@@ -1,0 +1,59 @@
+# CMakeLists.txt
+# This file is used to build the Sentinel application.
+# It is used to configure the build environment and the dependencies.
+# It is used to build the application.
+
+# Set the minimum required CMake version
+cmake_minimum_required(VERSION 3.16)
+project(Sentinel LANGUAGES CXX)
+
+# Set the C++ standard to C++17
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Enable Qt's automatic tools for Qt6
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+
+# Find the Qt6 libraries
+find_package(Qt6 REQUIRED COMPONENTS Widgets WebSockets)
+
+# --- Group Source and Header Files ---
+# This makes the file cleaner and easier to manage.
+
+# Source files (.cpp) that need to be compiled
+set(SOURCES
+    main.cpp
+    mainwindow.cpp
+    websocketclient.cpp
+    statisticsprocessor.cpp
+    statisticscontroller.cpp
+    ruleengine.cpp
+    cvdthresholdrule.cpp
+)
+
+# Header files (.h). Including them ensures they appear in IDEs 
+# and that AUTOMOC can process any headers with Q_OBJECT.
+set(HEADERS
+    mainwindow.h
+    websocketclient.h
+    statisticsprocessor.h
+    statisticscontroller.h
+    ruleengine.h
+    cvdthresholdrule.h
+    rule.h
+    tradedata.h
+)
+
+# Add our source and header files to the executable
+add_executable(sentinel 
+    ${SOURCES}
+    ${HEADERS}
+)
+
+# Link our executable against the Qt libraries
+target_link_libraries(sentinel PRIVATE
+    Qt6::Widgets
+    Qt6::WebSockets
+)
