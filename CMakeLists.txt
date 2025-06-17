@@ -24,26 +24,26 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets WebSockets)
 
 # Source files (.cpp) that need to be compiled
 set(SOURCES
-    main.cpp
-    mainwindow.cpp
-    websocketclient.cpp
-    statisticsprocessor.cpp
-    statisticscontroller.cpp
-    ruleengine.cpp
-    cvdthresholdrule.cpp
+    src/main.cpp
+    src/mainwindow.cpp
+    src/websocketclient.cpp
+    src/statisticsprocessor.cpp
+    src/statisticscontroller.cpp
+    src/ruleengine.cpp
+    src/cvdthresholdrule.cpp
 )
 
 # Header files (.h). Including them ensures they appear in IDEs 
 # and that AUTOMOC can process any headers with Q_OBJECT.
 set(HEADERS
-    mainwindow.h
-    websocketclient.h
-    statisticsprocessor.h
-    statisticscontroller.h
-    ruleengine.h
-    cvdthresholdrule.h
-    rule.h
-    tradedata.h
+    src/mainwindow.h
+    src/websocketclient.h
+    src/statisticsprocessor.h
+    src/statisticscontroller.h
+    src/ruleengine.h
+    src/cvdthresholdrule.h
+    src/rule.h
+    src/tradedata.h
 )
 
 # Add our source and header files to the executable
