@@ -9,6 +9,10 @@
   <img src="https://img.shields.io/badge/Performance-Sub%20100ms-orange.svg" alt="Performance">
 </p>
 
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/a3f7ccf9-7f5b-4d31-9dc0-d8370f38d71f" alt="your image" width="500"/>
+</div>
+
 ## 🎯 Project Vision
 
 Sentinel aims to be a **professional-grade, high-performance market microstructure analysis tool** for cryptocurrency markets, starting with BTC-USD and ETH-USD on Coinbase. The vision extends beyond a simple desktop application to a robust, 24/7 analysis engine with **rich visual analytics** inspired by tools like BookMap and aterm.
