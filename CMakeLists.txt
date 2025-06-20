@@ -41,6 +41,7 @@ set(SOURCES
     src/statisticscontroller.cpp
     src/ruleengine.cpp
     src/cvdthresholdrule.cpp
+    src/tradechartwidget.cpp
 )
 
 # Header files (.h). Including them ensures they appear in IDEs 
@@ -55,6 +56,7 @@ set(HEADERS
     src/cvdthresholdrule.h
     src/rule.h
     src/tradedata.h
+    src/tradechartwidget.h
 )
 
 # Add our source and header files to the executable

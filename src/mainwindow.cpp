@@ -3,23 +3,23 @@
 #include "statisticscontroller.h"
 #include "ruleengine.h"
 #include "cvdthresholdrule.h"
+#include "tradechartwidget.h"     // Include our new chart widget
 
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
-#include <QtWidgets/QTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtCore/QUrl>
 #include <QtCore/QMetaObject>
+#include <QtCore/QDebug>
 
 // Constructor
 MainWindow::MainWindow(QWidget *parent)
     : QWidget(parent)
 {
     // --- Create UI Elements ---
-    m_logOutput = new QTextEdit(this);
-    m_logOutput->setReadOnly(true);
+    m_chart = new TradeChartWidget(this); // Create our new chart widget
     m_cvdLabel = new QLabel("CVD: 0.00", this);
     m_alertLabel = new QLabel("Alerts: ---", this);
     m_alertLabel->setStyleSheet("color: red;");
@@ -33,7 +33,7 @@ MainWindow::MainWindow(QWidget *parent)
     QVBoxLayout *layout = new QVBoxLayout(this);
     layout->addWidget(m_cvdLabel);
     layout->addWidget(m_alertLabel);
-    layout->addWidget(m_logOutput);
+    layout->addWidget(m_chart); // Add the chart to the layout
 
     // Horizontal layout for command input
     QHBoxLayout *commandLayout = new QHBoxLayout();
@@ -67,7 +67,7 @@ MainWindow::MainWindow(QWidget *parent)
     // --- Connections ---
     
     // 1. Connect UI controls to slots in the main thread
-    connect(m_clearButton, &QPushButton::clicked, m_logOutput, &QTextEdit::clear);
+    connect(m_clearButton, &QPushButton::clicked, m_chart, &TradeChartWidget::clearTrades); // 🚀 Clear the chart
     connect(m_submitButton, &QPushButton::clicked, this, &MainWindow::onCommandEntered);
     connect(m_commandInput, &QLineEdit::returnPressed, this, &MainWindow::onCommandEntered);
 
@@ -77,7 +77,7 @@ MainWindow::MainWindow(QWidget *parent)
     // ⚡ C++: connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
     connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
     connect(m_streamController, &StreamController::disconnected, this, &MainWindow::onDisconnected);
-    connect(m_streamController, &StreamController::tradeReceived, this, &MainWindow::onTradeReceived);
+    connect(m_streamController, &StreamController::tradeReceived, m_chart, &TradeChartWidget::addTrade); // 🚀 Pipe trades to the chart!
     connect(m_statsController, &StatisticsController::cvdUpdated, this, &MainWindow::onCvdUpdated);
     connect(m_ruleEngine, &RuleEngine::alertTriggered, this, &MainWindow::onAlertTriggered);
 
@@ -86,7 +86,7 @@ MainWindow::MainWindow(QWidget *parent)
     // 🐍 Python: async def on_thread_start(): await self.stream_controller.start(["BTC-USD"])
     // ⚡ C++: connect(&m_workerThread, &QThread::started, m_streamController, [this](){...});
     connect(&m_workerThread, &QThread::started, m_streamController, [this](){
-        std::vector<std::string> symbols = {"BTC-USD", "ETH-USD"};
+        std::vector<std::string> symbols = {"BTC-USD"}; // 🚀 Just BTC for now!
         m_streamController->start(symbols);
     });
     
@@ -129,41 +129,13 @@ MainWindow::~MainWindow()
 // Slot for when the connection is established
 void MainWindow::onConnected()
 {
-    m_logOutput->append("Connection established! Subscribing to BTC-USD ticker...");
+    qDebug() << "Connection established! Subscribing to BTC-USD ticker...";
 }
 
 // Slot for when the connection is closed
 void MainWindow::onDisconnected()
 {
-    m_logOutput->append("Connection closed.");
-}
-
-// 🚀 Slot for when a new trade is received from StreamController!
-// 🐍 Python: def on_trade_received(self, trade):
-// ⚡ C++: void MainWindow::onTradeReceived(const Trade &trade)
-void MainWindow::onTradeReceived(const Trade &trade)
-{
-    // Convert enum to string (like Python's enum.name)
-    // 🐍 Python: side_str = "BUY" if trade.side == Side.Buy else "SELL"
-    // ⚡ C++: QString sideStr = (trade.side == Side::Buy) ? "BUY" : "SELL";
-    QString sideStr = (trade.side == Side::Buy) ? "BUY" : "SELL";
-    if (trade.side == Side::Unknown) {
-        sideStr = "UNKNOWN";
-    }
-
-    // Format the message (like Python's f-strings)
-    // 🐍 Python: message = f"TRADE [{side_str}]: {trade.size} @ ${trade.price}"
-    // ⚡ C++: QString formattedMessage = QString("TRADE [%1]: %2 @ $%3").arg(...);
-    QString formattedMessage = QString("TRADE [%1]: %2 @ $%3 ID:%4")
-                                   .arg(sideStr)
-                                   .arg(trade.size, 0, 'f', 8)
-                                   .arg(trade.price, 0, 'f', 2)
-                                   .arg(QString::fromStdString(trade.trade_id));
-
-    // Add to GUI log (like Python's print to console)
-    // 🐍 Python: self.log_output.append(message)
-    // ⚡ C++: m_logOutput->append(formattedMessage);
-    m_logOutput->append(formattedMessage);
+    qDebug() << "Connection closed.";
 }
 
 void MainWindow::onCvdUpdated(double newCvd)
@@ -184,24 +156,8 @@ void MainWindow::onCommandEntered()
         return;
     }
 
-    // Echo the command to the log
-    m_logOutput->append(QString("> %1").arg(command));
-
-    // Simple command parsing
-    if (command.compare("help", Qt::CaseInsensitive) == 0) {
-        m_logOutput->append("Available commands:\n- help: Show this message\n- clear: Clear the log\n- status: Show connection status");
-    } else if (command.compare("clear", Qt::CaseInsensitive) == 0) {
-        m_logOutput->clear();
-    } else if (command.compare("status", Qt::CaseInsensitive) == 0) {
-        if (m_workerThread.isRunning()) {
-             m_logOutput->append("Status: Worker thread running. Connection active.");
-        } else {
-            m_logOutput->append("Status: Worker thread stopped. Disconnected.");
-        }
-    }
-    else {
-        m_logOutput->append("Unknown command. Type 'help' for a list of commands.");
-    }
+    // Command handling logic will be updated later. For now, just clear the input.
+    // We can add a status bar or a different output for this later.
 
     // Clear the input field for the next command
     m_commandInput->clear();
