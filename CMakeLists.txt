@@ -35,8 +35,8 @@ find_package(OpenSSL REQUIRED)
 set(SOURCES
     src/main.cpp
     src/mainwindow.cpp
-    src/websocketclient.cpp
     src/coinbasestreamclient.cpp
+    src/streamcontroller.cpp
     src/statisticsprocessor.cpp
     src/statisticscontroller.cpp
     src/ruleengine.cpp
@@ -47,8 +47,8 @@ set(SOURCES
 # and that AUTOMOC can process any headers with Q_OBJECT.
 set(HEADERS
     src/mainwindow.h
-    src/websocketclient.h
     src/coinbasestreamclient.h
+    src/streamcontroller.h
     src/statisticsprocessor.h
     src/statisticscontroller.h
     src/ruleengine.h

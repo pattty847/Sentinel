@@ -9,7 +9,7 @@
 #include "tradedata.h"
 class QTextEdit;
 class QPushButton;
-class WebSocketClient;
+class StreamController;      // 🚀 Our new bridge!
 class StatisticsController; // Forward-declare our new controller
 class RuleEngine; // Forward-declare our new engine
 class QLabel; // Forward-declare the QLabel for our new display
@@ -46,7 +46,7 @@ public:
 
 private slots:
     /**
-     * Slot: Called when a new formatted trade message is received from WebSocketClient
+     * Slot: Called when a new formatted trade message is received from StreamController
      * @param trade - The structured trade object
      */
     void onTradeReceived(const Trade &trade);
@@ -88,7 +88,7 @@ private:
     QPushButton *m_submitButton; // Button to submit commands
 
     // --- Worker Objects (Will be moved to a separate thread) ---
-    WebSocketClient *m_client;   // Our custom class that handles WebSocket communication
+    StreamController *m_streamController;    // 🚀 Our new bridge to CoinbaseStreamClient!
     StatisticsController *m_statsController; // Qt wrapper for our stats processor
     RuleEngine *m_ruleEngine; // Our new rule engine
 

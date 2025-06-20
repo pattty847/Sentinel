@@ -1,4 +1,5 @@
 #include "coinbasestreamclient.h"
+#include "tradedata.h"
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 #include <websocketpp/common/thread.hpp>
@@ -12,6 +13,7 @@ using websocketpp::lib::placeholders::_1;
 using websocketpp::lib::placeholders::_2;
 using websocketpp::lib::bind;
 
+// Constructor
 CoinbaseStreamClient::CoinbaseStreamClient(bool useSandbox)
     : m_shouldReconnect(true) {
     if (useSandbox) {
@@ -67,6 +69,23 @@ std::vector<Trade> CoinbaseStreamClient::getRecentTrades(const std::string& symb
     return trades;
 }
 
+std::vector<Trade> CoinbaseStreamClient::getNewTrades(const std::string& symbol, const std::string& lastTradeId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<Trade> newTrades;
+    auto it = m_tradeBuffers.find(symbol);
+    if (it != m_tradeBuffers.end()) {
+        bool foundLastTrade = lastTradeId.empty();
+        for (const auto& trade : it->second) {
+            if (foundLastTrade) {
+                newTrades.push_back(trade);
+            } else if (trade.trade_id == lastTradeId) {
+                foundLastTrade = true;
+            }
+        }
+    }
+    return newTrades;
+}
+
 void CoinbaseStreamClient::run() {
     while (m_shouldReconnect) {
         connect();
@@ -97,6 +116,7 @@ std::string CoinbaseStreamClient::buildSubscribeMessage() const {
 }
 
 void CoinbaseStreamClient::onOpen(connection_hdl hdl) {
+    std::cout << "[Connection to Coinbase Stream opened]\n" << std::endl;
     m_client.send(hdl, buildSubscribeMessage(), websocketpp::frame::opcode::text);
 }
 
@@ -106,32 +126,63 @@ void CoinbaseStreamClient::onMessage(connection_hdl, client::message_ptr msg) {
     if (!j.is_object()) {
         return;
     }
+
+    // Only log non-matches here
     if (j.value("type", "") != "match") {
+        std::cout << "[Non-match type: " << j.value("type", "") << "]" << std::endl;
         return;
     }
 
+    // Real match processing
     Trade trade;
     trade.timestamp = parseTimestamp(j.value("time", ""));
-    trade.side = j.value("side", "");
+    
+    // trade_id is a number in Coinbase JSON, convert to string
+    if (j.contains("trade_id")) {
+        if (j["trade_id"].is_string()) {
+            trade.trade_id = j["trade_id"].get<std::string>();
+        } else if (j["trade_id"].is_number()) {
+            trade.trade_id = std::to_string(j["trade_id"].get<uint64_t>());
+        } else {
+            trade.trade_id = "unknown";
+        }
+    } else {
+        trade.trade_id = "unknown";
+    }
+    
+    auto side_str = j.value("side", "");
+    if (side_str == "buy") {
+        trade.side = Side::Buy;
+    } else if (side_str == "sell") {
+        trade.side = Side::Sell;
+    } else {
+        trade.side = Side::Unknown;
+    }
     trade.price = std::stod(j.value("price", "0"));
     trade.size = std::stod(j.value("size", "0"));
     auto product = j.value("product_id", "");
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto& buffer = m_tradeBuffers[product];
-    if (buffer.size() >= m_maxTrades) {
-        buffer.pop_front();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto& buffer = m_tradeBuffers[product];
+        if (buffer.size() >= m_maxTrades) {
+            buffer.pop_front();
+        }
+        buffer.push_back(trade);
     }
-    buffer.push_back(trade);
+
+    // Log the legit trade
     logTrade(product, j);
 }
 
 void CoinbaseStreamClient::onClose(connection_hdl) {
+    std::cout << "[Connection to Coinbase Stream closed\n]" << std::endl;
     m_shouldReconnect = true;
     m_client.reset();
 }
 
 void CoinbaseStreamClient::onFail(connection_hdl) {
+    std::cout << "[Connection to Coinbase Stream failed\n]" << std::endl;
     m_shouldReconnect = true;
     m_client.reset();
 }
