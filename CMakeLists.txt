@@ -21,8 +21,10 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets WebSockets)
 find_package(Boost COMPONENTS system thread)
 if(Boost_FOUND)
     message(STATUS "Using Boost")
+    set(USE_BOOST TRUE)
 else()
     add_definitions(-DASIO_STANDALONE)
+    set(USE_BOOST FALSE)
 endif()
 find_package(OpenSSL REQUIRED)
 
@@ -65,20 +67,21 @@ add_executable(sentinel
 target_link_libraries(sentinel PRIVATE
     Qt6::Widgets
     Qt6::WebSockets
-    Boost::system
-    Boost::thread
-    OpenSSL::SSL
-    OpenSSL::Crypto
 )
+if(USE_BOOST)
+    target_link_libraries(sentinel PRIVATE Boost::system Boost::thread)
+endif()
+target_link_libraries(sentinel PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 add_executable(coinbase_stream_test
     src/stream_main.cpp
     src/coinbasestreamclient.cpp
     src/coinbasestreamclient.h
 )
+if(USE_BOOST)
+    target_link_libraries(coinbase_stream_test PRIVATE Boost::system Boost::thread)
+endif()
 target_link_libraries(coinbase_stream_test PRIVATE
-    Boost::system
-    Boost::thread
     OpenSSL::SSL
     OpenSSL::Crypto
 )
