@@ -75,6 +75,7 @@ struct Trade
         }
     */
     std::chrono::system_clock::time_point timestamp;
+    std::string product_id; // The symbol, e.g., "BTC-USD"
     std::string trade_id;  // Added for deduplication
     Side side;
     double price;

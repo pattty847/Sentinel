@@ -14,6 +14,7 @@ class StatisticsController; // Forward-declare our new controller
 class RuleEngine; // Forward-declare our new engine
 class QLabel; // Forward-declare the QLabel for our new display
 class QLineEdit;
+class TradeChartWidget; // Our new custom chart widget!
 
 /**
  * MainWindow class: The main user interface for our Sentinel application
@@ -46,12 +47,6 @@ public:
 
 private slots:
     /**
-     * Slot: Called when a new formatted trade message is received from StreamController
-     * @param trade - The structured trade object
-     */
-    void onTradeReceived(const Trade &trade);
-    
-    /**
      * Slot: Called when WebSocketClient successfully connects to the server
      */
     void onConnected();
@@ -80,7 +75,7 @@ private slots:
 
 private:
     // --- UI Elements (Live in the Main/GUI thread) ---
-    QTextEdit *m_logOutput;      // Multi-line text widget for displaying trade data
+    TradeChartWidget *m_chart;   // The new custom chart widget
     QPushButton *m_clearButton;  // Button to clear the log display
     QLabel *m_cvdLabel;          // Label to display the live CVD
     QLabel *m_alertLabel;        // Label to display the latest alert
