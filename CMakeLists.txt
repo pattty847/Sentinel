@@ -24,6 +24,7 @@ if(Boost_FOUND)
 else()
     add_definitions(-DASIO_STANDALONE)
 endif()
+find_package(OpenSSL REQUIRED)
 
 # --- Group Source and Header Files ---
 # This makes the file cleaner and easier to manage.
@@ -66,6 +67,8 @@ target_link_libraries(sentinel PRIVATE
     Qt6::WebSockets
     Boost::system
     Boost::thread
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 add_executable(coinbase_stream_test
@@ -76,4 +79,6 @@ add_executable(coinbase_stream_test
 target_link_libraries(coinbase_stream_test PRIVATE
     Boost::system
     Boost::thread
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
