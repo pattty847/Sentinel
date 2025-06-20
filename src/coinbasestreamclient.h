@@ -1,6 +1,16 @@
 #ifndef COINBASESTREAMCLIENT_H
 #define COINBASESTREAMCLIENT_H
 
+#ifdef ASIO_STANDALONE
+#ifndef ASIO_DISABLE_IPV6
+#define ASIO_DISABLE_IPV6
+#endif
+#else
+#ifndef BOOST_ASIO_DISABLE_IPV6
+#define BOOST_ASIO_DISABLE_IPV6
+#endif
+#endif
+
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 #include <nlohmann/json.hpp>
