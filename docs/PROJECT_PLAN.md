@@ -34,29 +34,33 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 - **Multi-Layered Drawing** of price line and trade flow dots
 - **Symbol Filtering** to display a single, clean data stream
 
----
+### ✅ Phase 8: Professional Project Structure (June 2025) 🏗️
+- **Modular Architecture**: Refactored the entire project from a flat `src/` directory into a professional `libs/` and `apps/` structure.
+- **Created `sentinel_core` Library**: Isolated all non-GUI, high-performance logic (data processing, streaming, rules) into a reusable static library.
+- **Created `sentinel_gui_lib` Library**: Isolated all Qt-specific components (MainWindow, ChartWidget, StreamController) into a dedicated GUI library.
+- **Modernized Build System**: Rewrote the entire `CMakeLists.txt` hierarchy to be modular, using modern CMake practices (`target_link_libraries` with `PUBLIC`/`PRIVATE`, `add_subdirectory`).
+- **Dependency Management**: Successfully diagnosed and fixed missing system dependencies (`qt6-charts-dev`, `libboost-program-options-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`).
+- **Dual Executables**: The build system now produces two distinct targets: `sentinel` (the full GUI) and `sentinel_stream` (the command-line tool).
 
-## 🚀 **Upcoming Development Phases**
-
-## Phase 8: Order Book Heatmap Visualization 🔥
+### ✅ Phase 9: Order Book Heatmap Visualization 🔥
 **Timeline**: Next Sprint
 **Goal**: Professional liquidity visualization similar to BookMap
 
-### 8.1 Order Book Data Foundation
+### 9.1 Order Book Data Foundation
 - [ ] **Level 2 data integration**: Extend CoinbaseStreamClient for order book
 - [ ] **Book state management**: Maintain real-time bid/ask levels
 - [ ] **Depth calculation**: Volume aggregation at price levels
 - [ ] **Book events**: Add/remove/update order tracking
 - [ ] **Historical depth**: Time-series storage for heatmap
 
-### 8.2 Heatmap Rendering Engine
+### 9.2 Heatmap Rendering Engine
 - [ ] **HeatmapWidget**: Custom Qt widget with OpenGL backend
 - [ ] **Density visualization**: Color intensity based on volume/time
 - [ ] **Price level mapping**: Y-axis aligned with trade chart
 - [ ] **Time progression**: X-axis showing order flow evolution
 - [ ] **Color schemes**: Professional gradients (red/green, thermal, etc.)
 
-### 8.3 Advanced Features
+### 9.3 Advanced Features
 - [ ] **Imbalance detection**: Visual indicators for book skew
 - [ ] **Large order visualization**: Special highlighting for significant size
 - [ ] **Volume-at-price**: Aggregated liquidity histograms
