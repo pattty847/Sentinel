@@ -161,6 +161,7 @@ void CoinbaseStreamClient::onMessage(connection_hdl, client::message_ptr msg) {
     trade.price = std::stod(j.value("price", "0"));
     trade.size = std::stod(j.value("size", "0"));
     auto product = j.value("product_id", "");
+    trade.product_id = product;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
