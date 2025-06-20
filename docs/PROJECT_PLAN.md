@@ -1,133 +1,233 @@
-# Sentinel C++ Project: Plan & Progress
+# Sentinel C++: Project Roadmap & Development Plan
 
-This document serves as the long-term memory and project plan for re-architecting the "Sentinel" trading tool in C++.
+## 🎯 **Mission Statement**
 
-## The Ultimate Goal
-
-To build a high-performance, 24/7 BTC microstructure monitoring engine in C++. The initial version will be a desktop application with a sophisticated, terminal-inspired UI centered around an order book heatmap chart, similar to professional tools like `aterm`. The core logic will be architected with enough performance and separation to eventually be exposed as a queryable microservice, potentially to provide real-time context to an LLM or power a distributed system.
+Transform Sentinel into a **professional-grade market microstructure analysis platform** with real-time visualizations that rival tools like BookMap, aterm, and TradingView for cryptocurrency markets.
 
 ---
 
-## Current Status & Next Steps (For New Chat Session)
+## 📋 **Completed Phases** ✅
 
-**We have successfully completed Phase 3.**
+### ✅ Phase 1-4: Foundation (Pre-December 2024)
+- **Object-oriented refactoring** from single-file script
+- **Core logic implementation** (CVD, Rules Engine, Statistics)
+- **Multi-threading architecture** with responsive GUI
+- **Qt Controller pattern** for framework decoupling
 
-- **The Goal:** To ensure the UI is never blocked by networking or data processing.
-- **The Accomplishment:** We successfully refactored the application to use a dedicated worker thread (`QThread`). All networking (`WebSocketClient`), data processing (`StatisticsProcessor`), and logic (`RuleEngine`) now run in the background, leaving the GUI completely responsive. We learned how to manage object lifetime across threads (`moveToThread`, `deleteLater`) and how to use Qt's thread-safe signal/slot mechanism for communication.
-- **Immediate Next Step:** The next logical step is **Phase 4: Core Architecture & Headless Foundation**. This involves building the non-GUI data processing backbone required to power the advanced visualizations planned for Phase 5.
+### ✅ Phase 5: High-Performance Streaming (December 2024)
+- **CoinbaseStreamClient rewrite** for production-grade performance
+- **Trade deduplication** using Coinbase trade_id system
+- **Dual-speed modes** (full-hose vs controlled polling)
+- **Robust JSON parsing** with mixed type handling
+- **Thread-safe buffers** with configurable limits
 
----
-
-## Accomplishments & Concepts Covered
-
-### Phase 1: Object-Oriented Refactoring [COMPLETED]
-- **From single file to classes:** Refactored the entire application from one `main.cpp` file into a clean, object-oriented structure.
-- **`WebSocketClient` Class:** Created a dedicated class to handle all networking logic.
-- **`MainWindow` Class:** Created a dedicated class to handle all UI logic.
-- **C++ Skills:** Deepened understanding of `.h`/`.cpp` files, class creation, and object composition.
-
-### Phase 2: Implementing the Logic Core [COMPLETED]
-- **`Trade` Data Structure:** Created a `tradedata.h` file with a `Trade` struct and `Side` enum, moving from simple strings to structured data (our C++ "Pydantic model").
-- **`StatisticsProcessor` Class:** Built a processor to consume `Trade` objects and calculate a running Cumulative Volume Delta (CVD), emitting the result via a `cvdUpdated` signal.
-- **Polymorphism with Abstract Classes:** Introduced the powerful concept of polymorphism by creating an abstract base `Rule` class with pure virtual functions (`= 0`). This defines a contract for all future rule types.
-- **Concrete Rule Implementation:** Built our first specific rule, `CvdThresholdRule`, which inherits from `Rule` and implements the required logic.
-- **`RuleEngine` Class:** Created an engine to manage a list of `Rule` objects, receive data, and evaluate all rules polymorphically.
-- **Debugging:** Solved a complex linker error by refactoring the `CMakeLists.txt` file and fixed a C++ compilation error by switching from `QVector` to `std::vector` to correctly handle `std::unique_ptr`.
-
-### Initial Setup (The "Setup Saga") [COMPLETED]
-- **Environment:** Successfully configured a stable C++ environment using the **MSYS2 toolchain** (`g++`/`gdb`) after failed attempts with other methods.
-- **Build System:** Migrated from a manual `tasks.json` to a professional **CMake** build system to automatically handle Qt's Meta-Object Compiler (`moc`).
-- **Core Concepts:** Solidified understanding of the C++ build process (compiler vs. linker), `Q_OBJECT`, signals/slots, heap/stack, pointers, and Qt's parent-child ownership model.
-
-### 1. Environment Setup:
-- **Attempt 1 (Failed):** CMake + MSVC (`cppvsdbg` errors highlighted issues with proprietary Microsoft tooling in a VS Code context).
-- **Attempt 2 (Failed):** Qt's Bundled MinGW (`g++.exe not found` errors proved the Qt installer was incomplete/broken).
-- **Attempt 3 (SUCCESS):** A clean install of the **MSYS2 toolchain**, providing a reliable `g++` compiler and `gdb` debugger.
-- **Final Fixes:**
-    - Correctly configured the Windows `PATH` environment variable.
-    - Diagnosed and fixed a terminal launch bug by setting `"externalConsole": false` in `launch.json`.
-
-### 2. Core C++ & Qt Concepts Learned:
-- **Stack vs. Heap Memory:** Understanding `MyObject obj;` (stack) vs. `MyObject* obj = new MyObject();` (heap).
-- **Pointers & Accessors:** The difference between the dot `.` (for stack objects/references) and the arrow `->` (for pointers to heap objects).
-- **Qt's Ownership Model:** How setting a parent widget automatically manages memory, preventing leaks by calling `delete` on children (RAII).
-- **Signals & Slots:** Understanding Qt's core mechanism for event-driven programming.
-- **Lambdas:** Using anonymous, inline functions (`[=]() { ... }`) as slots.
-- **Basic GUI Development:** Using `QWidget`, `QLabel`, `QPushButton`, `QTextEdit`, and `QVBoxLayout`.
-- **Networking:** Using `QWebSocket` to connect to a live data stream.
-- **Data Handling:** Using `QJsonDocument` and `QJsonObject` to parse live JSON data.
-
-### Phase 3: High-Performance C++ with Multithreading [COMPLETED]
-- **Goal:** Ensure the UI is *never* blocked by networking or processing.
-- **Tasks:**
-    1. Move the `WebSocketClient` and all data processors to a separate worker thread using `QThread`.
-    2. Learn how to safely pass data between threads using thread-safe signals and slots.
-- **C++ Skills Learned:** The fundamentals of multithreading, `moveToThread`, `QThread`, `deleteLater`, and thread-safe cross-thread communication—a key reason for using C++.
-
-### Phase 4: Core Architecture & Headless Foundation
-- **Goal:** Build the "engine" of our application. This involves creating all necessary data processors and ensuring they are completely decoupled from any Qt GUI components, making the core logic portable and testable.
-- **Tasks:**
-    1. **Decouple Core Logic:** Refactor `StatisticsProcessor` and `RuleEngine` to remove all dependencies on Qt GUI libraries (e.g., `QtWidgets`). They should only use `QtCore` fundamentals if necessary (like signals/slots). This is a critical step for future reuse.
-    2. **Implement an Order Book Processor:** Create a new class to subscribe to the "level2" WebSocket channel, process snapshot and update messages, and maintain a real-time internal model of the BTC-USD order book. This is a complex data structure task.
-    3. **Define Data Interfaces:** Establish clear, lightweight data structures (structs/classes) that will be used to pass data from the core engine (worker thread) to the UI (main thread). These structures must not contain any GUI code.
-
-- **C++ Skills Learned:** Advanced data structures for order book management, library-independent architecture, and API/interface design.
-
-### Phase 5: Advanced Data Visualization with a Custom Charting Engine
-- **Goal:** Evolve Sentinel from a text-based tool into a professional-grade market analysis dashboard with graphical charts inspired by tools like `aterm`.
-- **Sub-Phase 5.1: The Custom Charting Framework**
-    - **Tasks:**
-        1. Create a base `ChartWidget` class inheriting from `QWidget` to serve as the foundation for all our future charts.
-        2. Learn to use `QPainter` for custom 2D drawing. Focus on creating a coordinate system that maps price and time to screen pixels.
-        3. Develop an efficient rendering loop that only repaints what's necessary, triggered by data updates from the core engine.
-- **Sub-Phase 5.2: The `aterm`-style Heatmap**
-    - **Tasks:**
-        1. Design and implement the heatmap chart as a new `HeatmapChartWidget` class.
-        2. Connect this widget to the `OrderBookProcessor`'s data stream.
-        3. Implement the logic for translating order book depth and volume into a color gradient to create the heatmap effect.
-        4. Draw the live price as a line overlay on top of the heatmap.
-- **Sub-Phase 5.3: Advanced Overlays & Interactivity**
-    - **Tasks:**
-        1. Implement "tick-by-tick" liquidity tracking. This involves processing the order book data to identify and visualize the lifecycle of individual limit orders or clusters of liquidity.
-        2. Add interactive features to the charts, such as zooming, panning, and a cursor that displays data for a specific point in time.
-        3. Implement price and time axes with dynamic labels.
-- **C++ Skills Learned:** Custom widget creation, 2D graphics with `QPainter`, advanced UI design, real-time data visualization, and performance optimization.
-
-### Phase 6: The Terminal UI Shell
-- **Goal:** Assemble all our components into a polished, professional, and functional application.
-- **Tasks:**
-    1. Re-design the `MainWindow` to use a flexible layout system (`QDockWidget` or similar) to host multiple chart and info panels.
-    2. Implement a command console widget for interacting with the `RuleEngine` and other application components.
-    3. Create dedicated widgets to display statistics from `StatisticsProcessor`, rule alerts from `RuleEngine`, and other key metrics.
-- **C++ Skills Learned:** Advanced Qt UI design with complex layouts and interactive widgets.
+### ✅ Phase 6: Bridge Integration (December 2024) 🚀
+- **StreamController bridge** connecting C++ engine to Qt GUI
+- **Real-time signal/slot** integration at sub-100ms latency
+- **Multi-symbol streaming** (BTC-USD + ETH-USD)
+- **Production stability** with clean lifecycle management
+- **Live CVD updates** and alert system integration
 
 ---
 
-## The Blueprint: Phased Development Plan
+## 🚀 **Upcoming Development Phases**
 
-We will build the Sentinel application incrementally. Each phase introduces a new architectural concept and a new set of C++ skills.
+## Phase 7: Real-Time Trade Visualization 📈
+**Timeline**: Next Sprint  
+**Goal**: Create professional tick-by-tick trade plotting
 
-### Phase 3: High-Performance C++ with Multithreading [COMPLETED]
-- **Goal:** Ensure the UI is *never* blocked by networking or processing.
-- **Tasks:**
-    1. Move the `WebSocketClient` and all data processors to a separate worker thread using `QThread`.
-    2. Learn how to safely pass data between threads using thread-safe signals and slots.
-- **C++ Skills Learned:** The fundamentals of multithreading, `moveToThread`, `QThread`, `deleteLater`, and thread-safe cross-thread communication—a key reason for using C++.
+### 7.1 Custom Qt Chart Widget
+- [ ] **TradeChartWidget**: Custom `QWidget` for trade plotting
+- [ ] **Time-based X-axis**: Microsecond timestamp precision
+- [ ] **Price-based Y-axis**: Dynamic scaling with trade prices
+- [ ] **Trade markers**: Color-coded buy/sell points with size mapping
+- [ ] **Zoom controls**: Mouse wheel and keyboard shortcuts
 
-### Phase 4: Finalizing the Vision
-- **Goal:** Polish the application and architect the core for potential microservice use.
-- **Tasks:**
-    1. Implement a more advanced UI for adding/editing rules via the command input.
-    2. Refactor the core logic (`StatisticsProcessor`, `RuleEngine`, etc.) to be completely independent of any Qt GUI libraries. This is a critical step before Phase 5.
-    3. (Stretch Goal) Expose the core logic via a simple local API (like ZeroMQ or a basic HTTP server).
-- **C++ Skills Learned:** Architectural patterns, library integration, and API design.
+### 7.2 Real-Time Data Integration
+- [ ] **Signal connection**: StreamController → TradeChartWidget
+- [ ] **Circular buffer**: Efficient storage for recent trades (configurable window)
+- [ ] **Incremental updates**: Add new trades without full redraws
+- [ ] **Performance optimization**: OpenGL rendering for smooth updates
+- [ ] **Multi-symbol support**: Tabbed interface for BTC-USD/ETH-USD
 
-### Phase 5: Advanced Data Visualization & Order Book Analysis
-- **Goal:** Evolve Sentinel from a text-based tool into a professional-grade market analysis dashboard with graphical charts inspired by tools like aterm.
-- **Tasks:**
-    1. **Implement an Order Book Processor:** Create a new class to subscribe to the "level2" WebSocket channel, process snapshot and update messages, and maintain a real-time internal model of the BTC-USD order book.
-    2. **Learn Custom Drawing:** Explore using `QPainter` and a custom `QWidget` to create our own charting components. This gives maximum control over performance and appearance.
-    3. **Build the Heatmap:** Design and implement the order book heatmap chart, where color intensity represents the volume of limit orders at each price level.
-    4. **Overlay the Price:** Draw the live price line on top of the heatmap.
-    5. **Integrate into UI:** Re-design the `MainWindow` to elegantly display the new charting components, creating a dashboard layout.
-- **C++ Skills Learned:** Advanced data structures for order book management, custom widget creation, 2D graphics with `QPainter`, and advanced UI design. 
+### 7.3 Visual Enhancements
+- [ ] **Trade size visualization**: Marker size proportional to volume
+- [ ] **Aggressive flow detection**: Enhanced colors for market vs limit orders
+- [ ] **Price level highlighting**: Horizontal lines for significant prices
+- [ ] **Time grid**: Vertical lines for time intervals
+- [ ] **Crosshair cursor**: Real-time price/time display
+
+---
+
+## Phase 8: Order Book Heatmap Visualization 🔥
+**Timeline**: Phase 7 + 2-3 weeks  
+**Goal**: Professional liquidity visualization similar to BookMap
+
+### 8.1 Order Book Data Foundation
+- [ ] **Level 2 data integration**: Extend CoinbaseStreamClient for order book
+- [ ] **Book state management**: Maintain real-time bid/ask levels
+- [ ] **Depth calculation**: Volume aggregation at price levels
+- [ ] **Book events**: Add/remove/update order tracking
+- [ ] **Historical depth**: Time-series storage for heatmap
+
+### 8.2 Heatmap Rendering Engine
+- [ ] **HeatmapWidget**: Custom Qt widget with OpenGL backend
+- [ ] **Density visualization**: Color intensity based on volume/time
+- [ ] **Price level mapping**: Y-axis aligned with trade chart
+- [ ] **Time progression**: X-axis showing order flow evolution
+- [ ] **Color schemes**: Professional gradients (red/green, thermal, etc.)
+
+### 8.3 Advanced Features
+- [ ] **Imbalance detection**: Visual indicators for book skew
+- [ ] **Large order visualization**: Special highlighting for significant size
+- [ ] **Volume-at-price**: Aggregated liquidity histograms
+- [ ] **Order flow arrows**: Directional indicators for aggressive flow
+- [ ] **Dynamic transparency**: Overlay capability with trade chart
+
+---
+
+## Phase 9: Multi-Timeframe Analysis 📊
+**Timeline**: Phase 8 + 2-3 weeks  
+**Goal**: Seamless zoom and aggregation capabilities
+
+### 9.1 Time Aggregation Engine
+- [ ] **Multi-resolution storage**: Tick → 1s → 5s → 1m → 5m → 1h
+- [ ] **OHLCV calculation**: Candle generation from tick data
+- [ ] **Volume profile**: Price-time-volume analysis
+- [ ] **CVD aggregation**: Multi-timeframe cumulative volume delta
+- [ ] **Efficient compression**: Smart data reduction algorithms
+
+### 9.2 Zoom and Navigation
+- [ ] **Smooth zoom controls**: Mouse wheel with animation
+- [ ] **Pan functionality**: Click-drag navigation
+- [ ] **Keyboard shortcuts**: Professional trading hotkeys
+- [ ] **Minimap**: Overview with current view indicator
+- [ ] **Time range selector**: Quick jump to specific periods
+
+### 9.3 Synchronized Views
+- [ ] **Multi-chart layout**: Split-screen with different timeframes
+- [ ] **Cursor synchronization**: Crosshair alignment across charts
+- [ ] **Event markers**: Alert/signal annotations
+- [ ] **Symbol switching**: Dropdown for BTC-USD/ETH-USD
+- [ ] **Layout persistence**: Save/restore window configurations
+
+---
+
+## Phase 10: Performance & Polish 🚀
+**Timeline**: Phase 9 + 2 weeks  
+**Goal**: Production-ready optimization and UX refinement
+
+### 10.1 Rendering Optimization
+- [ ] **OpenGL acceleration**: GPU-based chart rendering
+- [ ] **Level-of-detail**: Adaptive resolution based on zoom
+- [ ] **Culling optimization**: Skip off-screen elements
+- [ ] **Memory management**: Efficient data structure cleanup
+- [ ] **Frame rate limiting**: Smooth 60fps with power efficiency
+
+### 10.2 User Experience Polish
+- [ ] **Professional themes**: Dark/light mode with trader colors
+- [ ] **Customizable layouts**: Draggable panels and toolbars
+- [ ] **Keyboard shortcuts**: Complete hotkey system
+- [ ] **Settings persistence**: Save user preferences
+- [ ] **Splash screen**: Professional startup experience
+
+### 10.3 Advanced Features
+- [ ] **Data export**: CSV/JSON export for analysis
+- [ ] **Screenshot tool**: High-quality chart image export
+- [ ] **Alert system**: Audio/visual notifications
+- [ ] **Connection status**: Real-time health indicators
+- [ ] **Error recovery**: Graceful handling of disconnections
+
+---
+
+## 🔮 **Future Vision** (Phase 11+)
+
+### Additional Markets & Data Sources
+- **Binance integration**: Multi-exchange analysis
+- **Futures markets**: Perpetual swap analysis
+- **Options flow**: Crypto derivatives tracking
+- **DeFi integration**: DEX aggregated data
+
+### Advanced Analytics
+- **Machine learning**: Pattern recognition and prediction
+- **Market regime detection**: Volatility/trend classification
+- **Correlation analysis**: Cross-asset relationships
+- **Risk management**: Position sizing and alerts
+
+### Enterprise Features
+- **Multi-user support**: Collaborative analysis
+- **API endpoints**: Programmatic access to data
+- **Cloud deployment**: 24/7 server-based analysis
+- **Mobile companion**: Alert notifications and basic charts
+
+---
+
+## 🛠️ **Technical Architecture Goals**
+
+### Performance Targets
+- **Sub-50ms latency**: From trade received to chart updated
+- **60fps rendering**: Smooth animations and interactions
+- **<100MB memory**: Efficient resource utilization
+- **Multi-core usage**: Parallel processing optimization
+
+### Code Quality Standards
+- **100% modern C++17**: Smart pointers and RAII everywhere
+- **Qt best practices**: Proper signal/slot usage and threading
+- **Unit testing**: Critical path coverage with Google Test
+- **Documentation**: Comprehensive code comments and guides
+
+### Scalability Design
+- **Plugin architecture**: Modular indicator system
+- **Configuration system**: JSON-based settings management
+- **Extensible data sources**: Easy addition of new exchanges
+- **Microservice ready**: Core engine as standalone library
+
+---
+
+## 📅 **Development Timeline**
+
+| Phase | Duration | Key Deliverable |
+|-------|----------|----------------|
+| **Phase 7** | 2-3 weeks | Real-time trade plotting |
+| **Phase 8** | 3-4 weeks | Order book heatmaps |
+| **Phase 9** | 2-3 weeks | Multi-timeframe analysis |
+| **Phase 10** | 2 weeks | Performance optimization |
+| **Total** | **9-12 weeks** | **Professional trading platform** |
+
+---
+
+## 🎨 **Visual Design Philosophy**
+
+### Professional Trading Aesthetic
+- **Dark theme primary**: Reduce eye strain for long sessions
+- **High contrast**: Clear data visibility
+- **Color psychology**: Red/green for market direction, neutral for UI
+- **Information density**: Maximum data with minimal clutter
+
+### Inspired by Industry Leaders
+- **BookMap**: Liquidity heatmap visualization
+- **aterm**: Terminal-style efficiency with modern UX
+- **TradingView**: Smooth interactions and charting tools
+- **Bloomberg Terminal**: Information density and functionality
+
+---
+
+## 🚀 **Success Metrics**
+
+### Technical Performance
+- [ ] **Latency**: < 50ms end-to-end trade processing
+- [ ] **Throughput**: Handle full market data without drops
+- [ ] **Stability**: 24/7 operation without memory leaks
+- [ ] **Responsiveness**: No UI freezing during high volatility
+
+### User Experience
+- [ ] **Startup time**: < 3 seconds to first chart
+- [ ] **Learning curve**: Intuitive for experienced traders
+- [ ] **Feature completeness**: Match 80% of professional tools
+- [ ] **Customization**: Flexible layout and appearance options
+
+---
+
+<p align="center">
+  <strong>🎯 Goal: Create the most advanced open-source cryptocurrency market analysis tool</strong>
+</p> 

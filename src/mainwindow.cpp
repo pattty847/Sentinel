@@ -1,5 +1,5 @@
 #include "mainwindow.h"
-#include "websocketclient.h"
+#include "streamcontroller.h"     // 🚀 Our new bridge!
 #include "statisticscontroller.h"
 #include "ruleengine.h"
 #include "cvdthresholdrule.h"
@@ -50,11 +50,17 @@ MainWindow::MainWindow(QWidget *parent)
     layout->addLayout(buttonLayout);
 
     // --- Create Worker Objects ---
-    m_client = new WebSocketClient();
+    // 🚀 Create our new StreamController bridge!
+    // 🐍 Python: self.stream_controller = StreamController()
+    // ⚡ C++: m_streamController = new StreamController();
+    m_streamController = new StreamController();
     m_statsController = new StatisticsController();
     m_ruleEngine = new RuleEngine(m_statsController->processor());
     
-    m_client->moveToThread(&m_workerThread);
+    // Move all worker objects to the worker thread
+    // 🐍 Python: These would run in asyncio or threading
+    // ⚡ C++: Qt's threading system - moveToThread()
+    m_streamController->moveToThread(&m_workerThread);
     m_statsController->moveToThread(&m_workerThread);
     m_ruleEngine->moveToThread(&m_workerThread);
 
@@ -66,21 +72,32 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_commandInput, &QLineEdit::returnPressed, this, &MainWindow::onCommandEntered);
 
     // 2. Connect signals from worker objects to slots in the main thread (GUI updates)
-    connect(m_client, &WebSocketClient::connected, this, &MainWindow::onConnected);
-    connect(m_client, &WebSocketClient::disconnected, this, &MainWindow::onDisconnected);
-    connect(m_client, &WebSocketClient::tradeReady, this, &MainWindow::onTradeReceived);
+    // 🚀 Connect our StreamController bridge signals to the GUI!
+    // 🐍 Python: self.stream_controller.on_connected = self.on_connected
+    // ⚡ C++: connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
+    connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
+    connect(m_streamController, &StreamController::disconnected, this, &MainWindow::onDisconnected);
+    connect(m_streamController, &StreamController::tradeReceived, this, &MainWindow::onTradeReceived);
     connect(m_statsController, &StatisticsController::cvdUpdated, this, &MainWindow::onCvdUpdated);
     connect(m_ruleEngine, &RuleEngine::alertTriggered, this, &MainWindow::onAlertTriggered);
 
     // 3. Connect signals and slots between objects that live *inside* the worker thread.
-    connect(&m_workerThread, &QThread::started, m_client, [this](){ 
-        m_client->connectToServer(QUrl("wss://ws-feed.exchange.coinbase.com"));
+    // 🚀 Start streaming when worker thread starts!
+    // 🐍 Python: async def on_thread_start(): await self.stream_controller.start(["BTC-USD"])
+    // ⚡ C++: connect(&m_workerThread, &QThread::started, m_streamController, [this](){...});
+    connect(&m_workerThread, &QThread::started, m_streamController, [this](){
+        std::vector<std::string> symbols = {"BTC-USD", "ETH-USD"};
+        m_streamController->start(symbols);
     });
-    connect(m_client, &WebSocketClient::tradeReady, m_statsController, &StatisticsController::processTrade);
-    connect(m_client, &WebSocketClient::tradeReady, m_ruleEngine, &RuleEngine::onNewTrade);
+    
+    // Connect trade data flow between workers
+    // 🐍 Python: self.stream_controller.on_trade_received = self.stats_controller.process_trade
+    // ⚡ C++: connect(m_streamController, &StreamController::tradeReceived, ...);
+    connect(m_streamController, &StreamController::tradeReceived, m_statsController, &StatisticsController::processTrade);
+    connect(m_streamController, &StreamController::tradeReceived, m_ruleEngine, &RuleEngine::onNewTrade);
     
     // 4. Connect thread finishing to the cleanup of worker objects
-    connect(&m_workerThread, &QThread::finished, m_client, &QObject::deleteLater);
+    connect(&m_workerThread, &QThread::finished, m_streamController, &QObject::deleteLater);
     connect(&m_workerThread, &QThread::finished, m_statsController, &QObject::deleteLater);
     connect(&m_workerThread, &QThread::finished, m_ruleEngine, &QObject::deleteLater);
 
@@ -94,9 +111,11 @@ MainWindow::MainWindow(QWidget *parent)
 // Destructor
 MainWindow::~MainWindow()
 {
-    // Politely ask the client to close its connection.
+    // Politely ask the stream controller to stop streaming.
     // This is a thread-safe way to call a method on an object living in another thread.
-    QMetaObject::invokeMethod(m_client, "closeConnection", Qt::QueuedConnection);
+    // 🐍 Python: await self.stream_controller.stop()
+    // ⚡ C++: QMetaObject::invokeMethod(m_streamController, "stop", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(m_streamController, "stop", Qt::QueuedConnection);
 
     // Initiate a clean shutdown of the worker thread.
     // This will cause the thread's event loop to exit.
@@ -119,25 +138,31 @@ void MainWindow::onDisconnected()
     m_logOutput->append("Connection closed.");
 }
 
-// Slot for when a new trade is received
-// Why reference of the trade?
-// Because we don't want to copy the trade object, we want to use the same object
-// in the main thread and the worker thread.
-// If we pass the trade object by value, it will be copied to the main thread,
-// and the worker thread will not be able to use the same object.
-// If we pass the trade object by reference, it will be the same object in both threads.
+// 🚀 Slot for when a new trade is received from StreamController!
+// 🐍 Python: def on_trade_received(self, trade):
+// ⚡ C++: void MainWindow::onTradeReceived(const Trade &trade)
 void MainWindow::onTradeReceived(const Trade &trade)
 {
+    // Convert enum to string (like Python's enum.name)
+    // 🐍 Python: side_str = "BUY" if trade.side == Side.Buy else "SELL"
+    // ⚡ C++: QString sideStr = (trade.side == Side::Buy) ? "BUY" : "SELL";
     QString sideStr = (trade.side == Side::Buy) ? "BUY" : "SELL";
     if (trade.side == Side::Unknown) {
         sideStr = "UNKNOWN";
     }
 
-    QString formattedMessage = QString("TRADE [%1]: %2 @ $%3")
+    // Format the message (like Python's f-strings)
+    // 🐍 Python: message = f"TRADE [{side_str}]: {trade.size} @ ${trade.price}"
+    // ⚡ C++: QString formattedMessage = QString("TRADE [%1]: %2 @ $%3").arg(...);
+    QString formattedMessage = QString("TRADE [%1]: %2 @ $%3 ID:%4")
                                    .arg(sideStr)
                                    .arg(trade.size, 0, 'f', 8)
-                                   .arg(trade.price, 0, 'f', 2);
+                                   .arg(trade.price, 0, 'f', 2)
+                                   .arg(QString::fromStdString(trade.trade_id));
 
+    // Add to GUI log (like Python's print to console)
+    // 🐍 Python: self.log_output.append(message)
+    // ⚡ C++: m_logOutput->append(formattedMessage);
     m_logOutput->append(formattedMessage);
 }
 

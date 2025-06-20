@@ -14,6 +14,7 @@
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 #include <nlohmann/json.hpp>
+#include "tradedata.h"
 
 #include <deque>
 #include <string>
@@ -26,13 +27,6 @@
 #include <fstream>
 #include <filesystem>
 
-struct Trade {
-    std::chrono::system_clock::time_point timestamp;
-    std::string side;
-    double price;
-    double size;
-};
-
 class CoinbaseStreamClient {
 public:
     explicit CoinbaseStreamClient(bool useSandbox = false);
@@ -41,6 +35,7 @@ public:
     void subscribe(const std::vector<std::string>& symbols);
     void start();
     std::vector<Trade> getRecentTrades(const std::string& symbol);
+    std::vector<Trade> getNewTrades(const std::string& symbol, const std::string& lastTradeId = "");
 
 private:
     using client = websocketpp::client<websocketpp::config::asio_tls_client>;
