@@ -117,9 +117,9 @@ void TradeChartWidget::paintEvent(QPaintEvent *event)
         double x = left_margin + static_cast<double>(trade.timestamp.time_since_epoch().count() - first_trade_time) / (last_trade_time - first_trade_time) * chartWidth;
         double y = top_margin + (maxPrice - trade.price) / (maxPrice - minPrice) * chartHeight;
 
-        if (trade.side == Side::Buy) {
+        if (trade.side == AggressorSide::Buy) {
             painter.setBrush(Qt::green);
-        } else if (trade.side == Side::Sell) {
+        } else if (trade.side == AggressorSide::Sell) {
             painter.setBrush(Qt::red);
         } else {
             painter.setBrush(Qt::gray);

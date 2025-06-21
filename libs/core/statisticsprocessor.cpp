@@ -1,4 +1,5 @@
 #include "statisticsprocessor.h"
+#include "tradedata.h"
 
 StatisticsProcessor::StatisticsProcessor()
     : m_cvd(0.0)
@@ -20,9 +21,9 @@ void StatisticsProcessor::onCvdUpdated(CvdUpdateCallback callback)
 void StatisticsProcessor::processTrade(const Trade &trade)
 {
     // Simple CVD calculation logic
-    if (trade.side == Side::Buy) {
+    if (trade.side == AggressorSide::Buy) {
         m_cvd += trade.size;
-    } else if (trade.side == Side::Sell) {
+    } else if (trade.side == AggressorSide::Sell) {
         m_cvd -= trade.size;
     }
 

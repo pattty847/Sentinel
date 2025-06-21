@@ -14,35 +14,22 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 - **Multi-threading architecture** with responsive GUI
 - **Qt Controller pattern** for framework decoupling
 
-### ✅ Phase 5: High-Performance Streaming (December 2024)
-- **CoinbaseStreamClient rewrite** for production-grade performance
-- **Trade deduplication** using Coinbase trade_id system
-- **Dual-speed modes** (full-hose vs controlled polling)
-- **Robust JSON parsing** with mixed type handling
-- **Thread-safe buffers** with configurable limits
+### ✅ Phase 5-7: Core Features & Charting (Dec 2024 - June 2025)
+- **High-performance streaming client** and bridge integration
+- **Custom `TradeChartWidget`** for real-time data visualization
+- **Symbol filtering** and dynamic axes for price and time
 
-### ✅ Phase 6: Bridge Integration (December June 2025) 🚀
-- **StreamController bridge** connecting C++ engine to Qt GUI
-- **Real-time signal/slot** integration at sub-100ms latency
-- **Multi-symbol streaming** (BTC-USD + ETH-USD)
-- **Production stability** with clean lifecycle management
-- **Live CVD updates** and alert system integration
+### ✅ Phase 8: Modern Tooling & Networking Refactor (June 2025) 🚀
+- **Dependency Management**: Integrated `vcpkg` as the single source of truth for all C++ libraries, specified in `vcpkg.json`.
+- **Networking Rewrite**: Replaced the old WebSocket library with **`Boost.Beast`**, creating a fully asynchronous, more robust networking client.
+- **Build System Modernization**: Introduced **`CMakePresets.json`** for one-command, reproducible builds and simplified the entire CMake hierarchy.
+- **Professional Project Structure**: Re-organized the codebase into a modular `libs/` (`sentinel_core`, `sentinel_gui_lib`) and `apps/` (`sentinel_gui`, `stream_cli`) structure.
 
-### ✅ Phase 7: Real-Time Charting Engine (June 2025) 📈
-- **Custom `TradeChartWidget`** for high-performance rendering
-- **Dynamic Axes** with price and time labels and grid lines
-- **Multi-Layered Drawing** of price line and trade flow dots
-- **Symbol Filtering** to display a single, clean data stream
+---
 
-### ✅ Phase 8: Professional Project Structure (June 2025) 🏗️
-- **Modular Architecture**: Refactored the entire project from a flat `src/` directory into a professional `libs/` and `apps/` structure.
-- **Created `sentinel_core` Library**: Isolated all non-GUI, high-performance logic (data processing, streaming, rules) into a reusable static library.
-- **Created `sentinel_gui_lib` Library**: Isolated all Qt-specific components (MainWindow, ChartWidget, StreamController) into a dedicated GUI library.
-- **Modernized Build System**: Rewrote the entire `CMakeLists.txt` hierarchy to be modular, using modern CMake practices (`target_link_libraries` with `PUBLIC`/`PRIVATE`, `add_subdirectory`).
-- **Dependency Management**: Successfully diagnosed and fixed missing system dependencies (`qt6-charts-dev`, `libboost-program-options-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`).
-- **Dual Executables**: The build system now produces two distinct targets: `sentinel` (the full GUI) and `sentinel_stream` (the command-line tool).
+## 🔥 **NEXT PHASE**: Order Book Heatmap Visualization
 
-### ✅ Phase 9: Order Book Heatmap Visualization 🔥
+### Phase 9: Order Book Heatmap Visualization 🔥
 **Timeline**: Next Sprint
 **Goal**: Professional liquidity visualization similar to BookMap
 
@@ -52,6 +39,7 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 - [ ] **Depth calculation**: Volume aggregation at price levels
 - [ ] **Book events**: Add/remove/update order tracking
 - [ ] **Historical depth**: Time-series storage for heatmap
+- [ ] **Dynamic transparency**: Overlay capability with trade chart
 
 ### 9.2 Heatmap Rendering Engine
 - [ ] **HeatmapWidget**: Custom Qt widget with OpenGL backend
@@ -65,29 +53,28 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 - [ ] **Large order visualization**: Special highlighting for significant size
 - [ ] **Volume-at-price**: Aggregated liquidity histograms
 - [ ] **Order flow arrows**: Directional indicators for aggressive flow
-- [ ] **Dynamic transparency**: Overlay capability with trade chart
 
 ---
 
-## Phase 9: Multi-Timeframe Analysis 📊
-**Timeline**: Phase 8 + 2-3 weeks  
+## Phase 10: Multi-Timeframe Analysis 📊
+**Timeline**: Phase 9 + 2-3 weeks  
 **Goal**: Seamless zoom and aggregation capabilities
 
-### 9.1 Time Aggregation Engine
+### 10.1 Time Aggregation Engine
 - [ ] **Multi-resolution storage**: Tick → 1s → 5s → 1m → 5m → 1h
 - [ ] **OHLCV calculation**: Candle generation from tick data
 - [ ] **Volume profile**: Price-time-volume analysis
 - [ ] **CVD aggregation**: Multi-timeframe cumulative volume delta
 - [ ] **Efficient compression**: Smart data reduction algorithms
 
-### 9.2 Zoom and Navigation
+### 10.2 Zoom and Navigation
 - [ ] **Smooth zoom controls**: Mouse wheel with animation
 - [ ] **Pan functionality**: Click-drag navigation
 - [ ] **Keyboard shortcuts**: Professional trading hotkeys
 - [ ] **Minimap**: Overview with current view indicator
 - [ ] **Time range selector**: Quick jump to specific periods
 
-### 9.3 Synchronized Views
+### 10.3 Synchronized Views
 - [ ] **Multi-chart layout**: Split-screen with different timeframes
 - [ ] **Cursor synchronization**: Crosshair alignment across charts
 - [ ] **Event markers**: Alert/signal annotations
@@ -96,25 +83,25 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 
 ---
 
-## Phase 10: Performance & Polish 🚀
-**Timeline**: Phase 9 + 2 weeks  
+## Phase 11: Performance & Polish 🚀
+**Timeline**: Phase 10 + 2 weeks  
 **Goal**: Production-ready optimization and UX refinement
 
-### 10.1 Rendering Optimization
+### 11.1 Rendering Optimization
 - [ ] **OpenGL acceleration**: GPU-based chart rendering
 - [ ] **Level-of-detail**: Adaptive resolution based on zoom
 - [ ] **Culling optimization**: Skip off-screen elements
 - [ ] **Memory management**: Efficient data structure cleanup
 - [ ] **Frame rate limiting**: Smooth 60fps with power efficiency
 
-### 10.2 User Experience Polish
+### 11.2 User Experience Polish
 - [ ] **Professional themes**: Dark/light mode with trader colors
 - [ ] **Customizable layouts**: Draggable panels and toolbars
 - [ ] **Keyboard shortcuts**: Complete hotkey system
 - [ ] **Settings persistence**: Save user preferences
 - [ ] **Splash screen**: Professional startup experience
 
-### 10.3 Advanced Features
+### 11.3 Advanced Features
 - [ ] **Data export**: CSV/JSON export for analysis
 - [ ] **Screenshot tool**: High-quality chart image export
 - [ ] **Alert system**: Audio/visual notifications
@@ -123,13 +110,14 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 
 ---
 
-## 🔮 **Future Vision** (Phase 11+)
+## 🔮 **Future Vision** (Phase 12+)
 
 ### Additional Markets & Data Sources
 - **Binance integration**: Multi-exchange analysis
 - **Futures markets**: Perpetual swap analysis
 - **Options flow**: Crypto derivatives tracking
-- **DeFi integration**: DEX aggregated data
+- [ ] **DeFi integration**: DEX aggregated data
+- [ ] **Microservice ready**: Core engine as standalone library
 
 ### Advanced Analytics
 - **Machine learning**: Pattern recognition and prediction
@@ -172,10 +160,11 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 | Phase | Duration | Key Deliverable |
 |-------|----------|----------------|
 | **Phase 7** | 2-3 weeks | Real-time trade plotting |
-| **Phase 8** | 3-4 weeks | Order book heatmaps |
-| **Phase 9** | 2-3 weeks | Multi-timeframe analysis |
-| **Phase 10** | 2 weeks | Performance optimization |
-| **Total** | **9-12 weeks** | **Professional trading platform** |
+| **Phase 8** | 1 week | Modern Tooling & Networking Refactor |
+| **Phase 9** | 3-4 weeks | Order book heatmaps |
+| **Phase 10**| 2-3 weeks | Multi-timeframe analysis |
+| **Phase 11**| 2 weeks | Performance optimization |
+| **Total** | **~10-13 weeks**| **Professional trading platform** |
 
 ---
 
