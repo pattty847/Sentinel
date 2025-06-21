@@ -3,16 +3,21 @@
 ```mermaid
 graph TD
     subgraph "Worker Thread"
-        WS["Coinbase WebSocket"] --> CS["CoinbaseStreamClient"];
-        CS -- "Pure C++ Trade object" --> SC["StreamController (Bridge)"];
-        
-        subgraph "Data Fan-out"
-            SC -- "Qt Signal: tradeReceived(trade)" --> STATS["StatisticsController"];
-            SC -- "Qt Signal: tradeReceived(trade)" --> RULES["RuleEngine"];
-            SC -- "Qt Signal: tradeReceived(trade)" --> CHART["TradeChartWidget"];
+        subgraph "Network I/O (Boost.Asio)"
+            WS["Coinbase WebSocket API"];
         end
+        
+        CS[("CoinbaseStreamClient <br> C++ Networking Core <br> (Boost.Beast)")] -- "Raw Trade Data" --> SC[("StreamController <br> Qt Bridge")];
+    end
 
-        STATS --> PROC["StatisticsProcessor (CVD)"];
+    subgraph "Data Fan-out (Qt Signals/Slots)"
+        SC -- "tradeReceived(trade)" --> STATS["StatisticsController"];
+        SC -- "tradeReceived(trade)" --> RULES["RuleEngine"];
+        SC -- "tradeReceived(trade)" --> CHART["TradeChartWidget"];
+    end
+
+    subgraph "Processing Logic"
+        STATS -- "trade object" --> PROC["StatisticsProcessor (CVD)"];
     end
 
     subgraph "Main (GUI) Thread"
@@ -24,6 +29,8 @@ graph TD
         RULES -- "Qt Signal: alertTriggered(msg)" --> MW;
     end
     
+    WS --> CS;
+
     style CS fill:#4ecdc4,stroke:#333,stroke-width:2px
     style SC fill:#f9d71c,stroke:#333,stroke-width:2px
     style CHART fill:#ff6b6b,stroke:#333,stroke-width:2px
@@ -36,47 +43,45 @@ This document provides a high-level overview of the Sentinel C++ application's a
 The ultimate goal of Sentinel is to be a professional-grade, high-performance market microstructure analysis tool, beginning with the BTC-USD pair on Coinbase and expand from there. The vision extends beyond a simple desktop application to a robust, 24/7 analysis engine.
 
 The core principles are:
-1.  **High Performance:** The application must be able to process high-frequency data streams (both trades and order book updates) without lagging or freezing. The C++/Qt stack was chosen specifically for this purpose.
-2.  **Modularity:** The core analysis logic should be completely decoupled from the user interface. This allows the "engine" to be potentially compiled as a library, run as a headless daemon, or exposed as a microservice in the future.
-3.  **Rich Visualization:** The UI should evolve beyond simple text readouts to include rich, graphical visualizations of market data, such as order book heatmaps, inspired by professional trading tools like aterm.
+1.  **High Performance:** The application must be able to process high-frequency data streams. The choice of C++, Boost.Beast, and Qt ensures we can handle demanding workloads without compromising on speed or responsiveness.
+2.  **Modularity:** The core analysis logic is completely decoupled from the user interface. This is achieved by separating code into distinct libraries (`sentinel_core`, `sentinel_gui_lib`).
+3.  **Portability & Maintainability:** By using `vcpkg` for dependency management and `CMake` for builds, the project can be easily set up and compiled on different platforms (Windows, macOS, Linux).
 
 ## Current Architecture: A Two-Thread Model
 
 Sentinel is built on a multi-threaded architecture to ensure the user interface remains responsive at all times.
 
-![Architecture Diagram](https://raw.githubusercontent.com/context-copilot/sentinel-cpp-assets/main/architecture-v1.png)
-
 ### The Main (GUI) Thread
--   **Responsibilities:** Manages and renders all UI elements. Handles user input (mouse clicks, keyboard entry).
--   **Key Class:** `MainWindow`. It is the root of the UI and acts as the coordinator that sets up the worker thread and orchestrates the creation of all other objects.
+-   **Responsibilities:** Manages and renders all UI elements. Handles user input.
+-   **Key Class:** `MainWindow`. It is the root of the UI and orchestrates the creation of all other objects.
 
 ### The Worker Thread
 -   **Responsibilities:** Handles all blocking operations and heavy computation. This includes all networking, data parsing, and statistical calculations.
 -   **Key Classes:**
-    -   `WebSocketClient`: Manages the connection to the Coinbase WebSocket API, receives raw data, and parses it into structured `Trade` objects.
+    -   `CoinbaseStreamClient`: A high-performance, asynchronous networking client built with **Boost.Beast**. It runs on its own I/O context and communicates with the rest of the application via the `StreamController`.
     -   `RuleEngine`: Manages a collection of `Rule` objects and evaluates them against incoming data.
     -   `StatisticsController`: A Qt-based wrapper that owns the pure C++ `StatisticsProcessor`.
     -   `StatisticsProcessor`: A pure C++ class responsible for calculating the Cumulative Volume Delta (CVD).
 
 ### The "Controller" Pattern & Data Flow
-The key to our architecture is the **Controller Pattern**. Our core logic (like `StatisticsProcessor`) is written in pure, standard C++, making it independent and reusable. However, to integrate with Qt's threading and signal/slot system, we wrap it in a "Controller" (`StatisticsController`).
+The key to our architecture is the **Controller Pattern**. Our core logic (like `StatisticsProcessor`) is written in pure, standard C++, making it independent and reusable. However, to integrate with Qt's threading and signal/slot system, we wrap it in a "Controller" (`StatisticsController` or `StreamController`).
 
 The data flows as follows:
-1.  `WebSocketClient` receives data and emits a Qt signal (`tradeReady`).
-2.  This signal is received by slots in `RuleEngine` and `StatisticsController` (within the worker thread).
-3.  `StatisticsController` passes the data to the pure C++ `StatisticsProcessor`.
-4.  When the processor has a new CVD value, it invokes a standard C++ callback.
-5.  The callback is implemented inside `StatisticsController`, which then emits a new Qt signal (`cvdUpdated`).
+1.  `CoinbaseStreamClient` receives data on its own thread.
+2.  It uses a thread-safe queue to pass the data to the `StreamController`.
+3.  The `StreamController` emits a Qt signal (`tradeReceived`).
+4.  This signal is received by slots in `RuleEngine`, `StatisticsController`, and `TradeChartWidget` (within the main worker thread).
+5.  When a controller has new data for the UI, it emits another Qt signal (e.g., `cvdUpdated`).
 6.  This signal is safely sent across the thread boundary to a slot in `MainWindow`, which updates the UI.
 
 ## The Journey So Far: A Phased Approach
-1.  **Phase 1: Setup & OO Refactoring:** Migrated from a single-file script to a clean, object-oriented design.
-2.  **Phase 2: Logic Core:** Implemented the `RuleEngine` and `StatisticsProcessor` for CVD.
-3.  **Phase 3: Multithreading:** Moved all networking and processing to a background `QThread`.
-4.  **Phase 4: Decoupling:** Refactored core logic to be independent of Qt, introducing the "Controller" pattern.
-5.  **Phase 5: High-Performance Streaming Rewrite:** Replaced the basic WebSocket client with the production-grade `CoinbaseStreamClient`.
-6.  **Phase 6: Bridge Integration:** Integrated the C++ engine with Qt using the `StreamController` bridge pattern.
-7.  **Phase 7: Real-Time Charting:** Implemented the custom-drawn `TradeChartWidget` with live price-line, trade-flow dots, and dynamic axes.
+1.  **Phase 1-4:** Initial setup, OO refactoring, and multithreading.
+2.  **Phase 5-7:** High-performance client, bridge integration, and real-time charting.
+3.  **Phase 8: Modern Tooling & Networking Refactor:**
+    - **Replaced Manual Dependencies with `vcpkg`:** Introduced `vcpkg.json` as a single source of truth for all C++ libraries.
+    - **Replaced WebSocket++ with `Boost.Beast`:** Rewritten the entire networking client to use a modern, asynchronous, and more robust library.
+    - **Standardized Builds with `CMakePresets`:** Made the build process simple, reproducible, and platform-agnostic.
+    - **Refined Project Structure:** Re-organized the codebase into a professional `libs/` and `apps/` structure to improve modularity and decoupling.
 
 ### 🔥 Phase 7 Accomplishments: Real-Time Charting Engine
 

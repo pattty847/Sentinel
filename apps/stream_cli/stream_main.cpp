@@ -30,8 +30,8 @@ int main() {
                     
                     std::string side_str;
                     switch (trade.side) {
-                        case Side::Buy: side_str = "buy"; break;
-                        case Side::Sell: side_str = "sell"; break;
+                        case AggressorSide::Buy: side_str = "buy"; break;
+                        case AggressorSide::Sell: side_str = "sell"; break;
                         default: side_str = "unknown"; break;
                     }
                     
@@ -56,8 +56,8 @@ int main() {
                         
                         std::string side_str;
                         switch (last.side) {
-                            case Side::Buy: side_str = "buy"; break;
-                            case Side::Sell: side_str = "sell"; break;
+                            case AggressorSide::Buy: side_str = "buy"; break;
+                            case AggressorSide::Sell: side_str = "sell"; break;
                             default: side_str = "unknown"; break;
                         }
                         

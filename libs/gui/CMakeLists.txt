@@ -9,6 +9,9 @@ add_library(sentinel_gui_lib
 
 target_include_directories(sentinel_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+find_package(Boost REQUIRED COMPONENTS beast)
+find_package(OpenSSL REQUIRED)
+
 target_link_libraries(sentinel_gui_lib
     PUBLIC
         sentinel_core
@@ -17,6 +20,9 @@ target_link_libraries(sentinel_gui_lib
         Qt::Widgets
         Qt::Charts
         Qt::Network
+        Boost::beast
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )
 
 qt_add_resources(sentinel_gui_lib "resources"

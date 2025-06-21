@@ -16,21 +16,17 @@ add_library(sentinel_core
 target_include_directories(sentinel_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED COMPONENTS program_options)
-find_package(OpenSSL REQUIRED)
-find_package(CURL REQUIRED)
-find_package(ZLIB REQUIRED)
+find_package(Boost REQUIRED COMPONENTS beast)
 find_package(nlohmann_json REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 target_link_libraries(sentinel_core
     PRIVATE
         Qt6::Core
-        Boost::program_options
+        Boost::beast
+        nlohmann_json::nlohmann_json
         OpenSSL::SSL
         OpenSSL::Crypto
-        CURL::libcurl
-        ZLIB::ZLIB
-        nlohmann_json::nlohmann_json
 )
 
 set(CMAKE_AUTOMOC ON)

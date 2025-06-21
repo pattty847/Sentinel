@@ -1,18 +1,10 @@
 #ifndef COINBASESTREAMCLIENT_H
 #define COINBASESTREAMCLIENT_H
 
-#ifdef ASIO_STANDALONE
-#ifndef ASIO_DISABLE_IPV6
-#define ASIO_DISABLE_IPV6
-#endif
-#else
-#ifndef BOOST_ASIO_DISABLE_IPV6
-#define BOOST_ASIO_DISABLE_IPV6
-#endif
-#endif
-
-#include <websocketpp/config/asio_client.hpp>
-#include <websocketpp/client.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/asio/strand.hpp>
 #include <nlohmann/json.hpp>
 #include "tradedata.h"
 
@@ -38,31 +30,43 @@ public:
     std::vector<Trade> getNewTrades(const std::string& symbol, const std::string& lastTradeId = "");
 
 private:
-    using client = websocketpp::client<websocketpp::config::asio_tls_client>;
-    using connection_hdl = websocketpp::connection_hdl;
-
-    void connect();
     void run();
-
-    void onOpen(connection_hdl hdl);
-    void onMessage(connection_hdl hdl, client::message_ptr msg);
-    void onClose(connection_hdl hdl);
-    void onFail(connection_hdl hdl);
-    std::string buildSubscribeMessage() const;
+    void on_resolve(boost::beast::error_code ec, boost::asio::ip::tcp::resolver::results_type results);
+    void on_connect(boost::beast::error_code ec, boost::asio::ip::tcp::resolver::results_type::endpoint_type);
+    void on_ssl_handshake(boost::beast::error_code ec);
+    void on_handshake(boost::beast::error_code ec);
+    void on_write(boost::beast::error_code ec, std::size_t bytes_transferred);
+    void on_read(boost::beast::error_code ec, std::size_t bytes_transferred);
+    void on_close(boost::beast::error_code ec);
+    
+    void do_close();
+    void reconnect();
+    
+    std::string buildSubscribeMessage();
     std::chrono::system_clock::time_point parseTimestamp(const std::string& t);
     void logTrade(const std::string& product, const nlohmann::json& j);
     std::ofstream& getLogStream(const std::string& product);
 
-    client m_client;
-    connection_hdl m_hdl;
+    std::string m_host;
+    std::string m_port;
+    std::string m_endpoint;
+
+    boost::asio::io_context m_ioc;
+    boost::asio::ssl::context m_ssl_ctx;
+    boost::asio::ip::tcp::resolver m_resolver;
+    boost::beast::websocket::stream<boost::beast::ssl_stream<boost::beast::tcp_stream>> m_ws;
+    boost::beast::flat_buffer m_buffer;
+
     std::thread m_thread;
-    std::atomic<bool> m_shouldReconnect;
-    std::vector<std::string> m_symbols;
+    std::atomic<bool> m_running;
+    
     std::mutex m_mutex;
+    std::vector<std::string> m_symbols;
+    std::string m_subscribe_message;
+
     std::unordered_map<std::string, std::deque<Trade>> m_tradeBuffers;
     const std::size_t m_maxTrades = 1000;
     std::unordered_map<std::string, std::ofstream> m_logStreams;
-    std::string m_endpoint;
     std::filesystem::path m_logDir{"logs"};
     const std::uintmax_t m_maxLogSize = 10 * 1024 * 1024;
 };

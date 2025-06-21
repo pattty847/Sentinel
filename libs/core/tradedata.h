@@ -50,7 +50,7 @@ Similarly, if you were the maker, the message would have the following:
 
 // An enumeration to represent the side of a trade in a type-safe way
 // This is better than using raw strings like "buy" or "sell"
-enum class Side {
+enum class AggressorSide {
     Buy,
     Sell,
     Unknown
@@ -77,7 +77,7 @@ struct Trade
     std::chrono::system_clock::time_point timestamp;
     std::string product_id; // The symbol, e.g., "BTC-USD"
     std::string trade_id;  // Added for deduplication
-    Side side;
+    AggressorSide side;
     double price;
     double size;
 };
