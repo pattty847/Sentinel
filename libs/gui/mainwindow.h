@@ -75,6 +75,10 @@ private slots:
 
 private:
     // --- UI Elements (Live in the Main/GUI thread) ---
+    // Why use m as a prefix for variables?
+    // It's a convention in C++ to use m_ as a prefix for member variables.
+    // It's not required, but it's a good practice to make it clear that the variable is a member of the class.
+    // It's also a good practice to use m_ as a prefix for member variables that are pointers.
     TradeChartWidget *m_chart;   // The new custom chart widget
     QPushButton *m_clearButton;  // Button to clear the log display
     QLabel *m_cvdLabel;          // Label to display the live CVD

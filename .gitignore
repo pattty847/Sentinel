@@ -1,3 +1,10 @@
 .vscode
 build
 .cache
+
+# User-specific files
+/build*/
+compile_commands.json
+key.json
+config.json
+*.log

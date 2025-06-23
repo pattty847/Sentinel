@@ -1,164 +1,147 @@
 #include "mainwindow.h"
-#include "streamcontroller.h"     // 🚀 Our new bridge!
+#include "streamcontroller.h"
 #include "statisticscontroller.h"
 #include "ruleengine.h"
 #include "cvdthresholdrule.h"
-#include "tradechartwidget.h"     // Include our new chart widget
-
+#include "tradechartwidget.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
-#include <QtCore/QUrl>
-#include <QtCore/QMetaObject>
-#include <QtCore/QDebug>
+#include <QtWidgets/QGroupBox>
+#include <QDebug>
+#include <vector>
+#include <string>
 
-// Constructor
 MainWindow::MainWindow(QWidget *parent)
     : QWidget(parent)
 {
     // --- Create UI Elements ---
-    m_chart = new TradeChartWidget(this); // Create our new chart widget
-    m_cvdLabel = new QLabel("CVD: 0.00", this);
+    m_chart = new TradeChartWidget(this);
+    m_chart->setSymbol("BTC-USD"); // Set a default symbol for the chart on startup
+    m_cvdLabel = new QLabel("CVD: N/A", this);
     m_alertLabel = new QLabel("Alerts: ---", this);
-    m_alertLabel->setStyleSheet("color: red;");
     m_commandInput = new QLineEdit(this);
-    m_commandInput->setPlaceholderText("Enter command... (try 'help')");
-    m_submitButton = new QPushButton("Submit", this);
-    m_clearButton = new QPushButton("Clear Log", this);
+    m_commandInput->setPlaceholderText("e.g., BTC-USD,ETH-USD");
+    m_submitButton = new QPushButton("Subscribe", this);
+
+    // Style the labels
+    m_cvdLabel->setStyleSheet("QLabel { color : white; font-size: 16px; }");
+    m_alertLabel->setStyleSheet("QLabel { color : yellow; font-size: 16px; }");
 
     // --- Layout ---
-    // Main vertical layout
-    QVBoxLayout *layout = new QVBoxLayout(this);
-    layout->addWidget(m_cvdLabel);
-    layout->addWidget(m_alertLabel);
-    layout->addWidget(m_chart); // Add the chart to the layout
+    QVBoxLayout *mainLayout = new QVBoxLayout(this);
+    mainLayout->addWidget(m_chart, 1); // Chart takes up most space
 
-    // Horizontal layout for command input
-    QHBoxLayout *commandLayout = new QHBoxLayout();
-    commandLayout->addWidget(m_commandInput);
-    commandLayout->addWidget(m_submitButton);
+    QGroupBox *statsGroup = new QGroupBox("Live Stats");
+    QHBoxLayout *statsLayout = new QHBoxLayout();
+    statsLayout->addWidget(m_cvdLabel);
+    statsLayout->addWidget(m_alertLabel);
+    statsGroup->setLayout(statsLayout);
     
-    // Horizontal layout for buttons
-    QHBoxLayout *buttonLayout = new QHBoxLayout();
-    buttonLayout->addStretch(); // Add spacer to push button to the right
-    buttonLayout->addWidget(m_clearButton);
+    QGroupBox *controlGroup = new QGroupBox("Controls");
+    QHBoxLayout *controlLayout = new QHBoxLayout();
+    controlLayout->addWidget(m_commandInput);
+    controlLayout->addWidget(m_submitButton);
+    controlGroup->setLayout(controlLayout);
 
-    // Add the nested layouts to the main layout
-    layout->addLayout(commandLayout);
-    layout->addLayout(buttonLayout);
+    mainLayout->addWidget(statsGroup);
+    mainLayout->addWidget(controlGroup);
+    setLayout(mainLayout);
 
-    // --- Create Worker Objects ---
-    // 🚀 Create our new StreamController bridge!
-    // 🐍 Python: self.stream_controller = StreamController()
-    // ⚡ C++: m_streamController = new StreamController();
+    // --- Worker Thread Setup ---
     m_streamController = new StreamController();
     m_statsController = new StatisticsController();
     m_ruleEngine = new RuleEngine(m_statsController->processor());
     
-    // Move all worker objects to the worker thread
-    // 🐍 Python: These would run in asyncio or threading
-    // ⚡ C++: Qt's threading system - moveToThread()
+    // Add a simple rule
+    m_ruleEngine->addRule(std::make_unique<CvdThresholdRule>(1000.0));
+
+    // Move worker objects to the thread
     m_streamController->moveToThread(&m_workerThread);
     m_statsController->moveToThread(&m_workerThread);
     m_ruleEngine->moveToThread(&m_workerThread);
 
     // --- Connections ---
     
-    // 1. Connect UI controls to slots in the main thread
-    connect(m_clearButton, &QPushButton::clicked, m_chart, &TradeChartWidget::clearTrades); // 🚀 Clear the chart
+    // Command connections
     connect(m_submitButton, &QPushButton::clicked, this, &MainWindow::onCommandEntered);
     connect(m_commandInput, &QLineEdit::returnPressed, this, &MainWindow::onCommandEntered);
 
-    // 2. Connect signals from worker objects to slots in the main thread (GUI updates)
-    // 🚀 Connect our StreamController bridge signals to the GUI!
-    // 🐍 Python: self.stream_controller.on_connected = self.on_connected
-    // ⚡ C++: connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
-    connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
-    connect(m_streamController, &StreamController::disconnected, this, &MainWindow::onDisconnected);
-    connect(m_streamController, &StreamController::tradeReceived, m_chart, &TradeChartWidget::addTrade); // 🚀 Pipe trades to the chart!
-    connect(m_statsController, &StatisticsController::cvdUpdated, this, &MainWindow::onCvdUpdated);
-    connect(m_ruleEngine, &RuleEngine::alertTriggered, this, &MainWindow::onAlertTriggered);
-
-    // 3. Connect signals and slots between objects that live *inside* the worker thread.
-    // 🚀 Start streaming when worker thread starts!
-    // 🐍 Python: async def on_thread_start(): await self.stream_controller.start(["BTC-USD"])
-    // ⚡ C++: connect(&m_workerThread, &QThread::started, m_streamController, [this](){...});
-    connect(&m_workerThread, &QThread::started, m_streamController, [this](){
-        std::vector<std::string> symbols = {"BTC-USD"}; // 🚀 Just BTC for now!
-        m_streamController->start(symbols);
-    });
-    
-    // Connect trade data flow between workers
-    // 🐍 Python: self.stream_controller.on_trade_received = self.stats_controller.process_trade
-    // ⚡ C++: connect(m_streamController, &StreamController::tradeReceived, ...);
-    connect(m_streamController, &StreamController::tradeReceived, m_statsController, &StatisticsController::processTrade);
-    connect(m_streamController, &StreamController::tradeReceived, m_ruleEngine, &RuleEngine::onNewTrade);
-    
-    // 4. Connect thread finishing to the cleanup of worker objects
+    // Worker thread management
     connect(&m_workerThread, &QThread::finished, m_streamController, &QObject::deleteLater);
     connect(&m_workerThread, &QThread::finished, m_statsController, &QObject::deleteLater);
     connect(&m_workerThread, &QThread::finished, m_ruleEngine, &QObject::deleteLater);
+    
+    // StreamController -> MainWindow UI
+    connect(m_streamController, &StreamController::connected, this, &MainWindow::onConnected);
+    connect(m_streamController, &StreamController::disconnected, this, &MainWindow::onDisconnected);
+    
+    // StreamController -> Data Processors
+    connect(m_streamController, &StreamController::tradeReceived, m_statsController, &StatisticsController::processTrade);
+    connect(m_streamController, &StreamController::tradeReceived, m_ruleEngine, &RuleEngine::onNewTrade);
 
-    // --- Add Rules to Engine ---
-    m_ruleEngine->addRule(std::make_unique<CvdThresholdRule>(2000.0));
+    // StreamController -> Chart
+    connect(m_streamController, &StreamController::tradeReceived, m_chart, &TradeChartWidget::addTrade);
+    connect(m_streamController, &StreamController::orderBookUpdated, m_chart, &TradeChartWidget::updateOrderBook);
+
+    // Data Processors -> MainWindow UI
+    connect(m_statsController, &StatisticsController::cvdUpdated, this, &MainWindow::onCvdUpdated);
+    connect(m_ruleEngine, &RuleEngine::alertTriggered, this, &MainWindow::onAlertTriggered);
 
     // --- Start the Worker Thread ---
     m_workerThread.start();
+    
+    // Set initial size
+    resize(1200, 800);
+    
+    // Automatically start the stream with the default symbol
+    onCommandEntered();
 }
 
-// Destructor
 MainWindow::~MainWindow()
 {
-    // Politely ask the stream controller to stop streaming.
-    // This is a thread-safe way to call a method on an object living in another thread.
-    // 🐍 Python: await self.stream_controller.stop()
-    // ⚡ C++: QMetaObject::invokeMethod(m_streamController, "stop", Qt::QueuedConnection);
-    QMetaObject::invokeMethod(m_streamController, "stop", Qt::QueuedConnection);
-
-    // Initiate a clean shutdown of the worker thread.
-    // This will cause the thread's event loop to exit.
     m_workerThread.quit();
-    
-    // Wait for the thread to fully finish its execution before we exit.
-    // This is crucial to prevent crashes on close.
     m_workerThread.wait();
 }
 
-// Slot for when the connection is established
-void MainWindow::onConnected()
-{
-    qDebug() << "Connection established! Subscribing to BTC-USD ticker...";
+void MainWindow::onConnected() {
+    qDebug() << "MainWindow received connected signal";
+    m_commandInput->setEnabled(false);
+    m_submitButton->setText("Connected");
+    m_submitButton->setEnabled(false);
 }
 
-// Slot for when the connection is closed
-void MainWindow::onDisconnected()
-{
-    qDebug() << "Connection closed.";
+void MainWindow::onDisconnected() {
+    qDebug() << "MainWindow received disconnected signal";
+    m_commandInput->setEnabled(true);
+    m_submitButton->setText("Subscribe");
+    m_submitButton->setEnabled(true);
 }
 
-void MainWindow::onCvdUpdated(double newCvd)
-{
-    m_cvdLabel->setText(QString("CVD: %1").arg(newCvd, 0, 'f', 4));
+void MainWindow::onCvdUpdated(double newCvd) {
+    m_cvdLabel->setText(QString("CVD: %1").arg(newCvd, 0, 'f', 2));
 }
 
-void MainWindow::onAlertTriggered(const QString &alertMessage)
-{
-    m_alertLabel->setText(alertMessage);
+void MainWindow::onAlertTriggered(const QString &alertMessage) {
+    m_alertLabel->setText(QString("Alert: %1").arg(alertMessage));
 }
 
-void MainWindow::onCommandEntered()
-{
-    // Get the command from the input field
-    QString command = m_commandInput->text().trimmed();
+void MainWindow::onCommandEntered() {
+    QString command = m_commandInput->text().toUpper().trimmed();
     if (command.isEmpty()) {
-        return;
+        command = "BTC-USD"; // Default to BTC-USD if empty
+    }
+    
+    QStringList symbols = command.split(',', Qt::SkipEmptyParts);
+    std::vector<std::string> symbolVec;
+    for (const auto& s : symbols) {
+        symbolVec.push_back(s.trimmed().toStdString());
     }
 
-    // Command handling logic will be updated later. For now, just clear the input.
-    // We can add a status bar or a different output for this later.
-
-    // Clear the input field for the next command
-    m_commandInput->clear();
+    if (!symbolVec.empty()) {
+        m_chart->setSymbol(symbolVec[0]); // Ensure chart is always aware of the symbol
+        QMetaObject::invokeMethod(m_streamController, "start", Qt::QueuedConnection, Q_ARG(std::vector<std::string>, symbolVec));
+    }
 }

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 /*
 Match:
@@ -80,6 +81,18 @@ struct Trade
     AggressorSide side;
     double price;
     double size;
+};
+
+struct OrderBookLevel {
+    double price;
+    double size;
+};
+
+struct OrderBook {
+    std::string product_id;
+    std::vector<OrderBookLevel> bids;
+    std::vector<OrderBookLevel> asks;
+    std::chrono::system_clock::time_point timestamp;
 };
 
 #endif // TRADEDATA_H 
