@@ -3,12 +3,23 @@
   "configurePresets": [
     {
       "name": "default",
-      "displayName": "Default Config",
+      "displayName": "Default Config",  
       "description": "Default build configuration using vcpkg",
-      "generator": "Ninja",
+      "generator": "MinGW Makefiles",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "/Users/patrickmcdermott/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        "CMAKE_TOOLCHAIN_FILE": {
+          "type": "FILEPATH",
+          "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        },
+        "Qt6_DIR": {
+          "type": "PATH",
+          "value": "C:/Qt/6.9.1/mingw_64/lib/cmake/Qt6"
+        },
+        "CMAKE_PREFIX_PATH": {
+          "type": "PATH", 
+          "value": "C:/Qt/6.9.1/mingw_64"
+        }
       }
     }
   ],

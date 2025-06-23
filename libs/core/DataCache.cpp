@@ -1,5 +1,6 @@
 #include "DataCache.hpp"
 #include <algorithm>
+#include <mutex>
 
 // Stub implementation for Phase 1 compilation verification
 
