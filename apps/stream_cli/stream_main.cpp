@@ -23,7 +23,7 @@ int main() {
         std::cout << "[Running at full speed - no duplicates!]" << std::endl;
         while (std::chrono::steady_clock::now() - start < std::chrono::seconds(60)) {
             for (const auto& sym : {std::string("BTC-USD"), std::string("ETH-USD")}) {
-                auto newTrades = client.getNewTrades(sym, lastTradeIds[sym]);
+                auto newTrades = client.getRecentTrades(sym);
                 
                 for (const auto& trade : newTrades) {
                     lastTradeIds[sym] = trade.trade_id;

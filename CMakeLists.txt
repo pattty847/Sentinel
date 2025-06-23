@@ -5,6 +5,13 @@
 
 # Set the minimum required CMake version
 cmake_minimum_required(VERSION 3.16)
+
+# --- Vcpkg Integration ---
+# If CMAKE_TOOLCHAIN_FILE is not set, set it to the default vcpkg location.
+if(NOT CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE /Users/patrickmcdermott/vcpkg/scripts/buildsystems/vcpkg.cmake CACHE STRING "Vcpkg toolchain file")
+endif()
+
 project(Sentinel LANGUAGES CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -26,3 +33,6 @@ add_subdirectory(libs/core)
 add_subdirectory(libs/gui)
 add_subdirectory(apps/sentinel_gui)
 add_subdirectory(apps/stream_cli)
+
+# Add tests subdirectory
+add_subdirectory(tests)

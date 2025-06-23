@@ -8,6 +8,7 @@ StreamController::StreamController(QObject* parent)
     : QObject(parent)  // 🪄 This calls the parent class constructor (like super().__init__())
     , m_client(nullptr)  // Initialize to null (like Python's None)
     , m_pollTimer(nullptr)
+    , m_orderBookPollTimer(nullptr)
 {
     // 🐍 Python: print("StreamController created")
     // ⚡ C++: qDebug() << "StreamController created";
@@ -47,22 +48,14 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Start the client
     m_client->start();
     
-    // Create and configure the polling timer
-    // 🐍 Python: self.timer = Timer()
-    // ⚡ C++: m_pollTimer = new QTimer(this);
-    //        "new" creates an object, "this" is like Python's self
+    // Create and configure the polling timers
     m_pollTimer = new QTimer(this);
-    
-    // Connect timer signal to our polling slot
-    // 🐍 Python: self.timer.timeout.connect(self.poll_for_trades)
-    // ⚡ C++: connect(m_pollTimer, &QTimer::timeout, this, &StreamController::pollForTrades);
-    //        This is Qt's signal/slot connection (like Python event handlers)
     connect(m_pollTimer, &QTimer::timeout, this, &StreamController::pollForTrades);
-    
-    // Start the timer with 100ms interval (super fast polling!)
-    // 🐍 Python: self.timer.start(100)  # 100ms
-    // ⚡ C++: m_pollTimer->start(100);
     m_pollTimer->start(100);
+
+    m_orderBookPollTimer = new QTimer(this);
+    connect(m_orderBookPollTimer, &QTimer::timeout, this, &StreamController::pollForOrderBooks);
+    m_orderBookPollTimer->start(100);
     
     // Emit connected signal
     // 🐍 Python: self.on_connected()  # call callback
@@ -77,13 +70,16 @@ void StreamController::start(const std::vector<std::string>& symbols) {
 void StreamController::stop() {
     qDebug() << "Stopping StreamController...";
     
-    // Stop the timer
-    // 🐍 Python: if self.timer: self.timer.stop()
-    // ⚡ C++: if (m_pollTimer) { m_pollTimer->stop(); }
+    // Stop the timers
     if (m_pollTimer) {
         m_pollTimer->stop();
-        m_pollTimer->deleteLater();  // Qt's way of safe deletion
-        m_pollTimer = nullptr;       // Set to null (like Python's None)
+        m_pollTimer->deleteLater();
+        m_pollTimer = nullptr;
+    }
+    if (m_orderBookPollTimer) {
+        m_orderBookPollTimer->stop();
+        m_orderBookPollTimer->deleteLater();
+        m_orderBookPollTimer = nullptr;
     }
     
     // Reset the client (smart pointer automatically cleans up)
@@ -118,7 +114,13 @@ void StreamController::pollForTrades() {
         // Get new trades since last seen trade ID
         // 🐍 Python: new_trades = self.client.get_new_trades(symbol, self.last_trade_ids.get(symbol, ""))
         // ⚡ C++: auto newTrades = m_client->getNewTrades(symbol, m_lastTradeIds[symbol]);
-        auto newTrades = m_client->getNewTrades(symbol, m_lastTradeIds[symbol]);
+        std::string lastTradeId = m_lastTradeIds.count(symbol) ? m_lastTradeIds[symbol] : "";
+        auto newTrades = m_client->getNewTrades(symbol, lastTradeId);
+        
+        // Debug logging
+        if (!newTrades.empty()) {
+            qDebug() << "🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol);
+        }
         
         // Process each new trade
         // 🐍 Python: for trade in new_trades:
@@ -132,11 +134,22 @@ void StreamController::pollForTrades() {
             // Emit the trade signal (this is where the magic happens!)
             // 🐍 Python: self.on_trade_received(trade)  # call callback
             // ⚡ C++: emit tradeReceived(trade);        # emit Qt signal
+            qDebug() << "📤 Emitting trade:" << QString::fromStdString(trade.product_id) 
+                     << "$" << trade.price << "size:" << trade.size;
             emit tradeReceived(trade);
         }
     }
 }
 
-// 🪄 Qt magic: This line tells Qt to generate the signal/slot code
-// It's like Python decorators but happens at compile time
-#include "streamcontroller.moc" 
+void StreamController::pollForOrderBooks() {
+    if (!m_client) return;
+
+    // qDebug() << "Polling for order books..."; // Let's be more specific
+    for (const auto& symbol : m_symbols) {
+        auto book = m_client->getOrderBook(symbol);
+        qDebug() << "Polled client for" << QString::fromStdString(symbol) << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size();
+        if (!book.bids.empty() || !book.asks.empty()) {
+            emit orderBookUpdated(book);
+        }
+    }
+}
