@@ -34,6 +34,7 @@ signals:
     // ⚡ C++: void tradeReceived(const Trade& trade);      # signal
     //        "const Trade&" means "read-only reference to Trade object"
     void tradeReceived(const Trade& trade);
+    void orderBookUpdated(const OrderBook& book);
     void connected();
     void disconnected();
 
@@ -47,6 +48,7 @@ public slots:
 // ⚡ C++: private slots are internal methods connected to signals
 private slots:
     void pollForTrades();
+    void pollForOrderBooks();
 
 // 🐍 Python: These would be private variables (self._variable)
 // ⚡ C++: private member variables (prefixed with m_ by convention)
@@ -60,6 +62,11 @@ private:
     // ⚡ C++: QTimer* m_pollTimer;
     //        The * means "pointer to QTimer" (like Python's references)
     QTimer* m_pollTimer;
+    
+    // 🐍 Python: self.orderBookPollTimer = Timer()
+    // ⚡ C++: QTimer* m_orderBookPollTimer;
+    //        The * means "pointer to QTimer" (like Python's references)
+    QTimer* m_orderBookPollTimer;
     
     // 🐍 Python: self.symbols = []
     // ⚡ C++: std::vector<std::string> m_symbols;
