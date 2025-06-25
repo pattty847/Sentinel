@@ -51,6 +51,89 @@ LOD bake cron – run a nightly job that pre-generates those candle LOD arrays f
 Settings file schema – document the runtime-tweakable knobs (reserveSize, firehoseRate, etc.) so QA doesn’t spelunk code to change them.
 
 
+## 🛡️ **CRITICAL: FALLBACK TOGGLE SYSTEM**
+**NEVER BREAK THE WORKING SYSTEM!** Before touching any GPU code, implement a runtime toggle:
+
+### **Task -1: Implement Render Mode Toggle**
+**Changed Files**: 
+- `libs/gui/tradechartwidget.h` (MODIFIED)
+- `libs/gui/tradechartwidget.cpp` (MODIFIED)
+- `apps/sentinel_gui/main.cpp` (MODIFIED - CLI flag)
+
+```cpp
+// tradechartwidget.h - ADD RENDER MODE TOGGLE
+class TradeChartWidget : public QWidget {
+    Q_OBJECT
+    
+public:
+    enum RenderMode {
+        RENDER_QPAINTER,  // Current working system (NEVER REMOVE)
+        RENDER_GPU_BASIC, // Phase 0: Basic Qt Quick
+        RENDER_GPU_VBO,   // Phase 1: VBO optimized
+        RENDER_GPU_FULL   // Phase 2+: Full GPU pipeline
+    };
+    
+    void setRenderMode(RenderMode mode);
+    RenderMode getRenderMode() const { return m_renderMode; }
+    
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    
+private:
+    RenderMode m_renderMode = RENDER_QPAINTER; // SAFE DEFAULT
+    
+    // KEEP ALL EXISTING METHODS - NEVER DELETE
+    void renderWithQPainter(QPaintEvent* event);  // Original implementation
+    void renderWithGPU(QPaintEvent* event);      // New GPU path
+};
+```
+
+```cpp
+// tradechartwidget.cpp - RUNTIME TOGGLE IMPLEMENTATION
+void TradeChartWidget::paintEvent(QPaintEvent* event) {
+    switch (m_renderMode) {
+        case RENDER_QPAINTER:
+            renderWithQPainter(event);  // ORIGINAL CODE - NEVER MODIFY
+            break;
+        case RENDER_GPU_BASIC:
+        case RENDER_GPU_VBO:
+        case RENDER_GPU_FULL:
+            renderWithGPU(event);       // New GPU implementation
+            break;
+    }
+}
+
+void TradeChartWidget::renderWithQPainter(QPaintEvent* event) {
+    // EXACT COPY OF CURRENT WORKING CODE - UNTOUCHABLE
+    QPainter painter(this);
+    // ... existing rendering logic ...
+}
+```
+
+```cpp
+// apps/sentinel_gui/main.cpp - CLI TOGGLE SUPPORT
+QCommandLineParser parser;
+parser.addOption({{"render-mode"}, "Rendering mode", "mode", "qpainter"});
+// Options: qpainter, gpu-basic, gpu-vbo, gpu-full
+
+QString renderMode = parser.value("render-mode");
+if (renderMode == "gpu-basic") {
+    chartWidget->setRenderMode(TradeChartWidget::RENDER_GPU_BASIC);
+} else if (renderMode == "gpu-vbo") {
+    chartWidget->setRenderMode(TradeChartWidget::RENDER_GPU_VBO);
+} // etc...
+```
+
+### **Safety Features**:
+- **F1 Key**: Toggle between QPainter and GPU modes in real-time
+- **Auto-fallback**: If GPU mode crashes, automatically fall back to QPainter
+- **Performance comparison**: Side-by-side FPS/memory comparison
+- **Settings persistence**: Remember user's preferred mode
+
+**NEVER RISK THE WORKING SYSTEM!** 🛡️
+
+---
+
 ## 📍 **PHASE 0: BARE-BONES QT QUICK + SCENEGRAPH**
 **Goal**: Establish GPU rendering foundation with 1k dummy points  
 **Timeline**: Day 1  
