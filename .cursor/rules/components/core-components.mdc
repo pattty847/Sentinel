@@ -1,0 +1,87 @@
+---
+description: 
+globs: libs/core/**/*
+alwaysApply: false
+---
+# Core Components Implementation Patterns
+
+## PROVEN PATTERNS (FROM 83% CODE REDUCTION SUCCESS)
+
+### CoinbaseStreamClient - Facade Pattern
+```cpp
+// SUCCESS: 39-line implementation
+class CoinbaseStreamClient {
+private:
+    std::unique_ptr<MarketDataCore> core_;
+    std::unique_ptr<Authenticator> auth_;
+    
+public:
+    void start() { core_->start(); }
+    void stop() { core_->stop(); }
+    // Pure delegation - no business logic
+};
+```
+
+### MarketDataCore - WebSocket Management
+- **Boost.Beast WebSocket** with RAII lifecycle
+- **Worker thread** for all networking operations
+- **Exception safety** with proper cleanup
+- **Performance**: Sub-millisecond message processing
+
+### DataCache - Ring Buffer Design
+```cpp
+// O(1) concurrent access pattern
+class DataCache {
+    std::shared_mutex mutex_;
+    std::vector<TradeData> ringBuffer_;
+    size_t writeIndex_;
+    
+    // Multiple concurrent readers, single writer
+};
+```
+
+### Authenticator - JWT ES256
+- **ES256 signing** with ECDSA
+- **Token lifecycle management**
+- **Secure key handling**
+- **Error recovery** for auth failures
+
+## IMPLEMENTATION CONSTRAINTS
+
+### Performance Requirements
+- **Sub-millisecond latency** for all operations
+- **Lock-free reads** where possible
+- **Minimal memory allocation** in hot paths
+- **Move semantics** throughout
+
+### Thread Safety Model
+- **Worker Thread**: All networking, WebSocket, data processing
+- **Synchronization**: shared_mutex for DataCache access
+- **No blocking operations** in performance-critical paths
+- **Exception safety** with RAII patterns
+
+### Integration Points
+- **Qt Signals**: Thread-safe communication to GUI
+- **CMake Integration**: Proper dependency management
+- **Error Handling**: Consistent error propagation
+- **Testing**: Comprehensive test coverage required
+
+## MODIFICATION GUIDELINES
+
+### When Adding New Core Components
+1. **Follow Facade Pattern**: Delegate to implementation classes
+2. **Maintain Thread Safety**: Use proven synchronization patterns
+3. **Preserve Performance**: Benchmark all changes
+4. **Update CMake**: Add proper dependencies and targets
+
+### When Modifying Existing Components
+1. **Preserve Interfaces**: Maintain ABI compatibility
+2. **Benchmark Performance**: Validate sub-millisecond requirements
+3. **Update Tests**: Ensure comprehensive coverage
+4. **Thread Safety**: Verify worker/GUI thread separation
+
+### Integration Requirements
+- **Qt Signals**: Use for GUI communication
+- **Error Handling**: Consistent exception handling
+- **Logging**: Appropriate debug information
+- **Resource Management**: RAII for all resources

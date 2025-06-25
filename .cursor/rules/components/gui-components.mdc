@@ -1,0 +1,125 @@
+---
+description: 
+globs: libs/gui/**/*
+alwaysApply: false
+---
+# GUI Components Implementation Patterns
+
+## QT INTEGRATION PATTERNS
+
+### StreamController - Core/GUI Bridge
+```cpp
+// Thread-safe bridge pattern
+class StreamController : public QObject {
+    Q_OBJECT
+    
+signals:
+    void tradeReceived(const TradeData& trade);
+    void connectionStatusChanged(bool connected);
+    
+private slots:
+    void handleCoreData(); // Worker thread → GUI thread
+};
+```
+
+### TradeChartWidget - Real-time Visualization
+- **Qt Widget-based** visualization
+- **Real-time updates** via Qt signals/slots
+- **Performance optimization** for rapid data updates
+- **Thread-safe** data reception from worker thread
+
+### MainWindow - Application Coordinator
+- **Central Qt application** window
+- **Menu/toolbar integration**
+- **Status bar** for connection/performance info
+- **Layout management** for child widgets
+
+## THREADING MODEL
+
+### GUI Thread Responsibilities
+- **Qt UI updates** (widgets, charts, status)
+- **User interaction handling** (buttons, menus)
+- **Event processing** (Qt event loop)
+- **No blocking operations** (maintain UI responsiveness)
+
+### Signal/Slot Communication
+```cpp
+// Worker thread → GUI thread communication
+connect(core, &MarketDataCore::dataReceived,
+        controller, &StreamController::handleData,
+        Qt::QueuedConnection); // Thread-safe async
+```
+
+### Performance Considerations
+- **Batch UI updates** to minimize Qt overhead
+- **Efficient painting** in custom widgets
+- **Memory management** for real-time data
+- **Update throttling** for high-frequency data
+
+## IMPLEMENTATION GUIDELINES
+
+### Widget Development
+1. **Inherit from appropriate Qt base** (QWidget, QMainWindow, etc.)
+2. **Use Qt signals/slots** for all communication
+3. **Implement thread-safe data reception**
+4. **Optimize paint events** for real-time updates
+
+### Data Visualization
+- **Qt Charts integration** where appropriate
+- **Custom painting** for high-performance requirements
+- **Real-time updates** without blocking GUI thread
+- **Memory-efficient** data handling
+
+### Layout and UI
+- **Responsive layouts** using Qt layout managers
+- **Consistent styling** across components
+- **Keyboard shortcuts** and accessibility
+- **Status indicators** for system state
+
+## INTEGRATION REQUIREMENTS
+
+### Core Component Integration
+```cpp
+// Typical integration pattern
+class ComponentWidget : public QWidget {
+    Q_OBJECT
+    
+private:
+    StreamController* controller_;
+    
+private slots:
+    void updateDisplay(const TradeData& data);
+    
+public:
+    void connectToController(StreamController* ctrl) {
+        connect(ctrl, &StreamController::tradeReceived,
+                this, &ComponentWidget::updateDisplay);
+    }
+};
+```
+
+### CMake Integration
+- **Qt6 dependencies** properly declared
+- **MOC compilation** for Q_OBJECT classes
+- **Resource files** (.qrc) integration
+- **Platform-specific** requirements
+
+### Error Handling
+- **User-friendly error messages**
+- **Connection status indication**
+- **Graceful degradation** on data loss
+- **Recovery mechanisms** for connection issues
+
+## TESTING CONSIDERATIONS
+
+### GUI Testing
+- **Qt Test framework** integration
+- **Mock data providers** for isolated testing
+- **UI automation** where appropriate
+- **Visual regression testing** for charts/widgets
+
+### Performance Testing
+- **UI responsiveness** under load
+- **Memory usage** with continuous data
+- **Update frequency** optimization
+- **Thread safety** validation
