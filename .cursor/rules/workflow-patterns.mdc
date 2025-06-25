@@ -1,0 +1,107 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Strategic Plan Customization Patterns
+
+## WORKFLOW TYPES
+You'll receive strategic plans for three main types of work:
+
+### 1. REFACTORING WORKFLOWS
+**Input Pattern**: Monolithic code analysis and architectural recommendations
+**Customization Focus**:
+- Map generic architectural patterns to specific Sentinel components
+- Identify exact files and functions requiring modification
+- Provide incremental refactoring phases with rollback points
+- Specify performance impact of each refactoring step
+
+**Key Sentinel Mappings**:
+- Facade pattern → CoinbaseStreamClient (39-line success model)
+- Threading concerns → Worker/GUI thread separation
+- Performance → Ring buffer and shared_mutex patterns
+
+### 2. FEATURE IMPLEMENTATION 
+**Input Pattern**: High-level feature requirements and implementation strategies
+**Customization Focus**:
+- Map new features to existing component integration points
+- Specify Qt GUI integration requirements (signals/slots)
+- Detail data flow through existing architecture
+- Identify CMake build system changes needed
+
+**Key Integration Points**:
+- Data ingestion → MarketDataCore WebSocket handling
+- Data storage → DataCache ring buffer integration  
+- UI display → TradeChartWidget and Qt signal/slot system
+- Threading → Ensure proper worker/GUI thread communication
+
+### 3. PERFORMANCE OPTIMIZATION
+**Input Pattern**: Performance analysis and optimization strategies
+**Customization Focus**:
+- Map optimization strategies to specific performance bottlenecks
+- Identify exact code locations for optimization
+- Specify benchmarking approach for measuring improvements
+- Detail thread safety implications of optimizations
+
+**Sentinel Performance Context**:
+- Current baseline: 0.0003ms average latency
+- Critical path: WebSocket → DataCache → Qt UI
+- Optimization targets: Lock contention, memory allocation, data copying
+
+## CUSTOMIZATION METHODOLOGY
+
+### Phase-by-Phase Enhancement
+When updating strategic plans:
+1. **Convert generic phases** to specific Sentinel implementation steps
+2. **Add file-specific details** (exact paths, function names, line numbers)
+3. **Include integration touchpoints** (Qt signals, CMake targets, dependencies)
+4. **Specify validation criteria** (compilation, tests, performance benchmarks)
+
+### Risk Assessment Integration
+For each strategic recommendation:
+- **Architectural Risk**: Does it maintain Facade pattern integrity?
+- **Performance Risk**: Will it impact sub-millisecond requirements?
+- **Thread Safety Risk**: Does it affect worker/GUI thread separation?
+- **Integration Risk**: How does it impact Qt signal/slot system?
+
+### Implementation Detail Template
+```markdown
+## Phase X: [Strategic Recommendation Title]
+
+### Specific Implementation
+- **Files Modified**: `libs/core/ComponentName.cpp`, `libs/gui/WidgetName.h`
+- **Key Functions**: `SpecificFunction()` in line X-Y
+- **Qt Integration**: Signal `dataUpdated()` → Slot `updateUI()`
+- **CMake Changes**: Add dependency to `find_package()` in `libs/core/CMakeLists.txt`
+
+### Thread Safety Considerations
+- Worker thread modifications: [specific details]
+- GUI thread impact: [specific details]
+- Synchronization points: [shared_mutex usage]
+
+### Performance Impact
+- Expected latency change: [measurement approach]
+- Memory usage impact: [ring buffer implications]
+- Benchmarking approach: [specific test cases]
+
+### Validation Criteria
+- [ ] Compiles successfully
+- [ ] All 12+ tests pass
+- [ ] Performance benchmarks meet requirements
+- [ ] Integration tests validate data flow
+```
+
+## OUTPUT GUIDELINES
+
+### Document Enhancement Strategy
+- **Preserve strategic structure** but add implementation specificity
+- **Enhance each phase** with Sentinel-specific details
+- **Add validation sections** with concrete success criteria
+- **Include rollback procedures** for each implementation phase
+
+### Handoff Optimization
+Structure updates to enable effective strategic AI review:
+- Clear before/after architectural state
+- Specific implementation complexity assessments
+- Integration risk evaluations
+- Performance impact predictions
