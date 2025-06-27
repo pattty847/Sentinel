@@ -11,7 +11,7 @@
 </p>
 
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/a3f7ccf9-7f5b-4d31-9dc0-d8370f38d71f" alt="Sentinel GUI" width="600"/>
+  <img src="https://github.com/user-attachments/assets/f8691b82-a576-4888-aa94-4b096abc5360" alt="Sentinel GUI" width="600"/>
 </div>
 
 ## 🎯 Project Vision
