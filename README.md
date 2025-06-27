@@ -2,6 +2,8 @@
 
 🚀 **Real-time cryptocurrency market data analysis with professional-grade visualizations**
 
+> **Note:** The current working branch is `feature/gpu-chart-rendering`.
+
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-17-blue.svg" alt="C++17">
   <img src="https://img.shields.io/badge/Qt-6-green.svg" alt="Qt6">
