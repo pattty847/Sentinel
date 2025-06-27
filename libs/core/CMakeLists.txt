@@ -12,6 +12,8 @@ target_sources(sentinel_core
         Authenticator.cpp
         DataCache.cpp
         MarketDataCore.cpp
+        # Phase 3: Lock-free performance monitoring
+        performancemonitor.cpp
         # CoinbaseStreamClientFacade.cpp  # TODO: Enable in Phase 5 when replacing original
         # Existing files
         ruleengine.cpp

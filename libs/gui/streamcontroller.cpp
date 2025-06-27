@@ -1,48 +1,31 @@
 #include "streamcontroller.h"
-#include <QDebug>  // For debugging output (like Python's print statements)
+#include "gpudataadapter.h"
+#include <QDebug>
 
-// 🐍 Python: def __init__(self, parent=None):
-// ⚡ C++: StreamController::StreamController(QObject* parent)
-//        The :: means "this method belongs to StreamController class"
 StreamController::StreamController(QObject* parent)
-    : QObject(parent)  // 🪄 This calls the parent class constructor (like super().__init__())
-    , m_client(nullptr)  // Initialize to null (like Python's None)
+    : QObject(parent)
+    , m_client(nullptr)
     , m_pollTimer(nullptr)
     , m_orderBookPollTimer(nullptr)
 {
-    // 🐍 Python: print("StreamController created")
-    // ⚡ C++: qDebug() << "StreamController created";
     qDebug() << "StreamController created";
 }
 
-// 🐍 Python: def __del__(self):
-// ⚡ C++: StreamController::~StreamController() - destructor with ~
 StreamController::~StreamController() {
-    stop();  // Make sure we clean up properly
+    stop();
     qDebug() << "StreamController destroyed";
 }
 
-// 🐍 Python: def start(self, symbols):
-// ⚡ C++: void StreamController::start(const std::vector<std::string>& symbols)
-//        "const &" means "read-only reference" - efficient like Python's object passing
 void StreamController::start(const std::vector<std::string>& symbols) {
     qDebug() << "Starting StreamController...";
     
     // Store the symbols for later use
-    // 🐍 Python: self.symbols = symbols
-    // ⚡ C++: m_symbols = symbols;  (the = operator copies the vector)
     m_symbols = symbols;
     
     // Create the stream client (like instantiating a Python class)
-    // 🐍 Python: self.client = CoinbaseStreamClient()
-    // ⚡ C++: m_client = std::make_unique<CoinbaseStreamClient>();
-    //        make_unique creates a smart pointer (auto memory management)
     m_client = std::make_unique<CoinbaseStreamClient>();
     
     // Subscribe to the symbols
-    // 🐍 Python: self.client.subscribe(symbols)
-    // ⚡ C++: m_client->subscribe(symbols);
-    //        -> is used for pointer access (like . in Python)
     m_client->subscribe(symbols);
     
     // Start the client
@@ -58,15 +41,11 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     m_orderBookPollTimer->start(100);
     
     // Emit connected signal
-    // 🐍 Python: self.on_connected()  # call callback
-    // ⚡ C++: emit connected();        # emit Qt signal
     emit connected();
     
     qDebug() << "StreamController started successfully";
 }
 
-// 🐍 Python: def stop(self):
-// ⚡ C++: void StreamController::stop()
 void StreamController::stop() {
     qDebug() << "Stopping StreamController...";
     
@@ -83,13 +62,9 @@ void StreamController::stop() {
     }
     
     // Reset the client (smart pointer automatically cleans up)
-    // 🐍 Python: self.client = None
-    // ⚡ C++: m_client.reset();  # smart pointer cleanup
     m_client.reset();
     
     // Clear tracking data
-    // 🐍 Python: self.last_trade_ids.clear()
-    // ⚡ C++: m_lastTradeIds.clear();
     m_lastTradeIds.clear();
     
     // Emit disconnected signal
@@ -98,22 +73,13 @@ void StreamController::stop() {
     qDebug() << "StreamController stopped";
 }
 
-// 🐍 Python: def poll_for_trades(self):  # private method
-// ⚡ C++: void StreamController::pollForTrades()  # private slot
 void StreamController::pollForTrades() {
     // Check if client exists
-    // 🐍 Python: if not self.client: return
-    // ⚡ C++: if (!m_client) return;  # ! means "not" like Python's "not"
     if (!m_client) return;
     
     // Poll each symbol for new trades
-    // 🐍 Python: for symbol in self.symbols:
-    // ⚡ C++: for (const auto& symbol : m_symbols) {
-    //        "const auto&" lets the compiler figure out the type (like Python's dynamic typing)
     for (const auto& symbol : m_symbols) {
         // Get new trades since last seen trade ID
-        // 🐍 Python: new_trades = self.client.get_new_trades(symbol, self.last_trade_ids.get(symbol, ""))
-        // ⚡ C++: auto newTrades = m_client->getNewTrades(symbol, m_lastTradeIds[symbol]);
         std::string lastTradeId = m_lastTradeIds.count(symbol) ? m_lastTradeIds[symbol] : "";
         auto newTrades = m_client->getNewTrades(symbol, lastTradeId);
         
@@ -123,19 +89,24 @@ void StreamController::pollForTrades() {
         }
         
         // Process each new trade
-        // 🐍 Python: for trade in new_trades:
-        // ⚡ C++: for (const auto& trade : newTrades) {
         for (const auto& trade : newTrades) {
             // Update last seen trade ID
-            // 🐍 Python: self.last_trade_ids[symbol] = trade.trade_id
-            // ⚡ C++: m_lastTradeIds[symbol] = trade.trade_id;
             m_lastTradeIds[symbol] = trade.trade_id;
             
-            // Emit the trade signal (this is where the magic happens!)
-            // 🐍 Python: self.on_trade_received(trade)  # call callback
-            // ⚡ C++: emit tradeReceived(trade);        # emit Qt signal
-            qDebug() << "📤 Emitting trade:" << QString::fromStdString(trade.product_id) 
-                     << "$" << trade.price << "size:" << trade.size;
+            // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter instead of Qt signals
+            if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
+                qWarning() << "⚠️ StreamController: GPU trade queue full! Trade dropped.";
+            }
+            
+            // 🔥 THROTTLED LOGGING: Only log every 50th trade processing to reduce spam
+            static int processLogCount = 0;
+            if (++processLogCount % 50 == 1) { // Log 1st, 51st, 101st trade, etc.
+                qDebug() << "📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
+                         << "$" << trade.price << "size:" << trade.size 
+                         << "[" << processLogCount << " trades processed]";
+            }
+            
+            // Keep Qt signal for backward compatibility (will be removed in final version)
             emit tradeReceived(trade);
         }
     }
@@ -147,7 +118,15 @@ void StreamController::pollForOrderBooks() {
     // qDebug() << "Polling for order books..."; // Let's be more specific
     for (const auto& symbol : m_symbols) {
         auto book = m_client->getOrderBook(symbol);
-        qDebug() << "Polled client for" << QString::fromStdString(symbol) << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size();
+        
+        // 🔥 THROTTLED LOGGING: Only log every 20th order book poll to reduce spam
+        static int pollLogCount = 0;
+        if (++pollLogCount % 20 == 1) { // Log 1st, 21st, 41st poll, etc.
+            qDebug() << "Polled client for" << QString::fromStdString(symbol) 
+                     << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size()
+                     << "[" << pollLogCount << " polls total]";
+        }
+        
         if (!book.bids.empty() || !book.asks.empty()) {
             emit orderBookUpdated(book);
         }
