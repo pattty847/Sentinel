@@ -76,6 +76,7 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     // Thread-safe append
     std::lock_guard<std::mutex> lock(m_bufferMutex);
     buffer.points.push_back(point);
+    m_allRenderPoints.push_back(point); // 🔥 GEMINI FIX: Accumulate all trades
     
     // 🔥 REDUCED DEBUG: Only log first few trades to confirm system is working
     static int appendDebugCount = 0;
@@ -167,6 +168,9 @@ void GPUChartWidget::updateDynamicPriceRange(double newPrice) {
                      << "→ Range:" << m_minPrice << "-" << m_maxPrice 
                      << "Size:" << (m_maxPrice - m_minPrice) 
                      << "Delta:" << priceDelta;
+            
+            // 🔥 THE FINAL FIX: Broadcast the new price range to the heatmap
+            emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         }
     }
 }
@@ -252,6 +256,13 @@ void GPUChartWidget::cleanupOldTrades() {
         buffer.points.erase(buffer.points.begin(), buffer.points.begin() + excess);
         qDebug() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();
     }
+    
+    // 🔥 GEMINI FIX: Also clean up accumulated points
+    if (m_allRenderPoints.size() > static_cast<size_t>(m_maxPoints)) {
+        size_t excess = m_allRenderPoints.size() - m_maxPoints;
+        m_allRenderPoints.erase(m_allRenderPoints.begin(), m_allRenderPoints.begin() + excess);
+        qDebug() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();
+    }
 }
 
 void GPUChartWidget::swapBuffers() {
@@ -294,6 +305,7 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
     }
     
     readBuffer.inUse.store(true);
+    std::lock_guard<std::mutex> lock(m_bufferMutex); // 🔥 GEMINI FIX: Thread safety lock
     
     // Create or reuse geometry node
     auto* node = static_cast<QSGGeometryNode*>(oldNode);
@@ -301,7 +313,7 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         node = new QSGGeometryNode;
         
         // Simple rectangles for visibility
-        QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), readBuffer.points.size() * 6);
+        QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), m_allRenderPoints.size() * 6);
         geometry->setDrawingMode(QSGGeometry::DrawTriangles);
         node->setGeometry(geometry);
         node->setFlag(QSGNode::OwnsGeometry);
@@ -311,19 +323,19 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         node->setMaterial(material);
         node->setFlag(QSGNode::OwnsMaterial);
         
-        qDebug() << "🔧 Created single-coordinate-system node with" << readBuffer.points.size() << "trade points";
+        qDebug() << "🔧 Created single-coordinate-system node with" << m_allRenderPoints.size() << "trade points";
     }
     
     if (readBuffer.dirty.load() || m_geometryDirty.load()) {
         // Update geometry with new trade data
         QSGGeometry* geometry = node->geometry();
-        geometry->allocate(readBuffer.points.size() * 6); // 6 vertices per rectangle
+        geometry->allocate(m_allRenderPoints.size() * 6); // 🔥 GEMINI FIX: Use accumulated points
         
         QSGGeometry::Point2D* vertices = geometry->vertexDataAsPoint2D();
         const float rectSize = 8.0f; // 8 pixel rectangles
         
-        for (size_t i = 0; i < readBuffer.points.size(); ++i) {
-            const auto& point = readBuffer.points[i];
+        for (size_t i = 0; i < m_allRenderPoints.size(); ++i) { // 🔥 GEMINI FIX: Use accumulated points
+            const auto& point = m_allRenderPoints[i]; // 🔥 GEMINI FIX: Use accumulated points
             size_t baseIndex = i * 6;
             
             // 🔥 NEW: Use clean stateless coordinate system
@@ -348,8 +360,8 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         
         // Debug first few coordinate mappings
         static int debugCount = 0;
-        if (debugCount++ < 5 && !readBuffer.points.empty()) {
-            const auto& firstPoint = readBuffer.points[0];
+        if (debugCount++ < 5 && !m_allRenderPoints.empty()) { // 🔥 GEMINI FIX: Use accumulated points
+            const auto& firstPoint = m_allRenderPoints[0]; // 🔥 GEMINI FIX: Use accumulated points
             QPointF firstScreenPos = worldToScreen(firstPoint.rawTimestamp, firstPoint.rawPrice);
             qDebug() << "🎯 TIME-SERIES Trade: Price:" << firstPoint.rawPrice
                      << "Time:" << firstPoint.rawTimestamp << "→ Screen(" << firstScreenPos.x() << "," << firstScreenPos.y() << ")";
@@ -388,25 +400,21 @@ void GPUChartWidget::updateOrderBook(const OrderBook& book) {
 }
 
 void GPUChartWidget::clearTrades() {
-    for (int i = 0; i < BUFFER_COUNT; ++i) {
-        std::lock_guard<std::mutex> lock(m_bufferMutex);
-        m_gpuBuffers[i].points.clear();
-        m_gpuBuffers[i].dirty.store(true);
+    std::lock_guard<std::mutex> lock(m_bufferMutex);
+    
+    // Clear all buffers
+    for (auto& buffer : m_gpuBuffers) {
+        buffer.points.clear();
+        buffer.dirty.store(true);
     }
     
-            // Clear trades instead of test points
-        {
-            std::lock_guard<std::mutex> lock(m_bufferMutex);
-            for (auto& buffer : m_gpuBuffers) {
-                buffer.points.clear();
-                buffer.dirty.store(true);
-            }
-        }
-    // m_testDataDirty removed in Option B - use geometry dirty instead
+    // 🔥 GEMINI FIX: Also clear accumulated points
+    m_allRenderPoints.clear();
+    
     m_geometryDirty.store(true);
     update();
     
-    qDebug() << "🧹 All GPU buffers cleared!";
+    qDebug() << "🧹 All GPU buffers and accumulated points cleared!";
 }
 
 // 🔥 REMOVED: mapToScreen function - replaced with worldToScreen in Option B
@@ -419,11 +427,10 @@ void GPUChartWidget::mousePressEvent(QMouseEvent* event) {
         m_isDragging = true;
         m_lastMousePos = event->position();
         
-        // Disable auto-scroll when user starts interacting
-        if (m_autoScrollEnabled) {
-            m_autoScrollEnabled = false;
-            qDebug() << "🖱️ Auto-scroll disabled - user interaction started";
-        }
+        // 🔥 GEMINI FIX: Disable ALL auto-pilot systems immediately
+        m_autoScrollEnabled = false;
+        m_dynamicPriceZoom = false;
+        qDebug() << "🖱️ User control active - all auto-pilot systems disabled";
         
         event->accept();
     }
@@ -431,6 +438,10 @@ void GPUChartWidget::mousePressEvent(QMouseEvent* event) {
 
 void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
     if (m_isDragging) {
+        // 🔥 GEMINI FIX: Disable auto-pilot systems at start of drag
+        m_autoScrollEnabled = false;
+        m_dynamicPriceZoom = false;
+        
         QPointF currentPos = event->position();
         QPointF delta = currentPos - m_lastMousePos;
         
@@ -445,6 +456,7 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
             // Move time window (subtract for natural drag direction)
             m_visibleTimeStart_ms -= timeDelta;
             m_visibleTimeEnd_ms -= timeDelta;
+            emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
             
             // Price range panning
             double priceRange = m_maxPrice - m_minPrice;
@@ -457,12 +469,6 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
             
             m_lastMousePos = currentPos;
             m_geometryDirty.store(true);
-            
-            // Disable auto-scroll when manually panning
-            if (m_autoScrollEnabled) {
-                m_autoScrollEnabled = false;
-                qDebug() << "🖱️ Auto-scroll disabled - manual panning";
-            }
             
             // Throttle updates for smooth performance
             static int updateCounter = 0;
@@ -500,6 +506,10 @@ void GPUChartWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void GPUChartWidget::wheelEvent(QWheelEvent* event) {
+    // 🔥 GEMINI FIX: Disable auto-pilot systems at start of wheel zoom
+    m_autoScrollEnabled = false;
+    m_dynamicPriceZoom = false;
+    
     if (!m_timeWindowInitialized || width() <= 0 || height() <= 0) {
         event->accept();
         return;
@@ -534,6 +544,7 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
         
         m_visibleTimeStart_ms -= startAdjust;
         m_visibleTimeEnd_ms += endAdjust;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
         
         // Disable auto-scroll on zoom
         if (m_autoScrollEnabled) {
@@ -568,6 +579,7 @@ void GPUChartWidget::zoomIn() {
     
     m_visibleTimeStart_ms = static_cast<int64_t>(timeCenter - newTimeRange / 2.0);
     m_visibleTimeEnd_ms = static_cast<int64_t>(timeCenter + newTimeRange / 2.0);
+    emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
     
     m_geometryDirty.store(true);
     update();
@@ -584,6 +596,7 @@ void GPUChartWidget::zoomOut() {
     
     m_visibleTimeStart_ms = static_cast<int64_t>(timeCenter - newTimeRange / 2.0);
     m_visibleTimeEnd_ms = static_cast<int64_t>(timeCenter + newTimeRange / 2.0);
+    emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
     
     m_geometryDirty.store(true);
     update();
@@ -597,6 +610,7 @@ void GPUChartWidget::resetZoom() {
             std::chrono::system_clock::now().time_since_epoch()).count();
         m_visibleTimeEnd_ms = currentTime;
         m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
         
         // 🔥 FIX: Reset price range to current BTC levels
         m_minPrice = 106000.0;  // Current BTC range
@@ -637,6 +651,7 @@ void GPUChartWidget::centerOnTime(qint64 timestamp) {
     double timeSpan = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
     m_visibleTimeStart_ms = timestamp - static_cast<int64_t>(timeSpan / 2.0);
     m_visibleTimeEnd_ms = timestamp + static_cast<int64_t>(timeSpan / 2.0);
+    emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
     m_geometryDirty.store(true);
     update();
     qDebug() << "🎯 Centered on timestamp:" << timestamp << "Window:" << m_visibleTimeStart_ms << "-" << m_visibleTimeEnd_ms;
@@ -722,6 +737,7 @@ void GPUChartWidget::updateAutoScroll() {
             std::chrono::system_clock::now().time_since_epoch()).count();
         m_visibleTimeEnd_ms = currentTime;
         m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
         m_geometryDirty.store(true);
         update();
     }
@@ -752,6 +768,7 @@ void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
         // Slide window to follow latest data
         m_visibleTimeEnd_ms = newTimestamp;
         m_visibleTimeStart_ms = newTimestamp - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
     }
 }
 

@@ -193,6 +193,21 @@ void MainWindowGPU::connectToGPUChart() {
                     Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
             
             qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
+            
+            // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
+            QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
+            HeatMapInstanced* heatmapLayer = qobject_cast<HeatMapInstanced*>(heatmapItem);
+            
+            if (heatmapLayer) {
+                // 🔥 THE CRITICAL BRIDGE: Chart view coordinates to heatmap
+                connect(gpuChart, &GPUChartWidget::viewChanged,
+                        heatmapLayer, &HeatMapInstanced::setTimeWindow,
+                        Qt::QueuedConnection);
+                
+                qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
+            } else {
+                qWarning() << "⚠️ HeatmapInstanced not found - coordinate unification failed";
+            }
         } else {
             qWarning() << "⚠️ GPUChartWidget not found using any strategy";
             qDebug() << "🔍 Available children:";

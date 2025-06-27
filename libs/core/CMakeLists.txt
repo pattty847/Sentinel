@@ -7,14 +7,14 @@ add_library(sentinel_core)
 # Source files for this library
 target_sources(sentinel_core 
     PRIVATE
-        coinbasestreamclient.cpp
+        # coinbasestreamclient.cpp  # OLD IMPLEMENTATION - DISABLED
         # New modular architecture files (Phase 1 stubs)  
         Authenticator.cpp
         DataCache.cpp
         MarketDataCore.cpp
         # Phase 3: Lock-free performance monitoring
         performancemonitor.cpp
-        # CoinbaseStreamClientFacade.cpp  # TODO: Enable in Phase 5 when replacing original
+        CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
         # Existing files
         ruleengine.cpp
         cvdthresholdrule.cpp

@@ -19,7 +19,7 @@ Rectangle {
         Component.onCompleted: {
             // 🔥 FIX PRICE RANGE: Use real BTC range from logs (~$107.283k)
             setPriceRange(107200, 107350)  // $150 range around actual trades
-            setMaxQuads(100)               // Fewer quads for cleaner visualization
+            setMaxQuads(50000)             // 🔥 WALL OF LIQUIDITY: 50k historical points for persistence
             setIntensityScale(0.1)         // Much smaller intensity scale
             
             // Generate test order book data
@@ -78,27 +78,8 @@ Rectangle {
         }
         
         function generateTestData() {
-            console.log("🔥 GENERATING 1K DUMMY POINTS FOR GPU TESTING");
-            var points = []
-            var basePrice = 50000.0;
-            var now = Date.now();
-            
-            for (var i = 0; i < 1000; i++) {
-                var price = basePrice + Math.sin(i * 0.01) * 1000 + (Math.random() - 0.5) * 500;
-                var timestamp = now + (i * 10); // 10ms intervals
-                var isBuy = Math.random() > 0.5;
-                
-                points.push({
-                    timestamp: timestamp,
-                    price: price,
-                    size: 0.01 + Math.random() * 0.1,
-                    side: isBuy ? "Buy" : "Sell"
-                });
-            }
-            
-            // 🔥 REMOVED: setTestPoints no longer exists in Option B
-            // gpuChart.setTestPoints(points);
             console.log("✅ TEST POINTS GENERATION DISABLED - USING REAL BTC DATA ONLY");
+            // 🔥 GEMINI FIX: Removed the function call that was causing TypeError
         }
         
         // 🔥 PHASE 1: 1 MILLION POINT STRESS TEST!
@@ -143,12 +124,9 @@ Rectangle {
             var generateTime = Date.now() - startTime;
             console.log("🔥 Generated 1M points in", generateTime, "ms");
             
-            // 🔥 REMOVED: setTestPoints no longer exists in Option B
-            // gpuChart.setTestPoints(points);
-            var loadTime = 0; // No test loading in Option B
-            
-            console.log("⚡ 1M POINTS LOADED TO GPU IN", loadTime, "MS!");
-            console.log("🚀 VBO TRIPLE-BUFFERING STRESS TEST COMPLETE!");
+            // 🔥 GEMINI FIX: Test data generation disabled in Option B - using real data only
+            console.log("⚡ STRESS TEST DISABLED - USING REAL BTC DATA STREAM INSTEAD!");
+            console.log("🚀 VBO TRIPLE-BUFFERING READY FOR REAL DATA!");
         }
     }
     

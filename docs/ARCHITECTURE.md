@@ -1,187 +1,115 @@
-# Sentinel C++: Architecture Overview
+# Sentinel C++: GPU Architecture Overview
 
 ```mermaid
 graph TD
-    subgraph "Worker Thread"
-        subgraph "Network I/O (Boost.Asio)"
-            WS["Coinbase WebSocket API"];
+    subgraph "WebSocket Thread"
+        WS["Coinbase WebSocket API"] --> CORE[("MarketDataCore<br>🌐 WebSocket Framing & Parsing")];
+        CORE -- "Snapshot & L2 Updates" --> LOB[("LiveOrderBook<br>📚 Stateful In-Memory Book")];
+        CORE -- "Trade Matches" --> ADAPTER[("GPUDataAdapter<br>🌉 Bridge to GUI Thread")];
+        LOB -- "Book State" --> ADAPTER;
+    end
+
+    subgraph "Lock-Free Data Pipeline (Zero-Malloc)"
+        ADAPTER -- "Push to Queues" --> TRADES_Q[("LockFreeQueue<br>Trade Objects")];
+        ADAPTER -- "Push to Queues" --> BOOK_Q[("LockFreeQueue<br>OrderBook Objects")];
+    end
+
+    subgraph "GUI Thread (Qt)"
+        subgraph "Data Processing (Batching)"
+            PROC_TIMER["QTimer (e.g., 16ms)"] --> |"Triggers"| BATCH_PROC[("GPUDataAdapter::processIncomingData<br>Drain Queues & Convert")];
+            TRADES_Q --> |"Pop"| BATCH_PROC;
+            BOOK_Q --> |"Pop"| BATCH_PROC;
         end
-        
-        subgraph "🎭 FACADE PATTERN - REVOLUTIONARY ARCHITECTURE"
-            CSF[("CoinbaseStreamClient <br> 🎭 FACADE <br> (100 lines of elegance)")] 
-            
-            subgraph "Component Architecture"
-                AUTH[("Authenticator <br> 🔐 JWT Management <br> Thread-safe")]
-                CACHE[("DataCache <br> 💾 Ring Buffer + Shared Mutex <br> O(1) Performance")]
-                CORE[("MarketDataCore <br> 🌐 WebSocket + Parsing <br> RAII Lifecycle")]
-            end
-            
-            CSF --> AUTH
-            CSF --> CACHE
-            CSF --> CORE
+
+        subgraph "GPU Rendering (Qt Scene Graph)"
+            GPU_CHART[("GPUChartWidget<br>📈 VBO Triple Buffering<br>Pan/Zoom Transforms")];
+            HEATMAP[("HeatmapInstanced<br>🔥 Instanced Rendering<br>Unified Coordinates")];
         end
-        
-        CSF -- "Raw Trade Data" --> SC[("StreamController <br> Qt Bridge")];
+
+        BATCH_PROC -- "tradesReady(points, count)" --> GPU_CHART;
+        BATCH_PROC -- "heatmapReady(quads, count)" --> HEATMAP;
+
+        subgraph "Coordinate Synchronization"
+            GPU_CHART -- "viewChanged(time, price)" --> HEATMAP;
+        end
     end
 
-    subgraph "Data Fan-out (Qt Signals/Slots)"
-        SC -- "tradeReceived(trade)" --> STATS["StatisticsController"];
-        SC -- "tradeReceived(trade)" --> RULES["RuleEngine"];
-        SC -- "tradeReceived(trade)" --> CHART["TradeChartWidget"];
+    subgraph "GPU Hardware"
+        GPU_CHART -- "Uploads VBO" --> GPU[("GPU<br>Batched Draw Calls")];
+        HEATMAP -- "Uploads Instance Data" --> GPU;
     end
 
-    subgraph "Processing Logic"
-        STATS -- "trade object" --> PROC["StatisticsProcessor (CVD)"];
-    end
-
-    subgraph "Main (GUI) Thread"
-        MW["MainWindow"] -- "owns/displays" --> CHART;
-        MW -- "owns/displays" --> CVD_LABEL["QLabel (CVD)"];
-        MW -- "owns/displays" --> ALERT_LABEL["QLabel (Alerts)"];
-        
-        STATS -- "Qt Signal: cvdUpdated(value)" --> MW;
-        RULES -- "Qt Signal: alertTriggered(msg)" --> MW;
-    end
-    
-    WS --> CORE;
-
-    style CSF fill:#FF6B6B,stroke:#333,stroke-width:3px
-    style AUTH fill:#4ECDC4,stroke:#333,stroke-width:2px
-    style CACHE fill:#45B7D1,stroke:#333,stroke-width:2px
-    style CORE fill:#96CEB4,stroke:#333,stroke-width:2px
-    style SC fill:#f9d71c,stroke:#333,stroke-width:2px
-    style CHART fill:#ff6b6b,stroke:#333,stroke-width:2px
+    style LOB fill:#4ECDC4,stroke:#333,stroke-width:3px
+    style ADAPTER fill:#f9d71c,stroke:#333,stroke-width:2px
+    style TRADES_Q fill:#FF6B6B,stroke:#333,stroke-width:2px
+    style BOOK_Q fill:#FF6B6B,stroke:#333,stroke-width:2px
+    style GPU_CHART fill:#45B7D1,stroke:#333,stroke-width:3px
+    style HEATMAP fill:#96CEB4,stroke:#333,stroke-width:3px
 ```
 
-This document provides a high-level overview of the Sentinel C++ application's architecture, design principles, and data flow. It is intended to be a guide for developers working on the codebase.
+This document provides a high-level overview of the Sentinel C++ application's **GPU-centric architecture**, designed for ultra-high-performance financial data visualization.
 
-## 🚀 **ARCHITECTURAL TRANSFORMATION: THE FACADE REVOLUTION**
+## 🚀 **Architectural Vision: The GPU Revolution**
 
-**June 2025 - A LEGENDARY REFACTORING SUCCESS**
+Sentinel has undergone a fundamental architectural transformation, moving away from CPU-based rendering to a direct-to-GPU pipeline. The new architecture is built on three core pillars designed to visualize dense, stateful market data in real-time with zero-contention and minimal latency.
 
-Sentinel underwent a **REVOLUTIONARY ARCHITECTURAL TRANSFORMATION** that converted a monolithic 615-line class into an elegant facade pattern with just ~100 lines, achieving:
+1.  **Stateful, Dense Order Book:** We now maintain a complete, live replica of the order book in memory, enabling the visualization of a dense "wall of liquidity" instead of sparse, individual updates.
+2.  **Lock-Free, Zero-Malloc Data Pipeline:** A high-throughput, non-blocking pipeline connects the WebSocket processing thread directly to the GUI rendering thread, eliminating contention and memory allocation on the hot path.
+3.  **Multi-Layer, Direct-to-GPU Rendering:** The CPU-bound `QPainter` is gone. All rendering is now performed directly on the GPU using Qt's Scene Graph, with dedicated components for different data types, leveraging VBOs and instanced rendering for maximum performance.
 
-### 🎯 **Transformation Metrics**
-- **83% code reduction** (615 → 100 lines)
-- **Exponential performance gains** (0.0003ms average latency!)
-- **100% API compatibility** (drop-in replacement)
-- **Production validation** (117 live trades processed)
-- **12/12 comprehensive tests passed** (100% success rate)
+## The New Data Flow: From Socket to Pixel
 
-### 🏗️ **New Component Architecture**
-The monolithic `CoinbaseStreamClient` was transformed into a beautiful facade orchestrating four specialized components:
+The architecture is designed to minimize latency and contention at every stage. Data flows from the network to the GPU in a carefully orchestrated, multi-threaded pipeline.
 
-1. **🎭 CoinbaseStreamClient (Facade)**: Clean 100-line delegation layer
-2. **🔐 Authenticator**: JWT token generation and API key management
-3. **💾 DataCache**: High-performance ring buffer with shared_mutex for O(1) concurrent reads
-4. **🌐 MarketDataCore**: WebSocket networking and message parsing with RAII lifecycle
+### The Worker (WebSocket) Thread
+-   **Responsibilities:** Handles all network I/O, parses WebSocket messages, and maintains the live order book state.
+-   **Key Classes:**
+    -   **`MarketDataCore`**: Manages the Boost.Beast WebSocket connection and parses incoming JSON messages (trades, L2 updates, snapshots).
+    -   **`LiveOrderBook`**: The crown jewel of our state management. It consumes L2 update messages to maintain a complete, sorted, in-memory representation of the bids and asks. This provides the "stateful" view of the market.
+    -   **`GPUDataAdapter`**: Acts as the bridge. It's called by `MarketDataCore` on the worker thread to push new `Trade` and `OrderBook` objects into high-performance, lock-free queues.
 
-### 🔥 **Performance Revolution**
-- **O(1) lookups** replacing O(log n) operations
-- **Shared mutex** enabling massive concurrent read scaling
-- **Ring buffer** providing bounded memory usage (no more leaks!)
-- **Sub-millisecond latency** for all data access operations
-
-This transformation showcases the power of the **Single Responsibility Principle** and demonstrates how AI-assisted phased refactoring can achieve architectural excellence with zero risk.
-
-## The North Star: The Vision for Sentinel
-
-The ultimate goal of Sentinel is to be a professional-grade, high-performance market microstructure analysis tool, beginning with the BTC-USD pair on Coinbase and expand from there. The vision extends beyond a simple desktop application to a robust, 24/7 analysis engine.
-
-The core principles are:
-1.  **High Performance:** The application must be able to process high-frequency data streams. The choice of C++, Boost.Beast, and Qt ensures we can handle demanding workloads without compromising on speed or responsiveness.
-2.  **Modularity:** The core analysis logic is completely decoupled from the user interface. This is achieved by separating code into distinct libraries (`sentinel_core`, `sentinel_gui_lib`).
-3.  **Portability & Maintainability:** By using `vcpkg` for dependency management and `CMake` for builds, the project can be easily set up and compiled on different platforms (Windows, macOS, Linux).
-
-## Current Architecture: A Two-Thread Model
-
-Sentinel is built on a multi-threaded architecture to ensure the user interface remains responsive at all times.
+### The Lock-Free Pipeline
+-   **Responsibilities:** Decouples the worker thread from the GUI thread, allowing the worker to process data at maximum speed without ever waiting for the renderer.
+-   **Key Components:**
+    -   **`LockFreeQueue`**: A template-based, single-producer, single-consumer (SPSC) queue. It uses atomic operations to enqueue and dequeue data without locks, making it perfect for cross-thread communication. We use two instances: one for trades and one for the full order book state.
 
 ### The Main (GUI) Thread
--   **Responsibilities:** Manages and renders all UI elements. Handles user input.
--   **Key Class:** `MainWindow`. It is the root of the UI and orchestrates the creation of all other objects.
-
-### The Worker Thread
--   **Responsibilities:** Handles all blocking operations and heavy computation. This includes all networking, data parsing, and statistical calculations.
+-   **Responsibilities:** Manages the UI, processes user input, and orchestrates all GPU rendering.
 -   **Key Classes:**
-    -   **🎭 `CoinbaseStreamClient` (Facade)**: A beautiful 100-line facade that orchestrates the specialized components below. Provides the same public API as before but with revolutionary performance improvements.
-    -   **🔐 `Authenticator`**: Handles JWT token generation and API key management with thread-safe, stateless design.
-    -   **💾 `DataCache`**: High-performance data storage using ring buffers and shared_mutex for O(1) concurrent reads with bounded memory usage.
-    -   **🌐 `MarketDataCore`**: WebSocket networking and message parsing built with **Boost.Beast**. Features RAII lifecycle management and robust reconnection logic.
-    -   `RuleEngine`: Manages a collection of `Rule` objects and evaluates them against incoming data.
-    -   `StatisticsController`: A Qt-based wrapper that owns the pure C++ `StatisticsProcessor`.
-    -   `StatisticsProcessor`: A pure C++ class responsible for calculating the Cumulative Volume Delta (CVD).
+    -   **`GPUDataAdapter`**: On the GUI thread, a `QTimer` periodically triggers `processIncomingData()`. This method drains the lock-free queues, transforms the raw data into GPU-optimized vertex structures, and emits signals (`tradesReady`, `heatmapReady`) with pointers to large, pre-allocated buffers. This "batching" approach is critical for performance.
+    -   **`GPUChartWidget`**: Renders tens of thousands of trade points. It uses **VBO triple-buffering** to update the GPU's memory without stalling the render loop. It is also the master of the coordinate system, handling all pan/zoom logic.
+    -   **`HeatmapInstanced`**: Renders the dense order book. It uses **instanced rendering** to draw thousands of quads (representing price levels) in a single, efficient draw call. It listens for signals from `GPUChartWidget` to keep its coordinate system perfectly synchronized.
 
-### The "Controller" Pattern & Data Flow
-The key to our architecture is the **Controller Pattern**. Our core logic (like `StatisticsProcessor`) is written in pure, standard C++, making it independent and reusable. However, to integrate with Qt's threading and signal/slot system, we wrap it in a "Controller" (`StatisticsController` or `StreamController`).
+## Architectural Pillars in Detail
 
-The data flows as follows:
-1.  **🌐 `MarketDataCore`** receives WebSocket data on its dedicated I/O thread and parses messages.
-2.  **💾 `DataCache`** stores the parsed data in high-performance ring buffers with O(1) access.
-3.  **🎭 `CoinbaseStreamClient` (Facade)** provides a clean API that delegates to the appropriate component.
-4.  The facade uses a thread-safe queue to pass the data to the `StreamController`.
-5.  The `StreamController` emits a Qt signal (`tradeReceived`).
-6.  This signal is received by slots in `RuleEngine`, `StatisticsController`, and `TradeChartWidget` (within the main worker thread).
-7.  When a controller has new data for the UI, it emits another Qt signal (e.g., `cvdUpdated`).
-8.  This signal is safely sent across the thread boundary to a slot in `MainWindow`, which updates the UI.
+### 1. Stateful Order Book Visualization
+-   **Why:** Traditional charting often shows sparse, stateless events (e.g., the last trade price). To understand market depth, we must see the entire "wall of liquidity"—every bid and ask currently on the book.
+-   **How:** The `LiveOrderBook` class subscribes to the `l2update` channel. It first initializes its state from a `snapshot` message. Then, it applies every subsequent `l2update` message to its internal `std::map` of bids and asks. This gives us a complete, live picture of the order book at any moment, ready to be rendered as a dense heatmap.
 
-### 🚀 **Performance Benefits of the New Architecture**
-- **Lazy Initialization**: Components are created only when needed
-- **Component Isolation**: Each component has a single, well-defined responsibility  
-- **Concurrent Reads**: `DataCache` shared_mutex allows multiple readers without blocking
-- **Bounded Memory**: Ring buffers prevent unbounded memory growth
-- **RAII Lifecycle**: Automatic resource management prevents leaks
+### 2. The Lock-Free, Zero-Malloc Pipeline
+-   **Why:** In a high-frequency system, locks are a primary source of performance bottlenecks and unpredictable latency (jitter). Furthermore, frequent memory allocations (`new`, `malloc`) on the data hot-path can lead to heap contention and fragmentation.
+-   **How:**
+    -   **`LockFreeQueue`** ensures the WebSocket thread can push data without ever being blocked by the GUI thread.
+    -   The `GPUDataAdapter` pre-allocates large `std::vector` buffers for GPU data (`m_tradeBuffer`, `m_heatmapBuffer`). When processing incoming data, it simply fills these buffers and passes pointers. There are **zero allocations** in the `processIncomingData` loop, resulting in a highly predictable, low-latency pipeline.
 
-## The Journey So Far: A Phased Approach
-1.  **Phase 1-4:** Initial setup, OO refactoring, and multithreading.
-2.  **Phase 5-7:** High-performance client, bridge integration, and real-time charting.
-3.  **Phase 8: Modern Tooling & Networking Refactor:**
-    - **Replaced Manual Dependencies with `vcpkg`:** Introduced `vcpkg.json` as a single source of truth for all C++ libraries.
-    - **Replaced WebSocket++ with `Boost.Beast`:** Rewritten the entire networking client to use a modern, asynchronous, and more robust library.
-    - **Standardized Builds with `CMakePresets`:** Made the build process simple, reproducible, and platform-agnostic.
-    - **Refined Project Structure:** Re-organized the codebase into a professional `libs/` and `apps/` structure to improve modularity and decoupling.
+### 3. Multi-Layer, Direct-to-GPU Rendering
+-   **Why:** To render tens of thousands of data points at 60+ FPS, CPU-based tools like `QPainter` are not viable. We must communicate with the GPU in its native language: buffers of vertex data and batched draw calls.
+-   **How:** We use Qt's Scene Graph, a retained-mode graphics API that sits on top of OpenGL/Metal/Vulkan.
+    -   **`GPUChartWidget`** uses Vertex Buffer Objects (VBOs). It maintains three buffers; while one is being rendered, another can be filled with new data from the `GPUDataAdapter`. This avoids stalls and visual tearing.
+    -   **`HeatmapInstanced`** uses a technique where a single base shape (a quad) is defined once, and the GPU is instructed to draw it thousands of times in a single call, each with a different position, size, and color. This is the most efficient method for rendering massive amounts of similar objects.
 
-### 🔥 Phase 7 Accomplishments: Real-Time Charting Engine
+## The Pan/Zoom Coordinate System
+Responsiveness during user interaction is critical. The pan and zoom system is designed for a fluid experience without compromising rendering performance.
 
-**Problem Solved:** How to visualize high-frequency trade data in real-time without using slow, pre-packaged chart libraries.
+-   **World vs. Screen Coordinates:** The `GPUChartWidget` acts as the single source of truth for the viewing window. It maintains a "world" coordinate system based on time (X-axis) and price (Y-axis). A transformation function (`worldToScreen`) converts these abstract coordinates into pixel coordinates for rendering.
+-   **User Input:** The `mousePressEvent`, `mouseMoveEvent`, and `wheelEvent` are overridden to capture user input. These events modify the transformation parameters (e.g., `m_zoomFactor`, `m_panOffsetX`).
+-   **Throttling & Synchronization:**
+    - During rapid mouse drags or wheel scrolls, updates are throttled to avoid overwhelming the render thread.
+    - Crucially, whenever the view changes, `GPUChartWidget` emits a `viewChanged` signal containing the new time and price range.
+    - `HeatmapInstanced` connects to this signal. This ensures that the heatmap and the trade chart are **always rendered in the same coordinate space**, providing a seamless, unified visualization.
 
-**What We Built:**
-- **`TradeChartWidget`:** A fully custom `QWidget` that takes complete control of the rendering process.
-- **Dynamic Scaling:** The chart automatically calculates the min/max of the current data window and scales the axes accordingly.
-- **Price and Time Axes:** We now draw proper Y-axis (price) and X-axis (time) labels with grid lines for context.
-- **Multi-layered Drawing:**
-  - ✅ **Layer 1:** Black background and faint grid.
-  - ✅ **Layer 2:** A continuous white line representing the price action.
-  - ✅ **Layer 3:** Red/Green dots overlaid at each data point to show aggressive buy/sell flow.
-- **Symbol Filtering:** The chart is now "symbol-aware" and correctly filters to display only `BTC-USD`, solving the scaling problem.
-
-**Architecture Pattern:**
-- **Direct Signal-to-Slot Connection:** The `StreamController`'s `tradeReceived` signal is piped directly to the `TradeChartWidget`'s `addTrade` slot, making the data flow incredibly efficient.
-- **`QPainter` Mastery:** All rendering is done using `QPainter`, giving us pixel-perfect control over the final output.
-
-**Integration Results:**
-- **The "Good Squigglies":** We have a beautiful, real-time chart showing live market microstructure.
-- **Readable & Contextual:** The addition of axes makes the chart instantly understandable.
-- **High Performance:** The custom widget can handle the high-frequency data stream with ease.
-
-**🚀 COMPLETED: Architectural Transformation (Phase 8)**
-- **Phase 8:** Revolutionary facade refactoring achieving 83% code reduction and exponential performance gains
-- **Phase 9:** Comprehensive testing suite with 100% success rate (12/12 tests passed)
-
-**📁 ORGANIZED TEST SUITE**
-Our comprehensive test suite is now properly organized in the `tests/` directory:
-- **`test_comprehensive.cpp`**: Full architectural validation with performance benchmarking
-- **`test_datacache.cpp`**: DataCache ring buffer and thread safety validation  
-- **`test_facade.cpp`**: Facade pattern integration testing
-
-All tests can be built with: `cmake --build build` and run individually from `./build/tests/`
-
-**🎯 NEXT PHASE: Advanced Visualizations & UI Polish**
-- **Phase 10:** Order Book Heatmaps - The next major step toward our `aterm` goal.
-- **Phase 11:** UI/UX Polish - Add zoom/pan controls, a proper status bar, and improved aesthetics.
-- **Phase 12:** Performance Optimization - Explore OpenGL rendering for even greater speed.
-
-## The Build System
--   **CMake:** The cross-platform build system generator. `CMakeLists.txt` is our master blueprint.
--   **make:** The build tool that executes the blueprint generated by CMake.
--   **moc (Meta-Object Compiler):** A Qt tool that reads `Q_OBJECT` classes and generates necessary C++ source code to enable signals, slots, and other Qt features. These generated files are placed in the `build/sentinel_autogen` directory and compiled along with your own code. 
+## Build System & Dependencies
+-   **CMake:** The cross-platform build system generator.
+-   **Qt6:** Used for the application framework, GUI thread event loop, and the Scene Graph rendering API.
+-   **Boost.Beast:** Powers the underlying WebSocket networking.
+-   **vcpkg:** Manages all C++ dependencies. 

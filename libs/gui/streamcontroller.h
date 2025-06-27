@@ -7,7 +7,7 @@
 #include <QTimer>      // For periodic polling (like Python's time.sleep in a loop)
 #include <memory>      // For smart pointers (like Python's automatic memory management)
 #include <unordered_map> // For the last trade IDs tracking (like Python's dict)
-#include "coinbasestreamclient.h"
+#include "CoinbaseStreamClient.hpp"
 #include "tradedata.h"
 
 // Forward declaration for lock-free GPU pipeline

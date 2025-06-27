@@ -1,4 +1,5 @@
 #include "CoinbaseStreamClient.hpp"
+#include <iostream>
 
 // New facade implementation - Phase 1 compilation verification stub
 
@@ -38,6 +39,27 @@ std::vector<Trade> CoinbaseStreamClient::getNewTrades(const std::string& symbol,
 }
 
 OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
-    // TODO: Implement in Phase 5
-    return m_cache.book(symbol);
+    // 🔥 NEW: Return dense LiveOrderBook data for professional visualization
+    OrderBook book = m_cache.getLiveOrderBook(symbol);
+    
+    // 🔍 DEBUG: Trace the final connection to identify the broken wire
+    static int debugCount = 0;
+    if (++debugCount % 20 == 1) { // Log every 20th call
+        std::cout << "🔍 FACADE getOrderBook: symbol='" << symbol 
+                  << "' → bids=" << book.bids.size() 
+                  << " asks=" << book.asks.size() 
+                  << " [call #" << debugCount << "]" << std::endl;
+    }
+    
+    return book;
+}
+
+std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveBids(const std::string& symbol) const {
+    // 🔥 NEW: Return complete bid levels for dense heatmap visualization
+    return m_cache.getLiveBids(symbol);
+}
+
+std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveAsks(const std::string& symbol) const {
+    // 🔥 NEW: Return complete ask levels for dense heatmap visualization
+    return m_cache.getLiveAsks(symbol);
 } 

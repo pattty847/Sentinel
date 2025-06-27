@@ -294,20 +294,19 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
             }
         }
     } else if (channel == "l2_data") {
-        // Process order book data
+        // 🔥 NEW: STATEFUL ORDER BOOK PROCESSING
         if (message.contains("events")) {
             for (const auto& event : message["events"]) {
                 std::string eventType = event.value("type", "");
-                if (eventType == "update" && event.contains("updates") && event.contains("product_id")) {
+                std::string product_id = event.value("product_id", "");
+                
+                if (eventType == "snapshot" && event.contains("updates") && !product_id.empty()) {
+                    // 🏗️ SNAPSHOT: Initialize complete order book state
+                    OrderBook snapshot;
+                    snapshot.product_id = product_id;
+                    snapshot.timestamp = std::chrono::system_clock::now();
                     
-                    std::string product_id = event["product_id"];
-                    
-                    // Build OrderBook from updates
-                    OrderBook orderBook;
-                    orderBook.product_id = product_id;
-                    orderBook.timestamp = std::chrono::system_clock::now();
-                    
-                    // Process each update
+                    // Process snapshot data
                     for (const auto& update : event["updates"]) {
                         if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
                             continue;
@@ -317,32 +316,47 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         double price = std::stod(update["price_level"].get<std::string>());
                         double quantity = std::stod(update["new_quantity"].get<std::string>());
                         
-                        OrderBookLevel level;
-                        level.price = price;
-                        level.size = quantity;
-                        
-                        // Only add non-zero quantities
                         if (quantity > 0.0) {
+                            OrderBookLevel level = {price, quantity};
                             if (side == "bid") {
-                                orderBook.bids.push_back(level);
+                                snapshot.bids.push_back(level);
                             } else if (side == "offer") {
-                                orderBook.asks.push_back(level);
+                                snapshot.asks.push_back(level);
                             }
                         }
                     }
                     
-                    // Store in DataCache if we have data
-                    if (!orderBook.bids.empty() || !orderBook.asks.empty()) {
-                        m_cache.updateBook(orderBook);
-                        
-                        // 🔥 THROTTLED LOGGING: Only log every 10th order book update
-                        static int orderBookLogCount = 0;
-                        if (++orderBookLogCount % 10 == 1) { // Log 1st, 11th, 21st update, etc.
-                            std::cout << "📊 " << product_id << " order book: " 
-                                      << orderBook.bids.size() << " bids, " 
-                                      << orderBook.asks.size() << " asks"
-                                      << " [" << orderBookLogCount << " updates total]" << std::endl;
+                    // Initialize the live order book with complete state
+                    m_cache.initializeLiveOrderBook(product_id, snapshot);
+                    
+                    std::cout << "📸 SNAPSHOT: Initialized " << product_id << " with " 
+                              << snapshot.bids.size() << " bids, " << snapshot.asks.size() << " asks" << std::endl;
+                    
+                } else if (eventType == "update" && event.contains("updates") && !product_id.empty()) {
+                    // 🔄 UPDATE: Apply incremental changes to stateful order book
+                    int updateCount = 0;
+                    
+                    for (const auto& update : event["updates"]) {
+                        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
+                            continue;
                         }
+                        
+                        std::string side = update["side"];
+                        double price = std::stod(update["price_level"].get<std::string>());
+                        double quantity = std::stod(update["new_quantity"].get<std::string>());
+                        
+                        // Apply update to live order book (handles add/update/remove automatically)
+                        m_cache.updateLiveOrderBook(product_id, side, price, quantity);
+                        updateCount++;
+                    }
+                    
+                    // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
+                    static int liveBookLogCount = 0;
+                    if (++liveBookLogCount % 100 == 1) {
+                        auto liveBook = m_cache.getLiveOrderBook(product_id);
+                        std::cout << "🏭 LIVE UPDATE " << liveBookLogCount << ": " << product_id 
+                                  << " → " << liveBook.bids.size() << " bids, " 
+                                  << liveBook.asks.size() << " asks (+" << updateCount << " changes)" << std::endl;
                     }
                 }
             }

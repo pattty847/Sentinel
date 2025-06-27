@@ -59,6 +59,9 @@ signals:
     void autoScrollEnabledChanged();
     void zoomFactorChanged(double factor);
     void panOffsetChanged(double x, double y);
+    
+    // 🔥 GEMINI UNIFICATION: Broadcasts the camera's current time window
+    void viewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice); // 🔥 FINAL POLISH: Include price range
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -96,10 +99,8 @@ private:
     std::atomic<int> m_readBuffer{1};
     std::mutex m_bufferMutex;
     
-    // 🔥 REMOVED: All test data storage - Option B clean approach
-    // std::vector<GPUPoint> m_testPoints;  // REMOVED
-    // std::vector<RawPoint> m_rawTestPoints;  // REMOVED
-    // bool m_testDataDirty = false;  // REMOVED
+    // 🔥 GEMINI FIX: Accumulate all trades for persistent rendering
+    std::vector<GPUPoint> m_allRenderPoints;
     
     // REAL DATA STORAGE
     std::vector<Trade> m_recentTrades;
