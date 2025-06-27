@@ -12,6 +12,7 @@ target_sources(sentinel_core
         Authenticator.cpp
         DataCache.cpp
         MarketDataCore.cpp
+        MessageParser.hpp
         # Phase 3: Lock-free performance monitoring
         performancemonitor.cpp
         CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
