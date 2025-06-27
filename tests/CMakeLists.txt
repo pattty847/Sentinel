@@ -1,34 +1,60 @@
 # =============================================================================
 # SENTINEL TESTS - CMakeLists.txt
-# Organized test suite for the revolutionary refactored architecture
+# Defines test executables and links them against GTest and the core library.
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.22)
 
-# Test executables with proper include directories
-add_executable(test_comprehensive test_comprehensive.cpp)
-target_link_libraries(test_comprehensive PRIVATE sentinel_core)
-target_include_directories(test_comprehensive PRIVATE ${CMAKE_SOURCE_DIR})
+include(FetchContent)
+# Fetch GoogleTest at configure time
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+FetchContent_MakeAvailable(googletest)
 
-add_executable(test_datacache test_datacache.cpp)
-target_link_libraries(test_datacache PRIVATE sentinel_core)
-target_include_directories(test_datacache PRIVATE ${CMAKE_SOURCE_DIR})
+# This allows CTest to discover and run the tests defined here.
+enable_testing()
 
-add_executable(test_facade test_facade.cpp)
-target_link_libraries(test_facade PRIVATE sentinel_core)
-target_include_directories(test_facade PRIVATE ${CMAKE_SOURCE_DIR})
+# Set the C++ standard for all test targets in this file.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set C++17 standard for all tests
-set_property(TARGET test_comprehensive PROPERTY CXX_STANDARD 17)
-set_property(TARGET test_datacache PROPERTY CXX_STANDARD 17)
-set_property(TARGET test_facade PROPERTY CXX_STANDARD 17)
+# -----------------------------------------------------------------------------
+# Test Target: test_messageparser
+# A standalone unit test for the JSON parser. It has no Qt dependencies.
+# -----------------------------------------------------------------------------
+add_executable(test_messageparser test_messageparser.cpp)
 
-# Add test descriptions
-set_target_properties(test_comprehensive PROPERTIES DESCRIPTION "Phase 6 comprehensive test suite")
-set_target_properties(test_datacache PROPERTIES DESCRIPTION "Phase 3 DataCache validation tests")
-set_target_properties(test_facade PROPERTIES DESCRIPTION "Phase 5 Facade pattern tests")
+target_link_libraries(test_messageparser PRIVATE
+  sentinel_core       # Assumes your core library target is named this
+  GTest::gtest_main
+)
+
+add_test(NAME MessageParserTests COMMAND test_messageparser)
+
+
+# -----------------------------------------------------------------------------
+# Test Target: test_rendering_performance
+# The benchmark test, which requires Qt libraries.
+# -----------------------------------------------------------------------------
+add_executable(test_rendering_performance test_rendering_performance.cpp)
+
+find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
+
+# Link against the GUI library and Qt
+target_link_libraries(test_rendering_performance PRIVATE
+  sentinel_core
+  sentinel_gui_lib        # GUI library target
+  GTest::gtest_main
+  Qt6::Widgets
+  Qt6::Charts
+)
+
+add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
+
+# You can add more test executables here as you create them...
+# add_executable(test_authenticator test_authenticator.cpp)
+# ...
 
 message(STATUS "✅ Sentinel test suite configured successfully!")
-message(STATUS "   - test_comprehensive: Full architectural validation")
-message(STATUS "   - test_datacache: DataCache performance & thread safety")
-message(STATUS "   - test_facade: Facade pattern integration tests") 
