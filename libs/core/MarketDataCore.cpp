@@ -282,8 +282,13 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // Store in DataCache
                         m_cache.addTrade(trade);
                         
-                        std::cout << "💰 " << trade.product_id << ": $" << trade.price 
-                                  << " size:" << trade.size << " (" << side << ")" << std::endl;
+                        // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
+                        static int tradeLogCount = 0;
+                        if (++tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
+                            std::cout << "💰 " << trade.product_id << ": $" << trade.price 
+                                      << " size:" << trade.size << " (" << side << ")" 
+                                      << " [" << tradeLogCount << " trades total]" << std::endl;
+                        }
                     }
                 }
             }
@@ -330,9 +335,14 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                     if (!orderBook.bids.empty() || !orderBook.asks.empty()) {
                         m_cache.updateBook(orderBook);
                         
-                        std::cout << "📊 " << product_id << " order book: " 
-                                  << orderBook.bids.size() << " bids, " 
-                                  << orderBook.asks.size() << " asks" << std::endl;
+                        // 🔥 THROTTLED LOGGING: Only log every 10th order book update
+                        static int orderBookLogCount = 0;
+                        if (++orderBookLogCount % 10 == 1) { // Log 1st, 11th, 21st update, etc.
+                            std::cout << "📊 " << product_id << " order book: " 
+                                      << orderBook.bids.size() << " bids, " 
+                                      << orderBook.asks.size() << " asks"
+                                      << " [" << orderBookLogCount << " updates total]" << std::endl;
+                        }
                     }
                 }
             }

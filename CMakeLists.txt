@@ -21,7 +21,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find top-level dependencies needed by multiple components
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets)
 
 # Automatically run MOC, UIC, and RCC
 set(CMAKE_AUTOMOC ON)
