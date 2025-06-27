@@ -154,16 +154,28 @@ void HeatMapInstanced::setIntensityScale(double scale) {
     update();
 }
 
-// 🔥 NEW: Time window synchronization for unified coordinates
-void HeatMapInstanced::setTimeWindow(int64_t startMs, int64_t endMs) {
+// 🔥 FINAL POLISH: Time window + price range synchronization for unified coordinates  
+void HeatMapInstanced::setTimeWindow(int64_t startMs, int64_t endMs, double minPrice, double maxPrice) {
     m_visibleTimeStart_ms = startMs;
     m_visibleTimeEnd_ms = endMs;
     m_timeWindowValid = (endMs > startMs);
+    
+    // 🔥 FINAL POLISH: Store the synchronized price range
+    m_minPrice = minPrice;
+    m_maxPrice = maxPrice;
     
     if (m_timeWindowValid) {
         // Trigger coordinate recalculation when time window changes
         m_geometryDirty.store(true);
         update();
+        
+        // 🔥 DEBUG: Verify the complete coordination is working
+        static int syncCount = 0;
+        if (syncCount++ < 5) {
+            qDebug() << "✅🔥 COMPLETE COORDINATION ESTABLISHED:" 
+                     << "HeatMap synced to GPUChart - Time:" << startMs << "to" << endMs 
+                     << "ms, Price:" << minPrice << "to" << maxPrice;
+        }
     }
 }
 
@@ -196,8 +208,8 @@ QSGNode* HeatMapInstanced::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
             delete m_bidNode;
         }
         
-        if (!m_bidInstances.empty()) {
-            m_bidNode = createQuadGeometryNode(m_bidInstances, QColor(0, 255, 0, 180));
+        if (!m_allBidInstances.empty()) { // 🔥 HISTORICAL HEATMAP: Use accumulated data
+            m_bidNode = createQuadGeometryNode(m_allBidInstances, QColor(0, 255, 0, 180));
             rootNode->appendChildNode(m_bidNode);
         } else {
             m_bidNode = nullptr;
@@ -213,8 +225,8 @@ QSGNode* HeatMapInstanced::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
             delete m_askNode;
         }
         
-        if (!m_askInstances.empty()) {
-            m_askNode = createQuadGeometryNode(m_askInstances, QColor(255, 0, 0, 180));
+        if (!m_allAskInstances.empty()) { // 🔥 HISTORICAL HEATMAP: Use accumulated data
+            m_askNode = createQuadGeometryNode(m_allAskInstances, QColor(255, 0, 0, 180));
             rootNode->appendChildNode(m_askNode);
         } else {
             m_askNode = nullptr;
@@ -228,9 +240,9 @@ QSGNode* HeatMapInstanced::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
 }
 
 void HeatMapInstanced::convertOrderBookToInstances(const OrderBook& book) {
-    // Clear existing instances
-    m_bidInstances.clear();
-    m_askInstances.clear();
+    // 🔥 HISTORICAL HEATMAP: Don't clear - we want to accumulate history!
+    // m_bidInstances.clear();  // REMOVED to preserve history
+    // m_askInstances.clear();  // REMOVED to preserve history
     
     // Convert bids to green quads
     convertBidsToInstances(book.bids);
@@ -238,8 +250,8 @@ void HeatMapInstanced::convertOrderBookToInstances(const OrderBook& book) {
     // Convert asks to red quads  
     convertAsksToInstances(book.asks);
     
-    // Sort and limit for performance
-    sortAndLimitLevels();
+    // 🔥 HISTORICAL HEATMAP: Sort/limit the historical data if needed
+    cleanupOldHeatmapPoints(); // Clean up old points to prevent unlimited memory growth
 }
 
 void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>& bids) {
@@ -250,37 +262,15 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
         if (level.price >= m_minPrice && level.price <= m_maxPrice && level.size > 0.0) {
             QuadInstance quad;
             
-            // 🚀 UNIFIED TIME-SERIES COORDINATE MAPPING (Option B approach)
-            QPointF basePos;
-            if (m_timeWindowValid) {
-                // Use same coordinate system as trades
-                double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-                double timeRatio = (currentTimestamp - m_visibleTimeStart_ms) / timeRange;
-                double x = timeRatio * width();
-                
-                // Map price to Y coordinate (same as trades)
-                double priceRange = m_maxPrice - m_minPrice;
-                double priceRatio = (level.price - m_minPrice) / priceRange;
-                double y = (1.0 - priceRatio) * height();
-                
-                basePos = QPointF(x, y);
-            } else {
-                // Fallback: place at 80% of screen width
-                double x = 0.8 * width();
-                double priceRange = m_maxPrice - m_minPrice;
-                double priceRatio = (level.price - m_minPrice) / priceRange;
-                double y = (1.0 - priceRatio) * height();
-                basePos = QPointF(x, y);
-            }
+            // 🔥 FINAL POLISH: Store raw data instead of calculating screen coordinates
+            // Screen coordinates will be calculated in createQuadGeometryNode every frame
+            quad.rawTimestamp = currentTimestamp;
+            quad.rawPrice = level.price;
             
-            // 🔥 ORDER BOOK POSITIONING: Bids extend RIGHT from the time column
-            float volumeScale = std::min(1.0f, static_cast<float>(level.size * 100.0f));
-            float bidWidth = width() * 0.2f * volumeScale;  // Max 20% of screen width
-            
-            quad.x = basePos.x();  // Start at the time column
-            quad.y = basePos.y();
-            quad.width = bidWidth;  // Extend rightward
-            quad.height = 4.0f;     // Thin horizontal bars
+            // Fixed point size for heatmap squares
+            const float pointSize = 4.0f;
+            quad.width = pointSize;
+            quad.height = pointSize;
             
             QColor color = calculateIntensityColor(level.size, true);
             quad.r = color.redF();
@@ -293,13 +283,14 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
             quad.size = level.size;
             quad.timestamp = currentTimestamp;
             
-            m_bidInstances.push_back(quad);
+            m_allBidInstances.push_back(quad); // 🔥 HISTORICAL HEATMAP: Accumulate all bid points
             
             // 🔇 REDUCED DEBUG: Only log every 50th bar to reduce spam
             static int bidBarCounter = 0;
             if (++bidBarCounter % 50 == 0) {
-                qDebug() << "🟢 UNIFIED BID BAR #" << bidBarCounter 
-                         << ": Price" << level.price << "→ ColumnX:" << basePos.x() << "Y:" << quad.y;
+                qDebug() << "🟢 HISTORICAL BID POINT #" << bidBarCounter 
+                         << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
+                         << "Total accumulated:" << m_allBidInstances.size();
             }
         }
     }
@@ -313,37 +304,15 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
         if (level.price >= m_minPrice && level.price <= m_maxPrice && level.size > 0.0) {
             QuadInstance quad;
             
-            // 🚀 UNIFIED TIME-SERIES COORDINATE MAPPING (Option B approach)
-            QPointF basePos;
-            if (m_timeWindowValid) {
-                // Use same coordinate system as trades
-                double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-                double timeRatio = (currentTimestamp - m_visibleTimeStart_ms) / timeRange;
-                double x = timeRatio * width();
-                
-                // Map price to Y coordinate (same as trades)
-                double priceRange = m_maxPrice - m_minPrice;
-                double priceRatio = (level.price - m_minPrice) / priceRange;
-                double y = (1.0 - priceRatio) * height();
-                
-                basePos = QPointF(x, y);
-            } else {
-                // Fallback: place at 80% of screen width
-                double x = 0.8 * width();
-                double priceRange = m_maxPrice - m_minPrice;
-                double priceRatio = (level.price - m_minPrice) / priceRange;
-                double y = (1.0 - priceRatio) * height();
-                basePos = QPointF(x, y);
-            }
+            // 🔥 FINAL POLISH: Store raw data instead of calculating screen coordinates
+            // Screen coordinates will be calculated in createQuadGeometryNode every frame
+            quad.rawTimestamp = currentTimestamp;
+            quad.rawPrice = level.price;
             
-            // 🔥 ORDER BOOK POSITIONING: Asks extend LEFT from the time column
-            float volumeScale = std::min(1.0f, static_cast<float>(level.size * 100.0f));
-            float askWidth = width() * 0.2f * volumeScale;  // Max 20% of screen width
-            
-            quad.x = basePos.x() - askWidth;  // Start LEFT of the time column
-            quad.y = basePos.y();
-            quad.width = askWidth;  // Extend leftward
-            quad.height = 4.0f;     // Thin horizontal bars
+            // Fixed point size for heatmap squares
+            const float pointSize = 4.0f;
+            quad.width = pointSize;
+            quad.height = pointSize;
             
             QColor color = calculateIntensityColor(level.size, false);
             quad.r = color.redF();
@@ -356,16 +325,35 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
             quad.size = level.size;
             quad.timestamp = currentTimestamp;
             
-            m_askInstances.push_back(quad);
+            m_allAskInstances.push_back(quad); // 🔥 HISTORICAL HEATMAP: Accumulate all ask points
             
             // 🔇 REDUCED DEBUG: Only log every 50th bar to reduce spam
             static int askBarCounter = 0;
             if (++askBarCounter % 50 == 0) {
-                qDebug() << "🔴 UNIFIED ASK BAR #" << askBarCounter 
-                         << ": Price" << level.price << "→ ColumnX:" << basePos.x() << "Y:" << quad.y;
+                qDebug() << "🔴 HISTORICAL ASK POINT #" << askBarCounter 
+                         << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
+                         << "Total accumulated:" << m_allAskInstances.size();
             }
         }
     }
+}
+
+QPointF HeatMapInstanced::worldToScreen(double timestamp_ms, double price) const {
+    if (width() <= 0 || height() <= 0 || !m_timeWindowValid) {
+        return QPointF(-1000, -1000); // Return off-screen point
+    }
+
+    double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+    if (timeRange <= 0) timeRange = 1.0;
+    double timeRatio = (timestamp_ms - m_visibleTimeStart_ms) / timeRange;
+    double x = timeRatio * width();
+
+    double priceRange = m_maxPrice - m_minPrice;
+    if (priceRange <= 0) priceRange = 1.0;
+    double priceRatio = (price - m_minPrice) / priceRange;
+    double y = (1.0 - priceRatio) * height();
+
+    return QPointF(x, y);
 }
 
 QRectF HeatMapInstanced::calculateQuadGeometry(double price, double size) const {
@@ -408,6 +396,46 @@ QColor HeatMapInstanced::calculateIntensityColor(double size, bool isBid) const 
     }
 }
 
+void HeatMapInstanced::cleanupOldHeatmapPoints() {
+    // 🔥 WALL OF LIQUIDITY: Manage historical points with time-based fading
+    const size_t maxHistoricalPoints = static_cast<size_t>(m_maxQuads);
+    double currentTime = QDateTime::currentMSecsSinceEpoch();
+    const double fadeTimeMs = 30000.0; // 30 seconds fade window
+    
+    // 🔥 NEW: Apply time-based fading to old points before cleanup
+    for (auto& quad : m_allBidInstances) {
+        double age = currentTime - quad.timestamp;
+        if (age > 0 && age < fadeTimeMs) {
+            // Fade alpha based on age (newer = more opaque)
+            float fadeFactor = 1.0f - (age / fadeTimeMs);
+            quad.a = quad.a * fadeFactor * 0.8f; // Reduce base opacity for trailing effect
+        }
+    }
+    
+    for (auto& quad : m_allAskInstances) {
+        double age = currentTime - quad.timestamp;
+        if (age > 0 && age < fadeTimeMs) {
+            // Fade alpha based on age (newer = more opaque)
+            float fadeFactor = 1.0f - (age / fadeTimeMs);
+            quad.a = quad.a * fadeFactor * 0.8f; // Reduce base opacity for trailing effect
+        }
+    }
+    
+    // Clean up bids if we exceed maximum (only remove oldest)
+    if (m_allBidInstances.size() > maxHistoricalPoints) {
+        size_t excess = m_allBidInstances.size() - maxHistoricalPoints;
+        m_allBidInstances.erase(m_allBidInstances.begin(), m_allBidInstances.begin() + excess);
+        qDebug() << "🌊 WAVE CLEANUP: Removed" << excess << "oldest bid points, remaining:" << m_allBidInstances.size() << "historical levels";
+    }
+    
+    // Clean up asks if we exceed maximum (only remove oldest)
+    if (m_allAskInstances.size() > maxHistoricalPoints) {
+        size_t excess = m_allAskInstances.size() - maxHistoricalPoints;
+        m_allAskInstances.erase(m_allAskInstances.begin(), m_allAskInstances.begin() + excess);
+        qDebug() << "🌊 WAVE CLEANUP: Removed" << excess << "oldest ask points, remaining:" << m_allAskInstances.size() << "historical levels";
+    }
+}
+
 void HeatMapInstanced::sortAndLimitLevels() {
     // Sort bids by price (descending - highest first)
     std::sort(m_bidInstances.begin(), m_bidInstances.end(), 
@@ -446,13 +474,17 @@ QSGGeometryNode* HeatMapInstanced::createQuadGeometryNode(const std::vector<Quad
     
     // Generate quad vertices for each instance (2 triangles = 6 vertices) - POSITION ONLY
     for (size_t i = 0; i < instances.size(); ++i) {
-        const QuadInstance& quad = instances[i];
+        const QuadInstance& quad_data = instances[i];
+
+        // 🔥 FINAL POLISH: RECALCULATE ON EVERY FRAME, inside the rendering function
+        QPointF screenPos = worldToScreen(quad_data.rawTimestamp, quad_data.rawPrice);
         
-        // Quad corners
-        float x1 = quad.x;
-        float y1 = quad.y;
-        float x2 = quad.x + quad.width;
-        float y2 = quad.y + quad.height;
+        // Use screenPos to define the quad corners
+        const float pointSize = 4.0f;
+        float x1 = screenPos.x() - (pointSize / 2.0f);
+        float y1 = screenPos.y() - (pointSize / 2.0f);
+        float x2 = x1 + pointSize;
+        float y2 = y1 + pointSize;
         
         // Triangle 1: top-left, top-right, bottom-left
         vertices[i * 6 + 0].set(x1, y1);

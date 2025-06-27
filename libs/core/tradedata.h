@@ -4,6 +4,8 @@
 #include <chrono>
 #include <string>
 #include <vector>
+#include <map>
+#include <mutex>
 
 /*
 Match:
@@ -93,6 +95,46 @@ struct OrderBook {
     std::vector<OrderBookLevel> bids;
     std::vector<OrderBookLevel> asks;
     std::chrono::system_clock::time_point timestamp;
+};
+
+// 🔥 NEW: LiveOrderBook - Stateful Order Book for Professional Visualization
+class LiveOrderBook {
+public:
+    LiveOrderBook() = default;
+    explicit LiveOrderBook(const std::string& product_id) : m_productId(product_id) {}
+    
+    // Initialize from snapshot (complete order book state)
+    void initializeFromSnapshot(const OrderBook& snapshot);
+    
+    // Apply incremental updates (l2update messages)
+    void applyUpdate(const std::string& side, double price, double quantity);
+    
+    // Get current complete state as OrderBook for rendering
+    OrderBook getCurrentState() const;
+    
+    // Get dense data for heatmap rendering
+    std::vector<OrderBookLevel> getAllBids() const;
+    std::vector<OrderBookLevel> getAllAsks() const;
+    
+    // Statistics
+    size_t getBidCount() const;
+    size_t getAskCount() const;
+    bool isEmpty() const;
+    
+    // Thread-safe access
+    void setProductId(const std::string& productId) { m_productId = productId; }
+    std::string getProductId() const { return m_productId; }
+
+private:
+    std::string m_productId;
+    
+    // 🚀 CORE: Sorted maps for efficient price level management
+    // Key = price, Value = quantity/size
+    std::map<double, double> m_bids;  // Higher prices first (reverse order)
+    std::map<double, double> m_asks;  // Lower prices first (normal order)
+    
+    std::chrono::system_clock::time_point m_lastUpdate;
+    mutable std::mutex m_mutex; // Thread safety for concurrent access
 };
 
 #endif // TRADEDATA_H 

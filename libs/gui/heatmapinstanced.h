@@ -27,8 +27,8 @@ public:
     Q_INVOKABLE void setPriceRange(double minPrice, double maxPrice);
     Q_INVOKABLE void setIntensityScale(double scale);
     
-    // 🔥 NEW: Time window synchronization for unified coordinates
-    Q_INVOKABLE void setTimeWindow(int64_t startMs, int64_t endMs);
+    // 🔥 FINAL POLISH: Time window + price range synchronization for unified coordinates
+    Q_INVOKABLE void setTimeWindow(int64_t startMs, int64_t endMs, double minPrice, double maxPrice);
 
 public slots:
     // Real-time order book updates
@@ -48,11 +48,19 @@ private:
         double price;         // Original price (for sorting/filtering)
         double size;          // Original size (for intensity calculation)
         double timestamp;     // Timestamp for unified coordinate system
+        
+        // 🔥 FINAL POLISH: Store raw data for per-frame recalculation
+        double rawTimestamp = 0.0;
+        double rawPrice = 0.0;
     };
 
     // 🚀 SEPARATE BID/ASK BUFFERS (as specified in plan)
     std::vector<QuadInstance> m_bidInstances;   // Green quads (bids)
     std::vector<QuadInstance> m_askInstances;   // Red quads (asks)
+    
+    // 🔥 HISTORICAL HEATMAP: Store the full history of all heatmap points for accumulation
+    std::vector<QuadInstance> m_allBidInstances;
+    std::vector<QuadInstance> m_allAskInstances;
     
     // Thread-safe buffer management
     std::mutex m_dataMutex;
@@ -83,6 +91,8 @@ private:
     void convertOrderBookToInstances(const OrderBook& book);
     void convertBidsToInstances(const std::vector<OrderBookLevel>& bids);
     void convertAsksToInstances(const std::vector<OrderBookLevel>& asks);
+    void cleanupOldHeatmapPoints(); // 🔥 HISTORICAL HEATMAP: Memory management
+    QPointF worldToScreen(double timestamp_ms, double price) const; // 🔥 FINAL POLISH: Per-frame coordinate transformation
     QRectF calculateQuadGeometry(double price, double size) const;
     QColor calculateIntensityColor(double size, bool isBid) const;
     void updateBidGeometry();
