@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: libs/gui/**/*
 alwaysApply: false
 ---
 # GPU Rendering Context
@@ -18,7 +18,9 @@ This rule provides specific technical details for the GPU rendering optimization
 - **Framework**: Qt Quick with SceneGraph (GPU-accelerated)
 - **Performance Target**: 1M+ points @ 144Hz, <3ms render time
 - **GPU Pipeline**: Direct OpenGL/Metal/Vulkan through Qt RHI
-- **Data Flow**: Lock-free data → VBO → GPU batching
+- **Data Flow**: Lock-free data → GPUDataAdapter (16ms batching) → VBO → GPU
+- **Multi-Layer Architecture**: GPUChartWidget + HeatmapInstanced + CandlestickBatched
+- **Coordination**: Master-follower coordinate system with viewChanged signals
 
 ## IMPLEMENTATION PHASES
 
