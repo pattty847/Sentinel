@@ -31,13 +31,18 @@ struct OHLC {
 
 class CandleLOD {
 public:
-    enum TimeFrame { 
-        TF_1min = 0, 
-        TF_5min = 1, 
-        TF_15min = 2, 
-        TF_60min = 3, 
-        TF_Daily = 4 
+    enum TimeFrame {
+        TF_100ms = 0,
+        TF_500ms = 1,
+        TF_1sec  = 2,
+        TF_1min  = 3,
+        TF_5min  = 4,
+        TF_15min = 5,
+        TF_60min = 6,
+        TF_Daily = 7
     };
+
+    static constexpr size_t NUM_TIMEFRAMES = 8;
     
     CandleLOD();
     
@@ -47,11 +52,14 @@ public:
     
     // 🎯 LOD SELECTION: Choose optimal timeframe based on visible pixels per candle
     TimeFrame selectOptimalTimeFrame(double pixelsPerCandle) const {
-        if (pixelsPerCandle < 2.0) return TF_Daily;   // Very zoomed out
-        if (pixelsPerCandle < 5.0) return TF_60min;   // Zoomed out
-        if (pixelsPerCandle < 10.0) return TF_15min;  // Medium zoom
-        if (pixelsPerCandle < 20.0) return TF_5min;   // Zoomed in
-        return TF_1min;                               // Very zoomed in
+        if (pixelsPerCandle < 2.0)  return TF_Daily;    // Very zoomed out
+        if (pixelsPerCandle < 5.0)  return TF_60min;    // Zoomed out
+        if (pixelsPerCandle < 10.0) return TF_15min;    // Medium zoom
+        if (pixelsPerCandle < 20.0) return TF_5min;     // Zoomed in
+        if (pixelsPerCandle < 40.0) return TF_1min;     // Close view
+        if (pixelsPerCandle < 80.0) return TF_1sec;     // Very close
+        if (pixelsPerCandle < 160.0) return TF_500ms;   // Ultra close
+        return TF_100ms;                                // Extreme zoom
     }
     
     // 🔥 DATA ACCESS: Get pre-baked candles for specific timeframe
@@ -71,21 +79,24 @@ public:
     void printStats() const;
 
 private:
-    // 🕯️ PRE-BAKED TIMEFRAME DATA: 5 different timeframes for LOD
-    std::array<std::vector<OHLC>, 5> m_timeFrameData;
+    // 🕯️ PRE-BAKED TIMEFRAME DATA: multiple timeframes for LOD
+    std::array<std::vector<OHLC>, NUM_TIMEFRAMES> m_timeFrameData;
     
     // 🎯 TIMEFRAME INTERVALS: Duration in milliseconds
-    static constexpr int64_t TIMEFRAME_INTERVALS[5] = {
+    static constexpr int64_t TIMEFRAME_INTERVALS[NUM_TIMEFRAMES] = {
+        100,            // 100ms
+        500,            // 500ms
+        1000,           // 1 second
         60 * 1000,      // 1 minute
-        5 * 60 * 1000,  // 5 minutes  
+        5 * 60 * 1000,  // 5 minutes
         15 * 60 * 1000, // 15 minutes
         60 * 60 * 1000, // 1 hour
         24 * 60 * 60 * 1000 // 1 day
     };
     
     // 🔥 CURRENT CANDLE TRACKING: For real-time updates
-    std::array<OHLC*, 5> m_currentCandles; // Pointer to current candle being built
-    std::array<int64_t, 5> m_lastCandleTime; // Last candle start time for each timeframe
+    std::array<OHLC*, NUM_TIMEFRAMES> m_currentCandles; // Pointer to current candle being built
+    std::array<int64_t, NUM_TIMEFRAMES> m_lastCandleTime; // Last candle start time for each timeframe
     
     // Helper methods
     void updateTimeFrame(TimeFrame tf, const Trade& trade);

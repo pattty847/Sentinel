@@ -3,9 +3,11 @@
 #include <QTimer>
 #include <QSettings>
 #include <vector>
+#include <array>
 #include <atomic>
 #include "../core/lockfreequeue.h"
 #include "../core/tradedata.h"
+#include "candlelod.h"
 
 // Forward declarations for GPU components
 namespace GPUTypes {
@@ -18,6 +20,16 @@ namespace GPUTypes {
         float r, g, b, a;
     };
 }
+
+struct CandleUpdate {
+    std::string symbol;
+    int64_t timestamp_ms;
+    CandleLOD::TimeFrame timeframe;
+    OHLC candle;
+    bool isNewCandle;
+};
+
+using CandleQueue = LockFreeQueue<CandleUpdate, 16384>;
 
 class GPUDataAdapter : public QObject {
     Q_OBJECT
@@ -44,6 +56,7 @@ public:
 signals:
     void tradesReady(const GPUTypes::Point* points, size_t count);
     void heatmapReady(const GPUTypes::QuadInstance* quads, size_t count);
+    void candlesReady(const std::vector<CandleUpdate>& candles);
     void performanceAlert(const QString& message);
 
 private slots:
@@ -57,8 +70,10 @@ private:
     // Zero-malloc buffers (pre-allocated, cursor-based)
     std::vector<GPUTypes::Point> m_tradeBuffer;
     std::vector<GPUTypes::QuadInstance> m_heatmapBuffer;
+    std::vector<CandleUpdate> m_candleBuffer;
     size_t m_tradeWriteCursor = 0;
     size_t m_heatmapWriteCursor = 0;
+    size_t m_candleWriteCursor = 0;
     
     // Configuration
     size_t m_reserveSize;
@@ -71,6 +86,11 @@ private:
     
     // Processing timer
     QTimer* m_processTimer;
+
+    CandleQueue m_candleQueue;
+    CandleLOD m_candleLOD;
+    std::array<int64_t, CandleLOD::NUM_TIMEFRAMES> m_lastEmittedCandleTime{};
+    std::string m_currentSymbol;
     
     // Coordinate mapping (cached for performance)
     struct CoordinateCache {

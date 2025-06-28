@@ -5,12 +5,12 @@
 #include <QSGVertexColorMaterial>
 #include <QSGTransformNode>
 #include <vector>
-#include <memory>
+#include <array>
 #include <atomic>
 #include <mutex>
-#include <QTimer>
 #include "candlelod.h"
 #include "tradedata.h"
+struct CandleUpdate;
 
 // 🕯️ BATCHED CANDLESTICK RENDERING: Professional trading chart candles
 // Two-draw-call architecture: green candles vs red candles for optimal GPU performance
@@ -28,8 +28,6 @@ class CandlestickBatched : public QQuickItem {
 public:
     explicit CandlestickBatched(QQuickItem* parent = nullptr);
     
-    // 🔥 MAIN DATA API: Connect to trade stream
-    Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void clearCandles();
     Q_INVOKABLE void setTimeWindow(int64_t startTime_ms, int64_t endTime_ms);
     
@@ -52,10 +50,7 @@ public:
 public slots:
     // 🔥 INTEGRATION: Connect to chart coordinate system
     void onViewChanged(int64_t startTimeMs, int64_t endTimeMs, double minPrice, double maxPrice);
-    void onTradeReceived(const Trade& trade);
-    
-    // 🔥 NEW: Batched update system to match GPU pipeline
-    void onTradesReady(const std::vector<Trade>& trades);
+    void onCandlesReady(const std::vector<CandleUpdate>& candles);
 
 signals:
     // Property change notifications
@@ -95,8 +90,8 @@ private:
         bool geometryDirty = true;
     };
     
-    // 🎯 CORE DATA: LOD system and rendering state
-    std::unique_ptr<CandleLOD> m_candleLOD;
+    // 🎯 CORE DATA: Render state and candle storage
+    std::array<std::vector<OHLC>, CandleLOD::NUM_TIMEFRAMES> m_candles;
     RenderBatch m_renderBatch;
     std::mutex m_dataMutex;
     std::atomic<bool> m_geometryDirty{true};
@@ -125,11 +120,6 @@ private:
     mutable std::chrono::high_resolution_clock::time_point m_lastRenderTime;
     mutable double m_lastRenderDuration_ms = 0.0;
     
-    // 🔥 NEW: Batching system
-    QTimer* m_updateTimer;
-    std::mutex m_pendingTradesMutex;
-    std::vector<Trade> m_pendingTrades;
-    bool m_hasPendingUpdates = false;
     
     // Helper methods
     void updateRenderBatch();
@@ -153,8 +143,4 @@ private:
     void setCandleWidth(double width);
     void setVolumeScaling(bool enabled);
     void setMaxCandles(int max);
-
-private slots:
-    // 🔥 NEW: Batched update processing
-    void processPendingUpdates();
 }; 

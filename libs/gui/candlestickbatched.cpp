@@ -3,116 +3,40 @@
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
 #include <QDebug>
+#include "gpudataadapter.h"
 #include <QDateTime>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <QTimer>
 
 CandlestickBatched::CandlestickBatched(QQuickItem* parent)
     : QQuickItem(parent)
-    , m_candleLOD(std::make_unique<CandleLOD>())
-    , m_updateTimer(new QTimer(this))
 {
     setFlag(ItemHasContents, true);
-    
-    // 🔥 BATCHING SYSTEM: Match GPUDataAdapter's 16ms frequency
-    m_updateTimer->setSingleShot(true);
-    m_updateTimer->setInterval(16); // 60 FPS batching
-    connect(m_updateTimer, &QTimer::timeout, this, &CandlestickBatched::processPendingUpdates);
-    
-    // Pre-allocate pending trades vector
-    m_pendingTrades.reserve(1000);
-    
+
     qDebug() << "🕯️ CandlestickBatched INITIALIZED - Professional Trading Terminal Candles!";
-    qDebug() << "🎯 LOD System: Enabled | Max Candles:" << m_maxCandles 
+    qDebug() << "🎯 LOD System: Enabled | Max Candles:" << m_maxCandles
              << "| Auto-scaling: " << (m_volumeScaling ? "ON" : "OFF");
-    qDebug() << "⏱️ BATCHING: 16ms intervals (60 FPS) - NO immediate updates!";
 }
 
-void CandlestickBatched::addTrade(const Trade& trade) {
-    if (!m_candleLOD) {
-        qDebug() << "🚨 CANDLE TRADE IGNORED: m_candleLOD is null!";
-        return;
-    }
-    
-    // 🔥 BATCHING: Add to pending trades instead of immediate processing
-    {
-        std::lock_guard<std::mutex> lock(m_pendingTradesMutex);
-        m_pendingTrades.push_back(trade);
-        m_hasPendingUpdates = true;
-    }
-    
-    // 🔥 START TIMER: Will process all pending trades in 16ms
-    if (!m_updateTimer->isActive()) {
-        m_updateTimer->start();
-    }
-    
-    // Debug first few trades AND every 100th trade to ensure data flow
-    static int candleTradeCount = 0;
-    if (++candleTradeCount <= 10 || candleTradeCount % 100 == 0) {
-        qDebug() << "🕯️ CANDLE TRADE #" << candleTradeCount << "BATCHED"
-                 << "Symbol:" << QString::fromStdString(trade.product_id)
-                 << "Price:" << trade.price << "Size:" << trade.size
-                 << "Side:" << (trade.side == AggressorSide::Buy ? "BUY" : "SELL")
-                 << "Pending:" << m_pendingTrades.size();
-    }
-    
-    // 🚨 REMOVED: update() - No immediate GPU updates!
-}
+void CandlestickBatched::onCandlesReady(const std::vector<CandleUpdate>& candles) {
+    if (candles.empty()) return;
 
-void CandlestickBatched::processPendingUpdates() {
-    if (!m_hasPendingUpdates) return;
-    
-    std::vector<Trade> tradesToProcess;
     {
-        std::lock_guard<std::mutex> lock(m_pendingTradesMutex);
-        if (m_pendingTrades.empty()) {
-            m_hasPendingUpdates = false;
-            return;
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        for (const auto& update : candles) {
+            auto& vec = m_candles[static_cast<size_t>(update.timeframe)];
+            if (!vec.empty() && vec.back().timestamp_ms == update.candle.timestamp_ms) {
+                vec.back() = update.candle;
+            } else {
+                vec.push_back(update.candle);
+            }
         }
-        
-        tradesToProcess = std::move(m_pendingTrades);
-        m_pendingTrades.clear();
-        m_pendingTrades.reserve(1000); // Re-allocate for next batch
-        m_hasPendingUpdates = false;
-    }
-    
-    // Process all batched trades
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    for (const auto& trade : tradesToProcess) {
-        m_candleLOD->addTrade(trade);
-    }
-    
-    // Mark geometry as dirty and trigger GPU update
-    m_geometryDirty.store(true);
-    update(); // 🔥 SINGLE GPU UPDATE for entire batch
-    
-    qDebug() << "🕯️ BATCH PROCESSED:" << tradesToProcess.size() << "trades in single GPU update";
-}
 
-void CandlestickBatched::onTradeReceived(const Trade& trade) {
-    static int signalCount = 0;
-    if (++signalCount <= 5) {
-        qDebug() << "🔗 CANDLE SIGNAL #" << signalCount << "RECEIVED! Forwarding to addTrade()...";
+        m_geometryDirty.store(true);
     }
-    addTrade(trade);
-}
 
-void CandlestickBatched::onTradesReady(const std::vector<Trade>& trades) {
-    // 🔥 NEW: Direct batched processing from GPUDataAdapter
-    if (trades.empty()) return;
-    
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    for (const auto& trade : trades) {
-        m_candleLOD->addTrade(trade);
-    }
-    
-    // Mark geometry as dirty and trigger GPU update
-    m_geometryDirty.store(true);
     update();
-    
-    qDebug() << "🔥 CANDLE BATCH DIRECT:" << trades.size() << "trades processed directly from GPU pipeline";
 }
 
 void CandlestickBatched::onViewChanged(int64_t startTimeMs, int64_t endTimeMs, 
@@ -156,7 +80,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     
     // Get optimal LOD level and candle data
     CandleLOD::TimeFrame activeTimeFrame = selectOptimalTimeFrame();
-    const auto& candles = m_candleLOD->getCandlesForTimeFrame(activeTimeFrame);
+    const auto& candles = m_candles[static_cast<size_t>(activeTimeFrame)];
     
     if (candles.empty()) {
         static int emptyCount = 0;
@@ -483,7 +407,14 @@ CandleLOD::TimeFrame CandlestickBatched::selectOptimalTimeFrame() const {
     
     // Calculate pixels per candle based on current view
     double pixelsPerCandle = calculateCurrentPixelsPerCandle();
-    return m_candleLOD->selectOptimalTimeFrame(pixelsPerCandle);
+    if (pixelsPerCandle < 2.0)  return CandleLOD::TF_Daily;
+    if (pixelsPerCandle < 5.0)  return CandleLOD::TF_60min;
+    if (pixelsPerCandle < 10.0) return CandleLOD::TF_15min;
+    if (pixelsPerCandle < 20.0) return CandleLOD::TF_5min;
+    if (pixelsPerCandle < 40.0) return CandleLOD::TF_1min;
+    if (pixelsPerCandle < 80.0) return CandleLOD::TF_1sec;
+    if (pixelsPerCandle < 160.0) return CandleLOD::TF_500ms;
+    return CandleLOD::TF_100ms;
 }
 
 double CandlestickBatched::calculateCurrentPixelsPerCandle() const {
@@ -491,16 +422,10 @@ double CandlestickBatched::calculateCurrentPixelsPerCandle() const {
         return 20.0; // Default to 1min candles
     }
     
-    // Get active timeframe interval
     CandleLOD::TimeFrame tf = m_autoLOD ? CandleLOD::TF_1min : m_forcedTimeFrame;
-    int64_t candleInterval_ms = 60 * 1000; // 1 minute default
-    
-    // Calculate how many candles fit in current view
     int64_t viewSpan_ms = m_viewEndTime_ms - m_viewStartTime_ms;
-    double candlesInView = static_cast<double>(viewSpan_ms) / static_cast<double>(candleInterval_ms);
-    
-    // Calculate pixels per candle
-    return candlesInView > 0 ? width() / candlesInView : 20.0;
+    double ppc = CandleUtils::calculatePixelsPerCandle(width(), viewSpan_ms, tf);
+    return ppc > 0 ? ppc : 20.0;
 }
 
 void CandlestickBatched::updateLODIfNeeded() {
@@ -554,8 +479,7 @@ void CandlestickBatched::setMaxCandles(int max) {
 
 void CandlestickBatched::clearCandles() {
     std::lock_guard<std::mutex> lock(m_dataMutex);
-    // Clear all timeframe data
-    // m_candleLOD will be recreated or cleared in implementation
+    for (auto& v : m_candles) v.clear();
     m_geometryDirty.store(true);
     update();
 }
@@ -572,7 +496,7 @@ void CandlestickBatched::setAutoLOD(bool enabled) {
 }
 
 void CandlestickBatched::forceTimeFrame(int timeframe) {
-    if (timeframe >= 0 && timeframe < 5) {
+    if (timeframe >= 0 && timeframe < static_cast<int>(CandleLOD::NUM_TIMEFRAMES)) {
         m_forcedTimeFrame = static_cast<CandleLOD::TimeFrame>(timeframe);
         m_geometryDirty.store(true);
         update();
