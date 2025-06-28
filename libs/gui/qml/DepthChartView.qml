@@ -7,6 +7,20 @@ Rectangle {
     
     property string symbol: "BTC-USD"
     property bool stressTestMode: false
+    property var chartModeController: null
+
+    Connections {
+        target: chartModeController
+        function onComponentVisibilityChanged(component, visible) {
+            if (component === "tradeScatter") {
+                gpuChart.visible = visible
+            } else if (component === "candles") {
+                candleChart.visible = visible
+            } else if (component === "orderBook") {
+                heatmapLayer.visible = visible
+            }
+        }
+    }
     
     // 🚀 GPU CHART COMPONENTS - LAYERED RENDERING
     

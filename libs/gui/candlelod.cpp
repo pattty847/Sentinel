@@ -17,7 +17,7 @@ void CandleLOD::addTrade(const Trade& trade) {
         trade.timestamp.time_since_epoch()).count();
     
     // Update all timeframes with this trade
-    for (int i = 0; i < 5; ++i) {
+    for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
         updateTimeFrame(static_cast<TimeFrame>(i), trade);
     }
     
@@ -155,7 +155,7 @@ void CandleLOD::prebakeTimeFrames(const std::vector<Trade>& rawTrades) {
 void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
     int totalRemoved = 0;
     
-    for (int i = 0; i < 5; ++i) {
+    for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
         auto& candles = m_timeFrameData[i];
         
         // Remove candles older than cutoff
@@ -183,7 +183,7 @@ void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
 
 void CandleLOD::printStats() const {
     qDebug() << "🕯️ CANDLE LOD STATS:";
-    for (int i = 0; i < 5; ++i) {
+    for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
         TimeFrame tf = static_cast<TimeFrame>(i);
         qDebug() << "  " << CandleUtils::timeFrameName(tf) << ":" << getCandleCount(tf) << "candles";
         
@@ -201,12 +201,15 @@ void CandleLOD::printStats() const {
 // 🔥 HELPER FUNCTIONS IMPLEMENTATION
 namespace CandleUtils {
     int64_t alignToTimeFrame(int64_t timestamp_ms, CandleLOD::TimeFrame tf) {
-        const int64_t intervals[5] = {
-            60 * 1000,      // 1 minute
-            5 * 60 * 1000,  // 5 minutes  
-            15 * 60 * 1000, // 15 minutes
-            60 * 60 * 1000, // 1 hour
-            24 * 60 * 60 * 1000 // 1 day
+        const int64_t intervals[NUM_TIMEFRAMES] = {
+            100,
+            500,
+            1000,
+            60 * 1000,
+            5 * 60 * 1000,
+            15 * 60 * 1000,
+            60 * 60 * 1000,
+            24 * 60 * 60 * 1000
         };
         
         int64_t interval = intervals[tf];
@@ -215,8 +218,11 @@ namespace CandleUtils {
     
     const char* timeFrameName(CandleLOD::TimeFrame tf) {
         switch (tf) {
-            case CandleLOD::TF_1min: return "1min";
-            case CandleLOD::TF_5min: return "5min";
+            case CandleLOD::TF_100ms: return "100ms";
+            case CandleLOD::TF_500ms: return "500ms";
+            case CandleLOD::TF_1sec:  return "1sec";
+            case CandleLOD::TF_1min:  return "1min";
+            case CandleLOD::TF_5min:  return "5min";
             case CandleLOD::TF_15min: return "15min";
             case CandleLOD::TF_60min: return "1hour";
             case CandleLOD::TF_Daily: return "1day";
@@ -225,12 +231,15 @@ namespace CandleUtils {
     }
     
     double calculatePixelsPerCandle(double viewWidth, int64_t timeSpan_ms, CandleLOD::TimeFrame tf) {
-        const int64_t intervals[5] = {
-            60 * 1000,      // 1 minute
-            5 * 60 * 1000,  // 5 minutes  
-            15 * 60 * 1000, // 15 minutes
-            60 * 60 * 1000, // 1 hour
-            24 * 60 * 60 * 1000 // 1 day
+        const int64_t intervals[NUM_TIMEFRAMES] = {
+            100,
+            500,
+            1000,
+            60 * 1000,
+            5 * 60 * 1000,
+            15 * 60 * 1000,
+            60 * 60 * 1000,
+            24 * 60 * 60 * 1000
         };
         
         int64_t candleInterval = intervals[tf];

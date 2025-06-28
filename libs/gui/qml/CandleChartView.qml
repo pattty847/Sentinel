@@ -46,10 +46,6 @@ Rectangle {
     }
     
     // 🎯 PUBLIC API: Allow external control
-    function addTrade(trade) {
-        candleChart.addTrade(trade);
-    }
-    
     function clearCandles() {
         candleChart.clearCandles();
     }
@@ -66,13 +62,6 @@ Rectangle {
         }
     }
     
-    function connectToTradeStream(streamController) {
-        // Connect to StreamController's trade signals
-        if (streamController && streamController.tradeReceived) {
-            streamController.tradeReceived.connect(candleChart.onTradeReceived);
-            console.log("🕯️ CONNECTED CANDLE CHART to trade stream");
-        }
-    }
     
     // 🎯 LOD CONTROL FUNCTIONS
     function setAutoLOD(enabled) {

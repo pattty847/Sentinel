@@ -48,6 +48,20 @@ target_link_libraries(test_rendering_performance PRIVATE
 add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
 
 # -----------------------------------------------------------------------------
+# Test Target: test_multi_mode_architecture
+# Headless integration test for candle batching and mode controller
+# -----------------------------------------------------------------------------
+add_executable(test_multi_mode_architecture test_multi_mode_architecture.cpp)
+target_link_libraries(test_multi_mode_architecture PRIVATE
+  sentinel_core
+  sentinel_gui_lib
+  GTest::gtest_main
+  Qt6::Core
+)
+
+add_test(NAME MultiModeArchitectureTest COMMAND test_multi_mode_architecture)
+
+# -----------------------------------------------------------------------------
 # Executable Target: test_performance_baseline
 # A standalone benchmark tool to measure pre-optimization performance.
 # This is not a GTest test and will not be run by CTest.
@@ -61,4 +75,4 @@ add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
 #   Qt6::Charts
 # )
 
-message(STATUS "✅ Sentinel test suite configured with 2 targets.")
+message(STATUS "✅ Sentinel test suite configured with 3 targets.")

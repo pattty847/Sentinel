@@ -21,6 +21,9 @@ qt6_add_qml_module(sentinel_gui_lib
         candlelod.h
         candlestickbatched.cpp
         candlestickbatched.h
+        chartmode.h
+        chartmodecontroller.cpp
+        chartmodecontroller.h
         # ✅ EXISTING DATA PIPELINE (PROVEN)
         streamcontroller.cpp
         streamcontroller.h

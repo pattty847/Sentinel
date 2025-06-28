@@ -4,6 +4,7 @@
 #include "gpuchartwidget.h"
 #include "heatmapinstanced.h"
 #include "candlestickbatched.h"
+#include "chartmodecontroller.h"
 #include <QQmlContext>
 #include <QDebug>
 #include <QDir>
@@ -53,6 +54,8 @@ void MainWindowGPU::setupUI() {
     // Set default symbol in QML context
     QQmlContext* context = m_gpuChart->rootContext();
     context->setContextProperty("symbol", "BTC-USD");
+    m_modeController = new ChartModeController(this);
+    context->setContextProperty("chartModeController", m_modeController);
     
     // Control panel
     m_cvdLabel = new QLabel("CVD: N/A", this);
@@ -117,6 +120,8 @@ void MainWindowGPU::setupConnections() {
     // Create data controllers (keep existing proven pipeline)
     m_streamController = new StreamController(this);
     m_statsController = new StatisticsController(this);
+    m_gpuAdapter = new GPUDataAdapter(this);
+    m_streamController->setGPUAdapter(m_gpuAdapter);
     
     // UI connections
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
@@ -247,9 +252,8 @@ void MainWindowGPU::connectToGPUChart() {
         qDebug() << "🔍 Cast to CandlestickBatched:" << candleChart;
         
         if (candleChart) {
-            // 🔥 TRADE STREAM CONNECTION: Real-time trades → candles  
-            bool tradeConnection = connect(m_streamController, &StreamController::tradeReceived,
-                                          candleChart, &CandlestickBatched::onTradeReceived,
+            bool tradeConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
+                                          candleChart, &CandlestickBatched::onCandlesReady,
                                           Qt::QueuedConnection);
             
             // 🔥 COORDINATE SYNCHRONIZATION: GPUChart drives candle coordinates
@@ -257,8 +261,8 @@ void MainWindowGPU::connectToGPUChart() {
                                           candleChart, &CandlestickBatched::onViewChanged,
                                           Qt::QueuedConnection);
             
-            qDebug() << "🕯️ CANDLESTICK CONNECTIONS:" 
-                     << "Trade stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
+            qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
+                     << "Candle stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
                      << "Coordinates:" << (coordConnection ? "SUCCESS" : "FAILED");
             
             if (tradeConnection && coordConnection) {
