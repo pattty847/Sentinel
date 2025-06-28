@@ -3,6 +3,7 @@
 #include "statisticscontroller.h"
 #include "gpuchartwidget.h"
 #include "heatmapinstanced.h"
+#include "candlestickbatched.h"
 #include <QQmlContext>
 #include <QDebug>
 #include <QDir>
@@ -171,67 +172,126 @@ void MainWindowGPU::onCVDUpdated(double cvd) {
 
 // 🔥 CRITICAL FIX: Helper method to establish GPU connections
 void MainWindowGPU::connectToGPUChart() {
+    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART...";
+    
     // Get the GPU chart widget from QML
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
-    if (qmlRoot) {
-        GPUChartWidget* gpuChart = nullptr;
-        
-        // 🔥 STRATEGY 1: Find by explicit objectName
-        QQuickItem* gpuChartItem = qmlRoot->findChild<QQuickItem*>("gpuChart");
+    if (!qmlRoot) {
+        qWarning() << "❌ QML root object not found - retrying in 100ms...";
+        // Retry after QML loads
+        QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
+        return;
+    }
+    
+    qDebug() << "✅ QML root found:" << qmlRoot;
+    qDebug() << "🔍 QML root children:";
+    for (QObject* child : qmlRoot->children()) {
+        qDebug() << "  -" << child->objectName() << child->metaObject()->className();
+    }
+    
+    GPUChartWidget* gpuChart = nullptr;
+    
+    // 🔥 STRATEGY 1: Find by explicit objectName
+    QQuickItem* gpuChartItem = qmlRoot->findChild<QQuickItem*>("gpuChart");
+    qDebug() << "🔍 objectName lookup for 'gpuChart':" << gpuChartItem;
+    
+    if (gpuChartItem) {
         gpuChart = qobject_cast<GPUChartWidget*>(gpuChartItem);
+        qDebug() << "🔍 qobject_cast to GPUChartWidget:" << gpuChart;
+    }
+    
+    // 🔥 STRATEGY 2: If objectName lookup fails, find by type
+    if (!gpuChart) {
+        qDebug() << "🔍 objectName lookup failed, trying type lookup...";
+        gpuChart = qmlRoot->findChild<GPUChartWidget*>();
+        qDebug() << "🔍 Type lookup result:" << gpuChart;
+    }
+    
+    if (gpuChart) {
+        // 🔥 CRITICAL: Disconnect any existing connections to avoid duplicates
+        disconnect(m_streamController, &StreamController::tradeReceived,
+                  gpuChart, &GPUChartWidget::onTradeReceived);
+                  
+        // 🔥 REAL-TIME DATA CONNECTION! (Qt::QueuedConnection for thread safety)
+        bool connectionSuccess = connect(m_streamController, &StreamController::tradeReceived,
+                                        gpuChart, &GPUChartWidget::onTradeReceived,
+                                        Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
+                                        
+        qDebug() << "🔗 Qt Signal Connection Result:" << (connectionSuccess ? "SUCCESS" : "FAILED");
+        qDebug() << "🎯 Connected StreamController:" << m_streamController 
+                 << "to GPUChart:" << gpuChart;
         
-        // 🔥 STRATEGY 2: If objectName lookup fails, find by type
-        if (!gpuChart) {
-            qDebug() << "🔍 objectName lookup failed, trying type lookup...";
-            gpuChart = qmlRoot->findChild<GPUChartWidget*>();
-        }
+        qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
         
-        if (gpuChart) {
-            // 🔥 CRITICAL: Disconnect any existing connections to avoid duplicates
-            disconnect(m_streamController, &StreamController::tradeReceived,
-                      gpuChart, &GPUChartWidget::onTradeReceived);
-                      
-            // 🔥 REAL-TIME DATA CONNECTION! (Qt::QueuedConnection for thread safety)
-            connect(m_streamController, &StreamController::tradeReceived,
-                    gpuChart, &GPUChartWidget::onTradeReceived,
-                    Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
-            
-            qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
-            
-            // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
-            QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
-            HeatMapInstanced* heatmapLayer = qobject_cast<HeatMapInstanced*>(heatmapItem);
-            
-            if (heatmapLayer) {
-                // 🔥 THE CRITICAL BRIDGE: Chart view coordinates to heatmap
-                connect(gpuChart, &GPUChartWidget::viewChanged,
-                        heatmapLayer, &HeatMapInstanced::setTimeWindow,
-                        Qt::QueuedConnection);
-                
-                qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
-            } else {
-                qWarning() << "⚠️ HeatmapInstanced not found - coordinate unification failed";
-            }
-        } else {
-            qWarning() << "⚠️ GPUChartWidget not found using any strategy";
-            qDebug() << "🔍 Available children:";
-            for (QObject* child : qmlRoot->children()) {
-                qDebug() << "  -" << child->objectName() << child->metaObject()->className();
-            }
-        }
+        // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
+        QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
+        HeatMapInstanced* heatmapLayer = qobject_cast<HeatMapInstanced*>(heatmapItem);
         
-        // 🔥 PHASE 2: Connect order book data to HeatmapInstanced - CRITICAL FIX!
-        HeatMapInstanced* heatmapLayer = qmlRoot->findChild<HeatMapInstanced*>("heatmapLayer");
         if (heatmapLayer) {
-            connect(m_streamController, &StreamController::orderBookUpdated,
-                    heatmapLayer, &HeatMapInstanced::onOrderBookUpdated,
-                    Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
+            // 🔥 THE CRITICAL BRIDGE: Chart view coordinates to heatmap
+            connect(gpuChart, &GPUChartWidget::viewChanged,
+                    heatmapLayer, &HeatMapInstanced::setTimeWindow,
+                    Qt::QueuedConnection);
             
-            qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
+            qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
         } else {
-            qWarning() << "⚠️ HeatMapInstanced (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
+            qWarning() << "⚠️ HeatmapInstanced not found - coordinate unification failed";
+        }
+        
+        // 🕯️ PHASE 5: CONNECT CANDLESTICK CHART
+        qDebug() << "🔍 Looking for candlestick renderer...";
+        QQuickItem* candleChartItem = qmlRoot->findChild<QQuickItem*>("candlestickRenderer");
+        qDebug() << "🔍 Found candlestickRenderer item:" << candleChartItem;
+        
+        CandlestickBatched* candleChart = qobject_cast<CandlestickBatched*>(candleChartItem);
+        qDebug() << "🔍 Cast to CandlestickBatched:" << candleChart;
+        
+        if (candleChart) {
+            // 🔥 TRADE STREAM CONNECTION: Real-time trades → candles  
+            bool tradeConnection = connect(m_streamController, &StreamController::tradeReceived,
+                                          candleChart, &CandlestickBatched::onTradeReceived,
+                                          Qt::QueuedConnection);
+            
+            // 🔥 COORDINATE SYNCHRONIZATION: GPUChart drives candle coordinates
+            bool coordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
+                                          candleChart, &CandlestickBatched::onViewChanged,
+                                          Qt::QueuedConnection);
+            
+            qDebug() << "🕯️ CANDLESTICK CONNECTIONS:" 
+                     << "Trade stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
+                     << "Coordinates:" << (coordConnection ? "SUCCESS" : "FAILED");
+            
+            if (tradeConnection && coordConnection) {
+                qDebug() << "✅ CANDLESTICK CHART FULLY CONNECTED TO REAL-TIME DATA!";
+            }
+        } else {
+            qWarning() << "❌ CandlestickBatched (candlestickRenderer) not found - candle integration failed";
+            
+            // List all available QML children for debugging
+            qDebug() << "🔍 Available QML children with objectNames:";
+            for (QObject* child : qmlRoot->findChildren<QObject*>()) {
+                QString objName = child->objectName();
+                if (!objName.isEmpty()) {
+                    qDebug() << "  -" << objName << ":" << child->metaObject()->className();
+                }
+            }
         }
     } else {
-        qWarning() << "⚠️ QML root object not found";
+        qWarning() << "❌ GPUChartWidget NOT FOUND - RETRYING IN 200ms...";
+        // Retry after a longer delay
+        QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
+        return;
+    }
+    
+    // 🔥 PHASE 2: Connect order book data to HeatmapInstanced - CRITICAL FIX!
+    HeatMapInstanced* heatmapLayer = qmlRoot->findChild<HeatMapInstanced*>("heatmapLayer");
+    if (heatmapLayer) {
+        connect(m_streamController, &StreamController::orderBookUpdated,
+                heatmapLayer, &HeatMapInstanced::onOrderBookUpdated,
+                Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
+        
+        qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
+    } else {
+        qWarning() << "⚠️ HeatMapInstanced (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
     }
 } 

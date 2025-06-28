@@ -1,6 +1,7 @@
 #include "gpuchartwidget.h"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
+#include <QSGVertexColorMaterial>
 #include <QVariantMap>
 #include <QDebug>
 #include <QDateTime>
@@ -43,12 +44,46 @@ void GPUChartWidget::geometryChanged(const QRectF &newGeometry, const QRectF &ol
 
 // 🔥 PHASE 1: REAL-TIME DATA INTEGRATION
 void GPUChartWidget::onTradeReceived(const Trade& trade) {
-    // 🔇 REDUCED DEBUG: Only log every 50th trade to reduce spam
-    static int tradeCounter = 0;
-    // if (++tradeCounter % 50 == 0) {
-    //     qDebug() << "🚀 GPU onTradeReceived:" << trade.product_id.c_str() 
-    //              << "Price:" << trade.price << "Size:" << trade.size;
-    // }
+    // 🔥 CONNECTION TEST: Verify this method is being called
+    static int connectionTestCount = 0;
+    if (++connectionTestCount <= 5) {
+        qDebug() << "🎯 onTradeReceived CALLED! #" << connectionTestCount 
+                 << "Price:" << trade.price << "Side:" << (int)trade.side;
+    }
+    
+    // 🔍 DEBUG: Log raw trade data to see what sides we're receiving
+    static int rawTradeDebugCount = 0;
+    if (++rawTradeDebugCount <= 10) {
+        const char* rawSideStr = "UNKNOWN";
+        if (trade.side == AggressorSide::Buy) rawSideStr = "BUY";
+        else if (trade.side == AggressorSide::Sell) rawSideStr = "SELL";
+        
+        qDebug() << "📈 RAW TRADE DATA #" << rawTradeDebugCount << ":"
+                 << "Product:" << trade.product_id.c_str()
+                 << "Side:" << rawSideStr
+                 << "Price:" << trade.price
+                 << "Size:" << trade.size;
+    }
+    
+    // 📊 TRADE DISTRIBUTION TRACKING
+    static int totalBuys = 0, totalSells = 0, totalUnknown = 0;
+    if (trade.side == AggressorSide::Buy) totalBuys++;
+    else if (trade.side == AggressorSide::Sell) totalSells++;
+    else totalUnknown++;
+    
+    // Log distribution every 25 trades
+    static int distributionCounter = 0;
+    if (++distributionCounter % 25 == 0) {
+        int totalTrades = totalBuys + totalSells + totalUnknown;
+        double buyPercent = totalTrades > 0 ? (totalBuys * 100.0 / totalTrades) : 0.0;
+        double sellPercent = totalTrades > 0 ? (totalSells * 100.0 / totalTrades) : 0.0;
+        
+        qDebug() << "📊 TRADE DISTRIBUTION SUMMARY:"
+                 << "Total:" << totalTrades
+                 << "Buys:" << totalBuys << "(" << QString::number(buyPercent, 'f', 1) << "%)"
+                 << "Sells:" << totalSells << "(" << QString::number(sellPercent, 'f', 1) << "%)"
+                 << "Unknown:" << totalUnknown;
+    }
     
     appendTradeToVBO(trade);
 }
@@ -125,15 +160,41 @@ void GPUChartWidget::convertTradeToGPUPoint(const Trade& trade, GPUPoint& point)
     point.x = static_cast<float>(screenPos.x());
     point.y = static_cast<float>(screenPos.y());
     
-    // Color coding: Green=Buy, Red=Sell
-    if (trade.side == AggressorSide::Buy) {
-        point.r = 0.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f;
+    // 🎨 THREE-COLOR PRICE CHANGE SYSTEM: Professional trading terminal style
+    const char* changeStr = "FIRST";
+    if (!m_hasPreviousPrice) {
+        // First trade - use neutral yellow
+        point.r = 1.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // YELLOW for FIRST
+        changeStr = "FIRST";
+        m_previousTradePrice = trade.price;
+        m_hasPreviousPrice = true;
     } else {
-        point.r = 1.0f; point.g = 0.0f; point.b = 0.0f; point.a = 0.8f;
+        // Compare with previous price for uptick/downtick/no-change
+        if (trade.price > m_previousTradePrice) {
+            point.r = 0.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // GREEN for UPTICK
+            changeStr = "UPTICK";
+        } else if (trade.price < m_previousTradePrice) {
+            point.r = 1.0f; point.g = 0.0f; point.b = 0.0f; point.a = 0.8f; // RED for DOWNTICK
+            changeStr = "DOWNTICK";
+        } else {
+            point.r = 1.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // YELLOW for NO CHANGE
+            changeStr = "NO_CHANGE";
+        }
+        m_previousTradePrice = trade.price;
     }
-    
+
     point.size = 4.0f; // Trade dot size
     point.timestamp_ms = timestamp_ms;
+    
+    // 🔍 DEBUG: Log every trade's color assignment
+    static int tradeColorDebugCount = 0;
+    if (++tradeColorDebugCount <= 10) {
+        qDebug() << "🎨 TRADE COLOR DEBUG #" << tradeColorDebugCount << ":"
+                 << "Change:" << changeStr
+                 << "Price:" << trade.price << "(prev:" << m_previousTradePrice << ")"
+                 << "Size:" << trade.size
+                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")";
+    }
     
     // Debug first few coordinate mappings to verify system
     static int tradeDebugCount = 0;
@@ -285,7 +346,7 @@ void GPUChartWidget::swapBuffers() {
     }
 }
 
-// 🔥 OPTION B: CLEAN REBUILD - SINGLE COORDINATE SYSTEM
+// 🔥 OPTION B: CLEAN REBUILD - SINGLE COORDINATE SYSTEM WITH PER-VERTEX COLORS
 QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     // 🚀 OPTION B: Start simple - render trades from VBO only
     if (width() <= 0 || height() <= 0) {
@@ -312,59 +373,103 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
     if (!node) {
         node = new QSGGeometryNode;
         
-        // Simple rectangles for visibility
-        QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), m_allRenderPoints.size() * 6);
+        // 🔵 CIRCLE GEOMETRY: Use 8 triangles per circle (24 vertices per trade)
+        QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), m_allRenderPoints.size() * 24);
         geometry->setDrawingMode(QSGGeometry::DrawTriangles);
         node->setGeometry(geometry);
         node->setFlag(QSGNode::OwnsGeometry);
         
-        QSGFlatColorMaterial* material = new QSGFlatColorMaterial;
-        material->setColor(QColor(0, 255, 0, 200)); // Green for trades
+        // 🔥 BREAKTHROUGH: QSGVertexColorMaterial reads per-vertex colors!
+        QSGVertexColorMaterial* material = new QSGVertexColorMaterial;
+        material->setFlag(QSGMaterial::Blending); // Enable alpha blending
         node->setMaterial(material);
         node->setFlag(QSGNode::OwnsMaterial);
         
-        qDebug() << "🔧 Created single-coordinate-system node with" << m_allRenderPoints.size() << "trade points";
+        qDebug() << "🔵 CREATED CIRCLE GEOMETRY: Three-color price change system with smooth circles!";
     }
     
     if (readBuffer.dirty.load() || m_geometryDirty.load()) {
         // Update geometry with new trade data
         QSGGeometry* geometry = node->geometry();
-        geometry->allocate(m_allRenderPoints.size() * 6); // 🔥 GEMINI FIX: Use accumulated points
+        geometry->allocate(m_allRenderPoints.size() * 24); // 🔵 CIRCLES: 8 triangles × 3 vertices = 24 per circle
         
-        QSGGeometry::Point2D* vertices = geometry->vertexDataAsPoint2D();
-        const float rectSize = 8.0f; // 8 pixel rectangles
+        // 🔵 CIRCLE GEOMETRY: Use ColoredPoint2D vertices for smooth circles!
+        QSGGeometry::ColoredPoint2D* vertices = geometry->vertexDataAsColoredPoint2D();
+        const float circleRadius = 6.0f; // 6 pixel radius circles (was 8px rectangles)
+        const int trianglesPerCircle = 8; // Octagon approximation for performance
         
-        for (size_t i = 0; i < m_allRenderPoints.size(); ++i) { // 🔥 GEMINI FIX: Use accumulated points
-            const auto& point = m_allRenderPoints[i]; // 🔥 GEMINI FIX: Use accumulated points
-            size_t baseIndex = i * 6;
+        for (size_t i = 0; i < m_allRenderPoints.size(); ++i) {
+            const auto& point = m_allRenderPoints[i];
+            size_t baseIndex = i * 24; // 24 vertices per circle
             
             // 🔥 NEW: Use clean stateless coordinate system
             QPointF screenPos = worldToScreen(point.rawTimestamp, point.rawPrice);
             
-            float x = screenPos.x();
-            float y = screenPos.y();
-            float halfSize = rectSize / 2.0f;
+            float centerX = screenPos.x();
+            float centerY = screenPos.y();
             
-            // Create rectangle (2 triangles = 6 vertices)
-            vertices[baseIndex + 0].set(x - halfSize, y - halfSize);
-            vertices[baseIndex + 1].set(x + halfSize, y - halfSize);
-            vertices[baseIndex + 2].set(x - halfSize, y + halfSize);
-            vertices[baseIndex + 3].set(x + halfSize, y - halfSize);
-            vertices[baseIndex + 4].set(x + halfSize, y + halfSize);
-            vertices[baseIndex + 5].set(x - halfSize, y + halfSize);
+            // 🎨 CONVERT RGB TO UCHAR: ColoredPoint2D expects separate RGBA values
+            uchar red   = static_cast<uchar>(point.r * 255);
+            uchar green = static_cast<uchar>(point.g * 255);
+            uchar blue  = static_cast<uchar>(point.b * 255);
+            uchar alpha = static_cast<uchar>(point.a * 255);
+            
+            // 🔵 CREATE CIRCLE: Triangle fan from center to perimeter
+            for (int t = 0; t < trianglesPerCircle; ++t) {
+                size_t triangleBase = baseIndex + (t * 3);
+                
+                // Calculate angles for this triangle
+                float angle1 = (t * 2.0f * M_PI) / trianglesPerCircle;
+                float angle2 = ((t + 1) * 2.0f * M_PI) / trianglesPerCircle;
+                
+                // Center vertex
+                vertices[triangleBase + 0].set(centerX, centerY, red, green, blue, alpha);
+                
+                // First perimeter vertex
+                float x1 = centerX + circleRadius * cos(angle1);
+                float y1 = centerY + circleRadius * sin(angle1);
+                vertices[triangleBase + 1].set(x1, y1, red, green, blue, alpha);
+                
+                // Second perimeter vertex
+                float x2 = centerX + circleRadius * cos(angle2);
+                float y2 = centerY + circleRadius * sin(angle2);
+                vertices[triangleBase + 2].set(x2, y2, red, green, blue, alpha);
+            }
         }
         
         node->markDirty(QSGNode::DirtyGeometry);
         readBuffer.dirty.store(false);
         m_geometryDirty.store(false);
         
-        // Debug first few coordinate mappings
+        // 🔍 DEBUG: Check what colors are actually being rendered
         static int debugCount = 0;
-        if (debugCount++ < 5 && !m_allRenderPoints.empty()) { // 🔥 GEMINI FIX: Use accumulated points
-            const auto& firstPoint = m_allRenderPoints[0]; // 🔥 GEMINI FIX: Use accumulated points
-            QPointF firstScreenPos = worldToScreen(firstPoint.rawTimestamp, firstPoint.rawPrice);
-            // qDebug() << "🎯 TIME-SERIES Trade: Price:" << firstPoint.rawPrice
-            //          << "Time:" << firstPoint.rawTimestamp << "→ Screen(" << firstScreenPos.x() << "," << firstScreenPos.y() << ")";  // Too chatty!
+        if (debugCount++ < 5 && !m_allRenderPoints.empty()) {
+            // Count price change types in current buffer
+            int uptickCount = 0, downtickCount = 0, noChangeCount = 0;
+            for (const auto& point : m_allRenderPoints) {
+                if (point.g > 0.8f && point.r < 0.2f) uptickCount++;        // Green = Uptick
+                else if (point.r > 0.8f && point.g < 0.2f) downtickCount++;  // Red = Downtick  
+                else noChangeCount++;                                         // Yellow = No Change
+            }
+            
+            qDebug() << "🔵 CIRCLE RENDER DEBUG #" << debugCount << ":"
+                     << "Total circles:" << m_allRenderPoints.size()
+                     << "UPTICKS:" << uptickCount << "(green)"
+                     << "DOWNTICKS:" << downtickCount << "(red)"  
+                     << "NO_CHANGE:" << noChangeCount << "(yellow)";
+                     
+            // Show first few individual circle colors
+            for (int i = 0; i < std::min(3, (int)m_allRenderPoints.size()); ++i) {
+                const auto& point = m_allRenderPoints[i];
+                const char* colorName = "NO_CHANGE";
+                if (point.g > 0.8f && point.r < 0.2f) colorName = "GREEN-UPTICK";
+                else if (point.r > 0.8f && point.g < 0.2f) colorName = "RED-DOWNTICK";
+                else if (point.r > 0.8f && point.g > 0.8f) colorName = "YELLOW-NO_CHANGE";
+                
+                qDebug() << "  Circle" << i << ":" << colorName 
+                         << "RGBA(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")"
+                         << "Price:" << point.rawPrice;
+            }
         }
     }
     

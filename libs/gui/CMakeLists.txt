@@ -3,6 +3,7 @@ qt6_add_qml_module(sentinel_gui_lib
     VERSION 1.0
     QML_FILES
         qml/DepthChartView.qml
+        qml/CandleChartView.qml
     SOURCES
         # 🚀 NEW GPU-FOCUSED COMPONENTS
         mainwindow_gpu.cpp
@@ -15,6 +16,11 @@ qt6_add_qml_module(sentinel_gui_lib
         # 🚀 PHASE 3: LOCK-FREE DATA PIPELINE
         gpudataadapter.cpp
         gpudataadapter.h
+        # 🕯️ PHASE 5: CANDLESTICK RENDERING + LOD
+        candlelod.cpp
+        candlelod.h
+        candlestickbatched.cpp
+        candlestickbatched.h
         # ✅ EXISTING DATA PIPELINE (PROVEN)
         streamcontroller.cpp
         streamcontroller.h

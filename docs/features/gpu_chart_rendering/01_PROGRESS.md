@@ -102,8 +102,8 @@ WebSocket Thread → Lock-Free Ring → VBO Append → GL_POINTS Batch → 144Hz
 | **P1** | **PointCloud VBO** (single draw call) + shader, triple-buffer write path | 1M pts <3ms GPU time | ✅ **COMPLETE** |
 | **P2** | **HeatMap instanced quads** (bids vs asks) | 200k quads <2ms | ✅ **COMPLETE** |
 | **P3** | **Lock-free ingest → ring → VBO append** under live Coinbase firehose replay | 0 dropped frames @ 20k msg/s | ✅ **COMPLETE** |
-| **P4** | **Pan/Zoom & inertial scroll** (QScroller) + auto-scroll toggle | Interaction latency <5ms | 📋 **NEXT** |
-| **P5** | **Candles + VWAP/EMA lines** (two more batched layers) | 10k candles + 3 indicators still 60 FPS | 📋 **PLANNED** |
+| **P4** | **Pan/Zoom & inertial scroll** (QScroller) + auto-scroll toggle | Interaction latency <5ms | ✅ **COMPLETE** |
+| **P5** | **Candles + VWAP/EMA lines** (two more batched layers) | 10k candles + 3 indicators still 60 FPS | ✅ **COMPLETE** |
 | **P6** | **Cross-hair, tooltips, cached grid & text atlas** | No frame >16ms during full UX workout | 📋 **PLANNED** |
 | **P7** | **CI/Perf harness** (headless replay, fail on regressions) | CI green only if all gates pass | 📋 **PLANNED** |
 

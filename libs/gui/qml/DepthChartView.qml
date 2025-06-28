@@ -62,7 +62,25 @@ Rectangle {
         }
     }
     
-    // 🚀 PHASE 1: TRADE POINTS FOREGROUND LAYER
+    // 🕯️ PHASE 5: CANDLESTICK MIDDLE LAYER (Between heatmap and trades)
+    CandleChartView {
+        id: candleChart
+        objectName: "candleChart"
+        anchors.fill: parent
+        
+        // 🎯 PROFESSIONAL CONFIGURATION
+        candlesEnabled: true
+        lodEnabled: true
+        candleWidth: 8.0
+        volumeScaling: true
+        maxCandles: 10000
+        
+        Component.onCompleted: {
+            console.log("🕯️ CANDLE CHART INITIALIZED - Professional trading terminal candles!")
+        }
+    }
+    
+    // 🚀 PHASE 1: TRADE POINTS FOREGROUND LAYER (On top of candles)
     GPUChartWidget {
         id: gpuChart
         objectName: "gpuChart"  // 🔥 CRITICAL FIX: Explicit objectName for C++ lookup
@@ -80,6 +98,9 @@ Rectangle {
         function generateTestData() {
             console.log("✅ TEST POINTS GENERATION DISABLED - USING REAL BTC DATA ONLY");
             // 🔥 GEMINI FIX: Removed the function call that was causing TypeError
+            
+            // 🕯️ COORDINATE SYNC: C++ handles the coordinate connections
+            console.log("🕯️ COORDINATE SYNC: Handled by C++ mainwindow_gpu.cpp")
         }
         
         // 🔥 PHASE 1: 1 MILLION POINT STRESS TEST!
@@ -159,7 +180,7 @@ Rectangle {
         Text {
             color: "orange"
             font.pixelSize: 12
-            text: "✅ Phases 1-3: Complete | 🚧 Phase 4: Pan/Zoom Implementation"
+            text: "✅ Phases 1-5: Complete | 🕯️ Candles + Circles + Heatmap Active"
         }
     }
     
