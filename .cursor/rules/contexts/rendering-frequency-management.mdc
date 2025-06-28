@@ -1,0 +1,225 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Rendering Frequency Management
+
+## CORE PRINCIPLE
+**Critical Architecture Rule**: Rendering frequency must align with data completion frequency to avoid waste and ensure smooth user experience.
+
+## FREQUENCY ALIGNMENT PATTERNS
+
+### ✅ Aligned Frequencies
+```
+Real-time Trade Data:
+- Data frequency: Continuous (every trade)
+- Render frequency: 60 FPS (16ms batching)
+- Alignment: Batch multiple trades per render frame ✅
+
+High-Frequency Candles:
+- Data frequency: 10 Hz (100ms candles)  
+- Render frequency: 60 FPS (16ms batching)
+- Alignment: ~6 render frames per candle completion ✅
+- Result: Smooth progressive candle building
+
+Order Book Updates:
+- Data frequency: High (every L2 update)
+- Render frequency: 60 FPS (16ms batching)  
+- Alignment: Batch multiple updates per render frame ✅
+```
+
+### ❌ Misaligned Frequencies (Anti-Pattern)
+```
+Traditional Candles:
+- Data frequency: 0.0167 Hz (1-minute candles)
+- Render frequency: 60 FPS (16ms batching)
+- Misalignment: 3,750 renders per candle completion ❌
+- Problem: Drawing incomplete data 99.97% of the time!
+```
+
+## BATCHING STRATEGIES
+
+### High-Frequency Data (Trades, Order Book)
+```cpp
+// Batch updates every 16ms for 60 FPS rendering
+class GPUDataAdapter {
+    QTimer* m_processTimer;  // 16ms interval
+    
+    void processIncomingData() {
+        // Drain lock-free queues
+        // Convert to GPU-optimized data
+        // Emit batched signals
+        emit tradesReady(batchedTrades);
+        emit heatmapReady(batchedOrderBook);
+    }
+};
+```
+
+### Progressive Building (High-Freq Candles)
+```cpp
+// 100ms candles with 16ms rendering = smooth building
+void onCandleUpdate(const OHLC& candle) {
+    if (candle.isPartial) {
+        // Show progressive candle formation
+        updatePartialCandle(candle);
+    } else {
+        // Finalize completed candle
+        finalizeCandle(candle);
+    }
+}
+```
+
+### Time-Based Updates (Traditional Candles)
+```cpp
+// Only update when candle period actually completes
+class CandleTimer {
+    void onCandlePeriodComplete(TimeFrame tf) {
+        // Only now update the GPU representation
+        emit candleCompleted(tf, finalizedCandle);
+    }
+    
+    // AVOID: Updating every 16ms for 1-minute candles!
+};
+```
+
+## PERFORMANCE OPTIMIZATION
+
+### Conditional Rendering
+```cpp
+// Only render components that have meaningful updates
+void updatePaintNode() {
+    if (!hasNewData && !hasViewChange) {
+        return oldNode; // Skip GPU update
+    }
+    
+    // Only update when necessary
+    return createUpdatedNode();
+}
+```
+
+### Update Throttling
+```cpp
+// Throttle high-frequency updates for expensive operations
+class ThrottledUpdater {
+    QTimer m_throttleTimer;
+    bool m_hasPendingUpdate = false;
+    
+    void requestUpdate() {
+        if (!m_throttleTimer.isActive()) {
+            m_throttleTimer.start(16); // Max 60 FPS
+            m_hasPendingUpdate = true;
+        }
+    }
+};
+```
+
+### GPU Resource Management
+```cpp
+// Allocate GPU resources based on active update frequency
+void allocateGPUBuffers(UpdateFrequency freq) {
+    switch(freq) {
+        case HIGH_FREQUENCY:   // 60+ FPS
+            allocateTripleBuffering();
+            break;
+        case MEDIUM_FREQUENCY: // 1-10 FPS  
+            allocateDoubleBuffering();
+            break;
+        case LOW_FREQUENCY:    // <1 FPS
+            allocateSingleBuffer();
+            break;
+    }
+}
+```
+
+## FREQUENCY DETECTION
+
+### Automatic Frequency Detection
+```cpp
+class FrequencyAnalyzer {
+    void analyzeDataFrequency() {
+        auto timeBetweenUpdates = calculateAverageInterval();
+        
+        if (timeBetweenUpdates < 50ms) {
+            return UpdateFrequency::HIGH;
+        } else if (timeBetweenUpdates < 1000ms) {
+            return UpdateFrequency::MEDIUM;  
+        } else {
+            return UpdateFrequency::LOW;
+        }
+    }
+};
+```
+
+### Adaptive Rendering Strategy
+```cpp
+void adaptRenderingToFrequency(UpdateFrequency freq) {
+    switch(freq) {
+        case HIGH:
+            enableBatching(16ms);
+            enableTripleBuffering();
+            break;
+        case MEDIUM:
+            enableBatching(100ms);
+            enableDoubleBuffering();
+            break;
+        case LOW:
+            enableTimeBasedUpdates();
+            enableSingleBuffer();
+            break;
+    }
+}
+```
+
+## DEBUGGING FREQUENCY ISSUES
+
+### Frequency Mismatch Detection
+```cpp
+class FrequencyProfiler {
+    void detectMismatch() {
+        auto dataFreq = measureDataFrequency();
+        auto renderFreq = measureRenderFrequency();
+        
+        if (renderFreq > dataFreq * 10) {
+            qWarning() << "FREQUENCY MISMATCH: Rendering" 
+                       << renderFreq << "Hz for data at" 
+                       << dataFreq << "Hz - consider batching!";
+        }
+    }
+};
+```
+
+### Performance Metrics
+```cpp
+struct FrequencyMetrics {
+    double dataUpdatesPerSecond;
+    double renderFramesPerSecond;
+    double gpuUtilizationPercent;
+    double wastedRenderPercentage;
+    
+    bool isOptimal() const {
+        return wastedRenderPercentage < 10.0;
+    }
+};
+```
+
+## INTEGRATION GUIDELINES
+
+### New Component Checklist
+- [ ] Identify natural data update frequency
+- [ ] Choose appropriate batching strategy
+- [ ] Implement conditional rendering
+- [ ] Add frequency profiling hooks
+- [ ] Test under various data load conditions
+
+### Common Pitfalls
+- **Over-rendering**: Updating GPU more often than data changes
+- **Under-batching**: Processing individual items instead of batches
+- **Blocking Updates**: Synchronous updates blocking the render thread
+- **Memory Thrashing**: Allocating/deallocating buffers frequently
+
+### Optimization Targets
+- **Render Efficiency**: >90% of render calls should update meaningful data
+- **GPU Utilization**: Steady utilization without thrashing
+- **Frame Consistency**: Consistent frame times under varying data loads
+- **Memory Stability**: No memory leaks during frequency changes

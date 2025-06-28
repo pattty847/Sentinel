@@ -22,8 +22,12 @@ Current architecture achieved through refactoring workflow:
 
 ### GUI Components (`libs/gui/`)
 - **StreamController**: Bridge between core and GUI with Qt signal/slot pattern
-- **TradeChartWidget**: Qt-based visualization with real-time updates
+- **GPUDataAdapter**: Central batching pipeline (16ms intervals, zero-malloc)
+- **GPUChartWidget**: Trade scatter visualization (VBO triple buffering, master coordinates)
+- **HeatmapInstanced**: Order book depth visualization (instanced quad rendering)
+- **CandlestickBatched**: Multi-timeframe OHLC candles (progressive building, LOD system)
 - **MainWindow**: Primary Qt application window
+- **TradeChartWidget**: Legacy Qt-based visualization (deprecated in favor of GPU components)
 
 ### Applications (`apps/`)
 - **sentinel_gui**: Main GUI application (CMake target)

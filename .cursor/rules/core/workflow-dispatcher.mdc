@@ -1,7 +1,7 @@
 ---
 description: 
 globs: 
-alwaysApply: true
+alwaysApply: false
 ---
 # Workflow Dispatcher
 
@@ -34,8 +34,11 @@ Lightweight detector that analyzes the current work context and automatically re
 - GPU rendering, threading, or memory optimization discussions
 - Benchmark requirements or performance targets
 - Mentions of FPS, render time, throughput metrics
+- **Rendering frequency mismatches** or batching issues
+- **Multi-mode chart architecture** work
 
 **→ ACTIVATE**: `agents/performance-optimization-agent.mdc`
+**→ CONTEXT**: `contexts/rendering-frequency-management.mdc`, `contexts/multi-mode-chart-architecture.mdc`
 
 ### Bug Fixing
 **Triggers**:
