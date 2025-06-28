@@ -12,6 +12,8 @@
 // Forward declarations
 class StreamController;
 class StatisticsController;
+class GPUDataAdapter;
+class ChartModeController;
 
 /**
  * 🚀 GPU-Powered Trading Terminal MainWindow
@@ -45,4 +47,6 @@ private:
     // Data controllers (keep existing proven pipeline)
     StreamController* m_streamController;
     StatisticsController* m_statsController;
-}; 
+    GPUDataAdapter* m_gpuAdapter{nullptr};
+    ChartModeController* m_modeController{nullptr};
+};

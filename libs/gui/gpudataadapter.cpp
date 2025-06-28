@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include <algorithm>
 #include <chrono>
+#include <QDateTime>
 
 GPUDataAdapter::GPUDataAdapter(QObject* parent)
     : QObject(parent)
@@ -32,15 +33,17 @@ void GPUDataAdapter::initializeBuffers() {
     // Pre-allocate once: std::max(expected, userPref)
     size_t actualSize = (m_reserveSize > 100000) ? m_reserveSize : 100000; // Minimum 100k
     
-    qDebug() << "🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize 
+    qDebug() << "🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize
              << "Heatmap buffer:" << actualSize;
-    
+
     m_tradeBuffer.reserve(actualSize);
     m_heatmapBuffer.reserve(actualSize);
-    
+    m_candleBuffer.reserve(actualSize);
+
     // Initialize with empty elements to avoid reallocations
     m_tradeBuffer.resize(actualSize);
     m_heatmapBuffer.resize(actualSize);
+    m_candleBuffer.resize(actualSize);
     
     qDebug() << "💾 GPUDataAdapter: Buffer allocation complete";
 }
@@ -75,21 +78,40 @@ void GPUDataAdapter::processIncomingData() {
     // ZERO MALLOC ZONE - rolling write cursor
     Trade trade;
     m_tradeWriteCursor = 0; // Reset cursor, DON'T clear()
-    
+    m_candleWriteCursor = 0;
+
     size_t tradesProcessed = 0;
     
     // Process trades with rate limiting based on firehose setting
     while (m_tradeQueue.pop(trade) && m_tradeWriteCursor < m_reserveSize) {
         if (Q_UNLIKELY(trade.trade_id.empty())) continue; // Guard clause
-        
+
         // Convert to GPU point with coordinate mapping
         m_tradeBuffer[m_tradeWriteCursor++] = convertTradeToGPUPoint(trade);
+        m_candleLOD.addTrade(trade);
+        m_currentSymbol = trade.product_id;
         tradesProcessed++;
         
         // Rate limiting for stress testing
         if (tradesProcessed >= static_cast<size_t>(m_firehoseRate / 60)) {
             break; // Limit to firehose_rate / 60 per frame (60 FPS assumption)
         }
+    }
+
+    // Prepare candle updates for all timeframes
+    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
+        CandleLOD::TimeFrame tf = static_cast<CandleLOD::TimeFrame>(i);
+        const auto& vec = m_candleLOD.getCandlesForTimeFrame(tf);
+        if (vec.empty()) continue;
+
+        CandleUpdate update;
+        update.symbol = m_currentSymbol;
+        update.timestamp_ms = vec.back().timestamp_ms;
+        update.timeframe = tf;
+        update.candle = vec.back();
+        update.isNewCandle = (update.timestamp_ms != m_lastEmittedCandleTime[i]);
+        m_lastEmittedCandleTime[i] = update.timestamp_ms;
+        m_candleQueue.push(update);
     }
     
     // Process order books for heatmap
@@ -159,6 +181,16 @@ void GPUDataAdapter::processIncomingData() {
     
     if (Q_LIKELY(m_heatmapWriteCursor > 0)) {
         emit heatmapReady(m_heatmapBuffer.data(), m_heatmapWriteCursor);
+    }
+
+    // Emit batched candle updates
+    CandleUpdate candleUpdate;
+    std::vector<CandleUpdate> ready;
+    while (m_candleQueue.pop(candleUpdate)) {
+        ready.push_back(candleUpdate);
+    }
+    if (!ready.empty()) {
+        emit candlesReady(ready);
     }
     
     // Performance monitoring
