@@ -3,6 +3,7 @@
 #include <QQuickItem>
 #include <QSGGeometryNode>
 #include <QSGFlatColorMaterial>
+#include <QSGVertexColorMaterial>  // 🚀 NEW: For per-vertex colors
 #include <QVariantList>
 #include <vector>
 #include <chrono>
@@ -143,6 +144,10 @@ private:
     // 🚀 PERFORMANCE OPTIMIZATION FLAGS
     std::atomic<bool> m_geometryDirty{true};
     std::atomic<bool> m_enableVBO{true};      // VBO optimization
+    
+    // 🟡 PRICE CHANGE TRACKING: For three-color system (uptick/downtick/no-change)
+    double m_previousTradePrice = 0.0;        // Track previous price for color logic
+    bool m_hasPreviousPrice = false;          // Flag to skip first trade color logic
     
     // Helper methods
     void convertTradeToGPUPoint(const Trade& trade, GPUPoint& point);

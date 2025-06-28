@@ -128,8 +128,31 @@ void GPUDataAdapter::processIncomingData() {
         orderBooksProcessed++;
     }
     
-    // Emit data if we have any
+    // 📊 TRADE DISTRIBUTION TRACKING in lock-free pipeline
+    static int gpuTotalBuys = 0, gpuTotalSells = 0, gpuTotalUnknown = 0;
     if (Q_LIKELY(m_tradeWriteCursor > 0)) {
+        // Count colors in current buffer
+        for (size_t i = 0; i < m_tradeWriteCursor; ++i) {
+            const auto& point = m_tradeBuffer[i];
+            if (point.g > 0.8f && point.r < 0.2f) gpuTotalBuys++;        // Green = Buy
+            else if (point.r > 0.8f && point.g < 0.2f) gpuTotalSells++; // Red = Sell
+            else gpuTotalUnknown++;                                      // Yellow/Other
+        }
+        
+        // Log distribution every 50 trades
+        static int gpuDistributionCounter = 0;
+        if (++gpuDistributionCounter % 50 == 0) {
+            int gpuTotalTrades = gpuTotalBuys + gpuTotalSells + gpuTotalUnknown;
+            double gpuBuyPercent = gpuTotalTrades > 0 ? (gpuTotalBuys * 100.0 / gpuTotalTrades) : 0.0;
+            double gpuSellPercent = gpuTotalTrades > 0 ? (gpuTotalSells * 100.0 / gpuTotalTrades) : 0.0;
+            
+            qDebug() << "📊 GPU ADAPTER DISTRIBUTION:"
+                     << "Total:" << gpuTotalTrades
+                     << "Buys:" << gpuTotalBuys << "(" << QString::number(gpuBuyPercent, 'f', 1) << "%)"
+                     << "Sells:" << gpuTotalSells << "(" << QString::number(gpuSellPercent, 'f', 1) << "%)"
+                     << "Unknown:" << gpuTotalUnknown;
+        }
+        
         emit tradesReady(m_tradeBuffer.data(), m_tradeWriteCursor);
         m_processedTrades.fetch_add(tradesProcessed, std::memory_order_relaxed);
     }
@@ -181,11 +204,27 @@ GPUTypes::Point GPUDataAdapter::convertTradeToGPUPoint(const Trade& trade) {
         point.y = 0.5f; // Center if no price range established
     }
     
-    // Color based on trade side
+    // 🎨 Color based on trade side
+    const char* sideStr = "UNKNOWN";
     if (trade.side == AggressorSide::Buy) {
         point.r = 0.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // Green
-    } else {
+        sideStr = "BUY";
+    } else if (trade.side == AggressorSide::Sell) {
         point.r = 1.0f; point.g = 0.0f; point.b = 0.0f; point.a = 0.8f; // Red
+        sideStr = "SELL";
+    } else {
+        // Unknown side - yellow for debugging
+        point.r = 1.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // Yellow
+        sideStr = "UNKNOWN";
+    }
+    
+    // 🔍 DEBUG: Log first 10 GPU conversions in lock-free pipeline
+    static int gpuConversionCount = 0;
+    if (++gpuConversionCount <= 10) {
+        qDebug() << "🎨 GPU ADAPTER COLOR #" << gpuConversionCount << ":"
+                 << "Side:" << sideStr
+                 << "Price:" << trade.price
+                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")";
     }
     
     return point;
