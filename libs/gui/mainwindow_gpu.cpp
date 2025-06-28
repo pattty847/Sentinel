@@ -19,6 +19,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     setWindowTitle("Sentinel - GPU Trading Terminal");
     resize(1400, 900);
     
+    // Automatically start the subscription process once the event loop begins.
+    // This ensures the window is fully constructed and shown before we start streaming.
+    QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
+    
     qDebug() << "✅ GPU MainWindow ready for 144Hz trading!";
 }
 

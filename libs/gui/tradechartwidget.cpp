@@ -25,8 +25,9 @@ void TradeChartWidget::addTrade(const Trade& trade) {
         return;
     }
     
-    qDebug() << "📊 TradeChartWidget::addTrade received:" << QString::fromStdString(trade.product_id) 
-             << "$" << trade.price << "size:" << trade.size << "Total trades now:" << (m_trades.size() + 1);
+    // TODO: Remove this
+    // qDebug() << "📊 TradeChartWidget::addTrade received:" << QString::fromStdString(trade.product_id) 
+    //          << "$" << trade.price << "size:" << trade.size << "Total trades now:" << (m_trades.size() + 1);
     
     m_trades.push_back(trade);
 

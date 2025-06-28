@@ -49,7 +49,12 @@ void StreamController::start(const std::vector<std::string>& symbols) {
 void StreamController::stop() {
     qDebug() << "Stopping StreamController...";
     
-    // Stop the timers
+    // 1. Reset the client first. This is critical.
+    // This stops the underlying threads in MarketDataCore and ensures no
+    // new work is done, even if a stray timer event fires.
+    m_client.reset();
+    
+    // 2. Now that the client is gone, we can safely stop and delete the timers.
     if (m_pollTimer) {
         m_pollTimer->stop();
         m_pollTimer->deleteLater();
@@ -60,9 +65,6 @@ void StreamController::stop() {
         m_orderBookPollTimer->deleteLater();
         m_orderBookPollTimer = nullptr;
     }
-    
-    // Reset the client (smart pointer automatically cleans up)
-    m_client.reset();
     
     // Clear tracking data
     m_lastTradeIds.clear();
