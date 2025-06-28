@@ -18,6 +18,8 @@ qt6_add_qml_module(sentinel_gui_lib
         # ✅ EXISTING DATA PIPELINE (PROVEN)
         streamcontroller.cpp
         streamcontroller.h
+        tradechartwidget.cpp
+        tradechartwidget.h
 )
 
 target_include_directories(sentinel_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

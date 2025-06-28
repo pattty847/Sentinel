@@ -1,24 +1,18 @@
 # =============================================================================
 # SENTINEL TESTS - CMakeLists.txt
-# Defines test executables and links them against GTest and the core library.
+# Defines test executables for unit, integration, and performance testing.
 # =============================================================================
-
-cmake_minimum_required(VERSION 3.22)
-
-include(FetchContent)
-# Fetch GoogleTest at configure time
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-)
-FetchContent_MakeAvailable(googletest)
 
 # This allows CTest to discover and run the tests defined here.
 enable_testing()
 
-# Set the C++ standard for all test targets in this file.
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Find Qt components needed for GUI-based tests
+find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
+
+# Set common properties for Qt-based test executables
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
 # -----------------------------------------------------------------------------
 # Test Target: test_messageparser
@@ -26,26 +20,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # -----------------------------------------------------------------------------
 add_executable(test_messageparser test_messageparser.cpp)
 
+# Link against the core library for data structures, GTest for testing,
+# and nlohmann_json for the exception handling.
 target_link_libraries(test_messageparser PRIVATE
-  sentinel_core       # Assumes your core library target is named this
+  sentinel_core
   GTest::gtest_main
+  nlohmann_json::nlohmann_json
 )
 
 add_test(NAME MessageParserTests COMMAND test_messageparser)
 
-
 # -----------------------------------------------------------------------------
 # Test Target: test_rendering_performance
-# The benchmark test, which requires Qt libraries.
+# A GTest-based benchmark for comparing QPainter vs. GPU rendering.
 # -----------------------------------------------------------------------------
 add_executable(test_rendering_performance test_rendering_performance.cpp)
-
-find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
 
 # Link against the GUI library and Qt
 target_link_libraries(test_rendering_performance PRIVATE
   sentinel_core
-  sentinel_gui_lib        # GUI library target
+  sentinel_gui_lib
   GTest::gtest_main
   Qt6::Widgets
   Qt6::Charts
@@ -53,8 +47,18 @@ target_link_libraries(test_rendering_performance PRIVATE
 
 add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
 
-# You can add more test executables here as you create them...
-# add_executable(test_authenticator test_authenticator.cpp)
-# ...
+# -----------------------------------------------------------------------------
+# Executable Target: test_performance_baseline
+# A standalone benchmark tool to measure pre-optimization performance.
+# This is not a GTest test and will not be run by CTest.
+# -----------------------------------------------------------------------------
+# add_executable(test_performance_baseline test_performance_baseline.cpp)
 
-message(STATUS "✅ Sentinel test suite configured successfully!")
+# target_link_libraries(test_performance_baseline PRIVATE
+#   sentinel_core
+#   sentinel_gui_lib
+#   Qt6::Widgets
+#   Qt6::Charts
+# )
+
+message(STATUS "✅ Sentinel test suite configured with 2 targets.")

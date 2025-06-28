@@ -45,10 +45,10 @@ void GPUChartWidget::geometryChanged(const QRectF &newGeometry, const QRectF &ol
 void GPUChartWidget::onTradeReceived(const Trade& trade) {
     // 🔇 REDUCED DEBUG: Only log every 50th trade to reduce spam
     static int tradeCounter = 0;
-    if (++tradeCounter % 50 == 0) {
-        qDebug() << "🚀 GPU onTradeReceived:" << trade.product_id.c_str() 
-                 << "Price:" << trade.price << "Size:" << trade.size;
-    }
+    // if (++tradeCounter % 50 == 0) {
+    //     qDebug() << "🚀 GPU onTradeReceived:" << trade.product_id.c_str() 
+    //              << "Price:" << trade.price << "Size:" << trade.size;
+    // }
     
     appendTradeToVBO(trade);
 }
@@ -81,7 +81,7 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     // 🔥 REDUCED DEBUG: Only log first few trades to confirm system is working
     static int appendDebugCount = 0;
     if (appendDebugCount++ < 3) {
-        qDebug() << "📝 Trade appended to VBO - Buffer points:" << buffer.points.size();
+        // qDebug() << "📝 Trade appended to VBO - Buffer points:" << buffer.points.size();  // Too chatty!
     }
     
     // Cleanup old points if we exceed max
@@ -92,12 +92,12 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     buffer.dirty.store(true);
     m_geometryDirty.store(true);
     
-    // 🎯 PHASE 2: SMOOTH UPDATES: Every 5 trades for better visual smoothness
+    // 🎯 PHASE 2: SMOOTH UPDATES: Every 10 trades for better visual smoothness
     static int tradeCount = 0;
-    if (++tradeCount >= 50) { // 🚀 SMOOTH: Every 5 trades for real-time feel
+    if (++tradeCount >= 10) { // 🚀 SMOOTH: Every 10 trades for real-time feel
         swapBuffers();
         tradeCount = 0;
-        qDebug() << "🔄 Periodic buffer swap after 50 trades";
+        // qDebug() << "🔄 Periodic buffer swap after 10 trades";  // Too chatty!
     }
     
     update(); // Trigger GPU update
@@ -138,9 +138,9 @@ void GPUChartWidget::convertTradeToGPUPoint(const Trade& trade, GPUPoint& point)
     // Debug first few coordinate mappings to verify system
     static int tradeDebugCount = 0;
     if (++tradeDebugCount < 5) {
-        qDebug() << "🎯 OPTION B TIME-SERIES Trade:" << "Price:" << trade.price 
-                 << "Time:" << timestamp_ms << "→ Screen(" << point.x << "," << point.y << ")"
-                 << "Window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;
+        // qDebug() << "🎯 OPTION B TIME-SERIES Trade:" << "Price:" << trade.price 
+        //          << "Time:" << timestamp_ms << "→ Screen(" << point.x << "," << point.y << ")"
+        //          << "Window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;  // Too chatty!
     }
 }
 
@@ -254,14 +254,14 @@ void GPUChartWidget::cleanupOldTrades() {
     if (buffer.points.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = buffer.points.size() - m_maxPoints;
         buffer.points.erase(buffer.points.begin(), buffer.points.begin() + excess);
-        qDebug() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();
+        // qDebug() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();  // Too chatty!
     }
     
     // 🔥 GEMINI FIX: Also clean up accumulated points
     if (m_allRenderPoints.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = m_allRenderPoints.size() - m_maxPoints;
         m_allRenderPoints.erase(m_allRenderPoints.begin(), m_allRenderPoints.begin() + excess);
-        qDebug() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();
+        // qDebug() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();  // Too chatty!
     }
 }
 
@@ -280,8 +280,8 @@ void GPUChartWidget::swapBuffers() {
     // 🔇 REDUCED DEBUG: Only log every 50th swap to reduce spam
     static int swapCounter = 0;
     if (++swapCounter % 50 == 0) {
-        qDebug() << "🔄 Buffer swap: write" << oldWrite << "→" << newWrite 
-                 << ", read" << oldRead << "→" << newRead;
+        // qDebug() << "🔄 Buffer swap: write" << oldWrite << "→" << newWrite 
+        //          << ", read" << oldRead << "→" << newRead;  // Too chatty!
     }
 }
 
@@ -363,8 +363,8 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         if (debugCount++ < 5 && !m_allRenderPoints.empty()) { // 🔥 GEMINI FIX: Use accumulated points
             const auto& firstPoint = m_allRenderPoints[0]; // 🔥 GEMINI FIX: Use accumulated points
             QPointF firstScreenPos = worldToScreen(firstPoint.rawTimestamp, firstPoint.rawPrice);
-            qDebug() << "🎯 TIME-SERIES Trade: Price:" << firstPoint.rawPrice
-                     << "Time:" << firstPoint.rawTimestamp << "→ Screen(" << firstScreenPos.x() << "," << firstScreenPos.y() << ")";
+            // qDebug() << "🎯 TIME-SERIES Trade: Price:" << firstPoint.rawPrice
+            //          << "Time:" << firstPoint.rawTimestamp << "→ Screen(" << firstScreenPos.x() << "," << firstScreenPos.y() << ")";  // Too chatty!
         }
     }
     

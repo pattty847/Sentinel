@@ -4,7 +4,7 @@
 // =============================================================================
 
 #include <gtest/gtest.h>
-#include "libs/core/MessageParser.hpp"
+#include "../libs/core/MessageParser.hpp"
 
 // Fixture not required as functions are stateless, but we use namespace alias
 namespace MP = MessageParser;

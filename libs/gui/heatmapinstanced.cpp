@@ -285,9 +285,9 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
             
             m_allBidInstances.push_back(quad); // 🔥 HISTORICAL HEATMAP: Accumulate all bid points
             
-            // 🔇 REDUCED DEBUG: Only log every 50th bar to reduce spam
+            // 🔇 REDUCED DEBUG: Only log every 1000th bar to reduce spam
             static int bidBarCounter = 0;
-            if (++bidBarCounter % 50 == 0) {
+            if (++bidBarCounter % 1000 == 0) {
                 qDebug() << "🟢 HISTORICAL BID POINT #" << bidBarCounter 
                          << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
                          << "Total accumulated:" << m_allBidInstances.size();
@@ -327,9 +327,9 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
             
             m_allAskInstances.push_back(quad); // 🔥 HISTORICAL HEATMAP: Accumulate all ask points
             
-            // 🔇 REDUCED DEBUG: Only log every 50th bar to reduce spam
+            // 🔇 REDUCED DEBUG: Only log every 1000th bar to reduce spam
             static int askBarCounter = 0;
-            if (++askBarCounter % 50 == 0) {
+            if (++askBarCounter % 1000 == 0) {
                 qDebug() << "🔴 HISTORICAL ASK POINT #" << askBarCounter 
                          << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
                          << "Total accumulated:" << m_allAskInstances.size();
