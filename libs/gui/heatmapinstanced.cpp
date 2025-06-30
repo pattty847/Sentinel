@@ -267,11 +267,6 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
             quad.rawTimestamp = currentTimestamp;
             quad.rawPrice = level.price;
             
-            // Fixed point size for heatmap squares
-            const float pointSize = 4.0f;
-            quad.width = pointSize;
-            quad.height = pointSize;
-            
             QColor color = calculateIntensityColor(level.size, true);
             quad.r = color.redF();
             quad.g = color.greenF();
@@ -308,11 +303,6 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
             // Screen coordinates will be calculated in createQuadGeometryNode every frame
             quad.rawTimestamp = currentTimestamp;
             quad.rawPrice = level.price;
-            
-            // Fixed point size for heatmap squares
-            const float pointSize = 4.0f;
-            quad.width = pointSize;
-            quad.height = pointSize;
             
             QColor color = calculateIntensityColor(level.size, false);
             quad.r = color.redF();
@@ -384,16 +374,54 @@ QRectF HeatMapInstanced::calculateQuadGeometry(double price, double size) const 
 }
 
 QColor HeatMapInstanced::calculateIntensityColor(double size, bool isBid) const {
-    // Calculate intensity (0.0 to 1.0)
+    // PHASE A2: Continuous color scale like reference image
+    // Calculate normalized intensity (0.0 to 1.0)
     double intensity = std::min(1.0, size * m_intensityScale / 10.0);
     
-    if (isBid) {
-        // Green for bids - more intense = brighter green
-        return QColor::fromRgbF(0.0, 0.4 + 0.6 * intensity, 0.0, 0.3 + 0.7 * intensity);
+    // Power-law scaling for better visual distribution
+    intensity = std::pow(intensity, 0.6);  // Makes low values more visible
+    
+    float r, g, b;
+    
+    if (intensity < 0.2) {
+        // Very low: Dark blue
+        r = 0.0f;
+        g = 0.0f + intensity * 2.0f;  // 0.0 → 0.4
+        b = 0.2f + intensity * 2.0f;  // 0.2 → 0.6
+    } else if (intensity < 0.5) {
+        // Low-medium: Blue → Cyan → Green
+        float t = (intensity - 0.2f) / 0.3f;  // 0.0 → 1.0
+        r = 0.0f;
+        g = 0.4f + t * 0.4f;  // 0.4 → 0.8
+        b = 0.6f - t * 0.6f;  // 0.6 → 0.0
+    } else if (intensity < 0.8) {
+        // Medium-high: Green → Yellow
+        float t = (intensity - 0.5f) / 0.3f;  // 0.0 → 1.0
+        r = t * 0.8f;         // 0.0 → 0.8
+        g = 0.8f;             // Stay bright green
+        b = 0.0f;
     } else {
-        // Red for asks - more intense = brighter red  
-        return QColor::fromRgbF(0.4 + 0.6 * intensity, 0.0, 0.0, 0.3 + 0.7 * intensity);
+        // High: Yellow → Orange → Red
+        float t = (intensity - 0.8f) / 0.2f;  // 0.0 → 1.0
+        r = 0.8f + t * 0.2f;  // 0.8 → 1.0
+        g = 0.8f - t * 0.8f;  // 0.8 → 0.0
+        b = 0.0f;
     }
+    
+    // Bid/Ask distinction: slightly shift hue
+    if (isBid) {
+        // Bids: Shift toward green/blue (cooler)
+        g = std::min(1.0f, g * 1.1f);
+        b = std::min(1.0f, b * 1.1f);
+    } else {
+        // Asks: Shift toward red/orange (warmer)
+        r = std::min(1.0f, r * 1.1f);
+    }
+    
+    // Alpha based on intensity (more intense = more opaque)
+    float alpha = 0.4f + intensity * 0.6f;  // 0.4 → 1.0
+    
+    return QColor::fromRgbF(r, g, b, alpha);
 }
 
 void HeatMapInstanced::cleanupOldHeatmapPoints() {
@@ -465,36 +493,52 @@ QSGGeometryNode* HeatMapInstanced::createQuadGeometryNode(const std::vector<Quad
         return nullptr;
     }
     
-    // 🔥 FIXED: Use Point2D attributes to match QSGFlatColorMaterial (no per-vertex color)
+    // PHASE A2: Use ColoredPoint2D to enable per-vertex gradient colors
     int vertexCount = instances.size() * 6;
-    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), vertexCount);
+    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
     geometry->setDrawingMode(QSGGeometry::DrawTriangles);
     
-    QSGGeometry::Point2D* vertices = geometry->vertexDataAsPoint2D();
+    QSGGeometry::ColoredPoint2D* vertices = geometry->vertexDataAsColoredPoint2D();
     
-    // Generate quad vertices for each instance (2 triangles = 6 vertices) - POSITION ONLY
+    // Generate quad vertices for each instance (2 triangles = 6 vertices) with individual colors
     for (size_t i = 0; i < instances.size(); ++i) {
         const QuadInstance& quad_data = instances[i];
 
-        // 🔥 FINAL POLISH: RECALCULATE ON EVERY FRAME, inside the rendering function
+        // Recalculate screen position for current zoom/pan
         QPointF screenPos = worldToScreen(quad_data.rawTimestamp, quad_data.rawPrice);
         
-        // Use screenPos to define the quad corners
-        const float pointSize = 4.0f;
-        float x1 = screenPos.x() - (pointSize / 2.0f);
-        float y1 = screenPos.y() - (pointSize / 2.0f);
-        float x2 = x1 + pointSize;
-        float y2 = y1 + pointSize;
+        // PHASE A1: Adaptive screen-space sizing (larger when zoomed in to fill gaps)
+        double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+        if (timeRange <= 0) timeRange = 60000.0; // Default 1 minute
         
+        // Calculate zoom factor based on time window (smaller window = more zoomed in)
+        double baseTimeWindow = 60000.0; // 1 minute reference
+        double zoomFactor = std::max(1.0, baseTimeWindow / timeRange);
+        
+        // Adaptive point size: 2px minimum, scales up when zoomed in
+        float adaptiveSize = std::min(8.0f, 2.0f * static_cast<float>(zoomFactor));
+        
+        float x1 = screenPos.x() - (adaptiveSize / 2.0f);
+        float y1 = screenPos.y() - (adaptiveSize / 2.0f);
+        float x2 = x1 + adaptiveSize;
+        float y2 = y1 + adaptiveSize;
+        
+        // Convert stored RGBA to uchar for ColoredPoint2D
+        unsigned char r = static_cast<unsigned char>(quad_data.r * 255);
+        unsigned char g = static_cast<unsigned char>(quad_data.g * 255);
+        unsigned char b = static_cast<unsigned char>(quad_data.b * 255);
+        unsigned char a = static_cast<unsigned char>(quad_data.a * 255);
+        
+        // All 6 vertices use the same color (per-quad coloring)
         // Triangle 1: top-left, top-right, bottom-left
-        vertices[i * 6 + 0].set(x1, y1);
-        vertices[i * 6 + 1].set(x2, y1);
-        vertices[i * 6 + 2].set(x1, y2);
+        vertices[i * 6 + 0].set(x1, y1, r, g, b, a);
+        vertices[i * 6 + 1].set(x2, y1, r, g, b, a);
+        vertices[i * 6 + 2].set(x1, y2, r, g, b, a);
         
         // Triangle 2: top-right, bottom-right, bottom-left  
-        vertices[i * 6 + 3].set(x2, y1);
-        vertices[i * 6 + 4].set(x2, y2);
-        vertices[i * 6 + 5].set(x1, y2);
+        vertices[i * 6 + 3].set(x2, y1, r, g, b, a);
+        vertices[i * 6 + 4].set(x2, y2, r, g, b, a);
+        vertices[i * 6 + 5].set(x1, y2, r, g, b, a);
     }
     
     // Create geometry node
@@ -502,9 +546,8 @@ QSGGeometryNode* HeatMapInstanced::createQuadGeometryNode(const std::vector<Quad
     node->setGeometry(geometry);
     node->setFlag(QSGNode::OwnsGeometry);
     
-    // Use flat color material for performance
-    QSGFlatColorMaterial* material = new QSGFlatColorMaterial;
-    material->setColor(baseColor);
+    // Use vertex color material to respect per-vertex colors
+    QSGVertexColorMaterial* material = new QSGVertexColorMaterial;
     node->setMaterial(material);
     node->setFlag(QSGNode::OwnsMaterial);
     

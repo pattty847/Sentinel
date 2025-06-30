@@ -91,7 +91,13 @@ void GPUChartWidget::onTradeReceived(const Trade& trade) {
 void GPUChartWidget::onOrderBookUpdated(const OrderBook& book) {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     m_currentOrderBook = book;
-    // TODO: Phase 2 - order book heatmap integration
+    
+    // 🔥 ORDER BOOK VIEWPORT UPDATES: Use fastest update cadence for smooth viewport movement
+    if (!book.bids.empty() || !book.asks.empty()) {
+        auto currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        updateTimeWindow(currentTime);
+    }
 }
 
 void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
@@ -717,9 +723,14 @@ void GPUChartWidget::resetZoom() {
         m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
         emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
         
-        // 🔥 FIX: Reset price range to current BTC levels
-        m_minPrice = 106000.0;  // Current BTC range
-        m_maxPrice = 108000.0;
+        // 🔥 FIX: Use dynamic price range based on recent trades
+        if (m_lastTradePrice > 0) {
+            updateDynamicPriceRange(m_lastTradePrice);
+        } else {
+            // Fallback to static range only if no trades yet
+            m_minPrice = m_staticMinPrice;
+            m_maxPrice = m_staticMaxPrice;
+        }
         
         m_geometryDirty.store(true);
         update();
@@ -837,12 +848,13 @@ void GPUChartWidget::applyPanZoomToPoint(GPUPoint& point, double rawTimestamp, d
 
 void GPUChartWidget::updateAutoScroll() {
     if (m_autoScrollEnabled) {
-        // 🔥 OPTION B: Follow latest data by adjusting time window
+        // 🔥 PADDING FIX: Add 20% padding to right edge so candles aren't at the edge
         auto currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        m_visibleTimeEnd_ms = currentTime;
-        m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
-        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
+        double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+        m_visibleTimeEnd_ms = currentTime + static_cast<int64_t>(paddingMs);
+        m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         m_geometryDirty.store(true);
         update();
     }
@@ -857,10 +869,12 @@ double GPUChartWidget::calculateInteractionLatency() const {
 
 // 🔥 NEW: Time window management functions (Option B)
 void GPUChartWidget::initializeTimeWindow(int64_t firstTimestamp) {
-    m_visibleTimeEnd_ms = firstTimestamp;
-    m_visibleTimeStart_ms = firstTimestamp - m_timeSpanMs;
+    // 🔥 PADDING FIX: Initialize with padding so first candle isn't at edge
+    double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+    m_visibleTimeEnd_ms = firstTimestamp + static_cast<int64_t>(paddingMs);
+    m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
     m_timeWindowInitialized = true;
-    qDebug() << "🔥 Initialized time window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;
+    qDebug() << "🔥 Initialized time window with padding:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;
 }
 
 void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
@@ -870,10 +884,11 @@ void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
     }
     
     if (m_autoScrollEnabled) {
-        // Slide window to follow latest data
-        m_visibleTimeEnd_ms = newTimestamp;
-        m_visibleTimeStart_ms = newTimestamp - m_timeSpanMs;
-        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
+        // 🔥 PADDING FIX: Add 20% padding to right edge for better candle visibility
+        double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+        m_visibleTimeEnd_ms = newTimestamp + static_cast<int64_t>(paddingMs);
+        m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     }
 }
 

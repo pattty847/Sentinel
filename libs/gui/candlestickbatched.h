@@ -66,6 +66,7 @@ signals:
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
+    void ensureCapacity(QSGGeometryNode* node, int vertexCount, QSGGeometry::DrawingMode mode);
 
 private:
     // 🕯️ CANDLE GEOMETRY: GPU vertex structure for efficient rendering
@@ -115,6 +116,10 @@ private:
     int m_maxCandles = 10000;        // Maximum candles to render
     bool m_autoLOD = true;           // Automatic LOD selection
     CandleLOD::TimeFrame m_forcedTimeFrame = CandleLOD::TF_1min;
+    
+    // 🚀 CURRENT ACTIVE LOD – set each frame in updatePaintNode so helper
+    // functions (e.g. midpoint calculation) have access to the timeframe
+    CandleLOD::TimeFrame m_activeTimeFrame = CandleLOD::TF_1sec;
     
     // 🔥 PERFORMANCE TRACKING
     mutable std::chrono::high_resolution_clock::time_point m_lastRenderTime;

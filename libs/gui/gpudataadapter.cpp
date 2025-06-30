@@ -8,21 +8,31 @@
 GPUDataAdapter::GPUDataAdapter(QObject* parent)
     : QObject(parent)
     , m_processTimer(new QTimer(this))
+    , m_candle100msTimer(new QTimer(this))
+    , m_candle500msTimer(new QTimer(this))
+    , m_candle1sTimer(new QTimer(this))
 {
     qDebug() << "🚀 GPUDataAdapter: Initializing lock-free data pipeline...";
     
     initializeBuffers();
     
-    // Connect processing timer
+    // Connect processing timers
     connect(m_processTimer, &QTimer::timeout, this, &GPUDataAdapter::processIncomingData);
+    connect(m_candle100msTimer, &QTimer::timeout, this, &GPUDataAdapter::processHighFrequencyCandles);
+    connect(m_candle500msTimer, &QTimer::timeout, this, &GPUDataAdapter::processMediumFrequencyCandles);
+    connect(m_candle1sTimer, &QTimer::timeout, this, &GPUDataAdapter::processSecondCandles);
     
-    // Start with 16ms (60 FPS) processing interval
-    m_processTimer->start(16);
+    // Start timers at their proper intervals
+    m_processTimer->start(16);     // 16ms - Trade scatter + Order book heatmap
+    m_candle100msTimer->start(100); // 100ms - High-frequency candles
+    m_candle500msTimer->start(500); // 500ms - Medium-frequency candles  
+    m_candle1sTimer->start(1000);   // 1000ms - Second candles
     
     qDebug() << "✅ GPUDataAdapter: Lock-free pipeline initialized"
              << "- Reserve size:" << m_reserveSize 
              << "- Trade queue capacity: 65536"
-             << "- OrderBook queue capacity: 16384";
+             << "- OrderBook queue capacity: 16384"
+             << "- Candle timers: 100ms, 500ms, 1s";
 }
 
 void GPUDataAdapter::initializeBuffers() {
@@ -98,21 +108,8 @@ void GPUDataAdapter::processIncomingData() {
         }
     }
 
-    // Prepare candle updates for all timeframes
-    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
-        CandleLOD::TimeFrame tf = static_cast<CandleLOD::TimeFrame>(i);
-        const auto& vec = m_candleLOD.getCandlesForTimeFrame(tf);
-        if (vec.empty()) continue;
-
-        CandleUpdate update;
-        update.symbol = m_currentSymbol;
-        update.timestamp_ms = vec.back().timestamp_ms;
-        update.timeframe = tf;
-        update.candle = vec.back();
-        update.isNewCandle = (update.timestamp_ms != m_lastEmittedCandleTime[i]);
-        m_lastEmittedCandleTime[i] = update.timestamp_ms;
-        m_candleQueue.push(update);
-    }
+    // Candle processing moved to separate time-based timers
+    // (100ms, 500ms, 1s timers handle their respective candle updates)
     
     // Process order books for heatmap
     OrderBook orderBook;
@@ -183,15 +180,7 @@ void GPUDataAdapter::processIncomingData() {
         emit heatmapReady(m_heatmapBuffer.data(), m_heatmapWriteCursor);
     }
 
-    // Emit batched candle updates
-    CandleUpdate candleUpdate;
-    std::vector<CandleUpdate> ready;
-    while (m_candleQueue.pop(candleUpdate)) {
-        ready.push_back(candleUpdate);
-    }
-    if (!ready.empty()) {
-        emit candlesReady(ready);
-    }
+    // Candle updates now emitted by separate time-based timers
     
     // Performance monitoring
     qint64 frameTime = frameTimer.elapsed();
@@ -286,4 +275,55 @@ void GPUDataAdapter::setReserveSize(size_t size) {
 void GPUDataAdapter::resetWriteCursors() {
     m_tradeWriteCursor = 0;
     m_heatmapWriteCursor = 0;
+}
+
+// 🕯️ TIME-BASED CANDLE PROCESSING: Emit candle updates at proper intervals
+
+void GPUDataAdapter::processHighFrequencyCandles() {
+    // Process 100ms candles only
+    processCandleTimeFrame(CandleLOD::TF_100ms);
+}
+
+void GPUDataAdapter::processMediumFrequencyCandles() {
+    // Process 500ms candles only
+    processCandleTimeFrame(CandleLOD::TF_500ms);
+}
+
+void GPUDataAdapter::processSecondCandles() {
+    // Process 1s candles only
+    processCandleTimeFrame(CandleLOD::TF_1sec);
+}
+
+void GPUDataAdapter::processCandleTimeFrame(CandleLOD::TimeFrame timeframe) {
+    const auto& vec = m_candleLOD.getCandlesForTimeFrame(timeframe);
+    if (vec.empty()) return;
+
+    size_t tfIndex = static_cast<size_t>(timeframe);
+    const OHLC& latestCandle = vec.back();
+    
+    // Only emit if candle has changed (time-based boundary crossed)
+    if (latestCandle.timestamp_ms != m_lastEmittedCandleTime[tfIndex]) {
+        CandleUpdate update;
+        update.symbol = m_currentSymbol;
+        update.timestamp_ms = latestCandle.timestamp_ms;
+        update.timeframe = timeframe;
+        update.candle = latestCandle;
+        update.isNewCandle = true; // Always true for time-based updates
+        
+        m_lastEmittedCandleTime[tfIndex] = update.timestamp_ms;
+        
+        // Emit immediately for time-based candles
+        std::vector<CandleUpdate> ready = {update};
+        emit candlesReady(ready);
+        
+        // Debug logging for first few candles of each timeframe
+        static std::array<int, CandleLOD::NUM_TIMEFRAMES> candleCount{};
+        if (++candleCount[tfIndex] <= 5) {
+            qDebug() << "🕯️ TIME-BASED CANDLE EMIT #" << candleCount[tfIndex]
+                     << "TimeFrame:" << CandleUtils::timeFrameName(timeframe)
+                     << "Timestamp:" << update.timestamp_ms
+                     << "OHLC:" << update.candle.open << update.candle.high 
+                     << update.candle.low << update.candle.close;
+        }
+    }
 } 

@@ -108,9 +108,9 @@ private:
     OrderBook m_currentOrderBook;
     std::mutex m_dataMutex;
     
-    // 🎯 VIEW PARAMETERS
-    double m_minPrice = 49000.0;
-    double m_maxPrice = 51000.0;
+    // 🎯 VIEW PARAMETERS - Dynamic price range (no hardcoded values)
+    double m_minPrice = 107000.0;  // Current BTC range - will be updated dynamically
+    double m_maxPrice = 109000.0;
     double m_timeSpanMs = 60000.0; // 60 seconds visible window
     int m_maxPoints = 100000;      // 100K points max (configurable)
     
@@ -124,8 +124,8 @@ private:
     double m_dynamicRangeSize = 50.0;      // Default $50 range for BTC (adjustable)
     double m_lastTradePrice = 0.0;         // Track most recent price for centering
     int m_priceUpdateCount = 0;            // Count trades for range adjustment frequency
-    double m_staticMinPrice = 49000.0;     // Fallback static range
-    double m_staticMaxPrice = 51000.0;     // Fallback static range
+    double m_staticMinPrice = 107000.0;    // Fallback static range - current BTC levels  
+    double m_staticMaxPrice = 109000.0;    // Fallback static range - current BTC levels
     
     // 🚀 PHASE 4: PAN/ZOOM INTERACTION STATE
     double m_zoomFactor = 1.0;             // Zoom level (1.0 = no zoom)

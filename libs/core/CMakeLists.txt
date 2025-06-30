@@ -25,7 +25,7 @@ target_sources(sentinel_core
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED COMPONENTS system beast)
+find_package(Boost REQUIRED COMPONENTS system)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(jwt-cpp REQUIRED)
@@ -37,7 +37,6 @@ target_link_libraries(sentinel_core
         Qt6::Core
     PRIVATE
         Boost::system
-        Boost::beast
         nlohmann_json::nlohmann_json
         OpenSSL::SSL
         OpenSSL::Crypto
