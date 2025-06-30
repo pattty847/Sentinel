@@ -4,7 +4,7 @@
 graph TD
     subgraph "WebSocket Thread"
         WS["Coinbase WebSocket API"] --> CORE[("MarketDataCore<br>🌐 WebSocket Framing & Parsing")];
-        CORE -- "Snapshot & L2 Updates" --> LOB[("LiveOrderBook<br>📚 Stateful In-Memory Book")];
+        CORE -- "Snapshot  V& L2 Updates" --> LOB[("LiveOrderBook<br>📚 Stateful In-Memory Book")];
         CORE -- "Trade Matches" --> ADAPTER[("GPUDataAdapter<br>🌉 Bridge to GUI Thread")];
         LOB -- "Book State" --> ADAPTER;
     end

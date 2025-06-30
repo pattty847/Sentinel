@@ -91,7 +91,13 @@ void GPUChartWidget::onTradeReceived(const Trade& trade) {
 void GPUChartWidget::onOrderBookUpdated(const OrderBook& book) {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     m_currentOrderBook = book;
-    // TODO: Phase 2 - order book heatmap integration
+    
+    // 🔥 ORDER BOOK VIEWPORT UPDATES: Use fastest update cadence for smooth viewport movement
+    if (!book.bids.empty() || !book.asks.empty()) {
+        auto currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        updateTimeWindow(currentTime);
+    }
 }
 
 void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
@@ -208,6 +214,13 @@ void GPUChartWidget::convertTradeToGPUPoint(const Trade& trade, GPUPoint& point)
 void GPUChartWidget::updateDynamicPriceRange(double newPrice) {
     m_lastTradePrice = newPrice;
     m_priceUpdateCount++;
+    
+    // 🚀 USER CONTROL PRIORITY: Don't auto-center if user is manually controlling viewport
+    // This prevents the annoying "snap back to center" behavior when price jumps
+    if (!m_autoScrollEnabled || m_isDragging) {
+        // User is in control - don't auto-adjust the price range
+        return;
+    }
     
     // Update range every 5 trades to prevent excessive recalculation
     if (m_priceUpdateCount % 5 == 0) {
@@ -526,7 +539,7 @@ void GPUChartWidget::mousePressEvent(QMouseEvent* event) {
         m_isDragging = true;
         m_lastMousePos = event->position();
         
-        // 🔥 GEMINI FIX: Disable ALL auto-pilot systems immediately
+        // 🚀 USER CONTROL: Disable auto-centering and auto-scroll immediately
         m_autoScrollEnabled = false;
         m_dynamicPriceZoom = false;
         LOG_D(CAT, "🖱️ User control active - all auto-pilot systems disabled");
@@ -537,7 +550,7 @@ void GPUChartWidget::mousePressEvent(QMouseEvent* event) {
 
 void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
     if (m_isDragging) {
-        // 🔥 GEMINI FIX: Disable auto-pilot systems at start of drag
+        // 🚀 USER CONTROL: Ensure auto-systems stay disabled during drag
         m_autoScrollEnabled = false;
         m_dynamicPriceZoom = false;
         
@@ -605,7 +618,7 @@ void GPUChartWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void GPUChartWidget::wheelEvent(QWheelEvent* event) {
-    // 🔥 GEMINI FIX: Disable auto-pilot systems at start of wheel zoom
+    // 🚀 USER CONTROL: Disable auto-centering when user manually zooms
     m_autoScrollEnabled = false;
     m_dynamicPriceZoom = false;
     
@@ -614,53 +627,82 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
         return;
     }
     
-    // 🔥 OPTION B: Zoom by changing the time window duration
+    // 🔥 ENHANCED ZOOM: Support both time (X) and price (Y) axis zooming
     const double ZOOM_SENSITIVITY = 0.001; // Tuned for time window
     const double MIN_TIME_RANGE = 1000.0;  // 1 second minimum
     const double MAX_TIME_RANGE = 600000.0; // 10 minutes maximum
+    const double MIN_PRICE_RANGE = 1.0;     // $1 minimum price range
+    const double MAX_PRICE_RANGE = 10000.0; // $10k maximum price range
     
     // Calculate zoom delta
     double delta = event->angleDelta().y() * ZOOM_SENSITIVITY;
     double zoomFactor = 1.0 - delta; // Invert for natural zoom direction
     
-    // Current time window
+    // Get cursor position for zoom center
+    QPointF cursorPos = event->position();
+    double cursorXRatio = cursorPos.x() / width();
+    double cursorYRatio = 1.0 - (cursorPos.y() / height()); // Invert Y for price axis
+    
+    // 🚀 DUAL-AXIS ZOOM: Zoom both time and price simultaneously
+    
+    // ──── TIME AXIS ZOOM (X) ────
     double currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
     double newTimeRange = currentTimeRange * zoomFactor;
-    
-    // Clamp to safe bounds
     newTimeRange = std::max(MIN_TIME_RANGE, std::min(MAX_TIME_RANGE, newTimeRange));
     
-    if (std::abs(newTimeRange - currentTimeRange) > 10.0) { // Only update if significant change
+    if (std::abs(newTimeRange - currentTimeRange) > 10.0) {
         // Calculate cursor position in time coordinates
-        QPointF cursorPos = event->position();
-        double cursorTimeRatio = cursorPos.x() / width();
-        int64_t cursorTimestamp = m_visibleTimeStart_ms + (cursorTimeRatio * currentTimeRange);
+        int64_t cursorTimestamp = m_visibleTimeStart_ms + (cursorXRatio * currentTimeRange);
         
-        // Calculate new window bounds around cursor
+        // Calculate new time window bounds around cursor
         double timeDelta = newTimeRange - currentTimeRange;
-        int64_t startAdjust = static_cast<int64_t>(timeDelta * cursorTimeRatio);
-        int64_t endAdjust = static_cast<int64_t>(timeDelta * (1.0 - cursorTimeRatio));
+        int64_t startAdjust = static_cast<int64_t>(timeDelta * cursorXRatio);
+        int64_t endAdjust = static_cast<int64_t>(timeDelta * (1.0 - cursorXRatio));
         
-        m_visibleTimeStart_ms -= startAdjust;
+                m_visibleTimeStart_ms -= startAdjust;
         m_visibleTimeEnd_ms += endAdjust;
-        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
+    }
+    
+    // ──── PRICE AXIS ZOOM (Y) ────
+    double currentPriceRange = m_maxPrice - m_minPrice;
+    double newPriceRange = currentPriceRange * zoomFactor;
+    newPriceRange = std::max(MIN_PRICE_RANGE, std::min(MAX_PRICE_RANGE, newPriceRange));
+    
+    if (std::abs(newPriceRange - currentPriceRange) > 0.01) {
+        // Calculate cursor position in price coordinates
+        double cursorPrice = m_minPrice + (cursorYRatio * currentPriceRange);
         
-        // Disable auto-scroll on zoom
-        if (m_autoScrollEnabled) {
-            m_autoScrollEnabled = false;
-            LOG_D(CAT, "🔍 Auto-scroll disabled - manual zoom");
-        }
+        // Calculate new price range bounds around cursor
+        double priceDelta = newPriceRange - currentPriceRange;
+        double minAdjust = priceDelta * cursorYRatio;
+        double maxAdjust = priceDelta * (1.0 - cursorYRatio);
         
-        m_geometryDirty.store(true);
-        update();
-        
-        // Debug camera zoom
-        static int zoomDebugCount = 0;
-        if (zoomDebugCount++ < 3) {
-            LOG_D(CAT,
-                  "🎥 CAMERA ZOOM: Time range:{} seconds Window:{}-{} Cursor at:{}",
-                  (newTimeRange/1000.0), m_visibleTimeStart_ms, m_visibleTimeEnd_ms, cursorTimestamp);
-        }
+        m_minPrice -= minAdjust;
+        m_maxPrice += maxAdjust;
+    }
+    
+    emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+    
+    // Disable auto-scroll on zoom
+    if (m_autoScrollEnabled) {
+        m_autoScrollEnabled = false;
+        LOG_D(CAT, "🔍 Auto-scroll disabled - manual zoom");
+    }
+    
+    m_geometryDirty.store(true);
+    updateDebugInfo();
+    update();
+    
+    // Debug camera zoom
+    static int zoomDebugCount = 0;
+    if (zoomDebugCount++ < 5) {
+        LOG_D(CAT,
+              "🎥 DUAL-AXIS ZOOM: Time:{} seconds Price: ${} Window:[{},{}] Range:[${},{}]",
+              (newTimeRange/1000.0), 
+              QString::number(newPriceRange, 'f', 2).toStdString(),
+              m_visibleTimeStart_ms, m_visibleTimeEnd_ms,
+              QString::number(m_minPrice, 'f', 2).toStdString(),
+              QString::number(m_maxPrice, 'f', 2).toStdString());
     }
     
     event->accept();
@@ -711,9 +753,14 @@ void GPUChartWidget::resetZoom() {
         m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
         emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
         
-        // 🔥 FIX: Reset price range to current BTC levels
-        m_minPrice = 106000.0;  // Current BTC range
-        m_maxPrice = 108000.0;
+        // 🔥 FIX: Use dynamic price range based on recent trades
+        if (m_lastTradePrice > 0) {
+            updateDynamicPriceRange(m_lastTradePrice);
+        } else {
+            // Fallback to static range only if no trades yet
+            m_minPrice = m_staticMinPrice;
+            m_maxPrice = m_staticMaxPrice;
+        }
         
         m_geometryDirty.store(true);
         update();
@@ -724,6 +771,7 @@ void GPUChartWidget::resetZoom() {
 void GPUChartWidget::enableAutoScroll(bool enabled) {
     if (m_autoScrollEnabled != enabled) {
         m_autoScrollEnabled = enabled;
+        qDebug() << "🚀 Auto-scroll" << (enabled ? "ENABLED" : "DISABLED");
         emit autoScrollEnabledChanged();
         
         if (enabled) {
@@ -831,12 +879,13 @@ void GPUChartWidget::applyPanZoomToPoint(GPUPoint& point, double rawTimestamp, d
 
 void GPUChartWidget::updateAutoScroll() {
     if (m_autoScrollEnabled) {
-        // 🔥 OPTION B: Follow latest data by adjusting time window
+        // 🔥 PADDING FIX: Add 20% padding to right edge so candles aren't at the edge
         auto currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        m_visibleTimeEnd_ms = currentTime;
-        m_visibleTimeStart_ms = currentTime - m_timeSpanMs;
-        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
+        double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+        m_visibleTimeEnd_ms = currentTime + static_cast<int64_t>(paddingMs);
+        m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         m_geometryDirty.store(true);
         update();
     }
@@ -851,8 +900,10 @@ double GPUChartWidget::calculateInteractionLatency() const {
 
 // 🔥 NEW: Time window management functions (Option B)
 void GPUChartWidget::initializeTimeWindow(int64_t firstTimestamp) {
-    m_visibleTimeEnd_ms = firstTimestamp;
-    m_visibleTimeStart_ms = firstTimestamp - m_timeSpanMs;
+    // 🔥 PADDING FIX: Initialize with padding so first candle isn't at edge
+    double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+    m_visibleTimeEnd_ms = firstTimestamp + static_cast<int64_t>(paddingMs);
+    m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
     m_timeWindowInitialized = true;
     LOG_D(CAT, "🔥 Initialized time window: {} to {}", m_visibleTimeStart_ms, m_visibleTimeEnd_ms);
 }
@@ -864,12 +915,51 @@ void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
     }
     
     if (m_autoScrollEnabled) {
-        // Slide window to follow latest data
-        m_visibleTimeEnd_ms = newTimestamp;
-        m_visibleTimeStart_ms = newTimestamp - m_timeSpanMs;
-        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
+        // 🔥 PADDING FIX: Add 20% padding to right edge for better candle visibility
+        double paddingMs = m_timeSpanMs * 0.2; // 20% padding from right edge
+        m_visibleTimeEnd_ms = newTimestamp + static_cast<int64_t>(paddingMs);
+        m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     }
 }
 
 // 🔥 REMOVED: calculateColumnBasedPosition function with problematic static variable
 // Replaced with stateless worldToScreen coordinate system in Option B 
+
+void GPUChartWidget::setDebugInfoVisible(bool visible) {
+    if (m_debugInfoVisible != visible) {
+        m_debugInfoVisible = visible;
+        emit debugInfoVisibleChanged();
+    }
+}
+
+void GPUChartWidget::updateDebugInfo() {
+    if (!m_debugInfoVisible) {
+        m_debugInfoText.clear();
+        return;
+    }
+    
+    // Calculate viewport metrics
+    double timeSpanSec = (m_visibleTimeEnd_ms - m_visibleTimeStart_ms) / 1000.0;
+    double priceRange = m_maxPrice - m_minPrice;
+    
+    // Format debug text
+    m_debugInfoText = QString(
+        "📊 VIEWPORT DEBUG\n"
+        "Screen: %1×%2px\n"
+        "Time: %3s [%4 - %5]\n"
+        "Price: $%6 [$%7 - $%8]\n"
+        "Points: %9 | Candle Threshold: %10"
+    ).arg(static_cast<int>(width()))
+     .arg(static_cast<int>(height()))
+     .arg(timeSpanSec, 0, 'f', 1)
+     .arg(m_visibleTimeStart_ms)
+     .arg(m_visibleTimeEnd_ms)
+     .arg(priceRange, 0, 'f', 2)
+     .arg(m_minPrice, 0, 'f', 2)
+     .arg(m_maxPrice, 0, 'f', 2)
+     .arg(m_allRenderPoints.size())
+     .arg(timeSpanSec < 10.0 ? "HIDDEN" : "VISIBLE");
+    
+    emit debugInfoChanged();
+} 
