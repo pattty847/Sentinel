@@ -27,12 +27,19 @@ void HeatMapInstanced::updateBids(const QVariantList& bidLevels) {
     
     m_bidInstances.clear();
     
+    // 🚀 VIEWPORT BUFFER: Render order book data beyond visible range to prevent gaps
+    double priceRange = m_maxPrice - m_minPrice;
+    double bufferSize = priceRange * 0.5; // 50% buffer on each side
+    double expandedMinPrice = m_minPrice - bufferSize;
+    double expandedMaxPrice = m_maxPrice + bufferSize;
+    
     for (const auto& level : bidLevels) {
         QVariantMap levelMap = level.toMap();
         double price = levelMap.value("price").toDouble();
         double size = levelMap.value("size").toDouble();
         
-        if (price >= m_minPrice && price <= m_maxPrice && size > 0.0) {
+        // 🚀 EXPANDED RANGE: Include levels outside viewport for smooth panning
+        if (price >= expandedMinPrice && price <= expandedMaxPrice && size > 0.0) {
             QuadInstance quad;
             QRectF geometry = calculateQuadGeometry(price, size);
             
@@ -65,12 +72,19 @@ void HeatMapInstanced::updateAsks(const QVariantList& askLevels) {
     
     m_askInstances.clear();
     
+    // 🚀 VIEWPORT BUFFER: Render order book data beyond visible range to prevent gaps
+    double priceRange = m_maxPrice - m_minPrice;
+    double bufferSize = priceRange * 0.5; // 50% buffer on each side
+    double expandedMinPrice = m_minPrice - bufferSize;
+    double expandedMaxPrice = m_maxPrice + bufferSize;
+    
     for (const auto& level : askLevels) {
         QVariantMap levelMap = level.toMap();
         double price = levelMap.value("price").toDouble();
         double size = levelMap.value("size").toDouble();
         
-        if (price >= m_minPrice && price <= m_maxPrice && size > 0.0) {
+        // 🚀 EXPANDED RANGE: Include levels outside viewport for smooth panning
+        if (price >= expandedMinPrice && price <= expandedMaxPrice && size > 0.0) {
             QuadInstance quad;
             QRectF geometry = calculateQuadGeometry(price, size);
             
@@ -258,8 +272,15 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
     // Use current timestamp for this order book snapshot
     double currentTimestamp = QDateTime::currentMSecsSinceEpoch();
     
+    // 🚀 EXPANDED BUFFER RANGE: Use the same buffer logic as updateBids for consistency
+    double priceRange = m_maxPrice - m_minPrice;
+    double bufferSize = priceRange * 0.5; // 50% buffer on each side
+    double expandedMinPrice = m_minPrice - bufferSize;
+    double expandedMaxPrice = m_maxPrice + bufferSize;
+    
     for (const auto& level : bids) {
-        if (level.price >= m_minPrice && level.price <= m_maxPrice && level.size > 0.0) {
+        // 🚀 EXPANDED RANGE: Include levels outside viewport for smooth panning
+        if (level.price >= expandedMinPrice && level.price <= expandedMaxPrice && level.size > 0.0) {
             QuadInstance quad;
             
             // 🔥 FINAL POLISH: Store raw data instead of calculating screen coordinates
@@ -295,8 +316,15 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
     // Use current timestamp for this order book snapshot  
     double currentTimestamp = QDateTime::currentMSecsSinceEpoch();
     
+    // 🚀 EXPANDED BUFFER RANGE: Use the same buffer logic as updateAsks for consistency
+    double priceRange = m_maxPrice - m_minPrice;
+    double bufferSize = priceRange * 0.5; // 50% buffer on each side
+    double expandedMinPrice = m_minPrice - bufferSize;
+    double expandedMaxPrice = m_maxPrice + bufferSize;
+    
     for (const auto& level : asks) {
-        if (level.price >= m_minPrice && level.price <= m_maxPrice && level.size > 0.0) {
+        // 🚀 EXPANDED RANGE: Include levels outside viewport for smooth panning
+        if (level.price >= expandedMinPrice && level.price <= expandedMaxPrice && level.size > 0.0) {
             QuadInstance quad;
             
             // 🔥 FINAL POLISH: Store raw data instead of calculating screen coordinates

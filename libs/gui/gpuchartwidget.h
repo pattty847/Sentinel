@@ -17,6 +17,8 @@ class GPUChartWidget : public QQuickItem {
 
     // 🚀 PHASE 4: QML Property for auto-scroll state
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
+    Q_PROPERTY(bool debugInfoVisible READ debugInfoVisible WRITE setDebugInfoVisible NOTIFY debugInfoVisibleChanged)
+    Q_PROPERTY(QString debugInfo READ debugInfo NOTIFY debugInfoChanged)
 
 public:
     explicit GPUChartWidget(QQuickItem* parent = nullptr);
@@ -41,6 +43,12 @@ public:
     
     // 🚀 PHASE 4: Property getters for QML
     bool autoScrollEnabled() const { return m_autoScrollEnabled; }
+    void enableAutoScroll(bool enabled);
+    
+    // 🚀 DEBUG INFO: On-screen viewport debugging
+    bool debugInfoVisible() const { return m_debugInfoVisible; }
+    void setDebugInfoVisible(bool visible);
+    QString debugInfo() const { return m_debugInfoText; }
 
 public slots:
     // 🔥 REAL-TIME DATA INTEGRATION
@@ -51,7 +59,6 @@ public slots:
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void resetZoom();
-    Q_INVOKABLE void enableAutoScroll(bool enabled);
     Q_INVOKABLE void centerOnPrice(double price);
     Q_INVOKABLE void centerOnTime(qint64 timestamp);
 
@@ -63,6 +70,8 @@ signals:
     
     // 🔥 GEMINI UNIFICATION: Broadcasts the camera's current time window
     void viewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice); // 🔥 FINAL POLISH: Include price range
+    void debugInfoVisibleChanged();
+    void debugInfoChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -149,10 +158,17 @@ private:
     double m_previousTradePrice = 0.0;        // Track previous price for color logic
     bool m_hasPreviousPrice = false;          // Flag to skip first trade color logic
     
+    // 🚀 DEBUG INFO: On-screen display
+    bool m_debugInfoVisible = true;  // Show debug info by default
+    QString m_debugInfoText;
+    
     // Helper methods
     void convertTradeToGPUPoint(const Trade& trade, GPUPoint& point);
     void cleanupOldTrades();
     void swapBuffers();
+    void updateDynamicPriceRange(double newPrice);
+    bool isInCurrentPriceRange(double price) const;
+    void updateDebugInfo();
     
     // 🔥 NEW: STATELESS COORDINATE SYSTEM (Option B)
     QPointF worldToScreen(int64_t timestamp_ms, double price) const;
@@ -161,10 +177,6 @@ private:
     void initializeTimeWindow(int64_t firstTimestamp);
     
     // 🎯 PHASE 2: Dynamic Price Scaling (NEW)
-    void updateDynamicPriceRange(double newPrice);
-    bool isInCurrentPriceRange(double price) const;
-    
-    // 🎯 PHASE 2: Safe Color Implementation (NEW)
     QColor determineDominantTradeColor(const std::vector<GPUPoint>& points) const;
     
     // 🎯 PHASE 4: Pan/Zoom Coordinate Transformation
