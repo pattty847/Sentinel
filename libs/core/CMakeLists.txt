@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.22)
 project(sentinel_core)
 
 add_library(sentinel_core)
+add_library(sentinel_logging INTERFACE)
+target_sources(sentinel_logging INTERFACE Log.hpp)
+target_include_directories(sentinel_logging INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Source files for this library
 target_sources(sentinel_core 
@@ -32,9 +35,10 @@ find_package(jwt-cpp REQUIRED)
 
 target_include_directories(sentinel_core PUBLIC .)
 
-target_link_libraries(sentinel_core 
+target_link_libraries(sentinel_core
     PUBLIC
         Qt6::Core
+        sentinel_logging
     PRIVATE
         Boost::system
         Boost::beast

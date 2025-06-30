@@ -1,15 +1,17 @@
 #include "candlelod.h"
-#include <QDebug>
+#include "Log.hpp"
 #include <QDateTime>
 #include <algorithm>
 #include <chrono>
+
+static constexpr auto CAT = "CandleLOD";
 
 CandleLOD::CandleLOD() {
     // Initialize tracking arrays
     m_currentCandles.fill(nullptr);
     m_lastCandleTime.fill(0);
     
-    qDebug() << "🕯️ CandleLOD INITIALIZED - Multi-timeframe candle system ready!";
+    LOG_I(CAT, "🕯️ CandleLOD INITIALIZED - Multi-timeframe candle system ready!");
 }
 
 void CandleLOD::addTrade(const Trade& trade) {
@@ -24,11 +26,10 @@ void CandleLOD::addTrade(const Trade& trade) {
     // Debug first few trades
     static int lodTradeCount = 0;
     if (++lodTradeCount <= 3) {
-        qDebug() << "🕯️ LOD TRADE #" << lodTradeCount 
-                 << "Price:" << trade.price << "Size:" << trade.size
-                 << "Candles: 1m=" << getCandleCount(TF_1min) 
-                 << "5m=" << getCandleCount(TF_5min)
-                 << "15m=" << getCandleCount(TF_15min);
+        LOG_D(CAT,
+              "🕯️ LOD TRADE #{} Price:{} Size:{} Candles:1m={} 5m={} 15m={}",
+              lodTradeCount, trade.price, trade.size,
+              getCandleCount(TF_1min), getCandleCount(TF_5min), getCandleCount(TF_15min));
     }
 }
 
@@ -39,7 +40,7 @@ void CandleLOD::updateTimeFrame(TimeFrame tf, const Trade& trade) {
     // Get or create current candle for this timeframe
     OHLC* currentCandle = getCurrentCandle(tf, timestamp_ms);
     if (!currentCandle) {
-        qDebug() << "⚠️ Failed to get current candle for timeframe" << tf;
+        LOG_W(CAT, "⚠️ Failed to get current candle for timeframe {}", tf);
         return;
     }
     
@@ -73,10 +74,10 @@ OHLC* CandleLOD::getCurrentCandle(TimeFrame tf, int64_t tradeTime) {
         
         static int newCandleCount = 0;
         if (++newCandleCount <= 5) {
-            qDebug() << "🕯️ NEW CANDLE #" << newCandleCount 
-                     << "Timeframe:" << CandleUtils::timeFrameName(tf)
-                     << "Start:" << QDateTime::fromMSecsSinceEpoch(candleStartTime).toString()
-                     << "Total candles:" << getCandleCount(tf);
+            LOG_D(CAT, "🕯️ NEW CANDLE #{} Timeframe:{} Start:{} Total candles:{}",
+                  newCandleCount, CandleUtils::timeFrameName(tf),
+                  QDateTime::fromMSecsSinceEpoch(candleStartTime).toString().toStdString(),
+                  getCandleCount(tf));
         }
     }
     
@@ -93,9 +94,9 @@ void CandleLOD::finalizePreviousCandle(TimeFrame tf, int64_t newCandleTime) {
     // No additional finalization needed for now
     static int finalizeCount = 0;
     if (++finalizeCount <= 3) {
-        qDebug() << "🕯️ FINALIZED CANDLE #" << finalizeCount 
-                 << "Timeframe:" << CandleUtils::timeFrameName(tf)
-                 << "Moving to new candle at:" << QDateTime::fromMSecsSinceEpoch(newCandleTime).toString();
+        LOG_D(CAT, "🕯️ FINALIZED CANDLE #{} Timeframe:{} Moving to new candle at:{}",
+              finalizeCount, CandleUtils::timeFrameName(tf),
+              QDateTime::fromMSecsSinceEpoch(newCandleTime).toString().toStdString());
     }
 }
 
@@ -122,15 +123,14 @@ void CandleLOD::incorporateTrade(OHLC& candle, const Trade& trade) {
     // Debug first few trade incorporations
     static int incorporateCount = 0;
     if (++incorporateCount <= 5) {
-        qDebug() << "🕯️ INCORPORATE TRADE #" << incorporateCount
-                 << "Into candle: O=" << candle.open << "H=" << candle.high 
-                 << "L=" << candle.low << "C=" << candle.close
-                 << "V=" << candle.volume << "Count=" << candle.tradeCount;
+        LOG_D(CAT, "🕯️ INCORPORATE TRADE #{} Into candle: O={} H={} L={} C={} V={} Count={}",
+              incorporateCount, candle.open, candle.high, candle.low, candle.close,
+              candle.volume, candle.tradeCount);
     }
 }
 
 void CandleLOD::prebakeTimeFrames(const std::vector<Trade>& rawTrades) {
-    qDebug() << "🕯️ PREBAKING TIMEFRAMES from" << rawTrades.size() << "trades...";
+    LOG_I(CAT, "🕯️ PREBAKING TIMEFRAMES from {} trades...", rawTrades.size());
     
     // Clear existing data
     for (auto& timeFrameData : m_timeFrameData) {
@@ -144,12 +144,10 @@ void CandleLOD::prebakeTimeFrames(const std::vector<Trade>& rawTrades) {
         addTrade(trade);
     }
     
-    qDebug() << "🕯️ PREBAKING COMPLETE:"
-             << "1m=" << getCandleCount(TF_1min)
-             << "5m=" << getCandleCount(TF_5min) 
-             << "15m=" << getCandleCount(TF_15min)
-             << "1h=" << getCandleCount(TF_60min)
-             << "1d=" << getCandleCount(TF_Daily);
+    LOG_I(CAT,
+          "🕯️ PREBAKING COMPLETE: 1m={} 5m={} 15m={} 1h={} 1d={}",
+          getCandleCount(TF_1min), getCandleCount(TF_5min), getCandleCount(TF_15min),
+          getCandleCount(TF_60min), getCandleCount(TF_Daily));
 }
 
 void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
@@ -177,23 +175,22 @@ void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
     }
     
     if (totalRemoved > 0) {
-        qDebug() << "🧹 CLEANED UP" << totalRemoved << "old candles";
+        LOG_D(CAT, "🧹 CLEANED UP {} old candles", totalRemoved);
     }
 }
 
 void CandleLOD::printStats() const {
-    qDebug() << "🕯️ CANDLE LOD STATS:";
+    LOG_I(CAT, "🕯️ CANDLE LOD STATS:");
     for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
         TimeFrame tf = static_cast<TimeFrame>(i);
-        qDebug() << "  " << CandleUtils::timeFrameName(tf) << ":" << getCandleCount(tf) << "candles";
+        LOG_I(CAT, "  {}: {} candles", CandleUtils::timeFrameName(tf), getCandleCount(tf));
         
         if (!m_timeFrameData[i].empty()) {
             const auto& firstCandle = m_timeFrameData[i].front();
             const auto& lastCandle = m_timeFrameData[i].back();
-            qDebug() << "    Range:" 
-                     << QDateTime::fromMSecsSinceEpoch(firstCandle.timestamp_ms).toString()
-                     << "to"
-                     << QDateTime::fromMSecsSinceEpoch(lastCandle.timestamp_ms).toString();
+            LOG_I(CAT, "    Range: {} to {}",
+                  QDateTime::fromMSecsSinceEpoch(firstCandle.timestamp_ms).toString().toStdString(),
+                  QDateTime::fromMSecsSinceEpoch(lastCandle.timestamp_ms).toString().toStdString());
         }
     }
 }

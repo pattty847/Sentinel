@@ -6,13 +6,15 @@
 #include "candlestickbatched.h"
 #include "chartmodecontroller.h"
 #include <QQmlContext>
-#include <QDebug>
+#include "Log.hpp"
 #include <QDir>
 #include <QFile>
 #include <QTimer>
 
+static constexpr auto CAT = "MainWindowGPU";
+
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
-    qDebug() << "🚀 CREATING GPU TRADING TERMINAL!";
+    LOG_I(CAT, "🚀 CREATING GPU TRADING TERMINAL!");
     
     setupUI();
     setupConnections();
@@ -25,7 +27,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     // This ensures the window is fully constructed and shown before we start streaming.
     QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
     
-    qDebug() << "✅ GPU MainWindow ready for 144Hz trading!";
+    LOG_I(CAT, "✅ GPU MainWindow ready for 144Hz trading!");
 }
 
 void MainWindowGPU::setupUI() {
@@ -35,20 +37,20 @@ void MainWindowGPU::setupUI() {
     
     // Try file system path first to bypass resource issues
     QString qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
-    qDebug() << "🔍 Trying QML path:" << qmlPath;
+    LOG_D(CAT, "🔍 Trying QML path: {}", qmlPath.toStdString());
     
     if (QFile::exists(qmlPath)) {
         m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
-        qDebug() << "✅ QML loaded from file system!";
+        LOG_I(CAT, "✅ QML loaded from file system!");
     } else {
-        qDebug() << "❌ QML file not found, trying resource path...";
+        LOG_W(CAT, "❌ QML file not found, trying resource path...");
         m_gpuChart->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
     }
     
     // Check if QML loaded successfully
     if (m_gpuChart->status() == QQuickWidget::Error) {
-        qCritical() << "🚨 QML FAILED TO LOAD!";
-        qCritical() << "QML Errors:" << m_gpuChart->errors();
+        LOG_E(CAT, "🚨 QML FAILED TO LOAD!");
+        LOG_E(CAT, "QML Errors: {}", m_gpuChart->errors());
     }
     
     // Set default symbol in QML context
@@ -68,7 +70,7 @@ void MainWindowGPU::setupUI() {
     stressTestButton->setStyleSheet("QPushButton { background-color: #ff4444; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; }");
     
     connect(stressTestButton, &QPushButton::clicked, [this]() {
-        qDebug() << "🚀 LAUNCHING 1M POINT VBO STRESS TEST!";
+    LOG_I(CAT, "🚀 LAUNCHING 1M POINT VBO STRESS TEST!");
         QQmlContext* context = m_gpuChart->rootContext();
         context->setContextProperty("stressTestMode", true);
         
@@ -85,7 +87,7 @@ void MainWindowGPU::setupUI() {
             connectToGPUChart();
         });
         
-        qDebug() << "🔥 VBO STRESS TEST ACTIVATED!";
+        LOG_I(CAT, "🔥 VBO STRESS TEST ACTIVATED!");
     });
     
     // Styling
@@ -148,17 +150,17 @@ void MainWindowGPU::setupConnections() {
     // 🔥 CRITICAL FIX: Establish GPU connections
     connectToGPUChart();
     
-    qDebug() << "✅ GPU MainWindow connections established";
+    LOG_I(CAT, "✅ GPU MainWindow connections established");
 }
 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty()) {
-        qWarning() << "❌ Empty symbol input";
+        LOG_W(CAT, "❌ Empty symbol input");
         return;
     }
     
-    qDebug() << "🚀 Subscribing to GPU chart:" << symbol;
+    LOG_I(CAT, "🚀 Subscribing to GPU chart: {}", symbol.toStdString());
     
     // Update QML context
     QQmlContext* context = m_gpuChart->rootContext();
@@ -168,7 +170,7 @@ void MainWindowGPU::onSubscribe() {
     std::vector<std::string> symbols = {symbol.toStdString()};
     m_streamController->start(symbols);
     
-    qDebug() << "✅ GPU subscription started for" << symbol;
+    LOG_I(CAT, "✅ GPU subscription started for {}", symbol.toStdString());
 }
 
 void MainWindowGPU::onCVDUpdated(double cvd) {
@@ -177,39 +179,39 @@ void MainWindowGPU::onCVDUpdated(double cvd) {
 
 // 🔥 CRITICAL FIX: Helper method to establish GPU connections
 void MainWindowGPU::connectToGPUChart() {
-    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART...";
+    LOG_D(CAT, "🔍 ATTEMPTING TO CONNECT TO GPU CHART...");
     
     // Get the GPU chart widget from QML
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
-        qWarning() << "❌ QML root object not found - retrying in 100ms...";
+        LOG_W(CAT, "❌ QML root object not found - retrying in 100ms...");
         // Retry after QML loads
         QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
-    qDebug() << "✅ QML root found:" << qmlRoot;
-    qDebug() << "🔍 QML root children:";
+    LOG_D(CAT, "✅ QML root found: {}", static_cast<void*>(qmlRoot));
+    LOG_D(CAT, "🔍 QML root children:");
     for (QObject* child : qmlRoot->children()) {
-        qDebug() << "  -" << child->objectName() << child->metaObject()->className();
+        LOG_D(CAT, "  - {} {}", child->objectName().toStdString(), child->metaObject()->className());
     }
     
     GPUChartWidget* gpuChart = nullptr;
     
     // 🔥 STRATEGY 1: Find by explicit objectName
     QQuickItem* gpuChartItem = qmlRoot->findChild<QQuickItem*>("gpuChart");
-    qDebug() << "🔍 objectName lookup for 'gpuChart':" << gpuChartItem;
+    LOG_D(CAT, "🔍 objectName lookup for 'gpuChart': {}", static_cast<void*>(gpuChartItem));
     
     if (gpuChartItem) {
         gpuChart = qobject_cast<GPUChartWidget*>(gpuChartItem);
-        qDebug() << "🔍 qobject_cast to GPUChartWidget:" << gpuChart;
+        LOG_D(CAT, "🔍 qobject_cast to GPUChartWidget: {}", static_cast<void*>(gpuChart));
     }
     
     // 🔥 STRATEGY 2: If objectName lookup fails, find by type
     if (!gpuChart) {
-        qDebug() << "🔍 objectName lookup failed, trying type lookup...";
+        LOG_D(CAT, "🔍 objectName lookup failed, trying type lookup...");
         gpuChart = qmlRoot->findChild<GPUChartWidget*>();
-        qDebug() << "🔍 Type lookup result:" << gpuChart;
+        LOG_D(CAT, "🔍 Type lookup result: {}", static_cast<void*>(gpuChart));
     }
     
     if (gpuChart) {
@@ -222,11 +224,10 @@ void MainWindowGPU::connectToGPUChart() {
                                         gpuChart, &GPUChartWidget::onTradeReceived,
                                         Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
                                         
-        qDebug() << "🔗 Qt Signal Connection Result:" << (connectionSuccess ? "SUCCESS" : "FAILED");
-        qDebug() << "🎯 Connected StreamController:" << m_streamController 
-                 << "to GPUChart:" << gpuChart;
+        LOG_D(CAT, "🔗 Qt Signal Connection Result: {}", (connectionSuccess ? "SUCCESS" : "FAILED"));
+        LOG_D(CAT, "🎯 Connected StreamController: {} to GPUChart: {}", static_cast<void*>(m_streamController), static_cast<void*>(gpuChart));
         
-        qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
+        LOG_I(CAT, "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!");
         
         // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
         QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
@@ -238,18 +239,18 @@ void MainWindowGPU::connectToGPUChart() {
                     heatmapLayer, &HeatMapInstanced::setTimeWindow,
                     Qt::QueuedConnection);
             
-            qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
+            LOG_I(CAT, "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.");
         } else {
-            qWarning() << "⚠️ HeatmapInstanced not found - coordinate unification failed";
+            LOG_W(CAT, "⚠️ HeatmapInstanced not found - coordinate unification failed");
         }
         
         // 🕯️ PHASE 5: CONNECT CANDLESTICK CHART
-        qDebug() << "🔍 Looking for candlestick renderer...";
+        LOG_D(CAT, "🔍 Looking for candlestick renderer...");
         QQuickItem* candleChartItem = qmlRoot->findChild<QQuickItem*>("candlestickRenderer");
-        qDebug() << "🔍 Found candlestickRenderer item:" << candleChartItem;
+        LOG_D(CAT, "🔍 Found candlestickRenderer item: {}", static_cast<void*>(candleChartItem));
         
         CandlestickBatched* candleChart = qobject_cast<CandlestickBatched*>(candleChartItem);
-        qDebug() << "🔍 Cast to CandlestickBatched:" << candleChart;
+        LOG_D(CAT, "🔍 Cast to CandlestickBatched: {}", static_cast<void*>(candleChart));
         
         if (candleChart) {
             bool tradeConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
@@ -261,27 +262,26 @@ void MainWindowGPU::connectToGPUChart() {
                                           candleChart, &CandlestickBatched::onViewChanged,
                                           Qt::QueuedConnection);
             
-            qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
-                     << "Candle stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
-                     << "Coordinates:" << (coordConnection ? "SUCCESS" : "FAILED");
+            LOG_D(CAT, "🕯️ CANDLESTICK CONNECTIONS: Candle stream:{} Coordinates:{}",
+                  (tradeConnection ? "SUCCESS" : "FAILED"), (coordConnection ? "SUCCESS" : "FAILED"));
             
             if (tradeConnection && coordConnection) {
-                qDebug() << "✅ CANDLESTICK CHART FULLY CONNECTED TO REAL-TIME DATA!";
+                LOG_I(CAT, "✅ CANDLESTICK CHART FULLY CONNECTED TO REAL-TIME DATA!");
             }
         } else {
-            qWarning() << "❌ CandlestickBatched (candlestickRenderer) not found - candle integration failed";
+            LOG_W(CAT, "❌ CandlestickBatched (candlestickRenderer) not found - candle integration failed");
             
             // List all available QML children for debugging
-            qDebug() << "🔍 Available QML children with objectNames:";
+            LOG_D(CAT, "🔍 Available QML children with objectNames:");
             for (QObject* child : qmlRoot->findChildren<QObject*>()) {
                 QString objName = child->objectName();
                 if (!objName.isEmpty()) {
-                    qDebug() << "  -" << objName << ":" << child->metaObject()->className();
+                    LOG_D(CAT, "  - {} : {}", objName.toStdString(), child->metaObject()->className());
                 }
             }
         }
     } else {
-        qWarning() << "❌ GPUChartWidget NOT FOUND - RETRYING IN 200ms...";
+        LOG_W(CAT, "❌ GPUChartWidget NOT FOUND - RETRYING IN 200ms...");
         // Retry after a longer delay
         QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
         return;
@@ -294,8 +294,8 @@ void MainWindowGPU::connectToGPUChart() {
                 heatmapLayer, &HeatMapInstanced::onOrderBookUpdated,
                 Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
         
-        qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
+        LOG_I(CAT, "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!");
     } else {
-        qWarning() << "⚠️ HeatMapInstanced (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
+        LOG_W(CAT, "⚠️ HeatMapInstanced (heatmapLayer) not found in QML root - CHECK OBJECTNAME!");
     }
 } 

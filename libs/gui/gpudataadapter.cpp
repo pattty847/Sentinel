@@ -1,15 +1,17 @@
 #include "gpudataadapter.h"
-#include <QDebug>
+#include "Log.hpp"
 #include <QElapsedTimer>
 #include <algorithm>
 #include <chrono>
 #include <QDateTime>
 
+static constexpr auto CAT = "GPUAdapter";
+
 GPUDataAdapter::GPUDataAdapter(QObject* parent)
     : QObject(parent)
     , m_processTimer(new QTimer(this))
 {
-    qDebug() << "🚀 GPUDataAdapter: Initializing lock-free data pipeline...";
+    LOG_I(CAT, "🚀 GPUDataAdapter: Initializing lock-free data pipeline...");
     
     initializeBuffers();
     
@@ -19,10 +21,9 @@ GPUDataAdapter::GPUDataAdapter(QObject* parent)
     // Start with 16ms (60 FPS) processing interval
     m_processTimer->start(16);
     
-    qDebug() << "✅ GPUDataAdapter: Lock-free pipeline initialized"
-             << "- Reserve size:" << m_reserveSize 
-             << "- Trade queue capacity: 65536"
-             << "- OrderBook queue capacity: 16384";
+    LOG_I(CAT,
+          "✅ GPUDataAdapter: Lock-free pipeline initialized - Reserve size:{} - Trade queue capacity: 65536 - OrderBook queue capacity: 16384",
+          m_reserveSize);
 }
 
 void GPUDataAdapter::initializeBuffers() {
@@ -33,8 +34,7 @@ void GPUDataAdapter::initializeBuffers() {
     // Pre-allocate once: std::max(expected, userPref)
     size_t actualSize = (m_reserveSize > 100000) ? m_reserveSize : 100000; // Minimum 100k
     
-    qDebug() << "🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize
-             << "Heatmap buffer:" << actualSize;
+    LOG_I(CAT, "🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:{} Heatmap buffer:{}", actualSize, actualSize);
 
     m_tradeBuffer.reserve(actualSize);
     m_heatmapBuffer.reserve(actualSize);
@@ -45,7 +45,7 @@ void GPUDataAdapter::initializeBuffers() {
     m_heatmapBuffer.resize(actualSize);
     m_candleBuffer.resize(actualSize);
     
-    qDebug() << "💾 GPUDataAdapter: Buffer allocation complete";
+    LOG_I(CAT, "💾 GPUDataAdapter: Buffer allocation complete");
 }
 
 bool GPUDataAdapter::pushTrade(const Trade& trade) {
@@ -168,11 +168,12 @@ void GPUDataAdapter::processIncomingData() {
             double gpuBuyPercent = gpuTotalTrades > 0 ? (gpuTotalBuys * 100.0 / gpuTotalTrades) : 0.0;
             double gpuSellPercent = gpuTotalTrades > 0 ? (gpuTotalSells * 100.0 / gpuTotalTrades) : 0.0;
             
-            qDebug() << "📊 GPU ADAPTER DISTRIBUTION:"
-                     << "Total:" << gpuTotalTrades
-                     << "Buys:" << gpuTotalBuys << "(" << QString::number(gpuBuyPercent, 'f', 1) << "%)"
-                     << "Sells:" << gpuTotalSells << "(" << QString::number(gpuSellPercent, 'f', 1) << "%)"
-                     << "Unknown:" << gpuTotalUnknown;
+            LOG_D(CAT,
+                  "📊 GPU ADAPTER DISTRIBUTION: Total:{} Buys:{}({}%) Sells:{}({}%) Unknown:{}",
+                  gpuTotalTrades,
+                  gpuTotalBuys, QString::number(gpuBuyPercent, 'f', 1).toStdString(),
+                  gpuTotalSells, QString::number(gpuSellPercent, 'f', 1).toStdString(),
+                  gpuTotalUnknown);
         }
         
         emit tradesReady(m_tradeBuffer.data(), m_tradeWriteCursor);
@@ -197,18 +198,16 @@ void GPUDataAdapter::processIncomingData() {
     qint64 frameTime = frameTimer.elapsed();
     if (frameTime > 16) { // >60 FPS threshold
         m_frameDrops.fetch_add(1, std::memory_order_relaxed);
-        qWarning() << "⚠️ GPUDataAdapter: Frame time exceeded:" << frameTime << "ms";
+        LOG_W(CAT, "⚠️ GPUDataAdapter: Frame time exceeded: {} ms", frameTime);
     }
     
     // Debug output every 1000 frames (~16.7 seconds at 60 FPS)
     static int frameCount = 0;
     if (++frameCount % 1000 == 0) {
-        qDebug() << "📊 GPUDataAdapter Stats:"
-                 << "Trades processed:" << m_processedTrades.load()
-                 << "Points pushed:" << m_pointsPushed.load()
-                 << "Frame drops:" << m_frameDrops.load()
-                 << "Trade queue size:" << m_tradeQueue.size()
-                 << "OrderBook queue size:" << m_orderBookQueue.size();
+        LOG_I(CAT,
+              "📊 GPUDataAdapter Stats: Trades processed:{} Points pushed:{} Frame drops:{} Trade queue size:{} OrderBook queue size:{}",
+              m_processedTrades.load(), m_pointsPushed.load(), m_frameDrops.load(),
+              m_tradeQueue.size(), m_orderBookQueue.size());
     }
 }
 
@@ -253,10 +252,8 @@ GPUTypes::Point GPUDataAdapter::convertTradeToGPUPoint(const Trade& trade) {
     // 🔍 DEBUG: Log first 10 GPU conversions in lock-free pipeline
     static int gpuConversionCount = 0;
     if (++gpuConversionCount <= 10) {
-        qDebug() << "🎨 GPU ADAPTER COLOR #" << gpuConversionCount << ":"
-                 << "Side:" << sideStr
-                 << "Price:" << trade.price
-                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")";
+        LOG_D(CAT, "🎨 GPU ADAPTER COLOR #{} : Side:{} Price:{} Color RGBA:({},{},{},{})",
+              gpuConversionCount, sideStr, trade.price, point.r, point.g, point.b, point.a);
     }
     
     return point;
@@ -280,7 +277,7 @@ void GPUDataAdapter::updateCoordinateCache(double price) {
 void GPUDataAdapter::setReserveSize(size_t size) {
     m_reserveSize = size;
     // Note: Would need to reinitialize buffers in production
-    qDebug() << "🔧 GPUDataAdapter: Reserve size set to" << size;
+    LOG_I(CAT, "🔧 GPUDataAdapter: Reserve size set to {}", size);
 }
 
 void GPUDataAdapter::resetWriteCursors() {
