@@ -1,9 +1,11 @@
 #include "tradechartwidget.h"
 #include <QPainter>
-#include <QDebug>
+#include "Log.hpp"
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+
+static constexpr auto CAT = "TradeChart";
 
 TradeChartWidget::TradeChartWidget(QWidget *parent) : QWidget(parent) {
     // Set a default size
@@ -49,8 +51,8 @@ void TradeChartWidget::updateOrderBook(const OrderBook& book) {
     if (book.product_id != m_symbol) {
         return; 
     }
-    qDebug() << "Received order book for" << QString::fromStdString(book.product_id) 
-             << "with" << book.bids.size() << "bids and" << book.asks.size() << "asks.";
+    LOG_D(CAT, "Received order book for {} with {} bids and {} asks.",
+          book.product_id, book.bids.size(), book.asks.size());
     m_currentOrderBook = book;
     update(); 
 }

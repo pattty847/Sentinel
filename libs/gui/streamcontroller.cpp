@@ -1,6 +1,8 @@
 #include "streamcontroller.h"
 #include "gpudataadapter.h"
-#include <QDebug>
+#include "Log.hpp"
+
+static constexpr auto CAT = "StreamCtrl";
 
 StreamController::StreamController(QObject* parent)
     : QObject(parent)
@@ -8,16 +10,16 @@ StreamController::StreamController(QObject* parent)
     , m_pollTimer(nullptr)
     , m_orderBookPollTimer(nullptr)
 {
-    qDebug() << "StreamController created";
+    LOG_I(CAT, "StreamController created");
 }
 
 StreamController::~StreamController() {
     stop();
-    qDebug() << "StreamController destroyed";
+    LOG_I(CAT, "StreamController destroyed");
 }
 
 void StreamController::start(const std::vector<std::string>& symbols) {
-    qDebug() << "Starting StreamController...";
+    LOG_I(CAT, "Starting StreamController...");
     
     // Store the symbols for later use
     m_symbols = symbols;
@@ -43,11 +45,11 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Emit connected signal
     emit connected();
     
-    qDebug() << "StreamController started successfully";
+    LOG_I(CAT, "StreamController started successfully");
 }
 
 void StreamController::stop() {
-    qDebug() << "Stopping StreamController...";
+    LOG_I(CAT, "Stopping StreamController...");
     
     // 1. Reset the client first. This is critical.
     // This stops the underlying threads in MarketDataCore and ensures no
@@ -72,7 +74,7 @@ void StreamController::stop() {
     // Emit disconnected signal
     emit disconnected();
     
-    qDebug() << "StreamController stopped";
+    LOG_I(CAT, "StreamController stopped");
 }
 
 void StreamController::pollForTrades() {
@@ -87,7 +89,7 @@ void StreamController::pollForTrades() {
         
         // Debug logging
         if (!newTrades.empty()) {
-            qDebug() << "🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol);
+            LOG_D(CAT, "🚀 StreamController: Found {} new trades for {}", newTrades.size(), QString::fromStdString(symbol).toStdString());
         }
         
         // Process each new trade
@@ -97,15 +99,14 @@ void StreamController::pollForTrades() {
             
             // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter instead of Qt signals
             if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
-                qWarning() << "⚠️ StreamController: GPU trade queue full! Trade dropped.";
+                LOG_W(CAT, "⚠️ StreamController: GPU trade queue full! Trade dropped.");
             }
             
             // 🔥 THROTTLED LOGGING: Only log every 50th trade processing to reduce spam
             static int processLogCount = 0;
-            if (++processLogCount % 50 == 1) { // Log 1st, 51st, 101st trade, etc.
-                qDebug() << "📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
-                         << "$" << trade.price << "size:" << trade.size 
-                         << "[" << processLogCount << " trades processed]";
+            if (++processLogCount % 50 == 1) {
+                LOG_D(CAT, "📤 Pushing trade to GPU queue: {} $ {} size:{} [{} trades processed]",
+                      QString::fromStdString(trade.product_id).toStdString(), trade.price, trade.size, processLogCount);
             }
             
             // Keep Qt signal for backward compatibility (will be removed in final version)
@@ -123,10 +124,9 @@ void StreamController::pollForOrderBooks() {
         
         // 🔥 THROTTLED LOGGING: Only log every 20th order book poll to reduce spam
         static int pollLogCount = 0;
-        if (++pollLogCount % 20 == 1) { // Log 1st, 21st, 41st poll, etc.
-            qDebug() << "Polled client for" << QString::fromStdString(symbol) 
-                     << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size()
-                     << "[" << pollLogCount << " polls total]";
+        if (++pollLogCount % 20 == 1) {
+            LOG_D(CAT, "Polled client for {} order book. Bids:{} Asks:{} [{} polls total]",
+                  QString::fromStdString(symbol).toStdString(), book.bids.size(), book.asks.size(), pollLogCount);
         }
         
         if (!book.bids.empty() || !book.asks.empty()) {

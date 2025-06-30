@@ -2,21 +2,22 @@
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
-#include <QDebug>
+#include "Log.hpp"
 #include "gpudataadapter.h"
 #include <QDateTime>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 
+static constexpr auto CAT = "Candles";
+
 CandlestickBatched::CandlestickBatched(QQuickItem* parent)
     : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
 
-    qDebug() << "🕯️ CandlestickBatched INITIALIZED - Professional Trading Terminal Candles!";
-    qDebug() << "🎯 LOD System: Enabled | Max Candles:" << m_maxCandles
-             << "| Auto-scaling: " << (m_volumeScaling ? "ON" : "OFF");
+    LOG_I(CAT, "🕯️ CandlestickBatched INITIALIZED - Professional Trading Terminal Candles!");
+    LOG_I(CAT, "🎯 LOD System: Enabled | Max Candles:{} | Auto-scaling:{}", m_maxCandles, (m_volumeScaling ? "ON" : "OFF"));
 }
 
 void CandlestickBatched::onCandlesReady(const std::vector<CandleUpdate>& candles) {
@@ -108,10 +109,11 @@ void CandlestickBatched::onViewChanged(int64_t startTimeMs, int64_t endTimeMs,
         bool reasonableTime = (endTimeMs - startTimeMs) > 1000 && (endTimeMs - startTimeMs) < 86400000; // 1s to 1 day
         bool reasonablePrice = minPrice > 50000 && maxPrice < 200000 && (maxPrice - minPrice) > 1.0; // BTC price range
         
-        qDebug() << "🔍 COORDINATE SANITY CHECK:"
-                 << "Time range reasonable:" << (reasonableTime ? "YES" : "NO")
-                 << "Price range reasonable:" << (reasonablePrice ? "YES" : "NO")
-                 << "Total candles available:" << m_candles[static_cast<size_t>(CandleLOD::TF_1sec)].size();
+        static int coordUpdateCount = 0;
+        if (++coordUpdateCount <= 5) {
+            LOG_D(CAT, "🕯️ CANDLE COORDINATES UPDATED #{} Time:{}-{} Price:{}-{}",
+                  coordUpdateCount, startTimeMs, endTimeMs, minPrice, maxPrice);
+        }
     }
 }
 
@@ -162,19 +164,17 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     if (candles.empty()) {
         static int emptyCount = 0;
         if (++emptyCount <= 5 || emptyCount % 100 == 0) {
-            qDebug() << "🕯️ NO CANDLES TO RENDER #" << emptyCount 
-                     << "TimeFrame:" << CandleUtils::timeFrameName(activeTimeFrame)
-                     << "View valid:" << m_coordinatesValid;
+            LOG_D(CAT, "🕯️ NO CANDLES TO RENDER #{} TimeFrame:{} View valid:{}",
+                  emptyCount, CandleUtils::timeFrameName(activeTimeFrame), m_coordinatesValid);
         }
         delete oldNode;
         return nullptr;
     } else {
         static int renderCount = 0;
         if (++renderCount <= 5 || renderCount % 100 == 0) {
-            qDebug() << "🕯️ RENDERING CANDLES #" << renderCount 
-                     << "Count:" << candles.size()
-                     << "TimeFrame:" << CandleUtils::timeFrameName(activeTimeFrame)
-                     << "ViewRange:" << m_viewStartTime_ms << "-" << m_viewEndTime_ms;
+            LOG_D(CAT, "🕯️ RENDERING CANDLES #{} Count:{} TimeFrame:{} ViewRange:{}-{}",
+                  renderCount, candles.size(), CandleUtils::timeFrameName(activeTimeFrame),
+                  m_viewStartTime_ms, m_viewEndTime_ms);
         }
     }
     
@@ -188,11 +188,8 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         bullishNode = new QSGGeometryNode();
         bearishNode = new QSGGeometryNode();
         rootNode->appendChildNode(bullishNode);
-        rootNode->appendChildNode(bearishNode);
-        qDebug() << "🕯️ CREATED NEW ROOT NODE: Setting up candle scene graph";
-    } else {
-        bullishNode = static_cast<QSGGeometryNode*>(rootNode->childAtIndex(0));
-        bearishNode = static_cast<QSGGeometryNode*>(rootNode->childAtIndex(1));
+        rootNode->appendChildNode(bearishNode);        
+        LOG_D(CAT, "🕯️ CREATED CANDLE SCENE GRAPH: Two-draw-call architecture ready!");
     }
     
     if (m_geometryDirty.load()) {
@@ -210,11 +207,12 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         emit candleCountChanged(m_renderBatch.bullishCandles.size() + m_renderBatch.bearishCandles.size());
         emit lodLevelChanged(static_cast<int>(activeTimeFrame));
         
-        qDebug() << "🕯️ CANDLE RENDER UPDATE:"
-                 << "LOD:" << CandleUtils::timeFrameName(activeTimeFrame)
-                 << "Bullish:" << m_renderBatch.bullishCandles.size()
-                 << "Bearish:" << m_renderBatch.bearishCandles.size()
-                 << "Total:" << (m_renderBatch.bullishCandles.size() + m_renderBatch.bearishCandles.size());
+        LOG_D(CAT,
+              "🕯️ CANDLE RENDER UPDATE: LOD:{} Bullish:{} Bearish:{} Total:{}",
+              CandleUtils::timeFrameName(activeTimeFrame),
+              m_renderBatch.bullishCandles.size(),
+              m_renderBatch.bearishCandles.size(),
+              totalCandles);
     }
     
     // Track render performance
@@ -698,9 +696,11 @@ void CandlestickBatched::updateLODIfNeeded() {
     static CandleLOD::TimeFrame lastTimeFrame = CandleLOD::TF_1min;
     
     if (newTimeFrame != lastTimeFrame) {
-        qDebug() << "🕯️ LOD CHANGED:" << CandleUtils::timeFrameName(lastTimeFrame) 
-                 << "→" << CandleUtils::timeFrameName(newTimeFrame)
-                 << "Pixels per candle:" << calculateCurrentPixelsPerCandle();
+        LOG_I(CAT,
+              "🕯️ LOD CHANGED: {} → {} Pixels per candle:{}",
+              CandleUtils::timeFrameName(lastTimeFrame),
+              CandleUtils::timeFrameName(newTimeFrame),
+              calculateCurrentPixelsPerCandle());
         lastTimeFrame = newTimeFrame;
     }
 }

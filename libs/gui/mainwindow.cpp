@@ -9,20 +9,22 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QGroupBox>
-#include <QDebug>
+#include "Log.hpp"
 #include <QQmlContext>
 #include <vector>
 #include <string>
 
+static constexpr auto CAT = "MainWindow";
+
 MainWindow::MainWindow(QWidget *parent)
     : QWidget(parent)
 {
-    qDebug() << "🚀 MAINWINDOW CREATING GPU CHART BEAST!";
+    LOG_I(CAT, "🚀 MAINWINDOW CREATING GPU CHART BEAST!");
     
     setupUI();
     setupConnections();
     
-    qDebug() << "✅ MainWindow initialized with GPU chart";
+    LOG_I(CAT, "✅ MainWindow initialized with GPU chart");
 }
 
 MainWindow::~MainWindow() = default;
@@ -79,11 +81,11 @@ void MainWindow::setupConnections() {
     
     // Connect worker signals
     connect(m_streamController, &StreamController::connected, this, []() {
-        qDebug() << "✅ StreamController connected";
+        LOG_I(CAT, "✅ StreamController connected");
     });
     
     connect(m_streamController, &StreamController::disconnected, this, []() {
-        qDebug() << "❌ StreamController disconnected";
+        LOG_W(CAT, "❌ StreamController disconnected");
     });
     
     // 🚀 TODO: Connect to GPU chart (Phase 1)
@@ -98,7 +100,7 @@ void MainWindow::setupConnections() {
 void MainWindow::onSubscribe() {
     QString input = m_commandInput->text().trimmed();
     if (input.isEmpty()) {
-        qDebug() << "❌ Empty input";
+        LOG_W(CAT, "❌ Empty input");
         return;
     }
     
@@ -109,7 +111,7 @@ void MainWindow::onSubscribe() {
         symbolsVec.push_back(symbol.trimmed().toStdString());
     }
     
-    qDebug() << "🚀 Subscribing to symbols:" << input;
+    LOG_I(CAT, "🚀 Subscribing to symbols: {}", input.toStdString());
     m_streamController->start(symbolsVec);
 }
 

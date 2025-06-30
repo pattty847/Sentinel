@@ -102,6 +102,15 @@ cmake --build build
 ./build/apps/sentinel_gui/sentinel
 ```
 
+### Adjusting Log Verbosity
+
+The logger defaults to `DEBUG` level in debug builds and `INFO` in release.
+Override at runtime with the `SENTINEL_LOG` environment variable:
+
+```bash
+SENTINEL_LOG=trace ./build/apps/sentinel_gui/sentinel
+```
+
 ## 🚧 **Coming Next: Advanced Visualizations & UX**
 
 With the core rendering engine in place, the focus now shifts to building out advanced features on top of this powerful foundation.

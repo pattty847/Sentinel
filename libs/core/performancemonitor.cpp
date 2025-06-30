@@ -1,7 +1,9 @@
 #include "performancemonitor.h"
-#include <QDebug>
+#include "Log.hpp"
 #include <QTimer>
 #include <algorithm>
+
+static constexpr auto CAT = "Perf";
 
 PerformanceMonitor::PerformanceMonitor(QObject* parent)
     : QObject(parent)
@@ -10,7 +12,7 @@ PerformanceMonitor::PerformanceMonitor(QObject* parent)
     // Initialize frame times array
     m_frameTimes.fill(0);
     
-    qDebug() << "🚀 PerformanceMonitor: Initialized with frame drop threshold" << MAX_FRAME_TIME_MS << "ms";
+    LOG_I(CAT, "🚀 PerformanceMonitor: Initialized with frame drop threshold {} ms", MAX_FRAME_TIME_MS);
 }
 
 void PerformanceMonitor::startFrame() {
@@ -96,12 +98,12 @@ void PerformanceMonitor::enableCLIOutput(bool enabled) {
             connect(m_metricsTimer, &QTimer::timeout, this, &PerformanceMonitor::dumpMetrics);
         }
         m_metricsTimer->start(1000); // Dump every second
-        qDebug() << "📊 PerformanceMonitor: CLI output enabled (1s interval)";
+        LOG_I(CAT, "📊 PerformanceMonitor: CLI output enabled (1s interval)");
     } else {
         if (m_metricsTimer) {
             m_metricsTimer->stop();
         }
-        qDebug() << "📊 PerformanceMonitor: CLI output disabled";
+        LOG_I(CAT, "📊 PerformanceMonitor: CLI output disabled");
     }
 }
 
@@ -114,7 +116,7 @@ void PerformanceMonitor::reset() {
     m_frameTimes.fill(0);
     m_startTime = std::chrono::steady_clock::now();
     
-    qDebug() << "🔄 PerformanceMonitor: Statistics reset";
+    LOG_D(CAT, "🔄 PerformanceMonitor: Statistics reset");
 }
 
 void PerformanceMonitor::dumpMetrics() {
@@ -126,19 +128,15 @@ void PerformanceMonitor::dumpMetrics() {
     qint64 avgFrameTime = getAverageFrameTime();
     
     // Emit "points pushed / Δt" to prove zero drops at 20k msgs/s
-    qDebug() << "📊 PERFORMANCE METRICS:"
-             << "Points/s:" << static_cast<int>(pointsThroughput)
-             << "Trades/s:" << static_cast<int>(tradesThroughput)
-             << "Avg frame:" << avgFrameTime << "ms"
-             << "Worst frame:" << m_worstFrameTime.load() << "ms"
-             << "Frame drops:" << m_frameDrops.load()
-             << "Runtime:" << static_cast<int>(elapsed) << "s";
+    LOG_I(CAT,
+           "📊 PERFORMANCE METRICS: Points/s:{} Trades/s:{} Avg frame:{} ms Worst frame:{} ms Frame drops:{} Runtime:{} s",
+           static_cast<int>(pointsThroughput), static_cast<int>(tradesThroughput),
+           avgFrameTime, m_worstFrameTime.load(), m_frameDrops.load(), static_cast<int>(elapsed));
     
     // Performance gate validation
     if (!getAllGatesPassed()) {
-        qWarning() << "⚠️ PERFORMANCE GATE FAILURE!"
-                   << "- Frame drops:" << m_frameDrops.load()
-                   << "- Points throughput:" << static_cast<int>(pointsThroughput) << "(target: 20000)";
+        LOG_W(CAT, "⚠️ PERFORMANCE GATE FAILURE! - Frame drops:{} - Points throughput:{} (target: 20000)",
+              m_frameDrops.load(), static_cast<int>(pointsThroughput));
     }
 }
 

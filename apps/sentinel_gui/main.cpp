@@ -1,6 +1,6 @@
 #include "mainwindow_gpu.h"
 #include <QApplication>
-#include <QDebug>
+#include "Log.hpp"
 #include <iostream>
 #include "tradedata.h"
 #include <QMetaType>
@@ -18,7 +18,7 @@ int main(int argc, char *argv[])
     MainWindowGPU window;
     window.show();
     
-    qDebug() << "✅ GPU Trading Terminal ready for 144Hz action!";
+    LOG_I("App", "✅ GPU Trading Terminal ready for 144Hz action!");
     
     return app.exec();
 }
