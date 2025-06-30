@@ -5,6 +5,7 @@
 #include "heatmapinstanced.h"
 #include "candlestickbatched.h"
 #include "chartmodecontroller.h"
+#include "gpudataadapter.h"
 #include <QQmlContext>
 #include <QDebug>
 #include <QDir>

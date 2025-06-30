@@ -60,7 +60,10 @@ signals:
     void performanceAlert(const QString& message);
 
 private slots:
-    void processIncomingData();
+    void processIncomingData();           // Process trades + order books (16ms)
+    void processHighFrequencyCandles();   // Process 100ms candles
+    void processMediumFrequencyCandles(); // Process 500ms candles
+    void processSecondCandles();          // Process 1s candles
 
 private:
     // Lock-free queues
@@ -84,8 +87,11 @@ private:
     std::atomic<size_t> m_processedTrades{0};
     std::atomic<int> m_frameDrops{0};
     
-    // Processing timer
-    QTimer* m_processTimer;
+    // Processing timers
+    QTimer* m_processTimer;      // 16ms - Trade scatter + Order book heatmap
+    QTimer* m_candle100msTimer;  // 100ms - High-frequency candles
+    QTimer* m_candle500msTimer;  // 500ms - Medium-frequency candles  
+    QTimer* m_candle1sTimer;     // 1000ms - Second candles
 
     CandleQueue m_candleQueue;
     CandleLOD m_candleLOD;
@@ -105,4 +111,5 @@ private:
     GPUTypes::Point convertTradeToGPUPoint(const Trade& trade);
     void updateCoordinateCache(double price);
     void resetWriteCursors();
+    void processCandleTimeFrame(CandleLOD::TimeFrame timeframe);  // Time-based candle processing
 }; 

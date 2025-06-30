@@ -155,7 +155,7 @@ void CandleLOD::prebakeTimeFrames(const std::vector<Trade>& rawTrades) {
 void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
     int totalRemoved = 0;
     
-    for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
+    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
         auto& candles = m_timeFrameData[i];
         
         // Remove candles older than cutoff
@@ -183,7 +183,7 @@ void CandleLOD::cleanupOldCandles(int64_t cutoffTime_ms) {
 
 void CandleLOD::printStats() const {
     qDebug() << "🕯️ CANDLE LOD STATS:";
-    for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
+    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
         TimeFrame tf = static_cast<TimeFrame>(i);
         qDebug() << "  " << CandleUtils::timeFrameName(tf) << ":" << getCandleCount(tf) << "candles";
         
@@ -201,7 +201,7 @@ void CandleLOD::printStats() const {
 // 🔥 HELPER FUNCTIONS IMPLEMENTATION
 namespace CandleUtils {
     int64_t alignToTimeFrame(int64_t timestamp_ms, CandleLOD::TimeFrame tf) {
-        const int64_t intervals[NUM_TIMEFRAMES] = {
+        const int64_t intervals[CandleLOD::NUM_TIMEFRAMES] = {
             100,
             500,
             1000,
@@ -231,7 +231,7 @@ namespace CandleUtils {
     }
     
     double calculatePixelsPerCandle(double viewWidth, int64_t timeSpan_ms, CandleLOD::TimeFrame tf) {
-        const int64_t intervals[NUM_TIMEFRAMES] = {
+        const int64_t intervals[CandleLOD::NUM_TIMEFRAMES] = {
             100,
             500,
             1000,

@@ -68,9 +68,9 @@ private:
     std::atomic<bool> m_bidsDirty{false};
     std::atomic<bool> m_asksDirty{false};
     
-    // 🎯 VIEW PARAMETERS
-    double m_minPrice = 49000.0;
-    double m_maxPrice = 51000.0;
+    // 🎯 VIEW PARAMETERS - Synchronized from GPUChartWidget (no hardcoded values)
+    double m_minPrice = 107000.0;  // Will be updated via setTimeWindow()
+    double m_maxPrice = 109000.0;
     int m_maxQuads = 200000;        // 200k quads max (as per plan target)
     double m_intensityScale = 1.0;  // Volume intensity scaling
     
