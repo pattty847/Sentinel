@@ -16,6 +16,8 @@ target_sources(sentinel_core
         # Phase 3: Lock-free performance monitoring
         performancemonitor.cpp
         CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
+        # Logging system
+        SentinelLogging.cpp
         # Existing files
         ruleengine.cpp
         cvdthresholdrule.cpp
