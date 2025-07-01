@@ -97,7 +97,7 @@ struct OrderBook {
     std::chrono::system_clock::time_point timestamp;
 };
 
-// 🔥 NEW: LiveOrderBook - Stateful Order Book for Professional Visualization
+// 🔥 NEW: LiveOrderBook - Stateful Order Book for Professional Visualization (O(log N) complexity)
 class LiveOrderBook {
 public:
     LiveOrderBook() = default;
