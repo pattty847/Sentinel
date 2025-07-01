@@ -1,4 +1,5 @@
 #include "streamcontroller.h"
+#include "SentinelLogging.hpp"
 #include "gpudataadapter.h"
 #include <QDebug>
 
@@ -8,16 +9,16 @@ StreamController::StreamController(QObject* parent)
     , m_pollTimer(nullptr)
     , m_orderBookPollTimer(nullptr)
 {
-    qDebug() << "StreamController created";
+    sLog_Init("StreamController created");
 }
 
 StreamController::~StreamController() {
     stop();
-    qDebug() << "StreamController destroyed";
+    sLog_Init("StreamController destroyed");
 }
 
 void StreamController::start(const std::vector<std::string>& symbols) {
-    qDebug() << "Starting StreamController...";
+    sLog_Init("Starting StreamController...");
     
     // Store the symbols for later use
     m_symbols = symbols;
@@ -43,11 +44,11 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Emit connected signal
     emit connected();
     
-    qDebug() << "StreamController started successfully";
+    sLog_Init("StreamController started successfully");
 }
 
 void StreamController::stop() {
-    qDebug() << "Stopping StreamController...";
+    sLog_Init("Stopping StreamController...");
     
     // 1. Reset the client first. This is critical.
     // This stops the underlying threads in MarketDataCore and ensures no
@@ -72,7 +73,7 @@ void StreamController::stop() {
     // Emit disconnected signal
     emit disconnected();
     
-    qDebug() << "StreamController stopped";
+    sLog_Init("StreamController stopped");
 }
 
 void StreamController::pollForTrades() {
@@ -87,7 +88,7 @@ void StreamController::pollForTrades() {
         
         // Debug logging
         if (!newTrades.empty()) {
-            qDebug() << "🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol);
+            sLog_Trades("🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol));
         }
         
         // Process each new trade
@@ -97,15 +98,15 @@ void StreamController::pollForTrades() {
             
             // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter instead of Qt signals
             if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
-                qWarning() << "⚠️ StreamController: GPU trade queue full! Trade dropped.";
+                sLog_Warning("⚠️ StreamController: GPU trade queue full! Trade dropped.");
             }
             
             // 🔥 THROTTLED LOGGING: Only log every 50th trade processing to reduce spam
             static int processLogCount = 0;
             if (++processLogCount % 50 == 1) { // Log 1st, 51st, 101st trade, etc.
-                qDebug() << "📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
+                sLog_Trades("📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
                          << "$" << trade.price << "size:" << trade.size 
-                         << "[" << processLogCount << " trades processed]";
+                         << "[" << processLogCount << " trades processed]");
             }
             
             // Keep Qt signal for backward compatibility (will be removed in final version)
@@ -124,9 +125,9 @@ void StreamController::pollForOrderBooks() {
         // 🔥 THROTTLED LOGGING: Only log every 20th order book poll to reduce spam
         static int pollLogCount = 0;
         if (++pollLogCount % 20 == 1) { // Log 1st, 21st, 41st poll, etc.
-            qDebug() << "Polled client for" << QString::fromStdString(symbol) 
+            sLog_Network("Polled client for" << QString::fromStdString(symbol) 
                      << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size()
-                     << "[" << pollLogCount << " polls total]";
+                     << "[" << pollLogCount << " polls total]");
         }
         
         if (!book.bids.empty() || !book.asks.empty()) {

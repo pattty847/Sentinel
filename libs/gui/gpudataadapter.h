@@ -5,6 +5,9 @@
 #include <vector>
 #include <array>
 #include <atomic>
+#include <deque>
+#include <mutex>
+#include <chrono>
 #include "../core/lockfreequeue.h"
 #include "../core/tradedata.h"
 #include "candlelod.h"
@@ -106,10 +109,19 @@ private:
         bool initialized = false;
     } m_coordCache;
     
+    // 🚀 PHASE 2: TIME-WINDOWED TRADE HISTORY BUFFER
+    // Maintains rolling 10-minute window of trades for re-aggregation
+    std::deque<Trade> m_tradeHistory;
+    std::mutex m_tradeHistoryMutex;
+    static constexpr std::chrono::seconds HISTORY_WINDOW_SPAN{600}; // 10 minutes
+    int64_t m_lastHistoryCleanup_ms = 0;
+    static constexpr int64_t CLEANUP_INTERVAL_MS = 5000; // Clean up every 5 seconds
+    
     // Helper methods
     void initializeBuffers();
     GPUTypes::Point convertTradeToGPUPoint(const Trade& trade);
     void updateCoordinateCache(double price);
     void resetWriteCursors();
     void processCandleTimeFrame(CandleLOD::TimeFrame timeframe);  // Time-based candle processing
+    void cleanupOldTradeHistory(); // 🚀 PHASE 2: Time-based history cleanup
 }; 

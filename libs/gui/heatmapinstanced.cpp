@@ -1,4 +1,5 @@
 #include "heatmapinstanced.h"
+#include "SentinelLogging.hpp"
 #include "gpuchartwidget.h"  // For unified coordinate system
 #include <QSGGeometry>
 #include <QColor>
@@ -19,7 +20,7 @@ HeatMapInstanced::HeatMapInstanced(QQuickItem* parent)
     m_bidInstances.reserve(m_maxBidLevels);
     m_askInstances.reserve(m_maxAskLevels);
     
-    qDebug() << "🔥 HeatmapInstanced created - Phase 2 GPU rendering ready!";
+    sLog_Init("🔥 HeatmapInstanced created - Phase 2 GPU rendering ready!");
 }
 
 void HeatMapInstanced::updateBids(const QVariantList& bidLevels) {
@@ -128,7 +129,7 @@ void HeatMapInstanced::onOrderBookUpdated(const OrderBook& book) {
     // 🔇 REDUCED DEBUG: Only log every 50th order book to reduce spam
     static int orderBookCounter = 0;
     if (++orderBookCounter % 50 == 0) {
-        qDebug() << "📊 HEATMAP: Received order book with" << book.bids.size() << "bids," << book.asks.size() << "asks";
+        sLog_GPU("📊 HEATMAP: Received order book with " << book.bids.size() << " bids, " << book.asks.size() << " asks");
     }
         
     updateOrderBook(book);
@@ -186,9 +187,9 @@ void HeatMapInstanced::setTimeWindow(int64_t startMs, int64_t endMs, double minP
         // 🔥 DEBUG: Verify the complete coordination is working
         static int syncCount = 0;
         if (syncCount++ < 5) {
-            qDebug() << "✅🔥 COMPLETE COORDINATION ESTABLISHED:" 
+            sLog_Chart("✅🔥 COMPLETE COORDINATION ESTABLISHED:" 
                      << "HeatMap synced to GPUChart - Time:" << startMs << "to" << endMs 
-                     << "ms, Price:" << minPrice << "to" << maxPrice;
+                     << "ms, Price:" << minPrice << "to" << maxPrice);
         }
     }
 }
@@ -304,9 +305,8 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
             // 🔇 REDUCED DEBUG: Only log every 1000th bar to reduce spam
             static int bidBarCounter = 0;
             if (++bidBarCounter % 1000 == 0) {
-                qDebug() << "🟢 HISTORICAL BID POINT #" << bidBarCounter 
-                         << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
-                         << "Total accumulated:" << m_allBidInstances.size();
+                sLog_GPU(QString("🟢 HISTORICAL BID POINT #%1: Raw Price %2 Timestamp: %3 Total accumulated: %4")
+                         .arg(bidBarCounter).arg(level.price).arg(quad.rawTimestamp).arg(m_allBidInstances.size()));
             }
         }
     }
@@ -348,9 +348,8 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
             // 🔇 REDUCED DEBUG: Only log every 1000th bar to reduce spam
             static int askBarCounter = 0;
             if (++askBarCounter % 1000 == 0) {
-                qDebug() << "🔴 HISTORICAL ASK POINT #" << askBarCounter 
-                         << ": Raw Price" << level.price << "Timestamp:" << quad.rawTimestamp
-                         << "Total accumulated:" << m_allAskInstances.size();
+                sLog_GPU(QString("🔴 HISTORICAL ASK POINT #%1: Raw Price %2 Timestamp: %3 Total accumulated: %4")
+                         .arg(askBarCounter).arg(level.price).arg(quad.rawTimestamp).arg(m_allAskInstances.size()));
             }
         }
     }
@@ -481,14 +480,16 @@ void HeatMapInstanced::cleanupOldHeatmapPoints() {
     if (m_allBidInstances.size() > maxHistoricalPoints) {
         size_t excess = m_allBidInstances.size() - maxHistoricalPoints;
         m_allBidInstances.erase(m_allBidInstances.begin(), m_allBidInstances.begin() + excess);
-        qDebug() << "🌊 WAVE CLEANUP: Removed" << excess << "oldest bid points, remaining:" << m_allBidInstances.size() << "historical levels";
+        sLog_GPU(QString("🌊 WAVE CLEANUP: Removed %1 oldest bid points, remaining: %2 historical levels")
+                 .arg(excess).arg(m_allBidInstances.size()));
     }
     
     // Clean up asks if we exceed maximum (only remove oldest)
     if (m_allAskInstances.size() > maxHistoricalPoints) {
         size_t excess = m_allAskInstances.size() - maxHistoricalPoints;
         m_allAskInstances.erase(m_allAskInstances.begin(), m_allAskInstances.begin() + excess);
-        qDebug() << "🌊 WAVE CLEANUP: Removed" << excess << "oldest ask points, remaining:" << m_allAskInstances.size() << "historical levels";
+        sLog_GPU(QString("🌊 WAVE CLEANUP: Removed %1 oldest ask points, remaining: %2 historical levels")
+                 .arg(excess).arg(m_allAskInstances.size()));
     }
 }
 

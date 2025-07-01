@@ -67,7 +67,9 @@ The project is built on a modular, multi-threaded architecture that is ruthlessl
     - `gui`: Qt-based components for the GPU rendering pipeline (`GPUChartWidget`, `HeatmapInstanced`, `GPUDataAdapter`).
 - **`vcpkg.json`**: The manifest file declaring all C++ dependencies.
 
-For a detailed explanation of the new architecture, see the **[GPU Architecture Overview](docs/ARCHITECTURE.md)**.
+For a detailed explanation of the new architecture, see the **[GPU Architecture Overview](docs/ARCHITECTURE.md)**. 
+
+The project also includes a **categorized logging system** with 16+ specialized categories for efficient debugging - see the [Smart Logging System](#🎛️-smart-logging-system) section above.
 
 ## 🚀 Quick Start
 
@@ -102,6 +104,48 @@ cmake --build build
 ./build/apps/sentinel_gui/sentinel
 ```
 
+## 🎛️ **Smart Logging System**
+
+Sentinel features a **professional categorized logging system** that lets you focus on exactly what you're debugging without log spam.
+
+### **Quick Setup**
+```bash
+# Load the logging modes (do this once per terminal session)
+source scripts/log-modes.sh
+
+# Pick your mode and run
+log-production && ./build/apps/sentinel_gui/sentinel
+```
+
+### **Available Modes**
+
+| Mode | Purpose | Log Volume | When to Use |
+|------|---------|------------|-------------|
+| `log-production` | Only errors/warnings | 5-10 lines | **Production builds, demos** |
+| `log-clean` | Remove spam, keep useful logs | ~50 lines | **Daily development** |
+| `log-trading` | Trade processing & data flow | ~100 lines | **Debug trading issues** |
+| `log-rendering` | Charts, candles, camera | ~150 lines | **Debug visual issues** |
+| `log-performance` | Performance metrics & timing | ~30 lines | **Debug slowness** |
+| `log-network` | WebSocket & connections | ~40 lines | **Debug connectivity** |
+| `log-development` | All categories enabled | 200+ lines | **Deep debugging** |
+
+### **Example Workflow**
+```bash
+# Start with clean logs for daily development
+log-clean
+./build/apps/sentinel_gui/sentinel
+
+# Switch to trading focus if trades aren't showing
+log-trading
+./build/apps/sentinel_gui/sentinel
+
+# Use production mode for demos
+log-production
+./build/apps/sentinel_gui/sentinel
+```
+
+> **💡 Pro Tip**: Use `log-help` to see all available modes anytime!
+
 ## 🚧 **Coming Next: Advanced Visualizations & UX**
 
 With the core rendering engine in place, the focus now shifts to building out advanced features on top of this powerful foundation.
@@ -124,6 +168,7 @@ This project follows modern C++ best practices:
 ## 🔗 Links
 
 - **[Detailed GPU Architecture](docs/ARCHITECTURE.md)**
+- **[Smart Logging Guide](docs/logging_usage_guide.md)** - Complete logging category reference
 - **[Full Execution Plan](docs/feature_implementations/main_chart_performance_optimization/PLAN.md)**
 - [Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)
 

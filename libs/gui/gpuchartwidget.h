@@ -162,6 +162,13 @@ private:
     bool m_debugInfoVisible = true;  // Show debug info by default
     QString m_debugInfoText;
     
+    // 🚀 PHASE 4: PCIe UPLOAD PROFILER
+    mutable size_t m_bytesUploadedThisFrame = 0;
+    mutable double m_mbPerFrame = 0.0;
+    mutable std::atomic<size_t> m_totalBytesUploaded{0};
+    mutable std::atomic<int> m_bandwidthWarnings{0};
+    static constexpr double PCIE_BUDGET_MB_PER_SECOND = 200.0; // PCIe 3.0 x4 budget
+    
     // Helper methods
     void convertTradeToGPUPoint(const Trade& trade, GPUPoint& point);
     void cleanupOldTrades();
