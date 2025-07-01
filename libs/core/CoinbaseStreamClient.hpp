@@ -25,6 +25,10 @@ public:
     [[nodiscard]] std::vector<Trade>   getNewTrades(const std::string& symbol,
                                                     const std::string& lastTradeId) const;
     [[nodiscard]] OrderBook            getOrderBook(const std::string& symbol) const;
+    
+    // 🔥 NEW: Dense order book data for professional visualization
+    [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
 
     // Non-copyable, non-movable (DataCache contains std::shared_mutex)
     CoinbaseStreamClient(const CoinbaseStreamClient&) = delete;

@@ -7,12 +7,18 @@ add_library(sentinel_core)
 # Source files for this library
 target_sources(sentinel_core 
     PRIVATE
-        coinbasestreamclient.cpp
+        # coinbasestreamclient.cpp  # OLD IMPLEMENTATION - DISABLED
         # New modular architecture files (Phase 1 stubs)  
         Authenticator.cpp
         DataCache.cpp
         MarketDataCore.cpp
-        # CoinbaseStreamClientFacade.cpp  # TODO: Enable in Phase 5 when replacing original
+        MessageParser.hpp
+        # Phase 3: Lock-free performance monitoring
+        performancemonitor.cpp
+        CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
+        FastOrderBook.cpp              # 🚀 ULTRA-FAST: O(1) Order Book
+        # Logging system
+        SentinelLogging.cpp
         # Existing files
         ruleengine.cpp
         cvdthresholdrule.cpp
@@ -22,7 +28,7 @@ target_sources(sentinel_core
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED COMPONENTS system beast)
+find_package(Boost REQUIRED COMPONENTS system)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(jwt-cpp REQUIRED)
@@ -34,7 +40,6 @@ target_link_libraries(sentinel_core
         Qt6::Core
     PRIVATE
         Boost::system
-        Boost::beast
         nlohmann_json::nlohmann_json
         OpenSSL::SSL
         OpenSSL::Crypto

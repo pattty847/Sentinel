@@ -7,8 +7,11 @@
 #include <QTimer>      // For periodic polling (like Python's time.sleep in a loop)
 #include <memory>      // For smart pointers (like Python's automatic memory management)
 #include <unordered_map> // For the last trade IDs tracking (like Python's dict)
-#include "coinbasestreamclient.h"
+#include "CoinbaseStreamClient.hpp"
 #include "tradedata.h"
+
+// Forward declaration for lock-free GPU pipeline
+class GPUDataAdapter;
 
 // 🐍 Python: class StreamController:
 // ⚡ C++: class StreamController : public QObject {
@@ -43,6 +46,9 @@ signals:
 public slots:
     void start(const std::vector<std::string>& symbols);
     void stop();
+    
+    // GPU pipeline integration
+    void setGPUAdapter(GPUDataAdapter* adapter) { m_gpuAdapter = adapter; }
 
 // 🐍 Python: These would be private methods (def _method_name)
 // ⚡ C++: private slots are internal methods connected to signals
@@ -77,6 +83,9 @@ private:
     // ⚡ C++: std::unordered_map<std::string, std::string> m_lastTradeIds;
     //        unordered_map is like Python's dict
     std::unordered_map<std::string, std::string> m_lastTradeIds;
+    
+    // Lock-free GPU pipeline integration
+    GPUDataAdapter* m_gpuAdapter = nullptr;
 };
 
 #endif // STREAMCONTROLLER_H 

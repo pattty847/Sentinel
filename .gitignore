@@ -8,3 +8,5 @@ compile_commands.json
 key.json
 config.json
 *.log
+
+/scripts
