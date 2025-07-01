@@ -23,7 +23,7 @@ graph TD
 
         subgraph "GPU Rendering (Qt Scene Graph)"
             GPU_CHART[("GPUChartWidget<br>📈 VBO Triple Buffering<br>Pan/Zoom Transforms<br>🎯 Master Coordinates")];
-            HEATMAP[("HeatmapInstanced<br>🔥 Instanced Rendering<br>Order Book Depth")];
+            HEATMAP[("HeatmapBatched<br>🔥 Batched Rendering<br>Order Book Depth")];
             CANDLES[("CandlestickBatched<br>🕯️ Multi-Timeframe OHLC<br>Progressive LOD System")];
         end
 
@@ -83,7 +83,7 @@ The architecture is designed to minimize latency and contention at every stage. 
 -   **Key Classes:**
     -   **`GPUDataAdapter`**: On the GUI thread, a `QTimer` periodically triggers `processIncomingData()`. This method drains the lock-free queues, transforms the raw data into GPU-optimized vertex structures, and emits signals (`tradesReady`, `heatmapReady`, `candlesReady`) with pointers to large, pre-allocated buffers. This "batching" approach is critical for performance.
     -   **`GPUChartWidget`**: Renders tens of thousands of trade points. It uses **VBO triple-buffering** to update the GPU's memory without stalling the render loop. It is also the master of the coordinate system, handling all pan/zoom logic.
-    -   **`HeatmapInstanced`**: Renders the dense order book. It uses **instanced rendering** to draw thousands of quads (representing price levels) in a single, efficient draw call. It listens for signals from `GPUChartWidget` to keep its coordinate system perfectly synchronized.
+    -   **`HeatmapBatched`**: Renders the dense order book. It uses **batched rendering** to draw thousands of quads (representing price levels) in efficient draw calls. It listens for signals from `GPUChartWidget` to keep its coordinate system perfectly synchronized.
     -   **`CandlestickBatched`**: Renders multi-timeframe OHLC candlestick charts with intelligent Level-of-Detail (LOD) switching. It progressively builds candles from trade data, automatically selects optimal timeframes based on zoom level, and synchronizes coordinates with the master chart widget for seamless multi-layer visualization.
 
 ## Architectural Pillars in Detail
@@ -102,7 +102,7 @@ The architecture is designed to minimize latency and contention at every stage. 
 -   **Why:** To render tens of thousands of data points at 60+ FPS, CPU-based tools like `QPainter` are not viable. We must communicate with the GPU in its native language: buffers of vertex data and batched draw calls.
 -   **How:** We use Qt's Scene Graph, a retained-mode graphics API that sits on top of OpenGL/Metal/Vulkan.
     -   **`GPUChartWidget`** uses Vertex Buffer Objects (VBOs). It maintains three buffers; while one is being rendered, another can be filled with new data from the `GPUDataAdapter`. This avoids stalls and visual tearing.
-    -   **`HeatmapInstanced`** uses a technique where a single base shape (a quad) is defined once, and the GPU is instructed to draw it thousands of times in a single call, each with a different position, size, and color. This is the most efficient method for rendering massive amounts of similar objects.
+    -   **`HeatmapBatched`** uses batched rendering techniques to efficiently draw thousands of quads representing price levels, with optimized VBO management for high-performance order book visualization.
     -   **`CandlestickBatched`** renders OHLC candles with separate geometry for bullish/bearish candles and wicks. It uses intelligent LOD switching to automatically select optimal timeframes (1sec to Daily) based on zoom level, ensuring candles remain visually meaningful at all scales while maintaining 60+ FPS performance.
 
 ## The Multi-Timeframe Candlestick System
@@ -159,7 +159,7 @@ Responsiveness during user interaction is critical. The pan and zoom system is d
 -   **Throttling & Synchronization:**
     - During rapid mouse drags or wheel scrolls, updates are throttled to avoid overwhelming the render thread.
     - Crucially, whenever the view changes, `GPUChartWidget` emits a `viewChanged` signal containing the new time and price range.
-    - Both `HeatmapInstanced` and `CandlestickBatched` connect to this signal. This ensures that all three rendering layers (trade scatter, order book heatmap, and OHLC candles) are **always rendered in the same coordinate space**, providing a seamless, unified visualization.
+    - Both `HeatmapBatched` and `CandlestickBatched` connect to this signal. This ensures that all three rendering layers (trade scatter, order book heatmap, and OHLC candles) are **always rendered in the same coordinate space**, providing a seamless, unified visualization.
 
 ## Build System & Dependencies
 -   **CMake:** The cross-platform build system generator.

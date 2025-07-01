@@ -9,12 +9,12 @@
 #include <atomic>
 #include "tradedata.h"
 
-class HeatMapInstanced : public QQuickItem {
+class HeatmapBatched : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
 
 public:
-    explicit HeatMapInstanced(QQuickItem* parent = nullptr);
+    explicit HeatmapBatched(QQuickItem* parent = nullptr);
 
     // 🎯 PHASE 2: Order Book Data Interface
     Q_INVOKABLE void updateBids(const QVariantList& bidLevels);

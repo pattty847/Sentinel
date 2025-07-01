@@ -10,7 +10,7 @@
 using std::max;
 using std::min;
 
-HeatMapInstanced::HeatMapInstanced(QQuickItem* parent)
+HeatmapBatched::HeatmapBatched(QQuickItem* parent)
     : QQuickItem(parent)
 {
     // Enable item for rendering
@@ -20,10 +20,10 @@ HeatMapInstanced::HeatMapInstanced(QQuickItem* parent)
     m_bidInstances.reserve(m_maxBidLevels);
     m_askInstances.reserve(m_maxAskLevels);
     
-    sLog_Init("🔥 HeatmapInstanced created - Phase 2 GPU rendering ready!");
+    sLog_Init("🔥 HeatmapBatched created - Phase 2 GPU rendering ready!");
 }
 
-void HeatMapInstanced::updateBids(const QVariantList& bidLevels) {
+void HeatmapBatched::updateBids(const QVariantList& bidLevels) {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     
     m_bidInstances.clear();
@@ -68,7 +68,7 @@ void HeatMapInstanced::updateBids(const QVariantList& bidLevels) {
     update();
 }
 
-void HeatMapInstanced::updateAsks(const QVariantList& askLevels) {
+void HeatmapBatched::updateAsks(const QVariantList& askLevels) {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     
     m_askInstances.clear();
@@ -113,7 +113,7 @@ void HeatMapInstanced::updateAsks(const QVariantList& askLevels) {
     update();
 }
 
-void HeatMapInstanced::updateOrderBook(const OrderBook& book) {
+void HeatmapBatched::updateOrderBook(const OrderBook& book) {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     
     // 🔥 PHASE 2: CONVERT ORDER BOOK TO GPU INSTANCES
@@ -124,7 +124,7 @@ void HeatMapInstanced::updateOrderBook(const OrderBook& book) {
     update();
 }
 
-void HeatMapInstanced::onOrderBookUpdated(const OrderBook& book) {
+void HeatmapBatched::onOrderBookUpdated(const OrderBook& book) {
     // 🔥 CRITICAL DEBUG: Confirm connection is working!
     // 🔇 REDUCED DEBUG: Only log every 50th order book to reduce spam
     static int orderBookCounter = 0;
@@ -135,7 +135,7 @@ void HeatMapInstanced::onOrderBookUpdated(const OrderBook& book) {
     updateOrderBook(book);
 }
 
-void HeatMapInstanced::clearOrderBook() {
+void HeatmapBatched::clearOrderBook() {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     
     m_bidInstances.clear();
@@ -146,7 +146,7 @@ void HeatMapInstanced::clearOrderBook() {
     update();
 }
 
-void HeatMapInstanced::setMaxQuads(int maxQuads) {
+void HeatmapBatched::setMaxQuads(int maxQuads) {
     m_maxQuads = maxQuads;
     // Adjust bid/ask limits proportionally
     m_maxBidLevels = maxQuads / 2;
@@ -156,21 +156,21 @@ void HeatMapInstanced::setMaxQuads(int maxQuads) {
     m_askInstances.reserve(m_maxAskLevels);
 }
 
-void HeatMapInstanced::setPriceRange(double minPrice, double maxPrice) {
+void HeatmapBatched::setPriceRange(double minPrice, double maxPrice) {
     m_minPrice = minPrice;
     m_maxPrice = maxPrice;
     m_geometryDirty = true;
     update();
 }
 
-void HeatMapInstanced::setIntensityScale(double scale) {
+void HeatmapBatched::setIntensityScale(double scale) {
     m_intensityScale = scale;
     m_geometryDirty.store(true);
     update();
 }
 
 // 🔥 FINAL POLISH: Time window + price range synchronization for unified coordinates  
-void HeatMapInstanced::setTimeWindow(int64_t startMs, int64_t endMs, double minPrice, double maxPrice) {
+void HeatmapBatched::setTimeWindow(int64_t startMs, int64_t endMs, double minPrice, double maxPrice) {
     m_visibleTimeStart_ms = startMs;
     m_visibleTimeEnd_ms = endMs;
     m_timeWindowValid = (endMs > startMs);
@@ -194,12 +194,12 @@ void HeatMapInstanced::setTimeWindow(int64_t startMs, int64_t endMs, double minP
     }
 }
 
-void HeatMapInstanced::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
+void HeatmapBatched::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
     // Note: Calling base class implementation (may not exist in this Qt version)
     m_geometryDirty = true;
 }
 
-QSGNode* HeatMapInstanced::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
+QSGNode* HeatmapBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     // 🚀 PHASE 2: TWO-DRAW-CALL ARCHITECTURE (bids + asks)
     
     auto* rootNode = static_cast<QSGTransformNode*>(oldNode);
@@ -254,7 +254,7 @@ QSGNode* HeatMapInstanced::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
     return rootNode;
 }
 
-void HeatMapInstanced::convertOrderBookToInstances(const OrderBook& book) {
+void HeatmapBatched::convertOrderBookToInstances(const OrderBook& book) {
     // 🔥 HISTORICAL HEATMAP: Don't clear - we want to accumulate history!
     // m_bidInstances.clear();  // REMOVED to preserve history
     // m_askInstances.clear();  // REMOVED to preserve history
@@ -269,7 +269,7 @@ void HeatMapInstanced::convertOrderBookToInstances(const OrderBook& book) {
     cleanupOldHeatmapPoints(); // Clean up old points to prevent unlimited memory growth
 }
 
-void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>& bids) {
+void HeatmapBatched::convertBidsToInstances(const std::vector<OrderBookLevel>& bids) {
     // Use current timestamp for this order book snapshot
     double currentTimestamp = QDateTime::currentMSecsSinceEpoch();
     
@@ -312,7 +312,7 @@ void HeatMapInstanced::convertBidsToInstances(const std::vector<OrderBookLevel>&
     }
 }
 
-void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>& asks) {
+void HeatmapBatched::convertAsksToInstances(const std::vector<OrderBookLevel>& asks) {
     // Use current timestamp for this order book snapshot  
     double currentTimestamp = QDateTime::currentMSecsSinceEpoch();
     
@@ -355,7 +355,7 @@ void HeatMapInstanced::convertAsksToInstances(const std::vector<OrderBookLevel>&
     }
 }
 
-QPointF HeatMapInstanced::worldToScreen(double timestamp_ms, double price) const {
+QPointF HeatmapBatched::worldToScreen(double timestamp_ms, double price) const {
     if (width() <= 0 || height() <= 0 || !m_timeWindowValid) {
         return QPointF(-1000, -1000); // Return off-screen point
     }
@@ -373,7 +373,7 @@ QPointF HeatMapInstanced::worldToScreen(double timestamp_ms, double price) const
     return QPointF(x, y);
 }
 
-QRectF HeatMapInstanced::calculateQuadGeometry(double price, double size) const {
+QRectF HeatmapBatched::calculateQuadGeometry(double price, double size) const {
     // Map price to Y coordinate (inverse - higher price at top)
     double priceRange = m_maxPrice - m_minPrice;
     if (priceRange <= 0) priceRange = 1.0;  // Avoid division by zero
@@ -400,7 +400,7 @@ QRectF HeatMapInstanced::calculateQuadGeometry(double price, double size) const 
     return QRectF(x, y, quadWidth, quadHeight);
 }
 
-QColor HeatMapInstanced::calculateIntensityColor(double size, bool isBid) const {
+QColor HeatmapBatched::calculateIntensityColor(double size, bool isBid) const {
     // PHASE A2: Continuous color scale like reference image
     // Calculate normalized intensity (0.0 to 1.0)
     double intensity = std::min(1.0, size * m_intensityScale / 10.0);
@@ -451,7 +451,7 @@ QColor HeatMapInstanced::calculateIntensityColor(double size, bool isBid) const 
     return QColor::fromRgbF(r, g, b, alpha);
 }
 
-void HeatMapInstanced::cleanupOldHeatmapPoints() {
+void HeatmapBatched::cleanupOldHeatmapPoints() {
     // 🔥 WALL OF LIQUIDITY: Manage historical points with time-based fading
     const size_t maxHistoricalPoints = static_cast<size_t>(m_maxQuads);
     double currentTime = QDateTime::currentMSecsSinceEpoch();
@@ -493,7 +493,7 @@ void HeatMapInstanced::cleanupOldHeatmapPoints() {
     }
 }
 
-void HeatMapInstanced::sortAndLimitLevels() {
+void HeatmapBatched::sortAndLimitLevels() {
     // Sort bids by price (descending - highest first)
     std::sort(m_bidInstances.begin(), m_bidInstances.end(), 
              [](const QuadInstance& a, const QuadInstance& b) {
@@ -516,7 +516,7 @@ void HeatMapInstanced::sortAndLimitLevels() {
     }
 }
 
-QSGGeometryNode* HeatMapInstanced::createQuadGeometryNode(const std::vector<QuadInstance>& instances, 
+QSGGeometryNode* HeatmapBatched::createQuadGeometryNode(const std::vector<QuadInstance>& instances, 
                                                          const QColor& baseColor) {
     if (instances.empty()) {
         return nullptr;

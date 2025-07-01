@@ -140,11 +140,7 @@ private:
     void createCandleGeometry(QSGGeometryNode* node, const std::vector<CandleInstance>& candles, 
                              const QColor& color, bool isBody);
     
-    // 🔥 GPU GEOMETRY CREATION: Efficient vertex buffer construction
-    void buildCandleBodies(const std::vector<CandleInstance>& candles, 
-                          std::vector<CandleVertex>& vertices) const;
-    void buildCandleWicks(const std::vector<CandleInstance>& candles, 
-                         std::vector<CandleVertex>& vertices) const;
+
     
     // 🎯 LOD MANAGEMENT
     CandleLOD::TimeFrame selectOptimalTimeFrame() const;

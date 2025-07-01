@@ -75,4 +75,13 @@ add_test(NAME MultiModeArchitectureTest COMMAND test_multi_mode_architecture)
 #   Qt6::Charts
 # )
 
-message(STATUS "✅ Sentinel test suite configured with 3 targets.")
+# -----------------------------------------------------------------------------
+# Test Target: test_fast_orderbook  
+# O(1) vs O(log N) order book performance benchmark
+# -----------------------------------------------------------------------------
+add_executable(test_fast_orderbook test_fast_orderbook.cpp)
+target_link_libraries(test_fast_orderbook PRIVATE
+  sentinel_core
+)
+
+message(STATUS "✅ Sentinel test suite configured with 4 targets (including O(1) orderbook benchmark).")

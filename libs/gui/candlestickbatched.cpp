@@ -331,7 +331,8 @@ void CandlestickBatched::separateAndUpdateCandles(const std::vector<OHLC>& candl
         }
         
         // 🔍 DEBUG: Check if candle prices are in reasonable range
-        if (candle.open < m_minPrice - 1000 || candle.open > m_maxPrice + 1000) {
+        static constexpr double PRICE_RANGE_BUFFER = 1000.0; // Price buffer for range validation
+        if (candle.open < m_minPrice - PRICE_RANGE_BUFFER || candle.open > m_maxPrice + PRICE_RANGE_BUFFER) {
             outsidePriceWindow++;
             if (separateCount <= 5) { // Only log first few batches
                 sLog_DebugGeometry("🚨 CANDLE OUTSIDE PRICE RANGE:" 
@@ -563,98 +564,7 @@ void CandlestickBatched::createCandleGeometry(QSGGeometryNode* node, const std::
     }
 }
 
-// 🔥 NOTE: Currently not used - simplified rendering approach above for stability
-void CandlestickBatched::buildCandleBodies(const std::vector<CandleInstance>& candles,
-                                          std::vector<CandleVertex>& vertices) const {
-    for (const auto& candle : candles) {
-        float halfWidth = candle.width / 2.0f;
-        float left = candle.screenX - halfWidth;
-        float right = candle.screenX + halfWidth;
-        float top = candle.bodyTop;
-        float bottom = candle.bodyBottom;
-        
-        // Ensure minimum body height for very small candles
-        if (std::abs(top - bottom) < 2.0f) {
-            float center = (top + bottom) / 2.0f;
-            top = center - 1.0f;
-            bottom = center + 1.0f;
-        }
-        
-        // Color from candle instance
-        float r = candle.color.redF();
-        float g = candle.color.greenF();
-        float b = candle.color.blueF();
-        float a = candle.color.alphaF();
-        
-        // 🔥 RECTANGLE BODY: Two triangles forming a quad
-        // Triangle 1: top-left, top-right, bottom-left
-        vertices.push_back({left, top, r, g, b, a});
-        vertices.push_back({right, top, r, g, b, a});
-        vertices.push_back({left, bottom, r, g, b, a});
-        
-        // Triangle 2: top-right, bottom-right, bottom-left  
-        vertices.push_back({right, top, r, g, b, a});
-        vertices.push_back({right, bottom, r, g, b, a});
-        vertices.push_back({left, bottom, r, g, b, a});
-    }
-}
 
-// 🔥 NOTE: Currently not used - simplified rendering approach above for stability  
-void CandlestickBatched::buildCandleWicks(const std::vector<CandleInstance>& candles,
-                                         std::vector<CandleVertex>& vertices) const {
-    for (const auto& candle : candles) {
-        float centerX = candle.screenX;
-        float wickWidth = 1.0f; // Thin wick lines
-        float left = centerX - wickWidth;
-        float right = centerX + wickWidth;
-        
-        // Upper wick (from body top to high)
-        float upperWickTop = candle.wickTop;
-        float upperWickBottom = candle.bodyTop;
-        
-        // Lower wick (from body bottom to low)
-        float lowerWickTop = candle.bodyBottom;
-        float lowerWickBottom = candle.wickBottom;
-        
-        // Wick color (usually same as body but can be different)
-        float r = m_wickColor.redF();
-        float g = m_wickColor.greenF(); 
-        float b = m_wickColor.blueF();
-        float a = m_wickColor.alphaF();
-        
-        // 🔥 UPPER WICK: Rectangle from body top to high
-        if (upperWickTop < upperWickBottom) { // Only draw if there's a wick
-            vertices.push_back({left, upperWickTop, r, g, b, a});
-            vertices.push_back({right, upperWickTop, r, g, b, a});
-            vertices.push_back({left, upperWickBottom, r, g, b, a});
-            
-            vertices.push_back({right, upperWickTop, r, g, b, a});
-            vertices.push_back({right, upperWickBottom, r, g, b, a});
-            vertices.push_back({left, upperWickBottom, r, g, b, a});
-        } else {
-            // Add dummy vertices to maintain vertex count
-            for (int i = 0; i < 6; ++i) {
-                vertices.push_back({centerX, centerX, 0, 0, 0, 0}); // Transparent
-            }
-        }
-        
-        // 🔥 LOWER WICK: Rectangle from body bottom to low
-        if (lowerWickBottom > lowerWickTop) { // Only draw if there's a wick
-            vertices.push_back({left, lowerWickTop, r, g, b, a});
-            vertices.push_back({right, lowerWickTop, r, g, b, a});
-            vertices.push_back({left, lowerWickBottom, r, g, b, a});
-            
-            vertices.push_back({right, lowerWickTop, r, g, b, a});
-            vertices.push_back({right, lowerWickBottom, r, g, b, a});
-            vertices.push_back({left, lowerWickBottom, r, g, b, a});
-        } else {
-            // Add dummy vertices to maintain vertex count
-            for (int i = 0; i < 6; ++i) {
-                vertices.push_back({centerX, centerX, 0, 0, 0, 0}); // Transparent
-            }
-        }
-    }
-}
 
 QPointF CandlestickBatched::worldToScreen(int64_t timestamp_ms, double price) const {
     // 🔥 UNIFIED COORD SYSTEM: Mirror GPUChartWidget::worldToScreen logic

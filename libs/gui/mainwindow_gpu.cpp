@@ -231,17 +231,17 @@ void MainWindowGPU::connectToGPUChart() {
         
         // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
         QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
-        HeatMapInstanced* heatmapLayer = qobject_cast<HeatMapInstanced*>(heatmapItem);
+        HeatmapBatched* heatmapLayer = qobject_cast<HeatmapBatched*>(heatmapItem);
         
         if (heatmapLayer) {
             // 🔥 THE CRITICAL BRIDGE: Chart view coordinates to heatmap
             connect(gpuChart, &GPUChartWidget::viewChanged,
-                    heatmapLayer, &HeatMapInstanced::setTimeWindow,
+                    heatmapLayer, &HeatmapBatched::setTimeWindow,
                     Qt::QueuedConnection);
             
             qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
         } else {
-            qWarning() << "⚠️ HeatmapInstanced not found - coordinate unification failed";
+            qWarning() << "⚠️ HeatmapBatched not found - coordinate unification failed";
         }
         
         // 🕯️ PHASE 5: CONNECT CANDLESTICK CHART
@@ -288,15 +288,29 @@ void MainWindowGPU::connectToGPUChart() {
         return;
     }
     
-    // 🔥 PHASE 2: Connect order book data to HeatmapInstanced - CRITICAL FIX!
-    HeatMapInstanced* heatmapLayer = qmlRoot->findChild<HeatMapInstanced*>("heatmapLayer");
+    // 🔥 PHASE 2: Connect order book data to HeatmapBatched - CRITICAL FIX!
+    HeatmapBatched* heatmapLayer = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
     if (heatmapLayer) {
         connect(m_streamController, &StreamController::orderBookUpdated,
-                heatmapLayer, &HeatMapInstanced::onOrderBookUpdated,
+                heatmapLayer, &HeatmapBatched::onOrderBookUpdated,
                 Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
+        
+        // 🚀 NEW: Connect FastOrderBook heatmap data
+        connect(m_gpuAdapter, &GPUDataAdapter::heatmapReady,
+                heatmapLayer, [=](const GPUTypes::QuadInstance* quads, size_t count) {
+                    // TODO: Pass FastOrderBook quad data to heatmap
+                    static int updateCount = 0;
+                    if (++updateCount % 100 == 0) {
+                        qDebug() << "🚀 FAST ORDER BOOK UPDATE #" << updateCount 
+                                 << "Quads:" << count
+                                 << "Spread:" << m_gpuAdapter->getSpread()
+                                 << "Best Bid:" << m_gpuAdapter->getBestBid()
+                                 << "Best Ask:" << m_gpuAdapter->getBestAsk();
+                    }
+                });
         
         qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
     } else {
-        qWarning() << "⚠️ HeatMapInstanced (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
+        qWarning() << "⚠️ HeatmapBatched (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
     }
 } 

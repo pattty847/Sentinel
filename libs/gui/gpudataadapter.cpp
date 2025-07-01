@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <QDateTime>
+#include <cstdint>
 
 GPUDataAdapter::GPUDataAdapter(QObject* parent)
     : QObject(parent)
@@ -12,6 +13,7 @@ GPUDataAdapter::GPUDataAdapter(QObject* parent)
     , m_candle100msTimer(new QTimer(this))
     , m_candle500msTimer(new QTimer(this))
     , m_candle1sTimer(new QTimer(this))
+    , m_fastOrderBook("BTC-USD") // Initialize O(1) order book
 {
     sLog_Init("🚀 GPUDataAdapter: Initializing lock-free data pipeline...");
     
@@ -119,40 +121,30 @@ void GPUDataAdapter::processIncomingData() {
     // Candle processing moved to separate time-based timers
     // (100ms, 500ms, 1s timers handle their respective candle updates)
     
-    // Process order books for heatmap
+    // 🚀 ULTRA-FAST: Process order books with O(1) FastOrderBook
     OrderBook orderBook;
     m_heatmapWriteCursor = 0;
     
     size_t orderBooksProcessed = 0;
-    while (m_orderBookQueue.pop(orderBook) && orderBooksProcessed < 10) { // Limit order book processing
-        // Convert order book to heatmap quads
+    while (m_orderBookQueue.pop(orderBook) && orderBooksProcessed < 10) { 
+        // O(1) update to FastOrderBook - BLAZING FAST!
+        // Capture timestamp ONCE for all levels in this order book message
+        const uint32_t now_ms = static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch());
+
         for (const auto& bid : orderBook.bids) {
-            if (m_heatmapWriteCursor >= m_reserveSize) break;
-            
-            GPUTypes::QuadInstance quad;
-            quad.x = 0.0f; // Will be calculated in GPU widget
-            quad.y = static_cast<float>(bid.price);
-            quad.width = static_cast<float>(bid.size * 100.0); // Scale for visibility
-            quad.height = 2.0f; // Fixed height
-            quad.r = 0.0f; quad.g = 1.0f; quad.b = 0.0f; quad.a = 0.8f; // Green for bids
-            
-            m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
+            m_fastOrderBook.updateLevel(bid.price, bid.size, true, now_ms); // O(1) bid update
         }
         
         for (const auto& ask : orderBook.asks) {
-            if (m_heatmapWriteCursor >= m_reserveSize) break;
-            
-            GPUTypes::QuadInstance quad;
-            quad.x = 0.0f; // Will be calculated in GPU widget
-            quad.y = static_cast<float>(ask.price);
-            quad.width = static_cast<float>(ask.size * 100.0); // Scale for visibility
-            quad.height = 2.0f; // Fixed height
-            quad.r = 1.0f; quad.g = 0.0f; quad.b = 0.0f; quad.a = 0.8f; // Red for asks
-            
-            m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
+            m_fastOrderBook.updateLevel(ask.price, ask.size, false, now_ms); // O(1) ask update
         }
         
         orderBooksProcessed++;
+    }
+    
+    // Convert FastOrderBook to GPU quads (only if data was updated)
+    if (orderBooksProcessed > 0) {
+        convertFastOrderBookToQuads();
     }
     
     // 📊 TRADE DISTRIBUTION TRACKING in lock-free pipeline
@@ -378,4 +370,50 @@ void GPUDataAdapter::cleanupOldTradeHistory() {
                  << " Current size:" << m_tradeHistory.size()
                  << " Window:" << HISTORY_WINDOW_SPAN.count() << " seconds");
     }
-} 
+}
+
+// 🚀 ULTRA-FAST: Convert O(1) order book to GPU heatmap quads
+void GPUDataAdapter::convertFastOrderBookToQuads() {
+    m_heatmapWriteCursor = 0;
+    
+    // Get bid levels with O(1) access pattern
+    auto bids = m_fastOrderBook.getBids(1000); // Top 1000 bid levels
+    for (const auto& bid : bids) {
+        if (m_heatmapWriteCursor >= m_reserveSize) break;
+        
+        GPUTypes::QuadInstance quad;
+        quad.x = 0.0f; // Will be calculated in GPU widget
+        quad.y = static_cast<float>(bid.price);
+        quad.width = static_cast<float>(bid.size * 100.0); // Scale for visibility
+        quad.height = 2.0f; // Fixed height
+        quad.r = 0.0f; quad.g = 1.0f; quad.b = 0.0f; quad.a = 0.8f; // Green for bids
+        
+        m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
+    }
+    
+    // Get ask levels with O(1) access pattern
+    auto asks = m_fastOrderBook.getAsks(1000); // Top 1000 ask levels
+    for (const auto& ask : asks) {
+        if (m_heatmapWriteCursor >= m_reserveSize) break;
+        
+        GPUTypes::QuadInstance quad;
+        quad.x = 0.0f; // Will be calculated in GPU widget
+        quad.y = static_cast<float>(ask.price);
+        quad.width = static_cast<float>(ask.size * 100.0); // Scale for visibility
+        quad.height = 2.0f; // Fixed height
+        quad.r = 1.0f; quad.g = 0.0f; quad.b = 0.0f; quad.a = 0.8f; // Red for asks
+        
+        m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
+    }
+    
+    // Log FastOrderBook performance metrics
+    static int heatmapUpdateCount = 0;
+    if (++heatmapUpdateCount % 100 == 0) {
+        sLog_GPU("🚀 FAST ORDER BOOK STATS #" << heatmapUpdateCount
+                 << " Active levels:" << m_fastOrderBook.getTotalLevels()
+                 << " Best bid:" << m_fastOrderBook.getBestBidPrice()
+                 << " Best ask:" << m_fastOrderBook.getBestAskPrice()
+                 << " Spread:" << m_fastOrderBook.getSpread()
+                 << " Heatmap quads:" << m_heatmapWriteCursor);
+    }
+}

@@ -25,7 +25,7 @@ Rectangle {
     // 🚀 GPU CHART COMPONENTS - LAYERED RENDERING
     
     // 🔥 PHASE 2: HEATMAP BACKGROUND LAYER (Order Book)
-    HeatMapInstanced {
+    HeatmapBatched {
         id: heatmapLayer
         objectName: "heatmapLayer"  // 🔥 EXPOSE TO C++ - CRITICAL FIX!
         anchors.fill: parent
