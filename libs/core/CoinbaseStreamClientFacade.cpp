@@ -1,4 +1,7 @@
 #include "CoinbaseStreamClient.hpp"
+#include "CoinbaseConnection.hpp"
+#include "CoinbaseProtocolHandler.hpp"
+#include "CoinbaseMessageParser.hpp"
 #include <iostream>
 
 // New facade implementation - Phase 1 compilation verification stub
@@ -11,20 +14,19 @@ CoinbaseStreamClient::~CoinbaseStreamClient() {
 }
 
 void CoinbaseStreamClient::start() {
-    // TODO: Implement in Phase 5
-    if (m_core) m_core->start();
+    if (m_handler) m_handler->start();
 }
 
 void CoinbaseStreamClient::stop() {
-    // TODO: Implement in Phase 5
-    if (m_core) m_core->stop();
+    if (m_handler) m_handler->stop();
 }
 
 void CoinbaseStreamClient::subscribe(const std::vector<std::string>& symbols) {
-    // TODO: Implement in Phase 5
     if (symbols.empty()) return;
-    m_core = std::make_unique<MarketDataCore>(symbols, m_auth, m_cache);
-    m_core->start();
+    m_connection = std::make_unique<CoinbaseConnection>();
+    m_parser = std::make_unique<CoinbaseMessageParser>(m_cache);
+    m_handler = std::make_unique<CoinbaseProtocolHandler>(*m_connection, m_auth, *m_parser, symbols);
+    m_handler->start();
 }
 
 std::vector<Trade> CoinbaseStreamClient::getRecentTrades(const std::string& symbol) const {

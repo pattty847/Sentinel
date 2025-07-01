@@ -4,7 +4,9 @@
 // to the new SRP components underneath.
 // ─────────────────────────────────────────────────────────────
 #include "DataCache.hpp"
-#include "MarketDataCore.hpp"
+#include "CoinbaseConnection.hpp"
+#include "CoinbaseProtocolHandler.hpp"
+#include "CoinbaseMessageParser.hpp"
 #include "Authenticator.hpp"
 #include "tradedata.h"
 #include <memory>
@@ -39,5 +41,7 @@ public:
 private:
     Authenticator          m_auth;
     DataCache              m_cache;
-    std::unique_ptr<MarketDataCore> m_core;   // starts lazily after subscribe()
+    std::unique_ptr<CoinbaseConnection>     m_connection;
+    std::unique_ptr<CoinbaseMessageParser>  m_parser;
+    std::unique_ptr<CoinbaseProtocolHandler> m_handler;
 }; 

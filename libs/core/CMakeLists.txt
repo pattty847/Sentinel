@@ -12,6 +12,9 @@ target_sources(sentinel_core
         Authenticator.cpp
         DataCache.cpp
         MarketDataCore.cpp
+        CoinbaseConnection.cpp
+        CoinbaseProtocolHandler.cpp
+        CoinbaseMessageParser.cpp
         MessageParser.hpp
         # Phase 3: Lock-free performance monitoring
         performancemonitor.cpp
