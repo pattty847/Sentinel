@@ -55,6 +55,12 @@ public:
     // Configuration
     void setReserveSize(size_t size);
     size_t getReserveSize() const { return m_reserveSize; }
+    
+    // 🚀 O(1) Order Book Access
+    const FastOrderBook& getFastOrderBook() const { return m_fastOrderBook; }
+    double getBestBid() const { return m_fastOrderBook.getBestBidPrice(); }
+    double getBestAsk() const { return m_fastOrderBook.getBestAskPrice(); }
+    double getSpread() const { return m_fastOrderBook.getSpread(); }
 
 signals:
     void tradesReady(const GPUTypes::Point* points, size_t count);
@@ -72,6 +78,9 @@ private:
     // Lock-free queues
     TradeQueue m_tradeQueue;         // 65536 = 2^16 (3.3s buffer @ 20k msg/s)
     OrderBookQueue m_orderBookQueue; // 16384 = 2^14
+    
+    // 🚀 ULTRA-FAST: O(1) Order Book for HFT Performance  
+    FastOrderBook m_fastOrderBook;
     
     // Zero-malloc buffers (pre-allocated, cursor-based)
     std::vector<GPUTypes::Point> m_tradeBuffer;
@@ -124,4 +133,5 @@ private:
     void resetWriteCursors();
     void processCandleTimeFrame(CandleLOD::TimeFrame timeframe);  // Time-based candle processing
     void cleanupOldTradeHistory(); // 🚀 PHASE 2: Time-based history cleanup
+    void convertFastOrderBookToQuads(); // 🚀 Convert O(1) order book to GPU quads
 }; 
