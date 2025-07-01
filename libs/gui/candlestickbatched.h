@@ -125,6 +125,13 @@ private:
     mutable std::chrono::high_resolution_clock::time_point m_lastRenderTime;
     mutable double m_lastRenderDuration_ms = 0.0;
     
+    // 🚀 PHASE 4: PCIe UPLOAD PROFILER
+    mutable size_t m_bytesUploadedThisFrame = 0;
+    mutable double m_mbPerFrame = 0.0;
+    mutable std::atomic<size_t> m_totalBytesUploaded{0};
+    mutable std::atomic<int> m_bandwidthWarnings{0};
+    static constexpr double PCIE_BUDGET_MB_PER_SECOND = 200.0; // PCIe 3.0 x4 budget
+    
     
     // Helper methods
     void updateRenderBatch();

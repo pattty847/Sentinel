@@ -196,6 +196,12 @@ Rectangle {
             font.pixelSize: 12
             text: "✅ Phases 1-5: Complete | 🕯️ Candles + Circles + Heatmap Active"
         }
+        
+        Text {
+            color: "magenta"
+            font.pixelSize: 12
+            text: "📊 GPU: " + gpuChart.debugInfo
+        }
     }
     
     // 🚀 PHASE 4: Pan/Zoom Control Panel

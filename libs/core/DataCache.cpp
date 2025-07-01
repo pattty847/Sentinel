@@ -1,7 +1,9 @@
 #include "DataCache.hpp"
+#include "SentinelLogging.hpp"
 #include <algorithm>
 #include <mutex>
 #include <iostream>
+#include <QString>
 
 // Stub implementation for Phase 1 compilation verification
 
@@ -114,8 +116,8 @@ void LiveOrderBook::initializeFromSnapshot(const OrderBook& snapshot) {
         }
     }
     
-    std::cout << "🏗️  LiveOrderBook initialized for " << m_productId 
-              << " with " << m_bids.size() << " bids and " << m_asks.size() << " asks" << std::endl;
+    sLog_Init(QString("🏗️  LiveOrderBook initialized for %1 with %2 bids and %3 asks")
+              .arg(QString::fromStdString(m_productId)).arg(m_bids.size()).arg(m_asks.size()));
 }
 
 void LiveOrderBook::applyUpdate(const std::string& side, double price, double quantity) {
@@ -214,7 +216,7 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const OrderBo
     liveBook.setProductId(symbol);
     liveBook.initializeFromSnapshot(snapshot);
     
-    std::cout << "🔥 DataCache: Initialized LiveOrderBook for " << symbol << std::endl;
+    sLog_Cache(QString("🔥 DataCache: Initialized LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
 void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
@@ -241,9 +243,8 @@ OrderBook DataCache::getLiveOrderBook(const std::string& symbol) const {
         // 🔍 DEBUG: Log what we're returning from the cache
         static int cacheDebugCount = 0;
         if (++cacheDebugCount % 30 == 1) { // Log every 30th call
-            std::cout << "🔍 DATACACHE getLiveOrderBook: Found '" << symbol 
-                      << "' → returning " << book.bids.size() << " bids, " 
-                      << book.asks.size() << " asks [call #" << cacheDebugCount << "]" << std::endl;
+            sLog_Cache(QString("🔍 DATACACHE getLiveOrderBook: Found '%1' → returning %2 bids, %3 asks [call #%4]")
+                       .arg(QString::fromStdString(symbol)).arg(book.bids.size()).arg(book.asks.size()).arg(cacheDebugCount));
         }
         
         return book;
@@ -252,12 +253,12 @@ OrderBook DataCache::getLiveOrderBook(const std::string& symbol) const {
     // 🔍 DEBUG: Log when symbol is not found
     static int notFoundCount = 0;
     if (++notFoundCount % 10 == 1) { // Log every 10th miss
-        std::cout << "⚠️ DATACACHE getLiveOrderBook: Symbol '" << symbol 
-                  << "' NOT FOUND in live books! Available symbols: ";
+        QString availableSymbols;
         for (const auto& [sym, book] : m_liveBooks) {
-            std::cout << "'" << sym << "' ";
+            availableSymbols += QString("'%1' ").arg(QString::fromStdString(sym));
         }
-        std::cout << " [miss #" << notFoundCount << "]" << std::endl;
+        sLog_Cache(QString("⚠️ DATACACHE getLiveOrderBook: Symbol '%1' NOT FOUND in live books! Available symbols: %2 [miss #%3]")
+                   .arg(QString::fromStdString(symbol)).arg(availableSymbols).arg(notFoundCount));
     }
     
     return {}; // Return empty OrderBook if not found

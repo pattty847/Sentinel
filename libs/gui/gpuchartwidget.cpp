@@ -1,4 +1,5 @@
 #include "gpuchartwidget.h"
+#include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
@@ -23,9 +24,9 @@ GPUChartWidget::GPUChartWidget(QQuickItem* parent)
         m_gpuBuffers[i].points.reserve(m_maxPoints);
     }
     
-    qDebug() << "🚀 GPUChartWidget OPTION B REBUILD - CLEAN COORDINATE SYSTEM!";
-    qDebug() << "💾 Max Points:" << m_maxPoints << "| Time Span:" << m_timeSpanMs << "ms";
-    qDebug() << "🎯 Single coordinate system - no test mode, no sine waves";
+    sLog_Init("🚀 GPUChartWidget OPTION B REBUILD - CLEAN COORDINATE SYSTEM!");
+    sLog_Init("💾 Max Points:" << m_maxPoints << "| Time Span:" << m_timeSpanMs << "ms");
+    sLog_Init("🎯 Single coordinate system - no test mode, no sine waves");
 }
 
 // 🔥 NEW: Handle widget resize - recalculate coordinates
@@ -34,7 +35,7 @@ void GPUChartWidget::geometryChanged(const QRectF &newGeometry, const QRectF &ol
     if (newGeometry.size() != oldGeometry.size() && 
         newGeometry.width() > 0 && newGeometry.height() > 0) {
         
-        qDebug() << "📐 Widget resized from" << oldGeometry.size() << "to" << newGeometry.size();
+        sLog_Chart("📐 Widget resized from" << oldGeometry.size() << "to" << newGeometry.size());
         
         // Mark geometry as dirty for coordinate recalculation
         m_geometryDirty.store(true);
@@ -47,8 +48,8 @@ void GPUChartWidget::onTradeReceived(const Trade& trade) {
     // 🔥 CONNECTION TEST: Verify this method is being called
     static int connectionTestCount = 0;
     if (++connectionTestCount <= 5) {
-        qDebug() << "🎯 onTradeReceived CALLED! #" << connectionTestCount 
-                 << "Price:" << trade.price << "Side:" << (int)trade.side;
+        sLog_Trades("🎯 onTradeReceived CALLED! #" << connectionTestCount 
+                 << "Price:" << trade.price << "Side:" << (int)trade.side);
     }
     
     // 🔍 DEBUG: Log raw trade data to see what sides we're receiving
@@ -58,11 +59,11 @@ void GPUChartWidget::onTradeReceived(const Trade& trade) {
         if (trade.side == AggressorSide::Buy) rawSideStr = "BUY";
         else if (trade.side == AggressorSide::Sell) rawSideStr = "SELL";
         
-        qDebug() << "📈 RAW TRADE DATA #" << rawTradeDebugCount << ":"
+        sLog_Trades("📈 RAW TRADE DATA #" << rawTradeDebugCount << ":"
                  << "Product:" << trade.product_id.c_str()
                  << "Side:" << rawSideStr
                  << "Price:" << trade.price
-                 << "Size:" << trade.size;
+                 << "Size:" << trade.size);
     }
     
     // 📊 TRADE DISTRIBUTION TRACKING
@@ -78,11 +79,11 @@ void GPUChartWidget::onTradeReceived(const Trade& trade) {
         double buyPercent = totalTrades > 0 ? (totalBuys * 100.0 / totalTrades) : 0.0;
         double sellPercent = totalTrades > 0 ? (totalSells * 100.0 / totalTrades) : 0.0;
         
-        qDebug() << "📊 TRADE DISTRIBUTION SUMMARY:"
+        sLog_Trades("📊 TRADE DISTRIBUTION SUMMARY:"
                  << "Total:" << totalTrades
                  << "Buys:" << totalBuys << "(" << QString::number(buyPercent, 'f', 1) << "%)"
                  << "Sells:" << totalSells << "(" << QString::number(sellPercent, 'f', 1) << "%)"
-                 << "Unknown:" << totalUnknown;
+                 << "Unknown:" << totalUnknown);
     }
     
     appendTradeToVBO(trade);
@@ -106,7 +107,7 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     auto& buffer = m_gpuBuffers[writeIdx];
     
     if (buffer.inUse.load()) {
-        qDebug() << "⚠️ Buffer collision - frame skip (performance optimization)";
+        sLog_Performance("⚠️ Buffer collision - frame skip (performance optimization)");
         return;
     }
     
@@ -122,7 +123,7 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     // 🔥 REDUCED DEBUG: Only log first few trades to confirm system is working
     static int appendDebugCount = 0;
     if (appendDebugCount++ < 3) {
-        // qDebug() << "📝 Trade appended to VBO - Buffer points:" << buffer.points.size();  // Too chatty!
+        // sLog_Gpu() << "📝 Trade appended to VBO - Buffer points:" << buffer.points.size();  // Too chatty!
     }
     
     // Cleanup old points if we exceed max
@@ -138,7 +139,7 @@ void GPUChartWidget::appendTradeToVBO(const Trade& trade) {
     if (++tradeCount >= 10) { // 🚀 SMOOTH: Every 10 trades for real-time feel
         swapBuffers();
         tradeCount = 0;
-        // qDebug() << "🔄 Periodic buffer swap after 10 trades";  // Too chatty!
+        // sLog_Gpu() << "🔄 Periodic buffer swap after 10 trades";  // Too chatty!
     }
     
     update(); // Trigger GPU update
@@ -195,17 +196,17 @@ void GPUChartWidget::convertTradeToGPUPoint(const Trade& trade, GPUPoint& point)
     // 🔍 DEBUG: Log every trade's color assignment
     static int tradeColorDebugCount = 0;
     if (++tradeColorDebugCount <= 10) {
-        qDebug() << "🎨 TRADE COLOR DEBUG #" << tradeColorDebugCount << ":"
+        sLog_Trades("🎨 TRADE COLOR DEBUG #" << tradeColorDebugCount << ":"
                  << "Change:" << changeStr
                  << "Price:" << trade.price << "(prev:" << m_previousTradePrice << ")"
                  << "Size:" << trade.size
-                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")";
+                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")");
     }
     
     // Debug first few coordinate mappings to verify system
     static int tradeDebugCount = 0;
     if (++tradeDebugCount < 5) {
-        // qDebug() << "🎯 OPTION B TIME-SERIES Trade:" << "Price:" << trade.price 
+        // sLog_DebugCoords() << "🎯 OPTION B TIME-SERIES Trade:" << "Price:" << trade.price 
         //          << "Time:" << timestamp_ms << "→ Screen(" << point.x << "," << point.y << ")"
         //          << "Window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;  // Too chatty!
     }
@@ -238,10 +239,10 @@ void GPUChartWidget::updateDynamicPriceRange(double newPrice) {
             m_minPrice = newMinPrice;
             m_maxPrice = newMaxPrice;
             
-            qDebug() << "🎯 DYNAMIC RANGE UPDATED: Price" << newPrice 
+            sLog_Chart("🎯 DYNAMIC RANGE UPDATED: Price" << newPrice 
                      << "→ Range:" << m_minPrice << "-" << m_maxPrice 
                      << "Size:" << (m_maxPrice - m_minPrice) 
-                     << "Delta:" << priceDelta;
+                     << "Delta:" << priceDelta);
             
             // 🔥 THE FINAL FIX: Broadcast the new price range to the heatmap
             emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
@@ -261,12 +262,12 @@ void GPUChartWidget::enableDynamicPriceZoom(bool enabled) {
         m_minPrice = m_staticMinPrice;
         m_maxPrice = m_staticMaxPrice;
     }
-    qDebug() << "🎯 Dynamic price zoom" << (enabled ? "ENABLED" : "DISABLED");
+    sLog_Chart("🎯 Dynamic price zoom" << (enabled ? "ENABLED" : "DISABLED"));
 }
 
 void GPUChartWidget::setDynamicPriceRange(double rangeSize) {
     m_dynamicRangeSize = rangeSize;
-    qDebug() << "🎯 Dynamic price range size set to:" << rangeSize;
+    sLog_Chart("🎯 Dynamic price range size set to:" << rangeSize);
     
     // If we have a recent price, update the range immediately
     if (m_lastTradePrice > 0.0) {
@@ -283,7 +284,7 @@ void GPUChartWidget::resetPriceRange() {
         m_minPrice = m_staticMinPrice;
         m_maxPrice = m_staticMaxPrice;
     }
-    qDebug() << "🎯 Price range reset to:" << m_minPrice << "-" << m_maxPrice;
+    sLog_Chart("🎯 Price range reset to:" << m_minPrice << "-" << m_maxPrice);
 }
 
 // 🎯 PHASE 2: Safe Color Implementation (avoids dual-node crashes)
@@ -328,14 +329,14 @@ void GPUChartWidget::cleanupOldTrades() {
     if (buffer.points.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = buffer.points.size() - m_maxPoints;
         buffer.points.erase(buffer.points.begin(), buffer.points.begin() + excess);
-        // qDebug() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();  // Too chatty!
+        // sLog_Gpu() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();  // Too chatty!
     }
     
     // 🔥 GEMINI FIX: Also clean up accumulated points
     if (m_allRenderPoints.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = m_allRenderPoints.size() - m_maxPoints;
         m_allRenderPoints.erase(m_allRenderPoints.begin(), m_allRenderPoints.begin() + excess);
-        // qDebug() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();  // Too chatty!
+        // sLog_Gpu() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();  // Too chatty!
     }
 }
 
@@ -354,7 +355,7 @@ void GPUChartWidget::swapBuffers() {
     // 🔇 REDUCED DEBUG: Only log every 50th swap to reduce spam
     static int swapCounter = 0;
     if (++swapCounter % 50 == 0) {
-        // qDebug() << "🔄 Buffer swap: write" << oldWrite << "→" << newWrite 
+        // sLog_Gpu() << "🔄 Buffer swap: write" << oldWrite << "→" << newWrite 
         //          << ", read" << oldRead << "→" << newRead;  // Too chatty!
     }
 }
@@ -373,7 +374,7 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
     
     // Start with a single dot at fixed position for testing
     if (readBuffer.points.empty()) {
-        qDebug() << "⚠️ No trade data yet - returning nullptr";
+        sLog_Render("⚠️ No trade data yet - returning nullptr");
         delete oldNode;
         return nullptr;
     }
@@ -398,10 +399,13 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
         node->setMaterial(material);
         node->setFlag(QSGNode::OwnsMaterial);
         
-        qDebug() << "🔵 CREATED CIRCLE GEOMETRY: Three-color price change system with smooth circles!";
+        sLog_RenderDetail("🔵 CREATED CIRCLE GEOMETRY: Three-color price change system with smooth circles!");
     }
     
     if (readBuffer.dirty.load() || m_geometryDirty.load()) {
+        // 🚀 PHASE 4: GPU UPLOAD PROFILER - Reset frame counter
+        m_bytesUploadedThisFrame = 0;
+        
         // Update geometry with new trade data
         QSGGeometry* geometry = node->geometry();
         geometry->allocate(m_allRenderPoints.size() * 24); // 🔵 CIRCLES: 8 triangles × 3 vertices = 24 per circle
@@ -450,6 +454,43 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
             }
         }
         
+        // 🚀 PHASE 4: GPU UPLOAD PROFILER - Track bytes sent to GPU
+        size_t vertexCount = m_allRenderPoints.size() * 24;
+        size_t bytesUploaded = vertexCount * sizeof(QSGGeometry::ColoredPoint2D);
+        m_bytesUploadedThisFrame += bytesUploaded;
+        m_totalBytesUploaded.fetch_add(bytesUploaded, std::memory_order_relaxed);
+        
+        // Calculate bandwidth and check budget
+        m_mbPerFrame = static_cast<double>(m_bytesUploadedThisFrame) / 1'000'000.0;
+        double estimatedFPS = 60.0; // Assume 60 FPS for trade scatter
+        double bandwidthMBps = m_mbPerFrame * estimatedFPS;
+        
+        // Warn if exceeding PCIe budget
+        if (bandwidthMBps > PCIE_BUDGET_MB_PER_SECOND) {
+            m_bandwidthWarnings.fetch_add(1, std::memory_order_relaxed);
+            static int warningCount = 0;
+            if (++warningCount <= 5) { // Limit warning spam
+                sLog_Performance("⚠️ TRADE SCATTER PCIe WARNING #" << warningCount
+                          << "Current:" << QString::number(bandwidthMBps, 'f', 1) << "MB/s"
+                          << "Budget:" << PCIE_BUDGET_MB_PER_SECOND << "MB/s"
+                          << "Frame:" << QString::number(m_mbPerFrame, 'f', 3) << "MB"
+                          << "Points:" << m_allRenderPoints.size());
+            }
+        }
+        
+        // 🚀 PHASE 4: Update debug display with profiler metrics
+        updateDebugInfo();
+        
+        // Debug logging for first few frames
+        static int profileCount = 0;
+        if (++profileCount <= 10 || profileCount % 100 == 0) {
+            sLog_Performance("📊 TRADE SCATTER GPU PROFILER #" << profileCount
+                     << "Points:" << m_allRenderPoints.size()
+                     << "Frame:" << QString::number(m_mbPerFrame, 'f', 3) << "MB"
+                     << "Bandwidth:" << QString::number(bandwidthMBps, 'f', 1) << "MB/s"
+                     << "Total uploaded:" << (m_totalBytesUploaded.load() / 1'000'000) << "MB");
+        }
+        
         node->markDirty(QSGNode::DirtyGeometry);
         readBuffer.dirty.store(false);
         m_geometryDirty.store(false);
@@ -465,11 +506,11 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
                 else noChangeCount++;                                         // Yellow = No Change
             }
             
-            qDebug() << "🔵 CIRCLE RENDER DEBUG #" << debugCount << ":"
+            sLog_RenderDetail("🔵 CIRCLE RENDER DEBUG #" << debugCount << ":"
                      << "Total circles:" << m_allRenderPoints.size()
                      << "UPTICKS:" << uptickCount << "(green)"
                      << "DOWNTICKS:" << downtickCount << "(red)"  
-                     << "NO_CHANGE:" << noChangeCount << "(yellow)";
+                     << "NO_CHANGE:" << noChangeCount << "(yellow)");
                      
             // Show first few individual circle colors
             for (int i = 0; i < std::min(3, (int)m_allRenderPoints.size()); ++i) {
@@ -479,9 +520,9 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
                 else if (point.r > 0.8f && point.g < 0.2f) colorName = "RED-DOWNTICK";
                 else if (point.r > 0.8f && point.g > 0.8f) colorName = "YELLOW-NO_CHANGE";
                 
-                qDebug() << "  Circle" << i << ":" << colorName 
+                sLog_RenderDetail("  Circle" << i << ":" << colorName 
                          << "RGBA(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")"
-                         << "Price:" << point.rawPrice;
+                         << "Price:" << point.rawPrice);
             }
         }
     }
@@ -493,18 +534,18 @@ QSGNode* GPUChartWidget::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*)
 // 🚀 PHASE 1: Configuration Methods
 void GPUChartWidget::setMaxPoints(int maxPoints) {
     m_maxPoints = maxPoints;
-    qDebug() << "🎯 Max points set to:" << maxPoints;
+    sLog_Chart("🎯 Max points set to:" << maxPoints);
 }
 
 void GPUChartWidget::setTimeSpan(double timeSpanSeconds) {
     m_timeSpanMs = timeSpanSeconds * 1000.0;
-    qDebug() << "⏱️ Time span set to:" << timeSpanSeconds << "seconds";
+    sLog_Chart("⏱️ Time span set to:" << timeSpanSeconds << "seconds");
 }
 
 void GPUChartWidget::setPriceRange(double minPrice, double maxPrice) {
     m_minPrice = minPrice;
     m_maxPrice = maxPrice;
-    qDebug() << "📊 Price range set to:" << minPrice << "-" << maxPrice;
+    sLog_Chart("📊 Price range set to:" << minPrice << "-" << maxPrice);
 }
 
 void GPUChartWidget::addTrade(const Trade& trade) {
@@ -532,7 +573,7 @@ void GPUChartWidget::clearTrades() {
     m_geometryDirty.store(true);
     update();
     
-    qDebug() << "🧹 All GPU buffers and accumulated points cleared!";
+    sLog_Chart("🧹 All GPU buffers and accumulated points cleared!");
 }
 
 // 🔥 REMOVED: mapToScreen function - replaced with worldToScreen in Option B
@@ -548,7 +589,7 @@ void GPUChartWidget::mousePressEvent(QMouseEvent* event) {
         // 🚀 USER CONTROL: Disable auto-centering and auto-scroll immediately
         m_autoScrollEnabled = false;
         m_dynamicPriceZoom = false;
-        qDebug() << "🖱️ User control active - manual viewport navigation enabled";
+        sLog_Camera("🖱️ User control active - manual viewport navigation enabled");
         
         event->accept();
     }
@@ -598,8 +639,8 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
         // Debug camera movement
         static int panDebugCount = 0;
         if (panDebugCount++ < 3) {
-            qDebug() << "🎥 CAMERA PAN: Time window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms
-                     << "Price range:" << m_minPrice << "to" << m_maxPrice;
+            sLog_Camera("🎥 CAMERA PAN: Time window:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms
+                     << "Price range:" << m_minPrice << "to" << m_maxPrice);
         }
         
         event->accept();
@@ -615,7 +656,7 @@ void GPUChartWidget::mouseReleaseEvent(QMouseEvent* event) {
         if (latency < 5.0) {
             static int panSuccessCount = 0;
             if (panSuccessCount++ < 3) {
-                qDebug() << "✅ PHASE 4 SUCCESS: Pan latency" << latency << "ms < 5ms target!";
+                sLog_Performance("✅ PHASE 4 SUCCESS: Pan latency" << latency << "ms < 5ms target!");
             }
         }
         
@@ -692,7 +733,7 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
     // Disable auto-scroll on zoom
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
-        qDebug() << "🔍 Auto-scroll disabled - manual zoom";
+        sLog_Camera("🔍 Auto-scroll disabled - manual zoom");
     }
     
     m_geometryDirty.store(true);
@@ -702,12 +743,12 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
     // 🚀 ENHANCED DEBUG: Show both time and price zoom info
     static int zoomDebugCount = 0;
     if (zoomDebugCount++ < 5) {
-        qDebug() << "🎥 DUAL-AXIS ZOOM:"
+        sLog_Camera("🎥 DUAL-AXIS ZOOM:"
                  << "Time:" << (newTimeRange/1000.0) << "s"
                  << "Price: $" << QString::number(newPriceRange, 'f', 2)
                  << "Window: [" << m_visibleTimeStart_ms << "," << m_visibleTimeEnd_ms << "]"
                  << "Range: [$" << QString::number(m_minPrice, 'f', 2) 
-                 << ",$" << QString::number(m_maxPrice, 'f', 2) << "]";
+                 << ",$" << QString::number(m_maxPrice, 'f', 2) << "]");
     }
     
     event->accept();
@@ -729,7 +770,7 @@ void GPUChartWidget::zoomIn() {
     
     m_geometryDirty.store(true);
     update();
-    qDebug() << "🔍 Camera ZOOM IN: Time range:" << (newTimeRange/1000.0) << "seconds";
+    sLog_Camera("🔍 Camera ZOOM IN: Time range:" << (newTimeRange/1000.0) << "seconds");
 }
 
 void GPUChartWidget::zoomOut() {
@@ -746,7 +787,7 @@ void GPUChartWidget::zoomOut() {
     
     m_geometryDirty.store(true);
     update();
-    qDebug() << "🔍 Camera ZOOM OUT: Time range:" << (newTimeRange/1000.0) << "seconds";
+    sLog_Camera("🔍 Camera ZOOM OUT: Time range:" << (newTimeRange/1000.0) << "seconds");
 }
 
 void GPUChartWidget::resetZoom() {
@@ -769,14 +810,14 @@ void GPUChartWidget::resetZoom() {
         
         m_geometryDirty.store(true);
         update();
-        qDebug() << "🔄 CAMERA RESET - Time window and price range restored!";
+        sLog_Camera("🔄 CAMERA RESET - Time window and price range restored!");
     }
 }
 
 void GPUChartWidget::enableAutoScroll(bool enabled) {
     if (m_autoScrollEnabled != enabled) {
         m_autoScrollEnabled = enabled;
-        qDebug() << "🚀 Auto-scroll" << (enabled ? "ENABLED" : "DISABLED");
+        sLog_Camera("🚀 Auto-scroll" << (enabled ? "ENABLED" : "DISABLED"));
         emit autoScrollEnabledChanged();
     }
 }
@@ -788,7 +829,7 @@ void GPUChartWidget::centerOnPrice(double price) {
     m_maxPrice = price + priceSpan / 2.0;
     m_geometryDirty.store(true);
     update();
-    qDebug() << "🎯 Centered on price:" << price << "Range:" << m_minPrice << "-" << m_maxPrice;
+    sLog_Camera("🎯 Centered on price:" << price << "Range:" << m_minPrice << "-" << m_maxPrice);
 }
 
 void GPUChartWidget::centerOnTime(qint64 timestamp) {
@@ -799,7 +840,7 @@ void GPUChartWidget::centerOnTime(qint64 timestamp) {
     emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
     m_geometryDirty.store(true);
     update();
-    qDebug() << "🎯 Centered on timestamp:" << timestamp << "Window:" << m_visibleTimeStart_ms << "-" << m_visibleTimeEnd_ms;
+    sLog_Camera("🎯 Centered on timestamp:" << timestamp << "Window:" << m_visibleTimeStart_ms << "-" << m_visibleTimeEnd_ms);
 }
 
 // 🎯 PHASE 4: Coordinate Transformation Methods
@@ -903,7 +944,7 @@ void GPUChartWidget::initializeTimeWindow(int64_t firstTimestamp) {
     m_visibleTimeEnd_ms = firstTimestamp + static_cast<int64_t>(paddingMs);
     m_visibleTimeStart_ms = m_visibleTimeEnd_ms - m_timeSpanMs;
     m_timeWindowInitialized = true;
-    qDebug() << "🔥 Initialized time window with padding:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms;
+    sLog_Chart("🔥 Initialized time window with padding:" << m_visibleTimeStart_ms << "to" << m_visibleTimeEnd_ms);
 }
 
 void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
@@ -941,23 +982,18 @@ void GPUChartWidget::updateDebugInfo() {
     double timeSpanSec = (m_visibleTimeEnd_ms - m_visibleTimeStart_ms) / 1000.0;
     double priceRange = m_maxPrice - m_minPrice;
     
-    // Format debug text
+    // 🚀 PHASE 4: Calculate bandwidth metrics
+    double totalMB = static_cast<double>(m_totalBytesUploaded.load()) / 1'000'000.0;
+    int warnings = m_bandwidthWarnings.load();
+    
+    // Format debug text with GPU profiler metrics
     m_debugInfoText = QString(
-        "📊 VIEWPORT DEBUG\n"
-        "Screen: %1×%2px\n"
-        "Time: %3s [%4 - %5]\n"
-        "Price: $%6 [$%7 - $%8]\n"
-        "Points: %9 | Candle Threshold: %10"
-    ).arg(static_cast<int>(width()))
-     .arg(static_cast<int>(height()))
-     .arg(timeSpanSec, 0, 'f', 1)
-     .arg(m_visibleTimeStart_ms)
-     .arg(m_visibleTimeEnd_ms)
-     .arg(priceRange, 0, 'f', 2)
-     .arg(m_minPrice, 0, 'f', 2)
-     .arg(m_maxPrice, 0, 'f', 2)
-     .arg(m_allRenderPoints.size())
-     .arg(timeSpanSec < 10.0 ? "HIDDEN" : "VISIBLE");
+        "📊 Frame:%1MB BW:%2MB/s Total:%3MB Warn:%4 | Points:%5"
+    ).arg(m_mbPerFrame, 0, 'f', 3)
+     .arg(m_mbPerFrame * 60.0, 0, 'f', 1)  // Assume 60 FPS
+     .arg(totalMB, 0, 'f', 1)
+     .arg(warnings)
+     .arg(m_allRenderPoints.size());
     
     emit debugInfoChanged();
 } 

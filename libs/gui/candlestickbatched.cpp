@@ -1,4 +1,5 @@
 #include "candlestickbatched.h"
+#include "../core/SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
@@ -14,30 +15,30 @@ CandlestickBatched::CandlestickBatched(QQuickItem* parent)
 {
     setFlag(ItemHasContents, true);
 
-    qDebug() << "🕯️ CandlestickBatched INITIALIZED - Professional Trading Terminal Candles!";
-    qDebug() << "🎯 LOD System: Enabled | Max Candles:" << m_maxCandles
-             << "| Auto-scaling: " << (m_volumeScaling ? "ON" : "OFF");
+    sLog_Init("🕯️ CandlestickBatched INITIALIZED - Professional Trading Terminal Candles!");
+    sLog_Init("🎯 LOD System: Enabled | Max Candles:" << m_maxCandles
+             << "| Auto-scaling: " << (m_volumeScaling ? "ON" : "OFF"));
 }
 
 void CandlestickBatched::onCandlesReady(const std::vector<CandleUpdate>& candles) {
     // 🔍 DEBUG: Log candle data reception
     static int candleReceptionCount = 0;
     if (++candleReceptionCount <= 10) {
-        qDebug() << "📦 CANDLES RECEIVED #" << candleReceptionCount
-                 << "Count:" << candles.size();
+        sLog_Candles("📦 CANDLES RECEIVED #" << candleReceptionCount
+                 << "Count:" << candles.size());
                  
         if (!candles.empty()) {
             const auto& first = candles[0];
-            qDebug() << "🕯️ FIRST CANDLE UPDATE: timeframe=" << static_cast<int>(first.timeframe)
+            sLog_Candles("🕯️ FIRST CANDLE UPDATE: timeframe=" << static_cast<int>(first.timeframe)
                      << "timestamp=" << first.candle.timestamp_ms
                      << "OHLC:" << first.candle.open << first.candle.high 
-                     << first.candle.low << first.candle.close;
+                     << first.candle.low << first.candle.close);
         }
     }
     
     if (candles.empty()) {
         if (candleReceptionCount <= 10) {
-            qDebug() << "⚠️ EMPTY CANDLES RECEIVED - returning early";
+            sLog_Candles("⚠️ EMPTY CANDLES RECEIVED - returning early");
         }
         return;
     }
@@ -61,7 +62,7 @@ void CandlestickBatched::onCandlesReady(const std::vector<CandleUpdate>& candles
             for (const auto& vec : m_candles) {
                 totalCandles += vec.size();
             }
-            qDebug() << "📊 CANDLE STORAGE: Total candles across all timeframes:" << totalCandles;
+            sLog_Candles("📊 CANDLE STORAGE: Total candles across all timeframes:" << totalCandles);
         }
     }
 
@@ -95,23 +96,23 @@ void CandlestickBatched::onViewChanged(int64_t startTimeMs, int64_t endTimeMs,
     }
     
     if (coordUpdateCount <= 20) { // Increased debugging
-        qDebug() << "🕯️ CANDLE COORDINATES UPDATE #" << coordUpdateCount
+        sLog_DebugCoords("🕯️ CANDLE COORDINATES UPDATE #" << coordUpdateCount
                  << "CHANGED:" << (coordsChanged ? "YES" : "NO")
                  << "Time window:" << startTimeMs << "-" << endTimeMs 
                  << "Duration:" << ((endTimeMs - startTimeMs) / 1000.0) << "seconds"
                  << "Price window:" << minPrice << "-" << maxPrice
                  << "Price range:" << (maxPrice - minPrice)
                  << "Widget size:" << width() << "x" << height()
-                 << "Coords valid:" << m_coordinatesValid;
+                 << "Coords valid:" << m_coordinatesValid);
                  
         // Check if the coordinate ranges look reasonable for BTC
         bool reasonableTime = (endTimeMs - startTimeMs) > 1000 && (endTimeMs - startTimeMs) < 86400000; // 1s to 1 day
         bool reasonablePrice = minPrice > 50000 && maxPrice < 200000 && (maxPrice - minPrice) > 1.0; // BTC price range
         
-        qDebug() << "🔍 COORDINATE SANITY CHECK:"
+        sLog_DebugCoords("🔍 COORDINATE SANITY CHECK:"
                  << "Time range reasonable:" << (reasonableTime ? "YES" : "NO")
                  << "Price range reasonable:" << (reasonablePrice ? "YES" : "NO")
-                 << "Total candles available:" << m_candles[static_cast<size_t>(CandleLOD::TF_1sec)].size();
+                 << "Total candles available:" << m_candles[static_cast<size_t>(CandleLOD::TF_1sec)].size());
     }
 }
 
@@ -120,7 +121,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     
     // 🚨 TEMPORARY: Disable candle rendering to isolate Qt scene graph issue
     // This proves our timing frequency fix works perfectly and the rest of the app is stable
-    // qDebug() << "🕯️ CANDLE RENDERING TEMPORARILY DISABLED - Timing frequency fix proven successful!";
+    // sLog_Render() << "🕯️ CANDLE RENDERING TEMPORARILY DISABLED - Timing frequency fix proven successful!";
     // delete oldNode;
     // return nullptr;
     
@@ -129,21 +130,21 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     paintNodeCount++;
     
     if (paintNodeCount <= 10) {
-        qDebug() << "🎨 PAINT NODE UPDATE #" << paintNodeCount
+        sLog_RenderDetail("🎨 PAINT NODE UPDATE #" << paintNodeCount
                  << "Widget size:" << width() << "x" << height()
                  << "Coordinates valid:" << m_coordinatesValid
                  << "Time range:" << m_viewStartTime_ms << "-" << m_viewEndTime_ms
                  << "Price range:" << m_minPrice << "-" << m_maxPrice
-                 << "Geometry dirty:" << m_geometryDirty.load();
+                 << "Geometry dirty:" << m_geometryDirty.load());
     }
     
     // CRITICAL: Ensure we're on the render thread and ready to paint
     if (width() <= 0 || height() <= 0 || !m_coordinatesValid) {
         if (paintNodeCount <= 10) {
-            qDebug() << "🕯️ SKIPPING PAINT: Invalid state - width:" << width() 
+            sLog_RenderDetail("🕯️ SKIPPING PAINT: Invalid state - width:" << width() 
                      << "height:" << height() << "coordsValid:" << m_coordinatesValid
                      << "Reason:" << (width() <= 0 ? "ZERO_WIDTH" : 
-                                    height() <= 0 ? "ZERO_HEIGHT" : "INVALID_COORDS");
+                                    height() <= 0 ? "ZERO_HEIGHT" : "INVALID_COORDS"));
         }
         delete oldNode;
         return nullptr;
@@ -162,19 +163,19 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     if (candles.empty()) {
         static int emptyCount = 0;
         if (++emptyCount <= 5 || emptyCount % 100 == 0) {
-            qDebug() << "🕯️ NO CANDLES TO RENDER #" << emptyCount 
+            sLog_Render("🕯️ NO CANDLES TO RENDER #" << emptyCount 
                      << "TimeFrame:" << CandleUtils::timeFrameName(activeTimeFrame)
-                     << "View valid:" << m_coordinatesValid;
+                     << "View valid:" << m_coordinatesValid);
         }
         delete oldNode;
         return nullptr;
     } else {
         static int renderCount = 0;
         if (++renderCount <= 5 || renderCount % 100 == 0) {
-            qDebug() << "🕯️ RENDERING CANDLES #" << renderCount 
+            sLog_Render("🕯️ RENDERING CANDLES #" << renderCount 
                      << "Count:" << candles.size()
                      << "TimeFrame:" << CandleUtils::timeFrameName(activeTimeFrame)
-                     << "ViewRange:" << m_viewStartTime_ms << "-" << m_viewEndTime_ms;
+                     << "ViewRange:" << m_viewStartTime_ms << "-" << m_viewEndTime_ms);
         }
     }
     
@@ -189,7 +190,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         bearishNode = new QSGGeometryNode();
         rootNode->appendChildNode(bullishNode);
         rootNode->appendChildNode(bearishNode);
-        qDebug() << "🕯️ CREATED NEW ROOT NODE: Setting up candle scene graph";
+        sLog_RenderDetail("🕯️ CREATED NEW ROOT NODE: Setting up candle scene graph");
     } else {
         bullishNode = static_cast<QSGGeometryNode*>(rootNode->childAtIndex(0));
         bearishNode = static_cast<QSGGeometryNode*>(rootNode->childAtIndex(1));
@@ -201,6 +202,9 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
         separateAndUpdateCandles(candles);
         
+        // 🚀 PHASE 4: GPU UPLOAD PROFILER - Reset frame counter
+        m_bytesUploadedThisFrame = 0;
+        
         // Update GPU geometry for both candle types
         createCandleGeometry(bullishNode, m_renderBatch.bullishCandles, m_bullishColor, true);
         createCandleGeometry(bearishNode, m_renderBatch.bearishCandles, m_bearishColor, true);
@@ -210,17 +214,50 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         emit candleCountChanged(m_renderBatch.bullishCandles.size() + m_renderBatch.bearishCandles.size());
         emit lodLevelChanged(static_cast<int>(activeTimeFrame));
         
-        qDebug() << "🕯️ CANDLE RENDER UPDATE:"
+        sLog_Render("🕯️ CANDLE RENDER UPDATE:"
                  << "LOD:" << CandleUtils::timeFrameName(activeTimeFrame)
                  << "Bullish:" << m_renderBatch.bullishCandles.size()
                  << "Bearish:" << m_renderBatch.bearishCandles.size()
-                 << "Total:" << (m_renderBatch.bullishCandles.size() + m_renderBatch.bearishCandles.size());
+                 << "Total:" << (m_renderBatch.bullishCandles.size() + m_renderBatch.bearishCandles.size()));
     }
     
     // Track render performance
     auto endTime = std::chrono::high_resolution_clock::now();
     m_lastRenderDuration_ms = std::chrono::duration<double, std::milli>(endTime - startTime).count();
     emit renderTimeChanged(m_lastRenderDuration_ms);
+    
+    // 🚀 PHASE 4: GPU UPLOAD BANDWIDTH MONITORING
+    if (m_geometryDirty.load() == false) { // Only track when we actually uploaded data
+        m_mbPerFrame = static_cast<double>(m_bytesUploadedThisFrame) / 1'000'000.0;
+        m_totalBytesUploaded.fetch_add(m_bytesUploadedThisFrame, std::memory_order_relaxed);
+        
+        // Calculate bandwidth: MB per frame * frames per second = MB/s
+        double estimatedFPS = m_lastRenderDuration_ms > 0 ? (1000.0 / m_lastRenderDuration_ms) : 60.0;
+        double bandwidthMBps = m_mbPerFrame * estimatedFPS;
+        
+        // Warn if exceeding PCIe budget
+        if (bandwidthMBps > PCIE_BUDGET_MB_PER_SECOND) {
+            m_bandwidthWarnings.fetch_add(1, std::memory_order_relaxed);
+            static int warningCount = 0;
+            if (++warningCount <= 5) { // Limit warning spam
+                sLog_Performance("⚠️ PCIe BANDWIDTH WARNING #" << warningCount
+                          << "Current:" << QString::number(bandwidthMBps, 'f', 1) << "MB/s"
+                          << "Budget:" << PCIE_BUDGET_MB_PER_SECOND << "MB/s"
+                          << "Frame:" << QString::number(m_mbPerFrame, 'f', 3) << "MB"
+                          << "FPS:" << QString::number(estimatedFPS, 'f', 1));
+            }
+        }
+        
+        // Debug logging for first few frames
+        static int profileCount = 0;
+        if (++profileCount <= 10 || profileCount % 100 == 0) {
+            sLog_DebugTiming("📊 GPU UPLOAD PROFILER #" << profileCount
+                     << "Frame:" << QString::number(m_mbPerFrame, 'f', 3) << "MB"
+                     << "Bandwidth:" << QString::number(bandwidthMBps, 'f', 1) << "MB/s"
+                     << "Total uploaded:" << (m_totalBytesUploaded.load() / 1'000'000) << "MB"
+                     << "Warnings:" << m_bandwidthWarnings.load());
+        }
+    }
     
     // FINAL VALIDATION: Ensure scene graph is in valid state before returning
     if (!rootNode || rootNode->childCount() != 2) {
@@ -242,7 +279,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         return nullptr;
     }
     
-    qDebug() << "✅ SCENE GRAPH VALIDATION PASSED: Returning valid candle node structure";
+    sLog_RenderDetail("✅ SCENE GRAPH VALIDATION PASSED: Returning valid candle node structure");
 
     // ────────────────────────────────────────────────────────────
     // MICRO-VIEW CLEAN-UP: Hide candle layer when the visible window
@@ -254,7 +291,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         int64_t viewSpanMs = m_viewEndTime_ms - m_viewStartTime_ms;
         if (viewSpanMs > 0 && viewSpanMs < kHideCandleThresholdMs) {
             if (paintNodeCount <= 10 || paintNodeCount % 200 == 0) {
-                qDebug() << "🕯️ MICRO VIEW: Candle layer hidden (view span" << viewSpanMs << "ms)";
+                sLog_RenderDetail("🕯️ MICRO VIEW: Candle layer hidden (view span" << viewSpanMs << "ms)");
             }
             // Clean up previous node if it exists, then skip rendering.
             delete oldNode;
@@ -275,10 +312,10 @@ void CandlestickBatched::separateAndUpdateCandles(const std::vector<OHLC>& candl
     // 🔍 DEBUG: Log candle processing details
     static int separateCount = 0;
     if (++separateCount <= 5) {
-        qDebug() << "🕯️ SEPARATING CANDLES #" << separateCount
+        sLog_DebugGeometry("🕯️ SEPARATING CANDLES #" << separateCount
                  << "Input candles:" << candles.size()
                  << "View window: time[" << m_viewStartTime_ms << "-" << m_viewEndTime_ms << "]"
-                 << "View window: price[" << m_minPrice << "-" << m_maxPrice << "]";
+                 << "View window: price[" << m_minPrice << "-" << m_maxPrice << "]");
     }
     
     int visibleCandleCount = 0;
@@ -297,10 +334,10 @@ void CandlestickBatched::separateAndUpdateCandles(const std::vector<OHLC>& candl
         if (candle.open < m_minPrice - 1000 || candle.open > m_maxPrice + 1000) {
             outsidePriceWindow++;
             if (separateCount <= 5) { // Only log first few batches
-                qDebug() << "🚨 CANDLE OUTSIDE PRICE RANGE:" 
+                sLog_DebugGeometry("🚨 CANDLE OUTSIDE PRICE RANGE:" 
                          << "timestamp:" << candle.timestamp_ms
                          << "OHLC:" << candle.open << candle.high << candle.low << candle.close
-                         << "vs range:" << m_minPrice << "-" << m_maxPrice;
+                         << "vs range:" << m_minPrice << "-" << m_maxPrice);
             }
             // Continue processing even if outside price range - it might be visible
         }
@@ -372,26 +409,26 @@ void CandlestickBatched::separateAndUpdateCandles(const std::vector<OHLC>& candl
     
     // 🔍 DEBUG: Summary of candle processing results
     if (separateCount <= 5) {
-        qDebug() << "📊 CANDLE PROCESSING SUMMARY #" << separateCount
+        sLog_DebugGeometry("📊 CANDLE PROCESSING SUMMARY #" << separateCount
                  << "Total input:" << candles.size()
                  << "Visible:" << visibleCandleCount
                  << "Outside time:" << outsideTimeWindow
                  << "Outside price:" << outsidePriceWindow  
                  << "Final bullish:" << m_renderBatch.bullishCandles.size()
-                 << "Final bearish:" << m_renderBatch.bearishCandles.size();
+                 << "Final bearish:" << m_renderBatch.bearishCandles.size());
                  
         // Show first few candle details if any were processed
         if (!m_renderBatch.bullishCandles.empty()) {
             const auto& first = m_renderBatch.bullishCandles[0];
-            qDebug() << "🟢 FIRST BULLISH CANDLE: x=" << first.screenX 
+            sLog_DebugGeometry("🟢 FIRST BULLISH CANDLE: x=" << first.screenX 
                      << "bodyTop=" << first.bodyTop << "bodyBottom=" << first.bodyBottom
-                     << "wickTop=" << first.wickTop << "wickBottom=" << first.wickBottom;
+                     << "wickTop=" << first.wickTop << "wickBottom=" << first.wickBottom);
         }
         if (!m_renderBatch.bearishCandles.empty()) {
             const auto& first = m_renderBatch.bearishCandles[0];
-            qDebug() << "🔴 FIRST BEARISH CANDLE: x=" << first.screenX
+            sLog_DebugGeometry("🔴 FIRST BEARISH CANDLE: x=" << first.screenX
                      << "bodyTop=" << first.bodyTop << "bodyBottom=" << first.bodyBottom
-                     << "wickTop=" << first.wickTop << "wickBottom=" << first.wickBottom;
+                     << "wickTop=" << first.wickTop << "wickBottom=" << first.wickBottom);
         }
     }
 }
@@ -414,33 +451,33 @@ void CandlestickBatched::createCandleGeometry(QSGGeometryNode* node, const std::
             }
         }
         
-        qDebug() << "🏗️ CREATING GEOMETRY #" << geometryCreateCount
+        sLog_DebugGeometry("🏗️ CREATING GEOMETRY #" << geometryCreateCount
                  << "Total candles:" << candles.size() 
                  << "VISIBLE candles:" << visibleCandles
                  << "VertexCount:" << vertexCount
                  << "IsBody:" << isBody
                  << "Color:" << color.name() << "Alpha:" << color.alpha()
-                 << "Widget size:" << width() << "x" << height();
+                 << "Widget size:" << width() << "x" << height());
                  
         // Log first few candle positions
         if (!candles.empty() && geometryCreateCount <= 5) {
             for (size_t i = 0; i < std::min(size_t(3), candles.size()); ++i) {
                 const auto& c = candles[i];
-                qDebug() << "  🕯️ Candle" << i << ":"
+                sLog_DebugGeometry("  🕯️ Candle" << i << ":"
                          << "x=" << c.screenX
                          << "bodyTop=" << c.bodyTop << "bodyBottom=" << c.bodyBottom
                          << "wickTop=" << c.wickTop << "wickBottom=" << c.wickBottom
-                         << "width=" << c.width;
+                         << "width=" << c.width);
             }
         }
     }
 
-    // ---------------------------------------------------------------------
+    // --------------------------------------------------------------------
     // 1.  MATERIAL – every QSGGeometryNode submitted to the scene graph MUST
     //     have a valid material pointer.  Missing materials are a very common
     //     cause of crashes deep inside QSGBatchRenderer (null-ptr deref while
     //     the renderer inspects material flags).
-    // ---------------------------------------------------------------------
+    // --------------------------------------------------------------------
 
     QSGFlatColorMaterial* mat = static_cast<QSGFlatColorMaterial*>(node->material());
     if (!mat) {
@@ -451,9 +488,9 @@ void CandlestickBatched::createCandleGeometry(QSGGeometryNode* node, const std::
     if (mat->color() != color)
         mat->setColor(color);
 
-    // ---------------------------------------------------------------------
+    // --------------------------------------------------------------------
     // 2. GEOMETRY – ensure vertex buffer has the right size.
-    // ---------------------------------------------------------------------
+    // --------------------------------------------------------------------
 
     // Ensure geometry buffer is correctly sized for the current vertex count.
     // We now allow 0-vertex allocations so that geometry that should be invisible
@@ -495,9 +532,9 @@ void CandlestickBatched::createCandleGeometry(QSGGeometryNode* node, const std::
                 
                 // 🔍 DEBUG: Log first few vertex positions for visibility
                 if (geometryCreateCount <= 5 && currentVertex < 6) {
-                    qDebug() << "    📍 Body vertex positions:"
+                    sLog_DebugGeometry("    📍 Body vertex positions:"
                              << "left=" << left << "right=" << right
-                             << "top=" << top << "bottom=" << bottom;
+                             << "top=" << top << "bottom=" << bottom);
                 }
                 
                 vertices[currentVertex++].set(left, bottom);
@@ -513,6 +550,11 @@ void CandlestickBatched::createCandleGeometry(QSGGeometryNode* node, const std::
                 vertices[currentVertex++].set(candle.screenX, candle.wickBottom);
             }
         }
+        
+        // 🚀 PHASE 4: GPU UPLOAD PROFILER - Track bytes sent to GPU
+        size_t bytesUploaded = vertexCount * sizeof(QSGGeometry::Point2D);
+        m_bytesUploadedThisFrame += bytesUploaded;
+        
         // In Qt6 the geometry itself no longer exposes markDirty(). Instead we
         // notify the parent geometry node that its geometry has changed so the
         // scene graph can update. DirtyGeometry is the closest equivalent to
@@ -653,12 +695,12 @@ QPointF CandlestickBatched::worldToScreen(int64_t timestamp_ms, double price) co
     static int dbgCount = 0;
     if (++dbgCount <= 10) {
         bool inViewport = (x >= 0 && x <= width() && y >= 0 && y <= height());
-        qDebug() << "🗺️ UNIFIED COORD CALC #" << dbgCount
+        sLog_DebugCoords("🗺️ UNIFIED COORD CALC #" << dbgCount
                  << "TS:" << timestamp_ms << "P:" << price
                  << "x:" << x << "y:" << y << "inViewport:" << (inViewport?"YES":"NO")
                  << "TimeRatio:" << timeRatio << "PriceRatio:" << priceRatio
                  << "TimeWin:" << m_viewStartTime_ms << "-" << m_viewEndTime_ms
-                 << "PriceWin:" << m_minPrice << "-" << m_maxPrice;
+                 << "PriceWin:" << m_minPrice << "-" << m_maxPrice);
     }
 
     return QPointF(x, y);
@@ -671,12 +713,26 @@ CandleLOD::TimeFrame CandlestickBatched::selectOptimalTimeFrame() const {
     
     // Calculate pixels per candle based on current view
     double pixelsPerCandle = calculateCurrentPixelsPerCandle();
+    
+    // 🚀 PHASE 1: VIEWPORT-AWARE LOD THRESHOLDS
+    // Replace hardcoded pixel values with viewport-relative calculations
+    // This ensures consistent LOD switching across different display resolutions (Retina, 4K, ultrawide)
+    double viewportWidth = width();
+    if (viewportWidth <= 0) viewportWidth = 1920.0; // Fallback for invalid widget size
+    
+    // Calculate viewport-relative thresholds (as fractions of viewport width)
+    double dailyThreshold   = viewportWidth * 0.001;  // 0.1% of viewport width
+    double hourlyThreshold  = viewportWidth * 0.0026; // 0.26% of viewport width  
+    double min15Threshold   = viewportWidth * 0.0052; // 0.52% of viewport width
+    double min5Threshold    = viewportWidth * 0.0104; // 1.04% of viewport width
+    double min1Threshold    = viewportWidth * 0.0208; // 2.08% of viewport width
+    
     // 🔥 BITCOIN-OPTIMIZED LOD: Avoid sub-second timeframes for crypto
-    if (pixelsPerCandle < 2.0)  return CandleLOD::TF_Daily;
-    if (pixelsPerCandle < 5.0)  return CandleLOD::TF_60min;
-    if (pixelsPerCandle < 10.0) return CandleLOD::TF_15min;
-    if (pixelsPerCandle < 20.0) return CandleLOD::TF_5min;
-    if (pixelsPerCandle < 40.0) return CandleLOD::TF_1min;
+    if (pixelsPerCandle < dailyThreshold)   return CandleLOD::TF_Daily;
+    if (pixelsPerCandle < hourlyThreshold)  return CandleLOD::TF_60min;
+    if (pixelsPerCandle < min15Threshold)   return CandleLOD::TF_15min;
+    if (pixelsPerCandle < min5Threshold)    return CandleLOD::TF_5min;
+    if (pixelsPerCandle < min1Threshold)    return CandleLOD::TF_1min;
     return CandleLOD::TF_1sec;  // 🕯️ MINIMUM: 1-second candles for crypto (never go below)
 }
 
@@ -698,9 +754,9 @@ void CandlestickBatched::updateLODIfNeeded() {
     static CandleLOD::TimeFrame lastTimeFrame = CandleLOD::TF_1min;
     
     if (newTimeFrame != lastTimeFrame) {
-        qDebug() << "🕯️ LOD CHANGED:" << CandleUtils::timeFrameName(lastTimeFrame) 
+        sLog_Chart("🕯️ LOD CHANGED:" << CandleUtils::timeFrameName(lastTimeFrame) 
                  << "→" << CandleUtils::timeFrameName(newTimeFrame)
-                 << "Pixels per candle:" << calculateCurrentPixelsPerCandle();
+                 << "Pixels per candle:" << calculateCurrentPixelsPerCandle());
         lastTimeFrame = newTimeFrame;
     }
 }
@@ -809,13 +865,13 @@ void CandlestickBatched::ensureCapacity(QSGGeometryNode* node, int wantedVertexC
         g = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), allocCount);
         node->setGeometry(g);
         node->setFlag(QSGNode::OwnsGeometry);
-        qDebug() << "  - Created new geometry with" << allocCount << "vertices";
+        sLog_DebugGeometry("  - Created new geometry with" << allocCount << "vertices");
     } else if (allocCount != g->vertexCount()) {
         g->allocate(allocCount);
-        qDebug() << "  - Reallocated geometry to" << allocCount << "vertices";
+        sLog_DebugGeometry("  - Reallocated geometry to" << allocCount << "vertices");
     }
 
     // Ensure drawing mode is always correct (may differ between body/wick calls)
     if (g->drawingMode() != mode)
         g->setDrawingMode(mode);
-} 
+}  

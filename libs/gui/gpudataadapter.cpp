@@ -1,4 +1,5 @@
 #include "gpudataadapter.h"
+#include "SentinelLogging.hpp"
 #include <QDebug>
 #include <QElapsedTimer>
 #include <algorithm>
@@ -12,7 +13,7 @@ GPUDataAdapter::GPUDataAdapter(QObject* parent)
     , m_candle500msTimer(new QTimer(this))
     , m_candle1sTimer(new QTimer(this))
 {
-    qDebug() << "🚀 GPUDataAdapter: Initializing lock-free data pipeline...";
+    sLog_Init("🚀 GPUDataAdapter: Initializing lock-free data pipeline...");
     
     initializeBuffers();
     
@@ -28,11 +29,11 @@ GPUDataAdapter::GPUDataAdapter(QObject* parent)
     m_candle500msTimer->start(500); // 500ms - Medium-frequency candles  
     m_candle1sTimer->start(1000);   // 1000ms - Second candles
     
-    qDebug() << "✅ GPUDataAdapter: Lock-free pipeline initialized"
+    sLog_Init("✅ GPUDataAdapter: Lock-free pipeline initialized"
              << "- Reserve size:" << m_reserveSize 
              << "- Trade queue capacity: 65536"
              << "- OrderBook queue capacity: 16384"
-             << "- Candle timers: 100ms, 500ms, 1s";
+             << "- Candle timers: 100ms, 500ms, 1s");
 }
 
 void GPUDataAdapter::initializeBuffers() {
@@ -43,8 +44,8 @@ void GPUDataAdapter::initializeBuffers() {
     // Pre-allocate once: std::max(expected, userPref)
     size_t actualSize = (m_reserveSize > 100000) ? m_reserveSize : 100000; // Minimum 100k
     
-    qDebug() << "🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize
-             << "Heatmap buffer:" << actualSize;
+    sLog_Init("🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize
+             << "Heatmap buffer:" << actualSize);
 
     m_tradeBuffer.reserve(actualSize);
     m_heatmapBuffer.reserve(actualSize);
@@ -55,7 +56,7 @@ void GPUDataAdapter::initializeBuffers() {
     m_heatmapBuffer.resize(actualSize);
     m_candleBuffer.resize(actualSize);
     
-    qDebug() << "💾 GPUDataAdapter: Buffer allocation complete";
+    sLog_Init("💾 GPUDataAdapter: Buffer allocation complete");
 }
 
 bool GPUDataAdapter::pushTrade(const Trade& trade) {
@@ -100,6 +101,13 @@ void GPUDataAdapter::processIncomingData() {
         m_tradeBuffer[m_tradeWriteCursor++] = convertTradeToGPUPoint(trade);
         m_candleLOD.addTrade(trade);
         m_currentSymbol = trade.product_id;
+        
+        // 🚀 PHASE 2: Add trade to time-windowed history buffer
+        {
+            std::lock_guard<std::mutex> lock(m_tradeHistoryMutex);
+            m_tradeHistory.push_back(trade);
+        }
+        
         tradesProcessed++;
         
         // Rate limiting for stress testing
@@ -165,11 +173,10 @@ void GPUDataAdapter::processIncomingData() {
             double gpuBuyPercent = gpuTotalTrades > 0 ? (gpuTotalBuys * 100.0 / gpuTotalTrades) : 0.0;
             double gpuSellPercent = gpuTotalTrades > 0 ? (gpuTotalSells * 100.0 / gpuTotalTrades) : 0.0;
             
-            qDebug() << "📊 GPU ADAPTER DISTRIBUTION:"
-                     << "Total:" << gpuTotalTrades
-                     << "Buys:" << gpuTotalBuys << "(" << QString::number(gpuBuyPercent, 'f', 1) << "%)"
-                     << "Sells:" << gpuTotalSells << "(" << QString::number(gpuSellPercent, 'f', 1) << "%)"
-                     << "Unknown:" << gpuTotalUnknown;
+            sLog_GPU("📊 GPU ADAPTER DISTRIBUTION: Total:" << gpuTotalTrades
+                     << " Buys:" << gpuTotalBuys << "(" << QString::number(gpuBuyPercent, 'f', 1) << "%)"
+                     << " Sells:" << gpuTotalSells << "(" << QString::number(gpuSellPercent, 'f', 1) << "%)"
+                     << " Unknown:" << gpuTotalUnknown);
         }
         
         emit tradesReady(m_tradeBuffer.data(), m_tradeWriteCursor);
@@ -182,22 +189,29 @@ void GPUDataAdapter::processIncomingData() {
 
     // Candle updates now emitted by separate time-based timers
     
+    // 🚀 PHASE 2: Periodic cleanup of trade history buffer (every 5 seconds)
+    int64_t currentTime_ms = QDateTime::currentMSecsSinceEpoch();
+    if (currentTime_ms - m_lastHistoryCleanup_ms > CLEANUP_INTERVAL_MS) {
+        cleanupOldTradeHistory();
+        m_lastHistoryCleanup_ms = currentTime_ms;
+    }
+    
     // Performance monitoring
     qint64 frameTime = frameTimer.elapsed();
     if (frameTime > 16) { // >60 FPS threshold
         m_frameDrops.fetch_add(1, std::memory_order_relaxed);
-        qWarning() << "⚠️ GPUDataAdapter: Frame time exceeded:" << frameTime << "ms";
+        sLog_Performance("⚠️ GPUDataAdapter: Frame time exceeded:" << frameTime << "ms");
     }
     
     // Debug output every 1000 frames (~16.7 seconds at 60 FPS)
     static int frameCount = 0;
     if (++frameCount % 1000 == 0) {
-        qDebug() << "📊 GPUDataAdapter Stats:"
+        sLog_Performance("📊 GPUDataAdapter Stats:"
                  << "Trades processed:" << m_processedTrades.load()
                  << "Points pushed:" << m_pointsPushed.load()
                  << "Frame drops:" << m_frameDrops.load()
                  << "Trade queue size:" << m_tradeQueue.size()
-                 << "OrderBook queue size:" << m_orderBookQueue.size();
+                 << "OrderBook queue size:" << m_orderBookQueue.size());
     }
 }
 
@@ -242,10 +256,9 @@ GPUTypes::Point GPUDataAdapter::convertTradeToGPUPoint(const Trade& trade) {
     // 🔍 DEBUG: Log first 10 GPU conversions in lock-free pipeline
     static int gpuConversionCount = 0;
     if (++gpuConversionCount <= 10) {
-        qDebug() << "🎨 GPU ADAPTER COLOR #" << gpuConversionCount << ":"
-                 << "Side:" << sideStr
-                 << "Price:" << trade.price
-                 << "Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")";
+        sLog_GPU("🎨 GPU ADAPTER COLOR #" << gpuConversionCount << ": Side:" << sideStr
+                 << " Price:" << trade.price
+                 << " Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")");
     }
     
     return point;
@@ -269,7 +282,7 @@ void GPUDataAdapter::updateCoordinateCache(double price) {
 void GPUDataAdapter::setReserveSize(size_t size) {
     m_reserveSize = size;
     // Note: Would need to reinitialize buffers in production
-    qDebug() << "🔧 GPUDataAdapter: Reserve size set to" << size;
+    sLog_GPU("🔧 GPUDataAdapter: Reserve size set to" << size);
 }
 
 void GPUDataAdapter::resetWriteCursors() {
@@ -319,11 +332,50 @@ void GPUDataAdapter::processCandleTimeFrame(CandleLOD::TimeFrame timeframe) {
         // Debug logging for first few candles of each timeframe
         static std::array<int, CandleLOD::NUM_TIMEFRAMES> candleCount{};
         if (++candleCount[tfIndex] <= 5) {
-            qDebug() << "🕯️ TIME-BASED CANDLE EMIT #" << candleCount[tfIndex]
+            sLog_Candles("🕯️ TIME-BASED CANDLE EMIT #" << candleCount[tfIndex]
                      << "TimeFrame:" << CandleUtils::timeFrameName(timeframe)
                      << "Timestamp:" << update.timestamp_ms
                      << "OHLC:" << update.candle.open << update.candle.high 
-                     << update.candle.low << update.candle.close;
+                     << update.candle.low << update.candle.close);
         }
+    }
+}
+
+// 🚀 PHASE 2: TIME-WINDOWED TRADE HISTORY CLEANUP
+void GPUDataAdapter::cleanupOldTradeHistory() {
+    std::lock_guard<std::mutex> lock(m_tradeHistoryMutex);
+    
+    if (m_tradeHistory.empty()) return;
+    
+    // Calculate cutoff time (10 minutes ago)
+    auto now = std::chrono::system_clock::now();
+    auto cutoffTime = now - HISTORY_WINDOW_SPAN;
+    int64_t cutoff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        cutoffTime.time_since_epoch()).count();
+    
+    // Remove trades older than cutoff
+    size_t initialSize = m_tradeHistory.size();
+    
+    while (!m_tradeHistory.empty()) {
+        // Convert trade timestamp to milliseconds for comparison
+        int64_t trade_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            m_tradeHistory.front().timestamp.time_since_epoch()).count();
+        
+        if (trade_ms < cutoff_ms) {
+            m_tradeHistory.pop_front();
+        } else {
+            break; // Remaining trades are newer
+        }
+    }
+    
+    size_t removedCount = initialSize - m_tradeHistory.size();
+    
+    // Log cleanup activity (throttled)
+    static int cleanupCount = 0;
+    if (++cleanupCount <= 10 || removedCount > 0) {
+        sLog_GPU("🧹 PHASE 2 TRADE HISTORY CLEANUP #" << cleanupCount
+                 << " Removed:" << removedCount << " old trades"
+                 << " Current size:" << m_tradeHistory.size()
+                 << " Window:" << HISTORY_WINDOW_SPAN.count() << " seconds");
     }
 } 
