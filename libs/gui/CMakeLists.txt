@@ -1,10 +1,34 @@
-add_library(sentinel_gui_lib
-    mainwindow.cpp
-    mainwindow.h
-    streamcontroller.cpp
-    streamcontroller.h
-    tradechartwidget.cpp
-    tradechartwidget.h
+qt6_add_qml_module(sentinel_gui_lib
+    URI Sentinel.Charts
+    VERSION 1.0
+    QML_FILES
+        qml/DepthChartView.qml
+        qml/CandleChartView.qml
+    SOURCES
+        # 🚀 NEW GPU-FOCUSED COMPONENTS
+        mainwindow_gpu.cpp
+        mainwindow_gpu.h
+        gpuchartwidget.cpp
+        gpuchartwidget.h
+        # 🔥 PHASE 2: HEATMAP INSTANCED QUADS
+        heatmapinstanced.cpp
+        heatmapinstanced.h
+        # 🚀 PHASE 3: LOCK-FREE DATA PIPELINE
+        gpudataadapter.cpp
+        gpudataadapter.h
+        # 🕯️ PHASE 5: CANDLESTICK RENDERING + LOD
+        candlelod.cpp
+        candlelod.h
+        candlestickbatched.cpp
+        candlestickbatched.h
+        chartmode.h
+        chartmodecontroller.cpp
+        chartmodecontroller.h
+        # ✅ EXISTING DATA PIPELINE (PROVEN)
+        streamcontroller.cpp
+        streamcontroller.h
+        tradechartwidget.cpp
+        tradechartwidget.h
 )
 
 target_include_directories(sentinel_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -20,6 +44,9 @@ target_link_libraries(sentinel_gui_lib
         Qt::Widgets
         Qt::Charts
         Qt::Network
+        Qt::Quick
+        Qt::Qml
+        Qt::QuickWidgets
         Boost::beast
         OpenSSL::SSL
         OpenSSL::Crypto

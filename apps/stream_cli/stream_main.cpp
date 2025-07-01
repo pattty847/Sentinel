@@ -1,4 +1,4 @@
-#include "coinbasestreamclient.h"
+#include "CoinbaseStreamClient.hpp"
 #include "tradedata.h"
 #include <iostream>
 #include <chrono>

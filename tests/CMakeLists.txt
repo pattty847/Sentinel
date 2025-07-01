@@ -1,34 +1,87 @@
 # =============================================================================
 # SENTINEL TESTS - CMakeLists.txt
-# Organized test suite for the revolutionary refactored architecture
+# Defines test executables for unit, integration, and performance testing.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.22)
+# This allows CTest to discover and run the tests defined here.
+enable_testing()
 
-# Test executables with proper include directories
-add_executable(test_comprehensive test_comprehensive.cpp)
-target_link_libraries(test_comprehensive PRIVATE sentinel_core)
-target_include_directories(test_comprehensive PRIVATE ${CMAKE_SOURCE_DIR})
+# Find Qt components needed for GUI-based tests
+find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
 
-add_executable(test_datacache test_datacache.cpp)
-target_link_libraries(test_datacache PRIVATE sentinel_core)
-target_include_directories(test_datacache PRIVATE ${CMAKE_SOURCE_DIR})
+# Set common properties for Qt-based test executables
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
-add_executable(test_facade test_facade.cpp)
-target_link_libraries(test_facade PRIVATE sentinel_core)
-target_include_directories(test_facade PRIVATE ${CMAKE_SOURCE_DIR})
+# -----------------------------------------------------------------------------
+# Test Target: test_messageparser
+# A standalone unit test for the JSON parser. It has no Qt dependencies.
+# -----------------------------------------------------------------------------
+add_executable(test_messageparser test_messageparser.cpp)
 
-# Set C++17 standard for all tests
-set_property(TARGET test_comprehensive PROPERTY CXX_STANDARD 17)
-set_property(TARGET test_datacache PROPERTY CXX_STANDARD 17)
-set_property(TARGET test_facade PROPERTY CXX_STANDARD 17)
+# Link against the core library for data structures, GTest for testing,
+# and nlohmann_json for the exception handling.
+target_link_libraries(test_messageparser PRIVATE
+  sentinel_core
+  GTest::gtest_main
+  nlohmann_json::nlohmann_json
+)
 
-# Add test descriptions
-set_target_properties(test_comprehensive PROPERTIES DESCRIPTION "Phase 6 comprehensive test suite")
-set_target_properties(test_datacache PROPERTIES DESCRIPTION "Phase 3 DataCache validation tests")
-set_target_properties(test_facade PROPERTIES DESCRIPTION "Phase 5 Facade pattern tests")
+add_test(NAME MessageParserTests COMMAND test_messageparser)
 
-message(STATUS "✅ Sentinel test suite configured successfully!")
-message(STATUS "   - test_comprehensive: Full architectural validation")
-message(STATUS "   - test_datacache: DataCache performance & thread safety")
-message(STATUS "   - test_facade: Facade pattern integration tests") 
+# -----------------------------------------------------------------------------
+# Test Target: test_rendering_performance
+# A GTest-based benchmark for comparing QPainter vs. GPU rendering.
+# -----------------------------------------------------------------------------
+add_executable(test_rendering_performance test_rendering_performance.cpp)
+
+# Link against the GUI library and Qt
+target_link_libraries(test_rendering_performance PRIVATE
+  sentinel_core
+  sentinel_gui_lib
+  GTest::gtest_main
+  Qt6::Widgets
+  Qt6::Charts
+)
+
+add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
+
+# -----------------------------------------------------------------------------
+# Test Target: test_multi_mode_architecture
+# Headless integration test for candle batching and mode controller
+# -----------------------------------------------------------------------------
+add_executable(test_multi_mode_architecture test_multi_mode_architecture.cpp)
+target_link_libraries(test_multi_mode_architecture PRIVATE
+  sentinel_core
+  sentinel_gui_lib
+  GTest::gtest_main
+  Qt6::Core
+)
+
+add_test(NAME MultiModeArchitectureTest COMMAND test_multi_mode_architecture)
+
+# -----------------------------------------------------------------------------
+# Executable Target: test_performance_baseline
+# A standalone benchmark tool to measure pre-optimization performance.
+# This is not a GTest test and will not be run by CTest.
+# -----------------------------------------------------------------------------
+# add_executable(test_performance_baseline test_performance_baseline.cpp)
+
+# target_link_libraries(test_performance_baseline PRIVATE
+#   sentinel_core
+#   sentinel_gui_lib
+#   Qt6::Widgets
+#   Qt6::Charts
+# )
+
+# -----------------------------------------------------------------------------
+# Test Target: test_fast_orderbook  
+# O(1) vs O(log N) order book performance benchmark
+# -----------------------------------------------------------------------------
+add_executable(test_fast_orderbook test_fast_orderbook.cpp)
+target_link_libraries(test_fast_orderbook PRIVATE
+  sentinel_core
+)
+
+message(STATUS "✅ Sentinel test suite configured with 4 targets (including O(1) orderbook benchmark).")
