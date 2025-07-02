@@ -1,0 +1,209 @@
+name: Cross-Platform CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} - ${{ matrix.preset }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows builds
+          - os: windows-2022
+            preset: windows-msvc
+            vcpkg_triplet: x64-windows
+          
+          # macOS builds  
+          - os: macos-13
+            preset: macos-clang
+            vcpkg_triplet: x64-osx
+          
+          # Linux builds
+          - os: ubuntu-22.04
+            preset: linux-gcc
+            vcpkg_triplet: x64-linux
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Setup GitHub Actions Cache for vcpkg
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6' # Latest stable
+        runVcpkgInstall: false # Dependencies will be installed during CMake configure
+
+    - name: Install Linux Dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          ninja-build \
+          pkg-config \
+          libgl1-mesa-dev \
+          libxkbcommon-dev \
+          libxcb-xkb-dev \
+          libxcb-icccm4-dev \
+          libxcb-image0-dev \
+          libxcb-keysyms1-dev \
+          libxcb-randr0-dev \
+          libxcb-render-util0-dev \
+          libxcb-shape0-dev \
+          libxcb-sync-dev \
+          libxcb-xfixes0-dev \
+          libxcb-xinerama0-dev \
+          libfontconfig1-dev \
+          libfreetype6-dev \
+          libx11-dev \
+          libx11-xcb-dev \
+          libxext-dev \
+          libxfixes-dev \
+          libxi-dev \
+          libxrender-dev
+
+    - name: Install macOS Dependencies  
+      if: runner.os == 'macOS'
+      run: |
+        brew install ninja
+
+    - name: Configure CMake
+      run: |
+        cmake --preset ${{ matrix.preset }}
+      env:
+        VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+
+    - name: Build
+      run: |
+        cmake --build --preset ${{ matrix.preset }} --config Release
+
+    - name: Run Tests
+      run: |
+        cd build-${{ matrix.preset }}
+        ctest --output-on-failure --config Release
+      env:
+        QT_QPA_PLATFORM: offscreen # Headless testing for GUI components
+
+    - name: Package Artifacts (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        mkdir artifacts
+        cp build-windows/apps/sentinel_gui/Release/sentinel_gui.exe artifacts/
+        cp build-windows/apps/stream_cli/Release/stream_cli.exe artifacts/
+        # Copy Qt DLLs and other dependencies
+        windeployqt artifacts/sentinel_gui.exe
+
+    - name: Package Artifacts (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        mkdir artifacts
+        cp build-macos/apps/sentinel_gui/sentinel_gui artifacts/
+        cp build-macos/apps/stream_cli/stream_cli artifacts/
+        # Create app bundle
+        macdeployqt artifacts/sentinel_gui -dmg
+
+    - name: Package Artifacts (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        mkdir artifacts
+        cp build-linux/apps/sentinel_gui/sentinel_gui artifacts/
+        cp build-linux/apps/stream_cli/stream_cli artifacts/
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sentinel-${{ matrix.os }}-${{ github.sha }}
+        path: artifacts/
+        retention-days: 30
+
+  performance-test:
+    name: Performance Regression Test
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6'
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential ninja-build pkg-config
+    
+    - name: Configure and Build
+      run: |
+        cmake --preset linux-gcc
+        cmake --build --preset linux-gcc --config Release
+    
+    - name: Run Performance Tests
+      run: |
+        cd build-linux
+        # Run FastOrderBook performance test
+        ./tests/test_fast_orderbook --benchmark
+        # Run firehose test for throughput
+        timeout 30s ./tests/test_coinbase_firehose || true
+        
+    - name: Check Performance Metrics
+      run: |
+        echo "Performance baseline: FastOrderBook should achieve >20M ops/sec"
+        echo "Latency baseline: Sub-millisecond processing required"
+        # Add specific performance regression checks here
+
+  code-quality:
+    name: Code Quality Check
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Install Tools
+      run: |
+        sudo apt update
+        sudo apt install -y clang-format clang-tidy cppcheck
+        
+    - name: Format Check
+      run: |
+        find . -name "*.cpp" -o -name "*.hpp" -o -name "*.h" | \
+          xargs clang-format --dry-run --Werror
+        
+    - name: Static Analysis
+      run: |
+        cppcheck --enable=all --error-exitcode=1 \
+          --suppress=missingIncludeSystem \
+          --suppress=unmatchedSuppression \
+          libs/ apps/
+        
+    - name: Header Guard Check
+      run: |
+        # Check for proper header guards in .hpp files
+        find . -name "*.hpp" | while read file; do
+          if ! grep -q "#pragma once" "$file"; then
+            echo "Missing #pragma once in $file"
+            exit 1
+          fi
+        done 

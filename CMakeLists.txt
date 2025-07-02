@@ -6,10 +6,50 @@
 # Set the minimum required CMake version
 cmake_minimum_required(VERSION 3.16)
 
-# --- Vcpkg Integration ---
-# If CMAKE_TOOLCHAIN_FILE is not set, set it to the default vcpkg location.
+# --- Cross-Platform Vcpkg Integration ---
+# Auto-detect vcpkg toolchain file across platforms
 if(NOT CMAKE_TOOLCHAIN_FILE)
-    set(CMAKE_TOOLCHAIN_FILE /Users/patrickmcdermott/vcpkg/scripts/buildsystems/vcpkg.cmake CACHE STRING "Vcpkg toolchain file")
+    # Try common vcpkg locations across platforms
+    if(WIN32)
+        # Windows common locations
+        set(VCPKG_PATHS
+            "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+            "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "C:/tools/vcpkg/scripts/buildsystems/vcpkg.cmake")
+    elseif(APPLE)
+        # macOS common locations
+        set(VCPKG_PATHS
+            "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+            "/usr/local/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "/opt/homebrew/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "$ENV{HOME}/vcpkg/scripts/buildsystems/vcpkg.cmake")
+    else()
+        # Linux common locations
+        set(VCPKG_PATHS
+            "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+            "/usr/local/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "/opt/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "$ENV{HOME}/vcpkg/scripts/buildsystems/vcpkg.cmake")
+    endif()
+    
+    # Find the first existing vcpkg toolchain file
+    foreach(VCPKG_PATH ${VCPKG_PATHS})
+        if(EXISTS "${VCPKG_PATH}")
+            set(CMAKE_TOOLCHAIN_FILE "${VCPKG_PATH}" CACHE STRING "Vcpkg toolchain file")
+            message(STATUS "Found vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
+            break()
+        endif()
+    endforeach()
+    
+    # If not found, provide helpful error message
+    if(NOT CMAKE_TOOLCHAIN_FILE)
+        message(FATAL_ERROR 
+            "Vcpkg toolchain file not found. Please:\n"
+            "1. Install vcpkg: https://vcpkg.io/en/getting-started.html\n"
+            "2. Set VCPKG_ROOT environment variable, or\n"
+            "3. Set CMAKE_TOOLCHAIN_FILE to point to vcpkg.cmake\n"
+            "Example: cmake -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake")
+    endif()
 endif()
 
 project(Sentinel LANGUAGES CXX)
@@ -19,6 +59,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Platform-specific compiler flags
+if(MSVC)
+    # Windows Visual Studio
+    add_compile_options(/W4)
+    # Enable parallel compilation
+    add_compile_options(/MP)
+else()
+    # GCC/Clang (Linux/macOS)
+    add_compile_options(-Wall -Wextra -Wpedantic)
+    # Enable debug symbols in debug builds
+    add_compile_options("$<$<CONFIG:Debug>:-g>")
+    # Enable optimizations in release builds
+    add_compile_options("$<$<CONFIG:Release>:-O3>")
+endif()
 
 # =============================================================================
 # DEPENDENCY MANAGEMENT (FetchContent)

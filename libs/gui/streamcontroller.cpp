@@ -35,11 +35,11 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Create and configure the polling timers
     m_pollTimer = new QTimer(this);
     connect(m_pollTimer, &QTimer::timeout, this, &StreamController::pollForTrades);
-    m_pollTimer->start(5);
+    m_pollTimer->start(100);
 
     m_orderBookPollTimer = new QTimer(this);
     connect(m_orderBookPollTimer, &QTimer::timeout, this, &StreamController::pollForOrderBooks);
-    m_orderBookPollTimer->start(5);
+    m_orderBookPollTimer->start(100);
     
     // Emit connected signal
     emit connected();

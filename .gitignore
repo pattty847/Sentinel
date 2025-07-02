@@ -1,6 +1,7 @@
 .vscode
 build
 .cache
+.cursor
 
 # User-specific files
 /build*/
