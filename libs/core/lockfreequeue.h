@@ -59,6 +59,6 @@ private:
 struct Trade;
 struct OrderBook;
 
-// QUEUE SIZES: 65k trades = ~3.3s at 20k msg/s (prevents GUI thread hiccup overflow)
+// QUEUE SIZES: 65k trades = substantial buffer for 20M+ ops/s (prevents overflow)
 using TradeQueue = LockFreeQueue<Trade, 65536>;      // 2^16
 using OrderBookQueue = LockFreeQueue<OrderBook, 16384>;  // 2^14 

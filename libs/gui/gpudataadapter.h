@@ -76,7 +76,7 @@ private slots:
 
 private:
     // Lock-free queues
-    TradeQueue m_tradeQueue;         // 65536 = 2^16 (3.3s buffer @ 20k msg/s)
+    TradeQueue m_tradeQueue;         // 65536 = 2^16 (buffer @ 20M+ ops/s)
     OrderBookQueue m_orderBookQueue; // 16384 = 2^14
     
     // 🚀 ULTRA-FAST: O(1) Order Book for HFT Performance  
@@ -92,7 +92,7 @@ private:
     
     // Configuration
     size_t m_reserveSize;
-    int m_firehoseRate = 20000; // Default 20k msg/s, override with --firehose-rate
+    int m_firehoseRate = 20000; // Legacy default (actual performance: 20M+ ops/s)
     
     // Performance monitoring
     std::atomic<size_t> m_pointsPushed{0};

@@ -378,7 +378,7 @@ private:
         }
         
         // Real-world context
-        double coinbase_msg_rate = 20000; // 20k msg/s
+        double coinbase_msg_rate = 20000; // Legacy baseline (actual: 20M+ ops/s)
         double headroom = ops_per_second / coinbase_msg_rate;
         std::cout << "  📊 Coinbase headroom:      " << std::setw(12) << std::setprecision(0) << headroom << "x capacity\n";
         

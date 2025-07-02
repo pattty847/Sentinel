@@ -84,4 +84,12 @@ target_link_libraries(test_fast_orderbook PRIVATE
   sentinel_core
 )
 
-message(STATUS "✅ Sentinel test suite configured with 4 targets (including O(1) orderbook benchmark).")
+# Test Target: test_coinbase_firehose
+# Full-throttle Coinbase order book stress test (1k to 500k msg/s)
+# -----------------------------------------------------------------------------
+add_executable(test_coinbase_firehose test_coinbase_firehose.cpp)
+target_link_libraries(test_coinbase_firehose PRIVATE
+  sentinel_core
+)
+
+message(STATUS "✅ Sentinel test suite configured with 5 targets (including Coinbase firehose stress test).")
