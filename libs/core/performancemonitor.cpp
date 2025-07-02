@@ -78,11 +78,11 @@ double PerformanceMonitor::getTradesThroughput() const {
 
 bool PerformanceMonitor::getAllGatesPassed() const {
     // Performance gates from PLAN.md Phase 3:
-    // - 0 dropped frames @ 20k msg/s
-    // - Points throughput >= 20k points/second
+    // - 0 dropped frames @ 20M+ ops/s 
+    // - Points throughput >= 20M points/second
     
     bool noFrameDrops = (m_frameDrops.load() == 0);
-    bool sufficientThroughput = (getPointsThroughput() >= 20000.0);
+    bool sufficientThroughput = (getPointsThroughput() >= 20000000.0); // 20M points/sec
     
     return noFrameDrops && sufficientThroughput;
 }
@@ -125,7 +125,7 @@ void PerformanceMonitor::dumpMetrics() {
     double tradesThroughput = getTradesThroughput();
     qint64 avgFrameTime = getAverageFrameTime();
     
-    // Emit "points pushed / Δt" to prove zero drops at 20k msgs/s
+    // Emit "points pushed / Δt" to prove zero drops at 20M+ ops/s
     qDebug() << "📊 PERFORMANCE METRICS:"
              << "Points/s:" << static_cast<int>(pointsThroughput)
              << "Trades/s:" << static_cast<int>(tradesThroughput)
@@ -138,7 +138,7 @@ void PerformanceMonitor::dumpMetrics() {
     if (!getAllGatesPassed()) {
         qWarning() << "⚠️ PERFORMANCE GATE FAILURE!"
                    << "- Frame drops:" << m_frameDrops.load()
-                   << "- Points throughput:" << static_cast<int>(pointsThroughput) << "(target: 20000)";
+                   << "- Points throughput:" << static_cast<int>(pointsThroughput) << "(target: 20M+)";
     }
 }
 
