@@ -7,7 +7,7 @@
 
 > **Real-time cryptocurrency market data streaming and analysis platform with sub-millisecond latency performance**
 
-Sentinel is a high-performance, cross-platform trading system built with modern C++17, designed to run identically on Windows, macOS, and Linux. Featuring a proven 83% code reduction architecture with 0.0003ms average latency [[memory:876671]].
+Sentinel is a high-performance, cross-platform trading system built with modern C++17, designed to run identically on Windows, macOS, and Linux. Featuring a proven 83% code reduction architecture with 0.0003ms average latency.
 
 ## 🌍 Cross-Platform Compatibility
 
