@@ -1,10 +1,14 @@
 # Sentinel - Cross-Platform High-Performance Trading System
 
-[![Cross-Platform CI](https://github.com/your-org/sentinel/actions/workflows/cross-platform-ci.yml/badge.svg)](https://github.com/your-org/sentinel/actions/workflows/cross-platform-ci.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-blue?logo=windows)](docs/CROSS_PLATFORM_BUILD.md#windows-detailed-setup)
 [![macOS](https://img.shields.io/badge/macOS-10.15%2B-blue?logo=apple)](docs/CROSS_PLATFORM_BUILD.md#macos-detailed-setup)
 [![Linux](https://img.shields.io/badge/Linux-Ubuntu%2FFedora%2FArch-blue?logo=linux)](docs/CROSS_PLATFORM_BUILD.md#linux-detailed-setup)
 
+_Limited to 50k points in image._
+<div align="center">
+<img width="300" alt="Screenshot 2025-06-30 at 12 26 34 AM" src="https://github.com/user-attachments/assets/83826bfd-487a-4c00-bd8a-155ef5bfea41" />
+<div>
+  
 > **Real-time cryptocurrency market data streaming and analysis platform with sub-millisecond latency performance**
 
 Sentinel is a high-performance, cross-platform trading system built with modern C++17, designed to run identically on Windows, macOS, and Linux. Featuring a proven 83% code reduction architecture with 0.0003ms average latency.
