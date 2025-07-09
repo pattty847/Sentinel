@@ -7,7 +7,7 @@
 _Limited to 50k points in image._
 <div align="center">
 <img width="300" alt="Screenshot 2025-06-30 at 12 26 34 AM" src="https://github.com/user-attachments/assets/83826bfd-487a-4c00-bd8a-155ef5bfea41" />
-<div>
+</div>
   
 > **Real-time cryptocurrency market data streaming and analysis platform with sub-millisecond latency performance**
 
