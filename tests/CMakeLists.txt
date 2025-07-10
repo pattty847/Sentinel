@@ -92,4 +92,38 @@ target_link_libraries(test_coinbase_firehose PRIVATE
   sentinel_core
 )
 
-message(STATUS "✅ Sentinel test suite configured with 5 targets (including Coinbase firehose stress test).")
+# -----------------------------------------------------------------------------
+# Test Target: test_market_data_orderbook_integration
+# Comprehensive integration test for backend market data + order book pipeline
+# Validates streaming, stateful order book maintenance, and correctness
+# -----------------------------------------------------------------------------
+add_executable(test_market_data_orderbook_integration test_market_data_orderbook_integration.cpp)
+target_link_libraries(test_market_data_orderbook_integration PRIVATE
+  sentinel_core
+)
+
+add_test(NAME MarketDataOrderBookIntegrationTest COMMAND test_market_data_orderbook_integration)
+
+# -----------------------------------------------------------------------------
+# Test Target: test_universal_orderbook
+# Comprehensive test for UniversalOrderBook with any asset, any precision, level grouping
+# -----------------------------------------------------------------------------
+add_executable(test_universal_orderbook test_universal_orderbook.cpp)
+target_link_libraries(test_universal_orderbook PRIVATE
+  sentinel_core
+)
+
+add_test(NAME UniversalOrderBookTest COMMAND test_universal_orderbook)
+
+# -----------------------------------------------------------------------------
+# Test Target: test_universal_market_data_integration
+# Ultimate integration test for UniversalOrderBook + market data streaming
+# -----------------------------------------------------------------------------
+add_executable(test_universal_market_data_integration test_universal_market_data_integration.cpp)
+target_link_libraries(test_universal_market_data_integration PRIVATE
+  sentinel_core
+)
+
+add_test(NAME UniversalMarketDataIntegrationTest COMMAND test_universal_market_data_integration)
+
+message(STATUS "✅ Sentinel test suite configured with 8 targets (including ultimate integration test).")

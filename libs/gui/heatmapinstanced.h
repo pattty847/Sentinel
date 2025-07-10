@@ -10,7 +10,6 @@
 #include <mutex>
 #include <atomic>
 #include <array>
-
 #include "../core/tradedata.h"
 #include "candlelod.h"
 

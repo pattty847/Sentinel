@@ -17,6 +17,7 @@ target_sources(sentinel_core
         performancemonitor.cpp
         CoinbaseStreamClientFacade.cpp  # 🚀 ULTRA-FAST: FastOrderBook implementation
         FastOrderBook.cpp              # 🚀 ULTRA-FAST: O(1) Order Book
+        UniversalOrderBook.hpp         # 🚀 UNIVERSAL: Any asset, any precision order book
         # Logging system
         SentinelLogging.cpp
         # Existing files

@@ -324,6 +324,11 @@ void MainWindowGPU::connectToGPUChart() {
             connect(heatmapLayer, &HeatmapBatched::dataUpdated,
                     gpuChart, &GPUChartWidget::update, Qt::QueuedConnection);
 
+            // 🔥 ADD DEBUG CONNECTION: Monitor viewChanged signal firing
+            connect(gpuChart, &GPUChartWidget::viewChanged, [](int64_t start, int64_t end, double minP, double maxP) {
+                qDebug() << "🔥 VIEWPORT DEBUG:" << start << "to" << end << "price:" << minP << "to" << maxP;
+            });
+
             
             // Test mode: Model B architecture uses aggregated heatmap data, not individual order book updates
             if (m_testMode && m_testDataPlayer) {

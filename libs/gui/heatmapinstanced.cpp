@@ -114,6 +114,10 @@ void HeatmapBatched::setIntensityScale(double scale) {
 
 void HeatmapBatched::setViewTimeStart(qint64 time) {
     if (m_visibleTimeStart_ms != time) {
+        static int logCount = 0;
+        if (++logCount <= 3) { // Only log first 3 calls
+            sLog_Chart("🔥 HEATMAP: setViewTimeStart called with:" << time << "(was:" << m_visibleTimeStart_ms << ")");
+        }
         m_visibleTimeStart_ms = time;
         m_geometryDirty = true; // Mark that geometry needs recalculating
         m_timeWindowValid = (m_visibleTimeEnd_ms > m_visibleTimeStart_ms);
@@ -124,6 +128,10 @@ void HeatmapBatched::setViewTimeStart(qint64 time) {
 
 void HeatmapBatched::setViewTimeEnd(qint64 time) {
     if (m_visibleTimeEnd_ms != time) {
+        static int logCount = 0;
+        if (++logCount <= 3) { // Only log first 3 calls
+            sLog_Chart("🔥 HEATMAP: setViewTimeEnd called with:" << time << "(was:" << m_visibleTimeEnd_ms << ")");
+        }
         m_visibleTimeEnd_ms = time;
         m_geometryDirty = true;
         m_timeWindowValid = (m_visibleTimeEnd_ms > m_visibleTimeStart_ms);
@@ -134,6 +142,10 @@ void HeatmapBatched::setViewTimeEnd(qint64 time) {
 
 void HeatmapBatched::setViewMinPrice(double price) {
     if (m_minPrice != price) {
+        static int logCount = 0;
+        if (++logCount <= 3) { // Only log first 3 calls
+            sLog_Chart("🔥 HEATMAP: setViewMinPrice called with:" << price << "(was:" << m_minPrice << ")");
+        }
         m_minPrice = price;
         m_geometryDirty = true;
         update();
@@ -143,6 +155,10 @@ void HeatmapBatched::setViewMinPrice(double price) {
 
 void HeatmapBatched::setViewMaxPrice(double price) {
     if (m_maxPrice != price) {
+        static int logCount = 0;
+        if (++logCount <= 3) { // Only log first 3 calls
+            sLog_Chart("🔥 HEATMAP: setViewMaxPrice called with:" << price << "(was:" << m_maxPrice << ")");
+        }
         m_maxPrice = price;
         m_geometryDirty = true;
         update();
@@ -246,19 +262,31 @@ QPointF HeatmapBatched::worldToScreen(qint64 timestamp_ms, double price) const {
     double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
     double priceRange = m_maxPrice - m_minPrice;
 
-    // static int logCounter = 0;
-    // if (logCounter++ % 5000 == 0) { // Log roughly every 5000 calls
-    //     sLog_RenderDetail(QString("HEATMAP: WorldToScreen: Timestamp: %1, TimeEnd: %2, TimeStart: %3, PriceRange: %4, MinPrice: %5, MaxPrice: %6").arg(timestamp_ms).arg(m_visibleTimeEnd_ms).arg(m_visibleTimeStart_ms).arg(priceRange).arg(m_minPrice).arg(m_maxPrice));
-    // }
+    static int logCounter = 0;
+    if (++logCounter <= 5) { // Only log first 5 calls
+        sLog_RenderDetail(QString("HEATMAP: WorldToScreen: Timestamp: %1, TimeEnd: %2, TimeStart: %3, PriceRange: %4, MinPrice: %5, MaxPrice: %6").arg(timestamp_ms).arg(m_visibleTimeEnd_ms).arg(m_visibleTimeStart_ms).arg(priceRange).arg(m_minPrice).arg(m_maxPrice));
+    }
     
-    if (timeRange <= 0 || priceRange <= 0) {
+    if (timeRange <= 0) {
         return QPointF(-1000, -1000);
     }
-
-    double timeRatio = (timestamp_ms - m_visibleTimeStart_ms) / timeRange;
-    double priceRatio = (price - m_minPrice) / priceRange;
     
-    return QPointF(timeRatio * width(), (1.0 - priceRatio) * height());
+    // 🔥 FIX: Add bounds checking and clamp price ratio
+    if (priceRange <= 0) priceRange = 1.0;
+    double timeRatio = (timestamp_ms - m_visibleTimeStart_ms) / timeRange;
+    double rawPriceRatio = (price - m_minPrice) / priceRange;
+    double priceRatio = max(-0.1, min(1.1, rawPriceRatio)); // Manual clamp
+    double y = (1.0 - priceRatio) * height();
+    
+    // 🔥 DEBUG: Log coordinate calculation for first few calls
+    static int coordDebugCount = 0;
+    if (++coordDebugCount <= 5) {
+        sLog_RenderDetail("🔧 HEATMAP COORD FIX: price=" << price 
+                     << "minPrice=" << m_minPrice << "maxPrice=" << m_maxPrice
+                     << "y=" << y << "height=" << height());
+    }
+    
+    return QPointF(timeRatio * width(), y);
 }
 
 // This replaces your old createQuadGeometryNode function.
@@ -271,6 +299,12 @@ void HeatmapBatched::updateNodeGeometry(QSGGeometryNode* node,
     QSGGeometry* geometry = node->geometry();
     const int verticesPerQuad = 6;
     int requiredVertices = instances.size() * verticesPerQuad;
+
+    // 🔥 DEBUG: Log geometry creation
+    static int geometryDebugCount = 0;
+    if (++geometryDebugCount <= 5) {
+        sLog_RenderDetail("🔥 HEATMAP: updateNodeGeometry called with" << instances.size() << "instances, required vertices:" << requiredVertices);
+    }
 
     // Reallocate the buffer of the existing geometry if needed.
     if (geometry->vertexCount() != requiredVertices) {
@@ -287,7 +321,10 @@ void HeatmapBatched::updateNodeGeometry(QSGGeometryNode* node,
     int vertex_count = 0;
 
     // Use the finest-resolution bucket duration to determine the base width of our heatmap bars.
-    double timePerBucket = CandleLOD::getTimeFrameDuration(CandleLOD::TF_100ms);
+    double timePerBucket = std::max<double>(
+        CandleLOD::getTimeFrameDuration(m_activeTimeFrame), // Use current timeframe
+        2000.0 // Minimum 2 second width to fill gaps
+    );
 
     // Find the max aggregated size in this batch to normalize intensity against.
     // This makes the colors and widths relative to the current visible data.
@@ -315,9 +352,19 @@ void HeatmapBatched::updateNodeGeometry(QSGGeometryNode* node,
         float y = startPoint.y();
 
         // Make the bar wider for higher volume
-        float barHeight = 1.0f + (intensity * 4.0f); // 1px base, up to 5px tall for high volume
+        float barHeight = 8.0f + (intensity * 20.0f); // 8px base, up to 28px tall for high volume
         float y1 = y - (barHeight / 2.0f);
         float y2 = y + (barHeight / 2.0f);
+
+        // 🔥 DEBUG: Log first few bar dimensions
+        static int barDebugCount = 0;
+        if (barDebugCount++ < 3) {
+            sLog_RenderDetail("🔥 HEATMAP BAR DEBUG #" << barDebugCount << ":"
+                         << "Intensity:" << intensity
+                         << "BarHeight:" << barHeight
+                         << "Position:(" << x1 << "," << y1 << ") to (" << x2 << "," << y2 << ")"
+                         << "Screen coords:(" << startPoint.x() << "," << startPoint.y() << ")");
+        }
 
         // --- 3. Calculate Volume-Based Color & Opacity ---
         unsigned char r = baseColor.red();

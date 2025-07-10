@@ -619,17 +619,17 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
             m_lastMousePos = currentPos;
             m_geometryDirty.store(true);
             
-            // 🔥 MEMORY LEAK FIX: Heavily throttle expensive operations during drag
+            // 🔥 MEMORY LEAK FIX: Much more aggressive throttling during drag
             static int updateCounter = 0;
             static int viewChangeCounter = 0;
             
-            // Update rendering every 4th mouse move for smooth visuals
-            if (++updateCounter % 4 == 0) {
+            // Update rendering every 10th mouse move for smooth visuals
+            if (++updateCounter % 10 == 0) {
                 update();
             }
             
-            // Emit viewChanged only every 10th mouse move to prevent expensive recalculations
-            if (++viewChangeCounter % 10 == 0) {
+            // Emit viewChanged only every 25th mouse move to prevent expensive recalculations
+            if (++viewChangeCounter % 25 == 0) {
                 emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
             }
         }
