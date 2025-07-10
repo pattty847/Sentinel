@@ -6,6 +6,7 @@
 #include "DataCache.hpp"
 #include "MarketDataCore.hpp"
 #include "Authenticator.hpp"
+#include "UniversalOrderBook.hpp"
 #include "tradedata.h"
 #include <memory>
 #include <vector>
@@ -26,13 +27,13 @@ public:
                                                     const std::string& lastTradeId) const;
     [[nodiscard]] OrderBook            getOrderBook(const std::string& symbol) const;
     
-    // 🚀 ULTRA-FAST: O(1) order book access for Bookmap-style GPU pipeline
-    [[nodiscard]] const FastOrderBook* getFastOrderBook(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getFastBids(const std::string& symbol, size_t max_levels = 1000) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getFastAsks(const std::string& symbol, size_t max_levels = 1000) const;
-    [[nodiscard]] double getFastBestBid(const std::string& symbol) const;
-    [[nodiscard]] double getFastBestAsk(const std::string& symbol) const;
-    [[nodiscard]] double getFastSpread(const std::string& symbol) const;
+    // 🚀 UNIVERSAL: Universal order book access for any asset
+    [[nodiscard]] const UniversalOrderBook* getUniversalOrderBook(const std::string& symbol) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getBids(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getAsks(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] double getBestBid(const std::string& symbol) const;
+    [[nodiscard]] double getBestAsk(const std::string& symbol) const;
+    [[nodiscard]] double getSpread(const std::string& symbol) const;
     
 
 

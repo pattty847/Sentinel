@@ -9,6 +9,7 @@
 #include <cassert>
 #include <chrono>
 #include <memory>
+#include "tradedata.h"
 
 /**
  * 🚀 UNIVERSAL ORDER BOOK
@@ -25,16 +26,22 @@
  * - Support for any price range
  */
 
-struct OrderBookLevel {
+// Internal structure for UniversalOrderBook with timestamp
+struct UniversalOrderBookLevel {
     double price;
     double size;
     uint32_t timestamp;
     
-    OrderBookLevel(double p, double s, uint32_t t = 0) 
+    UniversalOrderBookLevel(double p, double s, uint32_t t = 0) 
         : price(p), size(s), timestamp(t) {}
     
-    bool operator<(const OrderBookLevel& other) const {
+    bool operator<(const UniversalOrderBookLevel& other) const {
         return price < other.price;
+    }
+    
+    // Convert to standard OrderBookLevel
+    OrderBookLevel toOrderBookLevel() const {
+        return OrderBookLevel{price, size};
     }
 };
 
@@ -55,6 +62,8 @@ public:
               auto_detect_precision(auto_precision), manual_precision(0.01) {}
     };
 
+    UniversalOrderBook() : m_productId(""), m_config(), m_precision(0.01) {}
+    
     UniversalOrderBook(const std::string& product_id, const Config& config = Config())
         : m_productId(product_id), m_config(config), m_precision(0.01) {
         // Initialize with empty books
@@ -93,7 +102,7 @@ public:
                 it->second.timestamp = timestamp;
             } else {
                 // Add new level
-                side_map.emplace(grouped_price, OrderBookLevel(grouped_price, quantity, timestamp));
+                side_map.emplace(grouped_price, UniversalOrderBookLevel(grouped_price, quantity, timestamp));
             }
         } else {
             // Remove level
@@ -153,7 +162,7 @@ public:
         
         // Iterate in reverse (highest to lowest price)
         for (auto it = m_bids.rbegin(); it != m_bids.rend() && result.size() < max_levels; ++it) {
-            result.push_back(it->second);
+            result.push_back(it->second.toOrderBookLevel());
         }
         
         return result;
@@ -165,7 +174,7 @@ public:
         
         // Iterate forward (lowest to highest price)
         for (auto it = m_asks.begin(); it != m_asks.end() && result.size() < max_levels; ++it) {
-            result.push_back(it->second);
+            result.push_back(it->second.toOrderBookLevel());
         }
         
         return result;
@@ -265,8 +274,8 @@ public:
         m_precision = m_config.manual_precision;
     }
     
-    void initializeFromSnapshot(const std::vector<OrderBookLevel>& bids, 
-                               const std::vector<OrderBookLevel>& asks) {
+    void initializeFromSnapshot(const std::vector<UniversalOrderBookLevel>& bids, 
+                               const std::vector<UniversalOrderBookLevel>& asks) {
         reset();
         
         // Process bids
@@ -286,12 +295,12 @@ private:
     double m_precision;
     
     // Order book data structures
-    std::map<double, OrderBookLevel> m_bids;  // Price -> Level (sorted)
-    std::map<double, OrderBookLevel> m_asks;  // Price -> Level (sorted)
+    std::map<double, UniversalOrderBookLevel> m_bids;  // Price -> Level (sorted)
+    std::map<double, UniversalOrderBookLevel> m_asks;  // Price -> Level (sorted)
     
     // Best level tracking
-    const OrderBookLevel* m_bestBid = nullptr;
-    const OrderBookLevel* m_bestAsk = nullptr;
+    const UniversalOrderBookLevel* m_bestBid = nullptr;
+    const UniversalOrderBookLevel* m_bestAsk = nullptr;
     
     // 🎯 PRECISION DETECTION
     

@@ -72,101 +72,126 @@ std::vector<Trade> DataCache::tradesSince(const std::string& symbol, const std::
 
 
 
-// 🚀 ULTRA-FAST: FastOrderBook Implementation for Bookmap
+// 🚀 UNIVERSAL: UniversalOrderBook Implementation for any asset
 // =============================================================================
 
-void DataCache::initializeFastOrderBook(const std::string& symbol, const OrderBook& snapshot) {
-    std::unique_lock<std::shared_mutex> lock(m_mxFastBooks);
+void DataCache::initializeOrderBook(const std::string& symbol, const OrderBook& snapshot, 
+                                   const UniversalOrderBook::Config& config) {
+    std::unique_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    // Create or get existing fast order book
-    auto& fastBook = m_fastBooks[symbol];
-    fastBook = FastOrderBook(symbol); // Initialize with product ID
-    fastBook.initializeFromSnapshot(snapshot);
+    // Create or get existing universal order book
+    auto& orderBook = m_orderBooks[symbol];
+    orderBook = UniversalOrderBook(symbol, config); // Initialize with product ID and config
     
-    sLog_Cache(QString("🚀 DataCache: Initialized FastOrderBook for %1").arg(QString::fromStdString(symbol)));
+    // Convert snapshot to vector format for initialization
+    std::vector<UniversalOrderBookLevel> bids, asks;
+    for (const auto& level : snapshot.bids) {
+        bids.emplace_back(level.price, level.size, 0);
+    }
+    for (const auto& level : snapshot.asks) {
+        asks.emplace_back(level.price, level.size, 0);
+    }
+    
+    orderBook.initializeFromSnapshot(bids, asks);
+    
+    sLog_Cache(QString("🚀 DataCache: Initialized UniversalOrderBook for %1 (precision: %2)")
+               .arg(QString::fromStdString(symbol))
+               .arg(orderBook.getPrecision()));
 }
 
-void DataCache::updateFastOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
-    std::unique_lock<std::shared_mutex> lock(m_mxFastBooks);
+void DataCache::updateOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
+    std::unique_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
-        // O(1) update using FastOrderBook's optimized method
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
+        // Update using UniversalOrderBook's method
         bool is_bid = (side == "bid");
         it->second.updateLevel(price, quantity, is_bid);
     } else {
-        // Create new fast book if it doesn't exist
-        auto& fastBook = m_fastBooks[symbol];
-        fastBook = FastOrderBook(symbol);
+        // Create new order book if it doesn't exist
+        auto& orderBook = m_orderBooks[symbol];
+        orderBook = UniversalOrderBook(symbol);
         bool is_bid = (side == "bid");
-        fastBook.updateLevel(price, quantity, is_bid);
+        orderBook.updateLevel(price, quantity, is_bid);
     }
 }
 
-const FastOrderBook* DataCache::getFastOrderBook(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+const UniversalOrderBook* DataCache::getOrderBook(const std::string& symbol) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return &(it->second);
     }
     
     return nullptr; // Return nullptr if not found
 }
 
-std::vector<OrderBookLevel> DataCache::getFastBids(const std::string& symbol, size_t max_levels) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+std::vector<OrderBookLevel> DataCache::getBids(const std::string& symbol, size_t max_levels) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return it->second.getBids(max_levels);
     }
     
     return {}; // Return empty vector if not found
 }
 
-std::vector<OrderBookLevel> DataCache::getFastAsks(const std::string& symbol, size_t max_levels) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+std::vector<OrderBookLevel> DataCache::getAsks(const std::string& symbol, size_t max_levels) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return it->second.getAsks(max_levels);
     }
     
     return {}; // Return empty vector if not found
 }
 
-double DataCache::getFastBestBid(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+double DataCache::getBestBid(const std::string& symbol) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return it->second.getBestBidPrice();
     }
     
     return 0.0; // Return 0 if not found
 }
 
-double DataCache::getFastBestAsk(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+double DataCache::getBestAsk(const std::string& symbol) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return it->second.getBestAskPrice();
     }
     
     return 0.0; // Return 0 if not found
 }
 
-double DataCache::getFastSpread(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxFastBooks);
+double DataCache::getSpread(const std::string& symbol) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
     
-    auto it = m_fastBooks.find(symbol);
-    if (it != m_fastBooks.end()) {
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
         return it->second.getSpread();
     }
     
     return 0.0; // Return 0 if not found
+}
+
+std::vector<UniversalOrderBook::LiquidityChunk> DataCache::getLiquidityChunks(const std::string& symbol, 
+                                                                              double chunk_size, bool is_bid_side) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxOrderBooks);
+    
+    auto it = m_orderBooks.find(symbol);
+    if (it != m_orderBooks.end()) {
+        return it->second.getLiquidityChunks(chunk_size, is_bid_side);
+    }
+    
+    return {}; // Return empty vector if not found
 }
 
 

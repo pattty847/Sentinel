@@ -131,12 +131,12 @@ void MainWindowGPU::setupConnections() {
         m_gpuAdapter = new GPUDataAdapter(this);
         m_streamController->setGPUAdapter(m_gpuAdapter);
         
-        // 🚀 CONNECT GPUDataAdapter to centralized FastOrderBook
-        // This enables O(1) order book access for the GPU pipeline
+        // 🚀 CONNECT GPUDataAdapter to centralized UniversalOrderBook
+        // This enables universal order book access for the GPU pipeline
         connect(m_streamController, &StreamController::connected, this, [this]() {
             if (m_streamController && m_streamController->getClient()) {
                 m_gpuAdapter->setCoinbaseClient(m_streamController->getClient());
-                qDebug() << "🚀 GPUDataAdapter connected to centralized FastOrderBook!";
+                qDebug() << "🚀 GPUDataAdapter connected to centralized UniversalOrderBook!";
             }
         });
         

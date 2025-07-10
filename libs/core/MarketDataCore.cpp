@@ -338,10 +338,10 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         }
                     }
                     
-                    // 🚀 ULTRA-FAST: Initialize FastOrderBook for Bookmap-style GPU pipeline
-                    m_cache.initializeFastOrderBook(product_id, snapshot);
+                    // 🚀 UNIVERSAL: Initialize UniversalOrderBook for any asset
+                    m_cache.initializeOrderBook(product_id, snapshot);
                     
-                    sLog_Cache(QString("📸 SNAPSHOT: Initialized %1 with %2 bids, %3 asks (FastOrderBook)")
+                    sLog_Cache(QString("📸 SNAPSHOT: Initialized %1 with %2 bids, %3 asks (UniversalOrderBook)")
                                .arg(QString::fromStdString(product_id))
                                .arg(snapshot.bids.size()).arg(snapshot.asks.size()));
                     
@@ -358,19 +358,19 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         double price = std::stod(update["price_level"].get<std::string>());
                         double quantity = std::stod(update["new_quantity"].get<std::string>());
                         
-                        // 🚀 ULTRA-FAST: Apply to FastOrderBook for Bookmap-style GPU pipeline
-                        m_cache.updateFastOrderBook(product_id, side, price, quantity);
+                        // 🚀 UNIVERSAL: Apply to UniversalOrderBook for any asset
+                        m_cache.updateOrderBook(product_id, side, price, quantity);
                         updateCount++;
                     }
                     
                     // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
                     static int liveBookLogCount = 0;
                     if (++liveBookLogCount % 100 == 1) {
-                        auto fastBook = m_cache.getFastOrderBook(product_id);
-                        if (fastBook) {
+                        auto orderBook = m_cache.getOrderBook(product_id);
+                        if (orderBook) {
                             sLog_Cache(QString("🏭 LIVE UPDATE %1: %2 → %3 bids, %4 asks (+%5 changes)")
                                        .arg(liveBookLogCount).arg(QString::fromStdString(product_id))
-                                       .arg(fastBook->getBids().size()).arg(fastBook->getAsks().size()).arg(updateCount));
+                                       .arg(orderBook->getBids().size()).arg(orderBook->getAsks().size()).arg(updateCount));
                         }
                     }
                 }

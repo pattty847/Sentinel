@@ -155,20 +155,20 @@ void GPUDataAdapter::processHeatmap() {
         return;
     }
 
-    const FastOrderBook* book = m_coinbaseClient->getFastOrderBook(m_currentSymbol);
+    const UniversalOrderBook* book = m_coinbaseClient->getUniversalOrderBook(m_currentSymbol);
     if (book && !book->isEmpty()) {
-        sLog_GPU("--- Step A: FastOrderBook retrieved successfully ---");
-        // Convert FastOrderBook to OrderBook for processing
+        sLog_GPU("--- Step A: UniversalOrderBook retrieved successfully ---");
+        // Convert UniversalOrderBook to OrderBook for processing
         OrderBook orderBook;
         orderBook.product_id = m_currentSymbol;
-        orderBook.bids = book->getBids(m_currentOrderBookDepth);
-        orderBook.asks = book->getAsks(m_currentOrderBookDepth);
+        orderBook.bids = m_coinbaseClient->getBids(m_currentSymbol, m_currentOrderBookDepth);
+        orderBook.asks = m_coinbaseClient->getAsks(m_currentSymbol, m_currentOrderBookDepth);
         orderBook.timestamp = std::chrono::system_clock::now();
         
         sLog_GPU("--- Step A: Converting to OrderBook - Bids:" << orderBook.bids.size() << " Asks:" << orderBook.asks.size() << " ---");
         processHeatmapAggregation(orderBook);
     } else {
-        sLog_GPU("--- Step A FAILED: FastOrderBook is null or empty ---");
+        sLog_GPU("--- Step A FAILED: UniversalOrderBook is null or empty ---");
     }
     sLog_GPU("--- Step A PASSED: processHeatmap() finished ---");
 }

@@ -6,6 +6,7 @@
 #include <vector>
 #include <shared_mutex>
 #include "tradedata.h"
+#include "UniversalOrderBook.hpp"
 
 template <typename T, std::size_t MaxN>
 class RingBuffer {
@@ -43,15 +44,18 @@ public:
     [[nodiscard]] std::vector<Trade>   recentTrades(const std::string& s) const;
     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
     
-    // 🚀 ULTRA-FAST: FastOrderBook methods for Bookmap-style GPU pipeline
-    void initializeFastOrderBook(const std::string& symbol, const OrderBook& snapshot);
-    void updateFastOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
-    [[nodiscard]] const FastOrderBook* getFastOrderBook(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getFastBids(const std::string& symbol, size_t max_levels = 1000) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getFastAsks(const std::string& symbol, size_t max_levels = 1000) const;
-    [[nodiscard]] double getFastBestBid(const std::string& symbol) const;
-    [[nodiscard]] double getFastBestAsk(const std::string& symbol) const;
-    [[nodiscard]] double getFastSpread(const std::string& symbol) const;
+    // 🚀 UNIVERSAL: UniversalOrderBook methods for any asset, any precision
+    void initializeOrderBook(const std::string& symbol, const OrderBook& snapshot, 
+                            const UniversalOrderBook::Config& config = UniversalOrderBook::Config());
+    void updateOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
+    [[nodiscard]] const UniversalOrderBook* getOrderBook(const std::string& symbol) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getBids(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getAsks(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] double getBestBid(const std::string& symbol) const;
+    [[nodiscard]] double getBestAsk(const std::string& symbol) const;
+    [[nodiscard]] double getSpread(const std::string& symbol) const;
+    [[nodiscard]] std::vector<UniversalOrderBook::LiquidityChunk> getLiquidityChunks(const std::string& symbol, 
+                                                                                    double chunk_size, bool is_bid_side = true) const;
     
 
 
@@ -59,7 +63,7 @@ private:
     using TradeRing = RingBuffer<Trade, 1000>;
 
     mutable std::shared_mutex                     m_mxTrades;
-    mutable std::shared_mutex                     m_mxFastBooks; // For O(1) order books
+    mutable std::shared_mutex                     m_mxOrderBooks; // For universal order books
     std::unordered_map<std::string, TradeRing>    m_trades;
-    std::unordered_map<std::string, FastOrderBook> m_fastBooks; // 🚀 O(1) order books for Bookmap
+    std::unordered_map<std::string, UniversalOrderBook> m_orderBooks; // 🚀 Universal order books for any asset
 }; 
