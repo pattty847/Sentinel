@@ -26,9 +26,15 @@ public:
                                                     const std::string& lastTradeId) const;
     [[nodiscard]] OrderBook            getOrderBook(const std::string& symbol) const;
     
-    // 🔥 NEW: Dense order book data for professional visualization
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
+    // 🚀 ULTRA-FAST: O(1) order book access for Bookmap-style GPU pipeline
+    [[nodiscard]] const FastOrderBook* getFastOrderBook(const std::string& symbol) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getFastBids(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getFastAsks(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] double getFastBestBid(const std::string& symbol) const;
+    [[nodiscard]] double getFastBestAsk(const std::string& symbol) const;
+    [[nodiscard]] double getFastSpread(const std::string& symbol) const;
+    
+
 
     // Non-copyable, non-movable (DataCache contains std::shared_mutex)
     CoinbaseStreamClient(const CoinbaseStreamClient&) = delete;

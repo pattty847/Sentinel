@@ -19,6 +19,10 @@ class GPUChartWidget : public QQuickItem {
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     Q_PROPERTY(bool debugInfoVisible READ debugInfoVisible WRITE setDebugInfoVisible NOTIFY debugInfoVisibleChanged)
     Q_PROPERTY(QString debugInfo READ debugInfo NOTIFY debugInfoChanged)
+    Q_PROPERTY(qint64 visibleTimeStart READ visibleTimeStart NOTIFY viewChanged)
+    Q_PROPERTY(qint64 visibleTimeEnd READ visibleTimeEnd NOTIFY viewChanged)
+    Q_PROPERTY(double minPrice READ minPrice NOTIFY viewChanged)
+    Q_PROPERTY(double maxPrice READ maxPrice NOTIFY viewChanged)
 
 public:
     explicit GPUChartWidget(QQuickItem* parent = nullptr);
@@ -49,6 +53,12 @@ public:
     bool debugInfoVisible() const { return m_debugInfoVisible; }
     void setDebugInfoVisible(bool visible);
     QString debugInfo() const { return m_debugInfoText; }
+    
+    // View properties for QML binding
+    qint64 visibleTimeStart() const { return m_visibleTimeStart_ms; }
+    qint64 visibleTimeEnd() const { return m_visibleTimeEnd_ms; }
+    double minPrice() const { return m_minPrice; }
+    double maxPrice() const { return m_maxPrice; }
 
 public slots:
     // 🔥 REAL-TIME DATA INTEGRATION
@@ -198,4 +208,4 @@ private:
     int64_t getVisibleTimeStart() const { return m_visibleTimeStart_ms; }
     int64_t getVisibleTimeEnd() const { return m_visibleTimeEnd_ms; }
     bool isTimeWindowInitialized() const { return m_timeWindowInitialized; }
-}; 
+};

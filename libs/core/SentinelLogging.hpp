@@ -3,6 +3,15 @@
 #include <QLoggingCategory>
 #include <QDebug>
 
+// Suppress variadic macro warnings for logging macros
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wvariadic-macro-arguments-omitted"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvariadic-macro-arguments-omitted"
+#endif
+
 // =============================================================================
 // SENTINEL LOGGING CATEGORIES
 // =============================================================================
@@ -136,3 +145,10 @@ FREQUENCY GUIDELINES:
 - logRender: High frequency (> 100/sec) - use throttling
 - logRenderDetail, logDebug*: Debug only - disabled in production
 */ 
+
+// Restore warning settings
+#ifdef __clang__
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif 

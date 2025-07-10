@@ -95,3 +95,26 @@ WebSocket Message → MarketDataCore → DataCache → Qt Signal → UI Componen
 - Performance benchmarking integrated
 - Integration tests for full data flow
 - Thread safety validation
+
+You have different logging modes you can toggle here: 
+log-help() {
+    echo "🎛️  SENTINEL LOGGING MODES"
+    echo "=========================="
+    echo ""
+    echo "📋 Usage: source scripts/log-modes.sh && log-<mode>"
+    echo ""
+    echo "🎯 log-production   - Only errors/warnings (5-10 lines)"
+    echo "🚀 log-development  - All categories (200+ lines)"
+    echo "💰 log-trading      - Trade processing & data flow"
+    echo "🎨 log-rendering    - Charts, candles, basic rendering"
+    echo "⚡ log-performance  - Performance metrics & timing"
+    echo "🔌 log-network      - WebSocket & connections"
+    echo "🎯 log-fractal      - Fractal zoom coordination & LOD changes"
+    echo "📊 log-chart        - Chart rendering without coordinate spam"
+    echo "🔍 log-deep         - Everything + detailed debug (VERY VERBOSE!)"
+    echo "🧹 log-clean        - Disable spam, keep useful logs"
+    echo ""
+    echo "💡 Then run: ./build/apps/sentinel_gui/sentinel"
+    echo ""
+    echo "🔄 Current setting: $QT_LOGGING_RULES"
+}

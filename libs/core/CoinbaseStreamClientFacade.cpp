@@ -39,8 +39,17 @@ std::vector<Trade> CoinbaseStreamClient::getNewTrades(const std::string& symbol,
 }
 
 OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
-    // 🔥 NEW: Return dense LiveOrderBook data for professional visualization
-    OrderBook book = m_cache.getLiveOrderBook(symbol);
+    // 🚀 ULTRA-FAST: Convert FastOrderBook to OrderBook format for compatibility
+    const FastOrderBook* fastBook = m_cache.getFastOrderBook(symbol);
+    if (!fastBook) {
+        return {}; // Return empty OrderBook if not found
+    }
+    
+    OrderBook book;
+    book.product_id = symbol;
+    book.timestamp = std::chrono::system_clock::now();
+    book.bids = fastBook->getBids(1000); // Get up to 1000 levels
+    book.asks = fastBook->getAsks(1000); // Get up to 1000 levels
     
     // 🔍 DEBUG: Trace the final connection to identify the broken wire
     static int debugCount = 0;
@@ -54,12 +63,31 @@ OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
     return book;
 }
 
-std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveBids(const std::string& symbol) const {
-    // 🔥 NEW: Return complete bid levels for dense heatmap visualization
-    return m_cache.getLiveBids(symbol);
+
+
+// 🚀 ULTRA-FAST: O(1) order book access for Bookmap-style GPU pipeline
+const FastOrderBook* CoinbaseStreamClient::getFastOrderBook(const std::string& symbol) const {
+    return m_cache.getFastOrderBook(symbol);
 }
 
-std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveAsks(const std::string& symbol) const {
-    // 🔥 NEW: Return complete ask levels for dense heatmap visualization
-    return m_cache.getLiveAsks(symbol);
-} 
+std::vector<OrderBookLevel> CoinbaseStreamClient::getFastBids(const std::string& symbol, size_t max_levels) const {
+    return m_cache.getFastBids(symbol, max_levels);
+}
+
+std::vector<OrderBookLevel> CoinbaseStreamClient::getFastAsks(const std::string& symbol, size_t max_levels) const {
+    return m_cache.getFastAsks(symbol, max_levels);
+}
+
+double CoinbaseStreamClient::getFastBestBid(const std::string& symbol) const {
+    return m_cache.getFastBestBid(symbol);
+}
+
+double CoinbaseStreamClient::getFastBestAsk(const std::string& symbol) const {
+    return m_cache.getFastBestAsk(symbol);
+}
+
+double CoinbaseStreamClient::getFastSpread(const std::string& symbol) const {
+    return m_cache.getFastSpread(symbol);
+}
+
+ 

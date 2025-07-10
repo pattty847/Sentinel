@@ -45,6 +45,27 @@ log-network() {
     echo "   Rules: $QT_LOGGING_RULES"
 }
 
+# 🎯 FRACTAL ZOOM FOCUS - Debug fractal zoom coordination
+log-fractal() {
+    export QT_LOGGING_RULES="sentinel.chart.debug=true;sentinel.candles.debug=true;sentinel.camera.debug=true;sentinel.debug.coords.debug=false;sentinel.debug.geometry.debug=false;sentinel.debug.timing.debug=false;sentinel.render.detail.debug=false"
+    echo "🎯 FRACTAL ZOOM FOCUS: Chart coordination, LOD changes, zoom triggers"
+    echo "   Rules: $QT_LOGGING_RULES"
+    echo ""
+    echo "🚀 FRACTAL ZOOM TESTING TIPS:"
+    echo "   • Look for: '🎯 FRACTAL ZOOM: TimeFrame changed to'"
+    echo "   • Look for: '🎯 FRACTAL ZOOM: Order book depth changed to'"
+    echo "   • Look for: '🕯️ LOD CHANGED:' (candle LOD switches)"
+    echo "   • Much less: '🌊 WAVE CLEANUP' spam (now throttled 100x)"
+    echo "   • Historical limit: 2M points (vs old 200k)"
+}
+
+# 📊 CHART FOCUS - Debug chart rendering and coordination
+log-chart() {
+    export QT_LOGGING_RULES="sentinel.chart.debug=true;sentinel.candles.debug=true;sentinel.render.debug=true;sentinel.camera.debug=true;sentinel.debug.coords.debug=false;sentinel.debug.geometry.debug=false;sentinel.render.detail.debug=false"
+    echo "📊 CHART FOCUS: Chart rendering, candles, camera, LOD without spam"
+    echo "   Rules: $QT_LOGGING_RULES"
+}
+
 # 🔍 DEEP DEBUG - Enable detailed debugging (VERY VERBOSE!)
 log-deep() {
     export QT_LOGGING_RULES="sentinel.*.debug=true;sentinel.debug.*.debug=true;sentinel.render.detail.debug=true"
@@ -72,6 +93,8 @@ log-help() {
     echo "🎨 log-rendering    - Charts, candles, basic rendering"
     echo "⚡ log-performance  - Performance metrics & timing"
     echo "🔌 log-network      - WebSocket & connections"
+    echo "🎯 log-fractal      - Fractal zoom coordination & LOD changes"
+    echo "📊 log-chart        - Chart rendering without coordinate spam"
     echo "🔍 log-deep         - Everything + detailed debug (VERY VERBOSE!)"
     echo "🧹 log-clean        - Disable spam, keep useful logs"
     echo ""

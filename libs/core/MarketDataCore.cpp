@@ -250,6 +250,15 @@ std::string MarketDataCore::buildSubscribe(const std::string& channel) const {
 }
 
 void MarketDataCore::dispatch(const nlohmann::json& message) {
+    /*
+    This is the main function that dispatches the messages from the Coinbase WebSocket.
+    It is called by the onRead function.
+    It is responsible for dispatching the messages to the appropriate functions.
+    It is also responsible for logging the messages.
+    It is also responsible for throttling the logging.
+    It is also responsible for parsing the messages.
+    It is also responsible for storing the messages in the DataCache.
+    */
     if (!message.is_object()) return;
     
     std::string channel = message.value("channel", "");
@@ -284,9 +293,9 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // Store in DataCache
                         m_cache.addTrade(trade);
                         
-                        // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
+                        // 🔥 THROTTLED LOGGING: Only log every 100th trade to reduce spam
                         static int tradeLogCount = 0;
-                        if (++tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
+                        if (++tradeLogCount % 100 == 1) { // Log 1st, 101st, 201st trade, etc.
                             sLog_Trades(QString("💰 %1: $%2 size:%3 (%4) [%5 trades total]")
                                         .arg(QString::fromStdString(trade.product_id))
                                         .arg(trade.price).arg(trade.size)
@@ -329,10 +338,10 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         }
                     }
                     
-                    // Initialize the live order book with complete state
-                    m_cache.initializeLiveOrderBook(product_id, snapshot);
+                    // 🚀 ULTRA-FAST: Initialize FastOrderBook for Bookmap-style GPU pipeline
+                    m_cache.initializeFastOrderBook(product_id, snapshot);
                     
-                    sLog_Cache(QString("📸 SNAPSHOT: Initialized %1 with %2 bids, %3 asks")
+                    sLog_Cache(QString("📸 SNAPSHOT: Initialized %1 with %2 bids, %3 asks (FastOrderBook)")
                                .arg(QString::fromStdString(product_id))
                                .arg(snapshot.bids.size()).arg(snapshot.asks.size()));
                     
@@ -349,18 +358,20 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         double price = std::stod(update["price_level"].get<std::string>());
                         double quantity = std::stod(update["new_quantity"].get<std::string>());
                         
-                        // Apply update to live order book (handles add/update/remove automatically)
-                        m_cache.updateLiveOrderBook(product_id, side, price, quantity);
+                        // 🚀 ULTRA-FAST: Apply to FastOrderBook for Bookmap-style GPU pipeline
+                        m_cache.updateFastOrderBook(product_id, side, price, quantity);
                         updateCount++;
                     }
                     
                     // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
                     static int liveBookLogCount = 0;
                     if (++liveBookLogCount % 100 == 1) {
-                        auto liveBook = m_cache.getLiveOrderBook(product_id);
-                        sLog_Cache(QString("🏭 LIVE UPDATE %1: %2 → %3 bids, %4 asks (+%5 changes)")
-                                   .arg(liveBookLogCount).arg(QString::fromStdString(product_id))
-                                   .arg(liveBook.bids.size()).arg(liveBook.asks.size()).arg(updateCount));
+                        auto fastBook = m_cache.getFastOrderBook(product_id);
+                        if (fastBook) {
+                            sLog_Cache(QString("🏭 LIVE UPDATE %1: %2 → %3 bids, %4 asks (+%5 changes)")
+                                       .arg(liveBookLogCount).arg(QString::fromStdString(product_id))
+                                       .arg(fastBook->getBids().size()).arg(fastBook->getAsks().size()).arg(updateCount));
+                        }
                     }
                 }
             }

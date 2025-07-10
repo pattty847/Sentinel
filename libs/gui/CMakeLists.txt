@@ -24,6 +24,12 @@ qt6_add_qml_module(sentinel_gui_lib
         chartmode.h
         chartmodecontroller.cpp
         chartmodecontroller.h
+        # 🎯 PHASE 5: FRACTAL ZOOM COORDINATION
+        fractalzoomcontroller.cpp
+        fractalzoomcontroller.h
+        # 🧪 TEST DATA PLAYER FOR FRACTAL ZOOM TESTING
+        testdataplayer.cpp
+        testdataplayer.h
         # ✅ EXISTING DATA PIPELINE (PROVEN)
         streamcontroller.cpp
         streamcontroller.h

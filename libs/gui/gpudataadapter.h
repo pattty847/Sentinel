@@ -5,22 +5,17 @@
 #include <vector>
 #include <array>
 #include <atomic>
-#include <deque>
-#include <mutex>
-#include <chrono>
+#include <map>
 #include "../core/lockfreequeue.h"
 #include "../core/tradedata.h"
+#include "../core/CoinbaseStreamClient.hpp"
 #include "candlelod.h"
+#include "fractalzoomcontroller.h"
 
 // Forward declarations for GPU components
 namespace GPUTypes {
     struct Point {
         float x, y, r, g, b, a;
-    };
-    
-    struct QuadInstance {
-        float x, y, width, height;
-        float r, g, b, a;
     };
 }
 
@@ -39,52 +34,57 @@ class GPUDataAdapter : public QObject {
 
 public:
     explicit GPUDataAdapter(QObject* parent = nullptr);
-    
-    // CLI flag: --firehose-rate for QA sweep testing
-    void setFirehoseRate(int msgsPerSec) { m_firehoseRate = msgsPerSec; }
-    
-    // Lock-free push from WebSocket thread
-    bool pushTrade(const Trade& trade);
-    bool pushOrderBook(const OrderBook& orderBook);
-    
-    // Performance monitoring
-    size_t getPointsThroughput() const { return m_pointsPushed.load(); }
-    size_t getProcessedTrades() const { return m_processedTrades.load(); }
-    bool hasDroppedFrames() const { return m_frameDrops.load() > 0; }
-    
+    ~GPUDataAdapter();
+
+    // Initialization
+    void setCoinbaseClient(CoinbaseStreamClient* client);
+    void setFractalZoomController(FractalZoomController* controller);
+    void setSymbol(const std::string& symbol);
+    void start();
+    void stop();
+
     // Configuration
     void setReserveSize(size_t size);
-    size_t getReserveSize() const { return m_reserveSize; }
-    
-    // 🚀 O(1) Order Book Access
-    const FastOrderBook& getFastOrderBook() const { return m_fastOrderBook; }
-    double getBestBid() const { return m_fastOrderBook.getBestBidPrice(); }
-    double getBestAsk() const { return m_fastOrderBook.getBestAskPrice(); }
-    double getSpread() const { return m_fastOrderBook.getSpread(); }
+    void setFirehoseRate(int rate);
+    void setOrderBookDepth(size_t depth);
+    void setTimeFrame(CandleLOD::TimeFrame timeframe);
+
+    // 🚀 LOCK-FREE PIPELINE: Push trades to GPU processing queue
+    bool pushTrade(const Trade& trade);
+
+    // Accessors
+    FractalZoomController* getFractalZoomController() { return m_fractalZoomController; }
 
 signals:
-    void tradesReady(const GPUTypes::Point* points, size_t count);
-    void heatmapReady(const GPUTypes::QuadInstance* quads, size_t count);
+    void tradesReady(const std::vector<GPUTypes::Point>& points);
     void candlesReady(const std::vector<CandleUpdate>& candles);
+    void aggregatedHeatmapReady(CandleLOD::TimeFrame timeframe, const std::vector<QuadInstance>& bids, const std::vector<QuadInstance>& asks);
     void performanceAlert(const QString& message);
 
 private slots:
-    void processIncomingData();           // Process trades + order books (16ms)
+    void processIncomingData();
     void processHighFrequencyCandles();   // Process 100ms candles
     void processMediumFrequencyCandles(); // Process 500ms candles
     void processSecondCandles();          // Process 1s candles
+    void processHeatmap();                // Process order book data
+    
+    // 🎯 FRACTAL ZOOM COORDINATION
+    void onOrderBookUpdateIntervalChanged(int intervalMs);
+    void onTradePointUpdateIntervalChanged(int intervalMs);
+    void onOrderBookDepthChanged(size_t maxLevels);
+    void onTimeFrameChanged(CandleLOD::TimeFrame newTimeFrame);
 
 private:
     // Lock-free queues
     TradeQueue m_tradeQueue;         // 65536 = 2^16 (buffer @ 20M+ ops/s)
     OrderBookQueue m_orderBookQueue; // 16384 = 2^14
     
-    // 🚀 ULTRA-FAST: O(1) Order Book for HFT Performance  
-    FastOrderBook m_fastOrderBook;
+    // 🚀 ULTRA-FAST: Reference to centralized O(1) Order Book from DataCache
+    CoinbaseStreamClient* m_coinbaseClient = nullptr;
     
     // Zero-malloc buffers (pre-allocated, cursor-based)
     std::vector<GPUTypes::Point> m_tradeBuffer;
-    std::vector<GPUTypes::QuadInstance> m_heatmapBuffer;
+    std::vector<QuadInstance> m_heatmapBuffer; // 🚨 LEGACY: This will be removed or repurposed
     std::vector<CandleUpdate> m_candleBuffer;
     size_t m_tradeWriteCursor = 0;
     size_t m_heatmapWriteCursor = 0;
@@ -97,18 +97,33 @@ private:
     // Performance monitoring
     std::atomic<size_t> m_pointsPushed{0};
     std::atomic<size_t> m_processedTrades{0};
-    std::atomic<int> m_frameDrops{0};
+    std::atomic<size_t> m_processedOrderBooks{0};
     
-    // Processing timers
-    QTimer* m_processTimer;      // 16ms - Trade scatter + Order book heatmap
-    QTimer* m_candle100msTimer;  // 100ms - High-frequency candles
-    QTimer* m_candle500msTimer;  // 500ms - Medium-frequency candles  
-    QTimer* m_candle1sTimer;     // 1000ms - Second candles
+    // Timers
+    QTimer* m_processTimer = nullptr;
+    QTimer* m_orderBookTimer = nullptr;
+    QTimer* m_tradePointTimer = nullptr;
+    QTimer* m_highFreqCandleTimer = nullptr;
+    QTimer* m_mediumFreqCandleTimer = nullptr;
+    QTimer* m_secondCandleTimer = nullptr;
+    
+    // 🎯 FRACTAL ZOOM CONTROLLER
+    FractalZoomController* m_fractalZoomController = nullptr;
+    
+    // 🔥 ADAPTIVE CONFIGURATION - Changes based on zoom level
+    size_t m_currentOrderBookDepth = 1000; // Default depth
+    CandleLOD::TimeFrame m_currentTimeFrame = CandleLOD::TF_1min;
 
     CandleQueue m_candleQueue;
     CandleLOD m_candleLOD;
     std::array<int64_t, CandleLOD::NUM_TIMEFRAMES> m_lastEmittedCandleTime{};
     std::string m_currentSymbol;
+    
+    // 🔥 NEW: State for the heatmap aggregation engine
+    using PriceVolumeMap = std::map<double, double>;
+    std::array<PriceVolumeMap, CandleLOD::NUM_TIMEFRAMES> m_bidHeatmapAggregators;
+    std::array<PriceVolumeMap, CandleLOD::NUM_TIMEFRAMES> m_askHeatmapAggregators;
+    std::array<int64_t, CandleLOD::NUM_TIMEFRAMES> m_heatmapBucketStartTimes;
     
     // Coordinate mapping (cached for performance)
     struct CoordinateCache {
@@ -118,20 +133,11 @@ private:
         bool initialized = false;
     } m_coordCache;
     
-    // 🚀 PHASE 2: TIME-WINDOWED TRADE HISTORY BUFFER
-    // Maintains rolling 10-minute window of trades for re-aggregation
-    std::deque<Trade> m_tradeHistory;
-    std::mutex m_tradeHistoryMutex;
-    static constexpr std::chrono::seconds HISTORY_WINDOW_SPAN{600}; // 10 minutes
-    int64_t m_lastHistoryCleanup_ms = 0;
-    static constexpr int64_t CLEANUP_INTERVAL_MS = 5000; // Clean up every 5 seconds
-    
     // Helper methods
     void initializeBuffers();
     GPUTypes::Point convertTradeToGPUPoint(const Trade& trade);
     void updateCoordinateCache(double price);
-    void resetWriteCursors();
     void processCandleTimeFrame(CandleLOD::TimeFrame timeframe);  // Time-based candle processing
     void cleanupOldTradeHistory(); // 🚀 PHASE 2: Time-based history cleanup
-    void convertFastOrderBookToQuads(); // 🚀 Convert O(1) order book to GPU quads
+    void processHeatmapAggregation(const OrderBook& book); // 🔥 NEW: Core aggregation logic
 }; 

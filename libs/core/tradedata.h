@@ -97,46 +97,6 @@ struct OrderBook {
     std::chrono::system_clock::time_point timestamp;
 };
 
-// 🔥 NEW: LiveOrderBook - Stateful Order Book for Professional Visualization (O(log N) complexity)
-class LiveOrderBook {
-public:
-    LiveOrderBook() = default;
-    explicit LiveOrderBook(const std::string& product_id) : m_productId(product_id) {}
-    
-    // Initialize from snapshot (complete order book state)
-    void initializeFromSnapshot(const OrderBook& snapshot);
-    
-    // Apply incremental updates (l2update messages)
-    void applyUpdate(const std::string& side, double price, double quantity);
-    
-    // Get current complete state as OrderBook for rendering
-    OrderBook getCurrentState() const;
-    
-    // Get dense data for heatmap rendering
-    std::vector<OrderBookLevel> getAllBids() const;
-    std::vector<OrderBookLevel> getAllAsks() const;
-    
-    // Statistics
-    size_t getBidCount() const;
-    size_t getAskCount() const;
-    bool isEmpty() const;
-    
-    // Thread-safe access
-    void setProductId(const std::string& productId) { m_productId = productId; }
-    std::string getProductId() const { return m_productId; }
-
-private:
-    std::string m_productId;
-    
-    // 🚀 CORE: Sorted maps for O(log N) price level management
-    // Key = price, Value = quantity/size
-    std::map<double, double> m_bids;  // Higher prices first (reverse order)
-    std::map<double, double> m_asks;  // Lower prices first (normal order)
-    
-    std::chrono::system_clock::time_point m_lastUpdate;
-    mutable std::mutex m_mutex; // Thread safety for concurrent access
-};
-
 // 🚀 ULTRA-FAST: O(1) Order Book Implementation
 // Inspired by Charles Cooper's ITCH implementation (61ns/tick, 16M msg/sec)
 // Uses direct array indexing for constant-time operations
@@ -322,6 +282,21 @@ private:
             ).count()
         );
     }
+};
+
+// 🔥 GPU RENDERING: Unified QuadInstance struct for heatmap visualization
+struct QuadInstance {
+    float x, y;           // Position (screen coordinates)
+    float width, height;  // Quad dimensions
+    float r, g, b, a;     // Color (RGBA)
+    float intensity;      // Size/volume intensity
+    double price;         // Original price (for sorting/filtering)
+    double size;          // Original size (for intensity calculation)
+    double timestamp;     // Timestamp for unified coordinate system
+    
+    // 🔥 FINAL POLISH: Store raw data for per-frame recalculation
+    double rawTimestamp = 0.0;
+    double rawPrice = 0.0;
 };
 
 #endif // TRADEDATA_H 

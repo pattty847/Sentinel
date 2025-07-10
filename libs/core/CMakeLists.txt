@@ -15,7 +15,7 @@ target_sources(sentinel_core
         MessageParser.hpp
         # Phase 3: Lock-free performance monitoring
         performancemonitor.cpp
-        CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
+        CoinbaseStreamClientFacade.cpp  # 🚀 ULTRA-FAST: FastOrderBook implementation
         FastOrderBook.cpp              # 🚀 ULTRA-FAST: O(1) Order Book
         # Logging system
         SentinelLogging.cpp

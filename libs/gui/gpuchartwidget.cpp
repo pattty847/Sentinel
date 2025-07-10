@@ -329,14 +329,12 @@ void GPUChartWidget::cleanupOldTrades() {
     if (buffer.points.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = buffer.points.size() - m_maxPoints;
         buffer.points.erase(buffer.points.begin(), buffer.points.begin() + excess);
-        // sLog_Gpu() << "🧹 Cleaned up" << excess << "old trades, remaining:" << buffer.points.size();  // Too chatty!
     }
     
     // 🔥 GEMINI FIX: Also clean up accumulated points
     if (m_allRenderPoints.size() > static_cast<size_t>(m_maxPoints)) {
         size_t excess = m_allRenderPoints.size() - m_maxPoints;
         m_allRenderPoints.erase(m_allRenderPoints.begin(), m_allRenderPoints.begin() + excess);
-        // sLog_Gpu() << "🧹 Cleaned up" << excess << "accumulated points, remaining:" << m_allRenderPoints.size();  // Too chatty!
     }
 }
 
@@ -351,13 +349,6 @@ void GPUChartWidget::swapBuffers() {
     
     m_readBuffer.store(newRead);
     m_writeBuffer.store(newWrite);
-    
-    // 🔇 REDUCED DEBUG: Only log every 50th swap to reduce spam
-    static int swapCounter = 0;
-    if (++swapCounter % 50 == 0) {
-        // sLog_Gpu() << "🔄 Buffer swap: write" << oldWrite << "→" << newWrite 
-        //          << ", read" << oldRead << "→" << newRead;  // Too chatty!
-    }
 }
 
 // 🔥 OPTION B: CLEAN REBUILD - SINGLE COORDINATE SYSTEM WITH PER-VERTEX COLORS
@@ -615,7 +606,6 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
             // Move time window (subtract for natural drag direction)
             m_visibleTimeStart_ms -= timeDelta;
             m_visibleTimeEnd_ms -= timeDelta;
-            emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice); // 🔥 FINAL POLISH: Include price range
             
             // Price range panning
             double priceRange = m_maxPrice - m_minPrice;
@@ -629,10 +619,18 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
             m_lastMousePos = currentPos;
             m_geometryDirty.store(true);
             
-            // Throttle updates for smooth performance
+            // 🔥 MEMORY LEAK FIX: Heavily throttle expensive operations during drag
             static int updateCounter = 0;
-            if (++updateCounter % 2 == 0) {
+            static int viewChangeCounter = 0;
+            
+            // Update rendering every 4th mouse move for smooth visuals
+            if (++updateCounter % 4 == 0) {
                 update();
+            }
+            
+            // Emit viewChanged only every 10th mouse move to prevent expensive recalculations
+            if (++viewChangeCounter % 10 == 0) {
+                emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
             }
         }
         
@@ -650,6 +648,9 @@ void GPUChartWidget::mouseMoveEvent(QMouseEvent* event) {
 void GPUChartWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && m_isDragging) {
         m_isDragging = false;
+        
+        // 🔥 MEMORY LEAK FIX: Emit final viewChanged to ensure components get final position
+        emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         
         // 🔥 REDUCED DEBUG: Only log performance achievements
         double latency = calculateInteractionLatency();
@@ -674,7 +675,30 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
         return;
     }
     
-    // 🔥 ENHANCED ZOOM: Support both time (X) and price (Y) axis zooming
+    // 🔥 ENHANCED ZOOM MODES: Support CTRL+modifier keys for different zoom modes
+    Qt::KeyboardModifiers modifiers = event->modifiers();
+    
+    // Determine zoom mode based on modifier keys
+    bool zoomTime = true;   // Default: zoom time axis
+    bool zoomPrice = true;  // Default: zoom price axis
+    
+    if (modifiers & Qt::ControlModifier) {
+        if (modifiers & Qt::ShiftModifier) {
+            // CTRL+SHIFT: Lock current zoom, pan only
+            zoomTime = false;
+            zoomPrice = false;
+        } else {
+            // CTRL: Time axis zoom only (X-axis)
+            zoomTime = true;
+            zoomPrice = false;
+        }
+    } else if (modifiers & Qt::AltModifier) {
+        // ALT: Price axis zoom only (Y-axis)
+        zoomTime = false;
+        zoomPrice = true;
+    }
+    // No modifiers: Default dual-axis zoom
+    
     const double ZOOM_SENSITIVITY = 0.001; // Tuned for time window
     const double MIN_TIME_RANGE = 1000.0;  // 1 second minimum
     const double MAX_TIME_RANGE = 600000.0; // 10 minutes maximum
@@ -690,42 +714,44 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
     double cursorXRatio = cursorPos.x() / width();
     double cursorYRatio = 1.0 - (cursorPos.y() / height()); // Invert Y for price axis
     
-    // 🚀 DUAL-AXIS ZOOM: Zoom both time and price simultaneously
-    
     // ──── TIME AXIS ZOOM (X) ────
-    double currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    double newTimeRange = currentTimeRange * zoomFactor;
-    newTimeRange = std::max(MIN_TIME_RANGE, std::min(MAX_TIME_RANGE, newTimeRange));
-    
-    if (std::abs(newTimeRange - currentTimeRange) > 10.0) {
-        // Calculate cursor position in time coordinates
-        int64_t cursorTimestamp = m_visibleTimeStart_ms + (cursorXRatio * currentTimeRange);
+    if (zoomTime) {
+        double currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+        double newTimeRange = currentTimeRange * zoomFactor;
+        newTimeRange = std::max(MIN_TIME_RANGE, std::min(MAX_TIME_RANGE, newTimeRange));
         
-        // Calculate new time window bounds around cursor
-        double timeDelta = newTimeRange - currentTimeRange;
-        int64_t startAdjust = static_cast<int64_t>(timeDelta * cursorXRatio);
-        int64_t endAdjust = static_cast<int64_t>(timeDelta * (1.0 - cursorXRatio));
-        
-        m_visibleTimeStart_ms -= startAdjust;
-        m_visibleTimeEnd_ms += endAdjust;
+        if (std::abs(newTimeRange - currentTimeRange) > 10.0) {
+            // Calculate cursor position in time coordinates
+            int64_t cursorTimestamp = m_visibleTimeStart_ms + (cursorXRatio * currentTimeRange);
+            
+            // Calculate new time window bounds around cursor
+            double timeDelta = newTimeRange - currentTimeRange;
+            int64_t startAdjust = static_cast<int64_t>(timeDelta * cursorXRatio);
+            int64_t endAdjust = static_cast<int64_t>(timeDelta * (1.0 - cursorXRatio));
+            
+            m_visibleTimeStart_ms -= startAdjust;
+            m_visibleTimeEnd_ms += endAdjust;
+        }
     }
     
     // ──── PRICE AXIS ZOOM (Y) ────
-    double currentPriceRange = m_maxPrice - m_minPrice;
-    double newPriceRange = currentPriceRange * zoomFactor;
-    newPriceRange = std::max(MIN_PRICE_RANGE, std::min(MAX_PRICE_RANGE, newPriceRange));
-    
-    if (std::abs(newPriceRange - currentPriceRange) > 0.01) {
-        // Calculate cursor position in price coordinates
-        double cursorPrice = m_minPrice + (cursorYRatio * currentPriceRange);
+    if (zoomPrice) {
+        double currentPriceRange = m_maxPrice - m_minPrice;
+        double newPriceRange = currentPriceRange * zoomFactor;
+        newPriceRange = std::max(MIN_PRICE_RANGE, std::min(MAX_PRICE_RANGE, newPriceRange));
         
-        // Calculate new price range bounds around cursor
-        double priceDelta = newPriceRange - currentPriceRange;
-        double minAdjust = priceDelta * cursorYRatio;
-        double maxAdjust = priceDelta * (1.0 - cursorYRatio);
-        
-        m_minPrice -= minAdjust;
-        m_maxPrice += maxAdjust;
+        if (std::abs(newPriceRange - currentPriceRange) > 0.01) {
+            // Calculate cursor position in price coordinates
+            double cursorPrice = m_minPrice + (cursorYRatio * currentPriceRange);
+            
+            // Calculate new price range bounds around cursor
+            double priceDelta = newPriceRange - currentPriceRange;
+            double minAdjust = priceDelta * cursorYRatio;
+            double maxAdjust = priceDelta * (1.0 - cursorYRatio);
+            
+            m_minPrice -= minAdjust;
+            m_maxPrice += maxAdjust;
+        }
     }
     
     emit viewChanged(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
@@ -740,12 +766,20 @@ void GPUChartWidget::wheelEvent(QWheelEvent* event) {
     updateDebugInfo();
     update();
     
-    // 🚀 ENHANCED DEBUG: Show both time and price zoom info
+    // 🚀 ENHANCED DEBUG: Show zoom mode and both axes info
     static int zoomDebugCount = 0;
     if (zoomDebugCount++ < 5) {
-        sLog_Camera("🎥 DUAL-AXIS ZOOM:"
-                 << "Time:" << (newTimeRange/1000.0) << "s"
-                 << "Price: $" << QString::number(newPriceRange, 'f', 2)
+        double currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+        double currentPriceRange = m_maxPrice - m_minPrice;
+        
+        QString zoomModeStr = "BOTH";
+        if (!zoomTime && !zoomPrice) zoomModeStr = "LOCKED";
+        else if (!zoomTime) zoomModeStr = "PRICE_ONLY";
+        else if (!zoomPrice) zoomModeStr = "TIME_ONLY";
+        
+        sLog_Camera("🎥 FRACTAL ZOOM [" << zoomModeStr << "]:"
+                 << "Time:" << (currentTimeRange/1000.0) << "s"
+                 << "Price: $" << QString::number(currentPriceRange, 'f', 2)
                  << "Window: [" << m_visibleTimeStart_ms << "," << m_visibleTimeEnd_ms << "]"
                  << "Range: [$" << QString::number(m_minPrice, 'f', 2) 
                  << ",$" << QString::number(m_maxPrice, 'f', 2) << "]");
@@ -847,6 +881,11 @@ void GPUChartWidget::centerOnTime(qint64 timestamp) {
 
 // 🔥 NEW: PURE STATELESS COORDINATE SYSTEM (Option B)
 QPointF GPUChartWidget::worldToScreen(int64_t timestamp_ms, double price) const {
+    static int logCounter = 0;
+    if (logCounter++ % 500 == 0) { // Log roughly every 500 calls
+        sLog_RenderDetail(QString("GPUCHART Coords: Time[%1, %2], Price[%3, %4]").arg(m_visibleTimeStart_ms).arg(m_visibleTimeEnd_ms).arg(m_minPrice).arg(m_maxPrice));
+    }   
+
     if (width() <= 0 || height() <= 0) {
         return QPointF(0, 0);
     }
@@ -962,9 +1001,6 @@ void GPUChartWidget::updateTimeWindow(int64_t newTimestamp) {
     }
 }
 
-// 🔥 REMOVED: calculateColumnBasedPosition function with problematic static variable
-// Replaced with stateless worldToScreen coordinate system in Option B 
-
 void GPUChartWidget::setDebugInfoVisible(bool visible) {
     if (m_debugInfoVisible != visible) {
         m_debugInfoVisible = visible;
@@ -996,4 +1032,4 @@ void GPUChartWidget::updateDebugInfo() {
      .arg(m_allRenderPoints.size());
     
     emit debugInfoChanged();
-} 
+}

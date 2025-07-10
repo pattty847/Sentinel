@@ -4,6 +4,7 @@
 #include <iostream>
 #include "tradedata.h"
 #include <QMetaType>
+#include "testdataplayer.h"
 
 int main(int argc, char *argv[])
 {
@@ -14,11 +15,18 @@ int main(int argc, char *argv[])
     qRegisterMetaType<Trade>();
     qRegisterMetaType<OrderBook>();
     
+    // Check for --test-mode flag
+    bool testMode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--test-mode") {
+            testMode = true;
+            break;
+        }
+    }
+
     // 🔥 CREATE GPU-POWERED MAIN WINDOW
-    MainWindowGPU window;
+    MainWindowGPU window(testMode);
     window.show();
-    
-    qDebug() << "✅ GPU Trading Terminal ready for 144Hz action!";
-    
+        
     return app.exec();
 }

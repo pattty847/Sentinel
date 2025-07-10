@@ -8,13 +8,13 @@ Transform Sentinel into a **professional-grade market microstructure analysis pl
 
 ## 📋 **Completed Phases** ✅
 
-### ✅ Phase 1-4: Foundation (Pre-December 2024)
+### ✅ Phase 1-4: Foundation (June 2025)
 - **Object-oriented refactoring** from single-file script
 - **Core logic implementation** (CVD, Rules Engine, Statistics)
 - **Multi-threading architecture** with responsive GUI
 - **Qt Controller pattern** for framework decoupling
 
-### ✅ Phase 5-7: Core Features & Charting (Dec 2024 - June 2025)
+### ✅ Phase 5-7: Core Features & Charting (June 2025)
 - **High-performance streaming client** and bridge integration
 - **Custom `TradeChartWidget`** for real-time data visualization
 - **Symbol filtering** and dynamic axes for price and time

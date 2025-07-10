@@ -151,4 +151,4 @@ private:
     void setCandleWidth(double width);
     void setVolumeScaling(bool enabled);
     void setMaxCandles(int max);
-}; 
+};

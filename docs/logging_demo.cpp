@@ -3,7 +3,7 @@
 // =============================================================================
 // This file shows before/after examples of the logging migration
 
-#include "SentinelLogging.hpppp"
+#include "SentinelLogging.hpp"
 #include <QCoreApplication>
 #include <QDebug>
 

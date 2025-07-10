@@ -88,4 +88,4 @@ Rectangle {
     function setWickColor(color) {
         candleChart.setWickColor(color);
     }
-} 
+}

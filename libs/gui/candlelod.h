@@ -72,6 +72,11 @@ public:
         return m_timeFrameData[tf].size();
     }
     
+    // 🔥 TIMEFRAME UTILITIES: Get duration in milliseconds
+    static int64_t getTimeFrameDuration(TimeFrame tf) {
+        return TIMEFRAME_INTERVALS[tf];
+    }
+    
     // 🧹 CLEANUP: Remove old candles to maintain performance
     void cleanupOldCandles(int64_t cutoffTime_ms);
     

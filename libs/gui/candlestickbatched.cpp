@@ -667,6 +667,11 @@ void CandlestickBatched::updateLODIfNeeded() {
         sLog_Chart("🕯️ LOD CHANGED:" << CandleUtils::timeFrameName(lastTimeFrame) 
                  << "→" << CandleUtils::timeFrameName(newTimeFrame)
                  << "Pixels per candle:" << calculateCurrentPixelsPerCandle());
+        
+        // 🎯 FRACTAL ZOOM FIX: Emit the signal to trigger coordination!
+        emit lodLevelChanged(static_cast<int>(newTimeFrame));
+        sLog_Chart("🎯 FRACTAL ZOOM: LOD signal emitted for timeframe" << static_cast<int>(newTimeFrame));
+        
         lastTimeFrame = newTimeFrame;
     }
 }
@@ -784,4 +789,4 @@ void CandlestickBatched::ensureCapacity(QSGGeometryNode* node, int wantedVertexC
     // Ensure drawing mode is always correct (may differ between body/wick calls)
     if (g->drawingMode() != mode)
         g->setDrawingMode(mode);
-}  
+}

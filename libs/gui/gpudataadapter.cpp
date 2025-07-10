@@ -1,419 +1,340 @@
 #include "gpudataadapter.h"
 #include "SentinelLogging.hpp"
 #include <QDebug>
-#include <QElapsedTimer>
-#include <algorithm>
-#include <chrono>
-#include <QDateTime>
-#include <cstdint>
 
 GPUDataAdapter::GPUDataAdapter(QObject* parent)
     : QObject(parent)
     , m_processTimer(new QTimer(this))
-    , m_candle100msTimer(new QTimer(this))
-    , m_candle500msTimer(new QTimer(this))
-    , m_candle1sTimer(new QTimer(this))
-    , m_fastOrderBook("BTC-USD") // Initialize O(1) order book
+    , m_orderBookTimer(new QTimer(this))
+    , m_tradePointTimer(new QTimer(this))
+    , m_highFreqCandleTimer(new QTimer(this))
+    , m_mediumFreqCandleTimer(new QTimer(this))
+    , m_secondCandleTimer(new QTimer(this))
+    , m_fractalZoomController(new FractalZoomController(this))
 {
-    sLog_Init("🚀 GPUDataAdapter: Initializing lock-free data pipeline...");
-    
+    // Initialize buffers
     initializeBuffers();
     
     // Connect processing timers
     connect(m_processTimer, &QTimer::timeout, this, &GPUDataAdapter::processIncomingData);
-    connect(m_candle100msTimer, &QTimer::timeout, this, &GPUDataAdapter::processHighFrequencyCandles);
-    connect(m_candle500msTimer, &QTimer::timeout, this, &GPUDataAdapter::processMediumFrequencyCandles);
-    connect(m_candle1sTimer, &QTimer::timeout, this, &GPUDataAdapter::processSecondCandles);
+    connect(m_highFreqCandleTimer, &QTimer::timeout, this, &GPUDataAdapter::processHighFrequencyCandles);
+    connect(m_mediumFreqCandleTimer, &QTimer::timeout, this, &GPUDataAdapter::processMediumFrequencyCandles);
+    connect(m_secondCandleTimer, &QTimer::timeout, this, &GPUDataAdapter::processSecondCandles);
+    connect(m_orderBookTimer, &QTimer::timeout, this, &GPUDataAdapter::processHeatmap);
     
-    // Start timers at their proper intervals
-    m_processTimer->start(16);     // 16ms - Trade scatter + Order book heatmap
-    m_candle100msTimer->start(100); // 100ms - High-frequency candles
-    m_candle500msTimer->start(500); // 500ms - Medium-frequency candles  
-    m_candle1sTimer->start(1000);   // 1000ms - Second candles
+    // Start timers at their initial intervals
+    m_processTimer->start(50);  // 20 Hz base processing rate
+    m_highFreqCandleTimer->start(100);   // 100ms candles
+    m_mediumFreqCandleTimer->start(500); // 500ms candles
+    m_secondCandleTimer->start(1000);    // 1s candles
+    m_orderBookTimer->start(100);        // 100ms order book updates
     
-    sLog_Init("✅ GPUDataAdapter: Lock-free pipeline initialized"
-             << "- Reserve size:" << m_reserveSize 
-             << "- Trade queue capacity: 65536"
-             << "- OrderBook queue capacity: 16384"
-             << "- Candle timers: 100ms, 500ms, 1s");
+    // Initialize fractal zoom controller with default timeframe
+    m_fractalZoomController->onTimeFrameChanged(m_currentTimeFrame);
+    
+    // Connect fractal zoom signals
+    connect(m_fractalZoomController, &FractalZoomController::orderBookUpdateIntervalChanged,
+            this, &GPUDataAdapter::onOrderBookUpdateIntervalChanged);
+    connect(m_fractalZoomController, &FractalZoomController::tradePointUpdateIntervalChanged,
+            this, &GPUDataAdapter::onTradePointUpdateIntervalChanged);
+    connect(m_fractalZoomController, &FractalZoomController::orderBookDepthChanged,
+            this, &GPUDataAdapter::onOrderBookDepthChanged);
+    connect(m_fractalZoomController, &FractalZoomController::timeFrameChanged,
+            this, &GPUDataAdapter::onTimeFrameChanged);
 }
+
+GPUDataAdapter::~GPUDataAdapter() {
+    stop();
+}
+
+void GPUDataAdapter::setCoinbaseClient(CoinbaseStreamClient* client) {
+    m_coinbaseClient = client;
+}
+
+void GPUDataAdapter::setFractalZoomController(FractalZoomController* controller) {
+    m_fractalZoomController = controller;
+}
+
+void GPUDataAdapter::setSymbol(const std::string& symbol) {
+    m_currentSymbol = symbol;
+}
+
+void GPUDataAdapter::start() {
+    m_processTimer->start();
+    m_orderBookTimer->start();
+    m_tradePointTimer->start();
+    m_highFreqCandleTimer->start();
+    m_mediumFreqCandleTimer->start();
+    m_secondCandleTimer->start();
+}
+
+void GPUDataAdapter::stop() {
+    m_processTimer->stop();
+    m_orderBookTimer->stop();
+    m_tradePointTimer->stop();
+    m_highFreqCandleTimer->stop();
+    m_mediumFreqCandleTimer->stop();
+    m_secondCandleTimer->stop();
+}
+
+void GPUDataAdapter::setReserveSize(size_t size) {
+    m_reserveSize = size;
+    initializeBuffers();
+}
+
+void GPUDataAdapter::setFirehoseRate(int rate) {
+    m_firehoseRate = rate;
+}
+
+void GPUDataAdapter::setOrderBookDepth(size_t depth) {
+    m_currentOrderBookDepth = depth;
+}
+
+void GPUDataAdapter::setTimeFrame(CandleLOD::TimeFrame timeframe) {
+    m_currentTimeFrame = timeframe;
+}
+
+bool GPUDataAdapter::pushTrade(const Trade& trade) {
+    // Push trade to lock-free queue for processing
+    bool success = m_tradeQueue.push(trade);
+    if (success) {
+        m_pointsPushed++;
+    }
+    return success;
+}
+
+void GPUDataAdapter::processIncomingData() {
+    // sLog_GPU("--- TRADES: Starting processIncomingData ---");
+    
+    Trade trade;
+    while (m_tradeQueue.pop(trade)) {
+        // sLog_GPU(QString("--- TRADES: Popped trade. Cursor is at %1 ---").arg(m_tradeWriteCursor));
+        
+        // --- FIX: Set the current symbol ---
+        if (m_currentSymbol.empty() && !trade.product_id.empty()) {
+            m_currentSymbol = trade.product_id;
+            // sLog_GPU("--- TRADES: SYMBOL DISCOVERED AND SET TO: " + QString::fromStdString(m_currentSymbol));
+        }
+
+        if (m_tradeWriteCursor >= m_reserveSize) {
+            // sLog_GPU(QString("--- TRADES: Write cursor (%1) hit limit, wrapping to 0 ---").arg(m_tradeWriteCursor));
+            m_tradeWriteCursor = 0;
+        }
+        
+        // --- Logging to debug the potential crash ---
+        // sLog_GPU(QString("--- TRADES: Preparing to write to m_tradeBuffer at index %1. Buffer size is %2.")
+        //              .arg(m_tradeWriteCursor)
+        //              .arg(m_tradeBuffer.size()));
+        
+        m_tradeBuffer[m_tradeWriteCursor++] = convertTradeToGPUPoint(trade);
+        
+        // sLog_GPU(QString("--- TRADES: Successfully wrote to buffer at index %1 ---").arg(m_tradeWriteCursor - 1));
+        m_processedTrades++;
+    }
+    
+    // Emit trade points if we have any
+    if (m_tradeWriteCursor > 0) {
+        // sLog_GPU("--- TRADES: Preparing to emit tradesReady signal ---");
+        std::vector<GPUTypes::Point> points(m_tradeBuffer.begin(), m_tradeBuffer.begin() + m_tradeWriteCursor);
+        emit tradesReady(points);
+        // sLog_GPU("--- TRADES: tradesReady signal emitted successfully ---");
+        m_tradeWriteCursor = 0;
+    }
+    // sLog_GPU("--- TRADES: Finished processIncomingData ---");
+}
+
+void GPUDataAdapter::processHeatmap() {
+    sLog_GPU("--- Step A: processHeatmap() slot triggered ---");
+    if (!m_coinbaseClient) {
+        sLog_GPU("--- Step A FAILED: m_coinbaseClient is null ---");
+        return;
+    }
+
+    if (m_currentSymbol.empty()) { // <-- ADD THIS GUARD CLAUSE
+        sLog_GPU("--- Step A SKIPPED: Symbol is not yet known. ---");
+        return;
+    }
+
+    const FastOrderBook* book = m_coinbaseClient->getFastOrderBook(m_currentSymbol);
+    if (book && !book->isEmpty()) {
+        sLog_GPU("--- Step A: FastOrderBook retrieved successfully ---");
+        // Convert FastOrderBook to OrderBook for processing
+        OrderBook orderBook;
+        orderBook.product_id = m_currentSymbol;
+        orderBook.bids = book->getBids(m_currentOrderBookDepth);
+        orderBook.asks = book->getAsks(m_currentOrderBookDepth);
+        orderBook.timestamp = std::chrono::system_clock::now();
+        
+        sLog_GPU("--- Step A: Converting to OrderBook - Bids:" << orderBook.bids.size() << " Asks:" << orderBook.asks.size() << " ---");
+        processHeatmapAggregation(orderBook);
+    } else {
+        sLog_GPU("--- Step A FAILED: FastOrderBook is null or empty ---");
+    }
+    sLog_GPU("--- Step A PASSED: processHeatmap() finished ---");
+}
+
+void GPUDataAdapter::processHeatmapAggregation(const OrderBook& book) {
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(book.timestamp.time_since_epoch()).count();
+
+    // --- STEP 1: Add current book's data to ALL in-progress buckets ---
+    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
+        for (const auto& level : book.bids) {
+            m_bidHeatmapAggregators[i][level.price] += level.size;
+        }
+        for (const auto& level : book.asks) {
+            m_askHeatmapAggregators[i][level.price] += level.size;
+        }
+    }
+
+    // --- STEP 2: Check if any buckets are now complete and ready to be emitted ---
+    for (size_t i = 0; i < CandleLOD::NUM_TIMEFRAMES; ++i) {
+        auto timeframe = static_cast<CandleLOD::TimeFrame>(i);
+        int64_t bucketDuration = CandleLOD::getTimeFrameDuration(timeframe);
+        
+        if (m_heatmapBucketStartTimes[i] == 0) {
+            m_heatmapBucketStartTimes[i] = (now / bucketDuration) * bucketDuration;
+        }
+
+        if (now >= m_heatmapBucketStartTimes[i] + bucketDuration) {
+            std::vector<QuadInstance> finalBids, finalAsks;
+            finalBids.reserve(m_bidHeatmapAggregators[i].size());
+            finalAsks.reserve(m_askHeatmapAggregators[i].size());
+
+            for (const auto& [price, total_size] : m_bidHeatmapAggregators[i]) {
+                QuadInstance quad;
+                quad.rawPrice = price;
+                quad.size = total_size;
+                quad.rawTimestamp = m_heatmapBucketStartTimes[i];
+                finalBids.push_back(quad);
+            }
+            for (const auto& [price, total_size] : m_askHeatmapAggregators[i]) {
+                QuadInstance quad;
+                quad.rawPrice = price;
+                quad.size = total_size;
+                quad.rawTimestamp = m_heatmapBucketStartTimes[i];
+                finalAsks.push_back(quad);
+            }
+
+            // Always emit, even if both are empty, for gap debugging
+            bool willEmit = true;
+            sLog_GPU(QString("HEATMAP BUCKET: tf=%1 t=%2 dur=%3 bids_in=%4 asks_in=%5 bids_out=%6 asks_out=%7 emit=%8")
+                .arg(static_cast<int>(timeframe))
+                .arg(m_heatmapBucketStartTimes[i])
+                .arg(bucketDuration)
+                .arg(book.bids.size())
+                .arg(book.asks.size())
+                .arg(finalBids.size())
+                .arg(finalAsks.size())
+                .arg(willEmit ? "Y" : "N"));
+            emit aggregatedHeatmapReady(timeframe, finalBids, finalAsks);
+
+            // Start a new bucket for the next cycle
+            m_bidHeatmapAggregators[i].clear();
+            m_askHeatmapAggregators[i].clear();
+            m_heatmapBucketStartTimes[i] = (now / bucketDuration) * bucketDuration;
+        }
+    }
+}
+
+// In GPUDataAdapter.cpp
 
 void GPUDataAdapter::initializeBuffers() {
     // Runtime-configurable buffer size (handle Intel UHD VRAM limits)
     QSettings settings;
-    m_reserveSize = settings.value("chart/reserveSize", 2'000'000).toULongLong();
-    
-    // Pre-allocate once: std::max(expected, userPref)
-    size_t actualSize = (m_reserveSize > 100000) ? m_reserveSize : 100000; // Minimum 100k
-    
-    sLog_Init("🔧 GPUDataAdapter: Pre-allocating buffers - Trade buffer:" << actualSize
-             << "Heatmap buffer:" << actualSize);
-
-    m_tradeBuffer.reserve(actualSize);
-    m_heatmapBuffer.reserve(actualSize);
-    m_candleBuffer.reserve(actualSize);
-
-    // Initialize with empty elements to avoid reallocations
-    m_tradeBuffer.resize(actualSize);
-    m_heatmapBuffer.resize(actualSize);
-    m_candleBuffer.resize(actualSize);
-    
-    sLog_Init("💾 GPUDataAdapter: Buffer allocation complete");
-}
-
-bool GPUDataAdapter::pushTrade(const Trade& trade) {
-    if (m_tradeQueue.push(trade)) {
-        m_pointsPushed.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    } else {
-        // Queue full - performance alert
-        m_frameDrops.fetch_add(1, std::memory_order_relaxed);
-        emit performanceAlert("Trade queue full - dropping data!");
-        return false;
+    // Set a reasonable default and minimum size.
+    size_t desiredSize = settings.value("chart/reserveSize", 100000).toULongLong();
+    if (desiredSize < 10000) {
+        desiredSize = 10000; // Enforce a sane minimum to prevent crashes
     }
-}
+    m_reserveSize = desiredSize;
 
-bool GPUDataAdapter::pushOrderBook(const OrderBook& orderBook) {
-    if (m_orderBookQueue.push(orderBook)) {
-        return true;
-    } else {
-        // Queue full - performance alert
-        m_frameDrops.fetch_add(1, std::memory_order_relaxed);
-        emit performanceAlert("OrderBook queue full - dropping data!");
-        return false;
-    }
-}
+    sLog_Init(QString("🔧 GPUDataAdapter: Resizing buffers to %1 elements.").arg(m_reserveSize));
 
-void GPUDataAdapter::processIncomingData() {
-    static QElapsedTimer frameTimer;
-    frameTimer.start();
-    
-    // ZERO MALLOC ZONE - rolling write cursor
-    Trade trade;
-    m_tradeWriteCursor = 0; // Reset cursor, DON'T clear()
-    m_candleWriteCursor = 0;
-
-    size_t tradesProcessed = 0;
-    
-    // Process trades with rate limiting based on firehose setting
-    while (m_tradeQueue.pop(trade) && m_tradeWriteCursor < m_reserveSize) {
-        if (Q_UNLIKELY(trade.trade_id.empty())) continue; // Guard clause
-
-        // Convert to GPU point with coordinate mapping
-        m_tradeBuffer[m_tradeWriteCursor++] = convertTradeToGPUPoint(trade);
-        m_candleLOD.addTrade(trade);
-        m_currentSymbol = trade.product_id;
-        
-        // 🚀 PHASE 2: Add trade to time-windowed history buffer
-        {
-            std::lock_guard<std::mutex> lock(m_tradeHistoryMutex);
-            m_tradeHistory.push_back(trade);
-        }
-        
-        tradesProcessed++;
-        
-        // Rate limiting for stress testing
-        if (tradesProcessed >= static_cast<size_t>(m_firehoseRate / 60)) {
-            break; // Limit to firehose_rate / 60 per frame (60 FPS assumption)
-        }
-    }
-
-    // Candle processing moved to separate time-based timers
-    // (100ms, 500ms, 1s timers handle their respective candle updates)
-    
-    // 🚀 ULTRA-FAST: Process order books with O(1) FastOrderBook
-    OrderBook orderBook;
-    m_heatmapWriteCursor = 0;
-    
-    size_t orderBooksProcessed = 0;
-    while (m_orderBookQueue.pop(orderBook) && orderBooksProcessed < 10) { 
-        // O(1) update to FastOrderBook - BLAZING FAST!
-        // Capture timestamp ONCE for all levels in this order book message
-        const uint32_t now_ms = static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch());
-
-        for (const auto& bid : orderBook.bids) {
-            m_fastOrderBook.updateLevel(bid.price, bid.size, true, now_ms); // O(1) bid update
-        }
-        
-        for (const auto& ask : orderBook.asks) {
-            m_fastOrderBook.updateLevel(ask.price, ask.size, false, now_ms); // O(1) ask update
-        }
-        
-        orderBooksProcessed++;
+    try {
+        // Use resize() to actually create the elements and set the size.
+        m_tradeBuffer.resize(m_reserveSize);
+        m_heatmapBuffer.resize(m_reserveSize);
+        m_candleBuffer.resize(m_reserveSize);
+    } catch (const std::bad_alloc& e) {
+        sLog_Error(QString("FATAL: Failed to allocate memory for buffers! %1").arg(e.what()));
+        // In a real app, you might want to gracefully exit here.
+        return;
     }
     
-    // Convert FastOrderBook to GPU quads (only if data was updated)
-    if (orderBooksProcessed > 0) {
-        convertFastOrderBookToQuads();
-    }
-    
-    // 📊 TRADE DISTRIBUTION TRACKING in lock-free pipeline
-    static int gpuTotalBuys = 0, gpuTotalSells = 0, gpuTotalUnknown = 0;
-    if (Q_LIKELY(m_tradeWriteCursor > 0)) {
-        // Count colors in current buffer
-        for (size_t i = 0; i < m_tradeWriteCursor; ++i) {
-            const auto& point = m_tradeBuffer[i];
-            if (point.g > 0.8f && point.r < 0.2f) gpuTotalBuys++;        // Green = Buy
-            else if (point.r > 0.8f && point.g < 0.2f) gpuTotalSells++; // Red = Sell
-            else gpuTotalUnknown++;                                      // Yellow/Other
-        }
-        
-        // Log distribution every 50 trades
-        static int gpuDistributionCounter = 0;
-        if (++gpuDistributionCounter % 50 == 0) {
-            int gpuTotalTrades = gpuTotalBuys + gpuTotalSells + gpuTotalUnknown;
-            double gpuBuyPercent = gpuTotalTrades > 0 ? (gpuTotalBuys * 100.0 / gpuTotalTrades) : 0.0;
-            double gpuSellPercent = gpuTotalTrades > 0 ? (gpuTotalSells * 100.0 / gpuTotalTrades) : 0.0;
-            
-            sLog_GPU("📊 GPU ADAPTER DISTRIBUTION: Total:" << gpuTotalTrades
-                     << " Buys:" << gpuTotalBuys << "(" << QString::number(gpuBuyPercent, 'f', 1) << "%)"
-                     << " Sells:" << gpuTotalSells << "(" << QString::number(gpuSellPercent, 'f', 1) << "%)"
-                     << " Unknown:" << gpuTotalUnknown);
-        }
-        
-        emit tradesReady(m_tradeBuffer.data(), m_tradeWriteCursor);
-        m_processedTrades.fetch_add(tradesProcessed, std::memory_order_relaxed);
-    }
-    
-    if (Q_LIKELY(m_heatmapWriteCursor > 0)) {
-        emit heatmapReady(m_heatmapBuffer.data(), m_heatmapWriteCursor);
-    }
-
-    // Candle updates now emitted by separate time-based timers
-    
-    // 🚀 PHASE 2: Periodic cleanup of trade history buffer (every 5 seconds)
-    int64_t currentTime_ms = QDateTime::currentMSecsSinceEpoch();
-    if (currentTime_ms - m_lastHistoryCleanup_ms > CLEANUP_INTERVAL_MS) {
-        cleanupOldTradeHistory();
-        m_lastHistoryCleanup_ms = currentTime_ms;
-    }
-    
-    // Performance monitoring
-    qint64 frameTime = frameTimer.elapsed();
-    if (frameTime > 16) { // >60 FPS threshold
-        m_frameDrops.fetch_add(1, std::memory_order_relaxed);
-        sLog_Performance("⚠️ GPUDataAdapter: Frame time exceeded:" << frameTime << "ms");
-    }
-    
-    // Debug output every 1000 frames (~16.7 seconds at 60 FPS)
-    static int frameCount = 0;
-    if (++frameCount % 1000 == 0) {
-        sLog_Performance("📊 GPUDataAdapter Stats:"
-                 << "Trades processed:" << m_processedTrades.load()
-                 << "Points pushed:" << m_pointsPushed.load()
-                 << "Frame drops:" << m_frameDrops.load()
-                 << "Trade queue size:" << m_tradeQueue.size()
-                 << "OrderBook queue size:" << m_orderBookQueue.size());
-    }
+    // Final check to be 100% certain.
+    sLog_Init(QString("💾 GPUDataAdapter: Buffer allocation complete. m_tradeBuffer size is now: %1").arg(m_tradeBuffer.size()));
 }
 
 GPUTypes::Point GPUDataAdapter::convertTradeToGPUPoint(const Trade& trade) {
-    // Update coordinate cache if needed
-    updateCoordinateCache(trade.price);
-    
     GPUTypes::Point point;
+    point.x = 0.0f; // Will be calculated in GPU widget
+    point.y = static_cast<float>(trade.price);
     
-    // Time mapping (artificial spacing for now - will be natural in Phase 4)
-    static double artificialTimeOffset = 0.0;
-    artificialTimeOffset += 500.0; // 500ms spacing
-    
-    // For now, use simple time-based X coordinate
-    double normalizedTime = artificialTimeOffset / m_coordCache.timeSpanMs;
-    point.x = static_cast<float>(1.0 - fmod(normalizedTime, 1.0)); // Wrap around
-    
-    // Price mapping to Y coordinate
-    if (m_coordCache.initialized) {
-        double normalizedPrice = (trade.price - m_coordCache.minPrice) / 
-                                (m_coordCache.maxPrice - m_coordCache.minPrice);
-        normalizedPrice = std::max(0.05, std::min(0.95, normalizedPrice)); // Clamp
-        point.y = static_cast<float>(1.0 - normalizedPrice); // Invert Y (top = high price)
-    } else {
-        point.y = 0.5f; // Center if no price range established
-    }
-    
-    // 🎨 Color based on trade side
-    const char* sideStr = "UNKNOWN";
+    // Color based on trade side
     if (trade.side == AggressorSide::Buy) {
-        point.r = 0.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // Green
-        sideStr = "BUY";
-    } else if (trade.side == AggressorSide::Sell) {
-        point.r = 1.0f; point.g = 0.0f; point.b = 0.0f; point.a = 0.8f; // Red
-        sideStr = "SELL";
+        point.r = 0.0f; point.g = 1.0f; point.b = 0.0f; // Green for buys
     } else {
-        // Unknown side - yellow for debugging
-        point.r = 1.0f; point.g = 1.0f; point.b = 0.0f; point.a = 0.8f; // Yellow
-        sideStr = "UNKNOWN";
+        point.r = 1.0f; point.g = 0.0f; point.b = 0.0f; // Red for sells
     }
-    
-    // 🔍 DEBUG: Log first 10 GPU conversions in lock-free pipeline
-    static int gpuConversionCount = 0;
-    if (++gpuConversionCount <= 10) {
-        sLog_GPU("🎨 GPU ADAPTER COLOR #" << gpuConversionCount << ": Side:" << sideStr
-                 << " Price:" << trade.price
-                 << " Color RGBA:(" << point.r << "," << point.g << "," << point.b << "," << point.a << ")");
-    }
+    point.a = 0.8f;
     
     return point;
 }
 
 void GPUDataAdapter::updateCoordinateCache(double price) {
     if (!m_coordCache.initialized) {
-        m_coordCache.minPrice = price * 0.98; // 2% buffer below
-        m_coordCache.maxPrice = price * 1.02; // 2% buffer above
+        m_coordCache.minPrice = price;
+        m_coordCache.maxPrice = price;
         m_coordCache.initialized = true;
-    } else {
-        // Auto-expand range if needed
-        if (price < m_coordCache.minPrice) {
-            m_coordCache.minPrice = price * 0.98;
-        } else if (price > m_coordCache.maxPrice) {
-            m_coordCache.maxPrice = price * 1.02;
-        }
+        return;
     }
+    
+    m_coordCache.minPrice = std::min(m_coordCache.minPrice, price);
+    m_coordCache.maxPrice = std::max(m_coordCache.maxPrice, price);
 }
 
-void GPUDataAdapter::setReserveSize(size_t size) {
-    m_reserveSize = size;
-    // Note: Would need to reinitialize buffers in production
-    sLog_GPU("🔧 GPUDataAdapter: Reserve size set to" << size);
+void GPUDataAdapter::onOrderBookUpdateIntervalChanged(int intervalMs) {
+    m_orderBookTimer->setInterval(intervalMs);
 }
 
-void GPUDataAdapter::resetWriteCursors() {
-    m_tradeWriteCursor = 0;
-    m_heatmapWriteCursor = 0;
+void GPUDataAdapter::onTradePointUpdateIntervalChanged(int intervalMs) {
+    m_tradePointTimer->setInterval(intervalMs);
 }
 
-// 🕯️ TIME-BASED CANDLE PROCESSING: Emit candle updates at proper intervals
+void GPUDataAdapter::onOrderBookDepthChanged(size_t maxLevels) {
+    m_currentOrderBookDepth = maxLevels;
+}
+
+void GPUDataAdapter::onTimeFrameChanged(CandleLOD::TimeFrame newTimeFrame) {
+    m_currentTimeFrame = newTimeFrame;
+}
 
 void GPUDataAdapter::processHighFrequencyCandles() {
-    // Process 100ms candles only
+    // Process 100ms candles
     processCandleTimeFrame(CandleLOD::TF_100ms);
 }
 
 void GPUDataAdapter::processMediumFrequencyCandles() {
-    // Process 500ms candles only
+    // Process 500ms candles
     processCandleTimeFrame(CandleLOD::TF_500ms);
 }
 
 void GPUDataAdapter::processSecondCandles() {
-    // Process 1s candles only
+    // Process 1s candles
     processCandleTimeFrame(CandleLOD::TF_1sec);
 }
 
 void GPUDataAdapter::processCandleTimeFrame(CandleLOD::TimeFrame timeframe) {
-    const auto& vec = m_candleLOD.getCandlesForTimeFrame(timeframe);
-    if (vec.empty()) return;
-
-    size_t tfIndex = static_cast<size_t>(timeframe);
-    const OHLC& latestCandle = vec.back();
+    // Process candles for the specified timeframe
+    // This is a placeholder implementation - actual candle processing logic
+    // would be implemented based on the specific requirements
     
-    // Only emit if candle has changed (time-based boundary crossed)
-    if (latestCandle.timestamp_ms != m_lastEmittedCandleTime[tfIndex]) {
-        CandleUpdate update;
-        update.symbol = m_currentSymbol;
-        update.timestamp_ms = latestCandle.timestamp_ms;
-        update.timeframe = timeframe;
-        update.candle = latestCandle;
-        update.isNewCandle = true; // Always true for time-based updates
-        
-        m_lastEmittedCandleTime[tfIndex] = update.timestamp_ms;
-        
-        // Emit immediately for time-based candles
-        std::vector<CandleUpdate> ready = {update};
-        emit candlesReady(ready);
-        
-        // Debug logging for first few candles of each timeframe
-        static std::array<int, CandleLOD::NUM_TIMEFRAMES> candleCount{};
-        if (++candleCount[tfIndex] <= 5) {
-            sLog_Candles("🕯️ TIME-BASED CANDLE EMIT #" << candleCount[tfIndex]
-                     << "TimeFrame:" << CandleUtils::timeFrameName(timeframe)
-                     << "Timestamp:" << update.timestamp_ms
-                     << "OHLC:" << update.candle.open << update.candle.high 
-                     << update.candle.low << update.candle.close);
-        }
-    }
-}
-
-// 🚀 PHASE 2: TIME-WINDOWED TRADE HISTORY CLEANUP
-void GPUDataAdapter::cleanupOldTradeHistory() {
-    std::lock_guard<std::mutex> lock(m_tradeHistoryMutex);
+    // For now, we'll just emit a signal to indicate the timeframe was processed
+    // In a real implementation, this would process the CandleLOD data and emit candlesReady
     
-    if (m_tradeHistory.empty()) return;
-    
-    // Calculate cutoff time (10 minutes ago)
-    auto now = std::chrono::system_clock::now();
-    auto cutoffTime = now - HISTORY_WINDOW_SPAN;
-    int64_t cutoff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        cutoffTime.time_since_epoch()).count();
-    
-    // Remove trades older than cutoff
-    size_t initialSize = m_tradeHistory.size();
-    
-    while (!m_tradeHistory.empty()) {
-        // Convert trade timestamp to milliseconds for comparison
-        int64_t trade_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            m_tradeHistory.front().timestamp.time_since_epoch()).count();
-        
-        if (trade_ms < cutoff_ms) {
-            m_tradeHistory.pop_front();
-        } else {
-            break; // Remaining trades are newer
-        }
-    }
-    
-    size_t removedCount = initialSize - m_tradeHistory.size();
-    
-    // Log cleanup activity (throttled)
-    static int cleanupCount = 0;
-    if (++cleanupCount <= 10 || removedCount > 0) {
-        sLog_GPU("🧹 PHASE 2 TRADE HISTORY CLEANUP #" << cleanupCount
-                 << " Removed:" << removedCount << " old trades"
-                 << " Current size:" << m_tradeHistory.size()
-                 << " Window:" << HISTORY_WINDOW_SPAN.count() << " seconds");
-    }
-}
-
-// 🚀 ULTRA-FAST: Convert O(1) order book to GPU heatmap quads
-void GPUDataAdapter::convertFastOrderBookToQuads() {
-    m_heatmapWriteCursor = 0;
-    
-    // Get bid levels with O(1) access pattern
-    auto bids = m_fastOrderBook.getBids(1000); // Top 1000 bid levels
-    for (const auto& bid : bids) {
-        if (m_heatmapWriteCursor >= m_reserveSize) break;
-        
-        GPUTypes::QuadInstance quad;
-        quad.x = 0.0f; // Will be calculated in GPU widget
-        quad.y = static_cast<float>(bid.price);
-        quad.width = static_cast<float>(bid.size * 100.0); // Scale for visibility
-        quad.height = 2.0f; // Fixed height
-        quad.r = 0.0f; quad.g = 1.0f; quad.b = 0.0f; quad.a = 0.8f; // Green for bids
-        
-        m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
-    }
-    
-    // Get ask levels with O(1) access pattern
-    auto asks = m_fastOrderBook.getAsks(1000); // Top 1000 ask levels
-    for (const auto& ask : asks) {
-        if (m_heatmapWriteCursor >= m_reserveSize) break;
-        
-        GPUTypes::QuadInstance quad;
-        quad.x = 0.0f; // Will be calculated in GPU widget
-        quad.y = static_cast<float>(ask.price);
-        quad.width = static_cast<float>(ask.size * 100.0); // Scale for visibility
-        quad.height = 2.0f; // Fixed height
-        quad.r = 1.0f; quad.g = 0.0f; quad.b = 0.0f; quad.a = 0.8f; // Red for asks
-        
-        m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
-    }
-    
-    // Log FastOrderBook performance metrics
-    static int heatmapUpdateCount = 0;
-    if (++heatmapUpdateCount % 100 == 0) {
-        sLog_GPU("🚀 FAST ORDER BOOK STATS #" << heatmapUpdateCount
-                 << " Active levels:" << m_fastOrderBook.getTotalLevels()
-                 << " Best bid:" << m_fastOrderBook.getBestBidPrice()
-                 << " Best ask:" << m_fastOrderBook.getBestAskPrice()
-                 << " Spread:" << m_fastOrderBook.getSpread()
-                 << " Heatmap quads:" << m_heatmapWriteCursor);
-    }
+    // Example placeholder:
+    // std::vector<CandleUpdate> candles = m_candleLOD.getCandlesForTimeFrame(timeframe);
+    // if (!candles.empty()) {
+    //     emit candlesReady(candles);
+    // }
 }

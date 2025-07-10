@@ -39,26 +39,27 @@ private:
 class DataCache {
 public:
     void addTrade(const Trade& t);
-    void updateBook(const OrderBook& ob);
 
     [[nodiscard]] std::vector<Trade>   recentTrades(const std::string& s) const;
     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
-    [[nodiscard]] OrderBook            book(const std::string& s) const;
     
-    // 🔥 NEW: LiveOrderBook methods for stateful order book management
-    void initializeLiveOrderBook(const std::string& symbol, const OrderBook& snapshot);
-    void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
-    [[nodiscard]] OrderBook getLiveOrderBook(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
+    // 🚀 ULTRA-FAST: FastOrderBook methods for Bookmap-style GPU pipeline
+    void initializeFastOrderBook(const std::string& symbol, const OrderBook& snapshot);
+    void updateFastOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
+    [[nodiscard]] const FastOrderBook* getFastOrderBook(const std::string& symbol) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getFastBids(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] std::vector<OrderBookLevel> getFastAsks(const std::string& symbol, size_t max_levels = 1000) const;
+    [[nodiscard]] double getFastBestBid(const std::string& symbol) const;
+    [[nodiscard]] double getFastBestAsk(const std::string& symbol) const;
+    [[nodiscard]] double getFastSpread(const std::string& symbol) const;
+    
+
 
 private:
     using TradeRing = RingBuffer<Trade, 1000>;
 
     mutable std::shared_mutex                     m_mxTrades;
-    mutable std::shared_mutex                     m_mxBooks;
-    mutable std::shared_mutex                     m_mxLiveBooks; // For stateful order books
+    mutable std::shared_mutex                     m_mxFastBooks; // For O(1) order books
     std::unordered_map<std::string, TradeRing>    m_trades;
-    std::unordered_map<std::string, OrderBook>    m_books;
-    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; // 🔥 NEW: Stateful order books
+    std::unordered_map<std::string, FastOrderBook> m_fastBooks; // 🚀 O(1) order books for Bookmap
 }; 

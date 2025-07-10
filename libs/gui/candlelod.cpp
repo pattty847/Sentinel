@@ -13,9 +13,6 @@ CandleLOD::CandleLOD() {
 }
 
 void CandleLOD::addTrade(const Trade& trade) {
-    auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        trade.timestamp.time_since_epoch()).count();
-    
     // Update all timeframes with this trade
     for (size_t i = 0; i < NUM_TIMEFRAMES; ++i) {
         updateTimeFrame(static_cast<TimeFrame>(i), trade);

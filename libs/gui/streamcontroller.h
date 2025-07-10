@@ -49,6 +49,9 @@ public slots:
     
     // GPU pipeline integration
     void setGPUAdapter(GPUDataAdapter* adapter) { m_gpuAdapter = adapter; }
+    
+    // 🚀 ULTRA-FAST: Expose CoinbaseStreamClient for FastOrderBook access
+    CoinbaseStreamClient* getClient() const { return m_client.get(); }
 
 // 🐍 Python: These would be private methods (def _method_name)
 // ⚡ C++: private slots are internal methods connected to signals

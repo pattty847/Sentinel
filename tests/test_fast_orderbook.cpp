@@ -32,6 +32,52 @@ public:
         // NEW: Single operation latency test
         std::cout << "\n🎯 SINGLE OPERATION LATENCY TEST:\n";
         benchmarkSingleOperationLatency();
+
+        std::cout << "\n🧪 FASTORDERBOOK CORRECTNESS TEST\n";
+        testFastOrderBookCorrectness();
+    }
+
+    void testFastOrderBookCorrectness() {
+        FastOrderBook book("BTC-USD");
+    
+        // 1. Book should be empty initially
+        assert(book.getBestBidPrice() == 0.0);
+        assert(book.getBestAskPrice() == FastOrderBook::MAX_PRICE);
+    
+        // 2. Add a bid at 50000.00, qty 1.0
+        book.updateLevel(50000.00, 1.0, true);
+        assert(book.getBestBidPrice() == 50000.00);
+        assert(book.getBestBidQuantity() == 1.0);
+    
+        // 3. Add an ask at 50010.00, qty 2.0
+        book.updateLevel(50010.00, 2.0, false);
+        assert(book.getBestAskPrice() == 50010.00);
+        assert(book.getBestAskQuantity() == 2.0);
+    
+        // 4. Add a better bid at 50001.00, qty 0.5
+        book.updateLevel(50001.00, 0.5, true);
+        assert(book.getBestBidPrice() == 50001.00);
+        assert(book.getBestBidQuantity() == 0.5);
+    
+        // 5. Update ask at 50010.00 to qty 3.0
+        book.updateLevel(50010.00, 3.0, false);
+        assert(book.getBestAskPrice() == 50010.00);
+        assert(book.getBestAskQuantity() == 3.0);
+    
+        // 6. Remove the best bid (set qty to 0)
+        book.updateLevel(50001.00, 0.0, true);
+        assert(book.getBestBidPrice() == 50000.00);
+        assert(book.getBestBidQuantity() == 1.0);
+    
+        // 7. Remove the only ask
+        book.updateLevel(50010.00, 0.0, false);
+        assert(book.getBestAskPrice() == FastOrderBook::MAX_PRICE);
+    
+        // 8. Remove the last bid
+        book.updateLevel(50000.00, 0.0, true);
+        assert(book.getBestBidPrice() == 0.0);
+    
+        std::cout << "✅ All FastOrderBook correctness checks passed!\n";
     }
 
 private:
@@ -39,7 +85,6 @@ private:
         std::cout << "  🔧 PHASE 1: Initialization (excluded from timing)...\n";
         
         // === PHASE 1: INITIALIZATION (EXCLUDED FROM TIMING) ===
-        LiveOrderBook logN_book("BTC-USD");
         FastOrderBook o1_book("BTC-USD");
         
         // Pre-generate test data to avoid allocation during timing
@@ -70,24 +115,14 @@ private:
             ).count()
         );
         
-        // Warm up both structures with similar operations
+        // Warm up FastOrderBook structure
         for (size_t i = 0; i < 1000; ++i) {
             double warmup_price = 45000.0 + (i * 0.01);
-            logN_book.applyUpdate("buy", warmup_price, 1.0);
             o1_book.updateLevel(warmup_price, 1.0, true, warmup_time);
         }
         
         // === PHASE 3: PURE OPERATION TIMING ===
         std::cout << "  ⏱️  PHASE 3: Timing pure operations...\n";
-        
-        // Benchmark O(log N) - PURE OPERATIONS ONLY
-        auto logN_start = std::chrono::high_resolution_clock::now();
-        for (const auto& [price, quantity, is_bid] : operations) {
-            std::string side = is_bid ? "buy" : "sell";
-            logN_book.applyUpdate(side, price, quantity);
-        }
-        auto logN_end = std::chrono::high_resolution_clock::now();
-        auto logN_time = std::chrono::duration_cast<std::chrono::nanoseconds>(logN_end - logN_start);
         
         // Benchmark O(1) - PURE OPERATIONS ONLY (with timestamp optimization)
         const uint32_t batch_time = static_cast<uint32_t>(
@@ -121,17 +156,13 @@ private:
         auto precision_time = std::chrono::duration_cast<std::chrono::nanoseconds>(precision_end - precision_start);
         
         // Calculate metrics
-        double speedup = (double)logN_time.count() / (double)o1_time.count();
         double ns_per_op_batch = (double)o1_time.count() / (double)num_operations;
         double ns_per_op_precision = (double)precision_time.count() / (double)precision_repeats;
         double ops_per_second = 1e9 / ns_per_op_precision;
         
         // === RESULTS ===
-        std::cout << "\n  📊 FIXED BENCHMARK RESULTS:\n";
-        std::cout << "  O(log N) LiveOrderBook:     " << std::setw(12) << logN_time.count() << " ns\n";
+        std::cout << "\n  📊 FASTORDERBOOK BENCHMARK RESULTS:\n";
         std::cout << "  O(1) FastOrderBook:        " << std::setw(12) << o1_time.count() << " ns\n";
-        std::cout << "  🚀 TRUE Speedup:            " << std::setw(12) << std::fixed << std::setprecision(1) 
-                  << speedup << "x faster!\n";
         std::cout << "  Batch ops (ns/op):          " << std::setw(12) << std::setprecision(1) << ns_per_op_batch << " ns\n";
         std::cout << "  Precision ops (ns/op):      " << std::setw(12) << std::setprecision(1) << ns_per_op_precision << " ns\n";
         std::cout << "  Operations/second:          " << std::setw(12) << std::setprecision(0) << ops_per_second << "\n";
@@ -169,43 +200,16 @@ private:
             );
         }
         
-        // Benchmark O(log N) implementation
-        auto log_n_time = benchmarkLogN(operations);
-        
         // Benchmark O(1) implementation
         auto o1_time = benchmarkO1(operations);
         
         // Results
-        double speedup = static_cast<double>(log_n_time) / static_cast<double>(o1_time);
-        
-        std::cout << "  O(log N) std::map:  " << std::setw(8) << log_n_time << " microseconds\n";
         std::cout << "  O(1) FastOrderBook:" << std::setw(8) << o1_time << " microseconds\n";
-        std::cout << "  🚀 Speedup:         " << std::setw(8) << std::fixed << std::setprecision(1) 
-                  << speedup << "x faster!\n";
         std::cout << "  Per operation:      " << std::setw(8) << std::setprecision(3) 
                   << (static_cast<double>(o1_time) / num_operations) << " μs/op\n";
     }
     
-    int64_t benchmarkLogN(const std::vector<std::tuple<double, double, bool>>& operations) {
-        LiveOrderBook logN_book("BTC-USD");
-        
-        auto start = std::chrono::high_resolution_clock::now();
-        
-        for (const auto& [price, quantity, is_bid] : operations) {
-            std::string side = is_bid ? "buy" : "sell";
-            logN_book.applyUpdate(side, price, quantity);
-        }
-        
-        // Add some reads to test access performance
-        for (size_t i = 0; i < 1000; ++i) {
-            auto bids = logN_book.getAllBids();
-            auto asks = logN_book.getAllAsks();
-            (void)bids; (void)asks; // Prevent optimization
-        }
-        
-        auto end = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-    }
+
     
     int64_t benchmarkO1(const std::vector<std::tuple<double, double, bool>>& operations) {
         FastOrderBook o1_book("BTC-USD");

@@ -29,6 +29,12 @@ Rectangle {
         id: heatmapLayer
         objectName: "heatmapLayer"  // 🔥 EXPOSE TO C++ - CRITICAL FIX!
         anchors.fill: parent
+
+        // Use the new, writable property names
+        viewTimeStart: gpuChart.visibleTimeStart
+        viewTimeEnd: gpuChart.visibleTimeEnd
+        viewMinPrice: gpuChart.minPrice
+        viewMaxPrice: gpuChart.maxPrice
         
         Component.onCompleted: {
             // 🔥 FIX PRICE RANGE: Use real BTC range from logs (~$107.283k)
@@ -254,7 +260,7 @@ Rectangle {
             Rectangle {
                 width: 35
                 height: 25
-                color: Qt.rgba(0.4, 0, 0, 0.8)
+                color: Qt.rgba(0.4, 0, 0.8)
                 border.color: "red"
                 border.width: 1
                 radius: 3
@@ -345,4 +351,4 @@ Rectangle {
                 break
         }
     }
-} 
+}
