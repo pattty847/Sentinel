@@ -8,6 +8,10 @@
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QtQuickWidgets/QQuickWidget>
+#include "unifiedviewport.h"
+#include "zerolagarchitecture.h"
+#include "dynamiclod.h"
+#include "instanttestdata.h"
 
 // Forward declarations
 class StreamController;
@@ -41,6 +45,13 @@ private:
     // 🔥 GPU CHART - Core component
     QQuickWidget* m_gpuChart;
     bool m_testMode;
+
+    bool eventFilter(QObject* object, QEvent* event) override;
+
+    ZeroLagArchitecture* m_zeroLagArch = nullptr;
+    UnifiedViewport* m_unifiedViewport = nullptr;
+    DynamicLOD* m_dynamicLOD = nullptr;
+    InstantTestData* m_instantTestData = nullptr;
     
     // UI Controls
     QLabel* m_cvdLabel;

@@ -35,6 +35,18 @@ qt6_add_qml_module(sentinel_gui_lib
         streamcontroller.h
         tradechartwidget.cpp
         tradechartwidget.h
+        
+        # 🚀 ADD THESE NEW ZERO-LAG FILES:
+        unifiedviewport.cpp
+        unifiedviewport.h
+        dynamiclod.cpp
+        dynamiclod.h
+        zerolagheatmap.cpp
+        zerolagheatmap.h
+        instanttestdata.cpp
+        instanttestdata.h
+        zerolagarchitecture.cpp
+        zerolagarchitecture.h
 )
 
 target_include_directories(sentinel_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

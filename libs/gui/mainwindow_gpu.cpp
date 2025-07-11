@@ -18,21 +18,40 @@
 
 
 MainWindowGPU::MainWindowGPU(bool testMode, QWidget* parent) : QWidget(parent), m_testMode(testMode) {
-    qDebug() << "🚀 CREATING GPU TRADING TERMINAL!";
+    qDebug() << "🚀 CREATING ZERO-LAG GPU TRADING TERMINAL!";
+
+    // 🚀 CREATE ZERO-LAG ARCHITECTURE FIRST
+    m_zeroLagArch = new ZeroLagArchitecture(this);
+    m_unifiedViewport = new UnifiedViewport(this);
+    m_dynamicLOD = new DynamicLOD(this);
+    
+    if (testMode) {
+        m_instantTestData = new InstantTestData(this);
+    }
 
     setupUI();
     setupConnections();
     
     // Set window properties
-    setWindowTitle("Sentinel - GPU Trading Terminal");
+    setWindowTitle("Sentinel - Zero-Lag GPU Trading Terminal");
     resize(1400, 900);
     
-    // Automatically start the subscription process once the event loop begins.
-    // This ensures the window is fully constructed and shown before we start streaming.
+    // 🚀 INITIALIZE ZERO-LAG SYSTEM
+    QTimer::singleShot(100, [this]() {
+        if (m_gpuChart && m_gpuChart->rootObject()) {
+            m_zeroLagArch->initialize(m_gpuChart->rootObject());
+            
+            if (m_testMode && m_instantTestData) {
+                qDebug() << "🚀 STARTING ZERO-LAG TEST MODE!";
+                m_zeroLagArch->startTestMode();
+            }
+        }
+    });
+    
+    // Automatically start the subscription process
     if (!m_testMode) {
         QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
     }
-    
 }
 
 void MainWindowGPU::setupUI() {
@@ -248,180 +267,156 @@ void MainWindowGPU::onLodLevelChanged(int timeframe) {
     }
 }
 
-// 🔥 CRITICAL FIX: Helper method to establish GPU connections
 void MainWindowGPU::connectToGPUChart() {
-    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART...";
+    qDebug() << "🔍 CONNECTING TO ZERO-LAG GPU CHART...";
     
-    // Get the GPU chart widget from QML
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
         qWarning() << "❌ QML root object not found - retrying in 100ms...";
-        // Retry after QML loads
         QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
     qDebug() << "✅ QML root found:" << qmlRoot;
-    qDebug() << "🔍 QML root children:";
-    for (QObject* child : qmlRoot->children()) {
-        qDebug() << "  -" << child->objectName() << child->metaObject()->className();
-    }
     
-    GPUChartWidget* gpuChart = nullptr;
-    
-    // 🔥 STRATEGY 1: Find by explicit objectName
-    QQuickItem* gpuChartItem = qmlRoot->findChild<QQuickItem*>("gpuChart");
-    qDebug() << "🔍 objectName lookup for 'gpuChart':" << gpuChartItem;
-    
-    if (gpuChartItem) {
-        gpuChart = qobject_cast<GPUChartWidget*>(gpuChartItem);
-        qDebug() << "🔍 qobject_cast to GPUChartWidget:" << gpuChart;
-    }
-    
-    // 🔥 STRATEGY 2: If objectName lookup fails, find by type
-    if (!gpuChart) {
-        qDebug() << "🔍 objectName lookup failed, trying type lookup...";
-        gpuChart = qmlRoot->findChild<GPUChartWidget*>();
-        qDebug() << "🔍 Type lookup result:" << gpuChart;
-    }
+    // 🚀 FIND COMPONENTS - Both old and new
+    GPUChartWidget* gpuChart = qmlRoot->findChild<GPUChartWidget*>("gpuChart");
+    HeatmapBatched* oldHeatmap = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
+    CandlestickBatched* candleChart = qmlRoot->findChild<CandlestickBatched*>("candlestickRenderer");
     
     if (gpuChart) {
-        if (!m_testMode) {
-            // 🔥 CRITICAL: Disconnect any existing connections to avoid duplicates
+        qDebug() << "✅ Found GPUChartWidget";
+        
+        // REPLACE THIS BROKEN CONNECTION:
+        connect(gpuChart, &GPUChartWidget::viewChanged,
+            [this](int64_t start, int64_t end, double minP, double maxP) {
+            // 🔥 FIX: Only update if we have valid timestamps
+            if (start > 0 && end > start) {
+                m_unifiedViewport->setViewport(start, end, minP, maxP);
+                m_unifiedViewport->setPixelSize(m_gpuChart->width(), m_gpuChart->height());
+                qDebug() << "🚀 UNIFIED VIEWPORT:" << start << "to" << end;
+            } else {
+                qDebug() << "⚠️ IGNORING INVALID VIEWPORT:" << start << "to" << end;
+            }
+        });
+        
+        // 🚀 CONNECT MOUSE HANDLING to zero-lag system
+        if (m_zeroLagArch) {
+            // We'll add mouse event filter to intercept and send to zero-lag system
+            m_gpuChart->installEventFilter(this);
+        }
+        
+        // Keep existing connections for backward compatibility
+        if (!m_testMode && m_streamController) {
             disconnect(m_streamController, &StreamController::tradeReceived,
                       gpuChart, &GPUChartWidget::onTradeReceived);
                       
-            // 🔥 REAL-TIME DATA CONNECTION! (Qt::QueuedConnection for thread safety)
             bool connectionSuccess = connect(m_streamController, &StreamController::tradeReceived,
                                             gpuChart, &GPUChartWidget::onTradeReceived,
-                                            Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
-                                            
-            qDebug() << "🔗 Qt Signal Connection Result:" << (connectionSuccess ? "SUCCESS" : "FAILED");
-            qDebug() << "🎯 Connected StreamController:" << m_streamController 
-                     << "to GPUChart:" << gpuChart;
-            
-            qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
-        } else {
-            // Test mode: Connect test data player to GPU chart
-            if (m_testDataPlayer) {
-                bool testConnection = connect(m_testDataPlayer, &TestDataPlayer::orderBookUpdated,
-                                            gpuChart, &GPUChartWidget::updateOrderBook,
                                             Qt::QueuedConnection);
-                qDebug() << "🔗 Test Data Connection Result:" << (testConnection ? "SUCCESS" : "FAILED");
-                qDebug() << "🎯 Connected TestDataPlayer to GPUChart for test mode";
-            }
+                                            
+            qDebug() << "🔗 GPU Chart Trade Connection:" << (connectionSuccess ? "SUCCESS" : "FAILED");
         }
-        
-        // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
-        QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
-        HeatmapBatched* heatmapLayer = qobject_cast<HeatmapBatched*>(heatmapItem);
-        
-        if (heatmapLayer) {
-            // 🔥 PROPERTY BINDING: Chart view coordinates to heatmap via QML properties
-            // The viewChanged signal from GPUChartWidget will automatically update
-            // the Q_PROPERTY values in HeatmapBatched through QML binding
-
-            connect(heatmapLayer, &HeatmapBatched::dataUpdated,
-                    gpuChart, &GPUChartWidget::update, Qt::QueuedConnection);
-
-            // 🔥 ADD DEBUG CONNECTION: Monitor viewChanged signal firing
-            connect(gpuChart, &GPUChartWidget::viewChanged, [](int64_t start, int64_t end, double minP, double maxP) {
-                qDebug() << "🔥 VIEWPORT DEBUG:" << start << "to" << end << "price:" << minP << "to" << maxP;
-            });
-
-            
-            // Test mode: Model B architecture uses aggregated heatmap data, not individual order book updates
-            if (m_testMode && m_testDataPlayer) {
-                qDebug() << "🔥 TEST MODE HEATMAP: Using Model B aggregated data pipeline";
-            }
-            
-            qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
-        } else {
-            qWarning() << "⚠️ HeatmapBatched not found - coordinate unification failed";
-        }
-        
-        // 🕯️ PHASE 5: CONNECT CANDLESTICK CHART
-        qDebug() << "🔍 Looking for candlestick renderer...";
-        QQuickItem* candleChartItem = qmlRoot->findChild<QQuickItem*>("candlestickRenderer");
-        qDebug() << "🔍 Found candlestickRenderer item:" << candleChartItem;
-        
-        CandlestickBatched* candleChart = qobject_cast<CandlestickBatched*>(candleChartItem);
-        qDebug() << "🔍 Cast to CandlestickBatched:" << candleChart;
-        
-        if (candleChart) {
-            if (!m_testMode) {
-                bool tradeConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
-                                              candleChart, &CandlestickBatched::onCandlesReady,
-                                              Qt::QueuedConnection);
-                
-                // 🔥 COORDINATE SYNCHRONIZATION: GPUChart drives candle coordinates
-                bool coordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
-                                              candleChart, &CandlestickBatched::onViewChanged,
-                                              Qt::QueuedConnection);
-                
-                // 🎯 FRACTAL ZOOM COORDINATION: CandlestickBatched LOD → GPUDataAdapter → FractalZoomController
-                bool fractalConnection = connect(candleChart, SIGNAL(lodLevelChanged(int)),
-                                               this, SLOT(onLodLevelChanged(int)),
-                                               Qt::QueuedConnection);
-                
-                qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
-                         << "Candle stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
-                         << "Coordinates:" << (coordConnection ? "SUCCESS" : "FAILED")
-                         << "Fractal zoom:" << (fractalConnection ? "SUCCESS" : "FAILED");
-                
-                if (tradeConnection && coordConnection && fractalConnection) {
-                    qDebug() << "✅ CANDLESTICK CHART FULLY CONNECTED TO REAL-TIME DATA WITH FRACTAL ZOOM!";
-                }
-            } else {
-                // Test mode: Only connect coordinate synchronization
-                bool coordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
-                                              candleChart, &CandlestickBatched::onViewChanged,
-                                              Qt::QueuedConnection);
-                qDebug() << "🕯️ TEST MODE CANDLESTICK: Coordinate sync:" << (coordConnection ? "SUCCESS" : "FAILED");
-            }
-        } else {
-            qWarning() << "❌ CandlestickBatched (candlestickRenderer) not found - candle integration failed";
-            
-            // List all available QML children for debugging
-            qDebug() << "🔍 Available QML children with objectNames:";
-            for (QObject* child : qmlRoot->findChildren<QObject*>()) {
-                QString objName = child->objectName();
-                if (!objName.isEmpty()) {
-                    qDebug() << "  -" << objName << ":" << child->metaObject()->className();
-                }
-            }
-        }
-    } else {
-        qWarning() << "❌ GPUChartWidget NOT FOUND - RETRYING IN 200ms...";
-        // Retry after a longer delay
-        QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
-        return;
     }
     
-    // 🔥 PHASE 2: Connect order book data to HeatmapBatched - CRITICAL FIX!
-    if (!m_testMode) {
-        HeatmapBatched* heatmapLayer = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
-        if (heatmapLayer) {
-            // Model B architecture: Remove individual order book updates, use aggregated pipeline instead
-            // The GPUDataAdapter will process order books and emit aggregatedHeatmapReady signals
+    // 🚀 CONNECT INSTANT TEST DATA (if in test mode)
+    if (m_testMode && m_instantTestData && gpuChart) {
+        connect(m_instantTestData, &InstantTestData::orderBookUpdate,
+                [gpuChart](const InstantTestData::OrderBookSnapshot& snapshot) {
+            // Convert to your existing OrderBook format
+            OrderBook book;
+            book.product_id = "BTC-USD";
+            book.timestamp = std::chrono::system_clock::from_time_t(snapshot.timestamp_ms / 1000);
+            book.bids = snapshot.bids;
+            book.asks = snapshot.asks;
             
-            // 🔥 NEW: Connect GPUDataAdapter aggregated heatmap signal to Model B architecture
-            connect(m_gpuAdapter, &GPUDataAdapter::aggregatedHeatmapReady,
-                    heatmapLayer, &HeatmapBatched::onHeatmapDataReady,
-                    Qt::QueuedConnection);
-                    
-            // 🎯 FRACTAL ZOOM: Connect timeframe changes to heatmap
-            if (m_gpuAdapter->getFractalZoomController()) {
-                connect(m_gpuAdapter->getFractalZoomController(), &FractalZoomController::timeFrameChanged,
-                        heatmapLayer, &HeatmapBatched::onTimeFrameChanged,
-                        Qt::QueuedConnection);
+            gpuChart->updateOrderBook(book);
+        });
+        
+        connect(m_instantTestData, &InstantTestData::tradeExecuted,
+                [gpuChart](int64_t timestamp_ms, double price, double size, bool isBuy) {
+            Trade trade;
+            trade.product_id = "BTC-USD";
+            trade.price = price;
+            trade.size = size;
+            trade.side = isBuy ? AggressorSide::Buy : AggressorSide::Sell;
+            trade.timestamp = std::chrono::system_clock::from_time_t(timestamp_ms / 1000);
+            
+            gpuChart->onTradeReceived(trade);
+        });
+        
+        qDebug() << "✅ INSTANT TEST DATA CONNECTED TO GPU CHART!";
+    }
+    
+    // 🚀 CONNECT DYNAMIC LOD to old heatmap (bridge between old and new)
+    if (oldHeatmap && m_dynamicLOD) {
+        connect(m_unifiedViewport, &UnifiedViewport::viewportChanged,
+                [this, oldHeatmap](const UnifiedViewport::ViewState& state) {
+            // Update old heatmap with new viewport
+            oldHeatmap->setViewTimeStart(state.timeStart_ms);
+            oldHeatmap->setViewTimeEnd(state.timeEnd_ms);
+            oldHeatmap->setViewMinPrice(state.priceMin);
+            oldHeatmap->setViewMaxPrice(state.priceMax);
+            
+            // Check for LOD changes
+            auto newTF = m_dynamicLOD->selectOptimalTimeFrame(state.msPerPixel());
+            static DynamicLOD::TimeFrame lastTF = DynamicLOD::TimeFrame::TF_1s;
+            if (newTF != lastTF) {
+                qDebug() << "🎯 LOD CHANGE:" << DynamicLOD::getTimeFrameName(lastTF) 
+                         << "→" << DynamicLOD::getTimeFrameName(newTF);
+                lastTF = newTF;
             }
+        });
+        
+        qDebug() << "✅ DYNAMIC LOD CONNECTED TO OLD HEATMAP!";
+    }
+    
+    // Keep all your existing connections for candlesticks, etc.
+    if (candleChart) {
+        if (!m_testMode && m_gpuAdapter) {
+            connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
+                    candleChart, &CandlestickBatched::onCandlesReady,
+                    Qt::QueuedConnection);
             
-            qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
-        } else {
-            qWarning() << "⚠️ HeatmapBatched (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
+            connect(gpuChart, &GPUChartWidget::viewChanged,
+                    candleChart, &CandlestickBatched::onViewChanged,
+                    Qt::QueuedConnection);
+        }
+        
+        qDebug() << "✅ CANDLESTICK CONNECTIONS MAINTAINED!";
+    }
+    
+    qDebug() << "🚀 ZERO-LAG GPU CHART CONNECTED!";
+}
+
+bool MainWindowGPU::eventFilter(QObject* object, QEvent* event) {
+    // Intercept mouse events and send to zero-lag system
+    if (object == m_gpuChart && m_zeroLagArch) {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+            m_zeroLagArch->handleMousePress(mouseEvent->position());
+            break;
+        }
+        case QEvent::MouseMove: {
+            QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+            static QPointF lastPos;
+            QPointF delta = mouseEvent->position() - lastPos;
+            m_zeroLagArch->handleMouseMove(delta);
+            lastPos = mouseEvent->position();
+            break;
+        }
+        case QEvent::Wheel: {
+            QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(event);
+            m_zeroLagArch->handleWheel(wheelEvent->angleDelta().y() * 0.001, wheelEvent->position());
+            break;
+        }
+        default:
+            break;
         }
     }
+    
+    return QWidget::eventFilter(object, event);
 }
 
 // 🚀 NEW: Populate historical data for fractal zoom testing
