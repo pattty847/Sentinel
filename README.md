@@ -3,6 +3,7 @@
 🚀 **Real-time cryptocurrency market analysis with a direct-to-GPU visualization engine capable of 52 MILLION operations/second.**
 
 <p align="center">
+
   <img src="https://img.shields.io/badge/C%2B%2B-17-blue.svg" alt="C++17">
   <img src="https://img.shields.io/badge/Qt-6-green.svg" alt="Qt6">
   <img src="https://img.shields.io/badge/Renderer-Direct_to_GPU-purple.svg" alt="Direct-to-GPU">
@@ -12,7 +13,7 @@
 </p>
 
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/a3f7ccf9-7f5b-4d31-9dc0-d8370f38d71f" alt="Sentinel GUI" width="600"/>
+  <img width="1101" height="801" alt="Screenshot 2025-07-18 at 1 22 08 AM" src="https://github.com/user-attachments/assets/542d2497-d4e3-43d9-9663-9fbb135423e5" />
 </div>
 
 ## 🎯 Project Vision
