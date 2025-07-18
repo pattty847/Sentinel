@@ -55,6 +55,11 @@ public slots:
 private slots:
     void pollForTrades();
     void pollForOrderBooks();
+    
+    // 🔥 NEW: Real-time signal handlers
+    void onTradeReceived(const Trade& trade);
+    void onOrderBookUpdated(const OrderBook& orderBook);
+    void onConnectionStatusChanged(bool connected);
 
 // 🐍 Python: These would be private variables (self._variable)
 // ⚡ C++: private member variables (prefixed with m_ by convention)

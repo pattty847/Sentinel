@@ -2,28 +2,31 @@ cmake_minimum_required(VERSION 3.22)
 
 project(sentinel_core)
 
-add_library(sentinel_core)
-
-# Source files for this library
-target_sources(sentinel_core 
-    PRIVATE
-        # coinbasestreamclient.cpp  # OLD IMPLEMENTATION - DISABLED
-        # New modular architecture files (Phase 1 stubs)  
-        Authenticator.cpp
-        DataCache.cpp
-        MarketDataCore.cpp
-        MessageParser.hpp
-        # Phase 3: Lock-free performance monitoring
-        performancemonitor.cpp
-        CoinbaseStreamClientFacade.cpp  # 🔥 NEW: LiveOrderBook implementation
-        FastOrderBook.cpp              # 🚀 ULTRA-FAST: O(1) Order Book
-        # Logging system
-        SentinelLogging.cpp
-        # Existing files
-        ruleengine.cpp
-        cvdthresholdrule.cpp
-        statisticsprocessor.cpp
-        statisticscontroller.cpp
+add_library(sentinel_core
+    Authenticator.cpp
+    Authenticator.hpp
+    CoinbaseStreamClient.hpp
+    CoinbaseStreamClient.cpp
+    cvdthresholdrule.cpp
+    cvdthresholdrule.h
+    DataCache.cpp
+    DataCache.hpp
+    lockfreequeue.h
+    MarketDataCore.cpp
+    MarketDataCore.hpp
+    MessageParser.hpp
+    performancemonitor.cpp
+    performancemonitor.h
+    rule.h
+    ruleengine.cpp
+    ruleengine.h
+    SentinelLogging.cpp
+    SentinelLogging.hpp
+    statisticscontroller.cpp
+    statisticscontroller.h
+    statisticsprocessor.cpp
+    statisticsprocessor.h
+    tradedata.h
 )
 
 # Find required packages

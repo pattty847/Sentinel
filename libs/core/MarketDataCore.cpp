@@ -10,7 +10,8 @@
 MarketDataCore::MarketDataCore(const std::vector<std::string>& products,
                                Authenticator& auth,
                                DataCache& cache)
-    : m_products(products)
+    : QObject(nullptr)
+    , m_products(products)
     , m_auth(auth)
     , m_cache(cache)
 {
@@ -284,6 +285,9 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // Store in DataCache
                         m_cache.addTrade(trade);
                         
+                        // 🔥 NEW: Emit real-time signal to GUI layer
+                        emit tradeReceived(trade);
+                        
                         // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
                         static int tradeLogCount = 0;
                         if (++tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
@@ -354,10 +358,13 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         updateCount++;
                     }
                     
+                    // 🔥 NEW: Emit real-time order book signal to GUI layer
+                    auto liveBook = m_cache.getLiveOrderBook(product_id);
+                    emit orderBookUpdated(liveBook);
+                    
                     // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
                     static int liveBookLogCount = 0;
-                    if (++liveBookLogCount % 100 == 1) {
-                        auto liveBook = m_cache.getLiveOrderBook(product_id);
+                    if (++liveBookLogCount % 1000 == 1) {
                         sLog_Cache(QString("🏭 LIVE UPDATE %1: %2 → %3 bids, %4 asks (+%5 changes)")
                                    .arg(liveBookLogCount).arg(QString::fromStdString(product_id))
                                    .arg(liveBook.bids.size()).arg(liveBook.asks.size()).arg(updateCount));

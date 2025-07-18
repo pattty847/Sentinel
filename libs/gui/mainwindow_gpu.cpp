@@ -184,133 +184,84 @@ void MainWindowGPU::connectToGPUChart() {
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
         qWarning() << "❌ QML root object not found - retrying in 100ms...";
-        // Retry after QML loads
         QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
     qDebug() << "✅ QML root found:" << qmlRoot;
-    qDebug() << "🔍 QML root children:";
-    for (QObject* child : qmlRoot->children()) {
-        qDebug() << "  -" << child->objectName() << child->metaObject()->className();
-    }
     
-    GPUChartWidget* gpuChart = nullptr;
+    // 🔥 UNIFIED COMPONENT LOOKUP: Single strategy for all components
+    GPUChartWidget* gpuChart = qmlRoot->findChild<GPUChartWidget*>("gpuChart");
+    HeatmapBatched* heatmapLayer = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
+    CandlestickBatched* candleChart = qmlRoot->findChild<CandlestickBatched*>("candlestickRenderer");
     
-    // 🔥 STRATEGY 1: Find by explicit objectName
-    QQuickItem* gpuChartItem = qmlRoot->findChild<QQuickItem*>("gpuChart");
-    qDebug() << "🔍 objectName lookup for 'gpuChart':" << gpuChartItem;
-    
-    if (gpuChartItem) {
-        gpuChart = qobject_cast<GPUChartWidget*>(gpuChartItem);
-        qDebug() << "🔍 qobject_cast to GPUChartWidget:" << gpuChart;
-    }
-    
-    // 🔥 STRATEGY 2: If objectName lookup fails, find by type
+    // 🔥 VALIDATION: Check all required components are found
     if (!gpuChart) {
-        qDebug() << "🔍 objectName lookup failed, trying type lookup...";
-        gpuChart = qmlRoot->findChild<GPUChartWidget*>();
-        qDebug() << "🔍 Type lookup result:" << gpuChart;
-    }
-    
-    if (gpuChart) {
-        // 🔥 CRITICAL: Disconnect any existing connections to avoid duplicates
-        disconnect(m_streamController, &StreamController::tradeReceived,
-                  gpuChart, &GPUChartWidget::onTradeReceived);
-                  
-        // 🔥 REAL-TIME DATA CONNECTION! (Qt::QueuedConnection for thread safety)
-        bool connectionSuccess = connect(m_streamController, &StreamController::tradeReceived,
-                                        gpuChart, &GPUChartWidget::onTradeReceived,
-                                        Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
-                                        
-        qDebug() << "🔗 Qt Signal Connection Result:" << (connectionSuccess ? "SUCCESS" : "FAILED");
-        qDebug() << "🎯 Connected StreamController:" << m_streamController 
-                 << "to GPUChart:" << gpuChart;
-        
-        qDebug() << "🔥 GPU CHART CONNECTED TO REAL-TIME TRADE DATA!";
-        
-        // 🔥 GEMINI UNIFICATION: Connect chart view to heatmap
-        QQuickItem* heatmapItem = qmlRoot->findChild<QQuickItem*>("heatmapLayer");
-        HeatmapBatched* heatmapLayer = qobject_cast<HeatmapBatched*>(heatmapItem);
-        
-        if (heatmapLayer) {
-            // 🔥 THE CRITICAL BRIDGE: Chart view coordinates to heatmap
-            connect(gpuChart, &GPUChartWidget::viewChanged,
-                    heatmapLayer, &HeatmapBatched::setTimeWindow,
-                    Qt::QueuedConnection);
-            
-            qDebug() << "✅🔥 VIEW COORDINATION ESTABLISHED: Chart view is now wired to Heatmap.";
-        } else {
-            qWarning() << "⚠️ HeatmapBatched not found - coordinate unification failed";
-        }
-        
-        // 🕯️ PHASE 5: CONNECT CANDLESTICK CHART
-        qDebug() << "🔍 Looking for candlestick renderer...";
-        QQuickItem* candleChartItem = qmlRoot->findChild<QQuickItem*>("candlestickRenderer");
-        qDebug() << "🔍 Found candlestickRenderer item:" << candleChartItem;
-        
-        CandlestickBatched* candleChart = qobject_cast<CandlestickBatched*>(candleChartItem);
-        qDebug() << "🔍 Cast to CandlestickBatched:" << candleChart;
-        
-        if (candleChart) {
-            bool tradeConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
-                                          candleChart, &CandlestickBatched::onCandlesReady,
-                                          Qt::QueuedConnection);
-            
-            // 🔥 COORDINATE SYNCHRONIZATION: GPUChart drives candle coordinates
-            bool coordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
-                                          candleChart, &CandlestickBatched::onViewChanged,
-                                          Qt::QueuedConnection);
-            
-            qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
-                     << "Candle stream:" << (tradeConnection ? "SUCCESS" : "FAILED")
-                     << "Coordinates:" << (coordConnection ? "SUCCESS" : "FAILED");
-            
-            if (tradeConnection && coordConnection) {
-                qDebug() << "✅ CANDLESTICK CHART FULLY CONNECTED TO REAL-TIME DATA!";
-            }
-        } else {
-            qWarning() << "❌ CandlestickBatched (candlestickRenderer) not found - candle integration failed";
-            
-            // List all available QML children for debugging
-            qDebug() << "🔍 Available QML children with objectNames:";
-            for (QObject* child : qmlRoot->findChildren<QObject*>()) {
-                QString objName = child->objectName();
-                if (!objName.isEmpty()) {
-                    qDebug() << "  -" << objName << ":" << child->metaObject()->className();
-                }
-            }
-        }
-    } else {
-        qWarning() << "❌ GPUChartWidget NOT FOUND - RETRYING IN 200ms...";
-        // Retry after a longer delay
+        qWarning() << "❌ GPUChartWidget not found - retrying in 200ms...";
         QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
-    // 🔥 PHASE 2: Connect order book data to HeatmapBatched - CRITICAL FIX!
-    HeatmapBatched* heatmapLayer = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
-    if (heatmapLayer) {
-        connect(m_streamController, &StreamController::orderBookUpdated,
-                heatmapLayer, &HeatmapBatched::onOrderBookUpdated,
-                Qt::QueuedConnection); // CRITICAL: Async connection for thread safety!
+    // 🔥 CLEAN CONNECTION PATTERN: Use GPUDataAdapter for all batched data
+    bool allConnectionsSuccessful = true;
+    
+    // 1. GPU Chart - Trade scatter points (real-time)
+    disconnect(m_streamController, &StreamController::tradeReceived,
+              gpuChart, &GPUChartWidget::onTradeReceived);
+    bool tradeConnection = connect(m_streamController, &StreamController::tradeReceived,
+                                  gpuChart, &GPUChartWidget::onTradeReceived,
+                                  Qt::QueuedConnection);
+    allConnectionsSuccessful &= tradeConnection;
+    
+         // 2. Heatmap - Order book visualization (batched)
+     if (heatmapLayer) {
+         // Use StreamController for order book data (HeatmapBatched expects OrderBook)
+         bool heatmapConnection = connect(m_streamController, &StreamController::orderBookUpdated,
+                                         heatmapLayer, &HeatmapBatched::onOrderBookUpdated,
+                                         Qt::QueuedConnection);
+         allConnectionsSuccessful &= heatmapConnection;
         
-        // 🚀 NEW: Connect FastOrderBook heatmap data
-        connect(m_gpuAdapter, &GPUDataAdapter::heatmapReady,
-                heatmapLayer, [=](const GPUTypes::QuadInstance* quads, size_t count) {
-                    // TODO: Pass FastOrderBook quad data to heatmap
-                    static int updateCount = 0;
-                    if (++updateCount % 100 == 0) {
-                        qDebug() << "🚀 FAST ORDER BOOK UPDATE #" << updateCount 
-                                 << "Quads:" << count
-                                 << "Spread:" << m_gpuAdapter->getSpread()
-                                 << "Best Bid:" << m_gpuAdapter->getBestBid()
-                                 << "Best Ask:" << m_gpuAdapter->getBestAsk();
-                    }
-                });
+        // Coordinate synchronization
+        bool heatmapCoordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
+                                             heatmapLayer, &HeatmapBatched::setTimeWindow,
+                                             Qt::QueuedConnection);
+        allConnectionsSuccessful &= heatmapCoordConnection;
         
-        qDebug() << "🔥 HEATMAP CONNECTED TO REAL-TIME ORDER BOOK DATA!";
+        qDebug() << "🔥 HEATMAP CONNECTIONS:"
+                 << "Data:" << (heatmapConnection ? "SUCCESS" : "FAILED")
+                 << "Coordinates:" << (heatmapCoordConnection ? "SUCCESS" : "FAILED");
     } else {
-        qWarning() << "⚠️ HeatmapBatched (heatmapLayer) not found in QML root - CHECK OBJECTNAME!";
+        qWarning() << "⚠️ HeatmapBatched not found - heatmap integration disabled";
+    }
+    
+    // 3. Candlestick - OHLC candles (batched)
+    if (candleChart) {
+        bool candleConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
+                                       candleChart, &CandlestickBatched::onCandlesReady,
+                                       Qt::QueuedConnection);
+        allConnectionsSuccessful &= candleConnection;
+        
+        // Coordinate synchronization
+        bool candleCoordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
+                                            candleChart, &CandlestickBatched::onViewChanged,
+                                            Qt::QueuedConnection);
+        allConnectionsSuccessful &= candleCoordConnection;
+        
+        qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
+                 << "Data:" << (candleConnection ? "SUCCESS" : "FAILED")
+                 << "Coordinates:" << (candleCoordConnection ? "SUCCESS" : "FAILED");
+    } else {
+        qWarning() << "⚠️ CandlestickBatched not found - candle integration disabled";
+    }
+    
+    // 🔥 FINAL STATUS REPORT
+    if (allConnectionsSuccessful) {
+        qDebug() << "✅ GPU CHART FULLY CONNECTED TO REAL-TIME DATA PIPELINE!";
+        qDebug() << "🎯 Connected components:"
+                 << "GPUChart:" << (gpuChart ? "YES" : "NO")
+                 << "Heatmap:" << (heatmapLayer ? "YES" : "NO")
+                 << "Candles:" << (candleChart ? "YES" : "NO");
+    } else {
+        qWarning() << "⚠️ Some GPU connections failed - partial functionality";
     }
 } 

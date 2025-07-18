@@ -11,8 +11,11 @@
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <thread>
+#include <QObject>
+#include <QTimer>
 #include "Authenticator.hpp"
 #include "DataCache.hpp"
+#include "tradedata.h"
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -20,7 +23,9 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-class MarketDataCore {
+class MarketDataCore : public QObject {
+    Q_OBJECT
+
 public:
     MarketDataCore(const std::vector<std::string>& products,
                    Authenticator& auth,
@@ -35,6 +40,13 @@ public:
     MarketDataCore& operator=(const MarketDataCore&) = delete;
     MarketDataCore(MarketDataCore&&) = delete;
     MarketDataCore& operator=(MarketDataCore&&) = delete;
+
+signals:
+    // 🔥 NEW: Real-time signals for GUI layer
+    void tradeReceived(const Trade& trade);
+    void orderBookUpdated(const OrderBook& orderBook);
+    void connectionStatusChanged(bool connected);
+    void errorOccurred(const QString& error);
 
 private:
     // Connection/handshake chain

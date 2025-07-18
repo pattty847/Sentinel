@@ -1,6 +1,7 @@
 #include "streamcontroller.h"
 #include "SentinelLogging.hpp"
 #include "gpudataadapter.h"
+#include "MarketDataCore.hpp"
 #include <QDebug>
 
 StreamController::StreamController(QObject* parent)
@@ -32,14 +33,28 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Start the client
     m_client->start();
     
-    // Create and configure the polling timers
-    m_pollTimer = new QTimer(this);
-    connect(m_pollTimer, &QTimer::timeout, this, &StreamController::pollForTrades);
-    m_pollTimer->start(100);
+    // 🔥 NEW: Connect to real-time WebSocket signals instead of polling
+    if (m_client->getMarketDataCore()) {
+        connect(m_client->getMarketDataCore(), &MarketDataCore::tradeReceived,
+                this, &StreamController::onTradeReceived, Qt::QueuedConnection);
+        connect(m_client->getMarketDataCore(), &MarketDataCore::orderBookUpdated,
+                this, &StreamController::onOrderBookUpdated, Qt::QueuedConnection);
+        connect(m_client->getMarketDataCore(), &MarketDataCore::connectionStatusChanged,
+                this, &StreamController::onConnectionStatusChanged, Qt::QueuedConnection);
+        
+        sLog_Init("✅ Connected to real-time WebSocket signals");
+    } else {
+        sLog_Warning("⚠️ MarketDataCore not available, falling back to polling");
+        
+        // Fallback to polling if real-time signals not available
+        m_pollTimer = new QTimer(this);
+        connect(m_pollTimer, &QTimer::timeout, this, &StreamController::pollForTrades);
+        m_pollTimer->start(100);
 
-    m_orderBookPollTimer = new QTimer(this);
-    connect(m_orderBookPollTimer, &QTimer::timeout, this, &StreamController::pollForOrderBooks);
-    m_orderBookPollTimer->start(100);
+        m_orderBookPollTimer = new QTimer(this);
+        connect(m_orderBookPollTimer, &QTimer::timeout, this, &StreamController::pollForOrderBooks);
+        m_orderBookPollTimer->start(100);
+    }
     
     // Emit connected signal
     emit connected();
@@ -74,6 +89,38 @@ void StreamController::stop() {
     emit disconnected();
     
     sLog_Init("StreamController stopped");
+}
+
+// 🔥 NEW: Real-time signal handlers
+void StreamController::onTradeReceived(const Trade& trade) {
+    // 🔥 REAL-TIME: Process trade immediately from WebSocket
+    sLog_Trades("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
+               << "$" << trade.price << "size:" << trade.size);
+    
+    // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter
+    if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
+        sLog_Warning("⚠️ StreamController: GPU trade queue full! Trade dropped.");
+    }
+    
+    // Keep Qt signal for backward compatibility
+    emit tradeReceived(trade);
+}
+
+void StreamController::onOrderBookUpdated(const OrderBook& orderBook) {
+    // 🔥 REAL-TIME: Process order book immediately from WebSocket
+    sLog_Network("🔥 REAL-TIME: Received order book for" << QString::fromStdString(orderBook.product_id)
+                 << "Bids:" << orderBook.bids.size() << "Asks:" << orderBook.asks.size());
+    
+    // Emit to GUI components
+    emit orderBookUpdated(orderBook);
+}
+
+void StreamController::onConnectionStatusChanged(bool connected) {
+    if (connected) {
+        sLog_Connection("✅ WebSocket connection established");
+    } else {
+        sLog_Connection("❌ WebSocket connection lost");
+    }
 }
 
 void StreamController::pollForTrades() {

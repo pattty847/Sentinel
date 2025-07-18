@@ -13,7 +13,7 @@ GPUDataAdapter::GPUDataAdapter(QObject* parent)
     , m_candle100msTimer(new QTimer(this))
     , m_candle500msTimer(new QTimer(this))
     , m_candle1sTimer(new QTimer(this))
-    , m_fastOrderBook("BTC-USD") // Initialize O(1) order book
+    , m_liveOrderBook("BTC-USD") // Initialize stateful order book
 {
     sLog_Init("🚀 GPUDataAdapter: Initializing lock-free data pipeline...");
     
@@ -121,30 +121,33 @@ void GPUDataAdapter::processIncomingData() {
     // Candle processing moved to separate time-based timers
     // (100ms, 500ms, 1s timers handle their respective candle updates)
     
-    // 🚀 ULTRA-FAST: Process order books with O(1) FastOrderBook
+    // 🚀 STATEFUL: Process order books with LiveOrderBook
     OrderBook orderBook;
     m_heatmapWriteCursor = 0;
     
     size_t orderBooksProcessed = 0;
     while (m_orderBookQueue.pop(orderBook) && orderBooksProcessed < 10) { 
-        // O(1) update to FastOrderBook - BLAZING FAST!
-        // Capture timestamp ONCE for all levels in this order book message
-        const uint32_t now_ms = static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch());
-
-        for (const auto& bid : orderBook.bids) {
-            m_fastOrderBook.updateLevel(bid.price, bid.size, true, now_ms); // O(1) bid update
-        }
-        
-        for (const auto& ask : orderBook.asks) {
-            m_fastOrderBook.updateLevel(ask.price, ask.size, false, now_ms); // O(1) ask update
+        // Initialize from snapshot or apply updates to LiveOrderBook
+        if (orderBooksProcessed == 0) {
+            // First order book is treated as a snapshot
+            m_liveOrderBook.initializeFromSnapshot(orderBook);
+        } else {
+            // Subsequent order books are treated as updates
+            for (const auto& bid : orderBook.bids) {
+                m_liveOrderBook.applyUpdate("bid", bid.price, bid.size);
+            }
+            
+            for (const auto& ask : orderBook.asks) {
+                m_liveOrderBook.applyUpdate("ask", ask.price, ask.size);
+            }
         }
         
         orderBooksProcessed++;
     }
     
-    // Convert FastOrderBook to GPU quads (only if data was updated)
+    // Convert LiveOrderBook to GPU quads (only if data was updated)
     if (orderBooksProcessed > 0) {
-        convertFastOrderBookToQuads();
+        convertLiveOrderBookToQuads();
     }
     
     // 📊 TRADE DISTRIBUTION TRACKING in lock-free pipeline
@@ -372,12 +375,12 @@ void GPUDataAdapter::cleanupOldTradeHistory() {
     }
 }
 
-// 🚀 ULTRA-FAST: Convert O(1) order book to GPU heatmap quads
-void GPUDataAdapter::convertFastOrderBookToQuads() {
+// 🚀 STATEFUL: Convert LiveOrderBook to GPU heatmap quads
+void GPUDataAdapter::convertLiveOrderBookToQuads() {
     m_heatmapWriteCursor = 0;
     
-    // Get bid levels with O(1) access pattern
-    auto bids = m_fastOrderBook.getBids(1000); // Top 1000 bid levels
+    // Get bid levels from stateful order book
+    auto bids = m_liveOrderBook.getAllBids();
     for (const auto& bid : bids) {
         if (m_heatmapWriteCursor >= m_reserveSize) break;
         
@@ -391,8 +394,8 @@ void GPUDataAdapter::convertFastOrderBookToQuads() {
         m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
     }
     
-    // Get ask levels with O(1) access pattern
-    auto asks = m_fastOrderBook.getAsks(1000); // Top 1000 ask levels
+    // Get ask levels from stateful order book
+    auto asks = m_liveOrderBook.getAllAsks();
     for (const auto& ask : asks) {
         if (m_heatmapWriteCursor >= m_reserveSize) break;
         
@@ -406,14 +409,15 @@ void GPUDataAdapter::convertFastOrderBookToQuads() {
         m_heatmapBuffer[m_heatmapWriteCursor++] = quad;
     }
     
-    // Log FastOrderBook performance metrics
+    // Log LiveOrderBook performance metrics
     static int heatmapUpdateCount = 0;
     if (++heatmapUpdateCount % 100 == 0) {
-        sLog_GPU("🚀 FAST ORDER BOOK STATS #" << heatmapUpdateCount
-                 << " Active levels:" << m_fastOrderBook.getTotalLevels()
-                 << " Best bid:" << m_fastOrderBook.getBestBidPrice()
-                 << " Best ask:" << m_fastOrderBook.getBestAskPrice()
-                 << " Spread:" << m_fastOrderBook.getSpread()
+        sLog_GPU("🚀 LIVE ORDER BOOK STATS #" << heatmapUpdateCount
+                 << " Bid count:" << m_liveOrderBook.getBidCount()
+                 << " Ask count:" << m_liveOrderBook.getAskCount()
+                 << " Best bid:" << getBestBid()
+                 << " Best ask:" << getBestAsk()
+                 << " Spread:" << getSpread()
                  << " Heatmap quads:" << m_heatmapWriteCursor);
     }
 }

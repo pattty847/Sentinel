@@ -29,6 +29,9 @@ public:
     // 🔥 NEW: Dense order book data for professional visualization
     [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
     [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
+    
+    // 🔥 NEW: Access to MarketDataCore for real-time signals
+    [[nodiscard]] MarketDataCore* getMarketDataCore() const { return m_core.get(); }
 
     // Non-copyable, non-movable (DataCache contains std::shared_mutex)
     CoinbaseStreamClient(const CoinbaseStreamClient&) = delete;

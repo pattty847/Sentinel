@@ -2,7 +2,6 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QTimer>
-#include "../libs/gui/tradechartwidget.h"
 #include "../libs/gui/gpuchartwidget.h"
 #include "../libs/core/tradedata.h"
 
@@ -22,24 +21,6 @@ protected:
         app.reset();
     }
 };
-
-TEST_F(RenderingBenchmark, QPainterBaseline) {
-    if (NUM_TRADES > 100000) {
-        GTEST_SKIP() << "Skipping QPainter test with " << NUM_TRADES << " trades - too slow.";
-    }
-    TradeChartWidget widget;
-    widget.setSymbol("BTC-USD");
-    QElapsedTimer timer;
-    timer.start();
-    for (int i = 0; i < NUM_TRADES; ++i) {
-        Trade t{std::chrono::system_clock::now(), "BTC-USD", std::to_string(i), AggressorSide::Buy, 100.0 + i*0.01, 0.1};
-        widget.addTrade(t);
-        if (i % 1000 == 0)
-            QCoreApplication::processEvents();
-    }
-    qint64 elapsed = timer.elapsed();
-    qInfo() << "[Benchmark] QPainter Total Time for" << NUM_TRADES << "trades:" << elapsed << "ms";
-}
 
 TEST_F(RenderingBenchmark, GPURenderer) {
     qInfo() << "🚀 Starting GPU benchmark with" << NUM_TRADES << "trades...";
