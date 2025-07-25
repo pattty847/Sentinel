@@ -1,7 +1,7 @@
 #ifndef CVDTHRESHOLDDRULE_H
 #define CVDTHRESHOLDDRULE_H
 
-#include "rule.h" // Include the base class interface
+#include "Rule.h" // Include the base class interface
 
 /**
  * @class CvdThresholdRule

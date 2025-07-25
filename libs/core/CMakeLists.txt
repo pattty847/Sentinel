@@ -7,26 +7,26 @@ add_library(sentinel_core
     Authenticator.hpp
     CoinbaseStreamClient.hpp
     CoinbaseStreamClient.cpp
-    cvdthresholdrule.cpp
-    cvdthresholdrule.h
+    CvdThresholdRule.cpp
+    CvdThresholdRule.h
     DataCache.cpp
     DataCache.hpp
-    lockfreequeue.h
+    LockFreeQueue.h
     MarketDataCore.cpp
     MarketDataCore.hpp
     MessageParser.hpp
-    performancemonitor.cpp
-    performancemonitor.h
-    rule.h
-    ruleengine.cpp
-    ruleengine.h
+    PerformanceMonitor.cpp
+    PerformanceMonitor.h
+    Rule.h
+    RuleEngine.cpp
+    RuleEngine.h
     SentinelLogging.cpp
     SentinelLogging.hpp
-    statisticscontroller.cpp
-    statisticscontroller.h
-    statisticsprocessor.cpp
-    statisticsprocessor.h
-    tradedata.h
+    StatisticsController.cpp
+    StatisticsController.h
+    StatisticsProcessor.cpp
+    StatisticsProcessor.h
+    TradeData.h
 )
 
 # Find required packages

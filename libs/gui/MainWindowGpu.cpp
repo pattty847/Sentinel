@@ -1,7 +1,7 @@
-#include "mainwindow_gpu.h"
-#include "streamcontroller.h"
-#include "statisticscontroller.h"
-#include "chartmodecontroller.h"
+#include "MainWindowGpu.h"
+#include "StreamController.h"
+#include "StatisticsController.h"
+#include "ChartModeController.h"
 #include "GridIntegrationAdapter.h"
 #include "UnifiedGridRenderer.h"
 #include <QQmlContext>

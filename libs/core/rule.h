@@ -2,7 +2,7 @@
 #define RULE_H
 
 #include <QtCore/QString>
-#include "tradedata.h" // We might need trade data for some rules
+#include "TradeData.h" // We might need trade data for some rules
 
 /**
  * @class Rule

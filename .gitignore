@@ -1,16 +1,22 @@
+# IDE and Editor files
 .vscode
-build
-.cache
+.cursor
 
-# User-specific files
+# Build artifacts and cache
+build
 /build*/
+.cache
 compile_commands.json
+
+# Configuration files
 key.json
 config.json
-*.log
-
-/scripts
-CLAUDE.md
-
 CMakePresets.json
 vcpkg.json
+
+# Log files
+*.log
+
+# Scripts and documentation
+/scripts
+CLAUDE.md

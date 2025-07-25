@@ -8,7 +8,7 @@
 #include <map>
 #include <random>
 #include "../libs/gui/LiquidityTimeSeriesEngine.h"
-#include "../libs/core/tradedata.h"
+#include "../libs/core/TradeData.h"
 
 /**
  * 📊 ORDER BOOK STATE CONSISTENCY TEST SUITE

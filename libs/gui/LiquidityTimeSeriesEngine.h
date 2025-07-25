@@ -2,17 +2,15 @@
 
 #include <QObject>
 #include <QTimer>
-#include <chrono>
 #include <deque>
 #include <map>
 #include <vector>
-#include <memory>
-#include "tradedata.h"
+#include "TradeData.h"
 
 /**
- * 🎯 BOOKMAP-STYLE LIQUIDITY TIME SERIES ENGINE
+ * 🎯 LIQUIDITY TIME SERIES ENGINE
  * 
- * This class implements the core Bookmap-style temporal order book analysis:
+ * This class implements the core temporal order book analysis:
  * - Captures 100ms order book snapshots
  * - Aggregates them into configurable timeframes (250ms, 500ms, 1s, 2s, 5s, etc.)
  * - Provides anti-spoofing detection via persistence ratio
@@ -65,10 +63,10 @@ struct LiquidityTimeSlice {
             return snapshotCount > 2;  // Present for at least 3 snapshots
         }
         
-        double persistenceRatio() const {
-            if (lastSeen_ms <= firstSeen_ms) return 0.0;
-            return static_cast<double>(lastSeen_ms - firstSeen_ms) / 
-                   static_cast<double>(lastSeen_ms - firstSeen_ms);
+        double persistenceRatio(int64_t slice_duration_ms) const {
+            if (slice_duration_ms <= 0 || lastSeen_ms <= firstSeen_ms) return 0.0;
+            return static_cast<double>(lastSeen_ms - firstSeen_ms) /
+                   static_cast<double>(slice_duration_ms);
         }
     };
     

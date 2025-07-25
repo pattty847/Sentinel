@@ -21,25 +21,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # =============================================================================
-# MIGRATION FEATURE FLAGS
-# =============================================================================
-option(SENTINEL_GRID_ONLY "Build with only grid system enabled" OFF)
-option(SENTINEL_MIGRATION_MODE "Enable both systems for A/B testing" ON)
-
-# Phase 4: Grid-only mode configuration
-if(SENTINEL_GRID_ONLY)
-    message(STATUS "🎯 PHASE 4: Building in grid-only mode - legacy components disabled")
-    set(SENTINEL_MIGRATION_MODE OFF)  # Override migration mode
-else()
-    message(STATUS "🔄 Building with legacy fallback support")
-endif()
-
-configure_file(
-    "${CMAKE_SOURCE_DIR}/config.h.in"
-    "${CMAKE_BINARY_DIR}/config.h"
-)
-
-# =============================================================================
 # DEPENDENCY MANAGEMENT (FetchContent)
 # This section ensures that all necessary third-party libraries are downloaded
 # and available for the project to use.

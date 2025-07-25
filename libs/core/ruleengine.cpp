@@ -1,5 +1,5 @@
-#include "ruleengine.h"
-#include "statisticsprocessor.h" // We need the full definition here
+#include "RuleEngine.h"
+#include "StatisticsProcessor.h" // We need the full definition here
 #include <utility> // For std::move
 
 RuleEngine::RuleEngine(StatisticsProcessor *processor, QObject *parent)

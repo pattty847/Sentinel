@@ -238,7 +238,7 @@ void paintEvent(QPaintEvent* event) {
 ### **Primary Refactoring Targets**:
 - `libs/gui/tradechartwidget.cpp` - Core rendering logic (278 lines → needs complete overhaul)
 - `libs/gui/tradechartwidget.h` - Data structures and coordinate system
-- `libs/core/tradedata.h` - May need additional fields for rendered coordinates
+- `libs/core/TradeData.h` - May need additional fields for rendered coordinates
 
 ### **New Files to Create**:
 - `libs/gui/chartviewport.h/cpp` - Viewport/camera management

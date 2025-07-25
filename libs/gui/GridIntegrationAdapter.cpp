@@ -129,3 +129,16 @@ void GridIntegrationAdapter::trimOldData() {
     sLog_Performance("🧹 GridIntegrationAdapter: Trimmed buffers - trades:" << m_tradeBuffer.size() 
                      << " orderBooks:" << m_orderBookBuffer.size());
 }
+
+void GridIntegrationAdapter::setBatchIntervalMs(int intervalMs) {
+    if (intervalMs < 1) intervalMs = 1; // Prevent zero/negative
+    if (m_processingTimer->interval() != intervalMs) {
+        m_processingTimer->setInterval(intervalMs);
+        emit batchIntervalChanged(intervalMs);
+        sLog_Performance(QString("🕒 Batch interval set to %1 ms (%2 FPS)").arg(intervalMs).arg(1000.0/intervalMs, 0, 'f', 1));
+    }
+}
+
+int GridIntegrationAdapter::batchIntervalMs() const {
+    return m_processingTimer->interval();
+}

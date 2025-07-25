@@ -4,7 +4,7 @@
 #include <QObject>
 #include <vector>
 #include <memory>
-#include "rule.h"
+#include "Rule.h"
 
 class StatisticsProcessor; // Forward-declaration to avoid circular dependencies
 

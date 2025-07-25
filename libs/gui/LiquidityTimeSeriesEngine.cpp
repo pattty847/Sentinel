@@ -51,6 +51,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
         std::chrono::system_clock::now().time_since_epoch()).count();
     
     // 🚀 PERFORMANCE FIX: Only store price levels within viewport + buffer
+    // TODO: Figure out how to do this in a more efficient way. You zoom out past the buffer, and then you get gaps in the heatmap.
     double priceBuffer = (maxPrice - minPrice) * 0.5;  // 50% buffer for smooth panning
     double filteredMinPrice = minPrice - priceBuffer;
     double filteredMaxPrice = maxPrice + priceBuffer;
@@ -311,7 +312,7 @@ void LiquidityTimeSeriesEngine::finalizeLiquiditySlice(LiquidityTimeSlice& slice
     // Final calculations for all price levels
     for (auto& [price, metrics] : slice.bidMetrics) {
         // Calculate final resting liquidity based on persistence
-        if (metrics.persistenceRatio() > 0.8) {  // Present for >80% of interval
+        if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {  // Present for >80% of interval
             metrics.restingLiquidity = metrics.avgLiquidity;
         } else {
             metrics.restingLiquidity = 0.0;  // Too sporadic, likely spoofing
@@ -319,7 +320,7 @@ void LiquidityTimeSeriesEngine::finalizeLiquiditySlice(LiquidityTimeSlice& slice
     }
     
     for (auto& [price, metrics] : slice.askMetrics) {
-        if (metrics.persistenceRatio() > 0.8) {
+        if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {
             metrics.restingLiquidity = metrics.avgLiquidity;
         } else {
             metrics.restingLiquidity = 0.0;

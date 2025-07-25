@@ -7,7 +7,9 @@
 #include <string_view>
 #include <format>
 #include <stdexcept>
-#include "tradedata.h"
+#include "TradeData.h"
+#include <charconv>
+#include <cstdlib>
 
 namespace Cpp20Utils {
 /**
@@ -28,12 +30,14 @@ namespace Cpp20Utils {
  * @param str Input string to convert
  * @return Converted double value, or 0.0 on error
  */
-inline double fastStringToDouble(const std::string& str) {
-    try {
-        return std::stod(str);
-    } catch (const std::exception&) {
-        return 0.0;
-    }
+inline double fastStringToDouble(std::string_view str) {
+    // Fallback: std::from_chars for double may not be available on all platforms/stdlibs
+    // Use std::strtod for fast, non-throwing conversion
+    const char* begin = str.data();
+    char* end = nullptr;
+    double value = std::strtod(begin, &end);
+    if (end == begin) return 0.0; // Conversion failed
+    return value;
 }
 
 /**
@@ -42,13 +46,13 @@ inline double fastStringToDouble(const std::string& str) {
  * @param defaultValue Value to return if conversion fails
  * @return Converted double value, or defaultValue on error
  */
-inline double fastStringToDouble(const std::string& str, double defaultValue) {
+inline double fastStringToDouble(std::string_view str, double defaultValue) {
     if (str.empty()) return defaultValue;
-    try {
-        return std::stod(str);
-    } catch (const std::exception&) {
-        return defaultValue;
-    }
+    const char* begin = str.data();
+    char* end = nullptr;
+    double value = std::strtod(begin, &end);
+    if (end == begin) return defaultValue;
+    return value;
 }
 
 /**
@@ -56,12 +60,13 @@ inline double fastStringToDouble(const std::string& str, double defaultValue) {
  * @param str Input string to convert
  * @return Converted int value, or 0 on error
  */
-inline int fastStringToInt(const std::string& str) {
-    try {
-        return std::stoi(str);
-    } catch (const std::exception&) {
-        return 0;
+inline int fastStringToInt(std::string_view str) {
+    int value = 0;
+    auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), value);
+    if (ec == std::errc()) {
+        return value;
     }
+    return 0;
 }
 
 /**
@@ -70,13 +75,14 @@ inline int fastStringToInt(const std::string& str) {
  * @param defaultValue Value to return if conversion fails
  * @return Converted int value, or defaultValue on error
  */
-inline int fastStringToInt(const std::string& str, int defaultValue) {
+inline int fastStringToInt(std::string_view str, int defaultValue) {
     if (str.empty()) return defaultValue;
-    try {
-        return std::stoi(str);
-    } catch (const std::exception&) {
-        return defaultValue;
+    int value = 0;
+    auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), value);
+    if (ec == std::errc()) {
+        return value;
     }
+    return defaultValue;
 }
 
 // 🚀 FAST SIDE DETECTION
