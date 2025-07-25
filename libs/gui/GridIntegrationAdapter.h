@@ -5,7 +5,7 @@
 #include <vector>
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "tradedata.h"
+#include "TradeData.h"
 
 /**
  * 🎯 GRID INTEGRATION ADAPTER - Phase 2 Migration
@@ -25,6 +25,7 @@ class GridIntegrationAdapter : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool gridModeEnabled READ gridModeEnabled WRITE setGridModeEnabled NOTIFY gridModeChanged)
     Q_PROPERTY(UnifiedGridRenderer* gridRenderer READ gridRenderer WRITE setGridRenderer)
+    Q_PROPERTY(int batchIntervalMs READ batchIntervalMs WRITE setBatchIntervalMs NOTIFY batchIntervalChanged)
 
 public:
     explicit GridIntegrationAdapter(QObject* parent = nullptr);
@@ -43,12 +44,15 @@ public slots:
     // Buffer management
     void setMaxHistorySlices(int slices) { m_maxHistorySlices = slices; }
     void trimOldData();
+    void setBatchIntervalMs(int intervalMs);
+    int batchIntervalMs() const;
 
 signals:
     void gridModeChanged(bool enabled);
     void bufferOverflow(int currentSize, int maxSize);
     
     // 🎯 PHASE 5: Legacy signals removed - pure grid-only mode
+    void batchIntervalChanged(int intervalMs);
 
 private slots:
     void processDataBuffer();

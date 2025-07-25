@@ -1,5 +1,5 @@
 #include "CoinbaseStreamClient.hpp"
-#include "tradedata.h"
+#include "TradeData.h"
 #include <iostream>
 #include <chrono>
 #include <thread>

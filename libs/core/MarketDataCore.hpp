@@ -15,7 +15,7 @@
 #include <QTimer>
 #include "Authenticator.hpp"
 #include "DataCache.hpp"
-#include "tradedata.h"
+#include "TradeData.h"
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;

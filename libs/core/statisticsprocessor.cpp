@@ -1,5 +1,5 @@
-#include "statisticsprocessor.h"
-#include "tradedata.h"
+#include "StatisticsProcessor.h"
+#include "TradeData.h"
 
 StatisticsProcessor::StatisticsProcessor()
     : m_cvd(0.0)

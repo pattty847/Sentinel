@@ -1,4 +1,4 @@
-#include "streamcontroller.h"
+#include "StreamController.h"
 #include "SentinelLogging.hpp"
 #include "MarketDataCore.hpp"
 #include <QDebug>

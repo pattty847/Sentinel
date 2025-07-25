@@ -1,12 +1,12 @@
 # Phase 4: Core grid components (always included)
 set(GRID_CORE_SOURCES
     # Main window and controllers
-    mainwindow_gpu.cpp
-    mainwindow_gpu.h
-    chartmodecontroller.cpp
-    chartmodecontroller.h
-    streamcontroller.cpp
-    streamcontroller.h
+    MainWindowGpu.cpp
+    MainWindowGpu.h
+    ChartModeController.cpp
+    ChartModeController.h
+    StreamController.cpp
+    StreamController.h
     
     # Grid system components
     GridIntegrationAdapter.cpp
@@ -17,7 +17,7 @@ set(GRID_CORE_SOURCES
     LiquidityTimeSeriesEngine.h
     CoordinateSystem.cpp
     CoordinateSystem.h
-    chartmode.h
+    ChartMode.h
 )
 
 # 🎯 PHASE 5: Legacy components ANNIHILATED! Pure grid-only now!
@@ -37,7 +37,6 @@ qt6_add_qml_module(sentinel_gui_lib
 
 target_include_directories(sentinel_gui_lib 
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${CMAKE_BINARY_DIR}  # For config.h
 )
 
 find_package(Boost REQUIRED COMPONENTS beast)

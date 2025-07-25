@@ -53,14 +53,14 @@ WebSocket → MarketDataCore → GPUDataAdapter (16ms batching)
 - **`libs/gui/candlestickbatched.h/cpp`**: OHLC candles (614 lines)
 
 #### Integration Points
-- **`libs/gui/mainwindow_gpu.h/cpp`**: Component wiring (297 lines)
-- **`libs/gui/streamcontroller.h/cpp`**: Data bridge (136 lines)
+- **`libs/gui/MainWindowGpu.h/cpp`**: Component wiring (297 lines)
+- **`libs/gui/StreamController.h/cpp`**: Data bridge (136 lines)
 - **`libs/gui/qml/DepthChartView.qml`**: Main QML view (328 lines)
 - **`libs/gui/qml/CandleChartView.qml`**: Candle QML wrapper (102 lines)
 
 #### Supporting Architecture
 - **`libs/gui/candlelod.h/cpp`**: Multi-timeframe candle management (241 lines)
-- **`libs/core/tradedata.h`**: Trade/OrderBook data structures
+- **`libs/core/TradeData.h`**: Trade/OrderBook data structures
 - **`docs/02_ARCHITECTURE.md`**: Current architectural documentation
 
 ## 🚨 IDENTIFIED PROBLEMS
@@ -257,7 +257,7 @@ enum class ChartMode {
 
 #### 3.2 Add Mode Controller
 ```cpp
-// In libs/gui/chartmodecontroller.h/cpp (NEW FILES)
+// In libs/gui/ChartModeController.h/cpp (NEW FILES)
 class ChartModeController : public QObject {
     Q_OBJECT
     
@@ -379,7 +379,7 @@ void processOrderBookForResampling(const OrderBook& book) {
 
 ### New Files to Create
 - [ ] `libs/gui/chartmode.h` - Mode enumeration and constants
-- [ ] `libs/gui/chartmodecontroller.h/cpp` - Mode switching logic
+- [ ] `libs/gui/ChartModeController.h/cpp` - Mode switching logic
 - [ ] `libs/core/orderbooksampler.h/cpp` - Temporal order book analysis
 - [ ] `docs/features/gpu_chart_rendering/multi_mode_architecture.md` - Documentation
 
@@ -394,7 +394,7 @@ void processOrderBookForResampling(const OrderBook& book) {
 #### UI Changes (Phase 3)  
 - [ ] `libs/gui/qml/DepthChartView.qml` - Add mode switching controls
 - [ ] `libs/gui/qml/CandleChartView.qml` - Add mode-aware visibility
-- [ ] `libs/gui/mainwindow_gpu.h/cpp` - Integrate ChartModeController
+- [ ] `libs/gui/MainWindowGpu.h/cpp` - Integrate ChartModeController
 
 #### Build System
 - [ ] `libs/gui/CMakeLists.txt` - Add new source files

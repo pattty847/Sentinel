@@ -1,7 +1,7 @@
 #ifndef STATISTICSPROCESSOR_H
 #define STATISTICSPROCESSOR_H
 
-#include "tradedata.h"
+#include "TradeData.h"
 #include <functional> // Include for std::function
 
 /**

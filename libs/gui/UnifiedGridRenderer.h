@@ -12,7 +12,7 @@
 #include <atomic>
 #include <mutex>
 #include "LiquidityTimeSeriesEngine.h"
-#include "tradedata.h"
+#include "TradeData.h"
 
 /**
  * 🎯 UNIFIED GRID RENDERER

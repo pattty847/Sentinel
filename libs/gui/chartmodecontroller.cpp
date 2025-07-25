@@ -1,4 +1,4 @@
-#include "chartmodecontroller.h"
+#include "ChartModeController.h"
 
 void ChartModeController::setMode(ChartMode mode) {
     if (m_currentMode == mode) return;

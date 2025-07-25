@@ -20,7 +20,7 @@
 #include "../libs/gui/UnifiedGridRenderer.h"
 #include "../libs/gui/LiquidityTimeSeriesEngine.h"
 #include "../libs/gui/GridIntegrationAdapter.h"
-#include "../libs/core/tradedata.h"
+#include "../libs/core/TradeData.h"
 #include "../libs/core/CoinbaseStreamClient.hpp"
 
 /**

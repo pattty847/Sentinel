@@ -1,6 +1,6 @@
 #pragma once
 #include <QObject>
-#include "chartmode.h"
+#include "ChartMode.h"
 
 class ChartModeController : public QObject {
     Q_OBJECT

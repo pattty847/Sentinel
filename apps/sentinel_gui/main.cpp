@@ -1,8 +1,8 @@
-#include "mainwindow_gpu.h"
+#include "MainWindowGpu.h"
 #include <QApplication>
 #include <QDebug>
 #include <iostream>
-#include "tradedata.h"
+#include "TradeData.h"
 #include <QMetaType>
 #include <QQmlEngine>
 #include "UnifiedGridRenderer.h"
