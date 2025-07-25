@@ -1,9 +1,13 @@
 #include "MarketDataCore.hpp"
 #include "SentinelLogging.hpp"
+#include "Cpp20Utils.hpp"  // 🚀 C++20 UTILITIES
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <QString>
+// 🚀 C++20 OPTIMIZATIONS
+#include <format>    // std::format for efficient string formatting
+#include <ranges>    // std::ranges for functional data processing
 
 // Stub implementation for Phase 1 compilation verification
 
@@ -266,18 +270,12 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         Trade trade;
                         trade.product_id = trade_data.value("product_id", "");
                         trade.trade_id = trade_data.value("trade_id", "");
-                        trade.price = std::stod(trade_data.value("price", "0"));
-                        trade.size = std::stod(trade_data.value("size", "0"));
+                        trade.price = Cpp20Utils::fastStringToDouble(trade_data.value("price", "0"));
+                        trade.size = Cpp20Utils::fastStringToDouble(trade_data.value("size", "0"));
                         
                         // Parse side
                         std::string side = trade_data.value("side", "");
-                        if (side == "BUY") {
-                            trade.side = AggressorSide::Buy;
-                        } else if (side == "SELL") {
-                            trade.side = AggressorSide::Sell;
-                        } else {
-                            trade.side = AggressorSide::Unknown;
-                        }
+                        trade.side = Cpp20Utils::fastSideDetection(side);
                         
                         // Parse timestamp (for now use current time)
                         trade.timestamp = std::chrono::system_clock::now();
@@ -291,10 +289,10 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
                         static int tradeLogCount = 0;
                         if (++tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
-                            sLog_Trades(QString("💰 %1: $%2 size:%3 (%4) [%5 trades total]")
-                                        .arg(QString::fromStdString(trade.product_id))
-                                        .arg(trade.price).arg(trade.size)
-                                        .arg(QString::fromStdString(side)).arg(tradeLogCount));
+                            // 🚀 C++20: Use optimized formatting from utils
+                            std::string logMessage = Cpp20Utils::formatTradeLog(
+                                trade.product_id, trade.price, trade.size, side, tradeLogCount);
+                            sLog_Trades(QString::fromStdString(logMessage));
                         }
                     }
                 }
@@ -320,8 +318,8 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         }
                         
                         std::string side = update["side"];
-                        double price = std::stod(update["price_level"].get<std::string>());
-                        double quantity = std::stod(update["new_quantity"].get<std::string>());
+                        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
+                        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
                         
                         if (quantity > 0.0) {
                             OrderBookLevel level = {price, quantity};
@@ -336,9 +334,10 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                     // Initialize the live order book with complete state
                     m_cache.initializeLiveOrderBook(product_id, snapshot);
                     
-                    sLog_Cache(QString("📸 SNAPSHOT: Initialized %1 with %2 bids, %3 asks")
-                               .arg(QString::fromStdString(product_id))
-                               .arg(snapshot.bids.size()).arg(snapshot.asks.size()));
+                    // 🚀 C++20: Use optimized formatting from utils
+                    std::string logMessage = Cpp20Utils::formatOrderBookLog(
+                        product_id, snapshot.bids.size(), snapshot.asks.size());
+                    sLog_Cache(QString::fromStdString(logMessage));
                     
                 } else if (eventType == "update" && event.contains("updates") && !product_id.empty()) {
                     // 🔄 UPDATE: Apply incremental changes to stateful order book
@@ -350,8 +349,8 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         }
                         
                         std::string side = update["side"];
-                        double price = std::stod(update["price_level"].get<std::string>());
-                        double quantity = std::stod(update["new_quantity"].get<std::string>());
+                        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
+                        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
                         
                         // Apply update to live order book (handles add/update/remove automatically)
                         m_cache.updateLiveOrderBook(product_id, side, price, quantity);
@@ -365,16 +364,23 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                     // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
                     static int liveBookLogCount = 0;
                     if (++liveBookLogCount % 1000 == 1) {
-                        sLog_Cache(QString("🏭 LIVE UPDATE %1: %2 → %3 bids, %4 asks (+%5 changes)")
-                                   .arg(liveBookLogCount).arg(QString::fromStdString(product_id))
-                                   .arg(liveBook.bids.size()).arg(liveBook.asks.size()).arg(updateCount));
+                        // 🚀 C++20: Use optimized formatting from utils
+                        std::string logMessage = Cpp20Utils::formatOrderBookLog(
+                            product_id, liveBook.bids.size(), liveBook.asks.size(), updateCount);
+                        sLog_Cache(QString::fromStdString(logMessage));
                     }
                 }
             }
         }
     } else if (channel == "subscriptions") {
-        sLog_Subscription(QString("✅ Subscription confirmed for %1").arg(QString::fromStdString(message.value("product_ids", nlohmann::json::array()).dump())));
+        // 🚀 C++20: Use std::format for faster string formatting
+        std::string logMessage = std::format("✅ Subscription confirmed for {}",
+            message.value("product_ids", nlohmann::json::array()).dump());
+        sLog_Subscription(QString::fromStdString(logMessage));
     } else if (type == "error") {
-        sLog_Error(QString("❌ Coinbase error: %1").arg(QString::fromStdString(message.value("message", "unknown error"))));
+        // 🚀 C++20: Use std::format for faster string formatting
+        std::string logMessage = std::format("❌ Coinbase error: {}",
+            message.value("message", "unknown error"));
+        sLog_Error(QString::fromStdString(logMessage));
     }
 } 

@@ -1,0 +1,52 @@
+---
+alwaysApply: true
+---
+
+
+# Sentinel Architecture
+
+The system processes and visualizes real-time market data as a 2D grid, where each cell represents aggregated liquidity for a specific time interval and price level. The end goal is a sophisticated high frequency trading terminal with intelligent markings and alerts of events like spoofing, absorption, hidden liquidity or iceberg orders, advanced LLM data synthesis, reports, and more. It will be ran as a gui or in daemon mode. 
+
+## Core Principles
+
+- **Mission**: Sentinel is a professional, open-source trading terminal, engineered to match or exceed the capabilities of Bloomberg, Bookmap, and TradingView, with a focus on real-time market microstructure analysis.
+- **Performance Philosophy**: The architecture is C++-first for deterministic, as-fast-as-possible execution. All code should be written with high performance and low latency in mind. Performance is continuously tested and improved; hard metrics are subject to ongoing validation as the system evolves.
+- **Modularity**: All logic is split into independent, reusable libraries. No monoliths. Every module must be independently testable and swappable.
+- **Migration-First**: The system is actively migrating from legacy scatter-plot to a unified grid-based architecture. All new features should target the grid pipeline unless otherwise justified.
+- **Domain Intelligence**: The system must intelligently detect and visualize spoofing, absorption, hidden liquidity, and other advanced trading phenomena.
+- **Extensibility**: New features, analytics, and visualizations should be easy to add without breaking existing workflows.
+- **AI-Driven**: LLM agents are expected to synthesize data, generate reports, and flag anomalies, not just answer questions.
+- **Logging & Observability**: Use the filtered logging system (see docs/LOGGING_GUIDE.md) for all diagnostics. All critical paths must be observable.
+- **Open Source Ethos**: No vendor lock-in. All code, data, and build systems are open and auditable.
+
+> **Note:** Performance metrics and quality gates are under continuous review as new tests and benchmarks are developed. The goal is always deterministic, best-in-class speed and reliability for a C++ architecture.
+
+## Directory Structure
+
+- `apps/`: Contains the main application executables.
+  - `sentinel_gui/`: The main graphical user interface for data visualization.
+  - `stream_cli/`: A command-line tool for interacting with data streams.
+- `libs/`: Contains the core logic and reusable components.
+  - `core/`: Core functionalities like data handling, networking, and business logic.
+  - `gui/`: Components related to the Qt-based graphical user interface.
+- `tests/`: Contains unit and integration tests for the libraries.
+- `docs/`: Project documentation.
+
+## Key Technologies
+
+- **C++**: The primary programming language for performance-critical components.
+- **Qt/QML**: Used for the graphical user interface in `libs/gui/qml`.
+- **CMake**: The build system used for the project.
+- **CPP20**:  
+  - `Cpp20Utils` provides high-performance trading utilities, including:
+    - `fastStringToDouble` / `fastStringToInt`: Optimized string-to-number conversion with error handling.
+    - `fastSideDetection`: Efficient trade side detection (Buy/Sell/Unknown).
+    - `formatTradeLog` / `formatOrderBookLog`: Fast logging message formatting for trades and order books.
+    - `formatErrorLog` / `formatSuccessLog`: Error and success message formatting.
+    - `formatPerformanceMetric` / `formatThroughput`: Performance monitoring and throughput calculation.
+  - All functions are optimized for real-time trading data processing with minimal overhead.
+- **OpenGL**: For high-performance GPU-accelerated chart rendering.
+---
+  - All functions are optimized for real-time trading data processing with minimal overhead.
+- **OpenGL**: For high-performance GPU-accelerated chart rendering.
+---

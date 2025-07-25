@@ -140,6 +140,8 @@ void LiveOrderBook::applyUpdate(const std::string& side, double price, double qu
     }
 }
 
+// In: libs/core/DataCache.cpp
+
 OrderBook LiveOrderBook::getCurrentState() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     
@@ -149,11 +151,12 @@ OrderBook LiveOrderBook::getCurrentState() const {
     
     // Convert bids map to vector
     book.bids.reserve(m_bids.size());
-    for (const auto& [price, size] : m_bids) {
-        book.bids.push_back({price, size});
+    // 🔥 SORTING FIX: Use reverse iterators (rbegin, rend) to sort bids from highest to lowest price
+    for (auto it = m_bids.rbegin(); it != m_bids.rend(); ++it) {
+        book.bids.push_back({it->first, it->second});
     }
     
-    // Convert asks map to vector  
+    // Convert asks map to vector (already sorted correctly low-to-high)
     book.asks.reserve(m_asks.size());
     for (const auto& [price, size] : m_asks) {
         book.asks.push_back({price, size});

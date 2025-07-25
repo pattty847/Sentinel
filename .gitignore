@@ -10,3 +10,7 @@ config.json
 *.log
 
 /scripts
+CLAUDE.md
+
+CMakePresets.json
+vcpkg.json
