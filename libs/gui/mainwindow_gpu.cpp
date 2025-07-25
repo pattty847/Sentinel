@@ -1,19 +1,19 @@
 #include "mainwindow_gpu.h"
 #include "streamcontroller.h"
 #include "statisticscontroller.h"
-#include "gpuchartwidget.h"
-#include "heatmapinstanced.h"
-#include "candlestickbatched.h"
 #include "chartmodecontroller.h"
-#include "gpudataadapter.h"
+#include "GridIntegrationAdapter.h"
+#include "UnifiedGridRenderer.h"
 #include <QQmlContext>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QTimer>
 
+// 🎯 PHASE 5: Pure grid-only mode - legacy includes removed
+
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
-    qDebug() << "🚀 CREATING GPU TRADING TERMINAL!";
+    qDebug() << "🎯 PHASE 5: Creating GPU Trading Terminal in pure GRID-ONLY mode!";
     
     setupUI();
     setupConnections();
@@ -27,6 +27,27 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
     
     qDebug() << "✅ GPU MainWindow ready for 144Hz trading!";
+}
+
+MainWindowGPU::~MainWindowGPU() {
+    qDebug() << "🛑 MainWindowGPU destructor - cleaning up...";
+    
+    // Stop data streams first
+    if (m_streamController) {
+        m_streamController->stop();
+    }
+    
+    // Disconnect all signals to prevent callbacks during destruction
+    if (m_gpuChart && m_gpuChart->rootObject()) {
+        disconnect(m_gpuChart->rootObject(), nullptr, this, nullptr);
+    }
+    
+    // Clear QML context to prevent dangling references
+    if (m_gpuChart) {
+        m_gpuChart->setSource(QUrl());
+    }
+    
+    qDebug() << "✅ MainWindowGPU cleanup complete";
 }
 
 void MainWindowGPU::setupUI() {
@@ -118,11 +139,15 @@ void MainWindowGPU::setupUI() {
 }
 
 void MainWindowGPU::setupConnections() {
-    // Create data controllers (keep existing proven pipeline)
+    // Phase 2: New single data pipeline architecture
     m_streamController = new StreamController(this);
     m_statsController = new StatisticsController(this);
-    m_gpuAdapter = new GPUDataAdapter(this);
-    m_streamController->setGPUAdapter(m_gpuAdapter);
+    
+    // NEW: GridIntegrationAdapter as primary data hub (replaces GPUDataAdapter)
+    m_gridAdapter = new GridIntegrationAdapter(this);
+    m_gridAdapter->setGridModeEnabled(true);  // 🎯 PHASE 5: Always grid-only mode
+
+    qDebug() << "🎯 Phase 2: GridIntegrationAdapter created as primary data hub, mode:" << m_gridAdapter->gridModeEnabled();
     
     // UI connections
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
@@ -165,6 +190,9 @@ void MainWindowGPU::onSubscribe() {
     QQmlContext* context = m_gpuChart->rootContext();
     context->setContextProperty("symbol", symbol);
     
+    // 🎯 PHASE 3 FIX: Expose C++ GridIntegrationAdapter to QML
+    context->setContextProperty("gridIntegrationAdapter", m_gridAdapter);
+    
     // Start data stream
     std::vector<std::string> symbols = {symbol.toStdString()};
     m_streamController->start(symbols);
@@ -178,89 +206,70 @@ void MainWindowGPU::onCVDUpdated(double cvd) {
 
 // 🔥 CRITICAL FIX: Helper method to establish GPU connections
 void MainWindowGPU::connectToGPUChart() {
-    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART...";
+    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART... (attempt" << m_connectionRetryCount + 1 << "/" << MAX_CONNECTION_RETRIES << ")";
+    
+    // Check retry limit
+    if (m_connectionRetryCount >= MAX_CONNECTION_RETRIES) {
+        qCritical() << "❌ MAX CONNECTION RETRIES REACHED - GPU chart connection failed!";
+        return;
+    }
     
     // Get the GPU chart widget from QML
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
         qWarning() << "❌ QML root object not found - retrying in 100ms...";
+        m_connectionRetryCount++;
         QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
     qDebug() << "✅ QML root found:" << qmlRoot;
     
-    // 🔥 UNIFIED COMPONENT LOOKUP: Single strategy for all components
-    GPUChartWidget* gpuChart = qmlRoot->findChild<GPUChartWidget*>("gpuChart");
-    HeatmapBatched* heatmapLayer = qmlRoot->findChild<HeatmapBatched*>("heatmapLayer");
-    CandlestickBatched* candleChart = qmlRoot->findChild<CandlestickBatched*>("candlestickRenderer");
+    // 🎯 PHASE 5: Pure grid-only component lookup
+    UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    GridIntegrationAdapter* qmlGridAdapter = qmlRoot->findChild<GridIntegrationAdapter*>("gridIntegration");
     
-    // 🔥 VALIDATION: Check all required components are found
-    if (!gpuChart) {
-        qWarning() << "❌ GPUChartWidget not found - retrying in 200ms...";
+    // 🎯 PHASE 5: Pure grid-only validation - only require UnifiedGridRenderer
+    if (!unifiedGridRenderer) {
+        qWarning() << "❌ UnifiedGridRenderer not found - retrying in 200ms...";
+        m_connectionRetryCount++;
         QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
+    qDebug() << "✅ Pure grid-only mode validation passed";
     
-    // 🔥 CLEAN CONNECTION PATTERN: Use GPUDataAdapter for all batched data
+    // 🎯 PHASE 2: NEW SINGLE DATA PIPELINE - StreamController → GridIntegrationAdapter
     bool allConnectionsSuccessful = true;
     
-    // 1. GPU Chart - Trade scatter points (real-time)
-    disconnect(m_streamController, &StreamController::tradeReceived,
-              gpuChart, &GPUChartWidget::onTradeReceived);
-    bool tradeConnection = connect(m_streamController, &StreamController::tradeReceived,
-                                  gpuChart, &GPUChartWidget::onTradeReceived,
-                                  Qt::QueuedConnection);
-    allConnectionsSuccessful &= tradeConnection;
-    
-         // 2. Heatmap - Order book visualization (batched)
-     if (heatmapLayer) {
-         // Use StreamController for order book data (HeatmapBatched expects OrderBook)
-         bool heatmapConnection = connect(m_streamController, &StreamController::orderBookUpdated,
-                                         heatmapLayer, &HeatmapBatched::onOrderBookUpdated,
+    // PRIMARY: Connect StreamController to GridIntegrationAdapter (single data hub)
+    bool primaryTradeConnection = connect(m_streamController, &StreamController::tradeReceived,
+                                         m_gridAdapter, &GridIntegrationAdapter::onTradeReceived,
                                          Qt::QueuedConnection);
-         allConnectionsSuccessful &= heatmapConnection;
-        
-        // Coordinate synchronization
-        bool heatmapCoordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
-                                             heatmapLayer, &HeatmapBatched::setTimeWindow,
+    bool primaryOrderBookConnection = connect(m_streamController, &StreamController::orderBookUpdated,
+                                             m_gridAdapter, &GridIntegrationAdapter::onOrderBookUpdated,
                                              Qt::QueuedConnection);
-        allConnectionsSuccessful &= heatmapCoordConnection;
-        
-        qDebug() << "🔥 HEATMAP CONNECTIONS:"
-                 << "Data:" << (heatmapConnection ? "SUCCESS" : "FAILED")
-                 << "Coordinates:" << (heatmapCoordConnection ? "SUCCESS" : "FAILED");
-    } else {
-        qWarning() << "⚠️ HeatmapBatched not found - heatmap integration disabled";
+    allConnectionsSuccessful &= primaryTradeConnection && primaryOrderBookConnection;
+    
+    // 🎯 PHASE 5: Pure grid-only connection - Connect GridIntegrationAdapter to UnifiedGridRenderer
+    if (unifiedGridRenderer) {
+        m_gridAdapter->setGridRenderer(unifiedGridRenderer);
+        qDebug() << "✅ GridIntegrationAdapter connected to UnifiedGridRenderer";
     }
     
-    // 3. Candlestick - OHLC candles (batched)
-    if (candleChart) {
-        bool candleConnection = connect(m_gpuAdapter, &GPUDataAdapter::candlesReady,
-                                       candleChart, &CandlestickBatched::onCandlesReady,
-                                       Qt::QueuedConnection);
-        allConnectionsSuccessful &= candleConnection;
-        
-        // Coordinate synchronization
-        bool candleCoordConnection = connect(gpuChart, &GPUChartWidget::viewChanged,
-                                            candleChart, &CandlestickBatched::onViewChanged,
-                                            Qt::QueuedConnection);
-        allConnectionsSuccessful &= candleCoordConnection;
-        
-        qDebug() << "🕯️ CANDLESTICK CONNECTIONS:"
-                 << "Data:" << (candleConnection ? "SUCCESS" : "FAILED")
-                 << "Coordinates:" << (candleCoordConnection ? "SUCCESS" : "FAILED");
-    } else {
-        qWarning() << "⚠️ CandlestickBatched not found - candle integration disabled";
-    }
+    // 🎯 PHASE 5: Legacy connections permanently removed - pure grid-only mode
+    
+    // 🎯 PHASE 5: Pure grid-only data pipeline summary
+    qDebug() << "🎯 Phase 5 Pure Grid-Only Data Pipeline Summary:"
+             << "Primary connections:" << (primaryTradeConnection && primaryOrderBookConnection ? "SUCCESS" : "FAILED")
+             << "Grid renderer:" << (unifiedGridRenderer ? "CONNECTED" : "MISSING");
     
     // 🔥 FINAL STATUS REPORT
     if (allConnectionsSuccessful) {
-        qDebug() << "✅ GPU CHART FULLY CONNECTED TO REAL-TIME DATA PIPELINE!";
-        qDebug() << "🎯 Connected components:"
-                 << "GPUChart:" << (gpuChart ? "YES" : "NO")
-                 << "Heatmap:" << (heatmapLayer ? "YES" : "NO")
-                 << "Candles:" << (candleChart ? "YES" : "NO");
+        qDebug() << "✅ PURE GRID-ONLY TERMINAL FULLY CONNECTED TO REAL-TIME DATA PIPELINE!";
+        qDebug() << "🎯 Grid components:" 
+                 << "UnifiedGridRenderer:" << (unifiedGridRenderer ? "YES" : "NO")
+                 << "GridIntegration:" << (qmlGridAdapter ? "YES" : "NO");
+        m_connectionRetryCount = 0;  // Reset retry counter on success
     } else {
         qWarning() << "⚠️ Some GPU connections failed - partial functionality";
     }

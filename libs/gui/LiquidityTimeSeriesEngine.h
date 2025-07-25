@@ -1,0 +1,164 @@
+#pragma once
+
+#include <QObject>
+#include <QTimer>
+#include <chrono>
+#include <deque>
+#include <map>
+#include <vector>
+#include <memory>
+#include "tradedata.h"
+
+/**
+ * 🎯 BOOKMAP-STYLE LIQUIDITY TIME SERIES ENGINE
+ * 
+ * This class implements the core Bookmap-style temporal order book analysis:
+ * - Captures 100ms order book snapshots
+ * - Aggregates them into configurable timeframes (250ms, 500ms, 1s, 2s, 5s, etc.)
+ * - Provides anti-spoofing detection via persistence ratio
+ * - Supports multiple display modes (average, resting, peak, total liquidity)
+ * 
+ * Key Features:
+ * - Dynamic timeframe management
+ * - Real-time "current" slice building
+ * - Memory-bounded with automatic cleanup
+ * - High-performance data structures for GPU rendering
+ */
+
+// Order book snapshot at a specific point in time
+struct OrderBookSnapshot {
+    int64_t timestamp_ms;
+    std::map<double, double> bids;  // price -> size
+    std::map<double, double> asks;  // price -> size
+    
+    // Helper methods
+    double getBidLiquidity(double price) const {
+        auto it = bids.find(price);
+        return it != bids.end() ? it->second : 0.0;
+    }
+    
+    double getAskLiquidity(double price) const {
+        auto it = asks.find(price);
+        return it != asks.end() ? it->second : 0.0;
+    }
+};
+
+// Aggregated liquidity data for one time bucket
+struct LiquidityTimeSlice {
+    int64_t startTime_ms;
+    int64_t endTime_ms;
+    int64_t duration_ms;
+    
+    // Metrics for each price level during this time slice
+    struct PriceLevelMetrics {
+        double totalLiquidity = 0.0;        // Sum of all liquidity seen
+        double avgLiquidity = 0.0;           // Average liquidity during interval
+        double maxLiquidity = 0.0;           // Peak liquidity seen
+        double minLiquidity = 0.0;           // Minimum liquidity (could be 0)
+        double restingLiquidity = 0.0;       // Liquidity that stayed for full duration
+        int snapshotCount = 0;               // How many snapshots included this price
+        int64_t firstSeen_ms = 0;            // When this price level first appeared
+        int64_t lastSeen_ms = 0;             // When this price level last had liquidity
+        
+        // Anti-spoofing detection
+        bool wasConsistent() const {
+            return snapshotCount > 2;  // Present for at least 3 snapshots
+        }
+        
+        double persistenceRatio() const {
+            if (lastSeen_ms <= firstSeen_ms) return 0.0;
+            return static_cast<double>(lastSeen_ms - firstSeen_ms) / 
+                   static_cast<double>(lastSeen_ms - firstSeen_ms);
+        }
+    };
+    
+    std::map<double, PriceLevelMetrics> bidMetrics;
+    std::map<double, PriceLevelMetrics> askMetrics;
+    
+    // Get display value for rendering
+    double getDisplayValue(double price, bool isBid, int displayMode) const;
+};
+
+class LiquidityTimeSeriesEngine : public QObject {
+    Q_OBJECT
+
+public:
+    enum class LiquidityDisplayMode {
+        Average = 0,    // Average liquidity during interval
+        Maximum = 1,    // Peak liquidity seen
+        Resting = 2,    // Only liquidity that persisted full duration (anti-spoof)
+        Total = 3       // Sum of all liquidity seen
+    };
+    Q_ENUM(LiquidityDisplayMode)
+
+private:
+    // Base 100ms snapshots (raw data)
+    std::deque<OrderBookSnapshot> m_snapshots;
+    
+    // Dynamic timeframe configuration
+    std::vector<int64_t> m_timeframes = {100, 250, 500, 1000, 2000, 5000, 10000}; // ms
+    
+    // Aggregated time slices for each timeframe
+    std::map<int64_t, std::deque<LiquidityTimeSlice>> m_timeSlices;
+    
+    // Real-time "current" slices being built
+    std::map<int64_t, LiquidityTimeSlice> m_currentSlices;
+    
+    // Configuration
+    int64_t m_baseTimeframe_ms = 100;           // Snapshot interval
+    size_t m_maxHistorySlices = 5000;           // Keep 5000 slices per timeframe
+    double m_priceResolution = 1.0;             // $1 price buckets
+    LiquidityDisplayMode m_displayMode = LiquidityDisplayMode::Average;
+
+public:
+    explicit LiquidityTimeSeriesEngine(QObject* parent = nullptr);
+
+    // Core data interface
+    void addOrderBookSnapshot(const OrderBook& book);
+    void addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice);
+    
+    // Query interface
+    const LiquidityTimeSlice* getTimeSlice(int64_t timeframe_ms, int64_t timestamp_ms) const;
+    std::vector<const LiquidityTimeSlice*> getVisibleSlices(int64_t timeframe_ms, 
+                                                           int64_t viewStart_ms, 
+                                                           int64_t viewEnd_ms) const;
+    
+    // Timeframe management
+    void addTimeframe(int64_t duration_ms);
+    void removeTimeframe(int64_t duration_ms);
+    std::vector<int64_t> getAvailableTimeframes() const;
+    
+    // 🚀 OPTIMIZATION: Suggest optimal timeframe based on viewport size
+    int64_t suggestTimeframe(int64_t viewStart_ms, int64_t viewEnd_ms, int maxSlices = 4000) const;
+    
+    // Configuration
+    void setDisplayMode(LiquidityDisplayMode mode);
+    LiquidityDisplayMode getDisplayMode() const { return m_displayMode; }
+    void setPriceResolution(double resolution) { m_priceResolution = resolution; }
+    double getPriceResolution() const { return m_priceResolution; }
+
+signals:
+    void timeSliceReady(int64_t timeframe_ms, const LiquidityTimeSlice& slice);
+    void displayModeChanged(LiquidityDisplayMode mode);
+
+private:
+    // Time slice processing
+    void updateAllTimeframes(const OrderBookSnapshot& snapshot);
+    void updateTimeframe(int64_t timeframe_ms, const OrderBookSnapshot& snapshot);
+    void addSnapshotToSlice(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot);
+    void updatePriceLevelMetrics(LiquidityTimeSlice::PriceLevelMetrics& metrics, 
+                                double liquidity, 
+                                int64_t timestamp_ms,
+                                const LiquidityTimeSlice& slice);
+    void updateDisappearingLevels(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot);
+    void finalizeLiquiditySlice(LiquidityTimeSlice& slice);
+    
+    // Timeframe management
+    void rebuildTimeframe(int64_t timeframe_ms);
+    
+    // Cleanup
+    void cleanupOldData();
+    
+    // Utilities
+    double quantizePrice(double price) const;
+};
