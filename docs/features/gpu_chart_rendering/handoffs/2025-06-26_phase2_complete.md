@@ -47,7 +47,7 @@ Expected but **NOT SEEN** in logs:
 
 ### **StreamController has the signal we need:**
 ```cpp
-// FROM libs/gui/streamcontroller.h - LINE 39:
+// FROM libs/gui/StreamController.h - LINE 39:
 void orderBookUpdated(const OrderBook& book);  ✅ SIGNAL EXISTS!
 
 // AND polling method exists:
@@ -122,11 +122,11 @@ grep -A 5 -B 5 "m_orderBookPollTimer" libs/gui/streamcontroller.cpp
 
 ### **Order Book Data Source:**
 - `libs/core/MarketDataCore.cpp` - Lines containing `order book`
-- `libs/core/tradedata.h` - `OrderBook` and `OrderBookLevel` structs
+- `libs/core/TradeData.h` - `OrderBook` and `OrderBookLevel` structs
 
 ### **Data Bridge (HIGH PRIORITY):**
 - `libs/gui/streamcontroller.cpp` - Implementation of `pollForOrderBooks()`
-- `libs/gui/streamcontroller.h` - Signal exists: `void orderBookUpdated(const OrderBook& book);`
+- `libs/gui/StreamController.h` - Signal exists: `void orderBookUpdated(const OrderBook& book);`
 
 ### **Heatmap Consumer:**
 - `libs/gui/heatmapinstanced.cpp` - `onOrderBookUpdated()` method

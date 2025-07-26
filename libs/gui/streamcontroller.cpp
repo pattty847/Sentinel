@@ -1,8 +1,8 @@
-#include "streamcontroller.h"
+#include "StreamController.h"
 #include "SentinelLogging.hpp"
-#include "gpudataadapter.h"
 #include "MarketDataCore.hpp"
 #include <QDebug>
+// Phase 4: gpudataadapter.h removed - using GridIntegrationAdapter with Qt signals
 
 StreamController::StreamController(QObject* parent)
     : QObject(parent)
@@ -94,13 +94,16 @@ void StreamController::stop() {
 // 🔥 NEW: Real-time signal handlers
 void StreamController::onTradeReceived(const Trade& trade) {
     // 🔥 REAL-TIME: Process trade immediately from WebSocket
-    sLog_Trades("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
-               << "$" << trade.price << "size:" << trade.size);
-    
-    // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter
-    if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
-        sLog_Warning("⚠️ StreamController: GPU trade queue full! Trade dropped.");
+    // Log only the first 10 trades
+    static int tradeCount = 0;
+    if (tradeCount < 10) {
+        sLog_Trades("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
+                   << "$" << trade.price << "size:" << trade.size);
+        tradeCount++;
     }
+
+    // 🎯 PHASE 4: Direct Qt signal pipeline (replaced lock-free GPUDataAdapter)
+    // Trades now flow: StreamController -> GridIntegrationAdapter via Qt signals
     
     // Keep Qt signal for backward compatibility
     emit tradeReceived(trade);
@@ -108,8 +111,8 @@ void StreamController::onTradeReceived(const Trade& trade) {
 
 void StreamController::onOrderBookUpdated(const OrderBook& orderBook) {
     // 🔥 REAL-TIME: Process order book immediately from WebSocket
-    sLog_Network("🔥 REAL-TIME: Received order book for" << QString::fromStdString(orderBook.product_id)
-                 << "Bids:" << orderBook.bids.size() << "Asks:" << orderBook.asks.size());
+    //sLog_Network("🔥 REAL-TIME: Received order book for" << QString::fromStdString(orderBook.product_id)
+                 //<< "Bids:" << orderBook.bids.size() << "Asks:" << orderBook.asks.size());
     
     // Emit to GUI components
     emit orderBookUpdated(orderBook);
@@ -143,10 +146,8 @@ void StreamController::pollForTrades() {
             // Update last seen trade ID
             m_lastTradeIds[symbol] = trade.trade_id;
             
-            // 🚀 LOCK-FREE PIPELINE: Push to GPU adapter instead of Qt signals
-            if (m_gpuAdapter && !m_gpuAdapter->pushTrade(trade)) {
-                sLog_Warning("⚠️ StreamController: GPU trade queue full! Trade dropped.");
-            }
+            // 🎯 PHASE 4: Direct Qt signal pipeline (replaced lock-free GPUDataAdapter)
+            // Trades now flow: StreamController -> GridIntegrationAdapter via Qt signals
             
             // 🔥 THROTTLED LOGGING: Only log every 50th trade processing to reduce spam
             static int processLogCount = 0;

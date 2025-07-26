@@ -1,4 +1,4 @@
-#include "cvdthresholdrule.h"
+#include "CvdThresholdRule.h"
 
 CvdThresholdRule::CvdThresholdRule(double threshold)
     : m_threshold(threshold), m_hasFired(false)

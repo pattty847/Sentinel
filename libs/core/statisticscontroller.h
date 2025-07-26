@@ -2,8 +2,8 @@
 #define STATISTICSCONTROLLER_H
 
 #include <QObject>
-#include "statisticsprocessor.h"
-#include "tradedata.h"
+#include "StatisticsProcessor.h"
+#include "TradeData.h"
 
 class StatisticsController : public QObject
 {

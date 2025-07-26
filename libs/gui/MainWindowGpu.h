@@ -8,11 +8,11 @@
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QtQuickWidgets/QQuickWidget>
+#include "GridIntegrationAdapter.h"
 
 // Forward declarations
 class StreamController;
 class StatisticsController;
-class GPUDataAdapter;
 class ChartModeController;
 
 /**
@@ -24,7 +24,7 @@ class MainWindowGPU : public QWidget {
 
 public:
     explicit MainWindowGPU(QWidget* parent = nullptr);
-    ~MainWindowGPU() = default;
+    ~MainWindowGPU();
 
 private slots:
     void onSubscribe();
@@ -44,9 +44,13 @@ private:
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
     
-    // Data controllers (keep existing proven pipeline)
+    // Phase 2: New single data pipeline architecture
     StreamController* m_streamController;
     StatisticsController* m_statsController;
-    GPUDataAdapter* m_gpuAdapter{nullptr};
+    GridIntegrationAdapter* m_gridAdapter{nullptr};  // Replaces GPUDataAdapter
     ChartModeController* m_modeController{nullptr};
+    
+    // Connection retry tracking
+    int m_connectionRetryCount{0};
+    static const int MAX_CONNECTION_RETRIES = 50;  // 5 seconds max
 };

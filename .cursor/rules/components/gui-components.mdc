@@ -1,125 +1,56 @@
 ---
-description: 
-globs: libs/gui/**/*
+globs: libs/gui/*/*
 alwaysApply: false
 ---
-# GUI Components Implementation Patterns
+# GUI Components
 
-## QT INTEGRATION PATTERNS
+This document provides an overview of the GUI components located in the `libs/gui` directory. These components are built using Qt and QML and are responsible for the visualization of market data.
 
-### StreamController - Core/GUI Bridge
-```cpp
-// Thread-safe bridge pattern
-class StreamController : public QObject {
-    Q_OBJECT
-    
-signals:
-    void tradeReceived(const TradeData& trade);
-    void connectionStatusChanged(bool connected);
-    
-private slots:
-    void handleCoreData(); // Worker thread → GUI thread
-};
-```
+## Key Components
 
-### TradeChartWidget - Real-time Visualization
-- **Qt Widget-based** visualization
-- **Real-time updates** via Qt signals/slots
-- **Performance optimization** for rapid data updates
-- **Thread-safe** data reception from worker thread
+- **`MainWindowGPU`**: The main application window. It sets up the QML engine and integrates the various GUI components.
 
-### MainWindow - Application Coordinator
-- **Central Qt application** window
-- **Menu/toolbar integration**
-- **Status bar** for connection/performance info
-- **Layout management** for child widgets
+- **`GPUChartWidget`**: A QQuickItem that hosts the OpenGL-rendered charts. It manages the rendering pipeline and user interactions.
 
-## THREADING MODEL
+- **`GPUDataAdapter`**: Acts as a bridge between the core data processing components (like `DataCache`) and the GUI. It prepares and transforms data for rendering on the GPU.
 
-### GUI Thread Responsibilities
-- **Qt UI updates** (widgets, charts, status)
-- **User interaction handling** (buttons, menus)
-- **Event processing** (Qt event loop)
-- **No blocking operations** (maintain UI responsiveness)
+- **`StreamController`**: Manages the data flow to the GUI. It connects to the `CoinbaseStreamClient` and pushes data to the `GPUDataAdapter`.
 
-### Signal/Slot Communication
-```cpp
-// Worker thread → GUI thread communication
-connect(core, &MarketDataCore::dataReceived,
-        controller, &StreamController::handleData,
-        Qt::QueuedConnection); // Thread-safe async
-```
+- **`CandlestickBatched` / `HeatmapInstanced`**: These are specialized rendering classes that use modern OpenGL techniques (instancing, batching) to draw large amounts of data efficiently.
 
-### Performance Considerations
-- **Batch UI updates** to minimize Qt overhead
-- **Efficient painting** in custom widgets
-- **Memory management** for real-time data
-- **Update throttling** for high-frequency data
+- **`UnifiedGridRenderer`**: A component responsible for drawing the chart grid, which is shared across different chart types (e.g., candlestick, depth).
 
-## IMPLEMENTATION GUIDELINES
+## Rendering Pipeline
 
-### Widget Development
-1. **Inherit from appropriate Qt base** (QWidget, QMainWindow, etc.)
-2. **Use Qt signals/slots** for all communication
-3. **Implement thread-safe data reception**
-4. **Optimize paint events** for real-time updates
+1.  `StreamController` receives market data.
+2.  Data is passed to `GPUDataAdapter`, which converts it into a format suitable for the GPU (e.g., vertices, colors).
+3.  `GPUChartWidget` orchestrates the rendering process, calling the appropriate rendering classes (`CandlestickBatched`, etc.).
+4.  The renderers draw the data using OpenGL.
+5.  QML components (`CandleChartView.qml`, etc.) are used to define the layout and user interface elements around the chart.
+---
+# GUI Components
 
-### Data Visualization
-- **Qt Charts integration** where appropriate
-- **Custom painting** for high-performance requirements
-- **Real-time updates** without blocking GUI thread
-- **Memory-efficient** data handling
+This document provides an overview of the GUI components located in the `libs/gui` directory. These components are built using Qt and QML and are responsible for the visualization of market data.
 
-### Layout and UI
-- **Responsive layouts** using Qt layout managers
-- **Consistent styling** across components
-- **Keyboard shortcuts** and accessibility
-- **Status indicators** for system state
+## Key Components
 
-## INTEGRATION REQUIREMENTS
+- **`MainWindowGPU`**: The main application window. It sets up the QML engine and integrates the various GUI components.
 
-### Core Component Integration
-```cpp
-// Typical integration pattern
-class ComponentWidget : public QWidget {
-    Q_OBJECT
-    
-private:
-    StreamController* controller_;
-    
-private slots:
-    void updateDisplay(const TradeData& data);
-    
-public:
-    void connectToController(StreamController* ctrl) {
-        connect(ctrl, &StreamController::tradeReceived,
-                this, &ComponentWidget::updateDisplay);
-    }
-};
-```
+- **`GPUChartWidget`**: A QQuickItem that hosts the OpenGL-rendered charts. It manages the rendering pipeline and user interactions.
 
-### CMake Integration
-- **Qt6 dependencies** properly declared
-- **MOC compilation** for Q_OBJECT classes
-- **Resource files** (.qrc) integration
-- **Platform-specific** requirements
+- **`GPUDataAdapter`**: Acts as a bridge between the core data processing components (like `DataCache`) and the GUI. It prepares and transforms data for rendering on the GPU.
 
-### Error Handling
-- **User-friendly error messages**
-- **Connection status indication**
-- **Graceful degradation** on data loss
-- **Recovery mechanisms** for connection issues
+- **`StreamController`**: Manages the data flow to the GUI. It connects to the `CoinbaseStreamClient` and pushes data to the `GPUDataAdapter`.
 
-## TESTING CONSIDERATIONS
+- **`CandlestickBatched` / `HeatmapInstanced`**: These are specialized rendering classes that use modern OpenGL techniques (instancing, batching) to draw large amounts of data efficiently.
 
-### GUI Testing
-- **Qt Test framework** integration
-- **Mock data providers** for isolated testing
-- **UI automation** where appropriate
-- **Visual regression testing** for charts/widgets
+- **`UnifiedGridRenderer`**: A component responsible for drawing the chart grid, which is shared across different chart types (e.g., candlestick, depth).
 
-### Performance Testing
-- **UI responsiveness** under load
-- **Memory usage** with continuous data
-- **Update frequency** optimization
-- **Thread safety** validation
+## Rendering Pipeline
+
+1.  `StreamController` receives market data.
+2.  Data is passed to `GPUDataAdapter`, which converts it into a format suitable for the GPU (e.g., vertices, colors).
+3.  `GPUChartWidget` orchestrates the rendering process, calling the appropriate rendering classes (`CandlestickBatched`, etc.).
+4.  The renderers draw the data using OpenGL.
+5.  QML components (`CandleChartView.qml`, etc.) are used to define the layout and user interface elements around the chart.
+---

@@ -1,87 +1,58 @@
 ---
-description: 
-globs: libs/core/**/*
+globs: libs/core/*
 alwaysApply: false
 ---
-# Core Components Implementation Patterns
+# Core Components
 
-## PROVEN PATTERNS (FROM 83% CODE REDUCTION SUCCESS)
+This document describes the core components found in the `libs/core` directory. These components are fundamental to the Sentinel application's backend and data processing capabilities.
 
-### CoinbaseStreamClient - Facade Pattern
-```cpp
-// SUCCESS: 39-line implementation
-class CoinbaseStreamClient {
-private:
-    std::unique_ptr<MarketDataCore> core_;
-    std::unique_ptr<Authenticator> auth_;
-    
-public:
-    void start() { core_->start(); }
-    void stop() { core_->stop(); }
-    // Pure delegation - no business logic
-};
-```
+## Key Components
 
-### MarketDataCore - WebSocket Management
-- **Boost.Beast WebSocket** with RAII lifecycle
-- **Worker thread** for all networking operations
-- **Exception safety** with proper cleanup
-- **Performance**: Sub-millisecond message processing
+- **`CoinbaseStreamClient`**: Manages the connection to the Coinbase WebSocket API. It handles authentication, subscription to market data channels, and message reception.
 
-### DataCache - Ring Buffer Design
-```cpp
-// O(1) concurrent access pattern
-class DataCache {
-    std::shared_mutex mutex_;
-    std::vector<TradeData> ringBuffer_;
-    size_t writeIndex_;
-    
-    // Multiple concurrent readers, single writer
-};
-```
+- **`MessageParser`**: Parses incoming JSON messages from the WebSocket stream into structured C++ objects (e.g., `TradeData`).
 
-### Authenticator - JWT ES256
-- **ES256 signing** with ECDSA
-- **Token lifecycle management**
-- **Secure key handling**
-- **Error recovery** for auth failures
+- **`DataCache`**: A thread-safe cache for storing and providing access to real-time market data. It is designed for high-throughput, low-latency access.
 
-## IMPLEMENTATION CONSTRAINTS
+- **`RuleEngine`**: Processes market data against a set of user-defined rules. It uses components like `CVDThresholdRule` to detect specific market events.
 
-### Performance Requirements
-- **Sub-millisecond latency** for all operations
-- **Lock-free reads** where possible
-- **Minimal memory allocation** in hot paths
-- **Move semantics** throughout
+- **`StatisticsProcessor`**: Computes various statistics from the market data, such as trading volume and price volatility.
 
-### Thread Safety Model
-- **Worker Thread**: All networking, WebSocket, data processing
-- **Synchronization**: shared_mutex for DataCache access
-- **No blocking operations** in performance-critical paths
-- **Exception safety** with RAII patterns
+- **`Authenticator`**: Handles the generation of authentication tokens required for the Coinbase API.
 
-### Integration Points
-- **Qt Signals**: Thread-safe communication to GUI
-- **CMake Integration**: Proper dependency management
-- **Error Handling**: Consistent error propagation
-- **Testing**: Comprehensive test coverage required
+- **`SentinelLogging`**: A custom logging utility used throughout the core components to provide detailed and structured logging.
 
-## MODIFICATION GUIDELINES
+## Data Flow
 
-### When Adding New Core Components
-1. **Follow Facade Pattern**: Delegate to implementation classes
-2. **Maintain Thread Safety**: Use proven synchronization patterns
-3. **Preserve Performance**: Benchmark all changes
-4. **Update CMake**: Add proper dependencies and targets
+1.  `CoinbaseStreamClient` receives raw JSON messages.
+2.  The messages are passed to `MessageParser` to be converted into `TradeData` objects.
+3.  The `TradeData` objects are stored in `DataCache`.
+4.  `RuleEngine` and `StatisticsProcessor` consume data from `DataCache` to perform their respective tasks.
+---
+# Core Components
 
-### When Modifying Existing Components
-1. **Preserve Interfaces**: Maintain ABI compatibility
-2. **Benchmark Performance**: Validate sub-millisecond requirements
-3. **Update Tests**: Ensure comprehensive coverage
-4. **Thread Safety**: Verify worker/GUI thread separation
+This document describes the core components found in the `libs/core` directory. These components are fundamental to the Sentinel application's backend and data processing capabilities.
 
-### Integration Requirements
-- **Qt Signals**: Use for GUI communication
-- **Error Handling**: Consistent exception handling
-- **Logging**: Appropriate debug information
-- **Resource Management**: RAII for all resources
+## Key Components
+
+- **`CoinbaseStreamClient`**: Manages the connection to the Coinbase WebSocket API. It handles authentication, subscription to market data channels, and message reception.
+
+- **`MessageParser`**: Parses incoming JSON messages from the WebSocket stream into structured C++ objects (e.g., `TradeData`).
+
+- **`DataCache`**: A thread-safe cache for storing and providing access to real-time market data. It is designed for high-throughput, low-latency access.
+
+- **`RuleEngine`**: Processes market data against a set of user-defined rules. It uses components like `CVDThresholdRule` to detect specific market events.
+
+- **`StatisticsProcessor`**: Computes various statistics from the market data, such as trading volume and price volatility.
+
+- **`Authenticator`**: Handles the generation of authentication tokens required for the Coinbase API.
+
+- **`SentinelLogging`**: A custom logging utility used throughout the core components to provide detailed and structured logging.
+
+## Data Flow
+
+1.  `CoinbaseStreamClient` receives raw JSON messages.
+2.  The messages are passed to `MessageParser` to be converted into `TradeData` objects.
+3.  The `TradeData` objects are stored in `DataCache`.
+4.  `RuleEngine` and `StatisticsProcessor` consume data from `DataCache` to perform their respective tasks.
+---

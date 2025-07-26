@@ -16,7 +16,7 @@ project(Sentinel LANGUAGES CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Set the C++ standard to C++17
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -49,7 +49,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # Find top-level dependencies needed by multiple components
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets Test)
 
 # Automatically run MOC, UIC, and RCC
 set(CMAKE_AUTOMOC ON)

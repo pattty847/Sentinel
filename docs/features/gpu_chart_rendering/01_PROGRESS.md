@@ -309,7 +309,7 @@ libs/gui/heatmapinstanced.h/cpp
 - Thread-safe GPU updates ✅ WORKING
 
 // Main application coordination (UPDATED IN PHASE 2)  
-libs/gui/mainwindow_gpu.h/cpp
+libs/gui/MainWindowGpu.h/cpp
 - Dual component connections ✅ WORKING
 - HeatmapInstanced + GPUChartWidget integration ✅ WORKING
 
@@ -362,7 +362,7 @@ libs/gui/streamcontroller.cpp ✅ DUAL SIGNAL EMISSION
 - `libs/core/lockfreequeue.h` ✅ **Power-of-2 lock-free queue template**
 - `libs/gui/gpudataadapter.h/cpp` ✅ **Zero-malloc data adapter**  
 - `libs/core/performancemonitor.h/cpp` ✅ **Performance tracking and metrics**
-- `libs/gui/streamcontroller.h/cpp` ✅ **Updated with GPU pipeline integration**
+- `libs/gui/StreamController.h/cpp` ✅ **Updated with GPU pipeline integration**
 - `libs/*/CMakeLists.txt` ✅ **Build system integration**
 
 **PERFORMANCE VALIDATION READY:**
@@ -491,11 +491,11 @@ WebSocket → MarketDataCore → LiveOrderBook.applyUpdate() → Dense state →
 ```
 
 **FILES IMPLEMENTED (PHASE 4.5):**
-- `libs/core/tradedata.h` ✅ **LiveOrderBook class with stateful order book management**
+- `libs/core/TradeData.h` ✅ **LiveOrderBook class with stateful order book management**
 - `libs/core/DataCache.hpp/cpp` ✅ **Extended with LiveOrderBook integration and thread-safe access**
 - `libs/core/MarketDataCore.cpp` ✅ **Snapshot/update processing for stateful accumulation**
 - `libs/core/CMakeLists.txt` ✅ **Fixed build system to use correct facade implementation**
-- `libs/gui/streamcontroller.h` ✅ **Updated includes to use new facade interface**
+- `libs/gui/StreamController.h` ✅ **Updated includes to use new facade interface**
 - `libs/core/CoinbaseStreamClient.hpp` ✅ **Enhanced interface with dense data methods**
 - `libs/core/CoinbaseStreamClientFacade.cpp` ✅ **Complete facade implementation with debug logging**
 

@@ -1,4 +1,4 @@
-#include "statisticscontroller.h"
+#include "StatisticsController.h"
 
 StatisticsController::StatisticsController(QObject *parent) : QObject(parent)
 {

@@ -1,35 +1,43 @@
+# Phase 4: Core grid components (always included)
+set(GRID_CORE_SOURCES
+    # Main window and controllers
+    MainWindowGpu.cpp
+    MainWindowGpu.h
+    ChartModeController.cpp
+    ChartModeController.h
+    StreamController.cpp
+    StreamController.h
+    
+    # Grid system components
+    GridIntegrationAdapter.cpp
+    GridIntegrationAdapter.h
+    UnifiedGridRenderer.cpp
+    UnifiedGridRenderer.h
+    LiquidityTimeSeriesEngine.cpp
+    LiquidityTimeSeriesEngine.h
+    CoordinateSystem.cpp
+    CoordinateSystem.h
+    ChartMode.h
+)
+
+# 🎯 PHASE 5: Legacy components ANNIHILATED! Pure grid-only now!
+
+# 🎯 PHASE 5: Pure grid-only configuration
+set(GUI_SOURCES ${GRID_CORE_SOURCES})
+message(STATUS "🎯 PHASE 5: Building PURE GRID-ONLY components - legacy DESTROYED!")
+
 qt6_add_qml_module(sentinel_gui_lib
     URI Sentinel.Charts
     VERSION 1.0
     QML_FILES
         qml/DepthChartView.qml
         qml/CandleChartView.qml
-    SOURCES
-        # 🚀 NEW GPU-FOCUSED COMPONENTS
-        mainwindow_gpu.cpp
-        mainwindow_gpu.h
-        gpuchartwidget.cpp
-        gpuchartwidget.h
-        # 🔥 PHASE 2: HEATMAP INSTANCED QUADS
-        heatmapinstanced.cpp
-        heatmapinstanced.h
-        # 🚀 PHASE 3: LOCK-FREE DATA PIPELINE
-        gpudataadapter.cpp
-        gpudataadapter.h
-        # 🕯️ PHASE 5: CANDLESTICK RENDERING + LOD
-        candlelod.cpp
-        candlelod.h
-        candlestickbatched.cpp
-        candlestickbatched.h
-        chartmode.h
-        chartmodecontroller.cpp
-        chartmodecontroller.h
-        # ✅ EXISTING DATA PIPELINE (PROVEN)
-        streamcontroller.cpp
-        streamcontroller.h
+    SOURCES ${GUI_SOURCES}
 )
 
-target_include_directories(sentinel_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(sentinel_gui_lib 
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 find_package(Boost REQUIRED COMPONENTS beast)
 find_package(OpenSSL REQUIRED)
@@ -60,4 +68,19 @@ qt_add_resources(sentinel_gui_lib "resources"
 # Automatically run MOC, UIC, and RCC
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON) 
+set(CMAKE_AUTORCC ON)
+
+# =============================================================================
+# MIGRATION SAFETY: ENHANCED COMPILER WARNINGS
+# =============================================================================
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(sentinel_gui_lib PRIVATE
+        -Wall -Wextra
+        -Wno-unused-parameter  # Temporary for legacy code
+        -Wno-sign-conversion   # Qt/Boost has many sign conversions
+        -Wno-shadow           # Qt macros cause shadow warnings
+    )
+endif()
+
+# 🎯 PHASE 5: Legacy build system ANNIHILATED! 
+# No more conditional builds - pure grid supremacy! 
