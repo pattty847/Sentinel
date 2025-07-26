@@ -49,32 +49,43 @@ WebSocket Stream → JSON Parsing → Structured Objects → Data Cache → Lock
 ### 📊 Class-by-Class Data Flow
 
 ```cpp
-// 1. Data Ingestion Layer
-CoinbaseStreamClient::start()
-    → MarketDataCore::onRead(websocket_message)  // Boost Beast WebSocket
-        → MarketDataCore::dispatch(json)          // JSON parsing
-            → emit tradeReceived(Trade&)          // Qt signals
-                → DataCache::addTrade(Trade&)     // Thread-safe storage
+// 1. Data Ingestion Layer (Real-time WebSocket)
+CoinbaseStreamClient::subscribe(symbols)
+    → MarketDataCore::start()                    // Boost Beast WebSocket connection
+        → MarketDataCore::onRead(websocket_message) // Raw JSON from Coinbase
+            → MarketDataCore::dispatch(json)        // JSON parsing with nlohmann::json
+                → MarketDataCore::emit orderBookUpdated(OrderBook&) // Qt signal
+                    → DataCache::updateLiveOrderBook() // Stateful order book management
 
-// 2. Data Distribution Layer  
-StreamController::onTradeReceived(Trade&)
-    → GPUDataAdapter::pushTrade(Trade&)         // Lock-free queue
-        → TradeQueue.push(trade)                // Ring buffer storage
-            → GPUDataAdapter::processIncomingData() // 16ms timer
-                → emit tradesReady(GPUPoint*)    // GPU-ready data
+// 2. Stateful Order Book Management (DataCache)
+DataCache::updateLiveOrderBook(symbol, side, price, quantity)
+    → LiveOrderBook::updateLevel()              // Maintains persistent order book state
+        → DataCache::getLiveOrderBook(symbol)   // Thread-safe retrieval
+            → CoinbaseStreamClient::getOrderBook(symbol) // Facade API
 
-// 3. Grid Processing Layer
-GridIntegrationAdapter::onTradeReceived(Trade&)
-    → UnifiedGridRenderer::onTradeReceived(Trade&)
-        → LiquidityTimeSeriesEngine::addOrderBookSnapshot()  // 100ms aggregation
-            → updateTimeframe(timeframe_ms, snapshot)         // Multi-timeframe processing
-                → createLiquidityCell(slice, price, liquidity) // Grid cell generation
+// 3. Real-Time Signal Distribution (StreamController)
+StreamController::start(symbols)
+    → connect(MarketDataCore::orderBookUpdated → StreamController::onOrderBookUpdated)
+        → StreamController::onOrderBookUpdated(OrderBook&) // Real-time signal handler
+            → StreamController::emit orderBookUpdated(OrderBook&) // Broadcast to GUI
 
-// 4. GPU Rendering Layer
+// 4. Grid Integration Hub (GridIntegrationAdapter)
+GridIntegrationAdapter::onOrderBookUpdated(OrderBook&)
+    → GridIntegrationAdapter::processOrderBookForGrid(OrderBook&) // Immediate processing
+        → UnifiedGridRenderer::updateOrderBook(OrderBook&) // Direct grid routing
+
+// 5. Grid-Based Processing (UnifiedGridRenderer)
+UnifiedGridRenderer::updateOrderBook(OrderBook&)
+    → LiquidityTimeSeriesEngine::addOrderBookSnapshot(OrderBook&) // 100ms aggregation
+        → LiquidityTimeSeriesEngine::updateAllTimeframes(snapshot) // Multi-timeframe processing
+            → LiquidityTimeSeriesEngine::updateTimeframe(timeframe_ms, snapshot) // Time bucketing
+                → LiquidityTimeSeriesEngine::addSnapshotToSlice(slice, snapshot) // Grid cell generation
+
+// 6. GPU Rendering Layer (Qt Scene Graph)
 UnifiedGridRenderer::updatePaintNode()
-    → createHeatmapNode(visibleCells)          // Qt Scene Graph
+    → UnifiedGridRenderer::createHeatmapNode(visibleCells) // GPU geometry creation
         → QSGGeometry::vertexDataAsColoredPoint2D() // GPU vertex buffer
-            → GPU rendering → Screen pixels     // Hardware acceleration
+            → Qt Scene Graph → OpenGL/Metal → Screen pixels // Hardware acceleration
 ```
 
 ### 🎯 Data Transformation Stages
@@ -408,75 +419,142 @@ graph TD
     
     subgraph DISTRIBUTION["📡 Data Distribution Layer"]
         E[StreamController<br/>Qt Signals Hub]
-        F[GPUDataAdapter<br/>Lock-Free Queues]
-        G[TradeQueue<br/>65536 capacity]
-        H[OrderBookQueue<br/>16384 capacity]
-    end
-    
-    subgraph LEGACY["📊 Legacy Rendering Pipeline"]
-        I[GPUChartWidget<br/>Trade Scatter Points]
-        J[HeatmapBatched<br/>Order Book Quads]
-        K[CandlestickBatched<br/>OHLC Candles]
+        F[GridIntegrationAdapter<br/>Primary Data Hub]
+        G[Trade Buffer<br/>Thread-safe storage]
+        H[OrderBook Buffer<br/>Thread-safe storage]
     end
     
     subgraph GRID["🎯 Grid-Based Pipeline"]
-        L[GridIntegrationAdapter<br/>Migration Bridge]
-        M[LiquidityTimeSeriesEngine<br/>100ms → Multi-timeframe]
-        N[UnifiedGridRenderer<br/>GPU Grid Visualization]
-        O[BookmapStyleRenderer<br/>Anti-spoof Features]
+        I[UnifiedGridRenderer<br/>GPU Grid Visualization]
+        J[LiquidityTimeSeriesEngine<br/>100ms → Multi-timeframe]
+        K[OrderBook Snapshots<br/>100ms resolution]
+        L[Time Slices<br/>Aggregated data]
     end
     
     subgraph GPU["🎮 GPU Rendering Layer"]
-        P[Qt Scene Graph<br/>OpenGL/Metal Backend]
-        Q[Vertex Buffers<br/>GPU Memory]
-        R[Hardware Rendering<br/>Screen Pixels]
+        M[Qt Scene Graph<br/>OpenGL/Metal Backend]
+        N[Vertex Buffers<br/>GPU Memory]
+        O[Hardware Rendering<br/>Screen Pixels]
     end
     
     subgraph MONITORING["📊 System Monitoring"]
-        S[PerformanceMonitor<br/>Health Tracking]
-        T[SentinelLogging<br/>Categorized Logs]
-        U[Error Recovery<br/>Auto-reconnect]
+        P[PerformanceMonitor<br/>Health Tracking]
+        Q[SentinelLogging<br/>Categorized Logs]
+        R[Error Recovery<br/>Auto-reconnect]
     end
     
     A -->|WebSocket Messages| B
     B -->|JSON Objects| C
     C -->|Parsed Structures| D
-    D -->|Cached Data| E
+    D -->|Stateful Order Books| E
     
     E -->|Qt Signals| F
-    E -->|Qt Signals| L
+    F -->|Immediate Processing| I
+    F -->|Buffered Data| G
+    F -->|Buffered Data| H
     
-    F -->|Lock-Free Push| G
-    F -->|Lock-Free Push| H
+    I -->|Order Book Updates| J
+    J -->|100ms Snapshots| K
+    K -->|Time Aggregation| L
     
-    G -->|Batched Data| I
-    H -->|Batched Data| J
-    F -->|Candle Data| K
+    I -->|Vertex Arrays| M
+    M -->|GPU Commands| N
+    N -->|Rasterization| O
     
-    L -->|Grid Mode| M
-    M -->|Time Slices| N
-    M -->|Time Slices| O
-    
-    I -->|Vertex Arrays| P
-    J -->|Vertex Arrays| P
-    K -->|Vertex Arrays| P
-    N -->|Vertex Arrays| P
-    O -->|Vertex Arrays| P
-    
-    P -->|GPU Commands| Q
-    Q -->|Rasterization| R
-    
-    B -.->|Health Data| S
-    F -.->|Performance| S
-    S -.->|Alerts| T
-    B -.->|Errors| U
+    B -.->|Health Data| P
+    F -.->|Performance| P
+    P -.->|Alerts| Q
+    B -.->|Errors| R
     
     style INGESTION fill:#ffebee,stroke:#d32f2f,stroke-width:2px
     style DISTRIBUTION fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    style LEGACY fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     style GRID fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
     style GPU fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     style MONITORING fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+```
+
+### 🔗 **Current Data Flow Connections**
+
+Based on the actual codebase analysis, here are the precise data flow connections:
+
+#### **1. WebSocket → MarketDataCore → DataCache**
+```cpp
+// MarketDataCore.cpp:386 - Real-time order book processing
+void MarketDataCore::dispatch(const nlohmann::json& message) {
+    if (channel == "l2_data") {
+        // Process order book updates with stateful management
+        if (eventType == "snapshot") {
+            m_cache.initializeLiveOrderBook(product_id, snapshot);
+        } else if (eventType == "update") {
+            m_cache.updateLiveOrderBook(product_id, side, price, quantity);
+        }
+        // 🔥 Emit real-time signal to GUI layer
+        emit orderBookUpdated(liveBook);
+    }
+}
+```
+
+#### **2. DataCache → CoinbaseStreamClient → StreamController**
+```cpp
+// CoinbaseStreamClient.cpp:45 - Facade API
+OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
+    OrderBook book = m_cache.getLiveOrderBook(symbol);
+    return book;
+}
+
+// StreamController.cpp:35 - Real-time signal connections
+void StreamController::start(const std::vector<std::string>& symbols) {
+    if (m_client->getMarketDataCore()) {
+        connect(m_client->getMarketDataCore(), &MarketDataCore::orderBookUpdated,
+                this, &StreamController::onOrderBookUpdated, Qt::QueuedConnection);
+    }
+}
+```
+
+#### **3. StreamController → GridIntegrationAdapter**
+```cpp
+// MainWindowGpu.cpp:244 - Primary data pipeline connections
+bool primaryOrderBookConnection = connect(m_streamController, &StreamController::orderBookUpdated,
+                                         m_gridAdapter, &GridIntegrationAdapter::onOrderBookUpdated,
+                                         Qt::QueuedConnection);
+
+// GridIntegrationAdapter.cpp:75 - Immediate grid processing
+void GridIntegrationAdapter::onOrderBookUpdated(const OrderBook& orderBook) {
+    if (m_gridRenderer) {
+        processOrderBookForGrid(orderBook);
+    }
+}
+```
+
+#### **4. GridIntegrationAdapter → UnifiedGridRenderer → LiquidityTimeSeriesEngine**
+```cpp
+// GridIntegrationAdapter.cpp:85 - Direct grid routing
+void GridIntegrationAdapter::processOrderBookForGrid(const OrderBook& orderBook) {
+    m_gridRenderer->updateOrderBook(orderBook);
+}
+
+// UnifiedGridRenderer.cpp:175 - Grid processing
+void UnifiedGridRenderer::updateOrderBook(const OrderBook& orderBook) {
+    m_latestOrderBook = orderBook;
+    if (m_liquidityEngine) {
+        m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook, m_minPrice, m_maxPrice);
+    }
+}
+```
+
+#### **5. LiquidityTimeSeriesEngine → Grid Visualization**
+```cpp
+// LiquidityTimeSeriesEngine.cpp - Temporal aggregation
+void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book) {
+    // Capture 100ms snapshots
+    OrderBookSnapshot snapshot;
+    snapshot.timestamp_ms = getCurrentTimeMs();
+    snapshot.bids = convertToMap(book.bids);
+    snapshot.asks = convertToMap(book.asks);
+    
+    // Update all timeframes
+    updateAllTimeframes(snapshot);
+}
 ```
 
 ### 📊 Detailed Data Flow
@@ -789,6 +867,726 @@ struct ThroughputMetrics {
 };
 ```
 
+## 🧪 **Comprehensive Testing Strategy**
+
+### 🎯 **Testing Architecture Overview**
+
+The Sentinel trading terminal requires rigorous testing across multiple layers to ensure reliability for high-frequency trading. Each component must be tested for performance, correctness, and failure scenarios.
+
+### 📊 **Testing Pyramid**
+
+```
+                    ┌─────────────────┐
+                    │   E2E Tests     │ ← GUI Integration Tests
+                    │   (10-20 tests) │
+                    └─────────────────┘
+                           │
+                    ┌─────────────────┐
+                    │ Integration     │ ← Component Integration Tests  
+                    │ Tests (50-100)  │
+                    └─────────────────┘
+                           │
+                    ┌─────────────────┐
+                    │ Unit Tests      │ ← Individual Component Tests
+                    │ (500-1000)      │
+                    └─────────────────┘
+```
+
+### 🔧 **Component Testing Strategy**
+
+#### **1. MarketDataCore Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_marketdatacore.cpp
+class MarketDataCoreTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_auth = std::make_unique<Authenticator>();
+        m_cache = std::make_unique<DataCache>();
+        m_core = std::make_unique<MarketDataCore>({"BTC-USD"}, *m_auth, *m_cache);
+    }
+    
+    std::unique_ptr<Authenticator> m_auth;
+    std::unique_ptr<DataCache> m_cache;
+    std::unique_ptr<MarketDataCore> m_core;
+};
+
+// Test WebSocket connection establishment
+TEST_F(MarketDataCoreTest, ConnectionEstablishment) {
+    // Mock WebSocket server
+    MockWebSocketServer server;
+    server.start("localhost", 8080);
+    
+    // Test connection sequence
+    m_core->start();
+    
+    // Verify connection events
+    EXPECT_TRUE(server.receivedHandshake());
+    EXPECT_TRUE(server.receivedSubscription());
+    
+    // Test reconnection on failure
+    server.disconnect();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(m_core->isReconnecting());
+}
+
+// Test JSON message parsing
+TEST_F(MarketDataCoreTest, MessageParsing) {
+    std::string tradeJson = R"({
+        "channel": "market_trades",
+        "events": [{
+            "trades": [{
+                "product_id": "BTC-USD",
+                "trade_id": "123",
+                "price": "50000.00",
+                "size": "0.1",
+                "side": "buy"
+            }]
+        }]
+    })";
+    
+    auto json = nlohmann::json::parse(tradeJson);
+    m_core->dispatch(json);
+    
+    // Verify trade was parsed and cached
+    auto trades = m_cache->recentTrades("BTC-USD");
+    ASSERT_EQ(trades.size(), 1);
+    EXPECT_EQ(trades[0].price, 50000.00);
+    EXPECT_EQ(trades[0].size, 0.1);
+    EXPECT_EQ(trades[0].side, AggressorSide::BUY);
+}
+
+// Test order book state management
+TEST_F(MarketDataCoreTest, OrderBookStateManagement) {
+    // Test snapshot processing
+    std::string snapshotJson = R"({
+        "channel": "l2_data",
+        "events": [{
+            "type": "snapshot",
+            "product_id": "BTC-USD",
+            "updates": [
+                {"side": "bid", "price_level": "50000.00", "new_quantity": "1.5"},
+                {"side": "offer", "price_level": "50001.00", "new_quantity": "2.0"}
+            ]
+        }]
+    })";
+    
+    auto json = nlohmann::json::parse(snapshotJson);
+    m_core->dispatch(json);
+    
+    // Verify order book state
+    auto orderBook = m_cache->getLiveOrderBook("BTC-USD");
+    EXPECT_EQ(orderBook.bids.size(), 1);
+    EXPECT_EQ(orderBook.asks.size(), 1);
+    EXPECT_EQ(orderBook.bids[0].price, 50000.00);
+    EXPECT_EQ(orderBook.bids[0].quantity, 1.5);
+}
+
+// Test error handling and recovery
+TEST_F(MarketDataCoreTest, ErrorRecovery) {
+    // Test malformed JSON
+    std::string malformedJson = "{ invalid json }";
+    EXPECT_NO_THROW(m_core->dispatch(malformedJson));
+    
+    // Test network disconnection
+    m_core->start();
+    // Simulate network failure
+    m_core->simulateNetworkFailure();
+    EXPECT_TRUE(m_core->isReconnecting());
+    
+    // Test SSL handshake failure
+    m_core->simulateSSLFailure();
+    EXPECT_TRUE(m_core->isReconnecting());
+}
+```
+
+**Performance Tests:**
+```cpp
+// Test file: test_marketdatacore_performance.cpp
+TEST_F(MarketDataCoreTest, HighThroughputProcessing) {
+    const int messageCount = 10000;
+    std::vector<std::string> messages;
+    
+    // Generate test messages
+    for (int i = 0; i < messageCount; ++i) {
+        messages.push_back(generateTradeMessage(i));
+    }
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Process messages
+    for (const auto& msg : messages) {
+        auto json = nlohmann::json::parse(msg);
+        m_core->dispatch(json);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // Verify performance requirements
+    EXPECT_LT(duration.count(), 1000); // Should process 10k messages in <1s
+    EXPECT_EQ(m_cache->recentTrades("BTC-USD").size(), messageCount);
+}
+```
+
+#### **2. DataCache Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_datacache.cpp
+class DataCacheTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_cache = std::make_unique<DataCache>();
+    }
+    
+    std::unique_ptr<DataCache> m_cache;
+};
+
+// Test thread safety
+TEST_F(DataCacheTest, ThreadSafety) {
+    const int threadCount = 4;
+    const int tradesPerThread = 1000;
+    std::vector<std::thread> threads;
+    
+    // Start multiple threads adding trades
+    for (int i = 0; i < threadCount; ++i) {
+        threads.emplace_back([this, i, tradesPerThread]() {
+            for (int j = 0; j < tradesPerThread; ++j) {
+                Trade trade;
+                trade.product_id = "BTC-USD";
+                trade.price = 50000.0 + j;
+                trade.size = 0.1;
+                trade.side = AggressorSide::BUY;
+                m_cache->addTrade(trade);
+            }
+        });
+    }
+    
+    // Wait for all threads
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    // Verify all trades were added
+    auto trades = m_cache->recentTrades("BTC-USD");
+    EXPECT_EQ(trades.size(), threadCount * tradesPerThread);
+}
+
+// Test order book state management
+TEST_F(DataCacheTest, OrderBookStateManagement) {
+    // Test live order book initialization
+    OrderBook snapshot;
+    snapshot.product_id = "BTC-USD";
+    snapshot.bids.push_back({50000.0, 1.5});
+    snapshot.asks.push_back({50001.0, 2.0});
+    
+    m_cache->initializeLiveOrderBook("BTC-USD", snapshot);
+    
+    auto liveBook = m_cache->getLiveOrderBook("BTC-USD");
+    EXPECT_EQ(liveBook.bids.size(), 1);
+    EXPECT_EQ(liveBook.asks.size(), 1);
+    
+    // Test incremental updates
+    m_cache->updateLiveOrderBook("BTC-USD", "bid", 50000.0, 0.0); // Remove bid
+    m_cache->updateLiveOrderBook("BTC-USD", "offer", 50002.0, 3.0); // Add new ask
+    
+    liveBook = m_cache->getLiveOrderBook("BTC-USD");
+    EXPECT_EQ(liveBook.bids.size(), 0); // Bid removed
+    EXPECT_EQ(liveBook.asks.size(), 2); // Original + new ask
+}
+
+// Test memory bounds
+TEST_F(DataCacheTest, MemoryBounds) {
+    const int maxTrades = 1000;
+    
+    // Add more trades than ring buffer capacity
+    for (int i = 0; i < maxTrades + 100; ++i) {
+        Trade trade;
+        trade.product_id = "BTC-USD";
+        trade.price = 50000.0 + i;
+        trade.size = 0.1;
+        m_cache->addTrade(trade);
+    }
+    
+    auto trades = m_cache->recentTrades("BTC-USD");
+    EXPECT_LE(trades.size(), maxTrades); // Should not exceed capacity
+}
+```
+
+#### **3. StreamController Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_streamcontroller.cpp
+class StreamControllerTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_controller = std::make_unique<StreamController>();
+    }
+    
+    std::unique_ptr<StreamController> m_controller;
+    std::vector<Trade> m_receivedTrades;
+    std::vector<OrderBook> m_receivedOrderBooks;
+};
+
+// Test real-time signal connections
+TEST_F(StreamControllerTest, RealTimeSignalConnections) {
+    // Connect to signals
+    connect(m_controller.get(), &StreamController::tradeReceived,
+            this, [this](const Trade& trade) {
+                m_receivedTrades.push_back(trade);
+            });
+    
+    connect(m_controller.get(), &StreamController::orderBookUpdated,
+            this, [this](const OrderBook& book) {
+                m_receivedOrderBooks.push_back(book);
+            });
+    
+    // Start streaming
+    std::vector<std::string> symbols = {"BTC-USD"};
+    m_controller->start(symbols);
+    
+    // Wait for data
+    QTest::qWait(1000);
+    
+    // Verify signals were received
+    EXPECT_GT(m_receivedTrades.size(), 0);
+    EXPECT_GT(m_receivedOrderBooks.size(), 0);
+}
+
+// Test connection status handling
+TEST_F(StreamControllerTest, ConnectionStatusHandling) {
+    bool connected = false;
+    bool disconnected = false;
+    
+    connect(m_controller.get(), &StreamController::connected,
+            this, [&connected]() { connected = true; });
+    
+    connect(m_controller.get(), &StreamController::disconnected,
+            this, [&disconnected]() { disconnected = true; });
+    
+    // Start and stop
+    m_controller->start({"BTC-USD"});
+    QTest::qWait(100);
+    m_controller->stop();
+    
+    EXPECT_TRUE(connected);
+    EXPECT_TRUE(disconnected);
+}
+```
+
+#### **4. GridIntegrationAdapter Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_gridintegrationadapter.cpp
+class GridIntegrationAdapterTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_adapter = std::make_unique<GridIntegrationAdapter>();
+        m_mockRenderer = std::make_unique<MockUnifiedGridRenderer>();
+        m_adapter->setGridRenderer(m_mockRenderer.get());
+    }
+    
+    std::unique_ptr<GridIntegrationAdapter> m_adapter;
+    std::unique_ptr<MockUnifiedGridRenderer> m_mockRenderer;
+};
+
+// Test data routing to grid renderer
+TEST_F(GridIntegrationAdapterTest, DataRoutingToGrid) {
+    // Create test data
+    Trade trade;
+    trade.product_id = "BTC-USD";
+    trade.price = 50000.0;
+    trade.size = 0.1;
+    
+    OrderBook orderBook;
+    orderBook.product_id = "BTC-USD";
+    orderBook.bids.push_back({50000.0, 1.5});
+    orderBook.asks.push_back({50001.0, 2.0});
+    
+    // Send data through adapter
+    m_adapter->onTradeReceived(trade);
+    m_adapter->onOrderBookUpdated(orderBook);
+    
+    // Verify data reached renderer
+    EXPECT_EQ(m_mockRenderer->getReceivedTrades().size(), 1);
+    EXPECT_EQ(m_mockRenderer->getReceivedOrderBooks().size(), 1);
+}
+
+// Test buffer management
+TEST_F(GridIntegrationAdapterTest, BufferManagement) {
+    const int maxBufferSize = 1000;
+    m_adapter->setMaxHistorySlices(maxBufferSize);
+    
+    // Add more data than buffer capacity
+    for (int i = 0; i < maxBufferSize + 100; ++i) {
+        Trade trade;
+        trade.product_id = "BTC-USD";
+        trade.price = 50000.0 + i;
+        m_adapter->onTradeReceived(trade);
+    }
+    
+    // Verify buffer was trimmed
+    // (Implementation would need to expose buffer size for testing)
+    EXPECT_LE(m_adapter->getBufferSize(), maxBufferSize);
+}
+```
+
+#### **5. LiquidityTimeSeriesEngine Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_liquiditytimeseriesengine.cpp
+class LiquidityTimeSeriesEngineTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_engine = std::make_unique<LiquidityTimeSeriesEngine>();
+    }
+    
+    std::unique_ptr<LiquidityTimeSeriesEngine> m_engine;
+};
+
+// Test order book snapshot processing
+TEST_F(LiquidityTimeSeriesEngineTest, OrderBookSnapshotProcessing) {
+    OrderBook book;
+    book.product_id = "BTC-USD";
+    book.bids.push_back({50000.0, 1.5});
+    book.bids.push_back({49999.0, 2.0});
+    book.asks.push_back({50001.0, 1.0});
+    book.asks.push_back({50002.0, 3.0});
+    
+    m_engine->addOrderBookSnapshot(book);
+    
+    // Verify snapshot was captured
+    auto timeSlice = m_engine->getTimeSlice(100, getCurrentTimeMs());
+    ASSERT_NE(timeSlice, nullptr);
+    EXPECT_EQ(timeSlice->bidMetrics.size(), 2);
+    EXPECT_EQ(timeSlice->askMetrics.size(), 2);
+}
+
+// Test multi-timeframe aggregation
+TEST_F(LiquidityTimeSeriesEngineTest, MultiTimeframeAggregation) {
+    // Add snapshots over time
+    for (int i = 0; i < 10; ++i) {
+        OrderBook book;
+        book.product_id = "BTC-USD";
+        book.bids.push_back({50000.0, 1.5});
+        book.asks.push_back({50001.0, 1.0});
+        
+        m_engine->addOrderBookSnapshot(book);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    // Verify different timeframes
+    auto timeSlice100 = m_engine->getTimeSlice(100, getCurrentTimeMs());
+    auto timeSlice500 = m_engine->getTimeSlice(500, getCurrentTimeMs());
+    auto timeSlice1000 = m_engine->getTimeSlice(1000, getCurrentTimeMs());
+    
+    EXPECT_NE(timeSlice100, nullptr);
+    EXPECT_NE(timeSlice500, nullptr);
+    EXPECT_NE(timeSlice1000, nullptr);
+}
+
+// Test anti-spoofing detection
+TEST_F(LiquidityTimeSeriesEngineTest, AntiSpoofingDetection) {
+    // Add consistent liquidity (should be flagged as persistent)
+    for (int i = 0; i < 5; ++i) {
+        OrderBook book;
+        book.product_id = "BTC-USD";
+        book.bids.push_back({50000.0, 1.5}); // Persistent bid
+        book.asks.push_back({50001.0, 1.0 + i * 0.1}); // Changing ask
+        
+        m_engine->addOrderBookSnapshot(book);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    auto timeSlice = m_engine->getTimeSlice(500, getCurrentTimeMs());
+    ASSERT_NE(timeSlice, nullptr);
+    
+    // Check persistence metrics
+    auto bidMetrics = timeSlice->bidMetrics.find(50000.0);
+    ASSERT_NE(bidMetrics, timeSlice->bidMetrics.end());
+    EXPECT_TRUE(bidMetrics->second.wasConsistent());
+    EXPECT_GT(bidMetrics->second.persistenceRatio(500), 0.8);
+}
+```
+
+#### **6. UnifiedGridRenderer Testing**
+
+**Unit Tests:**
+```cpp
+// Test file: test_unifiedgridrenderer.cpp
+class UnifiedGridRendererTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_renderer = std::make_unique<UnifiedGridRenderer>();
+    }
+    
+    std::unique_ptr<UnifiedGridRenderer> m_renderer;
+};
+
+// Test rendering mode switching
+TEST_F(UnifiedGridRendererTest, RenderingModeSwitching) {
+    EXPECT_EQ(m_renderer->renderMode(), UnifiedGridRenderer::RenderMode::LiquidityHeatmap);
+    
+    m_renderer->setRenderMode(UnifiedGridRenderer::RenderMode::TradeFlow);
+    EXPECT_EQ(m_renderer->renderMode(), UnifiedGridRenderer::RenderMode::TradeFlow);
+    
+    m_renderer->setRenderMode(UnifiedGridRenderer::RenderMode::VolumeCandles);
+    EXPECT_EQ(m_renderer->renderMode(), UnifiedGridRenderer::RenderMode::VolumeCandles);
+}
+
+// Test timeframe switching
+TEST_F(UnifiedGridRendererTest, TimeframeSwitching) {
+    EXPECT_EQ(m_renderer->getCurrentTimeframe(), 100); // Default 100ms
+    
+    m_renderer->setTimeframe(1000); // 1 second
+    EXPECT_EQ(m_renderer->getCurrentTimeframe(), 1000);
+    
+    m_renderer->setTimeframe(5000); // 5 seconds
+    EXPECT_EQ(m_renderer->getCurrentTimeframe(), 5000);
+}
+
+// Test performance under load
+TEST_F(UnifiedGridRendererTest, PerformanceUnderLoad) {
+    const int tradeCount = 10000;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Add many trades
+    for (int i = 0; i < tradeCount; ++i) {
+        Trade trade;
+        trade.product_id = "BTC-USD";
+        trade.price = 50000.0 + (i % 100) * 0.01;
+        trade.size = 0.1;
+        m_renderer->addTrade(trade);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // Should process 10k trades in reasonable time
+    EXPECT_LT(duration.count(), 1000);
+}
+```
+
+### 🔄 **Integration Testing**
+
+#### **End-to-End Data Pipeline Test**
+```cpp
+// Test file: test_integration_datapipeline.cpp
+class DataPipelineIntegrationTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        m_client = std::make_unique<CoinbaseStreamClient>();
+        m_controller = std::make_unique<StreamController>();
+        m_adapter = std::make_unique<GridIntegrationAdapter>();
+        m_renderer = std::make_unique<UnifiedGridRenderer>();
+        
+        // Connect the pipeline
+        m_adapter->setGridRenderer(m_renderer.get());
+        connect(m_controller.get(), &StreamController::tradeReceived,
+                m_adapter.get(), &GridIntegrationAdapter::onTradeReceived);
+        connect(m_controller.get(), &StreamController::orderBookUpdated,
+                m_adapter.get(), &GridIntegrationAdapter::onOrderBookUpdated);
+    }
+    
+    std::unique_ptr<CoinbaseStreamClient> m_client;
+    std::unique_ptr<StreamController> m_controller;
+    std::unique_ptr<GridIntegrationAdapter> m_adapter;
+    std::unique_ptr<UnifiedGridRenderer> m_renderer;
+};
+
+TEST_F(DataPipelineIntegrationTest, CompleteDataFlow) {
+    // Start the pipeline
+    m_controller->start({"BTC-USD"});
+    
+    // Wait for data to flow through
+    QTest::qWait(2000);
+    
+    // Verify data reached the renderer
+    EXPECT_GT(m_renderer->getTradeCount(), 0);
+    EXPECT_GT(m_renderer->getOrderBookUpdateCount(), 0);
+}
+```
+
+### 🚀 **Performance Testing**
+
+#### **Load Testing**
+```cpp
+// Test file: test_performance_load.cpp
+TEST_F(PerformanceTest, HighFrequencyTradingLoad) {
+    const int messagesPerSecond = 20000;
+    const int testDurationSeconds = 10;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Simulate high-frequency trading load
+    for (int second = 0; second < testDurationSeconds; ++second) {
+        auto secondStart = std::chrono::high_resolution_clock::now();
+        
+        for (int i = 0; i < messagesPerSecond; ++i) {
+            // Generate and process trade message
+            auto tradeMessage = generateTradeMessage(i);
+            auto json = nlohmann::json::parse(tradeMessage);
+            m_core->dispatch(json);
+        }
+        
+        // Ensure we don't exceed 1 second per iteration
+        auto secondEnd = std::chrono::high_resolution_clock::now();
+        auto secondDuration = std::chrono::duration_cast<std::chrono::milliseconds>(secondEnd - secondStart);
+        EXPECT_LE(secondDuration.count(), 1000);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto totalDuration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // Verify performance requirements
+    EXPECT_LE(totalDuration.count(), testDurationSeconds * 1000);
+}
+```
+
+#### **Memory Testing**
+```cpp
+// Test file: test_performance_memory.cpp
+TEST_F(PerformanceTest, MemoryUsageBounds) {
+    const int tradeCount = 100000;
+    size_t initialMemory = getCurrentMemoryUsage();
+    
+    // Add many trades
+    for (int i = 0; i < tradeCount; ++i) {
+        Trade trade;
+        trade.product_id = "BTC-USD";
+        trade.price = 50000.0 + (i % 1000) * 0.01;
+        trade.size = 0.1;
+        m_cache->addTrade(trade);
+    }
+    
+    size_t finalMemory = getCurrentMemoryUsage();
+    size_t memoryIncrease = finalMemory - initialMemory;
+    
+    // Memory increase should be bounded (due to ring buffers)
+    EXPECT_LE(memoryIncrease, 100 * 1024 * 1024); // Max 100MB increase
+}
+```
+
+### 🔍 **Stress Testing**
+
+#### **Network Failure Recovery**
+```cpp
+// Test file: test_stress_network.cpp
+TEST_F(StressTest, NetworkFailureRecovery) {
+    // Start normal operation
+    m_core->start();
+    QTest::qWait(1000);
+    
+    // Simulate network failures
+    for (int i = 0; i < 10; ++i) {
+        m_core->simulateNetworkFailure();
+        QTest::qWait(100);
+        
+        // Verify automatic reconnection
+        EXPECT_TRUE(m_core->isConnected() || m_core->isReconnecting());
+        
+        // Wait for reconnection
+        QTest::qWait(5000);
+        EXPECT_TRUE(m_core->isConnected());
+    }
+}
+```
+
+#### **Data Corruption Handling**
+```cpp
+// Test file: test_stress_data.cpp
+TEST_F(StressTest, DataCorruptionHandling) {
+    // Send malformed data
+    std::vector<std::string> malformedMessages = {
+        "{ invalid json }",
+        "null",
+        "[]",
+        "{\"channel\": \"unknown\"}",
+        "{\"channel\": \"market_trades\", \"events\": null}",
+        "{\"channel\": \"market_trades\", \"events\": [{\"trades\": [{\"price\": \"invalid\"}]}]}"
+    };
+    
+    for (const auto& message : malformedMessages) {
+        EXPECT_NO_THROW(m_core->dispatch(message));
+    }
+    
+    // Verify system remains stable
+    EXPECT_TRUE(m_core->isConnected());
+}
+```
+
+### 📊 **Test Execution Strategy**
+
+#### **Continuous Integration Pipeline**
+```yaml
+# .github/workflows/test.yml
+name: Sentinel Tests
+on: [push, pull_request]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build and Test
+        run: |
+          mkdir build && cd build
+          cmake ..
+          make -j$(nproc)
+          ctest --output-on-failure --verbose
+          # Run with sanitizers
+          ctest -T memcheck
+          ctest -T coverage
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Performance Tests
+        run: |
+          # Run performance benchmarks
+          ./tests/performance_benchmarks
+          # Verify performance requirements
+          ./scripts/verify_performance.sh
+
+  stress-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Stress Tests
+        run: |
+          # Run stress tests
+          ./tests/stress_tests
+          # Verify system stability
+          ./scripts/verify_stability.sh
+```
+
+#### **Test Coverage Requirements**
+```cpp
+// Minimum coverage requirements
+struct TestCoverageRequirements {
+    UnitTests:        "90% line coverage"
+    IntegrationTests: "80% component interaction coverage"
+    PerformanceTests: "100% critical path coverage"
+    StressTests:      "100% error handling coverage"
+    
+    // Critical components requiring 100% coverage
+    CriticalComponents: [
+        "MarketDataCore::dispatch()",
+        "DataCache::updateLiveOrderBook()",
+        "StreamController::onOrderBookUpdated()",
+        "GridIntegrationAdapter::processOrderBookForGrid()",
+        "LiquidityTimeSeriesEngine::addOrderBookSnapshot()"
+    ]
+};
+```
+
 ## 🎯 **Architectural Achievements**
 
 ### ✅ **Professional Trading Terminal Features**
@@ -827,47 +1625,3 @@ struct QualityMetrics {
     DataIntegrity:      "Zero trade/orderbook corruption events"
 };
 ```
-
-## 🚀 **Strategic Impact**
-
-### 💰 **Market Position**
-
-**Sentinel now competes directly with:**
-- **Bloomberg Terminal** ($40,000/year) - ✅ **Match visual quality**
-- **Bookmap** ($300/month) - ✅ **Exceed anti-spoof capabilities**  
-- **TradingView Pro** ($60/month) - ✅ **Superior performance**
-- **Sierra Chart** ($36/month) - ✅ **Match optimization level**
-
-### 🎯 **Competitive Advantages**
-
-1. **Open Source Foundation**: Full control over feature development
-2. **Modern C++ Architecture**: Superior performance to legacy systems
-3. **GPU-First Design**: Scales to unlimited dataset sizes
-4. **Professional Features**: Anti-spoofing, multi-timeframe analysis
-5. **Zero Vendor Lock-in**: Complete independence from data providers
-
-## Conclusion
-
-The new grid-based architecture represents a **fundamental transformation** from scatter plot visualization to professional market microstructure analysis. The system provides:
-
-✅ **Professional Features**: Anti-spoofing, multi-timeframe analysis, liquidity aggregation  
-✅ **Performance**: GPU-accelerated rendering, memory efficiency, scalable to any dataset size  
-✅ **Reliability**: Automatic error recovery, bounded memory usage, thread-safe design  
-✅ **Quality**: Bloomberg terminal visual standards with modern C++ performance  
-✅ **Migration Path**: Gradual transition with backward compatibility  
-
-### 🎉 **Achievement Summary**
-
-**You have successfully built a $40,000/year Bloomberg terminal competitor** using modern C++/Qt architecture with:
-
-- **2.27M trades/sec processing capacity**
-- **Sub-millisecond rendering latency**  
-- **Professional market microstructure analysis**
-- **Industrial-grade reliability and error recovery**
-- **GPU-accelerated visualization rivaling the best trading platforms**
-
-This architecture positions Sentinel as a **world-class trading terminal** capable of competing with the industry leaders while maintaining complete control over the technology stack and feature roadmap.
-
----
-
-*Next Steps: Begin Phase 1 migration by enhancing existing components with grid integration capabilities.* 
