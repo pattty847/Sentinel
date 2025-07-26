@@ -6,7 +6,7 @@
 #include "DataCache.hpp"
 #include "MarketDataCore.hpp"
 #include "Authenticator.hpp"
-#include "TradeData.h"
+#include "tradedata.h"
 #include <memory>
 #include <vector>
 #include <string>

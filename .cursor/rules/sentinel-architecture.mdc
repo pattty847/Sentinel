@@ -2,7 +2,6 @@
 alwaysApply: true
 ---
 
-
 # Sentinel Architecture
 
 The system processes and visualizes real-time market data as a 2D grid, where each cell represents aggregated liquidity for a specific time interval and price level. The end goal is a sophisticated high frequency trading terminal with intelligent markings and alerts of events like spoofing, absorption, hidden liquidity or iceberg orders, advanced LLM data synthesis, reports, and more. It will be ran as a gui or in daemon mode. 
