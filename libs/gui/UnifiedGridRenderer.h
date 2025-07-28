@@ -36,6 +36,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(int maxCells READ maxCells WRITE setMaxCells NOTIFY maxCellsChanged)
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
+    Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     // 🚀 OPTIMIZATION 4: Timeframe property with proper QML binding
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
 
@@ -58,6 +59,7 @@ private:
     bool m_showVolumeProfile = true;
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
+    double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
     
     // 🐛 FIX: Manual timeframe override tracking
@@ -152,6 +154,7 @@ public:
     double intensityScale() const { return m_intensityScale; }
     int maxCells() const { return m_maxCells; }
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
+    double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_autoScrollEnabled; }
     
     // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
@@ -219,6 +222,7 @@ signals:
     void maxCellsChanged();
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
+    void minVolumeFilterChanged();
     void timeframeChanged();
 
 protected:
@@ -237,6 +241,7 @@ private:
     void setShowVolumeProfile(bool show);
     void setIntensityScale(double scale);
     void setMaxCells(int max);
+    void setMinVolumeFilter(double minVolume);
     
     // 🚀 OPTIMIZED RENDERING METHODS (cache + transform)
     void updateCachedGeometry();  // Only when data changes
@@ -293,5 +298,8 @@ private:
     bool m_isDragging = false;
     QPointF m_lastMousePos;
     QPointF m_initialMousePos;
+    
+    // 🚀 OPTIMIZATION: Separate visual pan from data pan
+    QPointF m_panVisualOffset; // Temporary visual-only offset during a mouse drag
     QElapsedTimer m_interactionTimer;
 };

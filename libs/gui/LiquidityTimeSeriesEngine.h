@@ -106,6 +106,7 @@ private:
     int64_t m_baseTimeframe_ms = 100;           // Snapshot interval
     size_t m_maxHistorySlices = 5000;           // Keep 5000 slices per timeframe
     double m_priceResolution = 1.0;             // $1 price buckets
+    size_t m_depthLimit = 2000;                 // 🚀 PERFORMANCE FIX: Max bids/asks to process
     LiquidityDisplayMode m_displayMode = LiquidityDisplayMode::Average;
 
 public:

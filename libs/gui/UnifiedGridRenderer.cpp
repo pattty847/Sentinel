@@ -73,9 +73,6 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
         sLog_Render("📊 TRADE UPDATE: Triggering geometry update");
     }
     
-    m_geometryDirty.store(true);
-    update();
-    
     // Debug logging for first few trades
     static int realTradeCount = 0;
     if (++realTradeCount <= 10) {
@@ -169,27 +166,17 @@ void UnifiedGridRenderer::captureOrderBookSnapshot() {
             currentHash ^= std::hash<double>{}(ask.price) ^ std::hash<double>{}(ask.size);
         }
         
-        // Only update if order book actually changed
-        if (currentHash != lastOrderBookHash) {
-            // Pass latest order book to liquidity engine for 100ms snapshots WITH VIEWPORT FILTERING
-            if (m_timeWindowValid) {
-                m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook, m_minPrice, m_maxPrice);
-            } else {
-                // Fallback to unfiltered if viewport not yet initialized
-                m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook);
-            }
-            lastOrderBookHash = currentHash;
-            sLog_Render("📊 ORDER BOOK CHANGED: Triggering geometry update");
-            
-            m_geometryDirty.store(true);
-            update();
+        // ALWAYS pass the latest order book to the engine to ensure a continuous time series.
+        // This prevents visual gaps in the heatmap when the market is quiet.
+        if (m_timeWindowValid) {
+            m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook, m_minPrice, m_maxPrice);
         } else {
-            // Skip update - no changes detected
-            static int skipCount = 0;
-            if (++skipCount % 100 == 1) {
-                sLog_Render("📊 ORDER BOOK UNCHANGED: Skipped " << skipCount << " redundant updates");
-            }
+            // Fallback to unfiltered if viewport not yet initialized
+            m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook);
         }
+        lastOrderBookHash = currentHash; // Keep for potential future debugging
+        m_geometryDirty.store(true);
+        update();
     }
 }
 
@@ -232,37 +219,29 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     
     // 🚀 PERFORMANCE OPTIMIZATION: Use persistent geometry cache + transforms
     auto* rootNode = static_cast<QSGTransformNode*>(oldNode);
-    if (!rootNode) {
+    bool isNewNode = !rootNode;
+    if (isNewNode) {
         rootNode = new QSGTransformNode();
         m_rootTransformNode = rootNode;
     }
-    
+
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         
         // 🚀 PERFORMANCE CRITICAL: Check if we need cache refresh or just transform update
-        bool needsRebuild = m_geometryDirty.load() || shouldRefreshCache();
+        bool needsRebuild = m_geometryDirty.load() || shouldRefreshCache() || isNewNode;
         
         // 🎯 KEY OPTIMIZATION: Always update transform matrix for smooth interaction
-        if (m_geometryCache.isValid && !needsRebuild) {
-            // Update transform without rebuilding geometry - buttery smooth panning/zooming!
-            QMatrix4x4 transform = calculateViewportTransform();
-            rootNode->setMatrix(transform);
-            sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild");
-        }
-        
         if (needsRebuild) {
+            // This block is expensive. We want to avoid it during a pan.
             // Clear previous children only when rebuilding
             rootNode->removeAllChildNodes();
             
             // Update visible cell data
             updateVisibleCells();
-        }
-        
-        // Create appropriate rendering nodes based on mode
-        QSGNode* mainNode = nullptr;
-        
-        if (needsRebuild) {
+            
+            // Create appropriate rendering nodes based on mode
+            QSGNode* mainNode = nullptr;
             switch (m_renderMode) {
                 case RenderMode::LiquidityHeatmap:
                     mainNode = createHeatmapNode(m_visibleCells);
@@ -292,10 +271,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_geometryCache.cacheMinPrice = m_minPrice;
             m_geometryCache.cacheMaxPrice = m_maxPrice;
             
-            // 🚀 ALWAYS set transform matrix on new geometry for consistent positioning
-            QMatrix4x4 transform = calculateViewportTransform();
-            rootNode->setMatrix(transform);
-            
             sLog_Render("🎯 OPTIMIZED RENDER: " << m_visibleCells.size() << " cells rendered (rebuild) + cache updated");
             
             // Add volume profile if enabled (TODO: could also be cached)
@@ -307,11 +282,18 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 }
             }
         } else {
-            sLog_Render("🎯 OPTIMIZED RENDER: Using cached geometry (no rebuild needed)");
+            sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild");
         }
+
+        // 🚀 ALWAYS apply transform. During a pan, this is the ONLY thing that happens.
+        QMatrix4x4 transform = calculateViewportTransform();
+        // Apply the temporary visual pan offset
+        transform.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
+        rootNode->setMatrix(transform);
     }
     
     m_geometryDirty.store(false);
+    m_needsDataRefresh = false;
     
     // 📊 PERFORMANCE MONITORING: End frame timing
     m_perfMetrics.renderTime_us = frameTimer.nsecsElapsed() / 1000;
@@ -387,15 +369,15 @@ void UnifiedGridRenderer::updateVolumeProfile() {
 void UnifiedGridRenderer::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {
     // Create cells for each price level with liquidity
     for (const auto& [price, metrics] : slice.bidMetrics) {
-        double displayValue = slice.getDisplayValue(price, true, 0);  // Use Average mode
-        if (displayValue > 0.0) {
+        double displayValue = slice.getDisplayValue(price, true, static_cast<int>(m_liquidityEngine->getDisplayMode()));
+        if (displayValue >= m_minVolumeFilter) {
             createLiquidityCell(slice, price, displayValue, true);
         }
     }
     
     for (const auto& [price, metrics] : slice.askMetrics) {
-        double displayValue = slice.getDisplayValue(price, false, 0);  // Use Average mode
-        if (displayValue > 0.0) {
+        double displayValue = slice.getDisplayValue(price, false, static_cast<int>(m_liquidityEngine->getDisplayMode()));
+        if (displayValue >= m_minVolumeFilter) {
             createLiquidityCell(slice, price, displayValue, false);
         }
     }
@@ -757,6 +739,15 @@ void UnifiedGridRenderer::setMaxCells(int max) {
     }
 }
 
+void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
+    if (m_minVolumeFilter != minVolume) {
+        m_minVolumeFilter = minVolume;
+        m_geometryDirty.store(true);
+        update();
+        emit minVolumeFilterChanged();
+    }
+}
+
 // Public API methods
 void UnifiedGridRenderer::addTrade(const Trade& trade) {
     onTradeReceived(trade);
@@ -799,8 +790,12 @@ void UnifiedGridRenderer::setTimeResolution(int resolution_ms) {
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
-    // Note: Manual resolution override implemented via LiquidityTimeSeriesEngine
-    sLog_Chart("🎯 Manual price resolution override requested: $" << resolution);
+    if (m_liquidityEngine->getPriceResolution() != resolution && resolution > 0) {
+        m_liquidityEngine->setPriceResolution(resolution);
+        m_geometryDirty.store(true); // Rebuild is necessary with new price buckets
+        update();
+        sLog_Chart("🎯 Manual price resolution override set to: $" << resolution);
+    }
 }
 
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {
@@ -1321,6 +1316,9 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
     m_isDragging = true;
     m_lastMousePos = pos;
     m_initialMousePos = pos;  // Store initial click position
+
+    // Reset visual pan offset at the start of a drag
+    m_panVisualOffset = {0.0, 0.0};
     
     // 🚀 USER CONTROL: Disable auto-scroll when user starts dragging
     m_autoScrollEnabled = false;
@@ -1334,64 +1332,18 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
 
 void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
     if (m_isDragging && m_timeWindowValid) {
+        // 🚀 FAST PAN LOGIC
         QPointF currentPos = event->position();
         QPointF delta = currentPos - m_lastMousePos;
-        
-        if (width() > 0 && height() > 0) {
-            // Calculate pan amounts based on screen delta
-            int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-            double priceRange = m_maxPrice - m_minPrice;
-            
-            // Convert screen pixels to time/price units
-            double timePixelsToMs = static_cast<double>(timeRange) / width();
-            double pricePixelsToUnits = priceRange / height();
-            
-            // Apply drag delta (inverted for natural feel)
-            int64_t timeDelta = static_cast<int64_t>(-delta.x() * timePixelsToMs);
-            double priceDelta = delta.y() * pricePixelsToUnits;  // Y is already inverted in screen coords
-            
-            // 🚀 FAST VIEWPORT UPDATE: No data refresh needed for pan operations
-            {
-                std::lock_guard<std::mutex> lock(m_dataMutex);
-                
-                m_visibleTimeStart_ms += timeDelta;
-                m_visibleTimeEnd_ms += timeDelta;
-                m_minPrice += priceDelta;
-                m_maxPrice += priceDelta;
-                
-                // Update pan offsets for zoom consistency
-                m_panOffsetTime_ms += timeDelta;
-                m_panOffsetPrice += priceDelta;
-                
-                // Only refresh data if we've moved significantly outside cache bounds
-                if (shouldRefreshCache()) {
-                    m_needsDataRefresh = true; // Do NOT set m_geometryDirty here
-                }
-            }
-            
-            // 🚀 PERFORMANCE FIX: Only trigger update every few pixels of movement
-            static QPointF lastUpdateMousePos = currentPos;
-            double movementDistance = std::sqrt(
-                (currentPos.x() - lastUpdateMousePos.x()) * (currentPos.x() - lastUpdateMousePos.x()) + 
-                (currentPos.y() - lastUpdateMousePos.y()) * (currentPos.y() - lastUpdateMousePos.y())
-            );
-            
-            if (movementDistance > 5.0) {  // Only update every 5 pixels of movement
-                // Do NOT set m_geometryDirty here; just update the viewport
-                update();
-                lastUpdateMousePos = currentPos;
-            }
-            
-            // Performance tracking
-            int64_t latency = m_interactionTimer.elapsed();
-            static int dragCount = 0;
-            if (++dragCount <= 5) {
-                sLog_Performance("🖱️ Mouse drag #" << dragCount << " latency: " << latency << "ms"
-                              << " delta: " << timeDelta << "ms, $" << priceDelta);
-            }
-        }
-        
+
+        // Accumulate the visual offset
+        m_panVisualOffset += delta;
         m_lastMousePos = currentPos;
+
+        // Trigger a repaint to apply the new visual transform.
+        // Do NOT set m_geometryDirty.
+        update();
+
         event->accept();
     }
 }
@@ -1399,48 +1351,70 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && m_isDragging) {
         m_isDragging = false;
-        
+
+        // 🚀 DATA PAN LOGIC (happens once at the end)
+        if (width() > 0 && height() > 0 && m_panVisualOffset.manhattanLength() > 0) {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+
+            // Convert the final visual offset (in pixels) to data coordinates (time and price)
+            int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+            double priceRange = m_maxPrice - m_minPrice;
+            double timePixelsToMs = static_cast<double>(timeRange) / width();
+            double pricePixelsToUnits = priceRange / height();
+
+            int64_t timeDelta = static_cast<int64_t>(-m_panVisualOffset.x() * timePixelsToMs);
+            double priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
+
+            // Apply the delta to the main viewport
+            m_visibleTimeStart_ms += timeDelta;
+            m_visibleTimeEnd_ms += timeDelta;
+            m_minPrice += priceDelta;
+            m_maxPrice += priceDelta;
+
+            m_panOffsetTime_ms += timeDelta;
+            m_panOffsetPrice += priceDelta;
+        }
+
         int64_t totalDragTime = m_interactionTimer.elapsed();
         
-        // 🎯 CLICK TO CENTER: If it was a short click (not a drag), center on that point
+        // Reset the visual offset now that the data viewport is updated
+        m_panVisualOffset = {0.0, 0.0};
+
+        // Trigger a full data refresh for the new viewport area
+        m_geometryDirty.store(true);
+        update();
+
+        // --- Existing Click-to-center logic (can remain) ---
         QPointF releasePos = event->position();
         QPointF dragDistance = releasePos - m_initialMousePos;
         double dragPixels = std::sqrt(dragDistance.x() * dragDistance.x() + dragDistance.y() * dragDistance.y());
-        
+
         if (totalDragTime < 200 && dragPixels < 10.0 && m_timeWindowValid) {
             // Short click - center the viewport on this point
             double clickXRatio = releasePos.x() / width();
             double clickYRatio = 1.0 - (releasePos.y() / height()); // Invert Y for price axis
-            
             int64_t clickTime;
             double clickPrice;
-            
+
             {
                 std::lock_guard<std::mutex> lock(m_dataMutex);
-                
-                // Calculate current ranges
                 int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
                 double priceRange = m_maxPrice - m_minPrice;
-                
-                // Calculate click position in time/price coordinates
                 clickTime = m_visibleTimeStart_ms + static_cast<int64_t>(clickXRatio * timeRange);
                 clickPrice = m_minPrice + (clickYRatio * priceRange);
-                
-                // Center viewport on clicked point
                 m_visibleTimeStart_ms = clickTime - timeRange / 2;
                 m_visibleTimeEnd_ms = clickTime + timeRange / 2;
                 m_minPrice = clickPrice - priceRange / 2.0;
                 m_maxPrice = clickPrice + priceRange / 2.0;
             }
-            
+
             m_geometryDirty.store(true);
             update();
-            
             sLog_Chart("🎯 Click to center - centered on: " << clickTime << "ms, $" << clickPrice);
         } else {
             sLog_Chart("🖱️ Mouse drag completed - total time: " << totalDragTime << "ms");
         }
-        
+
         event->accept();
     }
 }
