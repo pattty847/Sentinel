@@ -44,7 +44,19 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book) {
 }
 
 void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice) {
-    if (book.product_id.empty() || book.bids.empty() || book.asks.empty()) return;
+    if (book.product_id.empty()) return;
+    
+    // Create a mutable copy to apply the depth limit
+    OrderBook limitedBook = book;
+    
+    // 🚀 PERFORMANCE OPTIMIZATION: Apply depth limit to the raw order book data
+    // This is the primary fix for CPU bottlenecking with large books.
+    if (limitedBook.bids.size() > m_depthLimit) {
+        limitedBook.bids.resize(m_depthLimit);
+    }
+    if (limitedBook.asks.size() > m_depthLimit) {
+        limitedBook.asks.resize(m_depthLimit);
+    }
     
     OrderBookSnapshot snapshot;
     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -60,7 +72,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     int filteredBidCount = 0, filteredAskCount = 0;
     
     // Convert OrderBook to snapshot format with price quantization AND viewport filtering
-    for (const auto& bid : book.bids) {
+    for (const auto& bid : limitedBook.bids) { // Use the limited book
         originalBidCount++;
         if (bid.price >= filteredMinPrice && bid.price <= filteredMaxPrice) {
             double quantizedPrice = quantizePrice(bid.price);
@@ -68,7 +80,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
             filteredBidCount++;
         }
     }
-    for (const auto& ask : book.asks) {
+    for (const auto& ask : limitedBook.asks) { // Use the limited book
         originalAskCount++;
         if (ask.price >= filteredMinPrice && ask.price <= filteredMaxPrice) {
             double quantizedPrice = quantizePrice(ask.price);
