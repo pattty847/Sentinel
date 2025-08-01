@@ -37,8 +37,19 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
+    Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
+    
+    // 🚀 VIEWPORT BOUNDS: Expose current viewport to QML for dynamic axis labels
+    Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
+    Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
+    Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
+    Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
+    
     // 🚀 OPTIMIZATION 4: Timeframe property with proper QML binding
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
+    
+    // 🚀 VISUAL TRANSFORM: Expose pan offset for real-time grid sync
+    Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
 public:
     enum class RenderMode {
@@ -157,8 +168,17 @@ public:
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_autoScrollEnabled; }
     
+    // 🚀 VIEWPORT BOUNDS: Getters for QML properties
+    qint64 getVisibleTimeStart() const { return m_visibleTimeStart_ms; }
+    qint64 getVisibleTimeEnd() const { return m_visibleTimeEnd_ms; }
+    double getMinPrice() const { return m_minPrice; }
+    double getMaxPrice() const { return m_maxPrice; }
+    
     // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
+    
+    // 🚀 VISUAL TRANSFORM: Getter for QML pan offset
+    QPointF getPanVisualOffset() const { return m_panVisualOffset; }
     
     // 🎯 DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
@@ -223,7 +243,10 @@ signals:
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
     void minVolumeFilterChanged();
+    void priceResolutionChanged();
+    void viewportChanged();
     void timeframeChanged();
+    void panVisualOffsetChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;

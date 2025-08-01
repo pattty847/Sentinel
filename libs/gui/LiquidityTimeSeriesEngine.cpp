@@ -191,14 +191,14 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
             // Ensure this timeframe has data available
             auto tf_it = m_timeSlices.find(timeframe);
             if (tf_it != m_timeSlices.end() && !tf_it->second.empty()) {
-                sLog_Cache("🚀 SUGGEST TIMEFRAME: " << timeframe << "ms for span " 
+                sLog_RenderDetail("🚀 SUGGEST TIMEFRAME: " << timeframe << "ms for span " 
                          << viewTimeSpan << "ms (" << expectedSlices << "/" << maxSlices << " slices, FINEST available)");
                 return timeframe;
             } else {
-                sLog_Cache("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (no data available)");
+                sLog_RenderDetail("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (no data available)");
             }
         } else {
-            sLog_Cache("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (" << expectedSlices << " > " << maxSlices << " slices)");
+            sLog_RenderDetail("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (" << expectedSlices << " > " << maxSlices << " slices)");
         }
     }
     
@@ -206,7 +206,7 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
     for (int64_t timeframe : m_timeframes) {
         auto tf_it = m_timeSlices.find(timeframe);
         if (tf_it != m_timeSlices.end() && !tf_it->second.empty()) {
-            sLog_Cache("🚀 FALLBACK TIMEFRAME: " << timeframe << "ms (finest with data)");
+            sLog_RenderDetail("🚀 FALLBACK TIMEFRAME: " << timeframe << "ms (finest with data)");
             return timeframe;
         }
     }
