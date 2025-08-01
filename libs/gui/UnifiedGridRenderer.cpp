@@ -67,10 +67,17 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
             sLog_Init("   Time: " << m_visibleTimeStart_ms << " - " << m_visibleTimeEnd_ms);
             sLog_Init("   Price: $" << m_minPrice << " - $" << m_maxPrice);
             sLog_Init("   Based on real trade: $" << trade.price << " at " << timestamp);
+            
+            // 🚀 Emit signal to update QML axis labels when viewport is first initialized
+            emit viewportChanged();
         }
         
         // 🚀 SIMPLE: No cache system, always update on new data
-        sLog_Render("📊 TRADE UPDATE: Triggering geometry update");
+        // 🚀 THROTTLED TRADE LOGGING: Only log every 20th trade to reduce spam
+        static int tradeUpdateCount = 0;
+        if (++tradeUpdateCount % 20 == 0) {
+            sLog_Render("📊 TRADE UPDATE: Triggering geometry update [Trade #" << tradeUpdateCount << "]");
+        }
     }
     
     // Debug logging for first few trades
@@ -111,6 +118,9 @@ void UnifiedGridRenderer::onOrderBookUpdated(const OrderBook& book) {
             sLog_Init("   Mid Price: $" << midPrice);
             sLog_Init("   Price Window: $" << m_minPrice << " - $" << m_maxPrice);
         }
+        
+        // 🚀 Emit signal to update QML axis labels when viewport is first initialized
+        emit viewportChanged();
     }
     
     // Debug logging for first few order books
@@ -138,6 +148,7 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     
     m_geometryDirty.store(true);
     update();
+    emit viewportChanged(); // 🚀 Notify QML of viewport changes
     
     // Debug logging for viewport changes
     static int viewportChangeCount = 0;
@@ -182,7 +193,11 @@ void UnifiedGridRenderer::captureOrderBookSnapshot() {
 
 void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
     if (newGeometry.size() != oldGeometry.size()) {
-        sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
+        // 🚀 THROTTLED GEOMETRY LOGGING: Only log every 5th geometry change to reduce spam
+        static int geometryChangeCount = 0;
+        if (++geometryChangeCount % 5 == 0) {
+            sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height() << " [Change #" << geometryChangeCount << "]");
+        }
         
         // Force redraw with new geometry
         m_geometryDirty.store(true);
@@ -271,7 +286,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_geometryCache.cacheMinPrice = m_minPrice;
             m_geometryCache.cacheMaxPrice = m_maxPrice;
             
-            sLog_Render("🎯 OPTIMIZED RENDER: " << m_visibleCells.size() << " cells rendered (rebuild) + cache updated");
+            // 🚀 THROTTLED OPTIMIZED RENDER LOGGING: Only log every 10th rebuild to reduce spam
+            static int optimizedRenderCount = 0;
+            if (++optimizedRenderCount % 10 == 0) {
+                sLog_Render("🎯 OPTIMIZED RENDER: " << m_visibleCells.size() << " cells rendered (rebuild) + cache updated [Rebuild #" << optimizedRenderCount << "]");
+            }
             
             // Add volume profile if enabled (TODO: could also be cached)
             if (m_showVolumeProfile) {
@@ -282,7 +301,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 }
             }
         } else {
-            sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild");
+            // 🚀 THROTTLED TRANSFORM LOGGING: Only log every 25th transform to reduce spam
+            static int transformCount = 0;
+            if (++transformCount % 25 == 0) {
+                sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild [Transform #" << transformCount << "]");
+            }
         }
 
         // 🚀 ALWAYS apply transform. During a pan, this is the ONLY thing that happens.
@@ -308,7 +331,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                       << " CachedCells=" << m_perfMetrics.cachedCellCount);
     }
     
-    sLog_Render("🎯 UNIFIED GRID RENDER COMPLETE (" << m_perfMetrics.renderTime_us / 1000.0 << "ms)");
+    // 🚀 THROTTLED RENDER LOGGING: Only log every 50th frame to reduce spam
+    static int renderLogCount = 0;
+    if (++renderLogCount % 50 == 0) {
+        sLog_Render("🎯 UNIFIED GRID RENDER COMPLETE (" << m_perfMetrics.renderTime_us / 1000.0 << "ms) [Frame #" << renderLogCount << "]");
+    }
     
     return rootNode;
 }
@@ -956,9 +983,9 @@ void UnifiedGridRenderer::updateCachedGeometry() {
 bool UnifiedGridRenderer::shouldRefreshCache() const {
     if (!m_geometryCache.isValid) return true;
     
-    // 🔧 DEBUG: Log cache bounds checking
+    // 🔧 DEBUG: Log cache bounds checking (throttled to reduce spam)
     static int checkCount = 0;
-    bool shouldLog = (++checkCount <= 10) || (checkCount % 50 == 0);
+    bool shouldLog = (++checkCount <= 5) || (checkCount % 100 == 0);  // Reduced frequency
     
     if (shouldLog) {
         sLog_Render("🔍 CACHE CHECK #" << checkCount << ":");
@@ -1339,6 +1366,9 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
         // Accumulate the visual offset
         m_panVisualOffset += delta;
         m_lastMousePos = currentPos;
+        
+        // 🚀 Emit signal to update QML grid lines in real-time
+        emit panVisualOffsetChanged();
 
         // Trigger a repaint to apply the new visual transform.
         // Do NOT set m_geometryDirty.
@@ -1379,6 +1409,7 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
         
         // Reset the visual offset now that the data viewport is updated
         m_panVisualOffset = {0.0, 0.0};
+        emit panVisualOffsetChanged();
 
         // Trigger a full data refresh for the new viewport area
         m_geometryDirty.store(true);

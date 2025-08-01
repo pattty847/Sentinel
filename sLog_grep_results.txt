@@ -1,0 +1,145 @@
+./docs/GRID_ARCHITECTURE.md:276:                sLog_Error("SSL handshake failed: " << ec.message());
+./docs/GRID_ARCHITECTURE.md:281:                sLog_Error("WebSocket error: " << ec.message());
+./docs/GRID_ARCHITECTURE.md:288:                sLog_Error("Network error: " << ec.message());
+./docs/GRID_ARCHITECTURE.md:312:            sLog_Warning("Invalid trade data: price=" << trade.price 
+./docs/GRID_ARCHITECTURE.md:320:            sLog_Warning("Trade queue full! Dropping trade. "
+./docs/GRID_ARCHITECTURE.md:345:            sLog_Error("CRITICAL: Queue overflow rate too high!");
+./docs/GRID_ARCHITECTURE.md:350:            sLog_Warning("Performance degradation detected");
+./docs/02_ARCHITECTURE.md:226:                sLog_Error("SSL handshake failed: " << ec.message());
+./docs/02_ARCHITECTURE.md:237:                sLog_Error("Network error: " << ec.message());
+./libs/core/MarketDataCore.cpp:26:    sLog_Init(QString("🏗️ MarketDataCore initialized for %1 products").arg(products.size()));
+./libs/core/MarketDataCore.cpp:31:    sLog_Init("🏗️ MarketDataCore destroyed");
+./libs/core/MarketDataCore.cpp:36:        sLog_Init("🚀 Starting MarketDataCore...");
+./libs/core/MarketDataCore.cpp:43:        sLog_Init("🛑 Stopping MarketDataCore...");
+./libs/core/MarketDataCore.cpp:58:        sLog_Init("✅ MarketDataCore stopped");
+./libs/core/MarketDataCore.cpp:63:    sLog_Connection(QString("🔌 Starting connection to %1:%2").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
+./libs/core/MarketDataCore.cpp:72:    sLog_Connection("🔌 IO context stopped");
+./libs/core/MarketDataCore.cpp:82:    sLog_Connection("🔍 DNS resolved, connecting...");
+./libs/core/MarketDataCore.cpp:99:    sLog_Connection("🔗 TCP connected, starting SSL handshake...");
+./libs/core/MarketDataCore.cpp:124:    sLog_Connection("🔐 SSL handshake complete, starting WebSocket handshake...");
+./libs/core/MarketDataCore.cpp:144:    sLog_Connection("🌐 WebSocket connected! Sending subscriptions...");
+./libs/core/MarketDataCore.cpp:148:    sLog_Subscription("📤 Sending level2 subscription...");
+./libs/core/MarketDataCore.cpp:158:            sLog_Subscription("✅ Level2 subscription sent! Sending trades subscription...");
+./libs/core/MarketDataCore.cpp:174:    sLog_Connection("✅ All subscriptions sent! Starting to read messages...");
+./libs/core/MarketDataCore.cpp:210:        sLog_Connection("🔌 Closing WebSocket connection...");
+./libs/core/MarketDataCore.cpp:220:        sLog_Connection("✅ WebSocket connection closed");
+./libs/core/MarketDataCore.cpp:227:    sLog_Connection("🔄 Scheduling reconnect in 5 seconds...");
+./libs/core/MarketDataCore.cpp:238:            sLog_Connection("🔄 Attempting reconnection...");
+./libs/core/MarketDataCore.cpp:253:    sLog_Subscription(QString("🔐 %1 subscription: %2").arg(QString::fromStdString(channel)).arg(QString::fromStdString(result)));
+./libs/core/MarketDataCore.cpp:295:                            sLog_Trades(QString::fromStdString(logMessage));
+./libs/core/MarketDataCore.cpp:340:                    sLog_Cache(QString::fromStdString(logMessage));
+./libs/core/MarketDataCore.cpp:370:                        sLog_Cache(QString::fromStdString(logMessage));
+./libs/core/MarketDataCore.cpp:379:        sLog_Subscription(QString::fromStdString(logMessage));
+./libs/core/MarketDataCore.cpp:384:        sLog_Error(QString::fromStdString(logMessage));
+./libs/core/SentinelLogging.hpp:43:#define sLog_Core(...)        qCDebug(logCore) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:44:#define sLog_Network(...)     qCDebug(logNetwork) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:45:#define sLog_Cache(...)       qCDebug(logCache) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:46:#define sLog_Performance(...) qCDebug(logPerformance) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:48:#define sLog_Render(...)      qCDebug(logRender) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:49:#define sLog_RenderDetail(...) qCDebug(logRenderDetail) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:50:#define sLog_Chart(...)       qCDebug(logChart) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:51:#define sLog_Candles(...)     qCDebug(logCandles) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:52:#define sLog_Trades(...)      qCDebug(logTrades) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:53:#define sLog_Camera(...)      qCDebug(logCamera) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:54:#define sLog_GPU(...)         qCDebug(logGPU) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:56:#define sLog_Init(...)        qCDebug(logInit) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:57:#define sLog_Connection(...)  qCDebug(logConnection) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:58:#define sLog_Subscription(...) qCDebug(logSubscription) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:60:#define sLog_DebugCoords(...) qCDebug(logDebugCoords) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:61:#define sLog_DebugGeometry(...) qCDebug(logDebugGeometry) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:62:#define sLog_DebugTiming(...) qCDebug(logDebugTiming) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:63:#define sLog_DebugData(...)   qCDebug(logDebugData) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:66:#define sLog_Warning(...)     qCWarning(logCore) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:67:#define sLog_Error(...)       qCCritical(logCore) << __VA_ARGS__
+./libs/core/SentinelLogging.hpp:124:NEW: sLog_Init() << "🚀 CREATING GPU TRADING TERMINAL!";
+./libs/core/SentinelLogging.hpp:127:NEW: sLog_Candles() << "🕯️ CANDLE RENDER UPDATE:" << "LOD:" << timeframe;
+./libs/core/DataCache.cpp:119:    sLog_Init(QString("🏗️  LiveOrderBook initialized for %1 with %2 bids and %3 asks")
+./libs/core/DataCache.cpp:222:    sLog_Cache(QString("🔥 DataCache: Initialized LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
+./libs/core/DataCache.cpp:249:            sLog_Cache(QString("🔍 DATACACHE getLiveOrderBook: Found '%1' → returning %2 bids, %3 asks [call #%4]")
+./libs/core/DataCache.cpp:263:        sLog_Cache(QString("⚠️ DATACACHE getLiveOrderBook: Symbol '%1' NOT FOUND in live books! Available symbols: %2 [miss #%3]")
+./libs/gui/UnifiedGridRenderer.cpp:38:        sLog_Performance("🧹 Cache cleanup #" << ++cleanupCount << " - geometry cache reset for fresh rendering");
+./libs/gui/UnifiedGridRenderer.cpp:44:    sLog_Init("🎯 UnifiedGridRenderer: Initialized with LiquidityTimeSeriesEngine");
+./libs/gui/UnifiedGridRenderer.cpp:45:    sLog_Init("📊 Configuration: 100ms order book snapshots for smooth rendering");
+./libs/gui/UnifiedGridRenderer.cpp:46:    sLog_Init("⚡ Ready for real-time liquidity data with proper timing");
+./libs/gui/UnifiedGridRenderer.cpp:66:            sLog_Init("🎯 UNIFIED RENDERER VIEWPORT INITIALIZED:");
+./libs/gui/UnifiedGridRenderer.cpp:67:            sLog_Init("   Time: " << m_visibleTimeStart_ms << " - " << m_visibleTimeEnd_ms);
+./libs/gui/UnifiedGridRenderer.cpp:68:            sLog_Init("   Price: $" << m_minPrice << " - $" << m_maxPrice);
+./libs/gui/UnifiedGridRenderer.cpp:69:            sLog_Init("   Based on real trade: $" << trade.price << " at " << timestamp);
+./libs/gui/UnifiedGridRenderer.cpp:79:            sLog_Render("📊 TRADE UPDATE: Triggering geometry update [Trade #" << tradeUpdateCount << "]");
+./libs/gui/UnifiedGridRenderer.cpp:86:        sLog_Trades("🎯 UNIFIED RENDERER TRADE #" << realTradeCount << ": $" << trade.price 
+./libs/gui/UnifiedGridRenderer.cpp:117:            sLog_Init("🎯 UNIFIED RENDERER VIEWPORT FROM ORDER BOOK:");
+./libs/gui/UnifiedGridRenderer.cpp:118:            sLog_Init("   Mid Price: $" << midPrice);
+./libs/gui/UnifiedGridRenderer.cpp:119:            sLog_Init("   Price Window: $" << m_minPrice << " - $" << m_maxPrice);
+./libs/gui/UnifiedGridRenderer.cpp:129:        sLog_Network("🎯 UNIFIED RENDERER ORDER BOOK #" << orderBookCount 
+./libs/gui/UnifiedGridRenderer.cpp:146:        sLog_DebugCoords("🎯 VIEWPORT CHANGED: Will rebuild geometry on next paint");
+./libs/gui/UnifiedGridRenderer.cpp:156:        sLog_DebugCoords("🎯 UNIFIED RENDERER VIEWPORT #" << viewportChangeCount 
+./libs/gui/UnifiedGridRenderer.cpp:199:            sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height() << " [Change #" << geometryChangeCount << "]");
+./libs/gui/UnifiedGridRenderer.cpp:224:        sLog_Render("🔍 UNIFIED GRID PAINT #" << paintCallCount 
+./libs/gui/UnifiedGridRenderer.cpp:292:                sLog_Render("🎯 OPTIMIZED RENDER: " << m_visibleCells.size() << " cells rendered (rebuild) + cache updated [Rebuild #" << optimizedRenderCount << "]");
+./libs/gui/UnifiedGridRenderer.cpp:307:                sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild [Transform #" << transformCount << "]");
+./libs/gui/UnifiedGridRenderer.cpp:328:        sLog_Performance("📊 PERF SUMMARY (100 frames): FPS=" << m_perfMetrics.getCurrentFPS() 
+./libs/gui/UnifiedGridRenderer.cpp:337:        sLog_Render("🎯 UNIFIED GRID RENDER COMPLETE (" << m_perfMetrics.renderTime_us / 1000.0 << "ms) [Frame #" << renderLogCount << "]");
+./libs/gui/UnifiedGridRenderer.cpp:363:            sLog_Render("🔄 AUTO-TIMEFRAME UPDATE: " << optimalTimeframe << "ms (viewport-optimized)");
+./libs/gui/UnifiedGridRenderer.cpp:366:        sLog_Render("🎯 MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
+./libs/gui/UnifiedGridRenderer.cpp:380:        sLog_Render("🎯 UNIFIED RENDERER COVERAGE #" << coverageCount
+./libs/gui/UnifiedGridRenderer.cpp:802:    sLog_Init("🎯 CLEAR DATA: Cleared rendering data");
+./libs/gui/UnifiedGridRenderer.cpp:811:    sLog_Init("🎯 UnifiedGridRenderer: Data cleared");
+./libs/gui/UnifiedGridRenderer.cpp:816:    sLog_Chart("🎯 Manual time resolution override requested: " << resolution_ms << "ms");
+./libs/gui/UnifiedGridRenderer.cpp:824:        sLog_Chart("🎯 Manual price resolution override set to: $" << resolution);
+./libs/gui/UnifiedGridRenderer.cpp:831:    sLog_Chart("Grid resolution set to: " << timeResMs << " ms, $" << priceRes);
+./libs/gui/UnifiedGridRenderer.cpp:971:    sLog_Render("📊 CACHE UPDATE: Loaded " << m_geometryCache.cachedCells.size() 
+./libs/gui/UnifiedGridRenderer.cpp:991:        sLog_Render("🔍 CACHE CHECK #" << checkCount << ":");
+./libs/gui/UnifiedGridRenderer.cpp:992:        sLog_Render("   Current viewport: time[" << m_visibleTimeStart_ms << "-" << m_visibleTimeEnd_ms << "] price[$" << m_minPrice << "-$" << m_maxPrice << "]");
+./libs/gui/UnifiedGridRenderer.cpp:993:        sLog_Render("   Cached bounds: time[" << m_geometryCache.cacheTimeStart_ms << "-" << m_geometryCache.cacheTimeEnd_ms << "] price[$" << m_geometryCache.cacheMinPrice << "-$" << m_geometryCache.cacheMaxPrice << "]");
+./libs/gui/UnifiedGridRenderer.cpp:1013:        sLog_Render("   timeOutOfBounds=" << (timeOutOfBounds ? "YES" : "NO")
+./libs/gui/UnifiedGridRenderer.cpp:1110:        sLog_Chart("🎯 Grid mode set to:" << (mode == 0 ? "FINE" : mode == 1 ? "MEDIUM" : "COARSE"));
+./libs/gui/UnifiedGridRenderer.cpp:1131:        sLog_Chart("🎯 MANUAL TIMEFRAME CHANGE: " << timeframe_ms << "ms (auto-suggestion disabled for 10s)");
+./libs/gui/UnifiedGridRenderer.cpp:1148:    sLog_Chart("🔍 Zoom In - Factor: " << m_zoomFactor);
+./libs/gui/UnifiedGridRenderer.cpp:1163:    sLog_Chart("🔍 Zoom Out - Factor: " << m_zoomFactor);
+./libs/gui/UnifiedGridRenderer.cpp:1192:    sLog_Chart("🔍 Zoom Reset");
+./libs/gui/UnifiedGridRenderer.cpp:1209:    sLog_Chart("👈 Pan Left - Offset: " << m_panOffsetTime_ms);
+./libs/gui/UnifiedGridRenderer.cpp:1226:    sLog_Chart("👉 Pan Right - Offset: " << m_panOffsetTime_ms);
+./libs/gui/UnifiedGridRenderer.cpp:1241:    sLog_Chart("👆 Pan Up - Offset: " << m_panOffsetPrice);
+./libs/gui/UnifiedGridRenderer.cpp:1256:    sLog_Chart("👇 Pan Down - Offset: " << m_panOffsetPrice);
+./libs/gui/UnifiedGridRenderer.cpp:1279:    sLog_Chart("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
+./libs/gui/UnifiedGridRenderer.cpp:1356:    sLog_Chart("🖱️ Mouse drag started - auto-scroll disabled");
+./libs/gui/UnifiedGridRenderer.cpp:1440:            sLog_Chart("🎯 Click to center - centered on: " << clickTime << "ms, $" << clickPrice);
+./libs/gui/UnifiedGridRenderer.cpp:1442:            sLog_Chart("🖱️ Mouse drag completed - total time: " << totalDragTime << "ms");
+./libs/gui/UnifiedGridRenderer.cpp:1527:            sLog_Performance("🔍 ZOOM CACHE REFRESH: Viewport moved outside cache bounds");
+./libs/gui/UnifiedGridRenderer.cpp:1535:    sLog_Chart("🖱️ Mouse wheel zoom - factor: " << m_zoomFactor 
+./libs/gui/UnifiedGridRenderer.cpp:1546:    sLog_Performance("📊 Performance overlay: " << (m_perfMetrics.showOverlay ? "ENABLED" : "DISABLED"));
+./libs/gui/LiquidityTimeSeriesEngine.cpp:35:    sLog_Init("🎯 LiquidityTimeSeriesEngine: Initialized with " << m_timeframes.size() << " timeframes");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:36:    sLog_Init("   Base resolution: " << m_baseTimeframe_ms << "ms");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:37:    sLog_Init("   Price resolution: $" << m_priceResolution);
+./libs/gui/LiquidityTimeSeriesEngine.cpp:38:    sLog_Init("   Max history per timeframe: " << m_maxHistorySlices << " slices");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:103:        sLog_Cache("🎯 VIEWPORT-FILTERED SNAPSHOT #" << snapshotCount 
+./libs/gui/LiquidityTimeSeriesEngine.cpp:160:        sLog_Init("🎯 Added timeframe: " << duration_ms << "ms");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:171:        sLog_Init("🎯 Removed timeframe: " << duration_ms << "ms");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:194:                sLog_RenderDetail("🚀 SUGGEST TIMEFRAME: " << timeframe << "ms for span " 
+./libs/gui/LiquidityTimeSeriesEngine.cpp:198:                sLog_RenderDetail("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (no data available)");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:201:            sLog_RenderDetail("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (" << expectedSlices << " > " << maxSlices << " slices)");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:209:            sLog_RenderDetail("🚀 FALLBACK TIMEFRAME: " << timeframe << "ms (finest with data)");
+./libs/gui/LiquidityTimeSeriesEngine.cpp:222:        sLog_Init("🎯 Display mode changed to: " << 
+./libs/gui/LiquidityTimeSeriesEngine.cpp:345:        sLog_Cache("🎯 FINALIZED SLICE #" << sliceCount
+./libs/gui/LiquidityTimeSeriesEngine.cpp:382:    sLog_Init("🎯 Rebuilt timeframe " << timeframe_ms << "ms: " << slices.size() << " slices");
+./libs/gui/StreamController.cpp:13:    sLog_Init("StreamController created");
+./libs/gui/StreamController.cpp:18:    sLog_Init("StreamController destroyed");
+./libs/gui/StreamController.cpp:22:    sLog_Init("Starting StreamController...");
+./libs/gui/StreamController.cpp:45:        sLog_Init("✅ Connected to real-time WebSocket signals");
+./libs/gui/StreamController.cpp:47:        sLog_Warning("⚠️ MarketDataCore not available, falling back to polling");
+./libs/gui/StreamController.cpp:62:    sLog_Init("StreamController started successfully");
+./libs/gui/StreamController.cpp:66:    sLog_Init("Stopping StreamController...");
+./libs/gui/StreamController.cpp:91:    sLog_Init("StreamController stopped");
+./libs/gui/StreamController.cpp:100:        sLog_Trades("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
+./libs/gui/StreamController.cpp:114:    //sLog_Network("🔥 REAL-TIME: Received order book for" << QString::fromStdString(orderBook.product_id)
+./libs/gui/StreamController.cpp:123:        sLog_Connection("✅ WebSocket connection established");
+./libs/gui/StreamController.cpp:125:        sLog_Connection("❌ WebSocket connection lost");
+./libs/gui/StreamController.cpp:141:            sLog_Trades("🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol));
+./libs/gui/StreamController.cpp:155:                sLog_Trades("📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
+./libs/gui/StreamController.cpp:176:            sLog_Network("Polled client for" << QString::fromStdString(symbol) 
+./libs/gui/GridIntegrationAdapter.cpp:22:    sLog_Init("🎯 GridIntegrationAdapter: Initialized as primary data pipeline hub");
+./libs/gui/GridIntegrationAdapter.cpp:47:        sLog_Init("🎯 GridIntegrationAdapter: Connected to UnifiedGridRenderer");
+./libs/gui/GridIntegrationAdapter.cpp:93:    sLog_Trades("🎯 Fed trade to UnifiedGridRenderer: price=" << trade.price << " size=" << trade.size);
+./libs/gui/GridIntegrationAdapter.cpp:102:    sLog_Network("🎯 Fed order book to UnifiedGridRenderer - bids:" << orderBook.bids.size() << "asks:" << orderBook.asks.size());
+./libs/gui/GridIntegrationAdapter.cpp:129:    sLog_Performance("🧹 GridIntegrationAdapter: Trimmed buffers - trades:" << m_tradeBuffer.size() 
+./libs/gui/GridIntegrationAdapter.cpp:138:        sLog_Performance(QString("🕒 Batch interval set to %1 ms (%2 FPS)").arg(intervalMs).arg(1000.0/intervalMs, 0, 'f', 1));

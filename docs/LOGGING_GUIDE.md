@@ -2,16 +2,42 @@
 
 ## Quick Start
 
-### 🔥 Immediate Relief from Log Spam
+### 🔥 Immediate Relief from Render Log Spam
 
-**Problem**: Your logs are flooded with 500+ lines in 3 seconds
+**Problem**: Your logs are flooded with render messages like "OPTIMIZED RENDER", "UNIFIED GRID RENDER COMPLETE", "CACHE CHECK"
 
-**Solution**: Set this environment variable:
+**Solution**: The render logging has been throttled to reduce spam:
+- Render completion: Now logs every 50th frame instead of every frame
+- Optimized render: Now logs every 10th rebuild instead of every rebuild  
+- Transform updates: Now logs every 25th transform instead of every transform
+- Cache checks: Reduced frequency from every 50th to every 100th check
+- Trade updates: Now logs every 20th trade instead of every trade
+- Geometry changes: Now logs every 5th change instead of every change
+
+**For even cleaner logs**, set this environment variable:
 ```bash
 export QT_LOGGING_RULES="sentinel.render.detail.debug=false;sentinel.debug.*.debug=false"
 ```
 
 This disables the high-frequency rendering spam while keeping useful logs.
+
+### 🚀 Render Log Throttling Implementation
+
+The render system now uses intelligent throttling to reduce log spam while preserving useful information:
+
+**Throttled Messages:**
+- `🎯 UNIFIED GRID RENDER COMPLETE`: Every 50th frame (was every frame)
+- `🎯 OPTIMIZED RENDER`: Every 10th rebuild (was every rebuild)  
+- `🎯 TRANSFORM-ONLY UPDATE`: Every 25th transform (was every transform)
+- `🔍 CACHE CHECK`: Every 100th check (was every 50th)
+- `📊 TRADE UPDATE`: Every 20th trade (was every trade)
+- `🎯 UNIFIED RENDERER GEOMETRY CHANGED`: Every 5th change (was every change)
+
+**Implementation Details:**
+- Uses static counters with modulo operations
+- Preserves frame/rebuild counts in log messages for debugging
+- Maintains all functionality while reducing noise
+- Can be adjusted by modifying the modulo values in `UnifiedGridRenderer.cpp`
 
 ## Environment Variable Control
 
