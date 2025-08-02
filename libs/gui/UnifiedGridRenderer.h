@@ -13,17 +13,19 @@
 #include <mutex>
 #include "LiquidityTimeSeriesEngine.h"
 #include "TradeData.h"
+#include "render/GridTypes.hpp"
+#include "render/GridViewState.hpp"
+
+// Forward declarations for new modular architecture
+class GridSceneNode;
+class RenderDiagnostics;
+class IRenderStrategy;
 
 /**
- * 🎯 UNIFIED GRID RENDERER
+ * 🎯 UNIFIED GRID RENDERER - SLIM QML ADAPTER
  * 
- * Single rendering component that can display:
- * - Dense liquidity heatmap (Bookmap style)
- * - Trade flow visualization
- * - Volume profile bars
- * - Aggregated OHLC candles
- * 
- * All using the same unified coordinate system with proper LOD.
+ * Slim QML adapter that delegates to the V2 modular architecture.
+ * Maintains QML interface compatibility while using the new modular system.
  */
 class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
@@ -81,28 +83,13 @@ private:
     mutable std::mutex m_dataMutex;
     std::atomic<bool> m_geometryDirty{true};
     
-    // GPU vertex structures
-    struct GridVertex {
-        float x, y;           // Position
-        float r, g, b, a;     // Color
-        float intensity;      // Volume/liquidity intensity
-    };
-    
-    struct CellInstance {
-        QRectF screenRect;
-        QColor color;
-        double intensity;
-        double liquidity;
-        bool isBid;
-        int64_t timeSlot;
-        double priceLevel;
-    };
+    // CellInstance now defined in render/GridTypes.hpp
     
     // Rendering data
     std::vector<CellInstance> m_visibleCells;
     std::vector<std::pair<double, double>> m_volumeProfile;
     
-    // 🚀 PERSISTENT GEOMETRY CACHE (for performance)
+    // Legacy geometry cache (simplified for V2)
     struct CachedGeometry {
         QSGGeometryNode* node = nullptr;
         QMatrix4x4 originalTransform;
@@ -118,46 +105,19 @@ private:
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
     
-    // 📊 PROFESSIONAL PERFORMANCE MONITORING (like TradingView/Bookmap)
-    struct PerformanceMetrics {
-        QElapsedTimer frameTimer;
-        std::vector<qint64> frameTimes;  // Last 60 frame times in microseconds
-        qint64 lastFrameTime_us = 0;
-        qint64 renderTime_us = 0;
-        qint64 cacheHits = 0;
-        qint64 cacheMisses = 0;
-        qint64 geometryRebuilds = 0;
-        qint64 transformsApplied = 0;
-        size_t cachedCellCount = 0;
-        bool showOverlay = false;
-        
-        double getCurrentFPS() const {
-            if (frameTimes.size() < 2) return 0.0;
-            qint64 totalTime = 0;
-            for (qint64 time : frameTimes) totalTime += time;
-            return (frameTimes.size() - 1) * 1000000.0 / totalTime;  // Convert μs to FPS
-        }
-        
-        double getAverageRenderTime_ms() const {
-            if (frameTimes.empty()) return 0.0;
-            qint64 totalTime = 0;
-            for (qint64 time : frameTimes) totalTime += time;
-            return totalTime / (frameTimes.size() * 1000.0);  // Convert μs to ms
-        }
-        
-        double getCacheHitRate() const {
-            qint64 total = cacheHits + cacheMisses;
-            return (total > 0) ? (cacheHits * 100.0 / total) : 0.0;
-        }
-    };
-    
-    mutable PerformanceMetrics m_perfMetrics;
-    mutable size_t m_bytesUploadedThisFrame = 0;
-    mutable std::atomic<size_t> m_totalBytesUploaded{0};
-    static constexpr double PCIE_BUDGET_MB_PER_SECOND = 200.0;
+    // V1 state (minimal for compatibility)
+    OrderBook m_latestOrderBook;
+    bool m_hasValidOrderBook = false;
+    bool m_timeWindowValid = false;
+    qint64 m_visibleTimeStart_ms = 0;
+    qint64 m_visibleTimeEnd_ms = 0;
+    double m_minPrice = 0.0;
+    double m_maxPrice = 0.0;
+    QPointF m_panVisualOffset = {0.0, 0.0};
 
 public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
+    ~UnifiedGridRenderer(); // Custom destructor needed for unique_ptr with incomplete types
     
     // Property accessors
     RenderMode renderMode() const { return m_renderMode; }
@@ -166,19 +126,19 @@ public:
     int maxCells() const { return m_maxCells; }
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
     double minVolumeFilter() const { return m_minVolumeFilter; }
-    bool autoScrollEnabled() const { return m_autoScrollEnabled; }
+    bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     
     // 🚀 VIEWPORT BOUNDS: Getters for QML properties
-    qint64 getVisibleTimeStart() const { return m_visibleTimeStart_ms; }
-    qint64 getVisibleTimeEnd() const { return m_visibleTimeEnd_ms; }
-    double getMinPrice() const { return m_minPrice; }
-    double getMaxPrice() const { return m_maxPrice; }
+    qint64 getVisibleTimeStart() const;
+    qint64 getVisibleTimeEnd() const; 
+    double getMinPrice() const;
+    double getMaxPrice() const;
     
     // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     // 🚀 VISUAL TRANSFORM: Getter for QML pan offset
-    QPointF getPanVisualOffset() const { return m_panVisualOffset; }
+    QPointF getPanVisualOffset() const;
     
     // 🎯 DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
@@ -207,9 +167,9 @@ public:
     // 📊 PERFORMANCE MONITORING API
     Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
-    Q_INVOKABLE double getCurrentFPS() const { return m_perfMetrics.getCurrentFPS(); }
-    Q_INVOKABLE double getAverageRenderTime() const { return m_perfMetrics.getAverageRenderTime_ms(); }
-    Q_INVOKABLE double getCacheHitRate() const { return m_perfMetrics.getCacheHitRate(); }
+    Q_INVOKABLE double getCurrentFPS() const;
+    Q_INVOKABLE double getAverageRenderTime() const;
+    Q_INVOKABLE double getCacheHitRate() const;
     
     // 🔥 GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
@@ -266,63 +226,28 @@ private:
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
     
-    // 🚀 OPTIMIZED RENDERING METHODS (cache + transform)
-    void updateCachedGeometry();  // Only when data changes
-    bool shouldRefreshCache() const;
-    QMatrix4x4 calculateViewportTransform() const;
-    void applyTransformToCache(const QMatrix4x4& transform);
-    
-    // Legacy methods (for data updates)
+    // V2 data processing methods
     void updateVisibleCells();
     void updateVolumeProfile();
-    QSGNode* createHeatmapNode(const std::vector<CellInstance>& cells);
-    QSGNode* createTradeFlowNode(const std::vector<CellInstance>& cells);
-    QSGNode* createVolumeProfileNode(const std::vector<std::pair<double, double>>& profile);
-    QSGNode* createCandleNode(const std::vector<CellInstance>& cells);
-    
-    // Color calculation for different modes
-    QColor calculateHeatmapColor(double liquidity, bool isBid, double intensity) const;
-    QColor calculateTradeFlowColor(double liquidity, bool isBid, double intensity) const;
-    QColor calculateCandleColor(double liquidity, bool isBid, double intensity) const;
-    
-    // Utility methods
-    void ensureGeometryCapacity(QSGGeometryNode* node, int vertexCount);
-    double calculateIntensity(double liquidity) const;
     
     // Liquidity time series integration
     void createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice);
     void createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
     QRectF timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const;
     
-    // 🚀 OPTIMIZED CACHE METHODS
-    void createCachedLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
-    QRectF timeSliceToCacheRect(const LiquidityTimeSlice& slice, double price) const;
+    // Color calculation methods (delegated to strategies in V2)
+    QColor calculateHeatmapColor(double liquidity, bool isBid, double intensity) const;
+    double calculateIntensity(double liquidity) const;
     
-    // Viewport management helpers
-    void updateViewportFromZoom();
-    void updateViewportFromPan();
+    // 🚀 NEW MODULAR ARCHITECTURE (V2)
+    std::unique_ptr<GridViewState> m_viewState;
+    std::unique_ptr<RenderDiagnostics> m_diagnostics;
+    std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
+    std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
+    std::unique_ptr<IRenderStrategy> m_candleStrategy;
     
-    // Viewport and order book state
-    int64_t m_visibleTimeStart_ms = 0;
-    int64_t m_visibleTimeEnd_ms = 0;
-    double m_minPrice = 0.0;
-    double m_maxPrice = 0.0;
-    bool m_timeWindowValid = false;
-    OrderBook m_latestOrderBook;
-    bool m_hasValidOrderBook = false;
-    
-    // Pan/zoom state
-    bool m_autoScrollEnabled = true;
-    double m_zoomFactor = 1.0;
-    double m_panOffsetTime_ms = 0.0;
-    double m_panOffsetPrice = 0.0;
-    
-    // Mouse interaction state
-    bool m_isDragging = false;
-    QPointF m_lastMousePos;
-    QPointF m_initialMousePos;
-    
-    // 🚀 OPTIMIZATION: Separate visual pan from data pan
-    QPointF m_panVisualOffset; // Temporary visual-only offset during a mouse drag
-    QElapsedTimer m_interactionTimer;
+    // Helper methods for V2 architecture
+    IRenderStrategy* getCurrentStrategy() const;
+    void initializeV2Architecture();
+    QSGNode* updatePaintNodeV2(QSGNode* oldNode);
 };
