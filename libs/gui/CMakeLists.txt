@@ -18,6 +18,25 @@ set(GRID_CORE_SOURCES
     CoordinateSystem.cpp
     CoordinateSystem.h
     ChartMode.h
+    
+    # New modular render architecture (V2)
+    render/IRenderStrategy.hpp
+    render/IRenderStrategy.cpp
+    render/GridViewState.hpp
+    render/GridViewState.cpp
+    render/GridSceneNode.hpp
+    render/GridSceneNode.cpp
+    render/RenderDiagnostics.hpp
+    render/RenderDiagnostics.cpp
+    render/RenderTypes.hpp
+    render/RenderConfig.hpp
+    render/GridTypes.hpp
+    render/strategies/HeatmapStrategy.hpp
+    render/strategies/HeatmapStrategy.cpp
+    render/strategies/TradeFlowStrategy.hpp
+    render/strategies/TradeFlowStrategy.cpp
+    render/strategies/CandleStrategy.hpp
+    render/strategies/CandleStrategy.cpp
 )
 
 # 🎯 PHASE 5: Legacy components ANNIHILATED! Pure grid-only now!

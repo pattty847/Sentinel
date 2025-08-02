@@ -8,6 +8,16 @@
 #include <algorithm>
 #include <cmath>
 
+// New modular architecture includes
+#include "render/GridTypes.hpp"
+#include "render/GridViewState.hpp"
+#include "render/GridSceneNode.hpp" 
+#include "render/RenderDiagnostics.hpp"
+#include "render/IRenderStrategy.hpp"
+#include "render/strategies/HeatmapStrategy.hpp"
+#include "render/strategies/TradeFlowStrategy.hpp"
+#include "render/strategies/CandleStrategy.hpp"
+
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
     , m_liquidityEngine(std::make_unique<LiquidityTimeSeriesEngine>(this))
@@ -41,9 +51,14 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     });
     cacheCleanupTimer->start(30000);  // 30 seconds
     
-    sLog_Init("🎯 UnifiedGridRenderer: Initialized with LiquidityTimeSeriesEngine");
-    sLog_Init("📊 Configuration: 100ms order book snapshots for smooth rendering");
-    sLog_Init("⚡ Ready for real-time liquidity data with proper timing");
+    // Initialize new modular architecture
+    initializeV2Architecture();
+    sLog_Init("🚀 UnifiedGridRenderer V2: Modular architecture initialized");
+}
+
+UnifiedGridRenderer::~UnifiedGridRenderer() {
+    // Default destructor implementation 
+    // Required for std::unique_ptr with incomplete types in header
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
@@ -68,6 +83,11 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
             sLog_Init("   Price: $" << m_minPrice << " - $" << m_maxPrice);
             sLog_Init("   Based on real trade: $" << trade.price << " at " << timestamp);
             
+            // 🚀 Sync ViewState with initialized viewport
+            if (m_viewState) {
+                m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+            }
+            
             // 🚀 Emit signal to update QML axis labels when viewport is first initialized
             emit viewportChanged();
         }
@@ -76,7 +96,7 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
         // 🚀 THROTTLED TRADE LOGGING: Only log every 20th trade to reduce spam
         static int tradeUpdateCount = 0;
         if (++tradeUpdateCount % 20 == 0) {
-            sLog_Render("📊 TRADE UPDATE: Triggering geometry update [Trade #" << tradeUpdateCount << "]");
+            sLog_Trades("📊 TRADE UPDATE: Triggering geometry update [Trade #" << tradeUpdateCount << "]");
         }
     }
     
@@ -117,6 +137,11 @@ void UnifiedGridRenderer::onOrderBookUpdated(const OrderBook& book) {
             sLog_Init("🎯 UNIFIED RENDERER VIEWPORT FROM ORDER BOOK:");
             sLog_Init("   Mid Price: $" << midPrice);
             sLog_Init("   Price Window: $" << m_minPrice << " - $" << m_maxPrice);
+            
+            // 🚀 Sync ViewState with initialized viewport
+            if (m_viewState) {
+                m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+            }
         }
         
         // 🚀 Emit signal to update QML axis labels when viewport is first initialized
@@ -206,138 +231,8 @@ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRect
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
-    // 📊 PERFORMANCE MONITORING: Start frame timing
-    QElapsedTimer frameTimer;
-    frameTimer.start();
-    
-    // Update frame time history (keep last 60 frames)
-    if (m_perfMetrics.frameTimes.size() >= 60) {
-        m_perfMetrics.frameTimes.erase(m_perfMetrics.frameTimes.begin());
-    }
-    if (m_perfMetrics.lastFrameTime_us > 0) {
-        m_perfMetrics.frameTimes.push_back(frameTimer.nsecsElapsed() / 1000 - m_perfMetrics.lastFrameTime_us);
-    }
-    
-    // 🔍 DEBUG: Log the first 10 paint calls
-    static int paintCallCount = 0;
-    if (++paintCallCount <= 10) {
-        sLog_Render("🔍 UNIFIED GRID PAINT #" << paintCallCount 
-                 << " size=" << width() << "x" << height() 
-                 << " visible=" << (isVisible() ? "YES" : "NO")
-                 << " geometryDirty=" << (m_geometryDirty.load() ? "YES" : "NO")
-                 << " FPS=" << m_perfMetrics.getCurrentFPS());
-    }
-    
-    if (width() <= 0 || height() <= 0) {
-        return oldNode;
-    }
-    
-    // 🚀 PERFORMANCE OPTIMIZATION: Use persistent geometry cache + transforms
-    auto* rootNode = static_cast<QSGTransformNode*>(oldNode);
-    bool isNewNode = !rootNode;
-    if (isNewNode) {
-        rootNode = new QSGTransformNode();
-        m_rootTransformNode = rootNode;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        // 🚀 PERFORMANCE CRITICAL: Check if we need cache refresh or just transform update
-        bool needsRebuild = m_geometryDirty.load() || shouldRefreshCache() || isNewNode;
-        
-        // 🎯 KEY OPTIMIZATION: Always update transform matrix for smooth interaction
-        if (needsRebuild) {
-            // This block is expensive. We want to avoid it during a pan.
-            // Clear previous children only when rebuilding
-            rootNode->removeAllChildNodes();
-            
-            // Update visible cell data
-            updateVisibleCells();
-            
-            // Create appropriate rendering nodes based on mode
-            QSGNode* mainNode = nullptr;
-            switch (m_renderMode) {
-                case RenderMode::LiquidityHeatmap:
-                    mainNode = createHeatmapNode(m_visibleCells);
-                    break;
-                    
-                case RenderMode::TradeFlow:
-                    mainNode = createTradeFlowNode(m_visibleCells);
-                    break;
-                    
-                case RenderMode::VolumeCandles:
-                    mainNode = createCandleNode(m_visibleCells);
-                    break;
-                    
-                case RenderMode::OrderBookDepth:
-                    mainNode = createHeatmapNode(m_visibleCells); // Similar to heatmap
-                    break;
-            }
-            
-            if (mainNode) {
-                rootNode->appendChildNode(mainNode);
-            }
-            
-            // 🎯 UPDATE GEOMETRY CACHE after successful rebuild
-            m_geometryCache.isValid = true;
-            m_geometryCache.cacheTimeStart_ms = m_visibleTimeStart_ms;
-            m_geometryCache.cacheTimeEnd_ms = m_visibleTimeEnd_ms;
-            m_geometryCache.cacheMinPrice = m_minPrice;
-            m_geometryCache.cacheMaxPrice = m_maxPrice;
-            
-            // 🚀 THROTTLED OPTIMIZED RENDER LOGGING: Only log every 10th rebuild to reduce spam
-            static int optimizedRenderCount = 0;
-            if (++optimizedRenderCount % 10 == 0) {
-                sLog_Render("🎯 OPTIMIZED RENDER: " << m_visibleCells.size() << " cells rendered (rebuild) + cache updated [Rebuild #" << optimizedRenderCount << "]");
-            }
-            
-            // Add volume profile if enabled (TODO: could also be cached)
-            if (m_showVolumeProfile) {
-                updateVolumeProfile();
-                QSGNode* profileNode = createVolumeProfileNode(m_volumeProfile);
-                if (profileNode) {
-                    rootNode->appendChildNode(profileNode);
-                }
-            }
-        } else {
-            // 🚀 THROTTLED TRANSFORM LOGGING: Only log every 25th transform to reduce spam
-            static int transformCount = 0;
-            if (++transformCount % 25 == 0) {
-                sLog_Render("🎯 TRANSFORM-ONLY UPDATE: Smooth pan/zoom without geometry rebuild [Transform #" << transformCount << "]");
-            }
-        }
-
-        // 🚀 ALWAYS apply transform. During a pan, this is the ONLY thing that happens.
-        QMatrix4x4 transform = calculateViewportTransform();
-        // Apply the temporary visual pan offset
-        transform.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
-        rootNode->setMatrix(transform);
-    }
-    
-    m_geometryDirty.store(false);
-    m_needsDataRefresh = false;
-    
-    // 📊 PERFORMANCE MONITORING: End frame timing
-    m_perfMetrics.renderTime_us = frameTimer.nsecsElapsed() / 1000;
-    m_perfMetrics.lastFrameTime_us = frameTimer.nsecsElapsed() / 1000;
-    
-    // Log performance summary every 100 frames
-    static int frameCount = 0;
-    if (++frameCount % 100 == 0) {
-        sLog_Performance("📊 PERF SUMMARY (100 frames): FPS=" << m_perfMetrics.getCurrentFPS() 
-                      << " AvgRender=" << m_perfMetrics.getAverageRenderTime_ms() << "ms"
-                      << " CacheHitRate=" << m_perfMetrics.getCacheHitRate() << "%"
-                      << " CachedCells=" << m_perfMetrics.cachedCellCount);
-    }
-    
-    // 🚀 THROTTLED RENDER LOGGING: Only log every 50th frame to reduce spam
-    static int renderLogCount = 0;
-    if (++renderLogCount % 50 == 0) {
-        sLog_Render("🎯 UNIFIED GRID RENDER COMPLETE (" << m_perfMetrics.renderTime_us / 1000.0 << "ms) [Frame #" << renderLogCount << "]");
-    }
-    
-    return rootNode;
+    // Route to V2 implementation
+    return updatePaintNodeV2(oldNode);
 }
 
 void UnifiedGridRenderer::updateVisibleCells() {
@@ -453,230 +348,7 @@ QRectF UnifiedGridRenderer::timeSliceToScreenRect(const LiquidityTimeSlice& slic
     return QRectF(topLeft, bottomRight);
 }
 
-QSGNode* UnifiedGridRenderer::createHeatmapNode(const std::vector<CellInstance>& cells) {
-    if (cells.empty()) return nullptr;
-    
-    auto* node = new QSGGeometryNode();
-    
-    // Create geometry for quads (6 vertices per cell)
-    int vertexCount = cells.size() * 6;
-    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    
-    auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    
-    for (size_t i = 0; i < cells.size(); ++i) {
-        const auto& cell = cells[i];
-        const QRectF& rect = cell.screenRect;
-        
-        // Convert color to vertex format
-        uchar r = static_cast<uchar>(cell.color.red());
-        uchar g = static_cast<uchar>(cell.color.green());
-        uchar b = static_cast<uchar>(cell.color.blue());
-        uchar a = static_cast<uchar>(cell.color.alpha());
-        
-        size_t baseIdx = i * 6;
-        
-        // Two triangles forming a quad
-        // Triangle 1: top-left, top-right, bottom-left
-        vertices[baseIdx + 0].set(rect.left(), rect.top(), r, g, b, a);
-        vertices[baseIdx + 1].set(rect.right(), rect.top(), r, g, b, a);
-        vertices[baseIdx + 2].set(rect.left(), rect.bottom(), r, g, b, a);
-        
-        // Triangle 2: top-right, bottom-right, bottom-left
-        vertices[baseIdx + 3].set(rect.right(), rect.top(), r, g, b, a);
-        vertices[baseIdx + 4].set(rect.right(), rect.bottom(), r, g, b, a);
-        vertices[baseIdx + 5].set(rect.left(), rect.bottom(), r, g, b, a);
-    }
-    
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry);
-    
-    // Use vertex color material for per-vertex colors
-    auto* material = new QSGVertexColorMaterial();
-    material->setFlag(QSGMaterial::Blending);
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial);
-    
-    // Track bandwidth usage
-    m_bytesUploadedThisFrame += vertexCount * sizeof(QSGGeometry::ColoredPoint2D);
-    
-    return node;
-}
-
-QSGNode* UnifiedGridRenderer::createTradeFlowNode(const std::vector<CellInstance>& cells) {
-    if (cells.empty()) return nullptr;
-    
-    auto* node = new QSGGeometryNode();
-    
-    // Create geometry for circles (similar to trade dots but grid-based)
-    int vertexCount = cells.size() * 6; // 6 vertices per circle (2 triangles)
-    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    
-    auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    
-    for (size_t i = 0; i < cells.size(); ++i) {
-        const auto& cell = cells[i];
-        const QRectF& rect = cell.screenRect;
-        
-        // Convert color to vertex format
-        uchar r = static_cast<uchar>(cell.color.red());
-        uchar g = static_cast<uchar>(cell.color.green());
-        uchar b = static_cast<uchar>(cell.color.blue());
-        uchar a = static_cast<uchar>(cell.color.alpha());
-        
-        // Calculate circle radius based on volume
-        float radius = std::max(2.0f, static_cast<float>(cell.intensity * 10.0f));
-        QPointF center(rect.center());
-        
-        size_t baseIdx = i * 6;
-        
-        // Create a simple circle approximation with 2 triangles
-        // Triangle 1: center, top-left, top-right
-        vertices[baseIdx + 0].set(center.x(), center.y(), r, g, b, a);
-        vertices[baseIdx + 1].set(center.x() - radius, center.y() - radius, r, g, b, a);
-        vertices[baseIdx + 2].set(center.x() + radius, center.y() - radius, r, g, b, a);
-        
-        // Triangle 2: center, bottom-left, bottom-right
-        vertices[baseIdx + 3].set(center.x(), center.y(), r, g, b, a);
-        vertices[baseIdx + 4].set(center.x() - radius, center.y() + radius, r, g, b, a);
-        vertices[baseIdx + 5].set(center.x() + radius, center.y() + radius, r, g, b, a);
-    }
-    
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry);
-    
-    // Use vertex color material for per-vertex colors
-    auto* material = new QSGVertexColorMaterial();
-    material->setFlag(QSGMaterial::Blending);
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial);
-    
-    // Track bandwidth usage
-    m_bytesUploadedThisFrame += vertexCount * sizeof(QSGGeometry::ColoredPoint2D);
-    
-    return node;
-}
-
-QSGNode* UnifiedGridRenderer::createCandleNode(const std::vector<CellInstance>& cells) {
-    if (cells.empty()) return nullptr;
-    
-    auto* node = new QSGGeometryNode();
-    
-    // Create simple volume bars instead of OHLC candles
-    int vertexCount = cells.size() * 6; // 6 vertices per bar (2 triangles)
-    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    
-    auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    
-    for (size_t i = 0; i < cells.size(); ++i) {
-        const auto& cell = cells[i];
-        const QRectF& rect = cell.screenRect;
-        
-        // Convert color to vertex format
-        uchar r = static_cast<uchar>(cell.color.red());
-        uchar g = static_cast<uchar>(cell.color.green());
-        uchar b = static_cast<uchar>(cell.color.blue());
-        uchar a = static_cast<uchar>(cell.color.alpha());
-        
-        // Create a simple volume bar
-        float barWidth = static_cast<float>(rect.width() * 0.8); // 80% of cell width
-        float barHeight = static_cast<float>(rect.height() * cell.intensity);
-        float left = rect.center().x() - barWidth / 2;
-        float right = rect.center().x() + barWidth / 2;
-        float top = rect.center().y() - barHeight / 2;
-        float bottom = rect.center().y() + barHeight / 2;
-        
-        size_t baseIdx = i * 6;
-        
-        // Bar quad (2 triangles = 6 vertices)
-        vertices[baseIdx + 0].set(left, bottom, r, g, b, a);
-        vertices[baseIdx + 1].set(right, bottom, r, g, b, a);
-        vertices[baseIdx + 2].set(right, top, r, g, b, a);
-        vertices[baseIdx + 3].set(right, top, r, g, b, a);
-        vertices[baseIdx + 4].set(left, top, r, g, b, a);
-        vertices[baseIdx + 5].set(left, bottom, r, g, b, a);
-    }
-    
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry);
-    
-    auto* material = new QSGVertexColorMaterial();
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial);
-    
-    m_bytesUploadedThisFrame += vertexCount * sizeof(QSGGeometry::ColoredPoint2D);
-    
-    return node;
-}
-
-QSGNode* UnifiedGridRenderer::createVolumeProfileNode(const std::vector<std::pair<double, double>>& profile) {
-    if (profile.empty()) return nullptr;
-    
-    auto* node = new QSGGeometryNode();
-    
-    // Create horizontal bars for volume profile
-    int vertexCount = profile.size() * 6; // 6 vertices per bar
-    QSGGeometry* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    
-    auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    
-    // Find max volume for scaling
-    double maxVolume = 0.0;
-    for (const auto& [price, volume] : profile) {
-        maxVolume = std::max(maxVolume, volume);
-    }
-    
-    if (maxVolume <= 0) return nullptr;
-    
-    double maxBarWidth = width() * 0.2; // Max 20% of screen width
-    
-    for (size_t i = 0; i < profile.size(); ++i) {
-        const auto& [price, volume] = profile[i];
-        
-        // Map price to screen Y coordinate
-        double priceRange = m_maxPrice - m_minPrice;
-        double priceRatio = (price - m_minPrice) / priceRange;
-        float y = static_cast<float>((1.0 - priceRatio) * height());
-        
-        // Calculate bar dimensions
-        float barHeight = static_cast<float>(height() / profile.size());
-        float barWidth = static_cast<float>((volume / maxVolume) * maxBarWidth);
-        
-        float left = width() - barWidth;
-        float right = width();
-        float top = y - barHeight / 2;
-        float bottom = y + barHeight / 2;
-        
-        // Volume profile color (semi-transparent white)
-        uchar r = 255, g = 255, b = 255, a = 128;
-        
-        size_t baseIdx = i * 6;
-        
-        // Bar quad
-        vertices[baseIdx + 0].set(left, bottom, r, g, b, a);
-        vertices[baseIdx + 1].set(right, bottom, r, g, b, a);
-        vertices[baseIdx + 2].set(right, top, r, g, b, a);
-        vertices[baseIdx + 3].set(right, top, r, g, b, a);
-        vertices[baseIdx + 4].set(left, top, r, g, b, a);
-        vertices[baseIdx + 5].set(left, bottom, r, g, b, a);
-    }
-    
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry);
-    
-    auto* material = new QSGVertexColorMaterial();
-    material->setFlag(QSGMaterial::Blending);
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial);
-    
-    return node;
-}
-
-// Color calculation methods
+// Color calculation methods (delegated to strategies in V2)
 QColor UnifiedGridRenderer::calculateHeatmapColor(double liquidity, bool isBid, double intensity) const {
     intensity = std::min(intensity * m_intensityScale, 1.0);
     
@@ -698,29 +370,6 @@ QColor UnifiedGridRenderer::calculateHeatmapColor(double liquidity, bool isBid, 
     float alpha = 0.1f + intensity * 0.8f;
     
     return QColor::fromRgbF(r, g, b, alpha);
-}
-
-QColor UnifiedGridRenderer::calculateTradeFlowColor(double liquidity, bool isBid, double intensity) const {
-    intensity = std::min(intensity * m_intensityScale, 1.0);
-    
-    if (isBid) {
-        // Bid-heavy: Green
-        return QColor::fromRgbF(0.0f, 0.8f, 0.0f, 0.6f + intensity * 0.4f);
-    } else {
-        // Ask-heavy: Red
-        return QColor::fromRgbF(0.8f, 0.0f, 0.0f, 0.6f + intensity * 0.4f);
-    }
-}
-
-QColor UnifiedGridRenderer::calculateCandleColor(double liquidity, bool isBid, double intensity) const {
-    if (liquidity <= 0) return QColor(128, 128, 128, 128);
-    
-    // Green for high volume, red for low volume
-    if (intensity > 0.5) {
-        return QColor(0, 255, 0, 180); // High volume: Green
-    } else {
-        return QColor(255, 0, 0, 180); // Low volume: Red
-    }
 }
 
 double UnifiedGridRenderer::calculateIntensity(double liquidity) const {
@@ -924,176 +573,6 @@ QString UnifiedGridRenderer::getDetailedGridDebug() const {
     return debug;
 }
 
-// 🚀 PERFORMANCE OPTIMIZATION METHODS
-
-void UnifiedGridRenderer::updateCachedGeometry() {
-    // 🚀 BALANCED: Load data for wider area but not too much
-    int64_t visibleTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    double visiblePriceRange = m_maxPrice - m_minPrice;
-    
-    // Use 2x buffer - reasonable for smooth panning without too much memory
-    int64_t cacheTimeBuffer = visibleTimeRange * 2; 
-    double cachePriceBuffer = visiblePriceRange * 2.0;
-    
-    int64_t cacheTimeStart = m_visibleTimeStart_ms - cacheTimeBuffer;
-    int64_t cacheTimeEnd = m_visibleTimeEnd_ms + cacheTimeBuffer;
-    double cacheMinPrice = m_minPrice - cachePriceBuffer;
-    double cacheMaxPrice = m_maxPrice + cachePriceBuffer;
-    
-    // Get liquidity slices for the expanded cache area
-    auto cacheSlices = m_liquidityEngine->getVisibleSlices(
-        m_currentTimeframe_ms, cacheTimeStart, cacheTimeEnd);
-    
-    m_geometryCache.cachedCells.clear();
-    
-    for (const auto* slice : cacheSlices) {
-        // Process bid metrics
-        for (const auto& [price, metrics] : slice->bidMetrics) {
-            if (price >= cacheMinPrice && price <= cacheMaxPrice) {
-                double displayValue = slice->getDisplayValue(price, true, 0);
-                if (displayValue > 0.0) {
-                    createCachedLiquidityCell(*slice, price, displayValue, true);
-                }
-            }
-        }
-        
-        // Process ask metrics
-        for (const auto& [price, metrics] : slice->askMetrics) {
-            if (price >= cacheMinPrice && price <= cacheMaxPrice) {
-                double displayValue = slice->getDisplayValue(price, false, 0);
-                if (displayValue > 0.0) {
-                    createCachedLiquidityCell(*slice, price, displayValue, false);
-                }
-            }
-        }
-    }
-    
-    sLog_Render("📊 CACHE UPDATE: Loaded " << m_geometryCache.cachedCells.size() 
-             << " cells for expanded area " << cacheTimeStart << "-" << cacheTimeEnd
-             << " price $" << cacheMinPrice << "-$" << cacheMaxPrice);
-    
-    // 🚀 OPTIMIZATION 3: Mark cache as valid and store bounds (fixes rebuild spam!)
-    m_geometryCache.isValid = true;
-    m_geometryCache.cacheTimeStart_ms = cacheTimeStart;
-    m_geometryCache.cacheTimeEnd_ms = cacheTimeEnd;
-    m_geometryCache.cacheMinPrice = cacheMinPrice;
-    m_geometryCache.cacheMaxPrice = cacheMaxPrice;
-}
-
-bool UnifiedGridRenderer::shouldRefreshCache() const {
-    if (!m_geometryCache.isValid) return true;
-    
-    // 🔧 DEBUG: Log cache bounds checking (throttled to reduce spam)
-    static int checkCount = 0;
-    bool shouldLog = (++checkCount <= 5) || (checkCount % 100 == 0);  // Reduced frequency
-    
-    if (shouldLog) {
-        sLog_Render("🔍 CACHE CHECK #" << checkCount << ":");
-        sLog_Render("   Current viewport: time[" << m_visibleTimeStart_ms << "-" << m_visibleTimeEnd_ms << "] price[$" << m_minPrice << "-$" << m_maxPrice << "]");
-        sLog_Render("   Cached bounds: time[" << m_geometryCache.cacheTimeStart_ms << "-" << m_geometryCache.cacheTimeEnd_ms << "] price[$" << m_geometryCache.cacheMinPrice << "-$" << m_geometryCache.cacheMaxPrice << "]");
-    }
-    
-    // 🚀 SIMPLE AND WORKING: Only refresh when viewport moves significantly outside cached area
-    int64_t cacheTimeRange = m_geometryCache.cacheTimeEnd_ms - m_geometryCache.cacheTimeStart_ms;
-    double cachePriceRange = m_geometryCache.cacheMaxPrice - m_geometryCache.cacheMinPrice;
-    
-    // Refresh cache if viewport moved more than 25% outside cached bounds
-    int64_t timeBuffer = cacheTimeRange * 0.25; // 25% buffer
-    double priceBuffer = cachePriceRange * 0.25; // 25% buffer
-    
-    bool timeOutOfBounds = (m_visibleTimeStart_ms < m_geometryCache.cacheTimeStart_ms + timeBuffer) ||
-                          (m_visibleTimeEnd_ms > m_geometryCache.cacheTimeEnd_ms - timeBuffer);
-    
-    bool priceOutOfBounds = (m_minPrice < m_geometryCache.cacheMinPrice + priceBuffer) ||
-                           (m_maxPrice > m_geometryCache.cacheMaxPrice - priceBuffer);
-    
-    bool shouldRefresh = timeOutOfBounds || priceOutOfBounds;
-    
-    if (shouldLog) {
-        sLog_Render("   timeOutOfBounds=" << (timeOutOfBounds ? "YES" : "NO")
-                 << " priceOutOfBounds=" << (priceOutOfBounds ? "YES" : "NO")
-                 << " -> REFRESH=" << (shouldRefresh ? "YES" : "NO"));
-    }
-    
-    return shouldRefresh;
-}
-
-QMatrix4x4 UnifiedGridRenderer::calculateViewportTransform() const {
-    if (!m_geometryCache.isValid) return QMatrix4x4();
-    
-    // Calculate transform to map from cache coordinates to current viewport
-    QMatrix4x4 transform;
-    
-    // Calculate scale factors
-    double cacheTimeRange = m_geometryCache.cacheTimeEnd_ms - m_geometryCache.cacheTimeStart_ms;
-    double cachePriceRange = m_geometryCache.cacheMaxPrice - m_geometryCache.cacheMinPrice;
-    double viewTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    double viewPriceRange = m_maxPrice - m_minPrice;
-    
-    if (cacheTimeRange <= 0 || cachePriceRange <= 0 || viewTimeRange <= 0 || viewPriceRange <= 0) {
-        return QMatrix4x4();
-    }
-    
-    float scaleX = static_cast<float>(cacheTimeRange / viewTimeRange);
-    float scaleY = static_cast<float>(cachePriceRange / viewPriceRange);
-    
-    // Calculate translation offsets
-    double timeOffset = (m_visibleTimeStart_ms - m_geometryCache.cacheTimeStart_ms) / cacheTimeRange;
-    double priceOffset = (m_minPrice - m_geometryCache.cacheMinPrice) / cachePriceRange;
-    
-    float translateX = static_cast<float>(-timeOffset * width() * scaleX);
-    float translateY = static_cast<float>(priceOffset * height() * scaleY);
-    
-    // Apply transformations
-    transform.translate(translateX, translateY);
-    transform.scale(scaleX, scaleY);
-    
-    return transform;
-}
-
-void UnifiedGridRenderer::createCachedLiquidityCell(const LiquidityTimeSlice& slice, 
-                                                   double price, double liquidity, bool isBid) {
-    CellInstance cell;
-    
-    // Use cache coordinates instead of screen coordinates
-    cell.screenRect = timeSliceToCacheRect(slice, price);
-    cell.liquidity = liquidity;
-    cell.isBid = isBid;
-    cell.intensity = calculateIntensity(liquidity);
-    cell.color = calculateHeatmapColor(liquidity, isBid, cell.intensity);
-    cell.timeSlot = slice.startTime_ms;
-    cell.priceLevel = price;
-    
-    // Only add cells with valid rectangles
-    if (cell.screenRect.width() > 0.1 && cell.screenRect.height() > 0.1) {
-        m_geometryCache.cachedCells.push_back(cell);
-    }
-}
-
-QRectF UnifiedGridRenderer::timeSliceToCacheRect(const LiquidityTimeSlice& slice, double price) const {
-    if (!m_geometryCache.isValid && !m_timeWindowValid) return QRectF();
-    
-    // Determine cache bounds
-    int64_t cacheTimeStart = (m_geometryCache.isValid) ? m_geometryCache.cacheTimeStart_ms : m_visibleTimeStart_ms;
-    int64_t cacheTimeEnd = (m_geometryCache.isValid) ? m_geometryCache.cacheTimeEnd_ms : m_visibleTimeEnd_ms;
-    double cacheMinPrice = (m_geometryCache.isValid) ? m_geometryCache.cacheMinPrice : m_minPrice;
-    double cacheMaxPrice = (m_geometryCache.isValid) ? m_geometryCache.cacheMaxPrice : m_maxPrice;
-    
-    // Create viewport from cache bounds
-    Viewport cacheViewport{
-        cacheTimeStart, cacheTimeEnd,
-        cacheMinPrice, cacheMaxPrice,
-        width(), height()
-    };
-    
-    // Use unified coordinate system for consistency
-    double priceResolution = 1.0;  // $1 price buckets
-    QPointF topLeft = CoordinateSystem::worldToScreen(slice.startTime_ms, price + priceResolution/2.0, cacheViewport);
-    QPointF bottomRight = CoordinateSystem::worldToScreen(slice.endTime_ms, price - priceResolution/2.0, cacheViewport);
-    
-    return QRectF(topLeft, bottomRight);
-}
-
 void UnifiedGridRenderer::setGridMode(int mode) {
     // 0 = Fine (50ms, $2.50)
     // 1 = Medium (100ms, $5.00)  
@@ -1134,444 +613,410 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
 
 // Pan/Zoom Controls Implementation
 void UnifiedGridRenderer::zoomIn() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_zoomFactor *= 1.5;
-    m_zoomFactor = std::min(m_zoomFactor, 50.0);  // Max zoom
-    
-    // Update viewport with zoom
-    updateViewportFromZoom();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("🔍 Zoom In - Factor: " << m_zoomFactor);
+    if (m_viewState) {
+        m_viewState->handleZoom(1.0, QPointF(width()/2, height()/2));
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("🔍 Zoom In");
+    }
 }
 
 void UnifiedGridRenderer::zoomOut() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_zoomFactor /= 1.5;
-    m_zoomFactor = std::max(m_zoomFactor, 0.1);  // Min zoom
-    
-    // Update viewport with zoom
-    updateViewportFromZoom();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("🔍 Zoom Out - Factor: " << m_zoomFactor);
+    if (m_viewState) {
+        m_viewState->handleZoom(-1.0, QPointF(width()/2, height()/2));
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("🔍 Zoom Out");
+    }
 }
 
 void UnifiedGridRenderer::resetZoom() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_zoomFactor = 1.0;
-    m_panOffsetTime_ms = 0.0;
-    m_panOffsetPrice = 0.0;
-    m_autoScrollEnabled = true;
-    
-    // Reset to initial viewport
-    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    
-    m_visibleTimeStart_ms = now - 30000;  // 30 seconds ago
-    m_visibleTimeEnd_ms = now + 30000;    // 30 seconds ahead
-    
-    if (m_hasValidOrderBook && !m_latestOrderBook.bids.empty() && !m_latestOrderBook.asks.empty()) {
-        double bestBid = m_latestOrderBook.bids[0].price;
-        double bestAsk = m_latestOrderBook.asks[0].price;
-        double midPrice = (bestBid + bestAsk) / 2.0;
-        m_minPrice = midPrice - 100.0;
-        m_maxPrice = midPrice + 100.0;
+    if (m_viewState) {
+        m_viewState->resetZoom();
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("🔍 Zoom Reset");
     }
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("🔍 Zoom Reset");
 }
 
 void UnifiedGridRenderer::panLeft() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_autoScrollEnabled = false;  // Disable auto-scroll when manually panning
-    
-    int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    int64_t panAmount = timeRange * 0.1;  // Pan 10% of visible range
-    
-    m_panOffsetTime_ms -= panAmount;
-    updateViewportFromPan();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("👈 Pan Left - Offset: " << m_panOffsetTime_ms);
+    if (m_viewState) {
+        // Pan left by adjusting time offset
+        m_viewState->setViewport(
+            m_viewState->getVisibleTimeStart() - 10000,
+            m_viewState->getVisibleTimeEnd() - 10000,
+            m_viewState->getMinPrice(),
+            m_viewState->getMaxPrice()
+        );
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("👈 Pan Left");
+    }
 }
 
 void UnifiedGridRenderer::panRight() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_autoScrollEnabled = false;  // Disable auto-scroll when manually panning
-    
-    int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    int64_t panAmount = timeRange * 0.1;  // Pan 10% of visible range
-    
-    m_panOffsetTime_ms += panAmount;
-    updateViewportFromPan();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("👉 Pan Right - Offset: " << m_panOffsetTime_ms);
+    if (m_viewState) {
+        // Pan right by adjusting time offset
+        m_viewState->setViewport(
+            m_viewState->getVisibleTimeStart() + 10000,
+            m_viewState->getVisibleTimeEnd() + 10000,
+            m_viewState->getMinPrice(),
+            m_viewState->getMaxPrice()
+        );
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("👉 Pan Right");
+    }
 }
 
 void UnifiedGridRenderer::panUp() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    double priceRange = m_maxPrice - m_minPrice;
-    double panAmount = priceRange * 0.1;  // Pan 10% of visible range
-    
-    m_panOffsetPrice += panAmount;
-    updateViewportFromPan();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("👆 Pan Up - Offset: " << m_panOffsetPrice);
+    if (m_viewState) {
+        // Pan up by adjusting price range
+        double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+        double panAmount = priceRange * 0.1;
+        m_viewState->setViewport(
+            m_viewState->getVisibleTimeStart(),
+            m_viewState->getVisibleTimeEnd(),
+            m_viewState->getMinPrice() + panAmount,
+            m_viewState->getMaxPrice() + panAmount
+        );
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("👆 Pan Up");
+    }
 }
 
 void UnifiedGridRenderer::panDown() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    double priceRange = m_maxPrice - m_minPrice;
-    double panAmount = priceRange * 0.1;  // Pan 10% of visible range
-    
-    m_panOffsetPrice -= panAmount;
-    updateViewportFromPan();
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("👇 Pan Down - Offset: " << m_panOffsetPrice);
+    if (m_viewState) {
+        // Pan down by adjusting price range
+        double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+        double panAmount = priceRange * 0.1;
+        m_viewState->setViewport(
+            m_viewState->getVisibleTimeStart(),
+            m_viewState->getVisibleTimeEnd(),
+            m_viewState->getMinPrice() - panAmount,
+            m_viewState->getMaxPrice() - panAmount
+        );
+        m_geometryDirty.store(true);
+        update();
+        sLog_Chart("👇 Pan Down");
+    }
 }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    m_autoScrollEnabled = enabled;
-    
-    if (enabled) {
-        // Reset to current time when enabling auto-scroll
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        
-        int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-        m_visibleTimeStart_ms = now - timeRange / 2;
-        m_visibleTimeEnd_ms = now + timeRange / 2;
-        m_panOffsetTime_ms = 0.0;
+    if (m_viewState) {
+        m_viewState->enableAutoScroll(enabled);
+        m_geometryDirty.store(true);
+        update();
+        emit autoScrollEnabledChanged();
+        sLog_Chart("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
     }
-    
-    m_geometryDirty.store(true);
-    update();
-    emit autoScrollEnabledChanged();
-    
-    sLog_Chart("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
-}
-
-// Viewport management helpers
-void UnifiedGridRenderer::updateViewportFromZoom() {
-    if (!m_timeWindowValid) return;
-    
-    // Calculate center point
-    int64_t centerTime = (m_visibleTimeStart_ms + m_visibleTimeEnd_ms) / 2 + static_cast<int64_t>(m_panOffsetTime_ms);
-    double centerPrice = (m_minPrice + m_maxPrice) / 2.0 + m_panOffsetPrice;
-    
-    // Calculate new ranges based on zoom factor
-    int64_t baseTimeRange = 60000;  // 60 second base range
-    int64_t newTimeRange = static_cast<int64_t>(baseTimeRange / m_zoomFactor);
-    
-    double basePriceRange = 200.0;  // $200 base range
-    double newPriceRange = basePriceRange / m_zoomFactor;
-    
-    // Apply new viewport
-    m_visibleTimeStart_ms = centerTime - newTimeRange / 2;
-    m_visibleTimeEnd_ms = centerTime + newTimeRange / 2;
-    m_minPrice = centerPrice - newPriceRange / 2.0;
-    m_maxPrice = centerPrice + newPriceRange / 2.0;
-}
-
-void UnifiedGridRenderer::updateViewportFromPan() {
-    if (!m_timeWindowValid) return;
-    
-    // Calculate base viewport
-    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    
-    int64_t baseTimeRange = static_cast<int64_t>(60000 / m_zoomFactor);  // Zoom-adjusted range
-    double basePriceRange = 200.0 / m_zoomFactor;
-    
-    // Apply pan offsets
-    int64_t centerTime = now + static_cast<int64_t>(m_panOffsetTime_ms);
-    double centerPrice = (m_hasValidOrderBook && !m_latestOrderBook.bids.empty() && !m_latestOrderBook.asks.empty()) ?
-        (m_latestOrderBook.bids[0].price + m_latestOrderBook.asks[0].price) / 2.0 : 50000.0;
-    centerPrice += m_panOffsetPrice;
-    
-    m_visibleTimeStart_ms = centerTime - baseTimeRange / 2;
-    m_visibleTimeEnd_ms = centerTime + baseTimeRange / 2;
-    m_minPrice = centerPrice - basePriceRange / 2.0;
-    m_maxPrice = centerPrice + basePriceRange / 2.0;
 }
 
 // 🖱️ MOUSE INTERACTION IMPLEMENTATION
 
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
-    // 🐛 FIX: Only handle mouse events when visible and in grid mode
+    // 🎯 MOUSE EVENT FILTERING: Only handle left-button clicks when visible
     if (!isVisible() || event->button() != Qt::LeftButton) {
         event->ignore();  // Let other components handle it
         return;
     }
     
-    // 🐛 FIX: Check if click is over UI control areas (exclude top-right corner for controls)
     QPointF pos = event->position();
-    if (pos.x() > width() * 0.7 && pos.y() < height() * 0.4) {
-        event->ignore();  // Let UI controls handle it
+    
+    // 🎯 SPATIAL BOUNDARIES: Define clear UI control areas that QML handles
+    bool inControlPanel = (pos.x() > width() * 0.75 && pos.y() < height() * 0.65);  // Right side control panel
+    bool inPriceAxis = (pos.x() < 60);  // Left side price axis
+    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis
+    
+    if (inControlPanel || inPriceAxis || inTimeAxis) {
+        event->ignore();  // Let QML MouseArea components handle these areas
+        sLog_Chart("🖱️ Mouse event in UI area - delegating to QML");
         return;
     }
     
-    m_interactionTimer.start();
-    m_isDragging = true;
-    m_lastMousePos = pos;
-    m_initialMousePos = pos;  // Store initial click position
-
-    // Reset visual pan offset at the start of a drag
-    m_panVisualOffset = {0.0, 0.0};
+    // 🎯 CHART INTERACTION AREA: Handle pan/zoom for the main chart area
+    if (m_viewState) {
+        m_viewState->handlePanStart(pos);
+        event->accept();
+        sLog_Chart("🖱️ Chart pan started at (" << pos.x() << ", " << pos.y() << ")");
+        return;
+    }
     
-    // 🚀 USER CONTROL: Disable auto-scroll when user starts dragging
-    m_autoScrollEnabled = false;
-    
-    m_geometryDirty.store(true);
-    update();
-    
-    sLog_Chart("🖱️ Mouse drag started - auto-scroll disabled");
-    event->accept();
+    // Fallback: ignore if no ViewState available
+    event->ignore();
 }
 
 void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
-    if (m_isDragging && m_timeWindowValid) {
-        // 🚀 FAST PAN LOGIC
-        QPointF currentPos = event->position();
-        QPointF delta = currentPos - m_lastMousePos;
-
-        // Accumulate the visual offset
-        m_panVisualOffset += delta;
-        m_lastMousePos = currentPos;
-        
-        // 🚀 Emit signal to update QML grid lines in real-time
-        emit panVisualOffsetChanged();
-
-        // Trigger a repaint to apply the new visual transform.
-        // Do NOT set m_geometryDirty.
-        update();
-
-        event->accept();
+    // 🎯 MOUSE MOVE: Only handle if we have an active ViewState
+    if (m_viewState) {
+        m_viewState->handlePanMove(event->position());
+        event->accept(); 
+        update(); // Trigger repaint for visual feedback
+        return;
     }
+    
+    // Let other components handle if no ViewState
+    event->ignore();
 }
 
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton && m_isDragging) {
-        m_isDragging = false;
-
-        // 🚀 DATA PAN LOGIC (happens once at the end)
-        if (width() > 0 && height() > 0 && m_panVisualOffset.manhattanLength() > 0) {
+    // Route to V2 ViewState
+    if (m_viewState) {
+        // Do the coordinate conversion here where we have access to width/height
+        QPointF panOffset = m_viewState->getPanVisualOffset();
+        if (width() > 0 && height() > 0 && panOffset.manhattanLength() > 0) {
             std::lock_guard<std::mutex> lock(m_dataMutex);
-
-            // Convert the final visual offset (in pixels) to data coordinates (time and price)
+            
+            // Convert visual offset to data coordinates
             int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
             double priceRange = m_maxPrice - m_minPrice;
             double timePixelsToMs = static_cast<double>(timeRange) / width();
             double pricePixelsToUnits = priceRange / height();
-
-            int64_t timeDelta = static_cast<int64_t>(-m_panVisualOffset.x() * timePixelsToMs);
-            double priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
-
-            // Apply the delta to the main viewport
+            
+            int64_t timeDelta = static_cast<int64_t>(-panOffset.x() * timePixelsToMs);
+            double priceDelta = panOffset.y() * pricePixelsToUnits;
+            
+            // Apply to viewport
             m_visibleTimeStart_ms += timeDelta;
             m_visibleTimeEnd_ms += timeDelta;
             m_minPrice += priceDelta;
             m_maxPrice += priceDelta;
-
-            m_panOffsetTime_ms += timeDelta;
-            m_panOffsetPrice += priceDelta;
-        }
-
-        int64_t totalDragTime = m_interactionTimer.elapsed();
-        
-        // Reset the visual offset now that the data viewport is updated
-        m_panVisualOffset = {0.0, 0.0};
-        emit panVisualOffsetChanged();
-
-        // Trigger a full data refresh for the new viewport area
-        m_geometryDirty.store(true);
-        update();
-
-        // --- Existing Click-to-center logic (can remain) ---
-        QPointF releasePos = event->position();
-        QPointF dragDistance = releasePos - m_initialMousePos;
-        double dragPixels = std::sqrt(dragDistance.x() * dragDistance.x() + dragDistance.y() * dragDistance.y());
-
-        if (totalDragTime < 200 && dragPixels < 10.0 && m_timeWindowValid) {
-            // Short click - center the viewport on this point
-            double clickXRatio = releasePos.x() / width();
-            double clickYRatio = 1.0 - (releasePos.y() / height()); // Invert Y for price axis
-            int64_t clickTime;
-            double clickPrice;
-
-            {
-                std::lock_guard<std::mutex> lock(m_dataMutex);
-                int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-                double priceRange = m_maxPrice - m_minPrice;
-                clickTime = m_visibleTimeStart_ms + static_cast<int64_t>(clickXRatio * timeRange);
-                clickPrice = m_minPrice + (clickYRatio * priceRange);
-                m_visibleTimeStart_ms = clickTime - timeRange / 2;
-                m_visibleTimeEnd_ms = clickTime + timeRange / 2;
-                m_minPrice = clickPrice - priceRange / 2.0;
-                m_maxPrice = clickPrice + priceRange / 2.0;
-            }
-
+            
+            // Update ViewState with new viewport
+            m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+            
             m_geometryDirty.store(true);
-            update();
-            sLog_Chart("🎯 Click to center - centered on: " << clickTime << "ms, $" << clickPrice);
-        } else {
-            sLog_Chart("🖱️ Mouse drag completed - total time: " << totalDragTime << "ms");
+            emit viewportChanged();
+            
+            sLog_Chart("🚀 V2 PAN: time Δ=" << timeDelta << "ms, price Δ=" << priceDelta);
         }
-
+        
+        m_viewState->handlePanEnd();
         event->accept();
+        update();
+        return;
     }
 }
 
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
-    // 🐛 FIX: Only handle wheel events when visible and in grid mode
+    // 🎯 WHEEL EVENT FILTERING: Basic validation
     if (!isVisible() || !m_timeWindowValid || width() <= 0 || height() <= 0) {
         event->ignore();  // Let other components handle it
         return;
     }
     
-    // 🐛 FIX: Check if wheel event is over UI control areas
     QPointF pos = event->position();
-    if (pos.x() > width() * 0.7 && pos.y() < height() * 0.4) {
-        event->ignore();  // Let UI controls handle it  
+    
+    // 🎯 SPATIAL BOUNDARIES: Same as mouse events - respect UI control areas
+    bool inControlPanel = (pos.x() > width() * 0.75 && pos.y() < height() * 0.65);
+    bool inPriceAxis = (pos.x() < 60);
+    bool inTimeAxis = (pos.y() > height() - 30);
+    
+    if (inControlPanel || inPriceAxis || inTimeAxis) {
+        event->ignore();  // Let QML handle wheel events in UI areas
+        sLog_Chart("🖱️ Wheel event in UI area - delegating to QML");
         return;
     }
     
-    // 🚀 USER CONTROL: Disable auto-scroll when user manually zooms  
-    m_autoScrollEnabled = false;
-    
-    // Zoom sensitivity settings
-    const double ZOOM_SENSITIVITY = 0.001;
-    const int64_t MIN_TIME_RANGE = 1000;     // 1 second minimum
-    const int64_t MAX_TIME_RANGE = 600000;   // 10 minutes maximum  
-    const double MIN_PRICE_RANGE = 1.0;      // $1 minimum
-    const double MAX_PRICE_RANGE = 10000.0;  // $10k maximum
-    
-    // Calculate zoom delta
-    double delta = event->angleDelta().y() * ZOOM_SENSITIVITY;
-    double zoomFactor = 1.0 - delta; // Invert for natural zoom direction
-    
-    // Get cursor position for zoom center
-    QPointF cursorPos = event->position();
-    double cursorXRatio = cursorPos.x() / width();
-    double cursorYRatio = 1.0 - (cursorPos.y() / height()); // Invert Y for price axis
-    
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
+    // 🎯 CHART ZOOM AREA: Handle zoom for the main chart area
+    if (m_viewState) {
+        // 🐛 FIX: Mouse coordinates are relative to the UnifiedGridRenderer widget (no margins)
+        // but the viewport size should match the actual chart rendering area
+        QPointF adjustedPos = event->position();  // Mouse position is already relative to our widget
+        QSizeF chartSize(width(), height());      // Our widget size IS the chart size
         
-        // ──── TIME AXIS ZOOM (X) ────
-        int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-        int64_t newTimeRange = static_cast<int64_t>(currentTimeRange * zoomFactor);
-        newTimeRange = std::max(MIN_TIME_RANGE, std::min(MAX_TIME_RANGE, newTimeRange));
-        
-        if (std::abs(newTimeRange - currentTimeRange) > 10) {
-            // Calculate cursor position in time coordinates
-            int64_t cursorTimestamp = m_visibleTimeStart_ms + static_cast<int64_t>(cursorXRatio * currentTimeRange);
-            
-            // Calculate new time window bounds around cursor
-            int64_t timeDelta = newTimeRange - currentTimeRange;
-            int64_t startAdjust = static_cast<int64_t>(timeDelta * cursorXRatio);
-            int64_t endAdjust = static_cast<int64_t>(timeDelta * (1.0 - cursorXRatio));
-            
-            m_visibleTimeStart_ms -= startAdjust;
-            m_visibleTimeEnd_ms += endAdjust;
-        }
-        
-        // ──── PRICE AXIS ZOOM (Y) ────  
-        double currentPriceRange = m_maxPrice - m_minPrice;
-        double newPriceRange = currentPriceRange * zoomFactor;
-        newPriceRange = std::max(MIN_PRICE_RANGE, std::min(MAX_PRICE_RANGE, newPriceRange));
-        
-        if (std::abs(newPriceRange - currentPriceRange) > 0.01) {
-            // Calculate cursor position in price coordinates
-            double cursorPrice = m_minPrice + (cursorYRatio * currentPriceRange);
-            
-            // Calculate new price window bounds around cursor
-            double priceDelta = newPriceRange - currentPriceRange;
-            double minAdjust = priceDelta * cursorYRatio;
-            double maxAdjust = priceDelta * (1.0 - cursorYRatio);
-            
-            m_minPrice -= minAdjust;
-            m_maxPrice += maxAdjust;
-        }
-        
-        // Update internal zoom factor for consistency with keyboard controls
-        m_zoomFactor = 60000.0 / newTimeRange;  // Normalize to base 60s range
-        
-        // 🚀 SMART CACHE REFRESH: Only refresh if zoom moved us outside cache bounds
-        if (shouldRefreshCache()) {
-            m_needsDataRefresh = true;
-            sLog_Performance("🔍 ZOOM CACHE REFRESH: Viewport moved outside cache bounds");
-        }
+        // Use improved zoom method with correct viewport size for proper mouse pointer centering
+        m_viewState->handleZoomWithViewport(
+            event->angleDelta().y() * 0.001, 
+            adjustedPos, 
+            chartSize
+        );
+        m_geometryDirty.store(true);
+        update();
+        emit autoScrollEnabledChanged(); // Notify UI that auto-scroll is disabled
+        event->accept();
+        sLog_Chart("🖱️ Chart zoom at (" << adjustedPos.x() << ", " << adjustedPos.y() << ") viewport=" << chartSize.width() << "x" << chartSize.height());
+        return;
     }
     
-    m_geometryDirty.store(true);
-    update();
-    emit autoScrollEnabledChanged(); // Notify UI that auto-scroll is disabled
-    
-    sLog_Chart("🖱️ Mouse wheel zoom - factor: " << m_zoomFactor 
-             << " time range: " << (m_visibleTimeEnd_ms - m_visibleTimeStart_ms) << "ms"
-             << " price range: $" << (m_maxPrice - m_minPrice));
-    
-    event->accept();
+    // Fallback: ignore if no ViewState available
+    event->ignore();
 }
 
 // 📊 PERFORMANCE MONITORING API
 
 void UnifiedGridRenderer::togglePerformanceOverlay() {
-    m_perfMetrics.showOverlay = !m_perfMetrics.showOverlay;
-    sLog_Performance("📊 Performance overlay: " << (m_perfMetrics.showOverlay ? "ENABLED" : "DISABLED"));
-    update();
+    if (m_diagnostics) {
+        m_diagnostics->toggleOverlay();
+        sLog_Performance("📊 Performance overlay: " << (m_diagnostics->isOverlayEnabled() ? "ENABLED" : "DISABLED"));
+        update();
+    }
 }
 
 QString UnifiedGridRenderer::getPerformanceStats() const {
-    return QString(
-        "=== SENTINEL PERFORMANCE STATS ===\n"
-        "FPS: %.1f\n"
-        "Avg Render Time: %.2f ms\n"
-        "Cache Hit Rate: %.1f%%\n"
-        "Cache Hits: %1\n"
-        "Cache Misses: %2\n"
-        "Geometry Rebuilds: %3\n"
-        "Transform Operations: %4\n"
-        "Cached Cells: %5\n"
-        "Last Frame Time: %.2f ms\n"
-        "GPU Bandwidth Est: %.1f MB/s\n"
-    ).arg(m_perfMetrics.cacheHits)
-     .arg(m_perfMetrics.cacheMisses)
-     .arg(m_perfMetrics.geometryRebuilds)
-     .arg(m_perfMetrics.transformsApplied)
-     .arg(m_perfMetrics.cachedCellCount)
-     .arg(m_perfMetrics.getCurrentFPS(), 0, 'f', 1)
-     .arg(m_perfMetrics.getAverageRenderTime_ms(), 0, 'f', 2)
-     .arg(m_perfMetrics.getCacheHitRate(), 0, 'f', 1)
-     .arg(m_perfMetrics.renderTime_us / 1000.0, 0, 'f', 2)
-     .arg((m_bytesUploadedThisFrame / 1024.0 / 1024.0) * m_perfMetrics.getCurrentFPS(), 0, 'f', 1);
+    if (m_diagnostics) {
+        return m_diagnostics->getPerformanceStats();
+    }
+    return "Performance monitoring not available";
 }
+
+double UnifiedGridRenderer::getCurrentFPS() const {
+    if (m_diagnostics) {
+        return m_diagnostics->getCurrentFPS();
+    }
+    return 0.0;
+}
+
+double UnifiedGridRenderer::getAverageRenderTime() const {
+    if (m_diagnostics) {
+        return m_diagnostics->getAverageRenderTime();
+    }
+    return 0.0;
+}
+
+double UnifiedGridRenderer::getCacheHitRate() const {
+    if (m_diagnostics) {
+        return m_diagnostics->getCacheHitRate();
+    }
+    return 0.0;
+}
+
+// 🚀 NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
+
+void UnifiedGridRenderer::initializeV2Architecture() {
+    m_viewState = std::make_unique<GridViewState>(this);
+    m_diagnostics = std::make_unique<RenderDiagnostics>();
+    
+    // Initialize rendering strategies
+    m_heatmapStrategy = std::make_unique<HeatmapStrategy>();
+    m_tradeFlowStrategy = std::make_unique<TradeFlowStrategy>();
+    m_candleStrategy = std::make_unique<CandleStrategy>();
+    
+    // Connect view state signals to maintain existing API compatibility
+    connect(m_viewState.get(), &GridViewState::viewportChanged, 
+            this, &UnifiedGridRenderer::viewportChanged);
+    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged,
+            this, &UnifiedGridRenderer::panVisualOffsetChanged);
+    connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged,
+            this, &UnifiedGridRenderer::autoScrollEnabledChanged);
+    
+    // Initialize ViewState with current viewport
+    if (m_timeWindowValid) {
+        m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+    }
+            
+    sLog_Init("🚀 V2 Architecture: GridViewState + 3 render strategies initialized");
+}
+
+IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
+    switch (m_renderMode) {
+        case RenderMode::LiquidityHeatmap:
+        case RenderMode::OrderBookDepth:  // Similar to heatmap
+            return m_heatmapStrategy.get();
+            
+        case RenderMode::TradeFlow:
+            return m_tradeFlowStrategy.get();
+            
+        case RenderMode::VolumeCandles:
+            return m_candleStrategy.get();
+    }
+    
+    return m_heatmapStrategy.get(); // Default fallback
+}
+
+QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
+    m_diagnostics->startFrame();
+    
+    static int paintCallCount = 0;
+    if (++paintCallCount <= 10) {
+        sLog_Render("🚀 V2 PAINT #" << paintCallCount 
+                 << " mode=" << getCurrentStrategy()->getStrategyName()
+                 << " size=" << width() << "x" << height() 
+                 << " FPS=" << m_diagnostics->getCurrentFPS());
+    }
+    
+    if (width() <= 0 || height() <= 0) {
+        return oldNode;
+    }
+    
+    // Use GridSceneNode as root (maintains transform capabilities)
+    auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
+    bool isNewNode = !sceneNode;
+    if (isNewNode) {
+        sceneNode = new GridSceneNode();
+        m_diagnostics->recordGeometryRebuild();
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        
+        // Check if we need to rebuild geometry
+        bool needsRebuild = m_geometryDirty.load() || isNewNode;
+        
+        if (needsRebuild) {
+            // Update visible cells using existing logic
+            updateVisibleCells();
+            
+            // Create batch for current strategy
+            GridSliceBatch batch;
+            batch.cells = m_visibleCells;
+            batch.intensityScale = m_intensityScale;
+            batch.minVolumeFilter = m_minVolumeFilter;
+            batch.maxCells = m_maxCells;
+            
+            // Update content using selected strategy
+            IRenderStrategy* strategy = getCurrentStrategy();
+            sceneNode->updateContent(batch, strategy);
+            
+            // Update volume profile if enabled
+            if (m_showVolumeProfile) {
+                updateVolumeProfile();
+                sceneNode->updateVolumeProfile(m_volumeProfile);
+            }
+            sceneNode->setShowVolumeProfile(m_showVolumeProfile);
+            
+            m_geometryDirty.store(false);
+            m_diagnostics->recordCacheMiss();
+            
+            // sLog_Render("🚀 V2 REBUILD: " << batch.cells.size() << " cells, strategy=" 
+            //         << strategy->getStrategyName());
+        } else {
+            m_diagnostics->recordCacheHit();
+        }
+        
+        // Always update transform for smooth interaction
+        if (m_viewState) {
+            QMatrix4x4 transform = m_viewState->calculateViewportTransform(
+                QRectF(0, 0, width(), height()));
+            sceneNode->updateTransform(transform);
+            m_diagnostics->recordTransformApplied();
+        }
+    }
+    
+    m_diagnostics->endFrame();
+    return sceneNode;
+}
+
+// 🚀 V2 VIEWPORT DELEGATION
+
+qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
+    return m_viewState ? m_viewState->getVisibleTimeStart() : m_visibleTimeStart_ms;
+}
+
+qint64 UnifiedGridRenderer::getVisibleTimeEnd() const {
+    return m_viewState ? m_viewState->getVisibleTimeEnd() : m_visibleTimeEnd_ms;
+}
+
+double UnifiedGridRenderer::getMinPrice() const {
+    return m_viewState ? m_viewState->getMinPrice() : m_minPrice;
+}
+
+double UnifiedGridRenderer::getMaxPrice() const {
+    return m_viewState ? m_viewState->getMaxPrice() : m_maxPrice;
+}
+
+QPointF UnifiedGridRenderer::getPanVisualOffset() const {
+    return m_viewState ? m_viewState->getPanVisualOffset() : m_panVisualOffset;
+}
+
