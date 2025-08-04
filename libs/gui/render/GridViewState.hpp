@@ -20,9 +20,11 @@ public:
     double getZoomFactor() const { return m_zoomFactor; }
     QPointF getPanVisualOffset() const { return m_panVisualOffset; }
     bool isAutoScrollEnabled() const { return m_autoScrollEnabled; }
+    bool isTimeWindowValid() const { return m_timeWindowValid; }
     
     // Viewport management
     void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
+    void setViewportSize(double width, double height);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
     
     // Interaction handling
@@ -47,6 +49,10 @@ private:
     double m_minPrice = 0.0;
     double m_maxPrice = 0.0;
     bool m_timeWindowValid = false;
+    
+    // Viewport dimensions for coordinate conversion
+    double m_viewportWidth = 800.0;
+    double m_viewportHeight = 600.0;
     
     // Pan/zoom state
     bool m_autoScrollEnabled = true;

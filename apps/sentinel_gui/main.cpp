@@ -8,6 +8,9 @@
 #include "UnifiedGridRenderer.h"
 #include "GridIntegrationAdapter.h"
 #include "CoordinateSystem.h"
+#include "models/AxisModel.hpp"
+#include "models/TimeAxisModel.hpp"
+#include "models/PriceAxisModel.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -24,6 +27,10 @@ int main(int argc, char *argv[])
     qmlRegisterType<GridIntegrationAdapter>("Sentinel.Charts", 1, 0, "GridIntegrationAdapter");
     qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<CoordinateSystem>("Sentinel.Charts", 1, 0, "CoordinateSystem");
+    
+    // Register axis models for clean QML grid line calculations
+    qmlRegisterType<TimeAxisModel>("Sentinel.Charts", 1, 0, "TimeAxisModel");
+    qmlRegisterType<PriceAxisModel>("Sentinel.Charts", 1, 0, "PriceAxisModel");
     
     std::cout << "✅ Pure grid-only mode: Legacy components permanently removed" << std::endl;
     

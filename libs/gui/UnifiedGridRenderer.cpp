@@ -13,6 +13,7 @@
 #include "render/GridViewState.hpp"
 #include "render/GridSceneNode.hpp" 
 #include "render/RenderDiagnostics.hpp"
+#include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
 #include "render/strategies/TradeFlowStrategy.hpp"
@@ -35,10 +36,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     m_geometryCache.isValid = false;
     m_geometryCache.node = nullptr;
     
-    // Setup 100ms order book polling timer for consistent updates
-    m_orderBookTimer = new QTimer(this);
-    connect(m_orderBookTimer, &QTimer::timeout, this, &UnifiedGridRenderer::captureOrderBookSnapshot);
-    m_orderBookTimer->start(100);  // 100ms base resolution
+    // Order book polling timer removed - now handled by DataProcessor
     
     // 🚀 GEOMETRY CACHE CLEANUP: Periodic cache maintenance every 30 seconds
     QTimer* cacheCleanupTimer = new QTimer(this);
@@ -56,119 +54,27 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     sLog_Init("🚀 UnifiedGridRenderer V2: Modular architecture initialized");
 }
 
-UnifiedGridRenderer::~UnifiedGridRenderer() {
-    // Default destructor implementation 
-    // Required for std::unique_ptr with incomplete types in header
-}
+UnifiedGridRenderer::~UnifiedGridRenderer() {}
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
-    if (trade.product_id.empty()) return;
-    
-    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        trade.timestamp.time_since_epoch()).count();
-    
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        // Initialize viewport from first trade if needed
-        if (!m_timeWindowValid) {
-            m_visibleTimeStart_ms = timestamp - 30000;  // 30 seconds ago
-            m_visibleTimeEnd_ms = timestamp + 30000;    // 30 seconds ahead
-            m_minPrice = trade.price - 100.0;
-            m_maxPrice = trade.price + 100.0;
-            m_timeWindowValid = true;
-            
-            sLog_Init("🎯 UNIFIED RENDERER VIEWPORT INITIALIZED:");
-            sLog_Init("   Time: " << m_visibleTimeStart_ms << " - " << m_visibleTimeEnd_ms);
-            sLog_Init("   Price: $" << m_minPrice << " - $" << m_maxPrice);
-            sLog_Init("   Based on real trade: $" << trade.price << " at " << timestamp);
-            
-            // 🚀 Sync ViewState with initialized viewport
-            if (m_viewState) {
-                m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
-            }
-            
-            // 🚀 Emit signal to update QML axis labels when viewport is first initialized
-            emit viewportChanged();
-        }
-        
-        // 🚀 SIMPLE: No cache system, always update on new data
-        // 🚀 THROTTLED TRADE LOGGING: Only log every 20th trade to reduce spam
-        static int tradeUpdateCount = 0;
-        if (++tradeUpdateCount % 20 == 0) {
-            sLog_Trades("📊 TRADE UPDATE: Triggering geometry update [Trade #" << tradeUpdateCount << "]");
-        }
-    }
-    
-    // Debug logging for first few trades
-    static int realTradeCount = 0;
-    if (++realTradeCount <= 10) {
-        sLog_Trades("🎯 UNIFIED RENDERER TRADE #" << realTradeCount << ": $" << trade.price 
-                 << " vol:" << trade.size 
-                 << " timestamp:" << timestamp);
+    // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
+    if (m_dataProcessor) {
+        m_dataProcessor->onTradeReceived(trade);
     }
 }
 
 void UnifiedGridRenderer::onOrderBookUpdated(const OrderBook& book) {
-    if (book.product_id.empty() || book.bids.empty() || book.asks.empty()) return;
-    
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        // Store latest order book for snapshots
-        m_latestOrderBook = book;
-        m_hasValidOrderBook = true;
-        
-        // Initialize viewport from order book if needed
-        if (!m_timeWindowValid) {
-            double bestBid = book.bids[0].price;
-            double bestAsk = book.asks[0].price;
-            double midPrice = (bestBid + bestAsk) / 2.0;
-            
-            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            
-            m_visibleTimeStart_ms = now - 30000;  // 30 seconds ago
-            m_visibleTimeEnd_ms = now + 30000;    // 30 seconds ahead
-            m_minPrice = midPrice - 100.0;
-            m_maxPrice = midPrice + 100.0;
-            m_timeWindowValid = true;
-            
-            sLog_Init("🎯 UNIFIED RENDERER VIEWPORT FROM ORDER BOOK:");
-            sLog_Init("   Mid Price: $" << midPrice);
-            sLog_Init("   Price Window: $" << m_minPrice << " - $" << m_maxPrice);
-            
-            // 🚀 Sync ViewState with initialized viewport
-            if (m_viewState) {
-                m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
-            }
-        }
-        
-        // 🚀 Emit signal to update QML axis labels when viewport is first initialized
-        emit viewportChanged();
-    }
-    
-    // Debug logging for first few order books
-    static int orderBookCount = 0;
-    if (++orderBookCount <= 10) {
-        sLog_Network("🎯 UNIFIED RENDERER ORDER BOOK #" << orderBookCount 
-                 << " Bids:" << book.bids.size() << " Asks:" << book.asks.size());
+    // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
+    if (m_dataProcessor) {
+        m_dataProcessor->onOrderBookUpdated(book);
     }
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
                                        double minPrice, double maxPrice) {
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        m_visibleTimeStart_ms = startTimeMs;
-        m_visibleTimeEnd_ms = endTimeMs;
-        m_minPrice = minPrice;
-        m_maxPrice = maxPrice;
-        m_timeWindowValid = true;
-        
-        // 🚀 SIMPLE: Always update on viewport changes
-        sLog_DebugCoords("🎯 VIEWPORT CHANGED: Will rebuild geometry on next paint");
+    // Delegate viewport management to GridViewState
+    if (m_viewState) {
+        m_viewState->setViewport(startTimeMs, endTimeMs, minPrice, maxPrice);
     }
     
     m_geometryDirty.store(true);
@@ -185,35 +91,8 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 }
 
 void UnifiedGridRenderer::captureOrderBookSnapshot() {
-    if (!m_hasValidOrderBook) return;
-    
-    // Store previous order book hash to detect changes
-    static size_t lastOrderBookHash = 0;
-    
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        // Calculate simple hash of current order book state
-        size_t currentHash = 0;
-        for (const auto& bid : m_latestOrderBook.bids) {
-            currentHash ^= std::hash<double>{}(bid.price) ^ std::hash<double>{}(bid.size);
-        }
-        for (const auto& ask : m_latestOrderBook.asks) {
-            currentHash ^= std::hash<double>{}(ask.price) ^ std::hash<double>{}(ask.size);
-        }
-        
-        // ALWAYS pass the latest order book to the engine to ensure a continuous time series.
-        // This prevents visual gaps in the heatmap when the market is quiet.
-        if (m_timeWindowValid) {
-            m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook, m_minPrice, m_maxPrice);
-        } else {
-            // Fallback to unfiltered if viewport not yet initialized
-            m_liquidityEngine->addOrderBookSnapshot(m_latestOrderBook);
-        }
-        lastOrderBookHash = currentHash; // Keep for potential future debugging
-        m_geometryDirty.store(true);
-        update();
-    }
+    // Delegated to DataProcessor - this method kept for compatibility
+    // but no longer used since DataProcessor handles snapshots
 }
 
 void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
@@ -238,7 +117,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 void UnifiedGridRenderer::updateVisibleCells() {
     m_visibleCells.clear();
     
-    if (!m_timeWindowValid) return;
+    if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
     int64_t activeTimeframe = m_currentTimeframe_ms;
     
@@ -248,7 +127,8 @@ void UnifiedGridRenderer::updateVisibleCells() {
         
         // Auto-suggest timeframe when no manual override
         int64_t optimalTimeframe = m_liquidityEngine->suggestTimeframe(
-            m_visibleTimeStart_ms, m_visibleTimeEnd_ms, width() > 0 ? static_cast<int>(width() / 4) : 2000);
+            m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), 
+            width() > 0 ? static_cast<int>(width() / 4) : 2000);
         
         if (optimalTimeframe != m_currentTimeframe_ms) {
             m_currentTimeframe_ms = optimalTimeframe;
@@ -263,7 +143,7 @@ void UnifiedGridRenderer::updateVisibleCells() {
     
     // Get liquidity slices for active timeframe within viewport
     auto visibleSlices = m_liquidityEngine->getVisibleSlices(
-        activeTimeframe, m_visibleTimeStart_ms, m_visibleTimeEnd_ms);
+        activeTimeframe, m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
     
     for (const auto* slice : visibleSlices) {
         createCellsFromLiquiditySlice(*slice);
@@ -307,7 +187,7 @@ void UnifiedGridRenderer::createCellsFromLiquiditySlice(const LiquidityTimeSlice
 
 void UnifiedGridRenderer::createLiquidityCell(const LiquidityTimeSlice& slice, double price, 
                                             double liquidity, bool isBid) {
-    if (price < m_minPrice || price > m_maxPrice) return;
+    if (!m_viewState || price < m_viewState->getMinPrice() || price > m_viewState->getMaxPrice()) return;
     
     CellInstance cell;
     cell.screenRect = timeSliceToScreenRect(slice, price);
@@ -331,12 +211,12 @@ void UnifiedGridRenderer::createLiquidityCell(const LiquidityTimeSlice& slice, d
 }
 
 QRectF UnifiedGridRenderer::timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const {
-    if (!m_timeWindowValid) return QRectF();
+    if (!m_viewState || !m_viewState->isTimeWindowValid()) return QRectF();
     
-    // Create viewport from current state
+    // Create viewport from current state - delegate to ViewState
     Viewport viewport{
-        m_visibleTimeStart_ms, m_visibleTimeEnd_ms,
-        m_minPrice, m_maxPrice,
+        m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+        m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
         width(), height()
     };
     
@@ -438,7 +318,10 @@ void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double p
 }
 
 void UnifiedGridRenderer::clearData() {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
+    // Delegate to DataProcessor
+    if (m_dataProcessor) {
+        m_dataProcessor->clearData();
+    }
     
     // Reset liquidity engine
     m_liquidityEngine = std::make_unique<LiquidityTimeSeriesEngine>(this);
@@ -447,17 +330,10 @@ void UnifiedGridRenderer::clearData() {
     m_visibleCells.clear();
     m_volumeProfile.clear();
     
-    // 🚀 SIMPLE: Clear rendering data only
-    sLog_Init("🎯 CLEAR DATA: Cleared rendering data");
-    
-    // Reset viewport state
-    m_timeWindowValid = false;
-    m_hasValidOrderBook = false;
-    
     m_geometryDirty.store(true);
     update();
     
-    sLog_Init("🎯 UnifiedGridRenderer: Data cleared");
+    sLog_Init("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
 }
 
 void UnifiedGridRenderer::setTimeResolution(int resolution_ms) {
@@ -523,15 +399,15 @@ QString UnifiedGridRenderer::getGridDebugInfo() const {
                           "Renderer Visible: %9\n"
                           "Time Window Valid: %10")
                           .arg(m_currentTimeframe_ms)
-                          .arg(m_visibleTimeStart_ms)
-                          .arg(m_visibleTimeEnd_ms)
-                          .arg(m_minPrice)
-                          .arg(m_maxPrice)
+                          .arg(getVisibleTimeStart())
+                          .arg(getVisibleTimeEnd())
+                          .arg(getMinPrice())
+                          .arg(getMaxPrice())
                           .arg(m_visibleCells.size())
                           .arg(width())
                           .arg(height())
                           .arg(isVisible() ? "YES" : "NO")
-                          .arg(m_timeWindowValid ? "YES" : "NO");
+                          .arg(m_viewState && m_viewState->isTimeWindowValid() ? "YES" : "NO");
     
     return info;
 }
@@ -548,12 +424,12 @@ QString UnifiedGridRenderer::getDetailedGridDebug() const {
                            "Has Valid Order Book: %10\n"
                            "Time Window Valid: %11\n")
                            .arg(width()).arg(height())
-                           .arg(m_visibleTimeStart_ms).arg(m_visibleTimeEnd_ms).arg(m_visibleTimeEnd_ms - m_visibleTimeStart_ms)
-                           .arg(m_minPrice).arg(m_maxPrice)
+                           .arg(getVisibleTimeStart()).arg(getVisibleTimeEnd()).arg(getVisibleTimeEnd() - getVisibleTimeStart())
+                           .arg(getMinPrice()).arg(getMaxPrice())
                            .arg(m_currentTimeframe_ms)
                            .arg(m_visibleCells.size())
-                           .arg(m_hasValidOrderBook ? "YES" : "NO")
-                           .arg(m_timeWindowValid ? "YES" : "NO");
+                           .arg(m_dataProcessor && m_dataProcessor->hasValidOrderBook() ? "YES" : "NO")
+                           .arg(m_viewState && m_viewState->isTimeWindowValid() ? "YES" : "NO");
     
     // Show first few cells
     int cellsToCheck = std::min(5, (int)m_visibleCells.size());
@@ -713,6 +589,54 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     }
 }
 
+// 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) const {
+    if (!m_viewState) return QPointF();
+    
+    Viewport viewport;
+    viewport.timeStart_ms = m_viewState->getVisibleTimeStart();
+    viewport.timeEnd_ms = m_viewState->getVisibleTimeEnd();
+    viewport.priceMin = m_viewState->getMinPrice();
+    viewport.priceMax = m_viewState->getMaxPrice();
+    viewport.width = width();
+    viewport.height = height();
+    
+    QPointF screenPos = CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
+    
+    // 🚀 SMOOTH DRAGGING: Apply visual pan offset for real-time feedback
+    QPointF panOffset = getPanVisualOffset();
+    screenPos.setX(screenPos.x() + panOffset.x());
+    screenPos.setY(screenPos.y() + panOffset.y());
+    
+    return screenPos;
+}
+
+QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const {
+    if (!m_viewState) return QPointF();
+    
+    Viewport viewport;
+    viewport.timeStart_ms = m_viewState->getVisibleTimeStart();
+    viewport.timeEnd_ms = m_viewState->getVisibleTimeEnd();
+    viewport.priceMin = m_viewState->getMinPrice();
+    viewport.priceMax = m_viewState->getMaxPrice();
+    viewport.width = width();
+    viewport.height = height();
+    
+    // 🚀 SMOOTH DRAGGING: Remove visual pan offset before world conversion
+    QPointF panOffset = getPanVisualOffset();
+    QPointF adjustedScreen(screenX - panOffset.x(), screenY - panOffset.y());
+    
+    return CoordinateSystem::screenToWorld(adjustedScreen, viewport);
+}
+
+double UnifiedGridRenderer::getScreenWidth() const {
+    return width();
+}
+
+double UnifiedGridRenderer::getScreenHeight() const {
+    return height();
+}
+
 // 🖱️ MOUSE INTERACTION IMPLEMENTATION
 
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
@@ -724,19 +648,26 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
     
     QPointF pos = event->position();
     
-    // 🎯 SPATIAL BOUNDARIES: Define clear UI control areas that QML handles
-    bool inControlPanel = (pos.x() > width() * 0.75 && pos.y() < height() * 0.65);  // Right side control panel
-    bool inPriceAxis = (pos.x() < 60);  // Left side price axis
-    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis
+    // 🎯 SPATIAL BOUNDARIES: Define clear UI control areas that QML handles (fixed calculations)
+    // Control panel: 150px wide + 10px margin from right edge
+    bool inControlPanel = (pos.x() > width() - 160);  // Right side control panel (150px + 10px margin)
+    bool inPriceAxis = (pos.x() < 60);  // Left side price axis (60px wide)
+    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis (30px high)
     
     if (inControlPanel || inPriceAxis || inTimeAxis) {
         event->ignore();  // Let QML MouseArea components handle these areas
-        sLog_Chart("🖱️ Mouse event in UI area - delegating to QML");
+        sLog_Chart("🖱️ Mouse event in UI area - delegating to QML (pos: " << pos.x() << "," << pos.y() << ")");
         return;
     }
     
+    // 🎯 DEBUG: Log all mouse events to track conflicts
+    sLog_Chart("🖱️ MOUSE PRESS: pos(" << pos.x() << "," << pos.y() << ") size(" << width() << "x" << height() << ")");
+    
     // 🎯 CHART INTERACTION AREA: Handle pan/zoom for the main chart area
     if (m_viewState) {
+        // Update viewport size for coordinate conversion
+        m_viewState->setViewportSize(width(), height());
+        
         m_viewState->handlePanStart(pos);
         event->accept();
         sLog_Chart("🖱️ Chart pan started at (" << pos.x() << ", " << pos.y() << ")");
@@ -753,6 +684,7 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
         m_viewState->handlePanMove(event->position());
         event->accept(); 
         update(); // Trigger repaint for visual feedback
+        sLog_Chart("🖱️ MOUSE MOVE: pos(" << event->position().x() << "," << event->position().y() << ")");
         return;
     }
     
@@ -761,57 +693,34 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
-    // Route to V2 ViewState
+    // Route to V2 ViewState - it now handles coordinate conversion internally
     if (m_viewState) {
-        // Do the coordinate conversion here where we have access to width/height
-        QPointF panOffset = m_viewState->getPanVisualOffset();
-        if (width() > 0 && height() > 0 && panOffset.manhattanLength() > 0) {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            
-            // Convert visual offset to data coordinates
-            int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-            double priceRange = m_maxPrice - m_minPrice;
-            double timePixelsToMs = static_cast<double>(timeRange) / width();
-            double pricePixelsToUnits = priceRange / height();
-            
-            int64_t timeDelta = static_cast<int64_t>(-panOffset.x() * timePixelsToMs);
-            double priceDelta = panOffset.y() * pricePixelsToUnits;
-            
-            // Apply to viewport
-            m_visibleTimeStart_ms += timeDelta;
-            m_visibleTimeEnd_ms += timeDelta;
-            m_minPrice += priceDelta;
-            m_maxPrice += priceDelta;
-            
-            // Update ViewState with new viewport
-            m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
-            
-            m_geometryDirty.store(true);
-            emit viewportChanged();
-            
-            sLog_Chart("🚀 V2 PAN: time Δ=" << timeDelta << "ms, price Δ=" << priceDelta);
-        }
+        // Update viewport size for coordinate conversion
+        m_viewState->setViewportSize(width(), height());
         
         m_viewState->handlePanEnd();
         event->accept();
         update();
+        
+        m_geometryDirty.store(true);
+        emit viewportChanged();
         return;
     }
 }
 
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     // 🎯 WHEEL EVENT FILTERING: Basic validation
-    if (!isVisible() || !m_timeWindowValid || width() <= 0 || height() <= 0) {
+    if (!isVisible() || !m_viewState || !m_viewState->isTimeWindowValid() || width() <= 0 || height() <= 0) {
         event->ignore();  // Let other components handle it
         return;
     }
     
     QPointF pos = event->position();
     
-    // 🎯 SPATIAL BOUNDARIES: Same as mouse events - respect UI control areas
-    bool inControlPanel = (pos.x() > width() * 0.75 && pos.y() < height() * 0.65);
-    bool inPriceAxis = (pos.x() < 60);
-    bool inTimeAxis = (pos.y() > height() - 30);
+    // 🎯 SPATIAL BOUNDARIES: Same as mouse events - respect UI control areas (fixed calculations)
+    bool inControlPanel = (pos.x() > width() - 160);  // Right side control panel (150px + 10px margin)
+    bool inPriceAxis = (pos.x() < 60);  // Left side price axis (60px wide)
+    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis (30px high)
     
     if (inControlPanel || inPriceAxis || inTimeAxis) {
         event->ignore();  // Let QML handle wheel events in UI areas
@@ -887,11 +796,16 @@ double UnifiedGridRenderer::getCacheHitRate() const {
 void UnifiedGridRenderer::initializeV2Architecture() {
     m_viewState = std::make_unique<GridViewState>(this);
     m_diagnostics = std::make_unique<RenderDiagnostics>();
+    m_dataProcessor = std::make_unique<DataProcessor>(this);
     
     // Initialize rendering strategies
     m_heatmapStrategy = std::make_unique<HeatmapStrategy>();
     m_tradeFlowStrategy = std::make_unique<TradeFlowStrategy>();
     m_candleStrategy = std::make_unique<CandleStrategy>();
+    
+    // Wire up V2 components
+    m_dataProcessor->setGridViewState(m_viewState.get());
+    m_dataProcessor->setLiquidityEngine(m_liquidityEngine.get());
     
     // Connect view state signals to maintain existing API compatibility
     connect(m_viewState.get(), &GridViewState::viewportChanged, 
@@ -901,12 +815,19 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged,
             this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
-    // Initialize ViewState with current viewport
-    if (m_timeWindowValid) {
-        m_viewState->setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
-    }
+    // Connect data processor signals
+    connect(m_dataProcessor.get(), &DataProcessor::dataUpdated,
+            this, [this]() {
+                m_geometryDirty.store(true);
+                update();
+            });
+    connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
+            this, &UnifiedGridRenderer::viewportChanged);
+    
+    // Start data processing
+    m_dataProcessor->startProcessing();
             
-    sLog_Init("🚀 V2 Architecture: GridViewState + 3 render strategies initialized");
+    sLog_Init("🚀 V2 Architecture: GridViewState + DataProcessor + 3 render strategies initialized");
 }
 
 IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
@@ -1001,22 +922,22 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
 // 🚀 V2 VIEWPORT DELEGATION
 
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
-    return m_viewState ? m_viewState->getVisibleTimeStart() : m_visibleTimeStart_ms;
+    return m_viewState ? m_viewState->getVisibleTimeStart() : 0;
 }
 
 qint64 UnifiedGridRenderer::getVisibleTimeEnd() const {
-    return m_viewState ? m_viewState->getVisibleTimeEnd() : m_visibleTimeEnd_ms;
+    return m_viewState ? m_viewState->getVisibleTimeEnd() : 0;
 }
 
 double UnifiedGridRenderer::getMinPrice() const {
-    return m_viewState ? m_viewState->getMinPrice() : m_minPrice;
+    return m_viewState ? m_viewState->getMinPrice() : 0.0;
 }
 
 double UnifiedGridRenderer::getMaxPrice() const {
-    return m_viewState ? m_viewState->getMaxPrice() : m_maxPrice;
+    return m_viewState ? m_viewState->getMaxPrice() : 0.0;
 }
 
 QPointF UnifiedGridRenderer::getPanVisualOffset() const {
-    return m_viewState ? m_viewState->getPanVisualOffset() : m_panVisualOffset;
+    return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0);
 }
 
