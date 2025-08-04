@@ -1,0 +1,32 @@
+# Cursor Indexing Ignore - Performance Optimization
+# Excludes historical/archived docs from semantic search to improve performance
+
+# Archive historical documentation
+docs/archive/
+docs/features/*/handoffs/
+docs/features/*/reports/
+docs/features/*/investigations/
+docs/features/*/topics/
+
+# Progress and completion docs (historical)
+docs/features/**/PROGRESS.md
+docs/features/**/PR_SUMMARY*.md
+docs/features/**/*_complete.md
+docs/features/**/*_handoff.md
+docs/features/**/*_bug_report.md
+docs/features/**/*_findings.md
+docs/features/**/*_target.md
+
+# Specific historical feature docs
+docs/features/gpu_chart_rendering/handoffs/
+docs/features/gpu_chart_rendering/reports/
+docs/features/gpu_chart_rendering/investigations/
+docs/features/gpu_chart_rendering/topics/
+
+# Keep only current, authoritative docs searchable:
+# - docs/02_ARCHITECTURE.md
+# - docs/GRID_ARCHITECTURE.md  
+# - docs/LOGGING_GUIDE.md
+# - docs/01_PROJECT_PLAN.md
+# - docs/features/microstructure_ai_roadmap/*.md (current roadmap)
+# - docs/features/2D_coordinate_grid/*.md (current grid docs) 

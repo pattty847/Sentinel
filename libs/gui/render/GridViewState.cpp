@@ -1,4 +1,5 @@
 #include "GridViewState.hpp"
+#include "../CoordinateSystem.h"
 #include <QMatrix4x4>
 #include <QSizeF>
 #include <QDebug>
@@ -36,6 +37,13 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
     
     if (changed) {
         emit viewportChanged();
+    }
+}
+
+void GridViewState::setViewportSize(double width, double height) {
+    if (width > 0 && height > 0) {
+        m_viewportWidth = width;
+        m_viewportHeight = height;
     }
 }
 
@@ -136,9 +144,15 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
             double currentPriceRange = m_maxPrice - m_minPrice;
             
-            // Calculate new ranges based on zoom factor
+            // Calculate new ranges based on zoom factor - ensure positive values
             int64_t newTimeRange = static_cast<int64_t>(currentTimeRange * (m_zoomFactor / newZoom));
             double newPriceRange = currentPriceRange * (m_zoomFactor / newZoom);
+            
+            // Validate ranges to prevent invalid coordinates
+            if (newTimeRange <= 0 || newPriceRange <= 0.0) {
+                qDebug() << "🚨 ZOOM ABORT: Invalid range calculated - TimeRange:" << newTimeRange << "PriceRange:" << newPriceRange;
+                return;
+            }
             
             // Convert mouse position to normalized coordinates (0.0 to 1.0)
             double centerTimeRatio = center.x() / viewportSize.width();
@@ -160,10 +174,22 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
             
             // Update viewport bounds around the center point
-            m_visibleTimeStart_ms = currentCenterTime - static_cast<int64_t>(newTimeRange * centerTimeRatio);
-            m_visibleTimeEnd_ms = currentCenterTime + static_cast<int64_t>(newTimeRange * (1.0 - centerTimeRatio));
-            m_minPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
-            m_maxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
+            int64_t newTimeStart = currentCenterTime - static_cast<int64_t>(newTimeRange * centerTimeRatio);
+            int64_t newTimeEnd = currentCenterTime + static_cast<int64_t>(newTimeRange * (1.0 - centerTimeRatio));
+            double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
+            double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
+            
+            // Final validation - ensure time range is positive and price range is valid
+            if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
+                qDebug() << "🚨 ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
+                return;
+            }
+            
+            // Apply validated bounds
+            m_visibleTimeStart_ms = newTimeStart;
+            m_visibleTimeEnd_ms = newTimeEnd;
+            m_minPrice = newMinPrice;
+            m_maxPrice = newMaxPrice;
             
             qDebug() << "🔍 ZOOM RESULT:"
                      << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
@@ -208,11 +234,35 @@ void GridViewState::handlePanMove(const QPointF& position) {
 
 void GridViewState::handlePanEnd() {
     if (!m_isDragging) return;
-    
-    // Reset drag state - parent handles coordinate conversion
+
     m_isDragging = false;
-    m_panVisualOffset = QPointF(0, 0);
     
+    if (m_panVisualOffset.manhattanLength() > 0 && m_viewportWidth > 0 && m_viewportHeight > 0) {
+        // Create viewport for coordinate conversion
+        Viewport viewport{
+            m_visibleTimeStart_ms, m_visibleTimeEnd_ms,
+            m_minPrice, m_maxPrice,
+            m_viewportWidth, m_viewportHeight
+        };
+        
+        // Convert visual offset to data coordinates using CoordinateSystem
+        int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+        double priceRange = m_maxPrice - m_minPrice;
+        
+        double timePixelsToMs = static_cast<double>(timeRange) / m_viewportWidth;
+        double pricePixelsToUnits = priceRange / m_viewportHeight;
+        
+        int64_t timeDelta = static_cast<int64_t>(-m_panVisualOffset.x() * timePixelsToMs);
+        double priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
+        
+        // Apply to viewport through setViewport
+        setViewport(m_visibleTimeStart_ms + timeDelta,
+                   m_visibleTimeEnd_ms + timeDelta,
+                   m_minPrice + priceDelta,
+                   m_maxPrice + priceDelta);
+    }
+    
+    m_panVisualOffset = QPointF(0, 0);
     emit panVisualOffsetChanged();
 }
 
