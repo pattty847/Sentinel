@@ -30,9 +30,16 @@ public:
     // Interaction handling
     void handleZoom(double delta, const QPointF& center);
     void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
+    void handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize);
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd();
+    
+    // Directional pan methods
+    void panLeft();
+    void panRight();
+    void panUp();
+    void panDown();
     
     void enableAutoScroll(bool enabled);
     void resetZoom();
@@ -59,6 +66,10 @@ private:
     double m_zoomFactor = 1.0;
     double m_panOffsetTime_ms = 0.0;
     double m_panOffsetPrice = 0.0;
+    
+    // Zoom sensitivity control
+    static constexpr double ZOOM_SENSITIVITY = 0.0005;
+    static constexpr double MAX_ZOOM_DELTA = 0.4;
     
     // Mouse interaction state
     bool m_isDragging = false;

@@ -241,13 +241,91 @@ class MarketDataCore {
 };
 ```
 
-## 🧩 Core Components
+## 🎯 GUI Rendering Architecture (V2 Modular Design)
+
+### **From Monolith to Modular: The V2 Transformation**
+
+The GUI rendering system has undergone a complete architectural refactoring, moving from a monolithic `UnifiedGridRenderer` to a highly modular, strategy-based architecture following **Separation of Concerns** principles.
+
+#### **V2 Architecture Principles:**
+- **Single Responsibility**: Each component has one clear purpose
+- **Strategy Pattern**: Pluggable rendering strategies for different visualization modes
+- **Clean Interfaces**: Well-defined contracts between components
+- **Testability**: All components are independently testable
+- **Performance**: Zero compromise on real-time performance
+
+### **Key V2 Components:**
+
+#### **1. UnifiedGridRenderer (The Slim Adapter)**
+```
+Purpose: Thin QML-C++ bridge with zero business logic
+Location: libs/gui/UnifiedGridRenderer.{h,cpp}
+```
+- **Properties**: Exposes `Q_PROPERTY` bindings to QML
+- **Event Routing**: Routes mouse/wheel events to `GridViewState`
+- **Data Delegation**: Forwards all data to `DataProcessor`  
+- **Strategy Selection**: Chooses appropriate `IRenderStrategy` based on render mode
+- **GPU Interface**: Updates Qt Scene Graph with strategy output
+
+#### **2. GridViewState (Single Source of Truth)**
+```
+Purpose: Manages all UI state and viewport transformations
+Location: libs/gui/render/GridViewState.{hpp,cpp}
+```
+- **Viewport Management**: Time/price ranges, zoom factors, pan offsets
+- **User Interaction**: Smooth, sensitivity-controlled zoom and pan logic
+- **Coordinate Conversion**: World ↔ screen coordinate transformations
+- **Visual Feedback**: Real-time dragging with visual offsets
+- **State Persistence**: Maintains zoom/pan state across renders
+
+#### **3. DataProcessor (Data Pipeline Hub)**
+```
+Purpose: Orchestrates all incoming data processing
+Location: libs/gui/render/DataProcessor.{hpp,cpp}
+```
+- **Data Ingestion**: Receives trades and order books from network layer
+- **Engine Integration**: Feeds data to `LiquidityTimeSeriesEngine`
+- **Viewport Initialization**: Sets initial viewport when first data arrives
+- **Processing Loop**: Manages timers and background processing
+- **Signal Routing**: Connects data flow to rendering pipeline
+
+#### **4. IRenderStrategy (Strategy Pattern)**
+```
+Purpose: Pluggable rendering strategies for different visualization modes
+Location: libs/gui/render/IRenderStrategy.{hpp,cpp}
+           libs/gui/render/strategies/*.{hpp,cpp}
+```
+- **HeatmapStrategy**: Bookmap-style liquidity heatmaps
+- **TradeFlowStrategy**: Trade density visualization with flow patterns
+- **CandleStrategy**: Volume-weighted candlestick charts
+- **Extensibility**: New visualization modes require only new strategy classes
+
+#### **5. AxisModel Family (QML Data Models)**
+```
+Purpose: Provides axis data to QML chart components
+Location: libs/gui/models/*.{hpp,cpp}
+```
+- **TimeAxisModel**: Calculates time axis labels and tick marks
+- **PriceAxisModel**: Generates price axis with appropriate increments
+- **Dynamic Updates**: Responds to viewport changes from `GridViewState`
+- **QML Integration**: Extends `QAbstractListModel` for efficient QML binding
+
+### **V2 Data Flow Architecture:**
+
+```
+Network → DataProcessor → LiquidityTimeSeriesEngine → UnifiedGridRenderer → IRenderStrategy → GridSceneNode → GPU
+                      ↓                                          ↑
+              GridViewState ←→ Mouse/Touch Events ←→ QML Interface
+```
+
+## 🧩 Core Components (Legacy + V2 Hybrid)
 
 ### 1. LiquidityTimeSeriesEngine - Data Aggregation Core
 
 ```
 Purpose: Converts 100ms order book snapshots into multi-timeframe liquidity data
 Location: libs/gui/LiquidityTimeSeriesEngine.{h,cpp}
+Status: Enhanced for V2 integration
 ```
 
 **Key Features:**
@@ -256,39 +334,39 @@ Location: libs/gui/LiquidityTimeSeriesEngine.{h,cpp}
 - Anti-spoofing detection via persistence analysis
 - Memory-bounded with automatic cleanup
 - Thread-safe data structures
+- **V2 Enhancement**: Optimized for strategy pattern integration
 
-**Data Flow:**
-```
-OrderBook → 100ms snapshots → Time buckets → Price levels → Liquidity metrics
-```
-
-### 2. UnifiedGridRenderer - Primary Visualization Engine
+### 2. GridSceneNode - GPU Scene Graph Root
 
 ```
-Purpose: Renders grid-aggregated data using Qt Scene Graph GPU acceleration
-Location: libs/gui/UnifiedGridRenderer.{h,cpp}
+Purpose: Custom QSGTransformNode for high-performance rendering
+Location: libs/gui/render/GridSceneNode.{hpp,cpp}
+Status: New V2 component
 ```
 
-**Rendering Modes:**
-- `LiquidityHeatmap`: Bookmap-style dense grid
-- `TradeFlow`: Trade dots with density aggregation
-- `VolumeCandles`: Volume-weighted candles
-- `OrderBookDepth`: Market depth visualization
+**Rendering Features:**
+- **Transform Management**: Smooth pan/zoom transforms
+- **Content Updates**: Efficient vertex buffer management  
+- **Volume Profile**: Integrated side panel visualization
+- **Triple Buffering**: Eliminates render stuttering
+- **Strategy Integration**: Receives geometry from current strategy
 
-### 3. GridIntegrationAdapter - Migration Bridge
+### 3. RenderDiagnostics - Performance Monitoring
 
 ```
-Purpose: Connects legacy pipeline to new grid system during migration
-Location: libs/gui/GridIntegrationAdapter.{h,cpp}
+Purpose: Real-time performance analysis and debugging
+Location: libs/gui/render/RenderDiagnostics.{hpp,cpp}
+Status: New V2 component
 ```
 
-**Integration Strategy:**
-- Intercepts data from existing `GPUDataAdapter`
-- Converts legacy data formats to grid-compatible structures
-- Enables A/B testing between systems
-- Provides backward compatibility
+**Monitoring Capabilities:**
+- **FPS Tracking**: Real-time frame rate monitoring
+- **Render Time**: Per-frame GPU timing analysis
+- **Cache Metrics**: Hit/miss ratios for optimization
+- **Memory Usage**: GPU buffer allocation tracking
+- **Performance Alerts**: Automatic degradation detection
 
-### 4. Anti-Spoofing Engine
+### 4. GridIntegrationAdapter - Migration Bridge
 
 ```cpp
 // Persistence ratio analysis for professional anti-spoofing

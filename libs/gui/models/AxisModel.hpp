@@ -58,16 +58,16 @@ protected:
     virtual double calculateNiceStep(double range, int targetTicks) const;
     
     // Viewport access for subclasses
-    double getViewportStart() const;
-    double getViewportEnd() const;
-    double getViewportWidth() const;
-    double getViewportHeight() const;
-    bool isViewportValid() const;
+    virtual double getViewportStart() const;
+    virtual double getViewportEnd() const;
+    virtual double getViewportWidth() const;
+    virtual double getViewportHeight() const;
+    virtual bool isViewportValid() const;
     
     // Utility functions
     void clearTicks();
     void addTick(double value, double position, const QString& label, bool isMajorTick = true);
-    double valueToScreenPosition(double value) const;
+    virtual double valueToScreenPosition(double value) const;
     
 private slots:
     void onViewportChanged();

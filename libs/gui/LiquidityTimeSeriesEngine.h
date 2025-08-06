@@ -99,6 +99,9 @@ private:
     // Aggregated time slices for each timeframe
     std::map<int64_t, std::deque<LiquidityTimeSlice>> m_timeSlices;
     
+    // 🚀 TIMEFRAME SUGGESTION TRACKING: Only log when suggestion changes
+    mutable int64_t m_lastSuggestedTimeframe = 0;
+    
     // Real-time "current" slices being built
     std::map<int64_t, LiquidityTimeSlice> m_currentSlices;
     
