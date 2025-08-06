@@ -19,6 +19,14 @@ set(GRID_CORE_SOURCES
     CoordinateSystem.h
     ChartMode.h
     
+    # Axis models for QML integration
+    models/AxisModel.hpp
+    models/AxisModel.cpp
+    models/TimeAxisModel.hpp
+    models/TimeAxisModel.cpp
+    models/PriceAxisModel.hpp
+    models/PriceAxisModel.cpp
+    
     # New modular render architecture (V2)
     render/IRenderStrategy.hpp
     render/IRenderStrategy.cpp
@@ -28,6 +36,8 @@ set(GRID_CORE_SOURCES
     render/GridSceneNode.cpp
     render/RenderDiagnostics.hpp
     render/RenderDiagnostics.cpp
+    render/DataProcessor.hpp
+    render/DataProcessor.cpp
     render/RenderTypes.hpp
     render/RenderConfig.hpp
     render/GridTypes.hpp

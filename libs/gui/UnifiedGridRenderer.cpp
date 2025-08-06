@@ -490,7 +490,8 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
 // Pan/Zoom Controls Implementation
 void UnifiedGridRenderer::zoomIn() {
     if (m_viewState) {
-        m_viewState->handleZoom(1.0, QPointF(width()/2, height()/2));
+        // Use gentle zoom delta (0.1) and center of viewport for UI button zoom
+        m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
         m_geometryDirty.store(true);
         update();
         sLog_Chart("🔍 Zoom In");
@@ -499,7 +500,8 @@ void UnifiedGridRenderer::zoomIn() {
 
 void UnifiedGridRenderer::zoomOut() {
     if (m_viewState) {
-        m_viewState->handleZoom(-1.0, QPointF(width()/2, height()/2));
+        // Use gentle zoom delta (-0.1) and center of viewport for UI button zoom
+        m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
         m_geometryDirty.store(true);
         update();
         sLog_Chart("🔍 Zoom Out");
@@ -517,13 +519,7 @@ void UnifiedGridRenderer::resetZoom() {
 
 void UnifiedGridRenderer::panLeft() {
     if (m_viewState) {
-        // Pan left by adjusting time offset
-        m_viewState->setViewport(
-            m_viewState->getVisibleTimeStart() - 10000,
-            m_viewState->getVisibleTimeEnd() - 10000,
-            m_viewState->getMinPrice(),
-            m_viewState->getMaxPrice()
-        );
+        m_viewState->panLeft();
         m_geometryDirty.store(true);
         update();
         sLog_Chart("👈 Pan Left");
@@ -532,13 +528,7 @@ void UnifiedGridRenderer::panLeft() {
 
 void UnifiedGridRenderer::panRight() {
     if (m_viewState) {
-        // Pan right by adjusting time offset
-        m_viewState->setViewport(
-            m_viewState->getVisibleTimeStart() + 10000,
-            m_viewState->getVisibleTimeEnd() + 10000,
-            m_viewState->getMinPrice(),
-            m_viewState->getMaxPrice()
-        );
+        m_viewState->panRight();
         m_geometryDirty.store(true);
         update();
         sLog_Chart("👉 Pan Right");
@@ -547,15 +537,7 @@ void UnifiedGridRenderer::panRight() {
 
 void UnifiedGridRenderer::panUp() {
     if (m_viewState) {
-        // Pan up by adjusting price range
-        double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
-        double panAmount = priceRange * 0.1;
-        m_viewState->setViewport(
-            m_viewState->getVisibleTimeStart(),
-            m_viewState->getVisibleTimeEnd(),
-            m_viewState->getMinPrice() + panAmount,
-            m_viewState->getMaxPrice() + panAmount
-        );
+        m_viewState->panUp();
         m_geometryDirty.store(true);
         update();
         sLog_Chart("👆 Pan Up");
@@ -564,15 +546,7 @@ void UnifiedGridRenderer::panUp() {
 
 void UnifiedGridRenderer::panDown() {
     if (m_viewState) {
-        // Pan down by adjusting price range
-        double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
-        double panAmount = priceRange * 0.1;
-        m_viewState->setViewport(
-            m_viewState->getVisibleTimeStart(),
-            m_viewState->getVisibleTimeEnd(),
-            m_viewState->getMinPrice() - panAmount,
-            m_viewState->getMaxPrice() - panAmount
-        );
+        m_viewState->panDown();
         m_geometryDirty.store(true);
         update();
         sLog_Chart("👇 Pan Down");
@@ -730,22 +704,21 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     
     // 🎯 CHART ZOOM AREA: Handle zoom for the main chart area
     if (m_viewState) {
-        // 🐛 FIX: Mouse coordinates are relative to the UnifiedGridRenderer widget (no margins)
-        // but the viewport size should match the actual chart rendering area
-        QPointF adjustedPos = event->position();  // Mouse position is already relative to our widget
-        QSizeF chartSize(width(), height());      // Our widget size IS the chart size
+        // Streamlined wheel event - pass raw angleDelta to sensitivity-controlled zoom
+        QPointF mousePos = event->position();
+        QSizeF chartSize(width(), height());
         
-        // Use improved zoom method with correct viewport size for proper mouse pointer centering
-        m_viewState->handleZoomWithViewport(
-            event->angleDelta().y() * 0.001, 
-            adjustedPos, 
+        // Use sensitivity-controlled zoom for smooth, predictable behavior
+        m_viewState->handleZoomWithSensitivity(
+            event->angleDelta().y(), 
+            mousePos, 
             chartSize
         );
         m_geometryDirty.store(true);
         update();
         emit autoScrollEnabledChanged(); // Notify UI that auto-scroll is disabled
         event->accept();
-        sLog_Chart("🖱️ Chart zoom at (" << adjustedPos.x() << ", " << adjustedPos.y() << ") viewport=" << chartSize.width() << "x" << chartSize.height());
+        sLog_Chart("🖱️ Smooth zoom at (" << mousePos.x() << ", " << mousePos.y() << ")");
         return;
     }
     

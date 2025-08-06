@@ -131,7 +131,9 @@ void GridViewState::handleZoom(double delta, const QPointF& center) {
 void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
     
-    double zoomMultiplier = 1.0 + (delta > 0 ? 0.1 : -0.1);
+    // Apply clamped delta for controlled zoom
+    double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
+    double zoomMultiplier = 1.0 + clampedDelta;
     double newZoom = m_zoomFactor * zoomMultiplier;
     
     // Clamp zoom levels (0.1x to 10x)
@@ -162,12 +164,10 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
             
-            // 🐛 DEBUG: Log the zoom calculation
-            qDebug() << "🔍 ZOOM DEBUG:"
-                     << "Mouse(" << center.x() << "," << center.y() << ")"
-                     << "Viewport(" << viewportSize.width() << "x" << viewportSize.height() << ")"
-                     << "Ratios(" << centerTimeRatio << "," << centerPriceRatio << ")"
-                     << "OldZoom:" << m_zoomFactor << "NewZoom:" << newZoom;
+            // Log zoom calculation (reduced verbosity)
+            qDebug() << "🔍 ZOOM:" << "Delta:" << delta << "->" << clampedDelta
+                     << "Zoom:" << m_zoomFactor << "->" << newZoom
+                     << "Mouse(" << center.x() << "," << center.y() << ")";
             
             // Calculate current center point in data coordinates
             int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
@@ -266,6 +266,17 @@ void GridViewState::handlePanEnd() {
     emit panVisualOffsetChanged();
 }
 
+void GridViewState::handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize) {
+    if (!m_timeWindowValid || viewportSize.isEmpty()) return;
+    
+    // Apply zoom sensitivity and clamp the delta
+    double processedDelta = rawDelta * ZOOM_SENSITIVITY;
+    processedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, processedDelta));
+    
+    // Use the existing viewport-aware zoom logic
+    handleZoomWithViewport(processedDelta, center, viewportSize);
+}
+
 void GridViewState::enableAutoScroll(bool enabled) {
     if (m_autoScrollEnabled != enabled) {
         m_autoScrollEnabled = enabled;
@@ -281,4 +292,61 @@ void GridViewState::resetZoom() {
     
     emit viewportChanged();
     emit panVisualOffsetChanged();
+}
+
+// Directional pan methods
+void GridViewState::panLeft() {
+    if (!m_timeWindowValid) return;
+    
+    int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+    int64_t panAmount = timeRange * 0.1; // Pan 10% of visible range
+    
+    setViewport(
+        m_visibleTimeStart_ms - panAmount,
+        m_visibleTimeEnd_ms - panAmount,
+        m_minPrice,
+        m_maxPrice
+    );
+}
+
+void GridViewState::panRight() {
+    if (!m_timeWindowValid) return;
+    
+    int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+    int64_t panAmount = timeRange * 0.1; // Pan 10% of visible range
+    
+    setViewport(
+        m_visibleTimeStart_ms + panAmount,
+        m_visibleTimeEnd_ms + panAmount,
+        m_minPrice,
+        m_maxPrice
+    );
+}
+
+void GridViewState::panUp() {
+    if (!m_timeWindowValid) return;
+    
+    double priceRange = m_maxPrice - m_minPrice;
+    double panAmount = priceRange * 0.1; // Pan 10% of visible range
+    
+    setViewport(
+        m_visibleTimeStart_ms,
+        m_visibleTimeEnd_ms,
+        m_minPrice + panAmount,
+        m_maxPrice + panAmount
+    );
+}
+
+void GridViewState::panDown() {
+    if (!m_timeWindowValid) return;
+    
+    double priceRange = m_maxPrice - m_minPrice;
+    double panAmount = priceRange * 0.1; // Pan 10% of visible range
+    
+    setViewport(
+        m_visibleTimeStart_ms,
+        m_visibleTimeEnd_ms,
+        m_minPrice - panAmount,
+        m_maxPrice - panAmount
+    );
 }
