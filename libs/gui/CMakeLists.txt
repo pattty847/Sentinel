@@ -55,13 +55,16 @@ set(GRID_CORE_SOURCES
 set(GUI_SOURCES ${GRID_CORE_SOURCES})
 message(STATUS "🎯 PHASE 5: Building PURE GRID-ONLY components - legacy DESTROYED!")
 
+# Create the main library target
+add_library(sentinel_gui_lib ${GUI_SOURCES})
+
+# Create the QML module
 qt6_add_qml_module(sentinel_gui_lib
     URI Sentinel.Charts
     VERSION 1.0
     QML_FILES
         qml/DepthChartView.qml
         qml/CandleChartView.qml
-    SOURCES ${GUI_SOURCES}
 )
 
 target_include_directories(sentinel_gui_lib 

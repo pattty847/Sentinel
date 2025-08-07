@@ -5,7 +5,7 @@
 #include <vector>
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "TradeData.h"
+#include "../core/TradeData.h"
 
 /**
  * 🎯 GRID INTEGRATION ADAPTER - Phase 2 Migration

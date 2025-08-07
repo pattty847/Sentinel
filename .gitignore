@@ -1,22 +1,25 @@
 # IDE and Editor files
-.vscode
-.cursor
+.cursor/
+*.swp
+*.swo
+*~
 
-# Build artifacts and cache
-build
-/build*/
-.cache
+# Build artifacts and directories
+build*/
+.cache/
 compile_commands.json
 
-# Configuration files
+# Configuration files (secrets only)
 key.json
 config.json
-CMakePresets.json
-vcpkg.json
 
 # Log files
 *.log
 
-# Scripts and documentation
-/scripts
-CLAUDE.md
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
