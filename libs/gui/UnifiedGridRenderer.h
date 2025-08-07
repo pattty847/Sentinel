@@ -12,7 +12,7 @@
 #include <atomic>
 #include <mutex>
 #include "LiquidityTimeSeriesEngine.h"
-#include "TradeData.h"
+#include "../core/TradeData.h"
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 

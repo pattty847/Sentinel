@@ -1,21 +1,45 @@
 {
-  "version": 3,
-  "configurePresets": [
-    {
-      "name": "default",
-      "displayName": "Default Config",
-      "description": "Default build configuration using vcpkg",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
-      "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "/Users/patrickmcdermott/vcpkg/scripts/buildsystems/vcpkg.cmake"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "default",
-      "configurePreset": "default"
-    }
-  ]
-} 
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "windows-mingw",
+            "displayName": "Win - MinGW",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-windows-mingw",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe",
+                "CMAKE_PREFIX_PATH": "C:/Qt/6.9.1/mingw_64",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "mac-clang",
+            "displayName": "macOS - Clang",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-mac-clang",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/qt",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "linux-gcc",
+            "displayName": "Linux - GCC",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-linux-gcc",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "windows-mingw", "configurePreset": "windows-mingw" },
+        { "name": "mac-clang", "configurePreset": "mac-clang" },
+        { "name": "linux-gcc", "configurePreset": "linux-gcc" }
+    ]
+}

@@ -4,6 +4,7 @@
   "version-string": "0.1.0",
   "dependencies": [
     "boost-beast",
+    "boost-system", 
     "nlohmann-json",
     "openssl",
     "jwt-cpp"

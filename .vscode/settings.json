@@ -1,0 +1,24 @@
+{
+    "cmake.configureOnOpen": false,
+    "cmake.generator": "Ninja",
+    "cmake.preferredGenerators": ["Ninja"],
+    "cmake.debugConfig": {
+        "cwd": "${workspaceFolder}"
+    },
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.autoAddFileAssociations": true,
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.cStandard": "c17",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build-${command:cmake.activeConfigurePreset}",
+        "--query-driver=C:/msys64/mingw64/bin/g++.exe",
+        "--background-index",
+        "--clang-tidy", 
+        "--header-insertion=iwyu"
+    ],
+    "files.associations": {
+        "*.qml": "qml"
+    }
+} 

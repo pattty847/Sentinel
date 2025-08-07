@@ -8,7 +8,7 @@
 #include <memory>      // For smart pointers (like Python's automatic memory management)
 #include <unordered_map> // For the last trade IDs tracking (like Python's dict)
 #include "CoinbaseStreamClient.hpp"
-#include "TradeData.h"
+#include "../core/TradeData.h"
 
 // Phase 4: GPUDataAdapter removed - replaced by GridIntegrationAdapter with Qt signals
 

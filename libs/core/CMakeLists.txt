@@ -34,7 +34,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(jwt-cpp REQUIRED)
+# jwt-cpp is fetched via FetchContent in main CMakeLists.txt
 
 target_include_directories(sentinel_core PUBLIC .)
 
