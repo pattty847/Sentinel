@@ -22,11 +22,19 @@
 
 ## ✨ Key Features
 
-### 🎯 Grid-Based Market Microstructure Analysis
+### 🎯 V2 Modular Grid Architecture
 - **Professional Liquidity Heatmap**: Dense grid orderbook visualization with 2D coordinate aggregation
+- **Modular Render System**: Strategy-pattern rendering (Heatmap, TradeFlow, Candle modes)
+- **Composable QML Components**: NavigationControls, TimeframeSelector, VolumeFilter extracted for reusability
 - **Multi-Timeframe Analysis**: 100ms → 10s temporal aggregation for professional market depth analysis
 - **Anti-Spoofing Detection**: Persistence ratio analysis to filter out fake liquidity
 - **Volume-at-Price Analysis**: Real-time depth visualization with GPU acceleration
+
+### 🏗️ Clean Architecture
+- **UnifiedGridRenderer**: Slim QML adapter delegating to V2 modular system
+- **GridViewState**: Pure viewport & gesture handling without Qt dependencies
+- **IRenderStrategy**: Pluggable rendering strategies for different visualization modes
+- **Component-Based QML**: Extracted reusable controls with clean interfaces
 
 ## 🚀 Quick Start
 

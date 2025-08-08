@@ -318,6 +318,37 @@ Network → DataProcessor → LiquidityTimeSeriesEngine → UnifiedGridRenderer 
               GridViewState ←→ Mouse/Touch Events ←→ QML Interface
 ```
 
+### **QML Component Architecture (Extracted Controls)**
+
+Following the component refactor blueprint, the monolithic QML has been modularized:
+
+```
+libs/gui/qml/
+├── DepthChartView.qml (Main orchestrator - Simplified)
+└── controls/ (✅ Extracted Components)
+    ├── NavigationControls.qml (Zoom/Pan buttons)
+    ├── TimeframeSelector.qml (100ms, 250ms, 500ms, 1s, 2s, 5s, 10s)
+    ├── VolumeFilter.qml (Asset-aware volume scaling)
+    ├── GridResolutionSelector.qml (Grid density controls)
+    └── PriceResolutionSelector.qml (Price increment controls)
+```
+
+**Component Interface Pattern:**
+```qml
+// Standard interface for all extracted controls
+QtObject {
+    property UnifiedGridRenderer target  // Required
+    property bool enabled: true
+    signal valueChanged(var newValue)
+}
+```
+
+**Benefits Achieved:**
+- ✅ **Reusability**: Controls work across different chart types
+- ✅ **Maintainability**: Isolated functionality, easier debugging
+- ✅ **Testability**: Each component independently testable
+- ✅ **Asset-Aware UI**: Dynamic volume ranges based on symbol (BTC: 0-100, ETH: 0-500, DOGE: 0-10k)
+
 ## 🧩 Core Components (Legacy + V2 Hybrid)
 
 ### 1. LiquidityTimeSeriesEngine - Data Aggregation Core

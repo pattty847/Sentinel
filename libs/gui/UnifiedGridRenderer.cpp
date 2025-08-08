@@ -79,7 +79,7 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     
     m_geometryDirty.store(true);
     update();
-    emit viewportChanged(); // 🚀 Notify QML of viewport changes
+    // GridViewState emits viewportChanged which is connected to us
     
     // Debug logging for viewport changes
     static int viewportChangeCount = 0;
@@ -103,6 +103,11 @@ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRect
             sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height() << " [Change #" << geometryChangeCount << "]");
         }
         
+        // Keep GridViewState in sync with the item size for accurate coord math
+        if (m_viewState) {
+            m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
+        }
+
         // Force redraw with new geometry
         m_geometryDirty.store(true);
         update();
@@ -193,8 +198,7 @@ void UnifiedGridRenderer::createLiquidityCell(const LiquidityTimeSlice& slice, d
     cell.screenRect = timeSliceToScreenRect(slice, price);
     cell.liquidity = liquidity;
     cell.isBid = isBid;
-    cell.intensity = calculateIntensity(liquidity);
-    cell.color = calculateHeatmapColor(liquidity, isBid, cell.intensity);
+    // Defer intensity and color calculation to render strategy to avoid duplication
     cell.timeSlot = slice.startTime_ms;
     cell.priceLevel = price;
     
@@ -228,37 +232,7 @@ QRectF UnifiedGridRenderer::timeSliceToScreenRect(const LiquidityTimeSlice& slic
     return QRectF(topLeft, bottomRight);
 }
 
-// Color calculation methods (delegated to strategies in V2)
-QColor UnifiedGridRenderer::calculateHeatmapColor(double liquidity, bool isBid, double intensity) const {
-    intensity = std::min(intensity * m_intensityScale, 1.0);
-    
-    float r, g, b;
-    
-    if (isBid) {
-        // Bid liquidity - Green scale
-        r = 0.0f;
-        g = 0.3f + intensity * 0.7f;
-        b = 0.0f;
-    } else {
-        // Ask liquidity - Red scale
-        r = 0.3f + intensity * 0.7f;
-        g = 0.0f;
-        b = 0.0f;
-    }
-    
-    // Alpha scales with intensity
-    float alpha = 0.1f + intensity * 0.8f;
-    
-    return QColor::fromRgbF(r, g, b, alpha);
-}
-
-double UnifiedGridRenderer::calculateIntensity(double liquidity) const {
-    if (liquidity <= 0) return 0.0;
-    
-    // Simple logarithmic scaling for better visualization
-    double intensity = std::log10(1.0 + liquidity * 1000.0) / 4.0;  // Scale to [0,1] range
-    return std::min(intensity, 1.0);
-}
+// Color/intensity now owned by render strategies (see HeatmapStrategy)
 
 // Property setters
 void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
@@ -677,7 +651,7 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
         update();
         
         m_geometryDirty.store(true);
-        emit viewportChanged();
+        // ViewState will emit viewportChanged; our connection forwards it
         return;
     }
 }
@@ -716,7 +690,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
         );
         m_geometryDirty.store(true);
         update();
-        emit autoScrollEnabledChanged(); // Notify UI that auto-scroll is disabled
+        // Auto-scroll change is emitted by GridViewState
         event->accept();
         sLog_Chart("🖱️ Smooth zoom at (" << mousePos.x() << ", " << mousePos.y() << ")");
         return;

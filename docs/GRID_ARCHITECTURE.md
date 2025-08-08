@@ -667,45 +667,97 @@ Item {
 }
 ```
 
-### **Control Widgets - Simple Bindings**
+### **Extracted Control Components (Modular QML)**
+
+Following the QML component refactor blueprint, controls have been extracted into reusable components:
 
 ```qml
-// Chart controls are simple property bindings
+// libs/gui/qml/controls/NavigationControls.qml
 Row {
-    spacing: 10
+    property UnifiedGridRenderer target  // Required interface
+    spacing: 8
     
-    // Rendering mode selector
-    ComboBox {
-        model: ["Liquidity Heatmap", "Trade Flow", "Volume Candles"]
-        onCurrentIndexChanged: gridRenderer.renderMode = currentIndex
+    Button { 
+        text: "+"
+        onClicked: target.zoomIn() 
+        ToolTip.text: "Zoom In (Ctrl++)"
     }
+    Button { 
+        text: "−"
+        onClicked: target.zoomOut()
+        ToolTip.text: "Zoom Out (Ctrl+-)" 
+    }
+    Button { 
+        text: "⌂"
+        onClicked: target.resetZoom()
+        ToolTip.text: "Reset View (Ctrl+0)"
+    }
+}
+
+// libs/gui/qml/controls/TimeframeSelector.qml  
+Column {
+    property UnifiedGridRenderer target
+    property int currentTimeframe: target.timeframeMs
     
-    // Timeframe selector  
     Row {
-        Button { text: "100ms"; onClicked: gridRenderer.setTimeframe(100) }
-        Button { text: "1s"; onClicked: gridRenderer.setTimeframe(1000) }
-        Button { text: "5s"; onClicked: gridRenderer.setTimeframe(5000) }
+        spacing: 4
+        Repeater {
+            model: [100, 250, 500, 1000, 2000, 5000, 10000]
+            Button {
+                text: modelData < 1000 ? modelData + "ms" : (modelData/1000) + "s"
+                highlighted: currentTimeframe === modelData
+                onClicked: target.setTimeframe(modelData)
+            }
+        }
+    }
+}
+
+// libs/gui/qml/controls/VolumeFilter.qml
+Column {
+    property UnifiedGridRenderer target
+    property real maxRange: {
+        if (target.symbol.includes("BTC")) return 100.0
+        if (target.symbol.includes("ETH")) return 500.0  
+        if (target.symbol.includes("DOGE")) return 10000.0
+        return 1000.0
     }
     
-    // Zoom controls
-    Row {
-        Button { text: "Zoom In"; onClicked: gridRenderer.zoomIn() }
-        Button { text: "Zoom Out"; onClicked: gridRenderer.zoomOut() }
-        Button { text: "Reset"; onClicked: gridRenderer.resetZoom() }
+    Slider {
+        from: 0
+        to: maxRange
+        value: target.minVolumeFilter
+        onValueChanged: target.setMinVolumeFilter(value)
     }
     
-    // Pan controls
-    Grid {
-        columns: 3
-        Button { text: ""; enabled: false }
-        Button { text: "↑"; onClicked: gridRenderer.panUp() }
-        Button { text: ""; enabled: false }
-        Button { text: "←"; onClicked: gridRenderer.panLeft() }
-        Button { text: "⌂"; onClicked: gridRenderer.resetZoom() }
-        Button { text: "→"; onClicked: gridRenderer.panRight() }
-        Button { text: ""; enabled: false }
-        Button { text: "↓"; onClicked: gridRenderer.panDown() }
-        Button { text: ""; enabled: false }
+    Text {
+        text: "Min Volume: " + target.minVolumeFilter.toFixed(2)
+        color: "white"
+    }
+}
+```
+
+**Integration in Main Chart:**
+```qml
+// libs/gui/qml/DepthChartView.qml (Simplified main orchestrator)
+Rectangle {
+    id: root
+    
+    UnifiedGridRenderer {
+        id: gridRenderer
+        anchors.fill: parent
+    }
+    
+    // Extracted components with clean interfaces
+    Column {
+        anchors.right: parent.right
+        anchors.top: parent.top
+        spacing: 16
+        
+        NavigationControls { target: gridRenderer }
+        TimeframeSelector { target: gridRenderer }  
+        VolumeFilter { target: gridRenderer }
+        GridResolutionSelector { target: gridRenderer }
+        PriceResolutionSelector { target: gridRenderer }
     }
 }
 ```

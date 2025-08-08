@@ -394,7 +394,7 @@ TEST_F(ProfessionalRequirementsTest, AntiSpoofingDetection) {
                         
                         // Analyze price level persistence
                         for (const auto& [price, metrics] : slice.bidMetrics) {
-                            double persistenceRatio = metrics.persistenceRatio();
+                            double persistenceRatio = metrics.persistenceRatio(timeframe_ms);
                             
                             if (metrics.snapshotCount > 5) { // Minimum observations
                                 if (persistenceRatio < SPOOF_DETECTION_THRESHOLD) {

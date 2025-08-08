@@ -54,23 +54,6 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
     
     QMatrix4x4 transform;
     
-    // Apply zoom transformation
-    if (m_zoomFactor != 1.0) {
-        transform.scale(m_zoomFactor, m_zoomFactor);
-    }
-    
-    // Apply pan transformation
-    if (m_panOffsetTime_ms != 0.0 || m_panOffsetPrice != 0.0) {
-        double timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-        double priceRange = m_maxPrice - m_minPrice;
-        
-        if (timeRange > 0 && priceRange > 0) {
-            double panX = (m_panOffsetTime_ms / timeRange) * itemBounds.width();
-            double panY = (m_panOffsetPrice / priceRange) * itemBounds.height();
-            transform.translate(panX, panY);
-        }
-    }
-    
     // Apply visual offset during active dragging
     if (m_isDragging && !m_panVisualOffset.isNull()) {
         transform.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
