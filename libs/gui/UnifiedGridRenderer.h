@@ -235,8 +235,7 @@ private:
     QRectF timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const;
     
     // Color calculation methods (delegated to strategies in V2)
-    QColor calculateHeatmapColor(double liquidity, bool isBid, double intensity) const;
-    double calculateIntensity(double liquidity) const;
+    // Color/intensity delegated to strategies; no duplicates here
     
     // 🚀 NEW MODULAR ARCHITECTURE (V2)
     std::unique_ptr<GridViewState> m_viewState;
