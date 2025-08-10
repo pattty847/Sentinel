@@ -10,16 +10,16 @@ StreamController::StreamController(QObject* parent)
     , m_pollTimer(nullptr)
     , m_orderBookPollTimer(nullptr)
 {
-    sLog_Init("StreamController created");
+    sLog_App("StreamController created");
 }
 
 StreamController::~StreamController() {
     stop();
-    sLog_Init("StreamController destroyed");
+    sLog_App("StreamController destroyed");
 }
 
 void StreamController::start(const std::vector<std::string>& symbols) {
-    sLog_Init("Starting StreamController...");
+    sLog_App("Starting StreamController...");
     
     // Store the symbols for later use
     m_symbols = symbols;
@@ -42,7 +42,7 @@ void StreamController::start(const std::vector<std::string>& symbols) {
         connect(m_client->getMarketDataCore(), &MarketDataCore::connectionStatusChanged,
                 this, &StreamController::onConnectionStatusChanged, Qt::QueuedConnection);
         
-        sLog_Init("✅ Connected to real-time WebSocket signals");
+        sLog_App("✅ Connected to real-time WebSocket signals");
     } else {
         sLog_Warning("⚠️ MarketDataCore not available, falling back to polling");
         
@@ -59,11 +59,11 @@ void StreamController::start(const std::vector<std::string>& symbols) {
     // Emit connected signal
     emit connected();
     
-    sLog_Init("StreamController started successfully");
+    sLog_App("StreamController started successfully");
 }
 
 void StreamController::stop() {
-    sLog_Init("Stopping StreamController...");
+    sLog_App("Stopping StreamController...");
     
     // 1. Reset the client first. This is critical.
     // This stops the underlying threads in MarketDataCore and ensures no
@@ -88,7 +88,7 @@ void StreamController::stop() {
     // Emit disconnected signal
     emit disconnected();
     
-    sLog_Init("StreamController stopped");
+    sLog_App("StreamController stopped");
 }
 
 // 🔥 NEW: Real-time signal handlers
@@ -97,7 +97,7 @@ void StreamController::onTradeReceived(const Trade& trade) {
     // Log only the first 10 trades
     static int tradeCount = 0;
     if (tradeCount < 10) {
-        sLog_Trades("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
+        sLog_Data("🚀 REAL-TIME: Received trade" << QString::fromStdString(trade.product_id) 
                    << "$" << trade.price << "size:" << trade.size);
         tradeCount++;
     }
@@ -120,9 +120,9 @@ void StreamController::onOrderBookUpdated(const OrderBook& orderBook) {
 
 void StreamController::onConnectionStatusChanged(bool connected) {
     if (connected) {
-        sLog_Connection("✅ WebSocket connection established");
+        sLog_Data("✅ WebSocket connection established");
     } else {
-        sLog_Connection("❌ WebSocket connection lost");
+        sLog_Data("❌ WebSocket connection lost");
     }
 }
 
@@ -138,7 +138,7 @@ void StreamController::pollForTrades() {
         
         // Debug logging
         if (!newTrades.empty()) {
-            sLog_Trades("🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol));
+            sLog_Data("🚀 StreamController: Found" << newTrades.size() << "new trades for" << QString::fromStdString(symbol));
         }
         
         // Process each new trade
@@ -152,7 +152,7 @@ void StreamController::pollForTrades() {
             // 🔥 THROTTLED LOGGING: Only log every 50th trade processing to reduce spam
             static int processLogCount = 0;
             if (++processLogCount % 50 == 1) { // Log 1st, 51st, 101st trade, etc.
-                sLog_Trades("📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
+                sLog_Data("📤 Pushing trade to GPU queue:" << QString::fromStdString(trade.product_id) 
                          << "$" << trade.price << "size:" << trade.size 
                          << "[" << processLogCount << " trades processed]");
             }
@@ -173,7 +173,7 @@ void StreamController::pollForOrderBooks() {
         // 🔥 THROTTLED LOGGING: Only log every 20th order book poll to reduce spam
         static int pollLogCount = 0;
         if (++pollLogCount % 20 == 1) { // Log 1st, 21st, 41st poll, etc.
-            sLog_Network("Polled client for" << QString::fromStdString(symbol) 
+            sLog_Data("Polled client for" << QString::fromStdString(symbol) 
                      << "order book. Bids:" << book.bids.size() << "Asks:" << book.asks.size()
                      << "[" << pollLogCount << " polls total]");
         }

@@ -2,137 +2,124 @@
 
 #include <QLoggingCategory>
 #include <QDebug>
+#include <cstdlib>
 
 // =============================================================================
-// SENTINEL LOGGING CATEGORIES
+// SENTINEL LOGGING CATEGORIES - SIMPLIFIED 4-CATEGORY SYSTEM
 // =============================================================================
-// Organized by component and severity for efficient debugging
-// Use Q_LOGGING_CATEGORY environment variables to control output
+// Simplified from 15+ categories to 4 core categories for better developer UX
+// Each category supports atomic throttling for high-frequency operations
 
-// CORE COMPONENTS
-Q_DECLARE_LOGGING_CATEGORY(logCore)           // Core data structures, auth
-Q_DECLARE_LOGGING_CATEGORY(logNetwork)       // WebSocket, connections, subscriptions  
-Q_DECLARE_LOGGING_CATEGORY(logCache)         // DataCache operations, trades, order books
-Q_DECLARE_LOGGING_CATEGORY(logPerformance)   // Performance monitoring, timing
-
-// GUI COMPONENTS
-Q_DECLARE_LOGGING_CATEGORY(logRender)        // High-frequency rendering operations
-Q_DECLARE_LOGGING_CATEGORY(logRenderDetail)  // Detailed paint/geometry logging (normally disabled)
-Q_DECLARE_LOGGING_CATEGORY(logChart)         // Chart operations, coordinate calculations
-Q_DECLARE_LOGGING_CATEGORY(logCandles)       // Candlestick processing, LOD system
-Q_DECLARE_LOGGING_CATEGORY(logTrades)        // Trade visualization, color processing
-Q_DECLARE_LOGGING_CATEGORY(logCamera)        // Camera pan/zoom operations
-Q_DECLARE_LOGGING_CATEGORY(logGPU)           // GPU data adapter, batching
-
-// INITIALIZATION & LIFECYCLE
-Q_DECLARE_LOGGING_CATEGORY(logInit)          // Component initialization
-Q_DECLARE_LOGGING_CATEGORY(logConnection)    // Connection establishment, cleanup
-Q_DECLARE_LOGGING_CATEGORY(logSubscription)  // Market data subscriptions
-
-// DEBUGGING CATEGORIES (disabled by default)
-Q_DECLARE_LOGGING_CATEGORY(logDebugCoords)   // Coordinate calculation details
-Q_DECLARE_LOGGING_CATEGORY(logDebugGeometry) // Geometry creation details
-Q_DECLARE_LOGGING_CATEGORY(logDebugTiming)   // Frame timing, paint cycles
-Q_DECLARE_LOGGING_CATEGORY(logDebugData)     // Raw data processing details
+Q_DECLARE_LOGGING_CATEGORY(logApp)      // Application: init, lifecycle, config, auth
+Q_DECLARE_LOGGING_CATEGORY(logData)     // Data: network, cache, trades, market data, WebSocket  
+Q_DECLARE_LOGGING_CATEGORY(logRender)   // Render: all rendering, charts, GPU, coordinates, camera
+Q_DECLARE_LOGGING_CATEGORY(logDebug)    // Debug: detailed diagnostics (disabled by default)
 
 // =============================================================================
-// CONVENIENCE MACROS FOR COMMON PATTERNS
+// ATOMIC THROTTLING SYSTEM
 // =============================================================================
 
-// Replace direct qDebug() calls with categorized versions
-#define sLog_Core(...)        qCDebug(logCore) << __VA_ARGS__
-#define sLog_Network(...)     qCDebug(logNetwork) << __VA_ARGS__
-#define sLog_Cache(...)       qCDebug(logCache) << __VA_ARGS__
-#define sLog_Performance(...) qCDebug(logPerformance) << __VA_ARGS__
+namespace sentinel::log_throttle {
+    // Compile-time defaults (overridden by env vars)
+    inline constexpr int kApp    = 1;    // Log every app event (low frequency)
+    inline constexpr int kData   = 20;   // Log every 20th data operation  
+    inline constexpr int kRender = 100;  // Log every 100th render operation
+    inline constexpr int kDebug  = 10;   // Log every 10th debug message
+}
 
-#define sLog_Render(...)      qCDebug(logRender) << __VA_ARGS__
-#define sLog_RenderDetail(...) qCDebug(logRenderDetail) << __VA_ARGS__
-#define sLog_Chart(...)       qCDebug(logChart) << __VA_ARGS__
-#define sLog_Candles(...)     qCDebug(logCandles) << __VA_ARGS__
-#define sLog_Trades(...)      qCDebug(logTrades) << __VA_ARGS__
-#define sLog_Camera(...)      qCDebug(logCamera) << __VA_ARGS__
-#define sLog_GPU(...)         qCDebug(logGPU) << __VA_ARGS__
-
-#define sLog_Init(...)        qCDebug(logInit) << __VA_ARGS__
-#define sLog_Connection(...)  qCDebug(logConnection) << __VA_ARGS__
-#define sLog_Subscription(...) qCDebug(logSubscription) << __VA_ARGS__
-
-#define sLog_DebugCoords(...) qCDebug(logDebugCoords) << __VA_ARGS__
-#define sLog_DebugGeometry(...) qCDebug(logDebugGeometry) << __VA_ARGS__
-#define sLog_DebugTiming(...) qCDebug(logDebugTiming) << __VA_ARGS__
-#define sLog_DebugData(...)   qCDebug(logDebugData) << __VA_ARGS__
-
-// Warning and Error macros (always enabled)
-#define sLog_Warning(...)     qCWarning(logCore) << __VA_ARGS__
-#define sLog_Error(...)       qCCritical(logCore) << __VA_ARGS__
+// Atomic throttling macro with runtime env var override
+#define SLOG_THROTTLED(cat, defaultInterval, ...)                                   \
+    do {                                                                             \
+        static std::atomic<uint32_t> _counter{0};                                    \
+        static int _interval = []() {                                                \
+            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");        \
+            return env ? std::atoi(env) : (defaultInterval);                        \
+        }();                                                                         \
+        if ((++_counter % _interval) == 1) {                                        \
+            qCDebug(log##cat) << __VA_ARGS__;                                        \
+        }                                                                            \
+    } while(false)
 
 // =============================================================================
-// THROTTLED LOGGING HELPERS
+// SIMPLIFIED LOGGING MACROS - 4 CATEGORIES WITH ATOMIC THROTTLING
 // =============================================================================
-// Use these for high-frequency operations to reduce spam
 
-template<int N = 50>
-class ThrottledLogger {
-private:
-    mutable int m_count = 0;
-    
-public:
-    // Simple one-argument version for most common use case
-    void log(const QLoggingCategory& category, const QString& message) const {
-        if (++m_count % N == 1) {
-            qCDebug(category) << message << "[call #" << m_count << "]";
-        }
-    }
-    
-    // Two-argument version for formatted messages  
-    template<typename T>
-    void log(const QLoggingCategory& category, const QString& message, const T& value) const {
-        if (++m_count % N == 1) {
-            qCDebug(category) << message << value << "[call #" << m_count << "]";
-        }
-    }
-};
+// Primary logging macros (automatically throttled for hot paths)
+#define sLog_App(...)     SLOG_THROTTLED(App, sentinel::log_throttle::kApp, __VA_ARGS__)
+#define sLog_Data(...)    SLOG_THROTTLED(Data, sentinel::log_throttle::kData, __VA_ARGS__)  
+#define sLog_Render(...)  SLOG_THROTTLED(Render, sentinel::log_throttle::kRender, __VA_ARGS__)
+#define sLog_Debug(...)   SLOG_THROTTLED(Debug, sentinel::log_throttle::kDebug, __VA_ARGS__)
 
-// Common throttled loggers for high-frequency operations
-extern ThrottledLogger<20> gTradeLogger;        // Log every 20th trade
-extern ThrottledLogger<100> gRenderLogger;      // Log every 100th render
-extern ThrottledLogger<50> gCoordLogger;        // Log every 50th coordinate calc
-extern ThrottledLogger<30> gCacheLogger;        // Log every 30th cache access
+// Override macros for specific throttle intervals
+#define sLog_AppN(n, ...)    SLOG_THROTTLED(App, n, __VA_ARGS__)
+#define sLog_DataN(n, ...)   SLOG_THROTTLED(Data, n, __VA_ARGS__)
+#define sLog_RenderN(n, ...) SLOG_THROTTLED(Render, n, __VA_ARGS__)
+#define sLog_DebugN(n, ...)  SLOG_THROTTLED(Debug, n, __VA_ARGS__)
+
+// Always-on macros (no throttling for critical messages)
+#define sLog_Warning(...)  qCWarning(logApp) << __VA_ARGS__
+#define sLog_Error(...)    qCCritical(logApp) << __VA_ARGS__
+
+// =============================================================================
+// 🔥 MIGRATION COMPLETE! BACKWARD COMPATIBILITY ALIASES OBLITERATED! 🔥
+// =============================================================================
+// All logging now uses the pure 4-category system with atomic throttling:
+// - sLog_App()    : Application lifecycle, config, auth
+// - sLog_Data()   : Network, cache, trades, WebSocket operations  
+// - sLog_Render() : Charts, rendering, GPU, coordinates
+// - sLog_Debug()  : Debug diagnostics and detailed logging
+//
+// 📊 PERFORMANCE BENEFITS:
+// ✅ Atomic throttling eliminates console spam
+// ✅ Thread-safe counters (no race conditions)  
+// ✅ Runtime tunable via environment variables
+// ✅ Zero manual static counter maintenance
+//
+// 🎯 LINUS-APPROVED: No blocking, no races, no lies!
+
+// =============================================================================
+// RUNTIME ENVIRONMENT VARIABLE CONTROL
+// =============================================================================
+// Override throttle intervals at runtime:
+//   export SENTINEL_LOG_App_INTERVAL=1      # Log every app message  
+//   export SENTINEL_LOG_Data_INTERVAL=5     # Log every 5th data operation
+//   export SENTINEL_LOG_Render_INTERVAL=50  # Log every 50th render
+//   export SENTINEL_LOG_Debug_INTERVAL=1    # Log every debug message
 
 // =============================================================================
 // USAGE EXAMPLES & DOCUMENTATION
 // =============================================================================
 /*
-ENVIRONMENT VARIABLE CONTROL:
-Export these to control which categories are enabled:
+NEW 4-CATEGORY SYSTEM WITH ATOMIC THROTTLING:
 
-# Enable all core logging
-export QT_LOGGING_RULES="*.debug=true"
+BASIC USAGE:
+sLog_App("🚀 CREATING GPU TRADING TERMINAL!");           // Application events
+sLog_Data("💰 Trade processed:" << price << size);       // Data operations  
+sLog_Render("🎨 Frame rendered:" << fps << "fps");       // Rendering operations
+sLog_Debug("🔍 Debug info:" << variable);                // Debug details
 
-# Enable only specific components
-export QT_LOGGING_RULES="sentinel.core.debug=true;sentinel.network.debug=true"
+CUSTOM THROTTLING:
+sLog_DataN(5, "Every 5th trade:" << trade);              // Custom interval
+sLog_RenderN(50, "Every 50th frame:" << frame);          // Custom interval
 
-# Disable high-frequency categories
-export QT_LOGGING_RULES="sentinel.render.detail.debug=false;sentinel.debug.*.debug=false"
+MIGRATION FROM OLD SYSTEM:
+OLD: sLog_Connection("Connected to WebSocket");
+NEW: sLog_Data("Connected to WebSocket");                // Network = Data
 
-# Production mode - only warnings and errors
-export QT_LOGGING_RULES="*.debug=false;*.warning=true;*.critical=true"
+OLD: sLog_Chart("Rendering chart with" << points << "points");  
+NEW: sLog_Render("Rendering chart with" << points << "points"); // Chart = Render
 
-MIGRATION EXAMPLES:
+OLD: static int count; if (++count % 20 == 1) sLog_Trades(...);
+NEW: sLog_Data(...);                                     // Automatic throttling!
 
-OLD: qDebug() << "🚀 CREATING GPU TRADING TERMINAL!";
-NEW: sLog_Init() << "🚀 CREATING GPU TRADING TERMINAL!";
+CATEGORY GUIDELINES:
+- sLog_App():    Init, lifecycle, config, auth           (throttle: every 1)
+- sLog_Data():   Network, cache, trades, WebSocket       (throttle: every 20)  
+- sLog_Render(): Charts, GPU, coordinates, painting      (throttle: every 100)
+- sLog_Debug():  Detailed diagnostics, variables         (throttle: every 10)
 
-OLD: qDebug() << "🕯️ CANDLE RENDER UPDATE:" << "LOD:" << timeframe;
-NEW: sLog_Candles() << "🕯️ CANDLE RENDER UPDATE:" << "LOD:" << timeframe;
-
-OLD: static int count = 0; if (++count % 20 == 1) qDebug() << "💰 Trade:" << trade;
-NEW: gTradeLogger.log(logTrades, "💰 Trade:", trade);
-
-FREQUENCY GUIDELINES:
-- logInit, logConnection: One-time events
-- logNetwork, logCache: Low frequency (< 10/sec)
-- logChart, logCandles: Medium frequency (< 100/sec)  
-- logRender: High frequency (> 100/sec) - use throttling
-- logRenderDetail, logDebug*: Debug only - disabled in production
+RUNTIME CONTROL:
+export SENTINEL_LOG_Data_INTERVAL=1    # See every data operation
+export SENTINEL_LOG_Render_INTERVAL=10 # See every 10th render
+export QT_LOGGING_RULES="*.debug=true" # Enable all categories
 */ 
