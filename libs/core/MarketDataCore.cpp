@@ -24,17 +24,17 @@ MarketDataCore::MarketDataCore(const std::vector<std::string>& products,
     m_sslCtx.set_default_verify_paths();
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
-    sLog_Init(QString("🏗️ MarketDataCore initialized for %1 products").arg(products.size()));
+    sLog_App(QString("🏗️ MarketDataCore initialized for %1 products").arg(products.size()));
 }
 
 MarketDataCore::~MarketDataCore() {
     stop();
-    sLog_Init("🏗️ MarketDataCore destroyed");
+    sLog_App("🏗️ MarketDataCore destroyed");
 }
 
 void MarketDataCore::start() {
     if (!m_running.exchange(true)) {
-        sLog_Init("🚀 Starting MarketDataCore...");
+        sLog_App("🚀 Starting MarketDataCore...");
         
         // Reset backoff on fresh start
         m_backoffDuration = std::chrono::seconds(1);
@@ -52,7 +52,7 @@ void MarketDataCore::start() {
 
 void MarketDataCore::stop() {
     if (m_running.exchange(false)) {
-        sLog_Init("🛑 Stopping MarketDataCore...");
+        sLog_App("🛑 Stopping MarketDataCore...");
         
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
@@ -82,12 +82,12 @@ void MarketDataCore::stop() {
             m_ioThread.join();
         }
         
-        sLog_Init("✅ MarketDataCore stopped");
+        sLog_App("✅ MarketDataCore stopped");
     }
 }
 
 void MarketDataCore::run() {
-    sLog_Connection(QString("🔌 Starting connection to %1:%2").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
+    sLog_Data(QString("🔌 Starting connection to %1:%2").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
     
     // Start the connection process
     m_resolver.async_resolve(m_host, m_port,
@@ -96,7 +96,7 @@ void MarketDataCore::run() {
     // Run the IO context - this blocks until stopped
     m_ioc.run();
     
-    sLog_Connection("🔌 IO context stopped");
+    sLog_Data("🔌 IO context stopped");
 }
 
 void MarketDataCore::onResolve(beast::error_code ec, tcp::resolver::results_type results) {
@@ -106,7 +106,7 @@ void MarketDataCore::onResolve(beast::error_code ec, tcp::resolver::results_type
         return;
     }
     
-    sLog_Connection("🔍 DNS resolved, connecting...");
+    sLog_Data("🔍 DNS resolved, connecting...");
     
     // Set connection timeout
     get_lowest_layer(m_ws).expires_after(std::chrono::seconds(30));
@@ -123,7 +123,7 @@ void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type
         return;
     }
     
-    sLog_Connection("🔗 TCP connected, starting SSL handshake...");
+    sLog_Data("🔗 TCP connected, starting SSL handshake...");
     
     // Set SNI hostname for SSL
     if (!SSL_set_tlsext_host_name(m_ws.next_layer().native_handle(), m_host.c_str())) {
@@ -160,7 +160,7 @@ void MarketDataCore::onSslHandshake(beast::error_code ec) {
         return;
     }
     
-    sLog_Connection("🔐 SSL handshake complete, starting WebSocket handshake...");
+    sLog_Data("🔐 SSL handshake complete, starting WebSocket handshake...");
     
     // Disable timeout (WebSocket has its own timeout settings)
     get_lowest_layer(m_ws).expires_never();
@@ -180,11 +180,11 @@ void MarketDataCore::onWsHandshake(beast::error_code ec) {
         return;
     }
     
-    sLog_Connection("🌐 WebSocket connected! Sending subscriptions...");
+    sLog_Data("🌐 WebSocket connected! Sending subscriptions...");
     
     // Send level2 subscription first
     std::string level2_sub = buildSubscribe("level2");
-    sLog_Subscription("📤 Sending level2 subscription...");
+    sLog_Data("📤 Sending level2 subscription...");
     
     m_ws.async_write(net::buffer(level2_sub),
         [this](beast::error_code ec, std::size_t) {
@@ -194,7 +194,7 @@ void MarketDataCore::onWsHandshake(beast::error_code ec) {
                 return;
             }
             
-            sLog_Subscription("✅ Level2 subscription sent! Sending trades subscription...");
+            sLog_Data("✅ Level2 subscription sent! Sending trades subscription...");
             
             // Send market_trades subscription
             std::string trades_sub = buildSubscribe("market_trades");
@@ -210,7 +210,7 @@ void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
         return;
     }
     
-    sLog_Connection("✅ All subscriptions sent! Starting to read messages...");
+    sLog_Data("✅ All subscriptions sent! Starting to read messages...");
     
     // Start reading messages
     m_ws.async_read(m_buf,
@@ -246,7 +246,7 @@ void MarketDataCore::onRead(beast::error_code ec, std::size_t) {
 
 void MarketDataCore::doClose() {
     if (m_ws.is_open()) {
-        sLog_Connection("🔌 Closing WebSocket connection...");
+        sLog_Data("🔌 Closing WebSocket connection...");
         m_ws.async_close(websocket::close_code::normal,
             beast::bind_front_handler(&MarketDataCore::onClose, this));
     }
@@ -256,7 +256,7 @@ void MarketDataCore::onClose(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ Close error: " << ec.message() << std::endl;
     } else {
-        sLog_Connection("✅ WebSocket connection closed");
+        sLog_Data("✅ WebSocket connection closed");
     }
 }
 
@@ -272,7 +272,7 @@ void MarketDataCore::scheduleReconnect() {
     std::uniform_int_distribution<> jitter(0, 250);
     auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
     
-    sLog_Connection(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
+    sLog_Data(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
     
@@ -286,7 +286,7 @@ void MarketDataCore::scheduleReconnect() {
     m_reconnectTimer.async_wait([this](beast::error_code ec) {
         if (ec || !m_running) return;
         
-        sLog_Connection("🔄 Attempting reconnection...");
+        sLog_Data("🔄 Attempting reconnection...");
         m_resolver.async_resolve(m_host, m_port,
             beast::bind_front_handler(&MarketDataCore::onResolve, this));
     });
@@ -300,7 +300,7 @@ std::string MarketDataCore::buildSubscribe(const std::string& channel) const {
     sub["jwt"] = m_auth.createJwt();
     
     std::string result = sub.dump();
-    sLog_Subscription(QString("🔐 %1 subscription: %2").arg(QString::fromStdString(channel)).arg(QString::fromStdString(result)));
+    sLog_Data(QString("🔐 %1 subscription: %2").arg(QString::fromStdString(channel)).arg(QString::fromStdString(result)));
     return result;
 }
 
@@ -344,7 +344,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                             // 🚀 C++20: Use optimized formatting from utils
                             std::string logMessage = Cpp20Utils::formatTradeLog(
                                 trade.product_id, trade.price, trade.size, side, m_tradeLogCount.load());
-                            sLog_Trades(QString::fromStdString(logMessage));
+                            sLog_Data(QString::fromStdString(logMessage));
                         }
                     }
                 }
@@ -389,7 +389,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                     // 🚀 C++20: Use optimized formatting from utils
                     std::string logMessage = Cpp20Utils::formatOrderBookLog(
                         product_id, snapshot.bids.size(), snapshot.asks.size());
-                    sLog_Cache(QString::fromStdString(logMessage));
+                    sLog_Data(QString::fromStdString(logMessage));
                     
                 } else if (eventType == "update" && event.contains("updates") && !product_id.empty()) {
                     // 🔄 UPDATE: Apply incremental changes to stateful order book
@@ -421,7 +421,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // 🚀 C++20: Use optimized formatting from utils
                         std::string logMessage = Cpp20Utils::formatOrderBookLog(
                             product_id, liveBook.bids.size(), liveBook.asks.size(), updateCount);
-                        sLog_Cache(QString::fromStdString(logMessage));
+                        sLog_Data(QString::fromStdString(logMessage));
                     }
                 }
             }
@@ -430,7 +430,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
         // 🚀 C++20: Use std::format for faster string formatting
         std::string logMessage = std::format("✅ Subscription confirmed for {}",
             message.value("product_ids", nlohmann::json::array()).dump());
-        sLog_Subscription(QString::fromStdString(logMessage));
+        sLog_Data(QString::fromStdString(logMessage));
     } else if (type == "error") {
         // 🚀 C++20: Use std::format for faster string formatting
         std::string logMessage = std::format("❌ Coinbase error: {}",

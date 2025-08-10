@@ -19,7 +19,7 @@ GridIntegrationAdapter::GridIntegrationAdapter(QObject* parent)
     connect(m_processingTimer, &QTimer::timeout, this, &GridIntegrationAdapter::processDataBuffer);
     m_processingTimer->start();
     
-    sLog_Init("🎯 GridIntegrationAdapter: Initialized as primary data pipeline hub");
+    sLog_App("🎯 GridIntegrationAdapter: Initialized as primary data pipeline hub");
 }
 
 void GridIntegrationAdapter::setGridModeEnabled(bool enabled) {
@@ -44,7 +44,7 @@ void GridIntegrationAdapter::setGridModeEnabled(bool enabled) {
 void GridIntegrationAdapter::setGridRenderer(UnifiedGridRenderer* renderer) {
     m_gridRenderer = renderer;
     if (m_gridRenderer) {
-        sLog_Init("🎯 GridIntegrationAdapter: Connected to UnifiedGridRenderer");
+        sLog_App("🎯 GridIntegrationAdapter: Connected to UnifiedGridRenderer");
     }
 }
 
@@ -90,7 +90,7 @@ void GridIntegrationAdapter::processTradeForGrid(const Trade& trade) {
     // Phase 3: Wire up actual data flow to UnifiedGridRenderer
     m_gridRenderer->addTrade(trade);
     
-    sLog_Trades("🎯 Fed trade to UnifiedGridRenderer: price=" << trade.price << " size=" << trade.size);
+    sLog_Data("🎯 Fed trade to UnifiedGridRenderer: price=" << trade.price << " size=" << trade.size);
 }
 
 void GridIntegrationAdapter::processOrderBookForGrid(const OrderBook& orderBook) {
@@ -99,7 +99,7 @@ void GridIntegrationAdapter::processOrderBookForGrid(const OrderBook& orderBook)
     // Phase 3: Wire up actual data flow to UnifiedGridRenderer  
     m_gridRenderer->updateOrderBook(orderBook);
     
-    sLog_Network("🎯 Fed order book to UnifiedGridRenderer - bids:" << orderBook.bids.size() << "asks:" << orderBook.asks.size());
+    sLog_Data("🎯 Fed order book to UnifiedGridRenderer - bids:" << orderBook.bids.size() << "asks:" << orderBook.asks.size());
 }
 
 void GridIntegrationAdapter::processDataBuffer() {
@@ -126,7 +126,7 @@ void GridIntegrationAdapter::trimOldData() {
                                m_orderBookBuffer.end() - maxRecentOrderBooks);
     }
     
-    sLog_Performance("🧹 GridIntegrationAdapter: Trimmed buffers - trades:" << m_tradeBuffer.size() 
+    sLog_Render("🧹 GridIntegrationAdapter: Trimmed buffers - trades:" << m_tradeBuffer.size() 
                      << " orderBooks:" << m_orderBookBuffer.size());
 }
 
@@ -135,7 +135,7 @@ void GridIntegrationAdapter::setBatchIntervalMs(int intervalMs) {
     if (m_processingTimer->interval() != intervalMs) {
         m_processingTimer->setInterval(intervalMs);
         emit batchIntervalChanged(intervalMs);
-        sLog_Performance(QString("🕒 Batch interval set to %1 ms (%2 FPS)").arg(intervalMs).arg(1000.0/intervalMs, 0, 'f', 1));
+        sLog_Render(QString("🕒 Batch interval set to %1 ms (%2 FPS)").arg(intervalMs).arg(1000.0/intervalMs, 0, 'f', 1));
     }
 }
 

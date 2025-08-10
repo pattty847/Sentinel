@@ -43,7 +43,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     connect(cacheCleanupTimer, &QTimer::timeout, [this]() {
         // Reset cache occasionally to prevent stale data buildup
         static int cleanupCount = 0;
-        sLog_Performance("🧹 Cache cleanup #" << ++cleanupCount << " - geometry cache reset for fresh rendering");
+        sLog_Render("🧹 Cache cleanup #" << ++cleanupCount << " - geometry cache reset for fresh rendering");
         m_geometryCache.isValid = false;  // Force refresh on next render
         m_geometryDirty.store(true);  // Trigger rebuild
     });
@@ -51,7 +51,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     
     // Initialize new modular architecture
     initializeV2Architecture();
-    sLog_Init("🚀 UnifiedGridRenderer V2: Modular architecture initialized");
+    sLog_App("🚀 UnifiedGridRenderer V2: Modular architecture initialized");
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {}
@@ -81,13 +81,9 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     update();
     // GridViewState emits viewportChanged which is connected to us
     
-    // Debug logging for viewport changes
-    static int viewportChangeCount = 0;
-    if (++viewportChangeCount <= 5) {
-        sLog_DebugCoords("🎯 UNIFIED RENDERER VIEWPORT #" << viewportChangeCount 
-                      << " Time:[" << startTimeMs << "-" << endTimeMs << "]"
-                      << " Price:[$" << minPrice << "-$" << maxPrice << "]");
-    }
+    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
+               << " Price:[$" << minPrice << "-$" << maxPrice << "]");
 }
 
 void UnifiedGridRenderer::captureOrderBookSnapshot() {
@@ -97,11 +93,8 @@ void UnifiedGridRenderer::captureOrderBookSnapshot() {
 
 void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
     if (newGeometry.size() != oldGeometry.size()) {
-        // 🚀 THROTTLED GEOMETRY LOGGING: Only log every 5th geometry change to reduce spam
-        static int geometryChangeCount = 0;
-        if (++geometryChangeCount % 5 == 0) {
-            sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height() << " [Change #" << geometryChangeCount << "]");
-        }
+        // 🔥 ATOMIC THROTTLING: No more manual counters!
+        sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
         // Keep GridViewState in sync with the item size for accurate coord math
         if (m_viewState) {
@@ -154,15 +147,11 @@ void UnifiedGridRenderer::updateVisibleCells() {
         createCellsFromLiquiditySlice(*slice);
     }
     
-    // Debug logging for cell coverage
-    static int coverageCount = 0;
-    if (++coverageCount <= 5) {
-        sLog_Render("🎯 UNIFIED RENDERER COVERAGE #" << coverageCount
-                 << " Slices:" << visibleSlices.size()
-                 << " TotalCells:" << m_visibleCells.size()
-                 << " ActiveTimeframe:" << activeTimeframe << "ms"
-                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
-    }
+    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    sLog_Render("🎯 UNIFIED RENDERER COVERAGE Slices:" << visibleSlices.size()
+             << " TotalCells:" << m_visibleCells.size()
+             << " ActiveTimeframe:" << activeTimeframe << "ms"
+             << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
 }
 
 void UnifiedGridRenderer::updateVolumeProfile() {
@@ -307,12 +296,12 @@ void UnifiedGridRenderer::clearData() {
     m_geometryDirty.store(true);
     update();
     
-    sLog_Init("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
+    sLog_App("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
 }
 
 void UnifiedGridRenderer::setTimeResolution(int resolution_ms) {
     // Note: Manual resolution override implemented via LiquidityTimeSeriesEngine
-    sLog_Chart("🎯 Manual time resolution override requested: " << resolution_ms << "ms");
+    sLog_Render("🎯 Manual time resolution override requested: " << resolution_ms << "ms");
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
@@ -320,14 +309,14 @@ void UnifiedGridRenderer::setPriceResolution(double resolution) {
         m_liquidityEngine->setPriceResolution(resolution);
         m_geometryDirty.store(true); // Rebuild is necessary with new price buckets
         update();
-        sLog_Chart("🎯 Manual price resolution override set to: $" << resolution);
+        sLog_Render("🎯 Manual price resolution override set to: $" << resolution);
     }
 }
 
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {
     setTimeResolution(timeResMs);
     setPriceResolution(priceRes);
-    sLog_Chart("Grid resolution set to: " << timeResMs << " ms, $" << priceRes);
+    sLog_Render("Grid resolution set to: " << timeResMs << " ms, $" << priceRes);
 }
 
 // Utility to round to a "nice" number
@@ -436,7 +425,7 @@ void UnifiedGridRenderer::setGridMode(int mode) {
         setPriceResolution(priceRes[mode]);
         setTimeframe(timeRes[mode]);  // Also update the timeframe
         
-        sLog_Chart("🎯 Grid mode set to:" << (mode == 0 ? "FINE" : mode == 1 ? "MEDIUM" : "COARSE"));
+        sLog_Render("🎯 Grid mode set to:" << (mode == 0 ? "FINE" : mode == 1 ? "MEDIUM" : "COARSE"));
     }
 }
 
@@ -457,7 +446,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
         // 🚀 OPTIMIZATION 4: Emit signal for QML binding updates
         emit timeframeChanged();
         
-        sLog_Chart("🎯 MANUAL TIMEFRAME CHANGE: " << timeframe_ms << "ms (auto-suggestion disabled for 10s)");
+        sLog_Render("🎯 MANUAL TIMEFRAME CHANGE: " << timeframe_ms << "ms (auto-suggestion disabled for 10s)");
     }
 }
 
@@ -468,7 +457,7 @@ void UnifiedGridRenderer::zoomIn() {
         m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("🔍 Zoom In");
+        sLog_Render("🔍 Zoom In");
     }
 }
 
@@ -478,7 +467,7 @@ void UnifiedGridRenderer::zoomOut() {
         m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("🔍 Zoom Out");
+        sLog_Render("🔍 Zoom Out");
     }
 }
 
@@ -487,7 +476,7 @@ void UnifiedGridRenderer::resetZoom() {
         m_viewState->resetZoom();
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("🔍 Zoom Reset");
+        sLog_Render("🔍 Zoom Reset");
     }
 }
 
@@ -496,7 +485,7 @@ void UnifiedGridRenderer::panLeft() {
         m_viewState->panLeft();
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("👈 Pan Left");
+        sLog_Render("👈 Pan Left");
     }
 }
 
@@ -505,7 +494,7 @@ void UnifiedGridRenderer::panRight() {
         m_viewState->panRight();
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("👉 Pan Right");
+        sLog_Render("👉 Pan Right");
     }
 }
 
@@ -514,7 +503,7 @@ void UnifiedGridRenderer::panUp() {
         m_viewState->panUp();
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("👆 Pan Up");
+        sLog_Render("👆 Pan Up");
     }
 }
 
@@ -523,7 +512,7 @@ void UnifiedGridRenderer::panDown() {
         m_viewState->panDown();
         m_geometryDirty.store(true);
         update();
-        sLog_Chart("👇 Pan Down");
+        sLog_Render("👇 Pan Down");
     }
 }
 
@@ -533,7 +522,7 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
         m_geometryDirty.store(true);
         update();
         emit autoScrollEnabledChanged();
-        sLog_Chart("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
+        sLog_Render("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
     }
 }
 
@@ -604,12 +593,12 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
     
     if (inControlPanel || inPriceAxis || inTimeAxis) {
         event->ignore();  // Let QML MouseArea components handle these areas
-        sLog_Chart("🖱️ Mouse event in UI area - delegating to QML (pos: " << pos.x() << "," << pos.y() << ")");
+        sLog_Render("🖱️ Mouse event in UI area - delegating to QML (pos: " << pos.x() << "," << pos.y() << ")");
         return;
     }
     
     // 🎯 DEBUG: Log all mouse events to track conflicts
-    sLog_Chart("🖱️ MOUSE PRESS: pos(" << pos.x() << "," << pos.y() << ") size(" << width() << "x" << height() << ")");
+    sLog_Render("🖱️ MOUSE PRESS: pos(" << pos.x() << "," << pos.y() << ") size(" << width() << "x" << height() << ")");
     
     // 🎯 CHART INTERACTION AREA: Handle pan/zoom for the main chart area
     if (m_viewState) {
@@ -618,7 +607,7 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
         
         m_viewState->handlePanStart(pos);
         event->accept();
-        sLog_Chart("🖱️ Chart pan started at (" << pos.x() << ", " << pos.y() << ")");
+        sLog_Render("🖱️ Chart pan started at (" << pos.x() << ", " << pos.y() << ")");
         return;
     }
     
@@ -632,7 +621,7 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
         m_viewState->handlePanMove(event->position());
         event->accept(); 
         update(); // Trigger repaint for visual feedback
-        sLog_Chart("🖱️ MOUSE MOVE: pos(" << event->position().x() << "," << event->position().y() << ")");
+        sLog_Render("🖱️ MOUSE MOVE: pos(" << event->position().x() << "," << event->position().y() << ")");
         return;
     }
     
@@ -672,7 +661,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     
     if (inControlPanel || inPriceAxis || inTimeAxis) {
         event->ignore();  // Let QML handle wheel events in UI areas
-        sLog_Chart("🖱️ Wheel event in UI area - delegating to QML");
+        sLog_Render("🖱️ Wheel event in UI area - delegating to QML");
         return;
     }
     
@@ -692,7 +681,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
         update();
         // Auto-scroll change is emitted by GridViewState
         event->accept();
-        sLog_Chart("🖱️ Smooth zoom at (" << mousePos.x() << ", " << mousePos.y() << ")");
+        sLog_Render("🖱️ Smooth zoom at (" << mousePos.x() << ", " << mousePos.y() << ")");
         return;
     }
     
@@ -705,7 +694,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
 void UnifiedGridRenderer::togglePerformanceOverlay() {
     if (m_diagnostics) {
         m_diagnostics->toggleOverlay();
-        sLog_Performance("📊 Performance overlay: " << (m_diagnostics->isOverlayEnabled() ? "ENABLED" : "DISABLED"));
+        sLog_Render("📊 Performance overlay: " << (m_diagnostics->isOverlayEnabled() ? "ENABLED" : "DISABLED"));
         update();
     }
 }
@@ -774,7 +763,7 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     // Start data processing
     m_dataProcessor->startProcessing();
             
-    sLog_Init("🚀 V2 Architecture: GridViewState + DataProcessor + 3 render strategies initialized");
+    sLog_App("🚀 V2 Architecture: GridViewState + DataProcessor + 3 render strategies initialized");
 }
 
 IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
@@ -796,13 +785,10 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
     m_diagnostics->startFrame();
     
-    static int paintCallCount = 0;
-    if (++paintCallCount <= 10) {
-        sLog_Render("🚀 V2 PAINT #" << paintCallCount 
-                 << " mode=" << getCurrentStrategy()->getStrategyName()
-                 << " size=" << width() << "x" << height() 
-                 << " FPS=" << m_diagnostics->getCurrentFPS());
-    }
+    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    sLog_Render("🚀 V2 PAINT mode=" << getCurrentStrategy()->getStrategyName()
+             << " size=" << width() << "x" << height() 
+             << " FPS=" << m_diagnostics->getCurrentFPS());
     
     if (width() <= 0 || height() <= 0) {
         return oldNode;

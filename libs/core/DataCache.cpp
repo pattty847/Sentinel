@@ -116,7 +116,7 @@ void LiveOrderBook::initializeFromSnapshot(const OrderBook& snapshot) {
         }
     }
     
-    sLog_Init(QString("🏗️  LiveOrderBook initialized for %1 with %2 bids and %3 asks")
+    sLog_App(QString("🏗️  LiveOrderBook initialized for %1 with %2 bids and %3 asks")
               .arg(QString::fromStdString(m_productId)).arg(m_bids.size()).arg(m_asks.size()));
 }
 
@@ -219,7 +219,7 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const OrderBo
     liveBook.setProductId(symbol);
     liveBook.initializeFromSnapshot(snapshot);
     
-    sLog_Cache(QString("🔥 DataCache: Initialized LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
+    sLog_Data(QString("🔥 DataCache: Initialized LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
 void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
@@ -246,7 +246,7 @@ OrderBook DataCache::getLiveOrderBook(const std::string& symbol) const {
         // 🔍 DEBUG: Log what we're returning from the cache
         static int cacheDebugCount = 0;
         if (++cacheDebugCount % 30 == 1) { // Log every 30th call
-            sLog_Cache(QString("🔍 DATACACHE getLiveOrderBook: Found '%1' → returning %2 bids, %3 asks [call #%4]")
+            sLog_Data(QString("🔍 DATACACHE getLiveOrderBook: Found '%1' → returning %2 bids, %3 asks [call #%4]")
                        .arg(QString::fromStdString(symbol)).arg(book.bids.size()).arg(book.asks.size()).arg(cacheDebugCount));
         }
         
@@ -260,7 +260,7 @@ OrderBook DataCache::getLiveOrderBook(const std::string& symbol) const {
         for (const auto& [sym, book] : m_liveBooks) {
             availableSymbols += QString("'%1' ").arg(QString::fromStdString(sym));
         }
-        sLog_Cache(QString("⚠️ DATACACHE getLiveOrderBook: Symbol '%1' NOT FOUND in live books! Available symbols: %2 [miss #%3]")
+        sLog_Data(QString("⚠️ DATACACHE getLiveOrderBook: Symbol '%1' NOT FOUND in live books! Available symbols: %2 [miss #%3]")
                    .arg(QString::fromStdString(symbol)).arg(availableSymbols).arg(notFoundCount));
     }
     

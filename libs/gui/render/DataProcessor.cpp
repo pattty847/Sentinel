@@ -10,7 +10,7 @@ DataProcessor::DataProcessor(QObject* parent)
     m_snapshotTimer = new QTimer(this);
     connect(m_snapshotTimer, &QTimer::timeout, this, &DataProcessor::captureOrderBookSnapshot);
     
-    sLog_Init("🚀 DataProcessor: Initialized for V2 architecture");
+    sLog_App("🚀 DataProcessor: Initialized for V2 architecture");
 }
 
 DataProcessor::~DataProcessor() {
@@ -20,7 +20,7 @@ DataProcessor::~DataProcessor() {
 void DataProcessor::startProcessing() {
     if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
         m_snapshotTimer->start(100);  // 100ms base resolution
-        sLog_Init("🚀 DataProcessor: Started processing with 100ms snapshots");
+        sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
     }
 }
 
@@ -44,22 +44,16 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
             initializeViewportFromTrade(trade);
         }
         
-        // 🚀 THROTTLED TRADE LOGGING: Only log every 20th trade to reduce spam
-        static int tradeUpdateCount = 0;
-        if (++tradeUpdateCount % 20 == 0) {
-            sLog_Trades("📊 DataProcessor TRADE UPDATE: Processing trade #" << tradeUpdateCount);
-        }
+        // 🔥 ATOMIC THROTTLING: No more manual counters!
+        sLog_Data("📊 DataProcessor TRADE UPDATE: Processing trade");
     }
     
     emit dataUpdated();
     
-    // Debug logging for first few trades
-    static int realTradeCount = 0;
-    if (++realTradeCount <= 10) {
-        sLog_Trades("🎯 DataProcessor TRADE #" << realTradeCount << ": $" << trade.price 
+    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    sLog_Data("🎯 DataProcessor TRADE: $" << trade.price 
                  << " vol:" << trade.size 
                  << " timestamp:" << timestamp);
-    }
 }
 
 void DataProcessor::onOrderBookUpdated(const OrderBook& book) {
@@ -80,12 +74,9 @@ void DataProcessor::onOrderBookUpdated(const OrderBook& book) {
     
     emit dataUpdated();
     
-    // Debug logging for first few order books
-    static int orderBookCount = 0;
-    if (++orderBookCount <= 10) {
-        sLog_Network("🎯 DataProcessor ORDER BOOK #" << orderBookCount 
-                 << " Bids:" << book.bids.size() << " Asks:" << book.asks.size());
-    }
+    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    sLog_Data("🎯 DataProcessor ORDER BOOK update"
+             << " Bids:" << book.bids.size() << " Asks:" << book.asks.size());
 }
 
 void DataProcessor::captureOrderBookSnapshot() {
@@ -121,10 +112,10 @@ void DataProcessor::initializeViewportFromTrade(const Trade& trade) {
     
     m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
     
-    sLog_Init("🎯 DataProcessor VIEWPORT INITIALIZED FROM TRADE:");
-    sLog_Init("   Time: " << timeStart << " - " << timeEnd);
-    sLog_Init("   Price: $" << minPrice << " - $" << maxPrice);
-    sLog_Init("   Based on trade: $" << trade.price << " at " << timestamp);
+    sLog_App("🎯 DataProcessor VIEWPORT INITIALIZED FROM TRADE:");
+    sLog_App("   Time: " << timeStart << " - " << timeEnd);
+    sLog_App("   Price: $" << minPrice << " - $" << maxPrice);
+    sLog_App("   Based on trade: $" << trade.price << " at " << timestamp);
     
     emit viewportInitialized();
 }
@@ -146,9 +137,9 @@ void DataProcessor::initializeViewportFromOrderBook(const OrderBook& book) {
     
     m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
     
-    sLog_Init("🎯 DataProcessor VIEWPORT FROM ORDER BOOK:");
-    sLog_Init("   Mid Price: $" << midPrice);
-    sLog_Init("   Price Window: $" << minPrice << " - $" << maxPrice);
+    sLog_App("🎯 DataProcessor VIEWPORT FROM ORDER BOOK:");
+    sLog_App("   Mid Price: $" << midPrice);
+    sLog_App("   Price Window: $" << minPrice << " - $" << maxPrice);
     
     emit viewportInitialized();
 }
@@ -163,6 +154,6 @@ void DataProcessor::clearData() {
         m_viewState->resetZoom();  // This resets the viewport state
     }
     
-    sLog_Init("🎯 DataProcessor: Data cleared");
+    sLog_App("🎯 DataProcessor: Data cleared");
     emit dataUpdated();
 }
