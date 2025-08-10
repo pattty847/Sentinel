@@ -2,7 +2,7 @@
 
 Helpful documents: 
 
-ARCHITECTURE: docs/02_ARCHITECTURE.md
+ARCHITECTURE: docs/SYSTEM_ARCHITECTURE.md
 GPU Rendering: docs/features/gpu_chart_rendering/00_PLAN.md
 GPU Rendering Progress: docs/features/gpu_chart_rendering/01_PROGRESS.md
 Fractal Zoom: docs/features/fractal_zoom/2025-06-30_fractal_zoom_outline.md

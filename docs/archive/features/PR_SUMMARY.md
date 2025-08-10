@@ -122,8 +122,8 @@ libs/gui/deprecated/candlestickbatched.{h,cpp}  # → UnifiedGridRenderer::Volum
 ### **Documentation Updates**
 ```
 README.md                                   # 50%+ reduction, focused on features
-docs/02_ARCHITECTURE.md                     # Complete rewrite with grid architecture
-docs/GRID_ARCHITECTURE.md                   # Comprehensive technical documentation
+docs/SYSTEM_ARCHITECTURE.md                # Complete rewrite with grid architecture
+docs/V2_RENDERING_ARCHITECTURE.md           # Comprehensive technical documentation
 docs/ROLLBACK.md                            # Emergency recovery procedures
 ```
 

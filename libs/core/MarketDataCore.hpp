@@ -8,9 +8,14 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <thread>
+#include <chrono>
+#include <optional>
+#include <random>
 #include <QObject>
 #include <QTimer>
 #include "Authenticator.hpp"
@@ -76,10 +81,19 @@ private:
 
     net::io_context                 m_ioc;
     ssl::context                    m_sslCtx{ssl::context::tlsv12_client};
-    tcp::resolver                   m_resolver{net::make_strand(m_ioc)};
+    net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
+    tcp::resolver                   m_resolver{m_strand};
     websocket::stream<beast::ssl_stream<beast::tcp_stream>>
-                                    m_ws{net::make_strand(m_ioc), m_sslCtx};
+                                    m_ws{m_strand, m_sslCtx};
     beast::flat_buffer              m_buf;
+    net::steady_timer               m_reconnectTimer{m_strand};
+    std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
+    
     std::atomic<bool>               m_running{false};
+    std::chrono::seconds            m_backoffDuration{1};
     std::thread                     m_ioThread;
+    
+    // Thread-safe counters (no more static!)
+    std::atomic<int>                m_tradeLogCount{0};
+    std::atomic<int>                m_orderBookLogCount{0};
 }; 

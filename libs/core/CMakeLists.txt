@@ -7,6 +7,7 @@ add_library(sentinel_core
     Authenticator.hpp
     CoinbaseStreamClient.hpp
     CoinbaseStreamClient.cpp
+    Cpp20Utils.hpp
     CvdThresholdRule.cpp
     CvdThresholdRule.h
     DataCache.cpp
@@ -49,8 +50,7 @@ target_link_libraries(sentinel_core
         jwt-cpp::jwt-cpp
 )
 
-# Enable C++17 standard
-target_compile_features(sentinel_core PRIVATE cxx_std_17)
+# C++20 standard is set globally in root CMakeLists.txt
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
