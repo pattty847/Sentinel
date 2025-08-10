@@ -24,8 +24,8 @@ docs/features/gpu_chart_rendering/investigations/
 docs/features/gpu_chart_rendering/topics/
 
 # Keep only current, authoritative docs searchable:
-# - docs/02_ARCHITECTURE.md
-# - docs/GRID_ARCHITECTURE.md  
+# - docs/SYSTEM_ARCHITECTURE.md
+# - docs/V2_RENDERING_ARCHITECTURE.md  
 # - docs/LOGGING_GUIDE.md
 # - docs/01_PROJECT_PLAN.md
 # - docs/features/microstructure_ai_roadmap/*.md (current roadmap)

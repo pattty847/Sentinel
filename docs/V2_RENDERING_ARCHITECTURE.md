@@ -5,6 +5,16 @@
 **Status**: Production Ready  
 **Last Updated**: August 2025
 
+## TL;DR
+
+- **What**: V2 modular refactor of the rendering system from monolithic to strategy-pattern architecture
+- **Why**: Maintainability, testability, extensibility while maintaining zero performance regression  
+- **Key Innovation**: Pluggable rendering strategies (Heatmap, TradeFlow, Candles) with buttery-smooth zoom/pan
+- **Performance**: Same 2.27M trades/sec capacity, 4x better zoom UX, <1ms interaction latency
+- **Status**: Production ready, complete architectural transformation
+
+[Skip to Quick Navigation](#table-of-contents) for specific components
+
 ## Table of Contents
 1. [Overview](#overview)
 2. [Component Breakdown](#component-breakdown)

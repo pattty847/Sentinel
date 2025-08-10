@@ -135,8 +135,8 @@ See [LICENSE](LICENSE) for details.
 ## 🔗 Links
 
 - **[Cross-Platform Setup Guide](docs/CROSS_PLATFORM_SETUP.md)**
-- **[GPU Architecture Details](docs/02_ARCHITECTURE.md)**
-- **[Grid Architecture Overview](docs/GRID_ARCHITECTURE.md)**
+- **[System Architecture Details](docs/SYSTEM_ARCHITECTURE.md)**
+- **[V2 Rendering Architecture Overview](docs/V2_RENDERING_ARCHITECTURE.md)**
 - **[Smart Logging Guide](docs/logging_usage_guide.md)**
 - [Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)
 

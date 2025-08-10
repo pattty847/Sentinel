@@ -289,7 +289,7 @@ System will evolve to:
 ### **Updated**
 - `tests/CMakeLists.txt` - Professional test structure with custom targets
 - `README.md` - Reduced by 65%, focused on features/performance
-- `docs/02_ARCHITECTURE.md` - Complete rewrite with grid architecture
+- `docs/SYSTEM_ARCHITECTURE.md` - Complete rewrite with grid architecture
 
 ### **Removed**
 - `tests/test_multi_mode_architecture.cpp` - Obsolete after grid migration

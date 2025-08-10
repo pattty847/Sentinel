@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <QString>
+#include <QMetaObject>
 // 🚀 C++20 OPTIMIZATIONS
 #include <format>    // std::format for efficient string formatting
 #include <ranges>    // std::ranges for functional data processing
@@ -34,6 +35,17 @@ MarketDataCore::~MarketDataCore() {
 void MarketDataCore::start() {
     if (!m_running.exchange(true)) {
         sLog_Init("🚀 Starting MarketDataCore...");
+        
+        // Reset backoff on fresh start
+        m_backoffDuration = std::chrono::seconds(1);
+        
+        // Create work guard to keep io_context alive
+        m_workGuard.emplace(m_ioc.get_executor());
+        
+        // Restart io_context in case it was previously stopped
+        m_ioc.restart();
+        
+        // Start I/O thread
         m_ioThread = std::thread(&MarketDataCore::run, this);
     }
 }
@@ -42,13 +54,28 @@ void MarketDataCore::stop() {
     if (m_running.exchange(false)) {
         sLog_Init("🛑 Stopping MarketDataCore...");
         
-        // Close WebSocket gracefully
-        if (m_ws.is_open()) {
-            net::post(m_ioc, [this]() { doClose(); });
-        }
+        // Cancel reconnect timer
+        m_reconnectTimer.cancel();
         
-        // Stop IO context
-        m_ioc.stop();
+        // Post close operation to strand for thread safety
+        net::post(m_strand, [this]() {
+            beast::error_code ec;
+            
+            // Cancel any pending timer operations
+            m_reconnectTimer.cancel();
+            
+            // Close WebSocket gracefully if open
+            if (m_ws.is_open()) {
+                m_ws.async_close(websocket::close_code::normal,
+                    [this](beast::error_code) {
+                        // Release work guard to allow io_context to exit
+                        m_workGuard.reset();
+                    });
+            } else {
+                // Release work guard immediately if WS not open
+                m_workGuard.reset();
+            }
+        });
         
         // Join thread
         if (m_ioThread.joinable()) {
@@ -105,6 +132,18 @@ void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type
         scheduleReconnect();
         return;
     }
+    
+    // Set hostname verification for SSL
+    SSL* ssl_handle = m_ws.next_layer().native_handle();
+    if (SSL_set1_host(ssl_handle, m_host.c_str()) != 1) {
+        beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
+        std::cerr << "❌ SSL hostname verification setup error: " << ssl_ec.message() << std::endl;
+        scheduleReconnect();
+        return;
+    }
+    
+    // Ensure proper certificate verification
+    m_ws.next_layer().set_verify_mode(ssl::verify_peer);
     
     // Set SSL handshake timeout
     get_lowest_layer(m_ws).expires_after(std::chrono::seconds(30));
@@ -224,21 +263,32 @@ void MarketDataCore::onClose(beast::error_code ec) {
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
     
-    sLog_Connection("🔄 Scheduling reconnect in 5 seconds...");
+    // Exponential backoff with jitter (max 60s)
+    m_backoffDuration = std::min(m_backoffDuration * 2, std::chrono::seconds(60));
+    
+    // Add 0-250ms jitter to prevent thundering herd
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_int_distribution<> jitter(0, 250);
+    auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
+    
+    sLog_Connection(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
+        .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
+        .arg(m_backoffDuration.count()));
     
     // Reset the stream state
     if (m_ws.is_open()) {
         doClose();
     }
     
-    // Schedule reconnection
-    net::post(m_ioc, [this]() {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        if (m_running) {
-            sLog_Connection("🔄 Attempting reconnection...");
-            m_resolver.async_resolve(m_host, m_port,
-                beast::bind_front_handler(&MarketDataCore::onResolve, this));
-        }
+    // NON-BLOCKING timer-based reconnect
+    m_reconnectTimer.expires_after(delay);
+    m_reconnectTimer.async_wait([this](beast::error_code ec) {
+        if (ec || !m_running) return;
+        
+        sLog_Connection("🔄 Attempting reconnection...");
+        m_resolver.async_resolve(m_host, m_port,
+            beast::bind_front_handler(&MarketDataCore::onResolve, this));
     });
 }
 
@@ -283,15 +333,17 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         // Store in DataCache
                         m_cache.addTrade(trade);
                         
-                        // 🔥 NEW: Emit real-time signal to GUI layer
-                        emit tradeReceived(trade);
+                        // 🔥 NEW: Emit real-time signal to GUI layer (Qt thread-safe)
+                        Trade tradeCopy = trade; // Make a copy for thread safety
+                        QMetaObject::invokeMethod(this, [this, tradeCopy]() {
+                            emit tradeReceived(tradeCopy);
+                        }, Qt::QueuedConnection);
                         
                         // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
-                        static int tradeLogCount = 0;
-                        if (++tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
+                        if (++m_tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
                             // 🚀 C++20: Use optimized formatting from utils
                             std::string logMessage = Cpp20Utils::formatTradeLog(
-                                trade.product_id, trade.price, trade.size, side, tradeLogCount);
+                                trade.product_id, trade.price, trade.size, side, m_tradeLogCount.load());
                             sLog_Trades(QString::fromStdString(logMessage));
                         }
                     }
@@ -357,13 +409,15 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         updateCount++;
                     }
                     
-                    // 🔥 NEW: Emit real-time order book signal to GUI layer
+                    // 🔥 NEW: Emit real-time order book signal to GUI layer (Qt thread-safe)
                     auto liveBook = m_cache.getLiveOrderBook(product_id);
-                    emit orderBookUpdated(liveBook);
+                    OrderBook orderBookCopy = liveBook; // Make a copy for thread safety
+                    QMetaObject::invokeMethod(this, [this, orderBookCopy]() {
+                        emit orderBookUpdated(orderBookCopy);
+                    }, Qt::QueuedConnection);
                     
-                    // 🔥 THROTTLED LOGGING: Only log every 100th update to reduce spam
-                    static int liveBookLogCount = 0;
-                    if (++liveBookLogCount % 1000 == 1) {
+                    // 🔥 THROTTLED LOGGING: Only log every 1000th update to reduce spam
+                    if (++m_orderBookLogCount % 1000 == 1) {
                         // 🚀 C++20: Use optimized formatting from utils
                         std::string logMessage = Cpp20Utils::formatOrderBookLog(
                             product_id, liveBook.bids.size(), liveBook.asks.size(), updateCount);

@@ -61,7 +61,7 @@ WebSocket → MarketDataCore → GPUDataAdapter (16ms batching)
 #### Supporting Architecture
 - **`libs/gui/candlelod.h/cpp`**: Multi-timeframe candle management (241 lines)
 - **`libs/core/TradeData.h`**: Trade/OrderBook data structures
-- **`docs/02_ARCHITECTURE.md`**: Current architectural documentation
+- **`docs/SYSTEM_ARCHITECTURE.md`**: Current architectural documentation
 
 ## 🚨 IDENTIFIED PROBLEMS
 

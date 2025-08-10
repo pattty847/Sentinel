@@ -1,19 +1,17 @@
-# 🚀 Sentinel: Open-Source Trading Terminal
+# 🚀 Sentinel: Professional Trading Terminal
 
-> **"Why pay $40,000/year for Bloomberg Terminal when you can have this for FREE?"**
+> **Open-source market analysis platform with GPU-accelerated visualization and AI insights**
 
 <p align="center">
-  <img src="https://img.shields.io/badge/📊_BookMap-$300%2Fmonth-red" alt="BookMap Cost">
-  <img src="https://img.shields.io/badge/📈_Bloomberg-$40%2C000%2Fyear-red" alt="Bloomberg Cost">
-  <img src="https://img.shields.io/badge/⚡_Sentinel-FREE-brightgreen" alt="Sentinel Cost">
-  <br>
   <img src="https://img.shields.io/badge/Architecture-GPU_Accelerated-purple" alt="Architecture">
-  <img src="https://img.shields.io/badge/Status-In_Development-orange" alt="Status">
+  <img src="https://img.shields.io/badge/Design-Lock_Free_Pipeline-green" alt="Design">
+  <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License">
+  <img src="https://img.shields.io/badge/Status-Active_Development-orange" alt="Status">
 </p>
 
 <div align="center">
 
-**Professional crypto market analysis with real-time order book heatmaps, AI-powered insights, and GPU acceleration.**
+**Professional crypto market analysis with real-time order book heatmaps, multi-timeframe aggregation, and upcoming AI-powered insights through CopeNet.**
 
 **[📚 Docs](#documentation) • [🚀 Quick Start](#quick-start) • [🗺️ Roadmap](#roadmap) • [💬 CopeNet AI](#copenet-ai)**
 
@@ -50,12 +48,10 @@ Sentinel is an **open-source trading terminal** designed to eventually provide p
 
 ## 🎯 **Why Sentinel?**
 
-| **Commercial Tool** | **Cost** | **Sentinel** | **Status** |
-|---------------------|----------|--------------|------------|
-| 📊 **BookMap Pro** | $300/month | 🚧 Basic Heatmap | **In Development** |
-| 📈 **Bloomberg Terminal** | $40,000/year | 🎯 Planned Features | **Long-term Goal** |
-| 📉 **TradingView Pro+** | $60/month | ⏳ Advanced Charting | **Coming Soon** |
-| 🤖 **AI Trading Assistant** | $500/month | 🧠 **CopeNet AI** | **In Development** |
+- **🆓 Completely Free & Open Source** - No subscriptions, no hidden costs
+- **⚡ Professional Architecture** - GPU-accelerated rendering with efficient data structures
+- **🧩 Modular Architecture** - Extensible design for custom strategies and indicators
+- **🤖 AI Integration** (Coming Soon) - Natural language market analysis with CopeNet
 
 ### **🏗️ Built for Performance**
 
@@ -140,48 +136,17 @@ cmake --build --preset [windows-mingw|mac-clang|linux-gcc]
 
 ---
 
-## 💰 **Cost Comparison**
+## 🌟 **Key Advantages**
 
-<table align="center">
-<tr>
-<th>Feature</th>
-<th>Bloomberg Terminal</th>
-<th>BookMap Pro</th>
-<th>Sentinel</th>
-</tr>
-<tr>
-<td>**Order Book Heatmap**</td>
-<td>✅ $40,000/year</td>
-<td>✅ $300/month</td>
-<td>✅ **FREE**</td>
-</tr>
-<tr>
-<td>**Real-time Data**</td>
-<td>✅ Included</td>
-<td>✅ Extra cost</td>
-<td>✅ **Direct from Coinbase**</td>
-</tr>
-<tr>
-<td>**AI Analysis**</td>
-<td>❌ Not available</td>
-<td>❌ Not available</td>
-<td>🤖 **CopeNet (Coming Soon)**</td>
-</tr>
-<tr>
-<td>**Source Code**</td>
-<td>❌ Proprietary</td>
-<td>❌ Proprietary</td>
-<td>✅ **Open Source**</td>
-</tr>
-<tr>
-<td>**Customization**</td>
-<td>❌ Limited</td>
-<td>❌ Limited</td>
-<td>✅ **Unlimited**</td>
-</tr>
-</table>
+| Feature | Sentinel Benefits |
+|---------|------------------|
+| **Open Source** | Complete control over your trading environment |
+| **Performance** | GPU-accelerated with 2.27M trades/sec capacity |
+| **Modularity** | Extensible architecture for custom indicators |
+| **AI Integration** | CopeNet for natural language market analysis |
+| **No Vendor Lock-in** | Direct data feeds, no subscription dependencies |
 
-**💡 Bottom Line**: Sentinel aims to deliver professional market analysis tools as a free, open-source alternative to expensive commercial platforms. When fully developed, it will offer features comparable to tools costing thousands per year.
+**Professional market analysis platform designed for traders who value performance, transparency, and customization.**
 
 ---
 
@@ -195,7 +160,7 @@ Sentinel is designed with performance in mind from the ground up:
 - **⚡ Zero-Malloc Hot Paths**: Memory allocation avoided in critical loops
 - **📈 Modular Rendering**: Strategy pattern for different visualization modes
 
-*Technical details: [🏛️ Architecture Guide](docs/developer/ARCHITECTURE.md)*
+*Technical details: [🏛️ System Architecture](docs/SYSTEM_ARCHITECTURE.md) • [⚙️ V2 Rendering Architecture](docs/V2_RENDERING_ARCHITECTURE.md)*
 
 ---
 
@@ -231,7 +196,8 @@ CopeNet: "That wall has only been there for 12 seconds and the address
 - [❓ FAQ & Troubleshooting](docs/user/FAQ.md)
 
 ### **🛠️ For Developers**
-- [🏛️ Architecture Overview](docs/developer/ARCHITECTURE.md)
+- [🏛️ System Architecture](docs/SYSTEM_ARCHITECTURE.md)
+- [⚙️ V2 Rendering Architecture](docs/V2_RENDERING_ARCHITECTURE.md)
 - [🤝 Contributing Guide](docs/developer/CONTRIBUTING.md)
 - [🔧 API Documentation](docs/developer/API.md)
 - [🧪 Testing Guide](docs/developer/TESTING.md)
@@ -261,13 +227,13 @@ Licensed under **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
 ## 🌟 **Star History**
 
-Show some love if Sentinel saved you from paying $40K/year for Bloomberg Terminal! ⭐
+Show some love if you believe in open-source trading technology! ⭐
 
 <div align="center">
 
 [![Star History Chart](https://api.star-history.com/svg?repos=your-repo/Sentinel&type=Date)](https://star-history.com/#your-repo/Sentinel&Date)
 
-**[⭐ Star this repo](https://github.com/your-repo/Sentinel) if you think free Bloomberg Terminal alternatives are awesome!**
+**[⭐ Star this repo](https://github.com/your-repo/Sentinel) if you support professional open-source trading tools!**
 
 </div>
 
@@ -275,7 +241,7 @@ Show some love if Sentinel saved you from paying $40K/year for Bloomberg Termina
 
 <div align="center">
 
-**Built with ⚡ by traders who got tired of overpaying for market data**
+**Built with ⚡ by traders who believe in open-source professional tools**
 
 [🐦 Twitter](https://twitter.com/your-handle) • [💬 Discord](https://discord.gg/your-invite) • [📧 Email](mailto:your-email)
 
