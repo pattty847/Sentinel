@@ -3,7 +3,7 @@
 #include <QTimer>
 #include <mutex>
 #include "../../core/TradeData.h"   
-#include "../../gui/LiquidityTimeSeriesEngine.h"
+#include "../../core/LiquidityTimeSeriesEngine.h"
 
 class GridViewState;
 

@@ -8,10 +8,10 @@
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QtQuickWidgets/QQuickWidget>
-#include "GridIntegrationAdapter.h"
+#include <memory>
+#include "../core/CoinbaseStreamClient.hpp"
 
 // Forward declarations
-class StreamController;
 class StatisticsController;
 class ChartModeController;
 
@@ -44,10 +44,9 @@ private:
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
     
-    // Phase 2: New single data pipeline architecture
-    StreamController* m_streamController;
+    // 🔥 PHASE 1.1: Direct MarketDataCore connection (StreamController OBLITERATED)
+    std::unique_ptr<CoinbaseStreamClient> m_client;
     StatisticsController* m_statsController;
-    GridIntegrationAdapter* m_gridAdapter{nullptr};  // Replaces GPUDataAdapter
     ChartModeController* m_modeController{nullptr};
     
     // Connection retry tracking
