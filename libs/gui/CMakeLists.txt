@@ -5,16 +5,10 @@ set(GRID_CORE_SOURCES
     MainWindowGpu.h
     ChartModeController.cpp
     ChartModeController.h
-    StreamController.cpp
-    StreamController.h
     
     # Grid system components
-    GridIntegrationAdapter.cpp
-    GridIntegrationAdapter.h
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.h
-    LiquidityTimeSeriesEngine.cpp
-    LiquidityTimeSeriesEngine.h
     CoordinateSystem.cpp
     CoordinateSystem.h
     ChartMode.h

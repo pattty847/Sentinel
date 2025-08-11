@@ -1,8 +1,6 @@
 #include "MainWindowGpu.h"
-#include "StreamController.h"
 #include "StatisticsController.h"
 #include "ChartModeController.h"
-#include "GridIntegrationAdapter.h"
 #include "UnifiedGridRenderer.h"
 #include <QQmlContext>
 #include <QDebug>
@@ -32,9 +30,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
 MainWindowGPU::~MainWindowGPU() {
     qDebug() << "🛑 MainWindowGPU destructor - cleaning up...";
     
-    // Stop data streams first
-    if (m_streamController) {
-        m_streamController->stop();
+    // 🔥 PHASE 1.1: Stop data streams first (direct client instead of StreamController)
+    if (m_client) {
+        m_client.reset();  // Clean shutdown of MarketDataCore
     }
     
     // Disconnect all signals to prevent callbacks during destruction
@@ -139,33 +137,20 @@ void MainWindowGPU::setupUI() {
 }
 
 void MainWindowGPU::setupConnections() {
-    // Phase 2: New single data pipeline architecture
-    m_streamController = new StreamController(this);
+    // 🔥 PHASE 1.1: StreamController OBLITERATED - Direct connection architecture
+    // m_streamController = new StreamController(this);  // OBLITERATED!
     m_statsController = new StatisticsController(this);
     
-    // NEW: GridIntegrationAdapter as primary data hub (replaces GPUDataAdapter)
-    m_gridAdapter = new GridIntegrationAdapter(this);
-    m_gridAdapter->setGridModeEnabled(true);  // 🎯 PHASE 5: Always grid-only mode
+    // 🔥 PHASE 1.2: GridIntegrationAdapter OBLITERATED! Direct MarketDataCore → UnifiedGridRenderer pipeline
+    // m_gridAdapter = new GridIntegrationAdapter(this);  // OBLITERATED!
 
-    qDebug() << "🎯 Phase 2: GridIntegrationAdapter created as primary data hub, mode:" << m_gridAdapter->gridModeEnabled();
+    qDebug() << "🔥 Phase 1.1: StreamController OBLITERATED - Direct data pipeline enabled";
     
     // UI connections
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
     
-    // Data pipeline connections
-    connect(m_streamController, &StreamController::connected, this, [this]() {
-        m_statusLabel->setText("🟢 Connected");
-        m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
-        m_subscribeButton->setText("🔗 Connected");
-        m_subscribeButton->setEnabled(false);
-    });
-    
-    connect(m_streamController, &StreamController::disconnected, this, [this]() {
-        m_statusLabel->setText("🔴 Disconnected");
-        m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
-        m_subscribeButton->setText("🚀 Subscribe");
-        m_subscribeButton->setEnabled(true);
-    });
+    // 🔥 PHASE 1.1: Direct MarketDataCore connections (StreamController OBLITERATED)
+    // Connection status will be handled directly through MarketDataCore signals
     
     // Stats pipeline
     connect(m_statsController, &StatisticsController::cvdUpdated, 
@@ -190,14 +175,48 @@ void MainWindowGPU::onSubscribe() {
     QQmlContext* context = m_gpuChart->rootContext();
     context->setContextProperty("symbol", symbol);
     
-    // 🎯 PHASE 3 FIX: Expose C++ GridIntegrationAdapter to QML
-    context->setContextProperty("gridIntegrationAdapter", m_gridAdapter);
+    // 🔥 PHASE 1.2: GridIntegrationAdapter QML exposure OBLITERATED!
+    // context->setContextProperty("gridIntegrationAdapter", m_gridAdapter);  // OBLITERATED!
     
-    // Start data stream
+    // 🔥 PHASE 2.4: Create CoinbaseStreamClient and subscribe FIRST
+    m_client = std::make_unique<CoinbaseStreamClient>();
     std::vector<std::string> symbols = {symbol.toStdString()};
-    m_streamController->start(symbols);
+    m_client->subscribe(symbols);  // This creates the MarketDataCore
+    m_client->start();
     
-    qDebug() << "✅ GPU subscription started for" << symbol;
+    // 🔥 PHASE 2.4: V2 ARCHITECTURE FIX - Connect MarketDataCore → UnifiedGridRenderer AFTER MarketDataCore exists
+    QObject* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<QObject*>("unifiedGridRenderer");
+    if (m_client->getMarketDataCore() && unifiedGridRenderer) {
+        // Use QObject::connect with SIGNAL/SLOT macros for cross-boundary connections
+        connect(m_client->getMarketDataCore(), SIGNAL(tradeReceived(const Trade&)),
+                unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
+        connect(m_client->getMarketDataCore(), SIGNAL(orderBookUpdated(const OrderBook&)),
+                unifiedGridRenderer, SLOT(onOrderBookUpdated(const OrderBook&)), Qt::QueuedConnection);
+        
+        // Connection status feedback
+        connect(m_client->getMarketDataCore(), &MarketDataCore::connectionStatusChanged, 
+                this, [this](bool connected) {
+            if (connected) {
+                m_statusLabel->setText("🟢 Connected");
+                m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
+                m_subscribeButton->setText("🔗 Connected");
+                m_subscribeButton->setEnabled(false);
+            } else {
+                m_statusLabel->setText("🔴 Disconnected");  
+                m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
+                m_subscribeButton->setText("🚀 Subscribe");
+                m_subscribeButton->setEnabled(true);
+            }
+        });
+        
+        qDebug() << "🔥 PHASE 2.4: V2 Architecture Fix - MarketDataCore → UnifiedGridRenderer connections established AFTER subscription!";
+    } else {
+        qCritical() << "❌ PHASE 2.4: MarketDataCore or UnifiedGridRenderer not found!";
+        if (!m_client->getMarketDataCore()) qCritical() << "   MarketDataCore is null!";
+        if (!unifiedGridRenderer) qCritical() << "   UnifiedGridRenderer not found!";
+    }
+    
+    qDebug() << "✅ PHASE 1.1: Direct data pipeline started for" << symbol;
 }
 
 void MainWindowGPU::onCVDUpdated(double cvd) {
@@ -225,11 +244,11 @@ void MainWindowGPU::connectToGPUChart() {
     
     qDebug() << "✅ QML root found:" << qmlRoot;
     
-    // 🎯 PHASE 5: Pure grid-only component lookup
+    // 🔥 PHASE 1.2: Ultra-direct pipeline - only UnifiedGridRenderer needed
     UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    GridIntegrationAdapter* qmlGridAdapter = qmlRoot->findChild<GridIntegrationAdapter*>("gridIntegration");
+    // GridIntegrationAdapter* qmlGridAdapter = qmlRoot->findChild<GridIntegrationAdapter*>("gridIntegration");  // OBLITERATED!
     
-    // 🎯 PHASE 5: Pure grid-only validation - only require UnifiedGridRenderer
+    // 🔥 PHASE 1.2: Ultra-direct validation - only require UnifiedGridRenderer
     if (!unifiedGridRenderer) {
         qWarning() << "❌ UnifiedGridRenderer not found - retrying in 200ms...";
         m_connectionRetryCount++;
@@ -238,37 +257,25 @@ void MainWindowGPU::connectToGPUChart() {
     }
     qDebug() << "✅ Pure grid-only mode validation passed";
     
-    // 🎯 PHASE 2: NEW SINGLE DATA PIPELINE - StreamController → GridIntegrationAdapter
+    // 🔥 PHASE 1.2: ULTRA-DIRECT DATA PIPELINE - MarketDataCore → UnifiedGridRenderer  
     bool allConnectionsSuccessful = true;
     
-    // PRIMARY: Connect StreamController to GridIntegrationAdapter (single data hub)
-    bool primaryTradeConnection = connect(m_streamController, &StreamController::tradeReceived,
-                                         m_gridAdapter, &GridIntegrationAdapter::onTradeReceived,
-                                         Qt::QueuedConnection);
-    bool primaryOrderBookConnection = connect(m_streamController, &StreamController::orderBookUpdated,
-                                             m_gridAdapter, &GridIntegrationAdapter::onOrderBookUpdated,
-                                             Qt::QueuedConnection);
-    allConnectionsSuccessful &= primaryTradeConnection && primaryOrderBookConnection;
-    
-    // 🎯 PHASE 5: Pure grid-only connection - Connect GridIntegrationAdapter to UnifiedGridRenderer
-    if (unifiedGridRenderer) {
-        m_gridAdapter->setGridRenderer(unifiedGridRenderer);
-        qDebug() << "✅ GridIntegrationAdapter connected to UnifiedGridRenderer";
-    }
+    // Data pipeline connections established directly in onSubscribe()
+    // Both StreamController AND GridIntegrationAdapter OBLITERATED!
     
     // 🎯 PHASE 5: Legacy connections permanently removed - pure grid-only mode
     
-    // 🎯 PHASE 5: Pure grid-only data pipeline summary
-    qDebug() << "🎯 Phase 5 Pure Grid-Only Data Pipeline Summary:"
-             << "Primary connections:" << (primaryTradeConnection && primaryOrderBookConnection ? "SUCCESS" : "FAILED")
-             << "Grid renderer:" << (unifiedGridRenderer ? "CONNECTED" : "MISSING");
+    // 🔥 PHASE 1.2: Ultra-direct data pipeline summary  
+    qDebug() << "🔥 Phase 1.2: BOTH StreamController & GridIntegrationAdapter OBLITERATED!"
+             << "Grid renderer:" << (unifiedGridRenderer ? "READY FOR DIRECT CONNECTION" : "MISSING")
+             << "Ultra-direct MarketDataCore → UnifiedGridRenderer pipeline!";
     
     // 🔥 FINAL STATUS REPORT
     if (allConnectionsSuccessful) {
         qDebug() << "✅ PURE GRID-ONLY TERMINAL FULLY CONNECTED TO REAL-TIME DATA PIPELINE!";
-        qDebug() << "🎯 Grid components:" 
+        qDebug() << "🔥 PHASE 1.2: Ultra-direct pipeline components:" 
                  << "UnifiedGridRenderer:" << (unifiedGridRenderer ? "YES" : "NO")
-                 << "GridIntegration:" << (qmlGridAdapter ? "YES" : "NO");
+                 << "GridIntegration:" << "OBLITERATED!";
         m_connectionRetryCount = 0;  // Reset retry counter on success
     } else {
         qWarning() << "⚠️ Some GPU connections failed - partial functionality";

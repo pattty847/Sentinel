@@ -12,6 +12,8 @@ add_library(sentinel_core
     CvdThresholdRule.h
     DataCache.cpp
     DataCache.hpp
+    LiquidityTimeSeriesEngine.cpp
+    LiquidityTimeSeriesEngine.h
     LockFreeQueue.h
     MarketDataCore.cpp
     MarketDataCore.hpp

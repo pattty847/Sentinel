@@ -6,7 +6,6 @@
 #include <QMetaType>
 #include <QQmlEngine>
 #include "UnifiedGridRenderer.h"
-#include "GridIntegrationAdapter.h"
 #include "CoordinateSystem.h"
 #include "models/AxisModel.hpp"
 #include "models/TimeAxisModel.hpp"
@@ -24,7 +23,6 @@ int main(int argc, char *argv[])
     // 🎯 PHASE 5: Pure grid-only QML component registration
     std::cout << "🎯 Registering pure grid-only QML components..." << std::endl;
     
-    qmlRegisterType<GridIntegrationAdapter>("Sentinel.Charts", 1, 0, "GridIntegrationAdapter");
     qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<CoordinateSystem>("Sentinel.Charts", 1, 0, "CoordinateSystem");
     
