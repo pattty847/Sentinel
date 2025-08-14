@@ -1,3 +1,14 @@
+/*
+Sentinel — HeatmapStrategy
+Role: Implements the logic for rendering a liquidity heatmap from grid cell data.
+Inputs/Outputs: Creates a QSGGeometryNode where each cell is a pair of colored triangles.
+Threading: All code is executed on the Qt Quick render thread.
+Performance: Uses a QSGVertexColorMaterial for efficient rendering of per-vertex colored geometry.
+Integration: The concrete implementation of the heatmap visualization strategy.
+Observability: No internal logging.
+Related: HeatmapStrategy.hpp.
+Assumptions: Liquidity intensity is represented by the alpha channel of the vertex color.
+*/
 #include "HeatmapStrategy.hpp"
 #include "../GridTypes.hpp"
 #include <QSGGeometryNode>
@@ -64,7 +75,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
 }
 
 QColor HeatmapStrategy::calculateColor(double liquidity, bool isBid, double intensity) const {
-    double alpha = std::min(intensity * 0.8, 1.0);
+    double alpha = std::min(intensity, 1.0); // LINUS FIX: let intensity speak
     
     if (isBid) {
         // Bid-heavy: Green spectrum

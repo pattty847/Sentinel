@@ -1,3 +1,14 @@
+/*
+Sentinel — CoordinateSystem
+Role: A QML-compatible utility for coordinate transformation between world (price/time) and screen.
+Inputs/Outputs: Takes world/screen coordinates and viewport boundaries; outputs converted coordinates.
+Threading: Lives on the main GUI thread; conversion methods are pure functions and thread-safe.
+Performance: All conversion methods are simple, fast arithmetic operations.
+Integration: Registered as a QML type; used by renderers and QML UI components.
+Observability: No internal logging.
+Related: CoordinateSystem.cpp, UnifiedGridRenderer.h, main.cpp.
+Assumptions: Assumes a linear mapping between world and screen coordinates.
+*/
 #pragma once
 #include <QPointF>
 #include <QMatrix4x4>

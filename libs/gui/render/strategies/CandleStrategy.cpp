@@ -1,3 +1,14 @@
+/*
+Sentinel — CandleStrategy
+Role: Implements the logic for rendering OHLC candlesticks from grid cell data.
+Inputs/Outputs: Creates a single QSGGeometryNode containing lines for all candle bodies and wicks.
+Threading: All code is executed on the Qt Quick render thread.
+Performance: Simulates thick candle bodies by drawing multiple adjacent lines.
+Integration: The concrete implementation of the candlestick visualization strategy.
+Observability: No internal logging.
+Related: CandleStrategy.hpp.
+Assumptions: Cells contain OHLC data; uses a single material for all rendered geometry.
+*/
 #include "CandleStrategy.hpp"
 #include "../GridTypes.hpp"
 #include <QSGGeometryNode>

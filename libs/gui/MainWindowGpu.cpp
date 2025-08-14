@@ -1,17 +1,27 @@
+/*
+Sentinel — MainWindowGpu
+Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
+Inputs/Outputs: Connects MarketDataCore signals to UnifiedGridRenderer slots.
+Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
+Performance: Connection logic is part of the user-initiated subscription setup.
+Integration: Obtains MarketDataCore from CoinbaseStreamClient and wires it to the QML renderer.
+Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
+Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
+Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
+*/
+
 #include "MainWindowGpu.h"
 #include "StatisticsController.h"
 #include "ChartModeController.h"
 #include "UnifiedGridRenderer.h"
+#include "SentinelLogging.hpp"
 #include <QQmlContext>
-#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QTimer>
 
-// 🎯 PHASE 5: Pure grid-only mode - legacy includes removed
-
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
-    qDebug() << "🎯 PHASE 5: Creating GPU Trading Terminal in pure GRID-ONLY mode!";
+    qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
     
     setupUI();
     setupConnections();
@@ -24,13 +34,13 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     // This ensures the window is fully constructed and shown before we start streaming.
     QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
     
-    qDebug() << "✅ GPU MainWindow ready for 144Hz trading!";
+    sLog_App("✅ GPU MainWindow ready for 144Hz trading!");
 }
 
 MainWindowGPU::~MainWindowGPU() {
-    qDebug() << "🛑 MainWindowGPU destructor - cleaning up...";
+    sLog_App("🛑 MainWindowGPU destructor - cleaning up...");
     
-    // 🔥 PHASE 1.1: Stop data streams first (direct client instead of StreamController)
+    // Stop data streams first
     if (m_client) {
         m_client.reset();  // Clean shutdown of MarketDataCore
     }
@@ -45,30 +55,31 @@ MainWindowGPU::~MainWindowGPU() {
         m_gpuChart->setSource(QUrl());
     }
     
-    qDebug() << "✅ MainWindowGPU cleanup complete";
+    sLog_App("✅ MainWindowGPU cleanup complete");
 }
 
 void MainWindowGPU::setupUI() {
-    // 🔥 CREATE GPU CHART (QML) - Load from file system first
+    // Create GPU Chart (QML) - Load from file system first
     m_gpuChart = new QQuickWidget(this);
     m_gpuChart->setResizeMode(QQuickWidget::SizeRootObjectToView);
     
     // Try file system path first to bypass resource issues
+    // TODO: move this to a config file - OS dependent paths
     QString qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
-    qDebug() << "🔍 Trying QML path:" << qmlPath;
+    sLog_App("🔍 Trying QML path:" << qmlPath);
     
     if (QFile::exists(qmlPath)) {
         m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
-        qDebug() << "✅ QML loaded from file system!";
+        sLog_App("✅ QML loaded from file system!");
     } else {
-        qDebug() << "❌ QML file not found, trying resource path...";
+        sLog_App("❌ QML file not found, trying resource path...");
         m_gpuChart->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
     }
     
     // Check if QML loaded successfully
     if (m_gpuChart->status() == QQuickWidget::Error) {
-        qCritical() << "🚨 QML FAILED TO LOAD!";
-        qCritical() << "QML Errors:" << m_gpuChart->errors();
+        sLog_Error("🚨 QML FAILED TO LOAD!");
+        sLog_Error("QML Errors:" << m_gpuChart->errors());
     }
     
     // Set default symbol in QML context
@@ -82,31 +93,6 @@ void MainWindowGPU::setupUI() {
     m_statusLabel = new QLabel("🔴 Disconnected", this);
     m_symbolInput = new QLineEdit("BTC-USD", this);
     m_subscribeButton = new QPushButton("🚀 Subscribe", this);
-    
-    // 🔥 PHASE 1: STRESS TEST CONTROLS
-    QPushButton* stressTestButton = new QPushButton("🔥 1M Point VBO Test", this);
-    stressTestButton->setStyleSheet("QPushButton { background-color: #ff4444; color: white; padding: 8px 16px; font-size: 14px; font-weight: bold; }");
-    
-    connect(stressTestButton, &QPushButton::clicked, [this]() {
-        qDebug() << "🚀 LAUNCHING 1M POINT VBO STRESS TEST!";
-        QQmlContext* context = m_gpuChart->rootContext();
-        context->setContextProperty("stressTestMode", true);
-        
-        // Reload QML to trigger stress test
-        QString qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
-        if (QFile::exists(qmlPath)) {
-            m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
-        } else {
-            m_gpuChart->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
-        }
-        
-        // 🔥 CRITICAL FIX: Re-establish connections after QML reload
-        QTimer::singleShot(100, [this]() {  // Small delay to ensure QML is loaded
-            connectToGPUChart();
-        });
-        
-        qDebug() << "🔥 VBO STRESS TEST ACTIVATED!";
-    });
     
     // Styling
     m_cvdLabel->setStyleSheet("QLabel { color: white; font-size: 16px; font-weight: bold; }");
@@ -126,7 +112,6 @@ void MainWindowGPU::setupUI() {
     controlLayout->addWidget(new QLabel("Symbol:"));
     controlLayout->addWidget(m_symbolInput);
     controlLayout->addWidget(m_subscribeButton);
-    controlLayout->addWidget(stressTestButton);  // 🔥 STRESS TEST BUTTON
     controlLayout->addStretch();
     controlLayout->addWidget(m_cvdLabel);
     controlLayout->addWidget(m_statusLabel);
@@ -137,61 +122,48 @@ void MainWindowGPU::setupUI() {
 }
 
 void MainWindowGPU::setupConnections() {
-    // 🔥 PHASE 1.1: StreamController OBLITERATED - Direct connection architecture
-    // m_streamController = new StreamController(this);  // OBLITERATED!
     m_statsController = new StatisticsController(this);
-    
-    // 🔥 PHASE 1.2: GridIntegrationAdapter OBLITERATED! Direct MarketDataCore → UnifiedGridRenderer pipeline
-    // m_gridAdapter = new GridIntegrationAdapter(this);  // OBLITERATED!
 
-    qDebug() << "🔥 Phase 1.1: StreamController OBLITERATED - Direct data pipeline enabled";
-    
     // UI connections
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
-    
-    // 🔥 PHASE 1.1: Direct MarketDataCore connections (StreamController OBLITERATED)
-    // Connection status will be handled directly through MarketDataCore signals
     
     // Stats pipeline
     connect(m_statsController, &StatisticsController::cvdUpdated, 
             this, &MainWindowGPU::onCVDUpdated);
     
-    // 🔥 CRITICAL FIX: Establish GPU connections
+    // Establish GPU connections
     connectToGPUChart();
     
-    qDebug() << "✅ GPU MainWindow connections established";
+    sLog_App("✅ GPU MainWindow connections established");
 }
 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty()) {
-        qWarning() << "❌ Empty symbol input";
+        sLog_Warning("❌ Empty symbol input");
         return;
     }
     
-    qDebug() << "🚀 Subscribing to GPU chart:" << symbol;
+    sLog_App("🚀 Subscribing to GPU chart:" << symbol);
     
     // Update QML context
     QQmlContext* context = m_gpuChart->rootContext();
     context->setContextProperty("symbol", symbol);
     
-    // 🔥 PHASE 1.2: GridIntegrationAdapter QML exposure OBLITERATED!
-    // context->setContextProperty("gridIntegrationAdapter", m_gridAdapter);  // OBLITERATED!
-    
-    // 🔥 PHASE 2.4: Create CoinbaseStreamClient and subscribe FIRST
+    // Create CoinbaseStreamClient and subscribe FIRST
     m_client = std::make_unique<CoinbaseStreamClient>();
     std::vector<std::string> symbols = {symbol.toStdString()};
     m_client->subscribe(symbols);  // This creates the MarketDataCore
     m_client->start();
     
-    // 🔥 PHASE 2.4: V2 ARCHITECTURE FIX - Connect MarketDataCore → UnifiedGridRenderer AFTER MarketDataCore exists
-    QObject* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<QObject*>("unifiedGridRenderer");
+    // V2 ARCHITECTURE FIX - Connect MarketDataCore → UnifiedGridRenderer AFTER MarketDataCore exists
+    UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
     if (m_client->getMarketDataCore() && unifiedGridRenderer) {
         // Use QObject::connect with SIGNAL/SLOT macros for cross-boundary connections
         connect(m_client->getMarketDataCore(), SIGNAL(tradeReceived(const Trade&)),
                 unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
-        connect(m_client->getMarketDataCore(), SIGNAL(orderBookUpdated(const OrderBook&)),
-                unifiedGridRenderer, SLOT(onOrderBookUpdated(const OrderBook&)), Qt::QueuedConnection);
+        connect(m_client->getMarketDataCore(), &MarketDataCore::orderBookUpdated,
+                unifiedGridRenderer, &UnifiedGridRenderer::onOrderBookUpdated, Qt::QueuedConnection);
         
         // Connection status feedback
         connect(m_client->getMarketDataCore(), &MarketDataCore::connectionStatusChanged, 
@@ -209,75 +181,61 @@ void MainWindowGPU::onSubscribe() {
             }
         });
         
-        qDebug() << "🔥 PHASE 2.4: V2 Architecture Fix - MarketDataCore → UnifiedGridRenderer connections established AFTER subscription!";
+        sLog_App("🔥 V2 Architecture Fix - MarketDataCore → UnifiedGridRenderer connections established AFTER subscription!");
     } else {
-        qCritical() << "❌ PHASE 2.4: MarketDataCore or UnifiedGridRenderer not found!";
-        if (!m_client->getMarketDataCore()) qCritical() << "   MarketDataCore is null!";
-        if (!unifiedGridRenderer) qCritical() << "   UnifiedGridRenderer not found!";
+        sLog_Error("❌ MarketDataCore or UnifiedGridRenderer not found!");
+        if (!m_client->getMarketDataCore()) sLog_Error("   MarketDataCore is null!");
+        if (!unifiedGridRenderer) sLog_Error("   UnifiedGridRenderer not found!");
     }
     
-    qDebug() << "✅ PHASE 1.1: Direct data pipeline started for" << symbol;
+    sLog_App("✅ Direct data pipeline started for" << symbol);
 }
 
 void MainWindowGPU::onCVDUpdated(double cvd) {
     m_cvdLabel->setText(QString("CVD: %1").arg(cvd, 0, 'f', 2));
 }
 
-// 🔥 CRITICAL FIX: Helper method to establish GPU connections
+// Helper method to establish GPU connections
 void MainWindowGPU::connectToGPUChart() {
-    qDebug() << "🔍 ATTEMPTING TO CONNECT TO GPU CHART... (attempt" << m_connectionRetryCount + 1 << "/" << MAX_CONNECTION_RETRIES << ")";
+    sLog_Debug("🔍 ATTEMPTING TO CONNECT TO GPU CHART... (attempt" << m_connectionRetryCount + 1 << "/" << MAX_CONNECTION_RETRIES << ")");
     
     // Check retry limit
     if (m_connectionRetryCount >= MAX_CONNECTION_RETRIES) {
-        qCritical() << "❌ MAX CONNECTION RETRIES REACHED - GPU chart connection failed!";
+        sLog_Error("❌ MAX CONNECTION RETRIES REACHED - GPU chart connection failed!");
         return;
     }
     
     // Get the GPU chart widget from QML
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
-        qWarning() << "❌ QML root object not found - retrying in 100ms...";
+        sLog_Warning("❌ QML root object not found - retrying in 100ms...");
         m_connectionRetryCount++;
         QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
     
-    qDebug() << "✅ QML root found:" << qmlRoot;
+    sLog_Debug("✅ QML root found:" << qmlRoot);
     
-    // 🔥 PHASE 1.2: Ultra-direct pipeline - only UnifiedGridRenderer needed
+    // Ultra-direct pipeline - only UnifiedGridRenderer needed
     UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    // GridIntegrationAdapter* qmlGridAdapter = qmlRoot->findChild<GridIntegrationAdapter*>("gridIntegration");  // OBLITERATED!
     
-    // 🔥 PHASE 1.2: Ultra-direct validation - only require UnifiedGridRenderer
+    // Ultra-direct validation - only require UnifiedGridRenderer
     if (!unifiedGridRenderer) {
-        qWarning() << "❌ UnifiedGridRenderer not found - retrying in 200ms...";
+        sLog_Warning("❌ UnifiedGridRenderer not found - retrying in 200ms...");
         m_connectionRetryCount++;
         QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
         return;
     }
-    qDebug() << "✅ Pure grid-only mode validation passed";
+    sLog_Debug("✅ Pure grid-only mode validation passed");
     
-    // 🔥 PHASE 1.2: ULTRA-DIRECT DATA PIPELINE - MarketDataCore → UnifiedGridRenderer  
+    // ULTRA-DIRECT DATA PIPELINE - MarketDataCore → UnifiedGridRenderer  
     bool allConnectionsSuccessful = true;
-    
-    // Data pipeline connections established directly in onSubscribe()
-    // Both StreamController AND GridIntegrationAdapter OBLITERATED!
-    
-    // 🎯 PHASE 5: Legacy connections permanently removed - pure grid-only mode
-    
-    // 🔥 PHASE 1.2: Ultra-direct data pipeline summary  
-    qDebug() << "🔥 Phase 1.2: BOTH StreamController & GridIntegrationAdapter OBLITERATED!"
-             << "Grid renderer:" << (unifiedGridRenderer ? "READY FOR DIRECT CONNECTION" : "MISSING")
-             << "Ultra-direct MarketDataCore → UnifiedGridRenderer pipeline!";
-    
-    // 🔥 FINAL STATUS REPORT
+
+    // FINAL STATUS REPORT
     if (allConnectionsSuccessful) {
-        qDebug() << "✅ PURE GRID-ONLY TERMINAL FULLY CONNECTED TO REAL-TIME DATA PIPELINE!";
-        qDebug() << "🔥 PHASE 1.2: Ultra-direct pipeline components:" 
-                 << "UnifiedGridRenderer:" << (unifiedGridRenderer ? "YES" : "NO")
-                 << "GridIntegration:" << "OBLITERATED!";
+        sLog_App("🔥 Ultra-direct pipeline components:" << "UnifiedGridRenderer:" << (unifiedGridRenderer ? "YES" : "NO"));
         m_connectionRetryCount = 0;  // Reset retry counter on success
     } else {
-        qWarning() << "⚠️ Some GPU connections failed - partial functionality";
+        sLog_Warning("⚠️ Some GPU connections failed - partial functionality");
     }
 } 

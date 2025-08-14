@@ -1,3 +1,14 @@
+/*
+Sentinel — DataCache
+Role: A thread-safe, in-memory cache for real-time trades and live order book state.
+Inputs/Outputs: Ingests Trade/OrderBook data; provides access to this data via query methods.
+Threading: Fully thread-safe using a std::shared_mutex for concurrent reads and exclusive writes.
+Performance: Optimized for frequent concurrent reads via shared locking; O(log n) access by product.
+Integration: Written to by MarketDataCore; read by components requiring access to market data.
+Observability: No internal logging; diagnostics are the responsibility of its clients.
+Related: DataCache.cpp, TradeData.h, MarketDataCore.hpp, CoinbaseStreamClient.hpp.
+Assumptions: Manages data for multiple independent products, identified by string IDs.
+*/
 #pragma once
 // ─────────────────────────────────────────────────────────────
 // DataCache – lock-efficient store for trades & order books.
@@ -5,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 #include <shared_mutex>
+#include <memory>
 #include "TradeData.h"
 
 template <typename T, std::size_t MaxN>
@@ -46,11 +58,10 @@ public:
     [[nodiscard]] OrderBook            book(const std::string& s) const;
     
     // 🔥 NEW: LiveOrderBook methods for stateful order book management
-    void initializeLiveOrderBook(const std::string& symbol, const OrderBook& snapshot);
+    void initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
-    [[nodiscard]] OrderBook getLiveOrderBook(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
+    [[nodiscard]] std::shared_ptr<const OrderBook> getLiveOrderBook(const std::string& symbol) const;
+    
 
 private:
     using TradeRing = RingBuffer<Trade, 1000>;

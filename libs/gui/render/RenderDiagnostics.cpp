@@ -1,3 +1,14 @@
+/*
+Sentinel — RenderDiagnostics
+Role: Implements the logic for calculating performance metrics and building the overlay.
+Inputs/Outputs: Calculates FPS/frame times; creates/updates a QSGSimpleTextNode for the overlay.
+Threading: All code is executed on the Qt Quick render thread.
+Performance: FPS is smoothed over a sample count to provide a stable reading.
+Integration: The concrete implementation of the performance monitoring utility.
+Observability: The overlay provides direct, real-time visual feedback on performance.
+Related: RenderDiagnostics.hpp.
+Assumptions: A default font is available for use by the QSGSimpleTextNode.
+*/
 #include "RenderDiagnostics.hpp"
 #include <QString>
 #include <algorithm>

@@ -1,3 +1,14 @@
+/*
+Sentinel — GridSceneNode
+Role: Implements the logic for managing the chart's scene graph structure.
+Inputs/Outputs: Handles the creation and deletion of child nodes as the chart updates.
+Threading: All code is executed on the Qt Quick render thread.
+Performance: The destructor ensures proper memory management of scene graph nodes.
+Integration: The concrete implementation of the chart's root scene graph node.
+Observability: No internal logging.
+Related: GridSceneNode.hpp.
+Assumptions: The active render strategy returns a valid node to be added to the scene.
+*/
 #include "GridSceneNode.hpp"
 #include "GridTypes.hpp"
 #include "IRenderStrategy.hpp"

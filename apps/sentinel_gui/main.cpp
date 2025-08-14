@@ -1,3 +1,14 @@
+/*
+Sentinel — main.cpp
+Role: Main entry point for the Sentinel GUI application.
+Inputs/Outputs: Standard command-line arguments -> application exit code.
+Threading: Runs exclusively on the main application/GUI thread.
+Performance: One-time application startup logic; not on a critical performance path.
+Integration: Top-level executable; launches MainWindowGPU and registers C++ types with QML.
+Observability: Logs key startup milestones to stdout/qDebug.
+Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoordinateSystem.h, TimeAxisModel.hpp.
+Assumptions: Executed as the primary entry point of a Qt application.
+*/
 #include "MainWindowGpu.h"
 #include <QApplication>
 #include <QDebug>
@@ -7,7 +18,6 @@
 #include <QQmlEngine>
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "models/AxisModel.hpp"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
 

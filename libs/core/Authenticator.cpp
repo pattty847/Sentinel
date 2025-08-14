@@ -1,3 +1,14 @@
+/*
+Sentinel — Authenticator
+Role: Implements the logic for loading API keys from a file and signing JWTs.
+Inputs/Outputs: Reads 'key.json'; creates and signs a JWT with an ES256 algorithm.
+Threading: All methods execute on the calling thread.
+Performance: File I/O is a one-time cost in the constructor.
+Integration: The concrete implementation of the authentication token generator.
+Observability: Logs file-not-found and JSON parsing errors to std::cerr.
+Related: Authenticator.hpp.
+Assumptions: The linked JWT library supports ES256 signing.
+*/
 #include "Authenticator.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>

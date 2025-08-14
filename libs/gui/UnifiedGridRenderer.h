@@ -1,4 +1,15 @@
 // ======= libs/gui/UnifiedGridRenderer.h =======
+/*
+Sentinel — UnifiedGridRenderer
+Role: A QML scene item that orchestrates multiple rendering strategies to draw market data.
+Inputs/Outputs: Takes Trade/OrderBook data via slots; outputs a QSGNode tree for GPU rendering.
+Threading: Runs on the GUI thread; data is received via queued connections; rendering on render thread.
+Performance: Batches incoming data with a QTimer to throttle scene graph updates.
+Integration: Used in QML; receives data from MarketDataCore; delegates rendering to strategy objects.
+Observability: Logs key events like data reception and paint node updates via qDebug.
+Related: UnifiedGridRenderer.cpp, IRenderStrategy.h, CoordinateSystem.h, MarketDataCore.hpp.
+Assumptions: CoordinateSystem and ChartModeController properties are set from QML.
+*/
 #pragma once
 #include <QQuickItem>
 #include <QSGGeometryNode>
@@ -135,7 +146,7 @@ public:
     
     // 🎯 DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
-    Q_INVOKABLE void updateOrderBook(const OrderBook& orderBook);
+    Q_INVOKABLE void updateOrderBook(std::shared_ptr<const OrderBook> orderBook);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
@@ -187,8 +198,11 @@ public:
 public slots:
     // Real-time data integration
     void onTradeReceived(const Trade& trade);
-    void onOrderBookUpdated(const OrderBook& book);
+    void onOrderBookUpdated(std::shared_ptr<const OrderBook> book);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
+    
+    // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
+    void onViewportChanged();
 
 private slots:
     // Timer-based order book capture for liquidity time series

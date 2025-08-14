@@ -1,3 +1,14 @@
+/*
+Sentinel — TradeFlowStrategy
+Role: Implements the logic for rendering individual trades as vertical lines.
+Inputs/Outputs: Creates a QSGNode containing a child node for each trade line.
+Threading: All code is executed on the Qt Quick render thread.
+Performance: Note: This implementation creates a large number of child nodes, which can be slow.
+Integration: The concrete implementation of the trade flow visualization strategy.
+Observability: No internal logging.
+Related: TradeFlowStrategy.hpp.
+Assumptions: The 'liquidity' field of a cell is used to determine the rendered line's length.
+*/
 #include "TradeFlowStrategy.hpp"
 #include "../GridTypes.hpp"
 #include <QSGGeometryNode>

@@ -1,3 +1,14 @@
+/*
+Sentinel — RenderDiagnostics
+Role: Collects, calculates, and displays real-time rendering performance metrics.
+Inputs/Outputs: Takes frame event notifications; provides calculated stats and a visual overlay node.
+Threading: All methods are designed to be called only on the Qt Quick render thread.
+Performance: Calculations are lightweight to minimize impact on the render loop.
+Integration: Owned by UnifiedGridRenderer and driven by the updatePaintNode V2 implementation.
+Observability: This class is the primary observability tool for the rendering pipeline.
+Related: RenderDiagnostics.cpp, UnifiedGridRenderer.h.
+Assumptions: Assumes startFrame() and endFrame() are called consistently for each frame.
+*/
 #pragma once
 #include <QElapsedTimer>
 #include <vector>

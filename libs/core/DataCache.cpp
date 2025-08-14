@@ -1,3 +1,14 @@
+/*
+Sentinel — DataCache
+Role: Implements the thread-safe storage logic for market trades and order books.
+Inputs/Outputs: Implements methods for adding trades and updating order book state.
+Threading: Uses std::unique_lock for write operations and std::shared_lock for read operations.
+Performance: Manages memory by pruning the trade history to a fixed size per product.
+Integration: The concrete implementation of the in-memory data store.
+Observability: No internal logging.
+Related: DataCache.hpp, TradeData.h.
+Assumptions: Assumes order book updates can be applied incrementally to the stored state.
+*/
 #include "DataCache.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -89,137 +100,103 @@ OrderBook DataCache::book(const std::string& symbol) const {
     return {}; // Return empty OrderBook if symbol not found
 }
 
-// 🔥 NEW: LiveOrderBook Implementation
+// 🔥 NEW: O(1) LiveOrderBook Implementation
 // =============================================================================
 
-void LiveOrderBook::initializeFromSnapshot(const OrderBook& snapshot) {
+void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
-    m_productId = snapshot.product_id;
-    m_lastUpdate = snapshot.timestamp;
-    
-    // Clear existing state
-    m_bids.clear();
-    m_asks.clear();
-    
-    // Initialize bids (higher prices first - reverse sorted for better visualization)
-    for (const auto& bid : snapshot.bids) {
-        if (bid.size > 0.0) {
-            m_bids[bid.price] = bid.size;
-        }
-    }
-    
-    // Initialize asks (lower prices first - normal sorted)
-    for (const auto& ask : snapshot.asks) {
-        if (ask.size > 0.0) {
-            m_asks[ask.price] = ask.size;
-        }
-    }
-    
-    sLog_App(QString("🏗️  LiveOrderBook initialized for %1 with %2 bids and %3 asks")
-              .arg(QString::fromStdString(m_productId)).arg(m_bids.size()).arg(m_asks.size()));
+
+    m_min_price = min_price;
+    m_max_price = max_price;
+    m_tick_size = tick_size;
+
+    if (m_tick_size <= 0) return; // Avoid division by zero
+
+    size_t size = static_cast<size_t>((max_price - min_price) / tick_size) + 1;
+
+    m_bids.resize(size, 0.0);
+    m_asks.resize(size, 0.0);
+
+    sLog_App(QString("🏗️  O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
+              .arg(QString::fromStdString(m_productId)).arg(size)
+              .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
 }
 
 void LiveOrderBook::applyUpdate(const std::string& side, double price, double quantity) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
+
+    // Bounds check
+    if (price < m_min_price || price > m_max_price) {
+        static int oob_count = 0;
+        if (++oob_count % 100 == 1) { // Log every 100th OOB update
+            sLog_Data(QString("⚠️ Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update. [Hit #%5]")
+                        .arg(price).arg(m_min_price).arg(m_max_price).arg(QString::fromStdString(m_productId)).arg(oob_count));
+        }
+        return;
+    }
+
+    size_t index = price_to_index(price);
     m_lastUpdate = std::chrono::system_clock::now();
-    
+
     if (side == "bid") {
-        if (quantity > 0.0) {
-            m_bids[price] = quantity; // Add or update bid
-        } else {
-            m_bids.erase(price); // Remove bid (quantity = 0)
+        if (index < m_bids.size()) {
+            m_bids[index] = quantity;
         }
     } else if (side == "offer" || side == "ask") {
-        if (quantity > 0.0) {
-            m_asks[price] = quantity; // Add or update ask
-        } else {
-            m_asks.erase(price); // Remove ask (quantity = 0)
+        if (index < m_asks.size()) {
+            m_asks[index] = quantity;
         }
     }
-}
-
-// In: libs/core/DataCache.cpp
-
-OrderBook LiveOrderBook::getCurrentState() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    OrderBook book;
-    book.product_id = m_productId;
-    book.timestamp = m_lastUpdate;
-    
-    // Convert bids map to vector
-    book.bids.reserve(m_bids.size());
-    // 🔥 SORTING FIX: Use reverse iterators (rbegin, rend) to sort bids from highest to lowest price
-    for (auto it = m_bids.rbegin(); it != m_bids.rend(); ++it) {
-        book.bids.push_back({it->first, it->second});
-    }
-    
-    // Convert asks map to vector (already sorted correctly low-to-high)
-    book.asks.reserve(m_asks.size());
-    for (const auto& [price, size] : m_asks) {
-        book.asks.push_back({price, size});
-    }
-    
-    return book;
-}
-
-std::vector<OrderBookLevel> LiveOrderBook::getAllBids() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    std::vector<OrderBookLevel> bids;
-    bids.reserve(m_bids.size());
-    
-    // Sort bids by price (highest first) for proper visualization
-    for (auto it = m_bids.rbegin(); it != m_bids.rend(); ++it) {
-        bids.push_back({it->first, it->second});
-    }
-    
-    return bids;
-}
-
-std::vector<OrderBookLevel> LiveOrderBook::getAllAsks() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    std::vector<OrderBookLevel> asks;
-    asks.reserve(m_asks.size());
-    
-    // Sort asks by price (lowest first) for proper visualization
-    for (const auto& [price, size] : m_asks) {
-        asks.push_back({price, size});
-    }
-    
-    return asks;
 }
 
 size_t LiveOrderBook::getBidCount() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_bids.size();
+    // Count non-zero elements
+    return std::count_if(m_bids.begin(), m_bids.end(), [](double q){ return q > 0.0; });
 }
 
 size_t LiveOrderBook::getAskCount() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_asks.size();
+    // Count non-zero elements
+    return std::count_if(m_asks.begin(), m_asks.end(), [](double q){ return q > 0.0; });
 }
 
 bool LiveOrderBook::isEmpty() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_bids.empty() && m_asks.empty();
+    // Check if all elements are zero
+    return std::all_of(m_bids.begin(), m_bids.end(), [](double q){ return q == 0.0; }) &&
+           std::all_of(m_asks.begin(), m_asks.end(), [](double q){ return q == 0.0; });
 }
 
 // 🔥 NEW: DataCache LiveOrderBook Methods
 // =============================================================================
 
-void DataCache::initializeLiveOrderBook(const std::string& symbol, const OrderBook& snapshot) {
+void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
     std::unique_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     // Create or get existing live order book
     auto& liveBook = m_liveBooks[symbol];
     liveBook.setProductId(symbol);
-    liveBook.initializeFromSnapshot(snapshot);
+
+    // TODO: dynamically set the price range based on the current price
+    // Use reasonable price ranges to avoid massive memory waste
+    if (symbol == "BTC-USD") {
+        // BTC: ±$25k around $100k = [75k, 125k] = 5M entries instead of 20M
+        liveBook.initialize(75000.0, 125000.0, 0.01);
+    } else {
+        // Default reasonable range for other crypto pairs
+        liveBook.initialize(75000.0, 125000.0, 0.01);
+    }
+
+    // Apply the snapshot levels to the new book structure
+    for (const auto& level : bids) {
+        liveBook.applyUpdate("bid", level.price, level.size);
+    }
+    for (const auto& level : asks) {
+        liveBook.applyUpdate("ask", level.price, level.size);
+    }
     
-    sLog_Data(QString("🔥 DataCache: Initialized LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
+    sLog_Data(QString("🔥 DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
 void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
@@ -229,62 +206,48 @@ void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string
     if (it != m_liveBooks.end()) {
         it->second.applyUpdate(side, price, quantity);
     } else {
-        // Create new live book if it doesn't exist
-        auto& liveBook = m_liveBooks[symbol];
-        liveBook.setProductId(symbol);
-        liveBook.applyUpdate(side, price, quantity);
+        // If book doesn't exist, we can't initialize it without a snapshot.
+        // The first message for a product MUST be a snapshot.
+        static int missing_count = 0;
+        if (++missing_count % 100 == 1) { // Log every 100th time
+             sLog_Data(QString("⚠️ Dropping update for uninitialized live book '%1'. Waiting for snapshot. [Hit #%2]")
+                        .arg(QString::fromStdString(symbol)).arg(missing_count));
+        }
     }
 }
 
-OrderBook DataCache::getLiveOrderBook(const std::string& symbol) const {
+std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& symbol) const {
     std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     auto it = m_liveBooks.find(symbol);
     if (it != m_liveBooks.end()) {
-        OrderBook book = it->second.getCurrentState();
+        const auto& liveBook = it->second;
+        auto book = std::make_shared<OrderBook>();
+        book->product_id = liveBook.getProductId();
+        book->timestamp = std::chrono::system_clock::now();
+
+        // Convert dense LiveOrderBook to sparse OrderBook format
+        const auto& denseBids = liveBook.getBids();
+        const auto& denseAsks = liveBook.getAsks();
         
-        // 🔍 DEBUG: Log what we're returning from the cache
-        static int cacheDebugCount = 0;
-        if (++cacheDebugCount % 30 == 1) { // Log every 30th call
-            sLog_Data(QString("🔍 DATACACHE getLiveOrderBook: Found '%1' → returning %2 bids, %3 asks [call #%4]")
-                       .arg(QString::fromStdString(symbol)).arg(book.bids.size()).arg(book.asks.size()).arg(cacheDebugCount));
+        // Convert bids (scan from highest to lowest price)
+        for (size_t i = denseBids.size(); i-- > 0; ) {
+            if (denseBids[i] > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
+                book->bids.push_back(OrderBookLevel{price, denseBids[i]});
+            }
+        }
+        
+        // Convert asks (scan from lowest to highest price)
+        for (size_t i = 0; i < denseAsks.size(); ++i) {
+            if (denseAsks[i] > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
+                book->asks.push_back(OrderBookLevel{price, denseAsks[i]});
+            }
         }
         
         return book;
     }
     
-    // 🔍 DEBUG: Log when symbol is not found
-    static int notFoundCount = 0;
-    if (++notFoundCount % 10 == 1) { // Log every 10th miss
-        QString availableSymbols;
-        for (const auto& [sym, book] : m_liveBooks) {
-            availableSymbols += QString("'%1' ").arg(QString::fromStdString(sym));
-        }
-        sLog_Data(QString("⚠️ DATACACHE getLiveOrderBook: Symbol '%1' NOT FOUND in live books! Available symbols: %2 [miss #%3]")
-                   .arg(QString::fromStdString(symbol)).arg(availableSymbols).arg(notFoundCount));
-    }
-    
-    return {}; // Return empty OrderBook if not found
-}
-
-std::vector<OrderBookLevel> DataCache::getLiveBids(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
-    
-    auto it = m_liveBooks.find(symbol);
-    if (it != m_liveBooks.end()) {
-        return it->second.getAllBids();
-    }
-    
-    return {}; // Return empty vector if not found
-}
-
-std::vector<OrderBookLevel> DataCache::getLiveAsks(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
-    
-    auto it = m_liveBooks.find(symbol);
-    if (it != m_liveBooks.end()) {
-        return it->second.getAllAsks();
-    }
-    
-    return {}; // Return empty vector if not found
+    return nullptr; // Return nullptr if not found
 } 

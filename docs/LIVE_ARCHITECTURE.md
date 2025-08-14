@@ -145,18 +145,24 @@ Once these core systems are rock-solid, here's the "cool stuff" that will make S
 
 -----
 
-## 📝 Sentinel Logging Guide
+## 📝 Sentinel Logging Guide (v2)
 
-This guide provides instructions for using Sentinel's powerful and flexible categorized logging system.
+This guide provides instructions for using Sentinel's simplified and powerful categorized logging system.
 
 ### **Quick Start: Controlling Log Verbosity**
 
-The logging system uses environment variables to control output, allowing you to focus on specific components without being overwhelmed by spam. The render logging is now throttled to reduce noise.
+The logging system uses the `QT_LOGGING_RULES` environment variable to control output, allowing you to focus on specific components.
+
+**The Four Categories:**
+- `sentinel.app`: Application lifecycle, config, auth.
+- `sentinel.data`: All data processing (network, cache, trades).
+- `sentinel.render`: All rendering logic (charts, GPU, coordinates).
+- `sentinel.debug`: High-frequency, specialized diagnostics (off by default).
 
 **To run in a clean, production-like mode (warnings and errors only):**
 
 ```bash
-export QT_LOGGING_RULES="*.debug=false;*.warning=true;*.critical=true"
+export QT_LOGGING_RULES="*.debug=false"
 ./build/apps/sentinel_gui/sentinel
 ```
 
@@ -169,42 +175,12 @@ export QT_LOGGING_RULES="sentinel.*.debug=true"
 
 ### **Focused Debugging Scenarios**
 
-You can enable specific categories to debug different parts of the application.
+- **Trading & Data Issues:**
+  ```bash
+  export QT_LOGGING_RULES="sentinel.data.debug=true;sentinel.render.debug=false"
+  ```
 
-  * **Trading & Data Issues:**
-
-    ```bash
-    export QT_LOGGING_RULES="sentinel.trades.debug=true;sentinel.cache.debug=true;sentinel.network.debug=true"
-    ```
-
-  * **Rendering & Charting Issues:**
-
-    ```bash
-    export QT_LOGGING_RULES="sentinel.chart.debug=true;sentinel.render.debug=true;sentinel.debug.coords.debug=true"
-    ```
-
-  * **Performance & Timing Issues:**
-
-    ```bash
-    export QT_LOGGING_RULES="sentinel.performance.debug=true;sentinel.debug.timing.debug=true"
-    ```
-
-  * **Connection & Network Issues:**
-
-    ```bash
-    export QT_LOGGING_RULES="sentinel.network.debug=true;sentinel.connection.debug=true"
-    ```
-
-### **Log Categories Reference**
-
-The system is divided into several categories, allowing for granular control.
-
-| Category | Purpose | Default |
-|---|---|---|
-| `sentinel.core` | Core data structures and logic | ✅ On |
-| `sentinel.network` | WebSocket connections and data flow | ✅ On |
-| `sentinel.cache` | `DataCache` and `LiveOrderBook` operations | ✅ On |
-| `sentinel.render` | Basic rendering and chart operations | ✅ On (Throttled) |
-| `sentinel.render.detail`| High-frequency paint/geometry details | ❌ Off |
-| `sentinel.performance`| Performance metrics and timing | ✅ On |
-| `sentinel.debug.*` | Very high-frequency debug categories (coords, timing) | ❌ Off |
+- **Rendering & Charting Issues:**
+  ```bash
+  export QT_LOGGING_RULES="sentinel.render.debug=true;sentinel.data.debug=false"
+  ```

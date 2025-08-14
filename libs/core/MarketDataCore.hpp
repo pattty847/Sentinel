@@ -1,9 +1,16 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────
-// MarketDataCore – owns Boost-Beast websocket & IO thread.
-// Responsibilities: network I/O, reconnection, back-pressure.
-// Emits fully‐parsed domain objects to DataCache.
-// ─────────────────────────────────────────────────────────────
+/*
+Sentinel — MarketDataCore
+Role: Owns the WebSocket connection and I/O thread, handling all network operations.
+Inputs/Outputs: Takes product IDs, an Authenticator, and a DataCache; emits parsed data via Qt signals.
+Threading: Runs a Boost.Asio io_context on a dedicated worker thread, using a strand for safety.
+Performance: High-throughput design using asynchronous I/O for non-blocking operations.
+Integration: Created and owned by CoinbaseStreamClient; its signals are wired to the GUI layer.
+Observability: Emits connectionStatusChanged and errorOccurred signals.
+Related: MarketDataCore.cpp, CoinbaseStreamClient.hpp, DataCache.hpp, Authenticator.hpp.
+Assumptions: The provided Authenticator and DataCache instances will outlive this object.
+*/
+#include <memory>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -47,9 +54,8 @@ public:
     MarketDataCore& operator=(MarketDataCore&&) = delete;
 
 signals:
-    // 🔥 NEW: Real-time signals for GUI layer
     void tradeReceived(const Trade& trade);
-    void orderBookUpdated(const OrderBook& orderBook);
+    void orderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
 
@@ -96,4 +102,4 @@ private:
     // Thread-safe counters (no more static!)
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
-}; 
+};

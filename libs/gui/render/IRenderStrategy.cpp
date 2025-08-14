@@ -18,7 +18,7 @@ double IRenderStrategy::calculateIntensity(double liquidity, double intensitySca
     
     // Logarithmic scaling for better visual distribution
     double logLiquidity = std::log(1.0 + liquidity);
-    double intensity = logLiquidity * intensityScale * 0.1;
+    double intensity = logLiquidity * intensityScale; // drop arbitrary 0.1 reduction
     
     return std::min(1.0, intensity);
 }

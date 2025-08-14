@@ -1,3 +1,14 @@
+/*
+Sentinel — LiquidityTimeSeriesEngine
+Role: Aggregates raw order book data into a multi-resolution, time-sliced data structure.
+Inputs/Outputs: Takes OrderBook updates; produces collections of LiquidityTimeSlice for rendering.
+Threading: Thread-safe for concurrent reads and writes using a QReadWriteLock.
+Performance: Optimized for high-frequency updates with logarithmic time complexity for lookups.
+Integration: Used by DataProcessor to process the live data stream for the UnifiedGridRenderer.
+Observability: Logs timeframe creation and update events via sLog_Render.
+Related: LiquidityTimeSeriesEngine.cpp, DataProcessor.hpp, UnifiedGridRenderer.h, TradeData.h.
+Assumptions: Order book updates are processed to update the time-sliced liquidity data.
+*/
 #pragma once
 
 #include <QObject>

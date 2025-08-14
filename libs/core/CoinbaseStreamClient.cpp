@@ -1,3 +1,14 @@
+/*
+Sentinel — CoinbaseStreamClient
+Role: Implements the facade that delegates calls to the underlying data components.
+Inputs/Outputs: Lazily initializes MarketDataCore on subscribe; delegates data queries to DataCache.
+Threading: All methods are executed on the caller's thread (typically main).
+Performance: All methods are lightweight delegations to the underlying components.
+Integration: The concrete implementation of the facade used by the GUI.
+Observability: Uses std::cout for debugging in getOrderBook.
+Related: CoinbaseStreamClient.hpp, MarketDataCore.hpp, DataCache.hpp.
+Assumptions: MarketDataCore is null until the first call to subscribe().
+*/
 #include "CoinbaseStreamClient.hpp"
 #include <iostream>
 
@@ -40,7 +51,8 @@ std::vector<Trade> CoinbaseStreamClient::getNewTrades(const std::string& symbol,
 
 OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
     // 🔥 NEW: Return dense LiveOrderBook data for professional visualization
-    OrderBook book = m_cache.getLiveOrderBook(symbol);
+    auto bookPtr = m_cache.getLiveOrderBook(symbol);
+    OrderBook book = bookPtr ? *bookPtr : OrderBook{};
     
     // 🔍 DEBUG: Trace the final connection to identify the broken wire
     static int debugCount = 0;
@@ -54,12 +66,6 @@ OrderBook CoinbaseStreamClient::getOrderBook(const std::string& symbol) const {
     return book;
 }
 
-std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveBids(const std::string& symbol) const {
-    // 🔥 NEW: Return complete bid levels for dense heatmap visualization
-    return m_cache.getLiveBids(symbol);
+std::shared_ptr<const OrderBook> CoinbaseStreamClient::getLiveOrderBook(const std::string& symbol) const {
+    return m_cache.getLiveOrderBook(symbol);
 }
-
-std::vector<OrderBookLevel> CoinbaseStreamClient::getLiveAsks(const std::string& symbol) const {
-    // 🔥 NEW: Return complete ask levels for dense heatmap visualization
-    return m_cache.getLiveAsks(symbol);
-} 

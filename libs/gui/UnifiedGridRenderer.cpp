@@ -1,3 +1,14 @@
+/*
+Sentinel — UnifiedGridRenderer
+Role: Implements the data batching and rendering orchestration logic.
+Inputs/Outputs: Buffers incoming data; passes it to rendering strategies in updatePaintNode.
+Threading: Data receiving slots run on main thread; updatePaintNode runs on the render thread.
+Performance: Batches high-frequency data events into single, throttled screen updates via a QTimer.
+Integration: Defines the specific set of render strategies that compose the final chart.
+Observability: Traces the data flow from reception to rendering via qDebug.
+Related: UnifiedGridRenderer.h, HeatmapStrategy.h, TradeStrategy.h, CoordinateSystem.h.
+Assumptions: The render strategies are compatible and can be layered together.
+*/
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
 #include "SentinelLogging.hpp"
@@ -63,7 +74,10 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     }
 }
 
-void UnifiedGridRenderer::onOrderBookUpdated(const OrderBook& book) {
+void UnifiedGridRenderer::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
+    if (!book) return;
+    // Pass the shared_ptr to the data processor
+    m_dataProcessor->onOrderBookUpdated(book);
     // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
     if (m_dataProcessor) {
         m_dataProcessor->onOrderBookUpdated(book);
@@ -84,6 +98,41 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     // 🔥 ATOMIC THROTTLING: No more manual counters!
     sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
                << " Price:[$" << minPrice << "-$" << maxPrice << "]");
+}
+
+void UnifiedGridRenderer::onViewportChanged() {
+    if (!m_viewState || !m_liquidityEngine) {
+        sLog_Render("⚠️ VIEWPORT CHANGED: Missing components - ViewState:" << (m_viewState ? "YES" : "NO") 
+                   << " Engine:" << (m_liquidityEngine ? "YES" : "NO"));
+        return;
+    }
+    
+    // 🚀 DYNAMIC PRICE LOD: Calculate optimal price resolution based on zoom level
+    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
+    double currentResolution = m_liquidityEngine->getPriceResolution();
+    
+    qint64 timeStart = m_viewState->getVisibleTimeStart();
+    qint64 timeEnd = m_viewState->getVisibleTimeEnd(); 
+    double timeSpanMs = timeEnd - timeStart;
+    // TODO: figure out why we aren't using 'timeSpanSeconds'
+    double timeSpanSeconds = timeSpanMs / 1000.0;
+    
+    double priceSpan = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+    
+    sLog_Render("🔍 PRICE LOD CHECK: Current=$" << currentResolution 
+               << " Optimal=$" << optimalResolution 
+               << " TimeSpanMs=" << timeSpanMs << " PriceSpan=$" << priceSpan);
+    
+    // Only update if resolution changed significantly (avoid thrashing)
+    if (std::abs(optimalResolution - currentResolution) > 0.01) {
+        m_liquidityEngine->setPriceResolution(optimalResolution);
+        m_geometryDirty.store(true);
+        update();
+        
+        sLog_Render("🚀 AUTO PRICE LOD: $" << currentResolution << " → $" << optimalResolution 
+                   << " (viewport optimization)");
+        emit priceResolutionChanged();
+    }
 }
 
 void UnifiedGridRenderer::captureOrderBookSnapshot() {
@@ -143,8 +192,19 @@ void UnifiedGridRenderer::updateVisibleCells() {
     auto visibleSlices = m_liquidityEngine->getVisibleSlices(
         activeTimeframe, m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
     
+    // 🚀 PERFORMANCE FIX: Process slices normally, but implement smart culling when needed
+    size_t processedSlices = 0;
     for (const auto* slice : visibleSlices) {
         createCellsFromLiquiditySlice(*slice);
+        processedSlices++;
+        
+        // 🚀 PERFORMANCE FIX: Hard cap cell count with smart slice management
+        if (m_visibleCells.size() > 8000) {
+            size_t remainingSlices = visibleSlices.size() - processedSlices;
+            sLog_Render("⚠️ CELL LIMIT HIT: Truncating at " << m_visibleCells.size() 
+                       << " cells (" << remainingSlices << " remaining slices skipped) to maintain FPS");
+            break;  // Keep the data we've processed so far
+        }
     }
     
     // 🔥 ATOMIC THROTTLING: No more manual counters!
@@ -214,7 +274,8 @@ QRectF UnifiedGridRenderer::timeSliceToScreenRect(const LiquidityTimeSlice& slic
     };
     
     // Use unified coordinate system for consistency
-    double priceResolution = 1.0;  // $1 price buckets
+    // 🚀 DYNAMIC PRICE LOD: Use current engine resolution instead of hardcoded $1
+    double priceResolution = m_liquidityEngine ? m_liquidityEngine->getPriceResolution() : 1.0;
     QPointF topLeft = CoordinateSystem::worldToScreen(slice.startTime_ms, price + priceResolution/2.0, viewport);
     QPointF bottomRight = CoordinateSystem::worldToScreen(slice.endTime_ms, price - priceResolution/2.0, viewport);
     
@@ -272,7 +333,7 @@ void UnifiedGridRenderer::addTrade(const Trade& trade) {
     onTradeReceived(trade);
 }
 
-void UnifiedGridRenderer::updateOrderBook(const OrderBook& orderBook) {
+void UnifiedGridRenderer::updateOrderBook(std::shared_ptr<const OrderBook> orderBook) {
     onOrderBookUpdated(orderBook);
 }
 
@@ -746,6 +807,8 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     // Connect view state signals to maintain existing API compatibility
     connect(m_viewState.get(), &GridViewState::viewportChanged, 
             this, &UnifiedGridRenderer::viewportChanged);
+    connect(m_viewState.get(), &GridViewState::viewportChanged, 
+            this, &UnifiedGridRenderer::onViewportChanged);
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged,
             this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged,

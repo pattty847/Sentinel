@@ -1,3 +1,14 @@
+/*
+Sentinel — LiquidityTimeSeriesEngine
+Role: Implements the logic for bucketing order book data into discrete time slices.
+Inputs/Outputs: Updates liquidity metrics within a time slice based on incoming order book data.
+Threading: Uses QReadWriteLock to manage concurrent access to the time-series data.
+Performance: Includes a 'suggestTimeframe' method to dynamically adjust data resolution.
+Integration: The concrete implementation of the renderer's core data aggregation engine.
+Observability: Logs the creation of new timeframes and slices.
+Related: LiquidityTimeSeriesEngine.h.
+Assumptions: Time bucketing logic correctly assigns updates to their respective time slices.
+*/
 #include "LiquidityTimeSeriesEngine.h"
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -63,31 +74,17 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     
-    // 🚀 PERFORMANCE FIX: Only store price levels within viewport + buffer
-    // TODO: Figure out how to do this in a more efficient way. You zoom out past the buffer, and then you get gaps in the heatmap.
-    double priceBuffer = (maxPrice - minPrice) * 0.5;  // 50% buffer for smooth panning
-    double filteredMinPrice = minPrice - priceBuffer;
-    double filteredMaxPrice = maxPrice + priceBuffer;
+    // LINUS FIX: No viewport filtering - store all depth-limited data
+    // Global storage strategy prevents black gaps on zoom-out
     
-    int originalBidCount = 0, originalAskCount = 0;
-    int filteredBidCount = 0, filteredAskCount = 0;
-    
-    // Convert OrderBook to snapshot format with price quantization AND viewport filtering
-    for (const auto& bid : limitedBook.bids) { // Use the limited book
-        originalBidCount++;
-        if (bid.price >= filteredMinPrice && bid.price <= filteredMaxPrice) {
-            double quantizedPrice = quantizePrice(bid.price);
-            snapshot.bids[quantizedPrice] += bid.size;  // Aggregate if multiple orders at same quantized price
-            filteredBidCount++;
-        }
+    // Convert sparse OrderBook to snapshot format with price quantization  
+    for (const auto& bid : limitedBook.bids) {
+        double quantizedPrice = quantizePrice(bid.price);
+        snapshot.bids[quantizedPrice] += bid.size;  // Aggregate if multiple orders at same quantized price
     }
-    for (const auto& ask : limitedBook.asks) { // Use the limited book
-        originalAskCount++;
-        if (ask.price >= filteredMinPrice && ask.price <= filteredMaxPrice) {
-            double quantizedPrice = quantizePrice(ask.price);
-            snapshot.asks[quantizedPrice] += ask.size;
-            filteredAskCount++;
-        }
+    for (const auto& ask : limitedBook.asks) {
+        double quantizedPrice = quantizePrice(ask.price);
+        snapshot.asks[quantizedPrice] += ask.size;
     }
     
     m_snapshots.push_back(snapshot);
@@ -101,10 +98,8 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     // Debug logging for first few snapshots
     static int snapshotCount = 0;
     if (++snapshotCount <= 5) {
-        sLog_Data("🎯 VIEWPORT-FILTERED SNAPSHOT #" << snapshotCount 
-                 << " OriginalBids:" << originalBidCount << " FilteredBids:" << filteredBidCount
-                 << " OriginalAsks:" << originalAskCount << " FilteredAsks:" << filteredAskCount
-                 << " PriceRange: $" << filteredMinPrice << "-$" << filteredMaxPrice
+        sLog_Data("🎯 GLOBAL SNAPSHOT #" << snapshotCount 
+                 << " Bids:" << snapshot.bids.size() << " Asks:" << snapshot.asks.size()
                  << " timestamp:" << snapshot.timestamp_ms);
     }
 }

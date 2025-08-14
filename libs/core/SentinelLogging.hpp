@@ -28,14 +28,14 @@ namespace sentinel::log_throttle {
 }
 
 // Atomic throttling macro with runtime env var override
-#define SLOG_THROTTLED(cat, defaultInterval, ...)                                   \
+#define SLOG_THROTTLED(cat, defaultInterval, ...)                                    \
     do {                                                                             \
         static std::atomic<uint32_t> _counter{0};                                    \
         static int _interval = []() {                                                \
-            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");        \
-            return env ? std::atoi(env) : (defaultInterval);                        \
+            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");         \
+            return env ? std::atoi(env) : (defaultInterval);                         \
         }();                                                                         \
-        if ((++_counter % _interval) == 1) {                                        \
+        if ((++_counter % _interval) == 1) {                                         \
             qCDebug(log##cat) << __VA_ARGS__;                                        \
         }                                                                            \
     } while(false)
