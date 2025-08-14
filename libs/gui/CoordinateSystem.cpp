@@ -1,3 +1,14 @@
+/*
+Sentinel — CoordinateSystem
+Role: Implements the mathematical logic for linear coordinate transformations.
+Inputs/Outputs: Implements the world-to-screen and screen-to-world mapping functions.
+Threading: All methods are pure functions and inherently thread-safe.
+Performance: The implementation uses simple and efficient arithmetic.
+Integration: The concrete implementation of the coordinate transformation utility.
+Observability: No internal logging.
+Related: CoordinateSystem.h.
+Assumptions: Assumes an inverted Y-axis for screen coordinates (0 at the top).
+*/
 #include "CoordinateSystem.h"
 #include <QDebug>
 #include <cmath>

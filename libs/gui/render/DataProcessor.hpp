@@ -1,22 +1,24 @@
+/*
+Sentinel — DataProcessor
+Role: Decouples data processing from rendering by processing market data on a background thread.
+Inputs/Outputs: Takes Trade/OrderBook data via slots; emits dataUpdated() when processing is done.
+Threading: Lives and operates on a dedicated QThread; receives data from main and signals back.
+Performance: Uses a queue and a timer-driven loop to batch-process data efficiently.
+Integration: Owned by UnifiedGridRenderer; uses LiquidityTimeSeriesEngine for data aggregation.
+Observability: Logs thread status and processing batches via sLog_Render.
+Related: DataProcessor.cpp, UnifiedGridRenderer.h, LiquidityTimeSeriesEngine.h, GridViewState.hpp.
+Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set before use.
+*/
 #pragma once
 #include <QObject>
 #include <QTimer>
 #include <mutex>
-#include "../../core/TradeData.h"   
+#include <memory>
+#include "../../core/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 
 class GridViewState;
 
-/**
- * DataProcessor - Handles all data processing and management
- * 
- * This component takes over the complex data processing logic from UnifiedGridRenderer,
- * making the renderer a pure UI adapter. It manages:
- * - Trade and order book data ingestion
- * - Liquidity time series processing  
- * - Data caching and cleanup
- * - Viewport initialization
- */
 class DataProcessor : public QObject {
     Q_OBJECT
     
@@ -26,7 +28,7 @@ public:
     
     // Data ingestion
     void onTradeReceived(const Trade& trade);
-    void onOrderBookUpdated(const OrderBook& orderBook);
+    void onOrderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
     
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
@@ -34,7 +36,7 @@ public:
     
     // Data access
     bool hasValidOrderBook() const { return m_hasValidOrderBook; }
-    const OrderBook& getLatestOrderBook() const { return m_latestOrderBook; }
+    const OrderBook& getLatestOrderBook() const;
     
     // Control
     void clearData();
@@ -57,7 +59,7 @@ private:
     LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
     
     // Data state
-    OrderBook m_latestOrderBook;
+    std::shared_ptr<const OrderBook> m_latestOrderBook;
     bool m_hasValidOrderBook = false;
     
     // Processing

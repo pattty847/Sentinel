@@ -1,3 +1,14 @@
+/*
+Sentinel — GridViewState
+Role: Implements the mathematical logic for panning and zooming the chart viewport.
+Inputs/Outputs: Implements formulas for updating time/price ranges based on mouse deltas.
+Threading: All code is designed to be executed on the main GUI thread.
+Performance: Calculations are optimized for real-time interactive performance.
+Integration: The concrete implementation of the viewport state machine.
+Observability: No internal logging; events are logged from the header's declared methods.
+Related: GridViewState.hpp.
+Assumptions: Zoom logic correctly implements "zoom-to-cursor" functionality.
+*/
 #include "GridViewState.hpp"
 #include "../CoordinateSystem.h"
 #include <QMatrix4x4>
@@ -222,6 +233,7 @@ void GridViewState::handlePanEnd() {
     
     if (m_panVisualOffset.manhattanLength() > 0 && m_viewportWidth > 0 && m_viewportHeight > 0) {
         // Create viewport for coordinate conversion
+        // TODO: figure out why we aren't using 'viewport'
         Viewport viewport{
             m_visibleTimeStart_ms, m_visibleTimeEnd_ms,
             m_minPrice, m_maxPrice,
@@ -332,4 +344,29 @@ void GridViewState::panDown() {
         m_minPrice - panAmount,
         m_maxPrice - panAmount
     );
+}
+
+double GridViewState::calculateOptimalPriceResolution() const {
+    if (!m_timeWindowValid) return 1.0;  // Default fallback
+    
+    // Calculate time span in seconds  
+    // TODO: figure out why we aren't using 'timeSpanSeconds'
+    double timeSpanSeconds = (m_visibleTimeEnd_ms - m_visibleTimeStart_ms) / 1000.0;
+    
+    // Calculate price span (this is the key - how much price range is visible)
+    double priceSpan = m_maxPrice - m_minPrice;
+    
+    // 🚀 PRICE-SPAN-BASED LOD: Use price range to determine resolution
+    // When zoomed out (large price range), use coarser buckets
+    if (priceSpan > 500) {               // > $500 range: $25 buckets  
+        return 25.0;
+    } else if (priceSpan > 100) {        // > $100 range: $5 buckets
+        return 5.0;
+    } else if (priceSpan > 50) {         // > $50 range: $1 buckets
+        return 1.0;
+    } else if (priceSpan > 10) {         // > $10 range: $0.50 buckets
+        return 0.50;
+    } else {                             // <= $10 range: $0.25 buckets
+        return 0.25;
+    }
 }

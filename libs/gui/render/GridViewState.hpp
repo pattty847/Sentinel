@@ -1,3 +1,14 @@
+/*
+Sentinel — GridViewState
+Role: A state machine that manages the chart's viewport, handling all pan and zoom logic.
+Inputs/Outputs: Takes user input events (pan, zoom); emits viewportChanged signals.
+Threading: Lives on the main GUI thread; all methods are executed on this thread.
+Performance: Logic is designed for smooth, interactive viewport manipulation.
+Integration: Owned by UnifiedGridRenderer; its state dictates the rendered data window.
+Observability: Logs pan and zoom actions via sLog_Render for debugging interactions.
+Related: GridViewState.cpp, UnifiedGridRenderer.h, CoordinateSystem.h.
+Assumptions: Driven by user input events forwarded from a UI component.
+*/
 #pragma once
 #include <QObject>
 #include <QPointF>
@@ -43,6 +54,9 @@ public:
     
     void enableAutoScroll(bool enabled);
     void resetZoom();
+    
+    // 🚀 PRICE LOD: Dynamic price resolution based on zoom level
+    double calculateOptimalPriceResolution() const;
 
 signals:
     void viewportChanged();

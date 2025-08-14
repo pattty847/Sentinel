@@ -93,20 +93,24 @@ cmake --build --preset [windows-mingw|mac-clang|linux-gcc]
 
 ## 🎛️ Smart Logging System
 
-Professional categorized logging for focused debugging:
+Professional categorized logging for focused debugging, controlled by the `QT_LOGGING_RULES` environment variable.
 
+**Key Categories:**
+- `sentinel.app`: Application lifecycle, config.
+- `sentinel.data`: Network, cache, trades.
+- `sentinel.render`: Rendering, charts, GPU.
+- `sentinel.debug`: Detailed diagnostics.
+
+**Example Usage:**
 ```bash
-# Load logging modes
-source scripts/log-modes.sh
+# Debug rendering issues
+export QT_LOGGING_RULES="sentinel.render.debug=true"
 
-# Common modes
-log-production    # Clean logs for demos (5-10 lines)
-log-clean         # Daily development (~50 lines)
-log-trading       # Debug trade processing (~100 lines)
-log-rendering     # Debug visual issues (~150 lines)
-log-performance   # Performance metrics (~30 lines)
-log-network       # WebSocket connectivity (~40 lines)
-log-development   # All categories (200+ lines)
+# Debug data and network issues
+export QT_LOGGING_RULES="sentinel.data.debug=true"
+
+# Run clean for production
+export QT_LOGGING_RULES="*.debug=false"
 ```
 
 ## 🗺️ Roadmap

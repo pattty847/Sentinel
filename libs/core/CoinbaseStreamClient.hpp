@@ -1,8 +1,15 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────
-// Facade that preserves the v1 public surface while delegating
-// to the new SRP components underneath.
-// ─────────────────────────────────────────────────────────────
+/*
+Sentinel — CoinbaseStreamClient
+Role: Facade that manages the lifecycle of and simplifies access to core data components.
+Inputs/Outputs: Takes symbols to subscribe; provides data via cache or direct MarketDataCore access.
+Threading: Methods are called from the main thread; owns MarketDataCore which has a worker thread.
+Performance: Simple delegation; performance is determined by the underlying components.
+Integration: Instantiated by MainWindowGpu to orchestrate the entire data pipeline.
+Observability: Minimal logging; diagnostics are handled by underlying components.
+Related: CoinbaseStreamClient.cpp, MarketDataCore.hpp, DataCache.hpp, MainWindowGpu.h.
+Assumptions: Assumes exclusive ownership of MarketDataCore, DataCache, and Authenticator.
+*/
 #include "DataCache.hpp"
 #include "MarketDataCore.hpp"
 #include "Authenticator.hpp"
@@ -27,8 +34,7 @@ public:
     [[nodiscard]] OrderBook            getOrderBook(const std::string& symbol) const;
     
     // 🔥 NEW: Dense order book data for professional visualization
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveBids(const std::string& symbol) const;
-    [[nodiscard]] std::vector<OrderBookLevel> getLiveAsks(const std::string& symbol) const;
+    [[nodiscard]] std::shared_ptr<const OrderBook> getLiveOrderBook(const std::string& symbol) const;
     
     // 🔥 NEW: Access to MarketDataCore for real-time signals
     [[nodiscard]] MarketDataCore* getMarketDataCore() const { return m_core.get(); }

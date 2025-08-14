@@ -1,3 +1,14 @@
+/*
+Sentinel — MarketDataCore
+Role: Manages the primary WebSocket connection for real-time market data streams.
+Inputs/Outputs: Ingests JSON from WebSocket; produces Trade/OrderBook data for DataCache.
+Threading: Runs network I/O on a dedicated worker thread; safely dispatches to main thread via Qt signals.
+Performance: Hot path is message parsing; uses fast string conversion and throttled logging.
+Integration: Instantiated by main app; feeds DataCache and GUI via tradeReceived/orderBookUpdated signals.
+Observability: Logs connection lifecycle and errors via SentinelLogging; data path logging is throttled.
+Related: MarketDataCore.hpp, DataCache.hpp, Authenticator.hpp, TradeData.h.
+Assumptions: Authenticator and DataCache instances outlive this object; API is Coinbase-like.
+*/
 #include "MarketDataCore.hpp"
 #include "SentinelLogging.hpp"
 #include "Cpp20Utils.hpp"  // 🚀 C++20 UTILITIES
@@ -359,11 +370,10 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                 
                 if (eventType == "snapshot" && event.contains("updates") && !product_id.empty()) {
                     // 🏗️ SNAPSHOT: Initialize complete order book state
-                    OrderBook snapshot;
-                    snapshot.product_id = product_id;
-                    snapshot.timestamp = std::chrono::system_clock::now();
+                    std::vector<OrderBookLevel> sparse_bids;
+                    std::vector<OrderBookLevel> sparse_asks;
                     
-                    // Process snapshot data
+                    // Process snapshot data into temporary sparse vectors
                     for (const auto& update : event["updates"]) {
                         if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
                             continue;
@@ -376,19 +386,19 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                         if (quantity > 0.0) {
                             OrderBookLevel level = {price, quantity};
                             if (side == "bid") {
-                                snapshot.bids.push_back(level);
+                                sparse_bids.push_back(level);
                             } else if (side == "offer") {
-                                snapshot.asks.push_back(level);
+                                sparse_asks.push_back(level);
                             }
                         }
                     }
                     
-                    // Initialize the live order book with complete state
-                    m_cache.initializeLiveOrderBook(product_id, snapshot);
+                    // Initialize the live order book with the sparse snapshot data
+                    m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks);
                     
                     // 🚀 C++20: Use optimized formatting from utils
                     std::string logMessage = Cpp20Utils::formatOrderBookLog(
-                        product_id, snapshot.bids.size(), snapshot.asks.size());
+                        product_id, sparse_bids.size(), sparse_asks.size());
                     sLog_Data(QString::fromStdString(logMessage));
                     
                 } else if (eventType == "update" && event.contains("updates") && !product_id.empty()) {
@@ -410,17 +420,24 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                     }
                     
                     // 🔥 NEW: Emit real-time order book signal to GUI layer (Qt thread-safe)
-                    auto liveBook = m_cache.getLiveOrderBook(product_id);
-                    OrderBook orderBookCopy = liveBook; // Make a copy for thread safety
-                    QMetaObject::invokeMethod(this, [this, orderBookCopy]() {
-                        emit orderBookUpdated(orderBookCopy);
-                    }, Qt::QueuedConnection);
+                    auto liveBookPtr = m_cache.getLiveOrderBook(product_id);
+                    if (liveBookPtr) {
+                        QMetaObject::invokeMethod(this, [this, bookPtr = liveBookPtr]() {
+                            emit orderBookUpdated(bookPtr);
+                        }, Qt::QueuedConnection);
+                    }
                     
                     // 🔥 THROTTLED LOGGING: Only log every 1000th update to reduce spam
                     if (++m_orderBookLogCount % 1000 == 1) {
+                        size_t bidCount = 0;
+                        size_t askCount = 0;
+                        if (liveBookPtr) {
+                            bidCount = liveBookPtr->bids.size();
+                            askCount = liveBookPtr->asks.size();
+                        }
                         // 🚀 C++20: Use optimized formatting from utils
                         std::string logMessage = Cpp20Utils::formatOrderBookLog(
-                            product_id, liveBook.bids.size(), liveBook.asks.size(), updateCount);
+                            product_id, bidCount, askCount, updateCount);
                         sLog_Data(QString::fromStdString(logMessage));
                     }
                 }

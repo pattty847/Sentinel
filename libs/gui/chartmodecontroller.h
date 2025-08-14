@@ -1,3 +1,14 @@
+/*
+Sentinel — ChartModeController
+Role: A QML-compatible controller for managing the chart's display mode and UI settings.
+Inputs/Outputs: Takes user settings from QML; emits signals when properties change.
+Threading: Lives and operates on the main GUI thread.
+Performance: All methods are simple setters/getters and are not performance-critical.
+Integration: Exposed to QML; its properties control the behavior of UnifiedGridRenderer.
+Observability: No internal logging.
+Related: ChartModeController.cpp, UnifiedGridRenderer.h, MainWindowGpu.h.
+Assumptions: A QML UI will connect to its signals and call its methods to drive changes.
+*/
 #pragma once
 #include <QObject>
 #include "ChartMode.h"
