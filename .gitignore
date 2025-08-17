@@ -1,5 +1,6 @@
 # IDE and Editor files
 .cursor/
+.vscode/
 *.swp
 *.swo
 *~
@@ -8,18 +9,148 @@
 build*/
 .cache/
 compile_commands.json
+CMakeCache.txt
+cmake_install.cmake
+build.ninja
+.ninja_log
+.ninja_deps
+.rcc/
+.qt/
 
-# Configuration files (secrets only)
+# Configuration files (secrets and sensitive data)
 key.json
 config.json
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.local
+.env.*.local
 
 # Log files
 *.log
+logs/
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
 # Temporary files
 *.tmp
 *.temp
+*~
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.app
+
+# Qt specific
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qm
+*.qmlc
+*.jsc
+
+# CMake generated files
+CMakeFiles/
+CMakeScripts/
+Testing/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Package manager files
+node_modules/
+vendor/
+bower_components/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Profiling and debugging
+*.prof
+*.gcov
+*.gcda
+*.gcno
+*.gch
+*.pch
+
+# Coverage reports
+coverage/
+*.gcov
+*.lcov
+
+# Memory dumps
+*.dmp
+*.core
+
+# Python (if any scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Claude AI settings
+.claude/
