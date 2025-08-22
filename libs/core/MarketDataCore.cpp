@@ -15,6 +15,7 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <mutex>
 #include <QString>
 #include <QMetaObject>
 // 🚀 C++20 OPTIMIZATIONS
@@ -44,6 +45,21 @@ MarketDataCore::~MarketDataCore() {
 }
 
 void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {
+    // 🚨 FIX: WebSocket subscription state guards
+    std::lock_guard<std::mutex> lock(m_subscriptionMutex);
+    
+    // Guard against connection state changes
+    if (!m_running.load() || !m_ws.is_open()) {
+        sLog_Warning("⚠️ Cannot subscribe - WebSocket not ready");
+        return;
+    }
+    
+    // Prevent overlapping subscriptions
+    if (m_subscriptionInProgress.exchange(true)) {
+        sLog_Warning("⚠️ Subscription already in progress - skipping");
+        return;
+    }
+    
     std::vector<std::string> new_symbols;
     for (const auto& s : symbols) {
         if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
@@ -54,6 +70,8 @@ void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols)
     if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
     }
+    
+    m_subscriptionInProgress = false;
 }
 
 void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
@@ -214,11 +232,22 @@ void MarketDataCore::onSslHandshake(beast::error_code ec) {
 void MarketDataCore::onWsHandshake(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ WebSocket handshake error: " << ec.message() << std::endl;
+        
+        // 🚨 FIX: Emit disconnected status on handshake failure
+        QMetaObject::invokeMethod(this, [this]() {
+            emit connectionStatusChanged(false);
+        }, Qt::QueuedConnection);
+        
         scheduleReconnect();
         return;
     }
     
     sLog_Data("🌐 WebSocket connected! Waiting for subscription requests...");
+    
+    // 🚨 FIX: Emit connected status when WebSocket is ready
+    QMetaObject::invokeMethod(this, [this]() {
+        emit connectionStatusChanged(true);
+    }, Qt::QueuedConnection);
     
     // Connection is live, start reading messages from the server.
     // Subscriptions will be sent on-demand via the public methods.
