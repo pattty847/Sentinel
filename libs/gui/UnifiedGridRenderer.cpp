@@ -11,6 +11,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 */
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
+#include "../core/DataCache.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
@@ -23,7 +24,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 #include "render/GridSceneNode.hpp" 
-#include "render/RenderDiagnostics.hpp"
+#include "../core/SentinelMonitor.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
@@ -32,7 +33,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
-    , m_liquidityEngine(std::make_unique<LiquidityTimeSeriesEngine>(this))
     , m_rootTransformNode(nullptr)
     , m_needsDataRefresh(false)
 {
@@ -74,14 +74,15 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     }
 }
 
-void UnifiedGridRenderer::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
-    if (!book) return;
-    // Pass the shared_ptr to the data processor
-    m_dataProcessor->onOrderBookUpdated(book);
-    // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
+// 🚀 PHASE 3: Pure delegation to DataProcessor - no business logic in UGR!
+void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
     if (m_dataProcessor) {
-        m_dataProcessor->onOrderBookUpdated(book);
+        m_dataProcessor->onLiveOrderBookUpdated(productId);
     }
+    
+    // 🔥 KEEP UI DIRTY FLAG: Signal that we need a repaint
+    m_geometryDirty = true;
+    update();
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
@@ -101,15 +102,15 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 }
 
 void UnifiedGridRenderer::onViewportChanged() {
-    if (!m_viewState || !m_liquidityEngine) {
+    if (!m_viewState || !m_dataProcessor) {
         sLog_Render("⚠️ VIEWPORT CHANGED: Missing components - ViewState:" << (m_viewState ? "YES" : "NO") 
-                   << " Engine:" << (m_liquidityEngine ? "YES" : "NO"));
+                   << " DataProcessor:" << (m_dataProcessor ? "YES" : "NO"));
         return;
     }
     
     // 🚀 DYNAMIC PRICE LOD: Calculate optimal price resolution based on zoom level
     double optimalResolution = m_viewState->calculateOptimalPriceResolution();
-    double currentResolution = m_liquidityEngine->getPriceResolution();
+    double currentResolution = m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0;
     
     qint64 timeStart = m_viewState->getVisibleTimeStart();
     qint64 timeEnd = m_viewState->getVisibleTimeEnd(); 
@@ -125,7 +126,7 @@ void UnifiedGridRenderer::onViewportChanged() {
     
     // Only update if resolution changed significantly (avoid thrashing)
     if (std::abs(optimalResolution - currentResolution) > 0.01) {
-        m_liquidityEngine->setPriceResolution(optimalResolution);
+        if (m_dataProcessor) m_dataProcessor->setPriceResolution(optimalResolution);
         m_geometryDirty.store(true);
         update();
         
@@ -162,56 +163,19 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 }
 
 void UnifiedGridRenderer::updateVisibleCells() {
-    m_visibleCells.clear();
-    
-    if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
-    
-    int64_t activeTimeframe = m_currentTimeframe_ms;
-    
-    // 🚀 OPTIMIZATION 1: Use manual timeframe if set, otherwise auto-suggest
-    if (!m_manualTimeframeSet || 
-        (m_manualTimeframeTimer.isValid() && m_manualTimeframeTimer.elapsed() > 10000)) {  // 10 second timeout
+    // 🚀 PHASE 3: Pure delegation to DataProcessor - no business logic in UGR!
+    if (m_dataProcessor) {
+        m_dataProcessor->updateVisibleCells();
         
-        // Auto-suggest timeframe when no manual override
-        int64_t optimalTimeframe = m_liquidityEngine->suggestTimeframe(
-            m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), 
-            width() > 0 ? static_cast<int>(width() / 4) : 2000);
-        
-        if (optimalTimeframe != m_currentTimeframe_ms) {
-            m_currentTimeframe_ms = optimalTimeframe;
-            activeTimeframe = optimalTimeframe;
-            emit timeframeChanged();
-            
-            sLog_Render("🔄 AUTO-TIMEFRAME UPDATE: " << optimalTimeframe << "ms (viewport-optimized)");
-        }
+        // Get processed cells from DataProcessor
+        m_visibleCells = m_dataProcessor->getVisibleCells();
     } else {
-        sLog_Render("🎯 MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
+        m_visibleCells.clear();
     }
     
-    // Get liquidity slices for active timeframe within viewport
-    auto visibleSlices = m_liquidityEngine->getVisibleSlices(
-        activeTimeframe, m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
-    
-    // 🚀 PERFORMANCE FIX: Process slices normally, but implement smart culling when needed
-    size_t processedSlices = 0;
-    for (const auto* slice : visibleSlices) {
-        createCellsFromLiquiditySlice(*slice);
-        processedSlices++;
-        
-        // 🚀 PERFORMANCE FIX: Hard cap cell count with smart slice management
-        if (m_visibleCells.size() > 8000) {
-            size_t remainingSlices = visibleSlices.size() - processedSlices;
-            sLog_Render("⚠️ CELL LIMIT HIT: Truncating at " << m_visibleCells.size() 
-                       << " cells (" << remainingSlices << " remaining slices skipped) to maintain FPS");
-            break;  // Keep the data we've processed so far
-        }
-    }
-    
-    // 🔥 ATOMIC THROTTLING: No more manual counters!
-    sLog_Render("🎯 UNIFIED RENDERER COVERAGE Slices:" << visibleSlices.size()
-             << " TotalCells:" << m_visibleCells.size()
-             << " ActiveTimeframe:" << activeTimeframe << "ms"
-             << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+    // 🔥 KEEP UI DIRTY FLAG: Signal that we need a repaint
+    m_geometryDirty = true;
+    update();
 }
 
 void UnifiedGridRenderer::updateVolumeProfile() {
@@ -222,65 +186,11 @@ void UnifiedGridRenderer::updateVolumeProfile() {
     // In a full implementation, this would aggregate volume across time slices
 }
 
-void UnifiedGridRenderer::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {
-    // Create cells for each price level with liquidity
-    for (const auto& [price, metrics] : slice.bidMetrics) {
-        double displayValue = slice.getDisplayValue(price, true, static_cast<int>(m_liquidityEngine->getDisplayMode()));
-        if (displayValue >= m_minVolumeFilter) {
-            createLiquidityCell(slice, price, displayValue, true);
-        }
-    }
-    
-    for (const auto& [price, metrics] : slice.askMetrics) {
-        double displayValue = slice.getDisplayValue(price, false, static_cast<int>(m_liquidityEngine->getDisplayMode()));
-        if (displayValue >= m_minVolumeFilter) {
-            createLiquidityCell(slice, price, displayValue, false);
-        }
-    }
-}
+// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
 
-void UnifiedGridRenderer::createLiquidityCell(const LiquidityTimeSlice& slice, double price, 
-                                            double liquidity, bool isBid) {
-    if (!m_viewState || price < m_viewState->getMinPrice() || price > m_viewState->getMaxPrice()) return;
-    
-    CellInstance cell;
-    cell.screenRect = timeSliceToScreenRect(slice, price);
-    cell.liquidity = liquidity;
-    cell.isBid = isBid;
-    // Defer intensity and color calculation to render strategy to avoid duplication
-    cell.timeSlot = slice.startTime_ms;
-    cell.priceLevel = price;
-    
-    // 🚀 OPTIMIZATION 2: Viewport culling like a videogame (AABB check)
-    if (cell.screenRect.right() < 0 || cell.screenRect.left() > width() ||
-        cell.screenRect.bottom() < 0 || cell.screenRect.top() > height()) {
-        return; // Culled - completely off-screen
-    }
-    
-    // Only add cells with valid screen rectangles
-    if (cell.screenRect.width() > 0.1 && cell.screenRect.height() > 0.1) {
-        m_visibleCells.push_back(cell);
-    }
-}
+// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
 
-QRectF UnifiedGridRenderer::timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const {
-    if (!m_viewState || !m_viewState->isTimeWindowValid()) return QRectF();
-    
-    // Create viewport from current state - delegate to ViewState
-    Viewport viewport{
-        m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
-        m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
-        width(), height()
-    };
-    
-    // Use unified coordinate system for consistency
-    // 🚀 DYNAMIC PRICE LOD: Use current engine resolution instead of hardcoded $1
-    double priceResolution = m_liquidityEngine ? m_liquidityEngine->getPriceResolution() : 1.0;
-    QPointF topLeft = CoordinateSystem::worldToScreen(slice.startTime_ms, price + priceResolution/2.0, viewport);
-    QPointF bottomRight = CoordinateSystem::worldToScreen(slice.endTime_ms, price - priceResolution/2.0, viewport);
-    
-    return QRectF(topLeft, bottomRight);
-}
+// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
 
 // Color/intensity now owned by render strategies (see HeatmapStrategy)
 
@@ -334,7 +244,10 @@ void UnifiedGridRenderer::addTrade(const Trade& trade) {
 }
 
 void UnifiedGridRenderer::updateOrderBook(std::shared_ptr<const OrderBook> orderBook) {
-    onOrderBookUpdated(orderBook);
+    // PHASE 2.1: Legacy API compatibility - extract productId and use new signal
+    if (orderBook && !orderBook->product_id.empty()) {
+        onLiveOrderBookUpdated(QString::fromStdString(orderBook->product_id));
+    }
 }
 
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) {
@@ -348,7 +261,7 @@ void UnifiedGridRenderer::clearData() {
     }
     
     // Reset liquidity engine
-    m_liquidityEngine = std::make_unique<LiquidityTimeSeriesEngine>(this);
+    // 🚀 PHASE 3: LiquidityTimeSeriesEngine now owned by DataProcessor, not UGR!
     
     // Clear rendering data
     m_visibleCells.clear();
@@ -366,8 +279,8 @@ void UnifiedGridRenderer::setTimeResolution(int resolution_ms) {
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
-    if (m_liquidityEngine->getPriceResolution() != resolution && resolution > 0) {
-        m_liquidityEngine->setPriceResolution(resolution);
+    if (m_dataProcessor && resolution > 0) {
+        m_dataProcessor->setPriceResolution(resolution);
         m_geometryDirty.store(true); // Rebuild is necessary with new price buckets
         update();
         sLog_Render("🎯 Manual price resolution override set to: $" << resolution);
@@ -499,7 +412,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
         m_manualTimeframeTimer.start();
         
         // Ensure this timeframe exists in the engine
-        m_liquidityEngine->addTimeframe(timeframe_ms);
+        if (m_dataProcessor) m_dataProcessor->addTimeframe(timeframe_ms);
         
         m_geometryDirty.store(true);
         update();
@@ -753,37 +666,39 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
 // 📊 PERFORMANCE MONITORING API
 
 void UnifiedGridRenderer::togglePerformanceOverlay() {
-    if (m_diagnostics) {
-        m_diagnostics->toggleOverlay();
-        sLog_Render("📊 Performance overlay: " << (m_diagnostics->isOverlayEnabled() ? "ENABLED" : "DISABLED"));
+    if (m_sentinelMonitor) {
+        // Toggle overlay functionality now handled by SentinelMonitor
+        bool overlayEnabled = !m_sentinelMonitor->isOverlayEnabled(); // Assume we add this method
+        m_sentinelMonitor->enablePerformanceOverlay(overlayEnabled);
+        sLog_Render("📊 Performance overlay: " << (overlayEnabled ? "ENABLED" : "DISABLED"));
         update();
     }
 }
 
 QString UnifiedGridRenderer::getPerformanceStats() const {
-    if (m_diagnostics) {
-        return m_diagnostics->getPerformanceStats();
+    if (m_sentinelMonitor) {
+        return m_sentinelMonitor->getComprehensiveStats();
     }
     return "Performance monitoring not available";
 }
 
 double UnifiedGridRenderer::getCurrentFPS() const {
-    if (m_diagnostics) {
-        return m_diagnostics->getCurrentFPS();
+    if (m_sentinelMonitor) {
+        return m_sentinelMonitor->getCurrentFPS();
     }
     return 0.0;
 }
 
 double UnifiedGridRenderer::getAverageRenderTime() const {
-    if (m_diagnostics) {
-        return m_diagnostics->getAverageRenderTime();
+    if (m_sentinelMonitor) {
+        return m_sentinelMonitor->getAverageFrameTime();
     }
     return 0.0;
 }
 
 double UnifiedGridRenderer::getCacheHitRate() const {
-    if (m_diagnostics) {
-        return m_diagnostics->getCacheHitRate();
+    if (m_sentinelMonitor) {
+        return m_sentinelMonitor->getCacheHitRate();
     }
     return 0.0;
 }
@@ -792,7 +707,7 @@ double UnifiedGridRenderer::getCacheHitRate() const {
 
 void UnifiedGridRenderer::initializeV2Architecture() {
     m_viewState = std::make_unique<GridViewState>(this);
-    m_diagnostics = std::make_unique<RenderDiagnostics>();
+    // m_sentinelMonitor is injected via setSentinelMonitor() - no local creation
     m_dataProcessor = std::make_unique<DataProcessor>(this);
     
     // Initialize rendering strategies
@@ -802,7 +717,8 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     
     // Wire up V2 components
     m_dataProcessor->setGridViewState(m_viewState.get());
-    m_dataProcessor->setLiquidityEngine(m_liquidityEngine.get());
+    // 🚀 PHASE 3: DataProcessor owns LTSE now, no injection needed
+    m_dataProcessor->setDataCache(m_dataCache);  // 🚀 PHASE 3: Inject DataCache dependency
     
     // Connect view state signals to maintain existing API compatibility
     connect(m_viewState.get(), &GridViewState::viewportChanged, 
@@ -846,12 +762,14 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
-    m_diagnostics->startFrame();
+    if (m_sentinelMonitor) {
+        m_sentinelMonitor->startFrame();
+    }
     
     // 🔥 ATOMIC THROTTLING: No more manual counters!
     sLog_Render("🚀 V2 PAINT mode=" << getCurrentStrategy()->getStrategyName()
              << " size=" << width() << "x" << height() 
-             << " FPS=" << m_diagnostics->getCurrentFPS());
+             << " FPS=" << (m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0));
     
     if (width() <= 0 || height() <= 0) {
         return oldNode;
@@ -862,7 +780,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
     bool isNewNode = !sceneNode;
     if (isNewNode) {
         sceneNode = new GridSceneNode();
-        m_diagnostics->recordGeometryRebuild();
+        if (m_sentinelMonitor) {
+            m_sentinelMonitor->recordGeometryRebuild();
+        }
     }
     
     {
@@ -894,12 +814,16 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
             sceneNode->setShowVolumeProfile(m_showVolumeProfile);
             
             m_geometryDirty.store(false);
-            m_diagnostics->recordCacheMiss();
+            if (m_sentinelMonitor) {
+                m_sentinelMonitor->recordCacheMiss();
+            }
             
             // sLog_Render("🚀 V2 REBUILD: " << batch.cells.size() << " cells, strategy=" 
             //         << strategy->getStrategyName());
         } else {
-            m_diagnostics->recordCacheHit();
+            if (m_sentinelMonitor) {
+                m_sentinelMonitor->recordCacheHit();
+            }
         }
         
         // Always update transform for smooth interaction
@@ -907,11 +831,15 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
             QMatrix4x4 transform = m_viewState->calculateViewportTransform(
                 QRectF(0, 0, width(), height()));
             sceneNode->updateTransform(transform);
-            m_diagnostics->recordTransformApplied();
+            if (m_sentinelMonitor) {
+                m_sentinelMonitor->recordTransformApplied();
+            }
         }
     }
     
-    m_diagnostics->endFrame();
+    if (m_sentinelMonitor) {
+        m_sentinelMonitor->endFrame();
+    }
     return sceneNode;
 }
 

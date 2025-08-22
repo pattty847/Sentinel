@@ -27,6 +27,7 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <QTimer>
 #include "Authenticator.hpp"
 #include "DataCache.hpp"
+#include "SentinelMonitor.hpp"
 #include "TradeData.h"
 
 namespace beast = boost::beast;
@@ -39,13 +40,17 @@ class MarketDataCore : public QObject {
     Q_OBJECT
 
 public:
-    MarketDataCore(const std::vector<std::string>& products,
-                   Authenticator& auth,
-                   DataCache& cache);
+    MarketDataCore(Authenticator& auth,
+                   DataCache& cache,
+                   std::shared_ptr<SentinelMonitor> monitor = nullptr);
 
-    ~MarketDataCore();                   // RAII shutdown
+    ~MarketDataCore();
     void start();
     void stop();
+
+    // Subscription Management
+    void subscribeToSymbols(const std::vector<std::string>& symbols);
+    void unsubscribeFromSymbols(const std::vector<std::string>& symbols);
 
     // Non-copyable, non-movable (manages thread)
     MarketDataCore(const MarketDataCore&) = delete;
@@ -55,7 +60,7 @@ public:
 
 signals:
     void tradeReceived(const Trade& trade);
-    void orderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
+    void liveOrderBookUpdated(const QString& productId);
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
 
@@ -73,8 +78,26 @@ private:
     void scheduleReconnect();
 
     // Helpers
-    [[nodiscard]] std::string buildSubscribe(const std::string& channel) const;
+    void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
     void dispatch(const nlohmann::json&);
+
+    // Message handling sub-functions
+    void handleMarketTrades(const nlohmann::json& message, 
+                          const std::chrono::system_clock::time_point& arrival_time);
+    void processTrades(const nlohmann::json& trades,
+                     const std::chrono::system_clock::time_point& arrival_time);
+    Trade createTradeFromJson(const nlohmann::json& trade_data,
+                            const std::chrono::system_clock::time_point& arrival_time);
+    void handleOrderBookData(const nlohmann::json& message,
+                           const std::chrono::system_clock::time_point& arrival_time);
+    void handleOrderBookSnapshot(const nlohmann::json& event,
+                               const std::string& product_id,
+                               const std::chrono::system_clock::time_point& exchange_timestamp);
+    void handleOrderBookUpdate(const nlohmann::json& event,
+                             const std::string& product_id,
+                             const std::chrono::system_clock::time_point& exchange_timestamp);
+    void handleSubscriptionConfirmation(const nlohmann::json& message);
+    void handleError(const nlohmann::json& message);
 
     // Members
     const std::string               m_host   = "advanced-trade-ws.coinbase.com";
@@ -84,6 +107,7 @@ private:
 
     Authenticator&                  m_auth;
     DataCache&                      m_cache;
+    std::shared_ptr<SentinelMonitor> m_monitor;
 
     net::io_context                 m_ioc;
     ssl::context                    m_sslCtx{ssl::context::tlsv12_client};

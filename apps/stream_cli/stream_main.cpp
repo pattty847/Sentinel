@@ -1,14 +1,26 @@
-#include "CoinbaseStreamClient.hpp"
+#include "MarketDataCore.hpp"
+#include "Authenticator.hpp"
+#include "DataCache.hpp"
 #include "TradeData.h"
+#include "SentinelMonitor.hpp"  // 🚀 PHASE 3: Add monitor
 #include <iostream>
 #include <chrono>
 #include <thread>
 #include <unordered_map>
+#include <memory>
 
 int main() {
     std::cout << "[Coinbase Stream Test Starting...]" << std::endl;
-    CoinbaseStreamClient client;
-    client.subscribe({"BTC-USD", "ETH-USD"});
+    
+    // Direct MarketDataCore usage (facade OBLITERATED)
+    Authenticator auth;  // uses default "key.json"
+    DataCache cache;
+    std::vector<std::string> symbols = {"BTC-USD", "ETH-USD"};
+    
+    // 🚀 PHASE 3: Fixed constructor order (auth, cache, monitor)
+    auto monitor = std::make_shared<SentinelMonitor>(nullptr);
+    MarketDataCore client(auth, cache, monitor);
+    client.subscribeToSymbols(symbols);
     client.start();
 
     // Track last seen trade_id for each symbol to avoid reprinting
@@ -23,7 +35,7 @@ int main() {
         std::cout << "[Running at full speed - no duplicates!]" << std::endl;
         while (std::chrono::steady_clock::now() - start < std::chrono::seconds(60)) {
             for (const auto& sym : {std::string("BTC-USD"), std::string("ETH-USD")}) {
-                auto newTrades = client.getRecentTrades(sym);
+                auto newTrades = cache.recentTrades(sym);
                 
                 for (const auto& trade : newTrades) {
                     lastTradeIds[sym] = trade.trade_id;
@@ -46,7 +58,7 @@ int main() {
         std::cout << "[Running with 200ms polling]" << std::endl;
         while (std::chrono::steady_clock::now() - start < std::chrono::seconds(60)) {
             for (const auto& sym : {std::string("BTC-USD"), std::string("ETH-USD")}) {
-                auto trades = client.getRecentTrades(sym);
+                auto trades = cache.recentTrades(sym);
                 if (!trades.empty()) {
                     const auto& last = trades.back();
                     

@@ -7,7 +7,7 @@
 #include <vector>
 #include <map>
 #include <random>
-#include "../libs/gui/LiquidityTimeSeriesEngine.h"
+#include "../libs/core/LiquidityTimeSeriesEngine.h"
 #include "../libs/core/TradeData.h"
 
 /**

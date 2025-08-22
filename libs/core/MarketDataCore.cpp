@@ -23,24 +23,51 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 
 // Stub implementation for Phase 1 compilation verification
 
-MarketDataCore::MarketDataCore(const std::vector<std::string>& products,
-                               Authenticator& auth,
-                               DataCache& cache)
+MarketDataCore::MarketDataCore(Authenticator& auth,
+                               DataCache& cache,
+                               std::shared_ptr<SentinelMonitor> monitor)
     : QObject(nullptr)
-    , m_products(products)
     , m_auth(auth)
     , m_cache(cache)
+    , m_monitor(monitor)
 {
     // Configure SSL context
     m_sslCtx.set_default_verify_paths();
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
-    sLog_App(QString("🏗️ MarketDataCore initialized for %1 products").arg(products.size()));
+    sLog_App("🏗️ MarketDataCore initialized");
 }
 
 MarketDataCore::~MarketDataCore() {
     stop();
     sLog_App("🏗️ MarketDataCore destroyed");
+}
+
+void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {
+    std::vector<std::string> new_symbols;
+    for (const auto& s : symbols) {
+        if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
+            m_products.push_back(s);
+            new_symbols.push_back(s);
+        }
+    }
+    if (!new_symbols.empty()) {
+        sendSubscriptionMessage("subscribe", new_symbols);
+    }
+}
+
+void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
+    std::vector<std::string> removed_symbols;
+    for (const auto& s : symbols) {
+        auto it = std::find(m_products.begin(), m_products.end(), s);
+        if (it != m_products.end()) {
+            m_products.erase(it);
+            removed_symbols.push_back(s);
+        }
+    }
+    if (!removed_symbols.empty()) {
+        sendSubscriptionMessage("unsubscribe", removed_symbols);
+    }
 }
 
 void MarketDataCore::start() {
@@ -191,27 +218,12 @@ void MarketDataCore::onWsHandshake(beast::error_code ec) {
         return;
     }
     
-    sLog_Data("🌐 WebSocket connected! Sending subscriptions...");
+    sLog_Data("🌐 WebSocket connected! Waiting for subscription requests...");
     
-    // Send level2 subscription first
-    std::string level2_sub = buildSubscribe("level2");
-    sLog_Data("📤 Sending level2 subscription...");
-    
-    m_ws.async_write(net::buffer(level2_sub),
-        [this](beast::error_code ec, std::size_t) {
-            if (ec) {
-                std::cerr << "❌ Level2 subscription write error: " << ec.message() << std::endl;
-                scheduleReconnect();
-                return;
-            }
-            
-            sLog_Data("✅ Level2 subscription sent! Sending trades subscription...");
-            
-            // Send market_trades subscription
-            std::string trades_sub = buildSubscribe("market_trades");
-            m_ws.async_write(net::buffer(trades_sub),
-                beast::bind_front_handler(&MarketDataCore::onWrite, this));
-        });
+    // Connection is live, start reading messages from the server.
+    // Subscriptions will be sent on-demand via the public methods.
+    m_ws.async_read(m_buf,
+        beast::bind_front_handler(&MarketDataCore::onRead, this));
 }
 
 void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
@@ -221,11 +233,8 @@ void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
         return;
     }
     
-    sLog_Data("✅ All subscriptions sent! Starting to read messages...");
-    
-    // Start reading messages
-    m_ws.async_read(m_buf,
-        beast::bind_front_handler(&MarketDataCore::onRead, this));
+    // This callback is now primarily for confirming subscription messages
+    sLog_Data("✅ Subscription message sent!");
 }
 
 void MarketDataCore::onRead(beast::error_code ec, std::size_t) {
@@ -266,6 +275,11 @@ void MarketDataCore::doClose() {
 void MarketDataCore::onClose(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ Close error: " << ec.message() << std::endl;
+        
+        // 🚀 PHASE 2.1: Record network error
+        if (m_monitor) {
+            m_monitor->recordNetworkError(QString("Close error: %1").arg(QString::fromStdString(ec.message())));
+        }
     } else {
         sLog_Data("✅ WebSocket connection closed");
     }
@@ -298,160 +312,258 @@ void MarketDataCore::scheduleReconnect() {
         if (ec || !m_running) return;
         
         sLog_Data("🔄 Attempting reconnection...");
+        
+        // 🚀 PHASE 2.1: Record network reconnection
+        if (m_monitor) {
+            m_monitor->recordNetworkReconnect();
+        }
+        
         m_resolver.async_resolve(m_host, m_port,
             beast::bind_front_handler(&MarketDataCore::onResolve, this));
     });
 }
 
-std::string MarketDataCore::buildSubscribe(const std::string& channel) const {
-    nlohmann::json sub;
-    sub["type"] = "subscribe";
-    sub["product_ids"] = m_products;
-    sub["channel"] = channel;
-    sub["jwt"] = m_auth.createJwt();
-    
-    std::string result = sub.dump();
-    sLog_Data(QString("🔐 %1 subscription: %2").arg(QString::fromStdString(channel)).arg(QString::fromStdString(result)));
-    return result;
+void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
+    if (symbols.empty()) {
+        return;
+    }
+
+    // Post to the strand to ensure thread-safe access to the WebSocket stream
+    net::post(m_strand, [this, type, symbols]() {
+        if (!m_ws.is_open()) {
+            sLog_Warning("WebSocket not open, cannot send subscription.");
+            return;
+        }
+
+        // Helper to build and send a message for a specific channel
+        auto sendMessage = [this](const std::string& channel, const std::string& type, const std::vector<std::string>& symbols) {
+            nlohmann::json msg;
+            msg["type"] = type;
+            msg["product_ids"] = symbols;
+            msg["channel"] = channel;
+            msg["jwt"] = m_auth.createJwt();
+
+            // Using a shared_ptr to manage the lifetime of the message string
+            auto message_ptr = std::make_shared<std::string>(msg.dump());
+
+            m_ws.async_write(net::buffer(*message_ptr),
+                [this, message_ptr, channel](beast::error_code ec, std::size_t) {
+                    if (ec) {
+                        sLog_Error(QString("Subscription write error for channel %1: %2")
+                            .arg(QString::fromStdString(channel))
+                            .arg(QString::fromStdString(ec.message())));
+                        scheduleReconnect();
+                    }
+                });
+        };
+
+        // Send messages for both level2 and market_trades channels
+        sendMessage("level2", type, symbols);
+        sendMessage("market_trades", type, symbols);
+    });
 }
 
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     
+    // 🚀 PHASE 2.1: Record message arrival time for latency analysis
+    auto arrival_time = std::chrono::system_clock::now();
+    
     std::string channel = message.value("channel", "");
     std::string type = message.value("type", "");
     
     if (channel == "market_trades") {
-        // Process trade data
-        if (message.contains("events")) {
-            for (const auto& event : message["events"]) {
-                if (event.contains("trades")) {
-                    for (const auto& trade_data : event["trades"]) {
-                        // Create Trade object
-                        Trade trade;
-                        trade.product_id = trade_data.value("product_id", "");
-                        trade.trade_id = trade_data.value("trade_id", "");
-                        trade.price = Cpp20Utils::fastStringToDouble(trade_data.value("price", "0"));
-                        trade.size = Cpp20Utils::fastStringToDouble(trade_data.value("size", "0"));
-                        
-                        // Parse side
-                        std::string side = trade_data.value("side", "");
-                        trade.side = Cpp20Utils::fastSideDetection(side);
-                        
-                        // Parse timestamp (for now use current time)
-                        trade.timestamp = std::chrono::system_clock::now();
-                        
-                        // Store in DataCache
-                        m_cache.addTrade(trade);
-                        
-                        // 🔥 NEW: Emit real-time signal to GUI layer (Qt thread-safe)
-                        Trade tradeCopy = trade; // Make a copy for thread safety
-                        QMetaObject::invokeMethod(this, [this, tradeCopy]() {
-                            emit tradeReceived(tradeCopy);
-                        }, Qt::QueuedConnection);
-                        
-                        // 🔥 THROTTLED LOGGING: Only log every 20th trade to reduce spam
-                        if (++m_tradeLogCount % 20 == 1) { // Log 1st, 21st, 41st trade, etc.
-                            // 🚀 C++20: Use optimized formatting from utils
-                            std::string logMessage = Cpp20Utils::formatTradeLog(
-                                trade.product_id, trade.price, trade.size, side, m_tradeLogCount.load());
-                            sLog_Data(QString::fromStdString(logMessage));
-                        }
-                    }
-                }
-            }
-        }
+        handleMarketTrades(message, arrival_time);
     } else if (channel == "l2_data") {
-        // 🔥 NEW: STATEFUL ORDER BOOK PROCESSING
-        if (message.contains("events")) {
-            for (const auto& event : message["events"]) {
-                std::string eventType = event.value("type", "");
-                std::string product_id = event.value("product_id", "");
-                
-                if (eventType == "snapshot" && event.contains("updates") && !product_id.empty()) {
-                    // 🏗️ SNAPSHOT: Initialize complete order book state
-                    std::vector<OrderBookLevel> sparse_bids;
-                    std::vector<OrderBookLevel> sparse_asks;
-                    
-                    // Process snapshot data into temporary sparse vectors
-                    for (const auto& update : event["updates"]) {
-                        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
-                            continue;
-                        }
-                        
-                        std::string side = update["side"];
-                        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
-                        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-                        
-                        if (quantity > 0.0) {
-                            OrderBookLevel level = {price, quantity};
-                            if (side == "bid") {
-                                sparse_bids.push_back(level);
-                            } else if (side == "offer") {
-                                sparse_asks.push_back(level);
-                            }
-                        }
-                    }
-                    
-                    // Initialize the live order book with the sparse snapshot data
-                    m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks);
-                    
-                    // 🚀 C++20: Use optimized formatting from utils
-                    std::string logMessage = Cpp20Utils::formatOrderBookLog(
-                        product_id, sparse_bids.size(), sparse_asks.size());
-                    sLog_Data(QString::fromStdString(logMessage));
-                    
-                } else if (eventType == "update" && event.contains("updates") && !product_id.empty()) {
-                    // 🔄 UPDATE: Apply incremental changes to stateful order book
-                    int updateCount = 0;
-                    
-                    for (const auto& update : event["updates"]) {
-                        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
-                            continue;
-                        }
-                        
-                        std::string side = update["side"];
-                        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
-                        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-                        
-                        // Apply update to live order book (handles add/update/remove automatically)
-                        m_cache.updateLiveOrderBook(product_id, side, price, quantity);
-                        updateCount++;
-                    }
-                    
-                    // 🔥 NEW: Emit real-time order book signal to GUI layer (Qt thread-safe)
-                    auto liveBookPtr = m_cache.getLiveOrderBook(product_id);
-                    if (liveBookPtr) {
-                        QMetaObject::invokeMethod(this, [this, bookPtr = liveBookPtr]() {
-                            emit orderBookUpdated(bookPtr);
-                        }, Qt::QueuedConnection);
-                    }
-                    
-                    // 🔥 THROTTLED LOGGING: Only log every 1000th update to reduce spam
-                    if (++m_orderBookLogCount % 1000 == 1) {
-                        size_t bidCount = 0;
-                        size_t askCount = 0;
-                        if (liveBookPtr) {
-                            bidCount = liveBookPtr->bids.size();
-                            askCount = liveBookPtr->asks.size();
-                        }
-                        // 🚀 C++20: Use optimized formatting from utils
-                        std::string logMessage = Cpp20Utils::formatOrderBookLog(
-                            product_id, bidCount, askCount, updateCount);
-                        sLog_Data(QString::fromStdString(logMessage));
-                    }
-                }
+        handleOrderBookData(message, arrival_time);
+    } else if (channel == "subscriptions") {
+        handleSubscriptionConfirmation(message);
+    } else if (type == "error") {
+        handleError(message);
+    }
+}
+
+void MarketDataCore::handleMarketTrades(const nlohmann::json& message, 
+                                      const std::chrono::system_clock::time_point& arrival_time) {
+    if (!message.contains("events")) return;
+    
+    for (const auto& event : message["events"]) {
+        if (event.contains("trades")) {
+            processTrades(event["trades"], arrival_time);
+        }
+    }
+}
+
+void MarketDataCore::processTrades(const nlohmann::json& trades,
+                                 const std::chrono::system_clock::time_point& arrival_time) {
+    for (const auto& trade_data : trades) {
+        Trade trade = createTradeFromJson(trade_data, arrival_time);
+        
+        // Store in DataCache
+        m_cache.addTrade(trade);
+        
+        // 🚀 PHASE 2.1: Record trade processed for throughput tracking
+        if (m_monitor) {
+            m_monitor->recordTradeProcessed(trade);
+        }
+        
+        // Emit real-time signal to GUI layer (Qt thread-safe)
+        Trade tradeCopy = trade; // Make a copy for thread safety
+        QMetaObject::invokeMethod(this, [this, tradeCopy]() {
+            emit tradeReceived(tradeCopy);
+        }, Qt::QueuedConnection);
+        
+        std::string logMessage = Cpp20Utils::formatTradeLog(
+            trade.product_id, trade.price, trade.size, 
+            trade.side == AggressorSide::Buy ? "buy" : "sell", 
+            m_tradeLogCount.load());
+        sLog_Data(QString::fromStdString(logMessage));
+    }
+}
+
+Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
+                                        const std::chrono::system_clock::time_point& arrival_time) {
+    Trade trade;
+    trade.product_id = trade_data.value("product_id", "");
+    trade.trade_id = trade_data.value("trade_id", "");
+    trade.price = Cpp20Utils::fastStringToDouble(trade_data.value("price", "0"));
+    trade.size = Cpp20Utils::fastStringToDouble(trade_data.value("size", "0"));
+    
+    // Parse side
+    std::string side = trade_data.value("side", "");
+    trade.side = Cpp20Utils::fastSideDetection(side);
+    
+    // Parse timestamp from trade data or use exchange timestamp
+    if (trade_data.contains("time")) {
+        std::string trade_timestamp_str = trade_data["time"];
+        trade.timestamp = Cpp20Utils::parseISO8601(trade_timestamp_str);
+        
+        // 🚀 PHASE 2.1: Record trade latency (exchange → arrival)
+        if (m_monitor) {
+            m_monitor->recordTradeLatency(trade.timestamp, arrival_time);
+        }
+    } else {
+        trade.timestamp = std::chrono::system_clock::now();
+    }
+    
+    return trade;
+}
+
+void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
+                                       const std::chrono::system_clock::time_point& arrival_time) {
+    // PHASE 1.4: Parse exchange timestamp from root-level JSON
+    std::chrono::system_clock::time_point exchange_timestamp = std::chrono::system_clock::now();
+    if (message.contains("timestamp")) {
+        // Parse ISO8601 timestamp: "2023-02-09T20:32:50.714964855Z"
+        std::string timestamp_str = message["timestamp"];
+        exchange_timestamp = Cpp20Utils::parseISO8601(timestamp_str);
+        
+        // 🚀 PHASE 2.1: Record order book latency (exchange → arrival)
+        if (m_monitor) {
+            m_monitor->recordOrderBookLatency(exchange_timestamp, arrival_time);
+        }
+    }
+    
+    if (!message.contains("events")) return;
+    
+    for (const auto& event : message["events"]) {
+        std::string eventType = event.value("type", "");
+        std::string product_id = event.value("product_id", "");
+        
+        if (eventType == "snapshot") {
+            handleOrderBookSnapshot(event, product_id, exchange_timestamp);
+        } else if (eventType == "update") {
+            handleOrderBookUpdate(event, product_id, exchange_timestamp);
+        }
+    }
+}
+
+void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
+                                           const std::string& product_id,
+                                           const std::chrono::system_clock::time_point& exchange_timestamp) {
+    if (!event.contains("updates") || product_id.empty()) return;
+    
+    // SNAPSHOT: Initialize complete order book state
+    std::vector<OrderBookLevel> sparse_bids;
+    std::vector<OrderBookLevel> sparse_asks;
+    
+    // Process snapshot data into temporary sparse vectors
+    for (const auto& update : event["updates"]) {
+        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
+            continue;
+        }
+        
+        std::string side = update["side"];
+        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
+        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
+        
+        if (quantity > 0.0) {
+            OrderBookLevel level = {price, quantity};
+            if (side == "bid") {
+                sparse_bids.push_back(level);
+            } else if (side == "offer") {
+                sparse_asks.push_back(level);
             }
         }
-    } else if (channel == "subscriptions") {
-        // 🚀 C++20: Use std::format for faster string formatting
-        std::string logMessage = std::format("✅ Subscription confirmed for {}",
-            message.value("product_ids", nlohmann::json::array()).dump());
-        sLog_Data(QString::fromStdString(logMessage));
-    } else if (type == "error") {
-        // 🚀 C++20: Use std::format for faster string formatting
-        std::string logMessage = std::format("❌ Coinbase error: {}",
-            message.value("message", "unknown error"));
-        sLog_Error(QString::fromStdString(logMessage));
     }
-} 
+    
+    // Initialize the live order book with the sparse snapshot data
+    m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
+    
+    std::string logMessage = Cpp20Utils::formatOrderBookLog(
+        product_id, sparse_bids.size(), sparse_asks.size());
+    sLog_Data(QString::fromStdString(logMessage));
+}
+
+void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
+                                         const std::string& product_id,
+                                         const std::chrono::system_clock::time_point& exchange_timestamp) {
+    if (!event.contains("updates") || product_id.empty()) return;
+    
+    // UPDATE: Apply incremental changes to stateful order book
+    int updateCount = 0;
+    
+    for (const auto& update : event["updates"]) {
+        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
+            continue;
+        }
+        
+        std::string side = update["side"];
+        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
+        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
+        
+        // Apply update to live order book (handles add/update/remove automatically)
+        m_cache.updateLiveOrderBook(product_id, side, price, quantity, exchange_timestamp);
+        updateCount++;
+    }
+    
+    // PHASE 2.1: Direct dense-only signal - NO CONVERSION!
+    QMetaObject::invokeMethod(this, [this, productId = QString::fromStdString(product_id)]() {
+        emit liveOrderBookUpdated(productId);  // Signal that dense book is ready
+    }, Qt::QueuedConnection);
+    
+    // 🚀 PHASE 2.1: Record order book update metrics
+    const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
+    size_t bidCount = liveBook.getBidCount();
+    size_t askCount = liveBook.getAskCount();
+    
+    if (m_monitor) {
+        m_monitor->recordOrderBookUpdate(QString::fromStdString(product_id), bidCount, askCount);
+    }
+    
+    std::string logMessage = Cpp20Utils::formatOrderBookLog(
+        product_id, bidCount, askCount, updateCount);
+    sLog_Data(QString::fromStdString(logMessage));
+}
+
+void MarketDataCore::handleSubscriptionConfirmation(const nlohmann::json& message) {
+    std::string logMessage = std::format("✅ Subscription confirmed for {}",
+        message.value("product_ids", nlohmann::json::array()).dump());
+    sLog_Data(QString::fromStdString(logMessage));
+}
+
+void MarketDataCore::handleError(const nlohmann::json& message) {
+    std::string logMessage = std::format("❌ Coinbase error: {}",
+        message.value("message", "unknown error"));
+    sLog_Error(QString::fromStdString(logMessage));
+}

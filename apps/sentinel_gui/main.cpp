@@ -26,9 +26,12 @@ int main(int argc, char *argv[])
     std::cout << "🚀 [Sentinel GPU Trading Terminal Starting...]" << std::endl;
     QApplication app(argc, argv);
     
-    // Register custom types for signal/slot connections
+    // PHASE 1.3: Consolidated type registrations (no duplicates)
     qRegisterMetaType<Trade>();
     qRegisterMetaType<OrderBook>();
+    qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
+    
+    // PHASE 2.1: Dense-only signal uses QString productId (no complex type needed)
     
     // 🎯 PHASE 5: Pure grid-only QML component registration
     std::cout << "🎯 Registering pure grid-only QML components..." << std::endl;
@@ -43,9 +46,15 @@ int main(int argc, char *argv[])
     std::cout << "✅ Pure grid-only mode: Legacy components permanently removed" << std::endl;
     
     // 🔥 CREATE GPU-POWERED MAIN WINDOW
+    std::cout << "🔧 Creating MainWindowGPU..." << std::endl;
     MainWindowGPU window;
-    window.show();
+    std::cout << "✅ MainWindowGPU created successfully" << std::endl;
     
+    std::cout << "🔧 Calling window.show()..." << std::endl;
+    window.show();
+    std::cout << "✅ window.show() completed" << std::endl;
+    
+    std::cout << "🔧 Starting Qt event loop with app.exec()..." << std::endl;
     qDebug() << "✅ GPU Trading Terminal ready for 144Hz action!";
     
     return app.exec();

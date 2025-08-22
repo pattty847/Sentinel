@@ -15,23 +15,22 @@ Assumptions: Time bucketing logic correctly assigns updates to their respective 
 #include <cmath>
 #include <set>
 
-// LiquidityTimeSlice implementation
+// LiquidityTimeSlice implementation - PHASE 2.2: O(1) tick-based access
 double LiquidityTimeSlice::getDisplayValue(double price, bool isBid, int displayMode) const {
-    const auto& metrics = isBid ? bidMetrics : askMetrics;
-    auto it = metrics.find(price);
-    if (it == metrics.end()) return 0.0;
+    const auto* metrics = getMetrics(price, isBid);
+    if (!metrics) return 0.0;
     
     switch (static_cast<LiquidityTimeSeriesEngine::LiquidityDisplayMode>(displayMode)) {
         case LiquidityTimeSeriesEngine::LiquidityDisplayMode::Average: 
-            return it->second.avgLiquidity;
+            return metrics->avgLiquidity;
         case LiquidityTimeSeriesEngine::LiquidityDisplayMode::Maximum: 
-            return it->second.maxLiquidity;
+            return metrics->maxLiquidity;
         case LiquidityTimeSeriesEngine::LiquidityDisplayMode::Resting: 
-            return it->second.restingLiquidity;
+            return metrics->restingLiquidity;
         case LiquidityTimeSeriesEngine::LiquidityDisplayMode::Total: 
-            return it->second.totalLiquidity;
+            return metrics->totalLiquidity;
         default: 
-            return it->second.avgLiquidity;
+            return metrics->avgLiquidity;
     }
 }
 
@@ -243,8 +242,52 @@ void LiquidityTimeSeriesEngine::setDisplayMode(LiquidityDisplayMode mode) {
 // Private implementation methods
 
 void LiquidityTimeSeriesEngine::updateAllTimeframes(const OrderBookSnapshot& snapshot) {
+    // PHASE 2.3: ROLLING SUM OPTIMIZATION - Only update timeframes that need it!
+    
     for (int64_t timeframe_ms : m_timeframes) {
-        updateTimeframe(timeframe_ms, snapshot);
+        // Calculate the slice boundary for this timeframe
+        int64_t sliceStart = (snapshot.timestamp_ms / timeframe_ms) * timeframe_ms;
+        
+        // Check if we've crossed into a new slice boundary for this timeframe
+        auto lastUpdateIt = m_lastUpdateTimestamp.find(timeframe_ms);
+        bool needsUpdate = false;
+        
+        if (lastUpdateIt == m_lastUpdateTimestamp.end()) {
+            // First time processing this timeframe
+            needsUpdate = true;
+            m_lastUpdateTimestamp[timeframe_ms] = sliceStart;
+        } else {
+            int64_t lastSliceStart = (lastUpdateIt->second / timeframe_ms) * timeframe_ms;
+            if (sliceStart != lastSliceStart) {
+                // Crossed into a new slice boundary - need to update
+                needsUpdate = true;
+                m_lastUpdateTimestamp[timeframe_ms] = snapshot.timestamp_ms;
+            }
+        }
+        
+        // OPTIMIZATION: Only update timeframes that have crossed slice boundaries
+        if (needsUpdate || timeframe_ms == m_baseTimeframe_ms) {
+            // Always update base timeframe (100ms), only update others when needed
+            updateTimeframe(timeframe_ms, snapshot);
+        }
+    }
+    
+    // Debug: Log efficiency gains for first few snapshots
+    static int updateCount = 0;
+    if (++updateCount <= 10) {
+        int actualUpdates = 0;
+        for (int64_t tf : m_timeframes) {
+            int64_t sliceStart = (snapshot.timestamp_ms / tf) * tf;
+            auto it = m_lastUpdateTimestamp.find(tf);
+            if (it != m_lastUpdateTimestamp.end()) {
+                int64_t lastSliceStart = (it->second / tf) * tf;
+                if (sliceStart != lastSliceStart || tf == m_baseTimeframe_ms) {
+                    actualUpdates++;
+                }
+            }
+        }
+        sLog_Data("🚀 PHASE 2.3: Rolling optimization - " << actualUpdates << "/" << m_timeframes.size() 
+                 << " timeframes updated (saved " << (m_timeframes.size() - actualUpdates) << " redundant updates)");
     }
 }
 
@@ -276,16 +319,79 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
 }
 
 void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot) {
+    // PHASE 2.4: Increment global sequence for version stamp presence detection
+    ++m_globalSequence;
+    
+    // PHASE 2.2: Determine tick range for this snapshot
+    Tick minSnapshotTick = std::numeric_limits<Tick>::max();
+    Tick maxSnapshotTick = std::numeric_limits<Tick>::min();
+    
+    // Find price range in snapshot
+    for (const auto& [price, size] : snapshot.bids) {
+        Tick tick = priceToTick(price);
+        minSnapshotTick = std::min(minSnapshotTick, tick);
+        maxSnapshotTick = std::max(maxSnapshotTick, tick);
+    }
+    for (const auto& [price, size] : snapshot.asks) {
+        Tick tick = priceToTick(price);
+        minSnapshotTick = std::min(minSnapshotTick, tick);
+        maxSnapshotTick = std::max(maxSnapshotTick, tick);
+    }
+    
+    // Expand slice tick range if needed
+    if (slice.bidMetrics.empty() && slice.askMetrics.empty()) {
+        // First snapshot in slice
+        slice.minTick = minSnapshotTick;
+        slice.maxTick = maxSnapshotTick;
+        slice.tickSize = m_priceResolution;
+        size_t range = static_cast<size_t>(maxSnapshotTick - minSnapshotTick + 1);
+        slice.bidMetrics.resize(range);
+        slice.askMetrics.resize(range);
+    } else {
+        // Expand existing range if needed
+        Tick newMinTick = std::min(slice.minTick, minSnapshotTick);
+        Tick newMaxTick = std::max(slice.maxTick, maxSnapshotTick);
+        
+        if (newMinTick < slice.minTick || newMaxTick > slice.maxTick) {
+            // Need to expand vectors
+            size_t newRange = static_cast<size_t>(newMaxTick - newMinTick + 1);
+            std::vector<LiquidityTimeSlice::PriceLevelMetrics> newBidMetrics(newRange);
+            std::vector<LiquidityTimeSlice::PriceLevelMetrics> newAskMetrics(newRange);
+            
+            // Copy existing data to new position
+            size_t oldOffset = static_cast<size_t>(slice.minTick - newMinTick);
+            for (size_t i = 0; i < slice.bidMetrics.size(); ++i) {
+                newBidMetrics[oldOffset + i] = std::move(slice.bidMetrics[i]);
+                newAskMetrics[oldOffset + i] = std::move(slice.askMetrics[i]);
+            }
+            
+            slice.bidMetrics = std::move(newBidMetrics);
+            slice.askMetrics = std::move(newAskMetrics);
+            slice.minTick = newMinTick;
+            slice.maxTick = newMaxTick;
+        }
+    }
+    
+    // PHASE 2.2: O(1) vector access instead of O(log N) map access
+    // PHASE 2.4: O(1) version stamp marking
     // Process bids
     for (const auto& [price, size] : snapshot.bids) {
-        auto& metrics = slice.bidMetrics[price];
-        updatePriceLevelMetrics(metrics, size, snapshot.timestamp_ms, slice);
+        Tick tick = priceToTick(price);
+        size_t index = static_cast<size_t>(tick - slice.minTick);
+        if (index < slice.bidMetrics.size()) {
+            updatePriceLevelMetrics(slice.bidMetrics[index], size, snapshot.timestamp_ms, slice);
+            slice.bidMetrics[index].lastSeenSeq = m_globalSequence;  // PHASE 2.4: Mark as present this snapshot
+        }
     }
     
     // Process asks
     for (const auto& [price, size] : snapshot.asks) {
-        auto& metrics = slice.askMetrics[price];
-        updatePriceLevelMetrics(metrics, size, snapshot.timestamp_ms, slice);
+        Tick tick = priceToTick(price);
+        size_t index = static_cast<size_t>(tick - slice.minTick);
+        if (index < slice.askMetrics.size()) {
+            updatePriceLevelMetrics(slice.askMetrics[index], size, snapshot.timestamp_ms, slice);
+            slice.askMetrics[index].lastSeenSeq = m_globalSequence;  // PHASE 2.4: Mark as present this snapshot
+        }
     }
     
     // Handle disappearing levels (important for resting liquidity calculation)
@@ -319,37 +425,50 @@ void LiquidityTimeSeriesEngine::updatePriceLevelMetrics(
 }
 
 void LiquidityTimeSeriesEngine::updateDisappearingLevels(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot) {
-    // Mark existing levels that are no longer present
-    for (auto& [price, metrics] : slice.bidMetrics) {
-        if (snapshot.bids.find(price) == snapshot.bids.end()) {
-            // Price level disappeared - update last seen time but don't add to totals
+    // PHASE 2.4: O(1) VERSION STAMP DISAPPEARING LEVEL DETECTION!
+    // No more O(L) scans - use sequence stamps for instant presence detection
+    
+    for (auto& metrics : slice.bidMetrics) {
+        if (metrics.snapshotCount > 0 && metrics.lastSeenSeq != m_globalSequence) {
+            // Price level disappeared this snapshot - update last seen time
             metrics.lastSeen_ms = snapshot.timestamp_ms;
         }
     }
     
-    for (auto& [price, metrics] : slice.askMetrics) {
-        if (snapshot.asks.find(price) == snapshot.asks.end()) {
+    for (auto& metrics : slice.askMetrics) {
+        if (metrics.snapshotCount > 0 && metrics.lastSeenSeq != m_globalSequence) {
+            // Price level disappeared this snapshot - update last seen time
             metrics.lastSeen_ms = snapshot.timestamp_ms;
         }
+    }
+    
+    // Debug: Log efficiency gains for first few snapshots
+    static int disappearCount = 0;
+    if (++disappearCount <= 5) {
+        sLog_Data("🚀 PHASE 2.4: O(1) version stamp disappearing level detection - sequence " << m_globalSequence);
     }
 }
 
 void LiquidityTimeSeriesEngine::finalizeLiquiditySlice(LiquidityTimeSlice& slice) {
-    // Final calculations for all price levels
-    for (auto& [price, metrics] : slice.bidMetrics) {
-        // Calculate final resting liquidity based on persistence
-        if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {  // Present for >80% of interval
-            metrics.restingLiquidity = metrics.avgLiquidity;
-        } else {
-            metrics.restingLiquidity = 0.0;  // Too sporadic, likely spoofing
+    // PHASE 2.2: Vector-based final calculations for all price levels
+    for (auto& metrics : slice.bidMetrics) {
+        if (metrics.snapshotCount > 0) {  // Only process levels that have data
+            // Calculate final resting liquidity based on persistence
+            if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {  // Present for >80% of interval
+                metrics.restingLiquidity = metrics.avgLiquidity;
+            } else {
+                metrics.restingLiquidity = 0.0;  // Too sporadic, likely spoofing
+            }
         }
     }
     
-    for (auto& [price, metrics] : slice.askMetrics) {
-        if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {
-            metrics.restingLiquidity = metrics.avgLiquidity;
-        } else {
-            metrics.restingLiquidity = 0.0;
+    for (auto& metrics : slice.askMetrics) {
+        if (metrics.snapshotCount > 0) {  // Only process levels that have data
+            if (metrics.persistenceRatio(slice.duration_ms) > 0.8) {
+                metrics.restingLiquidity = metrics.avgLiquidity;
+            } else {
+                metrics.restingLiquidity = 0.0;
+            }
         }
     }
     

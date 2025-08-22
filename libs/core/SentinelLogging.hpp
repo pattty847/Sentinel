@@ -35,7 +35,7 @@ namespace sentinel::log_throttle {
             const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");         \
             return env ? std::atoi(env) : (defaultInterval);                         \
         }();                                                                         \
-        if ((++_counter % _interval) == 1) {                                         \
+        if ((++_counter % _interval) == 0) {                                         \
             qCDebug(log##cat) << __VA_ARGS__;                                        \
         }                                                                            \
     } while(false)

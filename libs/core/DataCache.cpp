@@ -13,10 +13,7 @@ Assumptions: Assumes order book updates can be applied incrementally to the stor
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <mutex>
-#include <iostream>
 #include <QString>
-
-// Stub implementation for Phase 1 compilation verification
 
 void DataCache::addTrade(const Trade& t) {
     // Use exclusive lock for writing
@@ -100,7 +97,7 @@ OrderBook DataCache::book(const std::string& symbol) const {
     return {}; // Return empty OrderBook if symbol not found
 }
 
-// 🔥 NEW: O(1) LiveOrderBook Implementation
+// O(1) LiveOrderBook Implementation
 // =============================================================================
 
 void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
@@ -122,7 +119,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
               .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
 }
 
-void LiveOrderBook::applyUpdate(const std::string& side, double price, double quantity) {
+void LiveOrderBook::applyUpdate(const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Bounds check
@@ -136,7 +133,7 @@ void LiveOrderBook::applyUpdate(const std::string& side, double price, double qu
     }
 
     size_t index = price_to_index(price);
-    m_lastUpdate = std::chrono::system_clock::now();
+    m_lastUpdate = exchange_timestamp;  // PHASE 1.4: Use exchange timestamp, not system time!
 
     if (side == "bid") {
         if (index < m_bids.size()) {
@@ -171,7 +168,7 @@ bool LiveOrderBook::isEmpty() const {
 // 🔥 NEW: DataCache LiveOrderBook Methods
 // =============================================================================
 
-void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
+void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp) {
     std::unique_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     // Create or get existing live order book
@@ -188,23 +185,23 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::ve
         liveBook.initialize(75000.0, 125000.0, 0.01);
     }
 
-    // Apply the snapshot levels to the new book structure
+    // Apply the snapshot levels to the new book structure - PHASE 1.4: Use exchange timestamp
     for (const auto& level : bids) {
-        liveBook.applyUpdate("bid", level.price, level.size);
+        liveBook.applyUpdate("bid", level.price, level.size, exchange_timestamp);
     }
     for (const auto& level : asks) {
-        liveBook.applyUpdate("ask", level.price, level.size);
+        liveBook.applyUpdate("ask", level.price, level.size, exchange_timestamp);
     }
     
     sLog_Data(QString("🔥 DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
-void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity) {
+void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp) {
     std::unique_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     auto it = m_liveBooks.find(symbol);
     if (it != m_liveBooks.end()) {
-        it->second.applyUpdate(side, price, quantity);
+        it->second.applyUpdate(side, price, quantity, exchange_timestamp);  // PHASE 1.4: Pass exchange timestamp
     } else {
         // If book doesn't exist, we can't initialize it without a snapshot.
         // The first message for a product MUST be a snapshot.
@@ -224,7 +221,7 @@ std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& 
         const auto& liveBook = it->second;
         auto book = std::make_shared<OrderBook>();
         book->product_id = liveBook.getProductId();
-        book->timestamp = std::chrono::system_clock::now();
+        book->timestamp = liveBook.getLastUpdate();  // PHASE 1.4: Use exchange timestamp, not system time!
 
         // Convert dense LiveOrderBook to sparse OrderBook format
         const auto& denseBids = liveBook.getBids();
@@ -250,4 +247,17 @@ std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& 
     }
     
     return nullptr; // Return nullptr if not found
+}
+
+// PHASE 2.1: Direct dense access (no conversion)
+const LiveOrderBook& DataCache::getDirectLiveOrderBook(const std::string& symbol) const {
+    std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
+    
+    auto it = m_liveBooks.find(symbol);
+    if (it != m_liveBooks.end()) {
+        return it->second;  // Direct reference to dense LiveOrderBook
+    }
+    
+    static LiveOrderBook empty;  // Return empty if not found
+    return empty;
 } 
