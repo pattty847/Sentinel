@@ -26,10 +26,11 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
     m_dataCache = std::make_unique<DataCache>();
     
-    // 🚀 PHASE 2.1: Initialize unified monitoring system
-    m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
-    m_sentinelMonitor->startMonitoring();
-    m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
+    // 🚨 TESTING: Disable SentinelMonitor to isolate window hang issue
+    // m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
+    // m_sentinelMonitor->startMonitoring();
+    // m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
+    m_sentinelMonitor = nullptr;  // Temporarily disable
     
     sLog_App("🔧 Creating persistent MarketDataCore...");
     m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
