@@ -17,7 +17,7 @@
 #include <mach/mach_init.h>
 #endif
 #include "../libs/gui/UnifiedGridRenderer.h"
-#include "../libs/gui/LiquidityTimeSeriesEngine.h"
+#include "../libs/core/LiquidityTimeSeriesEngine.h"
 #include "../libs/gui/GridIntegrationAdapter.h"
 #include "../libs/core/TradeData.h"
 

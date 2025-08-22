@@ -31,7 +31,10 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QGroupBox>
 #include <QtQuickWidgets/QQuickWidget>
 #include <memory>
-#include "../core/CoinbaseStreamClient.hpp"
+#include "../core/MarketDataCore.hpp"
+#include "../core/Authenticator.hpp"
+#include "../core/DataCache.hpp"
+#include "../core/SentinelMonitor.hpp"
 
 // Forward declarations
 class StatisticsController;
@@ -55,7 +58,8 @@ private slots:
 private:
     void setupUI();
     void setupConnections();
-    void connectToGPUChart();  // 🔥 Helper to establish GPU connections
+    void initializeQMLComponents();  // 🔥 PHASE 1.2: Proper QML initialization
+    void connectMarketDataSignals();  // 🚀 GEMINI'S REFACTOR: Signal connections moved to constructor
 
     // 🔥 GPU CHART - Core component
     QQuickWidget* m_gpuChart;
@@ -66,12 +70,11 @@ private:
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
     
-    // 🔥 PHASE 1.1: Direct MarketDataCore connection (StreamController OBLITERATED)
-    std::unique_ptr<CoinbaseStreamClient> m_client;
+    // 🔥 PHASE 1.1: Direct MarketDataCore connection (facade OBLITERATED)
+    std::unique_ptr<MarketDataCore> m_marketDataCore;
+    std::unique_ptr<Authenticator> m_authenticator;
+    std::unique_ptr<DataCache> m_dataCache;
+    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
     StatisticsController* m_statsController;
     ChartModeController* m_modeController{nullptr};
-    
-    // Connection retry tracking
-    int m_connectionRetryCount{0};
-    static const int MAX_CONNECTION_RETRIES = 50;  // 5 seconds max
 };

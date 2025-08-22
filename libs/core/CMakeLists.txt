@@ -5,8 +5,6 @@ project(sentinel_core)
 add_library(sentinel_core
     Authenticator.cpp
     Authenticator.hpp
-    CoinbaseStreamClient.hpp
-    CoinbaseStreamClient.cpp
     Cpp20Utils.hpp
     CvdThresholdRule.cpp
     CvdThresholdRule.h
@@ -25,6 +23,8 @@ add_library(sentinel_core
     RuleEngine.h
     SentinelLogging.cpp
     SentinelLogging.hpp
+    SentinelMonitor.cpp
+    SentinelMonitor.hpp
     StatisticsController.cpp
     StatisticsController.h
     StatisticsProcessor.cpp

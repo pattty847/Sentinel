@@ -144,8 +144,9 @@ public:
     // Initialize the fixed-size order book
     void initialize(double min_price, double max_price, double tick_size);
 
-    // Apply incremental updates (l2update messages)
-    void applyUpdate(const std::string& side, double price, double quantity);
+    // Apply incremental updates (l2update messages) - PHASE 1.4: Now requires exchange timestamp
+    void applyUpdate(const std::string& side, double price, double quantity, 
+                    std::chrono::system_clock::time_point exchange_timestamp);
 
     // Get dense data for heatmap rendering
     const std::vector<double>& getBids() const { return m_bids; }
@@ -169,6 +170,9 @@ public:
     // Thread-safe access
     void setProductId(const std::string& productId) { m_productId = productId; }
     std::string getProductId() const { return m_productId; }
+    
+    // PHASE 1.4: Exchange timestamp access
+    std::chrono::system_clock::time_point getLastUpdate() const { return m_lastUpdate; }
 
 private:
     // Helper to convert a price to a vector index

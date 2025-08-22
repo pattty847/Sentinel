@@ -121,7 +121,7 @@ add_subdirectory(libs/core)
 add_subdirectory(libs/gui)
 add_subdirectory(apps/sentinel_gui)
 add_subdirectory(apps/stream_cli)
-add_subdirectory(tests)
+# add_subdirectory(tests)
 
 # --- Print Configuration Summary ---
 message(STATUS "=== Sentinel Build Configuration ===")

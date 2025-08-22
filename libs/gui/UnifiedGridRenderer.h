@@ -29,7 +29,7 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 
 // Forward declarations for new modular architecture
 class GridSceneNode;
-class RenderDiagnostics;
+class SentinelMonitor;
 class DataProcessor;
 class IRenderStrategy;
 
@@ -75,8 +75,7 @@ public:
     Q_ENUM(RenderMode)
 
 private:
-    // Core liquidity engine
-    std::unique_ptr<LiquidityTimeSeriesEngine> m_liquidityEngine;
+    // 🚀 PHASE 3: Removed V1 violation - m_liquidityEngine deleted! All data goes through DataProcessor now
     QTimer* m_orderBookTimer;
     
     // Rendering configuration
@@ -179,6 +178,12 @@ public:
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
+    // PHASE 2.1: Dense data access
+    void setDataCache(class DataCache* cache) { m_dataCache = cache; }
+    
+    // PHASE 2.2: Unified monitoring access
+    void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
+    
     // 🔥 PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
@@ -198,7 +203,9 @@ public:
 public slots:
     // Real-time data integration
     void onTradeReceived(const Trade& trade);
-    void onOrderBookUpdated(std::shared_ptr<const OrderBook> book);
+    
+    // PHASE 2.1: Dense-only order book signal (no sparse conversion)
+    void onLiveOrderBookUpdated(const QString& productId);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
     
     // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
@@ -243,17 +250,17 @@ private:
     void updateVisibleCells();
     void updateVolumeProfile();
     
-    // Liquidity time series integration
-    void createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice);
-    void createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
-    QRectF timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const;
+    // PHASE 2.1: Dense data access
+    class DataCache* m_dataCache = nullptr;
+    
+    // 🚀 PHASE 3C: Liquidity business logic moved to DataProcessor
     
     // Color calculation methods (delegated to strategies in V2)
     // Color/intensity delegated to strategies; no duplicates here
     
     // 🚀 NEW MODULAR ARCHITECTURE (V2)
     std::unique_ptr<GridViewState> m_viewState;
-    std::unique_ptr<RenderDiagnostics> m_diagnostics;
+    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;  // PHASE 2.2: Unified monitoring
     std::unique_ptr<DataProcessor> m_dataProcessor;
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
     std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
@@ -263,4 +270,8 @@ private:
     IRenderStrategy* getCurrentStrategy() const;
     void initializeV2Architecture();
     QSGNode* updatePaintNodeV2(QSGNode* oldNode);
+
+public:
+    // 🚀 PHASE 3: DataProcessor access for signal routing
+    DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }
 };

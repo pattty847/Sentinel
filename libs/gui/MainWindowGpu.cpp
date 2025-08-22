@@ -14,25 +14,49 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "StatisticsController.h"
 #include "ChartModeController.h"
 #include "UnifiedGridRenderer.h"
+#include "render/DataProcessor.hpp"  // 🚀 PHASE 3: Include for signal routing
 #include "SentinelLogging.hpp"
 #include <QQmlContext>
 #include <QDir>
 #include <QFile>
 #include <QTimer>
 
-MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
-    qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
+MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {    
+    // Initialize data components (was previously in facade)
+    m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
+    m_dataCache = std::make_unique<DataCache>();
     
+    // 🚀 PHASE 2.1: Initialize unified monitoring system
+    m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
+    m_sentinelMonitor->startMonitoring();
+    m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
+    
+    sLog_App("🔧 Creating persistent MarketDataCore...");
+    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
+    m_marketDataCore->start();
+    sLog_App("✅ MarketDataCore created and started");
+    
+    sLog_App("🔧 Setting up UI...");
     setupUI();
+    sLog_App("✅ UI setup complete");
+    
+    sLog_App("🔧 Setting up connections...");
     setupConnections();
+    sLog_App("✅ Connections setup complete");
     
     // Set window properties
     setWindowTitle("Sentinel - GPU Trading Terminal");
     resize(1400, 900);
+    sLog_App("✅ Window properties set");
     
-    // Automatically start the subscription process once the event loop begins.
-    // This ensures the window is fully constructed and shown before we start streaming.
-    QTimer::singleShot(0, this, &MainWindowGPU::onSubscribe);
+    sLog_App("🔧 Initializing QML components...");
+    initializeQMLComponents();
+    sLog_App("✅ QML components initialized");
+    
+    sLog_App("🔧 Connecting MarketData signals...");
+    // 🚀 PHASE 3: Connect signals after QML components are ready
+    connectMarketDataSignals();
+    sLog_App("✅ MarketData signals connected");
     
     sLog_App("✅ GPU MainWindow ready for 144Hz trading!");
 }
@@ -41,8 +65,9 @@ MainWindowGPU::~MainWindowGPU() {
     sLog_App("🛑 MainWindowGPU destructor - cleaning up...");
     
     // Stop data streams first
-    if (m_client) {
-        m_client.reset();  // Clean shutdown of MarketDataCore
+    if (m_marketDataCore) {
+        m_marketDataCore->stop();
+        m_marketDataCore.reset();  // Clean shutdown of MarketDataCore
     }
     
     // Disconnect all signals to prevent callbacks during destruction
@@ -131,10 +156,8 @@ void MainWindowGPU::setupConnections() {
     connect(m_statsController, &StatisticsController::cvdUpdated, 
             this, &MainWindowGPU::onCVDUpdated);
     
-    // Establish GPU connections
-    connectToGPUChart();
-    
-    sLog_App("✅ GPU MainWindow connections established");
+    // PHASE 1.2: Remove scattered QML connection setup - moved to constructor-based initialization
+    sLog_App("✅ GPU MainWindow basic connections established");
 }
 
 void MainWindowGPU::onSubscribe() {
@@ -144,98 +167,99 @@ void MainWindowGPU::onSubscribe() {
         return;
     }
     
-    sLog_App("🚀 Subscribing to GPU chart:" << symbol);
+    sLog_App(QString("🚀 Subscribing to symbol: %1").arg(symbol));
     
-    // Update QML context
-    QQmlContext* context = m_gpuChart->rootContext();
-    context->setContextProperty("symbol", symbol);
+    // Update QML context with the new symbol
+    m_gpuChart->rootContext()->setContextProperty("symbol", symbol);
     
-    // Create CoinbaseStreamClient and subscribe FIRST
-    m_client = std::make_unique<CoinbaseStreamClient>();
-    std::vector<std::string> symbols = {symbol.toStdString()};
-    m_client->subscribe(symbols);  // This creates the MarketDataCore
-    m_client->start();
-    
-    // V2 ARCHITECTURE FIX - Connect MarketDataCore → UnifiedGridRenderer AFTER MarketDataCore exists
-    UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    if (m_client->getMarketDataCore() && unifiedGridRenderer) {
-        // Use QObject::connect with SIGNAL/SLOT macros for cross-boundary connections
-        connect(m_client->getMarketDataCore(), SIGNAL(tradeReceived(const Trade&)),
-                unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
-        connect(m_client->getMarketDataCore(), &MarketDataCore::orderBookUpdated,
-                unifiedGridRenderer, &UnifiedGridRenderer::onOrderBookUpdated, Qt::QueuedConnection);
-        
-        // Connection status feedback
-        connect(m_client->getMarketDataCore(), &MarketDataCore::connectionStatusChanged, 
-                this, [this](bool connected) {
-            if (connected) {
-                m_statusLabel->setText("🟢 Connected");
-                m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
-                m_subscribeButton->setText("🔗 Connected");
-                m_subscribeButton->setEnabled(false);
-            } else {
-                m_statusLabel->setText("🔴 Disconnected");  
-                m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
-                m_subscribeButton->setText("🚀 Subscribe");
-                m_subscribeButton->setEnabled(true);
-            }
-        });
-        
-        sLog_App("🔥 V2 Architecture Fix - MarketDataCore → UnifiedGridRenderer connections established AFTER subscription!");
+    // 🚀 GEMINI'S REFACTOR: Use persistent MarketDataCore with subscribeToSymbols!
+    if (m_marketDataCore) {
+        m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
     } else {
-        sLog_Error("❌ MarketDataCore or UnifiedGridRenderer not found!");
-        if (!m_client->getMarketDataCore()) sLog_Error("   MarketDataCore is null!");
-        if (!unifiedGridRenderer) sLog_Error("   UnifiedGridRenderer not found!");
+        sLog_Error("❌ MarketDataCore not initialized!");
     }
-    
-    sLog_App("✅ Direct data pipeline started for" << symbol);
 }
 
 void MainWindowGPU::onCVDUpdated(double cvd) {
     m_cvdLabel->setText(QString("CVD: %1").arg(cvd, 0, 'f', 2));
 }
 
-// Helper method to establish GPU connections
-void MainWindowGPU::connectToGPUChart() {
-    sLog_Debug("🔍 ATTEMPTING TO CONNECT TO GPU CHART... (attempt" << m_connectionRetryCount + 1 << "/" << MAX_CONNECTION_RETRIES << ")");
+// 🚀 GEMINI'S REFACTOR: Signal connections moved from onSubscribe to constructor
+void MainWindowGPU::connectMarketDataSignals() {
+    sLog_App("🔥 Setting up persistent MarketDataCore signal connections...");
     
-    // Check retry limit
-    if (m_connectionRetryCount >= MAX_CONNECTION_RETRIES) {
-        sLog_Error("❌ MAX CONNECTION RETRIES REACHED - GPU chart connection failed!");
+    UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    if (m_marketDataCore && unifiedGridRenderer) {
+        // PHASE 2.1: Provide dense data access to renderer
+        unifiedGridRenderer->setDataCache(m_dataCache.get());
+        
+        // PHASE 2.2: Provide unified monitoring to renderer
+        unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
+        
+        // Get DataProcessor from UGR to route signals correctly
+        auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+        if (dataProcessor) {
+            // 🚀 PHASE 3: Route LiveOrderBook signal to DataProcessor (THE FIX!)
+            connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
+                    dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
+            sLog_App("🚀 PHASE 3: LiveOrderBook signal routed to DataProcessor!");
+        }
+        
+        // Trade signal still goes to UGR
+        connect(m_marketDataCore.get(), SIGNAL(tradeReceived(const Trade&)),
+                unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
+        
+        // Connection status feedback
+        connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, 
+                this, [this](bool connected) {
+            if (connected) {
+                m_statusLabel->setText("🟢 Connected");
+                m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
+                m_subscribeButton->setText("Subscribe");
+                m_subscribeButton->setEnabled(true);
+            } else {
+                m_statusLabel->setText("🔴 Disconnected");  
+                m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
+                m_subscribeButton->setText("Connect");
+                m_subscribeButton->setEnabled(true);
+            }
+        });
+        
+        sLog_App("🔥 Persistent MarketDataCore → DataProcessor connections established!");
+    } else {
+        sLog_Error("❌ MarketDataCore or UnifiedGridRenderer not found during signal setup!");
+        if (!m_marketDataCore) sLog_Error("   MarketDataCore is null!");
+        if (!unifiedGridRenderer) sLog_Error("   UnifiedGridRenderer not found!");
+    }
+}
+
+// PHASE 1.2: Proper QML component initialization without retry logic
+void MainWindowGPU::initializeQMLComponents() {
+    sLog_App("🔥 PHASE 1.2: Initializing QML components with proper lifecycle management");
+    
+    // Check if QML loaded successfully during setupUI()
+    if (m_gpuChart->status() == QQuickWidget::Error) {
+        sLog_Error("❌ QML failed to load during setupUI - cannot initialize components");
         return;
     }
     
-    // Get the GPU chart widget from QML
+    // Verify QML root object is available (should be ready after setupUI())
     QQuickItem* qmlRoot = m_gpuChart->rootObject();
     if (!qmlRoot) {
-        sLog_Warning("❌ QML root object not found - retrying in 100ms...");
-        m_connectionRetryCount++;
-        QTimer::singleShot(100, this, &MainWindowGPU::connectToGPUChart);
+        sLog_Warning("❌ QML root object not available - QML may not be fully loaded");
         return;
     }
     
-    sLog_Debug("✅ QML root found:" << qmlRoot);
-    
-    // Ultra-direct pipeline - only UnifiedGridRenderer needed
+    // Verify UnifiedGridRenderer is available
     UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    
-    // Ultra-direct validation - only require UnifiedGridRenderer
     if (!unifiedGridRenderer) {
-        sLog_Warning("❌ UnifiedGridRenderer not found - retrying in 200ms...");
-        m_connectionRetryCount++;
-        QTimer::singleShot(200, this, &MainWindowGPU::connectToGPUChart);
+        sLog_Warning("❌ UnifiedGridRenderer not found in QML");
         return;
     }
-    sLog_Debug("✅ Pure grid-only mode validation passed");
     
-    // ULTRA-DIRECT DATA PIPELINE - MarketDataCore → UnifiedGridRenderer  
-    bool allConnectionsSuccessful = true;
-
-    // FINAL STATUS REPORT
-    if (allConnectionsSuccessful) {
-        sLog_App("🔥 Ultra-direct pipeline components:" << "UnifiedGridRenderer:" << (unifiedGridRenderer ? "YES" : "NO"));
-        m_connectionRetryCount = 0;  // Reset retry counter on success
-    } else {
-        sLog_Warning("⚠️ Some GPU connections failed - partial functionality");
-    }
+    sLog_App("✅ PHASE 1.2: QML components verified and ready");
+    sLog_App("   → QML Root: AVAILABLE");
+    sLog_App("   → UnifiedGridRenderer: AVAILABLE");
+    
+    // Components are verified - data pipeline will be created on subscription
 } 

@@ -18,8 +18,7 @@
 #include <algorithm>
 #include <fstream>
 #include "../libs/gui/UnifiedGridRenderer.h"
-#include "../libs/gui/LiquidityTimeSeriesEngine.h"
-#include "../libs/gui/GridIntegrationAdapter.h"
+#include "../libs/core/LiquidityTimeSeriesEngine.h"
 #include "../libs/core/TradeData.h"
 #include "../libs/core/CoinbaseStreamClient.hpp"
 

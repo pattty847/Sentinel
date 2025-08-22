@@ -57,10 +57,15 @@ public:
     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
     [[nodiscard]] OrderBook            book(const std::string& s) const;
     
-    // 🔥 NEW: LiveOrderBook methods for stateful order book management
-    void initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
-    void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity);
+    // 🔥 NEW: LiveOrderBook methods for stateful order book management - PHASE 1.4: Now use exchange timestamps
+    void initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp);
+    void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp);
+    
+    // LEGACY: Remove in Phase 2 cleanup - kept for backwards compatibility during transition
     [[nodiscard]] std::shared_ptr<const OrderBook> getLiveOrderBook(const std::string& symbol) const;
+    
+    // PHASE 2.1: Direct dense access (no conversion)
+    [[nodiscard]] const LiveOrderBook& getDirectLiveOrderBook(const std::string& symbol) const;
     
 
 private:

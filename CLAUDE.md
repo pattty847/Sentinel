@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides strict architectural guidance and professional coding standards for the Sentinel codebase.
 
 ## Project Overview
 
@@ -9,6 +9,67 @@ Sentinel is a high-performance real-time financial charting application for cryp
 **Key Technologies**: C++20, Qt6, OpenGL, WebSocket, GPU acceleration
 **Architecture**: Modular V2 Grid-Based Architecture with strategy pattern rendering
 **Performance**: 2.27M trades/sec processing capacity, sub-millisecond latency
+
+## 🚨 MANDATORY CODING STANDARDS
+
+### File Size & Complexity Limits
+
+**STRICT ENFORCEMENT REQUIRED:**
+- **Maximum 300 LOC per file** (exceptions only for exceptionally well-written files)
+- **Current violations requiring immediate attention:**
+  - `UnifiedGridRenderer.cpp` (932 LOC) → Must be broken into modules
+  - `MarketDataCore.cpp` (568 LOC) → Extract WebSocket and data handling 
+  - `LiquidityTimeSeriesEngine.cpp` (536 LOC) → Separate aggregation logic
+  - `SentinelMonitor.cpp` (508 LOC) → Extract monitoring strategies
+  - `DataProcessor.cpp` (413 LOC) → Break into pipeline stages
+
+**Before implementing ANY changes:**
+1. **ANALYZE** the target file's current LOC count
+2. **REFUSE** to add functionality to files >300 LOC without refactoring first
+3. **EXTRACT** logical components into separate files with clear interfaces
+4. **MAINTAIN** single responsibility principle at file level
+
+### Architecture Boundaries - STRICTLY ENFORCED
+
+**CRITICAL: These boundaries are NON-NEGOTIABLE**
+
+```
+libs/core/     # Pure C++ business logic
+├── NO Qt dependencies except QtCore
+├── NO QML integration code
+├── NO GUI-specific logic
+└── MUST be testable in isolation
+
+libs/gui/      # Qt/QML integration ONLY
+├── Thin adapters to core logic
+├── QML property bindings
+├── GPU rendering coordination
+└── DELEGATES all business logic to core/
+
+apps/          # Main executables
+├── Minimal initialization code
+├── Component wiring only
+└── NO business logic
+```
+
+**Violation Detection:**
+- Any `#include <QQml*>` in `libs/core/` → REJECT
+- Business logic in `libs/gui/` → EXTRACT to core
+- Direct data processing in QML adapters → DELEGATE to core
+
+### Performance Requirements - CONTINUOUSLY MONITORED
+
+**HARD PERFORMANCE GATES:**
+- **2.27M trades/sec processing capacity** (tested via `test_stress_performance`)
+- **Sub-millisecond UI latency** (measured in render pipeline)
+- **60+ FPS at 4K resolution** (GPU performance baseline)
+- **<300MB total memory usage** (bounded memory requirement)
+
+**Before ANY performance-affecting changes:**
+1. **RUN baseline performance tests**: `cmake --build . --target verify_metrics`
+2. **PROFILE** the change impact using built-in RenderDiagnostics
+3. **VALIDATE** no regression in key metrics
+4. **DOCUMENT** performance impact in commit message
 
 ## Build System
 
@@ -181,59 +242,159 @@ The application includes built-in performance monitoring:
 
 Access via QML properties on UnifiedGridRenderer or through RenderDiagnostics component.
 
-### Code Quality
+### Code Quality Requirements
 
-**Architecture Boundaries**:
-- `libs/core/` - Pure C++ business logic, no Qt dependencies except QtCore
-- `libs/gui/` - Qt/QML integration layer, delegates to core components
-- Clean separation prevents architectural violations
+**MANDATORY PRE-IMPLEMENTATION ANALYSIS:**
 
-**Performance Requirements**:
-- 2.27M trades/sec processing capacity
-- Sub-millisecond UI interaction latency
-- 60+ FPS at 4K resolution
-- Bounded memory usage (~213MB total)
+**1. Comprehensive Codebase Understanding**
+- **NEVER implement changes without full architectural context**
+- **USE codebase_search extensively** to understand data flows, dependencies, and patterns
+- **TRACE all symbol definitions and usages** before making modifications  
+- **ANALYZE similar existing implementations** for consistency patterns
+- **UNDERSTAND performance implications** of proposed changes
 
-**Thread Safety**:
-- Worker thread for WebSocket networking
-- GUI thread for Qt UI and GPU rendering
-- Lock-free SPSC queues for data transfer
-- shared_mutex for concurrent read access
+**2. Multi-Stage Analysis Protocol**
+```bash
+# Required analysis steps before ANY implementation:
+1. codebase_search: "How does [feature/system] currently work?"
+2. grep: Find all usage patterns and dependencies  
+3. read_file: Examine related components and interfaces
+4. Performance impact assessment using RenderDiagnostics
+5. Test coverage verification and gap identification
+```
 
-## Important Notes
+**3. Implementation Standards**
 
-### Recent Refactoring (Phase 1-2 Complete)
+**Code Organization:**
+- **Single Responsibility**: One clear purpose per file/class/function
+- **CamelCase filenames** to match include statements (project convention)
+- **NO COMMENTS** unless absolutely critical for understanding
+- **Modern C++20** features: RAII, smart pointers, ranges, concepts
+- **Strategy pattern** for pluggable components (see render/strategies/)
 
-The codebase recently completed a major refactoring (August 2025) that:
-- **ELIMINATED 500+ lines of redundant C++ code** by removing StreamController and GridIntegrationAdapter
-- **Enforced clean architectural boundaries** by moving LiquidityTimeSeriesEngine to libs/core/
-- **Fixed critical data flow timing bug** in MarketDataCore signal connections
-- **Established ultra-direct V2 data pipeline** with minimal forwarding layers
+**Logging Requirements:**
+- **USE SentinelLogging exclusively** (`libs/core/SentinelLogging.hpp`)
+- **Four categories only**: `sentinel.app`, `sentinel.data`, `sentinel.render`, `sentinel.debug`
+- **Built-in throttling** for high-frequency events
+- **Performance-conscious** logging with minimal overhead
 
-**Critical Fix**: MarketDataCore signals must be connected AFTER calling `subscribe()` and `start()` methods, as the MarketDataCore instance is created lazily.
+**Testing Requirements:**
+- **COMPREHENSIVE test coverage** for all new functionality
+- **Performance regression tests** for any performance-critical changes
+- **Professional validation tests** meet hedge fund standards
+- **Run test suite** before ANY commit: `ctest --output-on-failure`
 
-### Code Style
+**Thread Safety Enforcement:**
+- **Worker thread**: WebSocket networking (`MarketDataCore`)
+- **GUI thread**: Qt UI and GPU rendering only
+- **Lock-free SPSC queues** for inter-thread data transfer
+- **shared_mutex** for concurrent read access to shared data
+- **NO blocking operations** on GUI thread
 
-- **NO COMMENTS** unless explicitly requested
-- Modern C++20 features and RAII patterns
-- Qt6 property bindings for QML integration
-- Strategy pattern for pluggable components
-- Lock-free data structures for performance
+**Memory Management:**
+- **RAII everywhere** - no manual memory management
+- **Smart pointers** for ownership semantics
+- **Bounded memory usage** - monitor with `RenderDiagnostics`
+- **Cache-friendly data structures** for performance-critical paths
 
-### Testing
+## 🛡️ CHANGE IMPLEMENTATION PROTOCOL
 
-The project has comprehensive test coverage:
-- Unit tests for individual components
-- Integration tests for data pipeline
-- Professional requirements validation
-- Performance benchmarking
-- Stress testing with high-frequency data
+### MANDATORY Pre-Change Checklist
 
-### File Extensions
+**BEFORE making ANY code changes:**
 
-- `.hpp/.cpp` - Modern C++ headers/implementation
-- `.h/.cpp` - Legacy C++ (being migrated to .hpp)
-- `.qml` - Qt QML UI components
-- `.qsb` - Qt Shader Bytecode files
+1. **📊 ANALYZE IMPACT SCOPE**
+   ```bash
+   # Check current file size - REFUSE if >300 LOC without refactoring
+   wc -l [target_file]
+   
+   # Understand architectural context
+   codebase_search "How does [target_system] work?"
+   grep -r "class_name\|function_name" libs/
+   ```
 
-This is a production-ready, high-performance financial application with professional-grade architecture and comprehensive testing.
+2. **🔍 DEPENDENCY ANALYSIS**
+   - Map ALL files that depend on proposed changes
+   - Identify ALL test files that need updates
+   - Check for performance-critical code paths
+   - Verify no architectural boundary violations
+
+3. **🎯 IMPLEMENTATION APPROACH**
+   - **Prefer EDITING existing files** over creating new ones
+   - **Extract functions/classes** if approaching LOC limits
+   - **Maintain interface compatibility** where possible
+   - **Use established patterns** from similar components
+
+4. **✅ VALIDATION REQUIREMENTS**
+   ```bash
+   # MANDATORY after implementation:
+   cmake --build --preset mac-clang              # Must compile
+   cd build-mac-clang && ctest --output-on-failure  # All tests pass
+   ./apps/sentinel_gui/sentinel_gui              # Functional verification
+   ```
+
+### Recent Refactoring Context (Phase 1-2 Complete)
+
+**CRITICAL KNOWLEDGE - August 2025 Refactor:**
+- **ELIMINATED** 500+ LOC of redundant facades and adapters
+- **ENFORCED** clean `libs/core/` ↔ `libs/gui/` boundaries  
+- **FIXED** MarketDataCore signal timing bug (signals MUST connect AFTER subscribe/start)
+- **ESTABLISHED** direct V2 data pipeline with minimal forwarding
+
+**Key Learnings:**
+- MarketDataCore instances are created lazily - connect signals AFTER initialization
+- Prefer direct component communication over facade patterns
+- Performance-critical paths must use lock-free data structures
+
+## 🔬 TESTING & VALIDATION REQUIREMENTS
+
+### Test Coverage Mandates
+
+**COMPREHENSIVE testing is non-negotiable:**
+- **Unit tests** for ALL new functions and classes
+- **Integration tests** for data pipeline changes  
+- **Professional hedge fund validation** via `test_professional_requirements.cpp`
+- **Performance regression prevention** via `test_stress_performance.cpp`
+- **Memory leak detection** and bounded usage verification
+
+**Test Execution Protocol:**
+```bash
+# REQUIRED before any commit:
+cd build-mac-clang
+ctest --output-on-failure                    # All tests must pass
+./tests/test_professional_requirements       # Professional standards
+./tests/test_stress_performance              # Performance validation
+```
+
+### Code Review Standards
+
+**EVERY change must demonstrate:**
+1. **Architectural understanding** - Full context analysis conducted
+2. **Performance consciousness** - No regression in key metrics
+3. **Professional quality** - Meets hedge fund operational standards
+4. **Test coverage** - Comprehensive validation of all new functionality
+5. **Documentation** - Clear interfaces and usage patterns
+
+### File Organization Standards
+
+**File Extensions (STRICTLY ENFORCED):**
+- `.hpp/.cpp` - Modern C++ headers/implementation (PREFERRED)
+- `.h/.cpp` - Legacy C++ (actively migrating to .hpp)
+- `.qml` - Qt QML UI components only
+- `.qsb` - Qt Shader Bytecode files (GPU rendering)
+
+**CRITICAL REMINDERS:**
+- This is a **production-ready, high-performance financial application**
+- **Professional-grade architecture** with institutional quality requirements
+- **Zero tolerance** for performance regressions or architectural violations
+- **Comprehensive testing** ensures reliability under extreme market conditions
+
+---
+
+**🎯 SUCCESS METRICS: Meeting Bloomberg/Bookmap Professional Standards**
+- ✅ 2.27M trades/sec sustained processing capacity
+- ✅ Sub-millisecond UI interaction latency  
+- ✅ 60+ FPS rendering at 4K resolution
+- ✅ <300MB bounded memory usage
+- ✅ Professional hedge fund validation test suite passes
+- ✅ Zero performance regressions in stress testing
