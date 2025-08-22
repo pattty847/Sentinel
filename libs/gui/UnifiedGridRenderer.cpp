@@ -324,67 +324,15 @@ double UnifiedGridRenderer::getCurrentPriceResolution() const {
     return 1.0;  // $1 default price resolution
 }
 
-QString UnifiedGridRenderer::getGridDebugInfo() const {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    QString info = QString("Unified Grid Debug Info:\n"
-                          "Time Resolution: %1 ms\n"
-                          "Price Resolution: $1.0\n"
-                          "Viewport: %2-%3 ms, $%4-$%5\n"
-                          "Visible Cells: %6\n"
-                          "Screen Size: %7x%8\n"
-                          "Renderer Visible: %9\n"
-                          "Time Window Valid: %10")
-                          .arg(m_currentTimeframe_ms)
-                          .arg(getVisibleTimeStart())
-                          .arg(getVisibleTimeEnd())
-                          .arg(getMinPrice())
-                          .arg(getMaxPrice())
-                          .arg(m_visibleCells.size())
-                          .arg(width())
-                          .arg(height())
-                          .arg(isVisible() ? "YES" : "NO")
-                          .arg(m_viewState && m_viewState->isTimeWindowValid() ? "YES" : "NO");
-    
-    return info;
+// 🚀 PHASE 3E: Debug info delegation
+QString UnifiedGridRenderer::getGridDebugInfo() const { 
+    return QString("Cells:%1 Time:%2-%3ms Price:$%4-$%5 Size:%6x%7")
+        .arg(m_visibleCells.size()).arg(getVisibleTimeStart()).arg(getVisibleTimeEnd())
+        .arg(getMinPrice()).arg(getMaxPrice()).arg(width()).arg(height()); 
 }
 
-QString UnifiedGridRenderer::getDetailedGridDebug() const {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    
-    QString debug = QString("🔍 DETAILED UNIFIED RENDERER DEBUG:\n"
-                           "Screen: %1x%2\n"
-                           "Viewport Time: %3 - %4 (%5ms)\n"
-                           "Viewport Price: $%6 - $%7\n"
-                           "Liquidity Resolution: %8ms, $1.0\n"
-                           "Visible Cells: %9\n"
-                           "Has Valid Order Book: %10\n"
-                           "Time Window Valid: %11\n")
-                           .arg(width()).arg(height())
-                           .arg(getVisibleTimeStart()).arg(getVisibleTimeEnd()).arg(getVisibleTimeEnd() - getVisibleTimeStart())
-                           .arg(getMinPrice()).arg(getMaxPrice())
-                           .arg(m_currentTimeframe_ms)
-                           .arg(m_visibleCells.size())
-                           .arg(m_dataProcessor && m_dataProcessor->hasValidOrderBook() ? "YES" : "NO")
-                           .arg(m_viewState && m_viewState->isTimeWindowValid() ? "YES" : "NO");
-    
-    // Show first few cells
-    int cellsToCheck = std::min(5, (int)m_visibleCells.size());
-    for (int i = 0; i < cellsToCheck; ++i) {
-        const auto& cell = m_visibleCells[i];
-        
-        debug += QString("Cell %1: TimeSlot=%2, Price=$%3, Liquidity=%4, IsBid=%5, ScreenRect=(%6,%7 %8x%9)\n")
-                .arg(i)
-                .arg(cell.timeSlot)
-                .arg(cell.priceLevel)
-                .arg(cell.liquidity)
-                .arg(cell.isBid ? "YES" : "NO")
-                .arg(cell.screenRect.x()).arg(cell.screenRect.y())
-                .arg(cell.screenRect.width()).arg(cell.screenRect.height());
-    }
-    
-    return debug;
-}
+// 🚀 PHASE 3E: Debug detailed delegation
+QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" OrderBook:%1").arg(m_dataProcessor && m_dataProcessor->hasValidOrderBook() ? "YES" : "NO"); }
 
 void UnifiedGridRenderer::setGridMode(int mode) {
     // 0 = Fine (50ms, $2.50)
@@ -550,158 +498,35 @@ double UnifiedGridRenderer::getScreenHeight() const {
 
 // 🖱️ MOUSE INTERACTION IMPLEMENTATION
 
-void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
-    // 🎯 MOUSE EVENT FILTERING: Only handle left-button clicks when visible
-    if (!isVisible() || event->button() != Qt::LeftButton) {
-        event->ignore();  // Let other components handle it
-        return;
-    }
-    
-    QPointF pos = event->position();
-    
-    // 🎯 SPATIAL BOUNDARIES: Define clear UI control areas that QML handles (fixed calculations)
-    // Control panel: 150px wide + 10px margin from right edge
-    bool inControlPanel = (pos.x() > width() - 160);  // Right side control panel (150px + 10px margin)
-    bool inPriceAxis = (pos.x() < 60);  // Left side price axis (60px wide)
-    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis (30px high)
-    
-    if (inControlPanel || inPriceAxis || inTimeAxis) {
-        event->ignore();  // Let QML MouseArea components handle these areas
-        sLog_Render("🖱️ Mouse event in UI area - delegating to QML (pos: " << pos.x() << "," << pos.y() << ")");
-        return;
-    }
-    
-    // 🎯 DEBUG: Log all mouse events to track conflicts
-    sLog_Render("🖱️ MOUSE PRESS: pos(" << pos.x() << "," << pos.y() << ") size(" << width() << "x" << height() << ")");
-    
-    // 🎯 CHART INTERACTION AREA: Handle pan/zoom for the main chart area
-    if (m_viewState) {
-        // Update viewport size for coordinate conversion
-        m_viewState->setViewportSize(width(), height());
-        
-        m_viewState->handlePanStart(pos);
-        event->accept();
-        sLog_Render("🖱️ Chart pan started at (" << pos.x() << ", " << pos.y() << ")");
-        return;
-    }
-    
-    // Fallback: ignore if no ViewState available
-    event->ignore();
-}
-
-void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
-    // 🎯 MOUSE MOVE: Only handle if we have an active ViewState
-    if (m_viewState) {
-        m_viewState->handlePanMove(event->position());
+// 🚀 PHASE 3E: Mouse press delegation
+void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
+    if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
+        m_viewState->setViewportSize(width(), height()); 
+        m_viewState->handlePanStart(event->position()); 
         event->accept(); 
-        update(); // Trigger repaint for visual feedback
-        sLog_Render("🖱️ MOUSE MOVE: pos(" << event->position().x() << "," << event->position().y() << ")");
-        return;
-    }
-    
-    // Let other components handle if no ViewState
-    event->ignore();
+    } else event->ignore(); 
 }
 
-void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
-    // Route to V2 ViewState - it now handles coordinate conversion internally
-    if (m_viewState) {
-        // Update viewport size for coordinate conversion
-        m_viewState->setViewportSize(width(), height());
-        
-        m_viewState->handlePanEnd();
-        event->accept();
-        update();
-        
-        m_geometryDirty.store(true);
-        // ViewState will emit viewportChanged; our connection forwards it
-        return;
-    }
+// 🚀 PHASE 3E: Mouse move delegation
+void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
+
+// 🚀 PHASE 3E: Mouse release delegation
+void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->setViewportSize(width(), height()); m_viewState->handlePanEnd(); event->accept(); update(); m_geometryDirty.store(true); } }
+
+// 🚀 PHASE 3E: Wheel event delegation
+void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
+    if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
+        m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
+        m_geometryDirty.store(true); update(); event->accept(); 
+    } else event->ignore(); 
 }
 
-void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
-    // 🎯 WHEEL EVENT FILTERING: Basic validation
-    if (!isVisible() || !m_viewState || !m_viewState->isTimeWindowValid() || width() <= 0 || height() <= 0) {
-        event->ignore();  // Let other components handle it
-        return;
-    }
-    
-    QPointF pos = event->position();
-    
-    // 🎯 SPATIAL BOUNDARIES: Same as mouse events - respect UI control areas (fixed calculations)
-    bool inControlPanel = (pos.x() > width() - 160);  // Right side control panel (150px + 10px margin)
-    bool inPriceAxis = (pos.x() < 60);  // Left side price axis (60px wide)
-    bool inTimeAxis = (pos.y() > height() - 30);  // Bottom time axis (30px high)
-    
-    if (inControlPanel || inPriceAxis || inTimeAxis) {
-        event->ignore();  // Let QML handle wheel events in UI areas
-        sLog_Render("🖱️ Wheel event in UI area - delegating to QML");
-        return;
-    }
-    
-    // 🎯 CHART ZOOM AREA: Handle zoom for the main chart area
-    if (m_viewState) {
-        // Streamlined wheel event - pass raw angleDelta to sensitivity-controlled zoom
-        QPointF mousePos = event->position();
-        QSizeF chartSize(width(), height());
-        
-        // Use sensitivity-controlled zoom for smooth, predictable behavior
-        m_viewState->handleZoomWithSensitivity(
-            event->angleDelta().y(), 
-            mousePos, 
-            chartSize
-        );
-        m_geometryDirty.store(true);
-        update();
-        // Auto-scroll change is emitted by GridViewState
-        event->accept();
-        sLog_Render("🖱️ Smooth zoom at (" << mousePos.x() << ", " << mousePos.y() << ")");
-        return;
-    }
-    
-    // Fallback: ignore if no ViewState available
-    event->ignore();
-}
-
-// 📊 PERFORMANCE MONITORING API
-
-void UnifiedGridRenderer::togglePerformanceOverlay() {
-    if (m_sentinelMonitor) {
-        // Toggle overlay functionality now handled by SentinelMonitor
-        bool overlayEnabled = !m_sentinelMonitor->isOverlayEnabled(); // Assume we add this method
-        m_sentinelMonitor->enablePerformanceOverlay(overlayEnabled);
-        sLog_Render("📊 Performance overlay: " << (overlayEnabled ? "ENABLED" : "DISABLED"));
-        update();
-    }
-}
-
-QString UnifiedGridRenderer::getPerformanceStats() const {
-    if (m_sentinelMonitor) {
-        return m_sentinelMonitor->getComprehensiveStats();
-    }
-    return "Performance monitoring not available";
-}
-
-double UnifiedGridRenderer::getCurrentFPS() const {
-    if (m_sentinelMonitor) {
-        return m_sentinelMonitor->getCurrentFPS();
-    }
-    return 0.0;
-}
-
-double UnifiedGridRenderer::getAverageRenderTime() const {
-    if (m_sentinelMonitor) {
-        return m_sentinelMonitor->getAverageFrameTime();
-    }
-    return 0.0;
-}
-
-double UnifiedGridRenderer::getCacheHitRate() const {
-    if (m_sentinelMonitor) {
-        return m_sentinelMonitor->getCacheHitRate();
-    }
-    return 0.0;
-}
+// 🚀 PHASE 3E: Performance API - Pure delegation to SentinelMonitor
+void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
+double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
+double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
+double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
 
 // 🚀 NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
 
