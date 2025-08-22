@@ -126,4 +126,8 @@ private:
     // Thread-safe counters (no more static!)
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
+    
+    // 🚨 FIX: WebSocket subscription state guards
+    std::mutex                      m_subscriptionMutex;
+    std::atomic<bool>               m_subscriptionInProgress{false};
 };
