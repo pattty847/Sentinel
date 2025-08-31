@@ -13,9 +13,11 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include "GridViewState.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include "../../core/DataCache.hpp"  // 🚀 PHASE 3: Access to dense LiveOrderBook
+#include "../CoordinateSystem.h"  // 🎯 FIX: Use proper coordinate transformation
 #include <QColor>
 #include <chrono>
 #include <limits>
+#include <climits>
 #include <cmath>
 
 DataProcessor::DataProcessor(QObject* parent)
@@ -43,6 +45,12 @@ void DataProcessor::startProcessing() {
     //     m_snapshotTimer->start(100);
     //     sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
     // }
+
+    // Ensure all standard timeframes are built/maintained by LTSE
+    if (m_liquidityEngine) {
+        const int64_t tf[] = {100, 250, 500, 1000, 2000, 5000, 10000};
+        for (int64_t t : tf) m_liquidityEngine->addTimeframe(t);
+    }
 }
 
 void DataProcessor::stopProcessing() {
@@ -162,11 +170,12 @@ void DataProcessor::initializeViewportFromOrderBook(const OrderBook& book) {
         midPrice = 100000.0; // Default fallback for BTC
     }
     
-    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    // Use the order book timestamp instead of system time for proper alignment
+    auto bookTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+        book.timestamp.time_since_epoch()).count();
     
-    qint64 timeStart = now - 30000;
-    qint64 timeEnd = now + 30000;
+    qint64 timeStart = bookTime - 30000;
+    qint64 timeEnd = bookTime + 30000;
     double minPrice = midPrice - 100.0;
     double maxPrice = midPrice + 100.0;
     
@@ -197,20 +206,33 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
     sparseBook.product_id = productId.toStdString();
     sparseBook.timestamp = std::chrono::system_clock::now();
     
-    // Convert dense to sparse (temporary until LTSE accepts dense format)
+    // Convert dense to sparse - OPTIMIZED: Only scan visible price window + margin
     const auto& denseBids = liveBook.getBids();
     const auto& denseAsks = liveBook.getAsks();
     
-    // Convert bids (scan from highest to lowest price)
-    for (size_t i = denseBids.size(); i-- > 0; ) {
-        if (denseBids[i] > 0.0) {
-            double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
-            sparseBook.bids.push_back({price, denseBids[i]});
+    // Get visible price range from ViewState (with 20% margin for smooth scrolling)
+    double visibleMinPrice = m_viewState ? m_viewState->getMinPrice() : liveBook.getMinPrice();
+    double visibleMaxPrice = m_viewState ? m_viewState->getMaxPrice() : liveBook.getMinPrice() + (denseBids.size() * liveBook.getTickSize());
+    double priceRange = visibleMaxPrice - visibleMinPrice;
+    double marginMinPrice = visibleMinPrice - (priceRange * 0.2);
+    double marginMaxPrice = visibleMaxPrice + (priceRange * 0.2);
+    
+    // Calculate index bounds for visible window
+    size_t minIndex = std::max(0.0, (marginMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+    size_t maxIndex = std::min(static_cast<double>(std::max(denseBids.size(), denseAsks.size())), 
+                              (marginMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+    
+    // Convert bids (scan only visible range from highest to lowest price)
+    for (size_t i = std::min(maxIndex, denseBids.size()); i > minIndex && i > 0; --i) {
+        size_t idx = i - 1;
+        if (denseBids[idx] > 0.0) {
+            double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
+            sparseBook.bids.push_back({price, denseBids[idx]});
         }
     }
     
-    // Convert asks (scan from lowest to highest price)
-    for (size_t i = 0; i < denseAsks.size(); ++i) {
+    // Convert asks (scan only visible range from lowest to highest price)
+    for (size_t i = minIndex; i < std::min(maxIndex, denseAsks.size()); ++i) {
         if (denseAsks[i] > 0.0) {
             double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
             sparseBook.asks.push_back({price, denseAsks[i]});
@@ -218,7 +240,14 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
     }
     
     // Process through LTSE
+    sLog_Render("🔍 LTSE INPUT: Adding snapshot with " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
     m_liquidityEngine->addOrderBookSnapshot(sparseBook);
+    
+    // Check if LTSE has any data now
+    auto testSlices = m_liquidityEngine->getVisibleSlices(m_currentTimeframe_ms, 
+        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() - 60000,
+        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() + 60000);
+    sLog_Render("🔍 LTSE STATUS: Total slices available = " << testSlices.size());
     
     sLog_Data("🎯 DataProcessor: LiveOrderBook processed - " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
     emit dataUpdated();
@@ -268,23 +297,48 @@ void DataProcessor::updateVisibleCells() {
     
     // Get liquidity slices for active timeframe within viewport
     if (m_liquidityEngine) {
-        auto visibleSlices = m_liquidityEngine->getVisibleSlices(
-            activeTimeframe, m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
+        qint64 timeStart = m_viewState->getVisibleTimeStart();
+        qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+        sLog_Render("🔍 LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
         
-        // 🚀 PERFORMANCE FIX: Process slices normally, but implement smart culling when needed
-        size_t processedSlices = 0;
-        for (const auto* slice : visibleSlices) {
-            createCellsFromLiquiditySlice(*slice);
-            processedSlices++;
-            
-            // 🚀 PERFORMANCE FIX: Hard cap cell count with smart slice management
-            if (m_visibleCells.size() > 8000) {
-                size_t remainingSlices = visibleSlices.size() - processedSlices;
-                sLog_Render("⚠️ CELL LIMIT HIT: Truncating at " << m_visibleCells.size() 
-                           << " cells (" << remainingSlices << " remaining slices skipped) to maintain FPS");
-                break;  // Keep the data we've processed so far
+        auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
+        sLog_Render("🔍 LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
+        
+        // 🔍 DEBUG: Check if slices are being processed
+        int processedSlices = 0;
+        
+        // Auto-fix viewport if no data found but data exists
+        if (visibleSlices.empty()) {
+            auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
+            if (!allSlices.empty()) {
+                qint64 oldestTime = allSlices.front()->startTime_ms;
+                qint64 newestTime = allSlices.back()->endTime_ms;
+                qint64 gap = timeStart - newestTime;
+                sLog_Render("🔍 LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
+                sLog_Render("🔍 TIME GAP: " << gap << "ms between newest data and viewport start");
+                
+                // AUTO-FIX: Snap viewport to actual data range
+                if (gap > 60000) { // If gap > 1 minute, auto-adjust
+                    qint64 newStart = newestTime - 30000; // 30s before newest data
+                    qint64 newEnd = newestTime + 30000;   // 30s after newest data
+                    sLog_Render("🔧 AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+                    
+                    m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+                    
+                    // Retry query with corrected viewport
+                    visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
+                    sLog_Render("🎯 VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                }
             }
         }
+        
+        // 🚀 Process all visible slices; viewport + transform handle GPU load
+        for (const auto* slice : visibleSlices) {
+            ++processedSlices;
+            createCellsFromLiquiditySlice(*slice);
+        }
+        
+        sLog_Render("🔍 SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
         
         sLog_Render("🎯 DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
                  << " TotalCells:" << m_visibleCells.size()
@@ -300,6 +354,14 @@ void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slic
     
     double minPrice = m_viewState->getMinPrice();
     double maxPrice = m_viewState->getMaxPrice();
+    
+    // 🔍 DEBUG: Log slice processing details
+    static int sliceCounter = 0;
+    if (++sliceCounter % 10 == 0) {
+        sLog_Render("🎯 SLICE DEBUG #" << sliceCounter << ": time=" << slice.startTime_ms 
+                    << " bids=" << slice.bidMetrics.size() << " asks=" << slice.askMetrics.size() 
+                    << " priceRange=$" << minPrice << "-$" << maxPrice);
+    }
     
     // Create cells for bid levels (tick-based iteration)
     for (size_t i = 0; i < slice.bidMetrics.size(); ++i) {
@@ -328,28 +390,65 @@ void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double 
     if (liquidity <= 0.0 || !m_viewState) return;
     
     CellInstance cell;
-    cell.timeSlot = slice.startTime_ms;  // Use correct field names
+    cell.timeSlot = slice.startTime_ms;
     cell.priceLevel = price;
     cell.liquidity = liquidity;
     cell.isBid = isBid;
-    cell.intensity = std::min(1.0, liquidity / 1000.0);  // Normalize intensity
-    cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);  // Default colors
-    
+    cell.intensity = std::min(1.0, liquidity / 1000.0);
+    cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
+    // Store world-space rect; it will be transformed by GridViewState
+    cell.screenRect = timeSliceToScreenRect(slice, price);
+
     m_visibleCells.push_back(cell);
+    
+    // 🔍 DEBUG: Log cell creation occasionally
+    static int cellCounter = 0;
+    if (++cellCounter % 50 == 0) {
+        sLog_Render("🎯 CELL DEBUG: Created cell #" << cellCounter << " at screenRect(" 
+                    << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
+                    << cell.screenRect.width() << "x" << cell.screenRect.height() 
+                    << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+    }
 }
 
 QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const {
     if (!m_viewState) return QRectF();
     
-    // Use current ViewState viewport for coordinate conversion
-    double timeStart = static_cast<double>(slice.startTime_ms);
-    double timeEnd = static_cast<double>(slice.endTime_ms);
-    double priceResolution = slice.tickSize;  // Use slice's tick size
+    // 🎯 FIX: Use CoordinateSystem for proper world-to-screen transformation
+    Viewport viewport{
+        m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+        m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+        m_viewState->getViewportWidth(), m_viewState->getViewportHeight()
+    };
+
+    const double priceResolution = getPriceResolution();  // Use dynamic price resolution from LOD system
+    const double halfTick = priceResolution * 0.5;
+
+    // Ensure a non-zero time extent
+    int64_t timeStart = slice.startTime_ms;
+    int64_t timeEnd = slice.endTime_ms;
+    if (timeEnd <= timeStart) {
+        int64_t span = slice.duration_ms > 0 ? slice.duration_ms : std::max<int64_t>(m_currentTimeframe_ms, 1);
+        timeEnd = timeStart + span;
+    }
+
+    // Use CoordinateSystem for proper transformation like old renderer
+    QPointF topLeft = CoordinateSystem::worldToScreen(timeStart, price + halfTick, viewport);
+    QPointF bottomRight = CoordinateSystem::worldToScreen(timeEnd, price - halfTick, viewport);
     
-    QPointF topLeft(timeStart, price + priceResolution/2);
-    QPointF bottomRight(timeEnd, price - priceResolution/2);
+    QRectF result(topLeft, bottomRight);
     
-    return QRectF(topLeft, bottomRight);
+    // 🔍 DEBUG: Log coordinate transformation once per batch
+    static int debugCounter = 0;
+    if (++debugCounter % 100 == 0) {
+        sLog_Render("🎯 COORD DEBUG: World(" << timeStart << "," << price << ") -> Screen(" 
+                    << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
+                    << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
+                    << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
+                    << viewport.width << "x" << viewport.height << "]");
+    }
+    
+    return result;
 }
 
 // 🚀 PHASE 3: LTSE delegation methods (moved from UGR)

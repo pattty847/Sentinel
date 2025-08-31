@@ -15,7 +15,6 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include <mutex>
 #include <QString>
 #include <QMetaObject>
 // 🚀 C++20 OPTIMIZATIONS
@@ -45,20 +44,7 @@ MarketDataCore::~MarketDataCore() {
 }
 
 void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {
-    // 🚨 FIX: WebSocket subscription state guards
-    std::lock_guard<std::mutex> lock(m_subscriptionMutex);
-    
-    // Guard against connection state changes
-    if (!m_running.load() || !m_ws.is_open()) {
-        sLog_Warning("⚠️ Cannot subscribe - WebSocket not ready");
-        return;
-    }
-    
-    // Prevent overlapping subscriptions
-    if (m_subscriptionInProgress.exchange(true)) {
-        sLog_Warning("⚠️ Subscription already in progress - skipping");
-        return;
-    }
+    // 🗑️ CLEANED UP: Redundant guards removed - write queue handles thread safety
     
     std::vector<std::string> new_symbols;
     for (const auto& s : symbols) {
@@ -70,8 +56,6 @@ void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols)
     if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
     }
-    
-    m_subscriptionInProgress = false;
 }
 
 void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
@@ -375,21 +359,48 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
             // Using a shared_ptr to manage the lifetime of the message string
             auto message_ptr = std::make_shared<std::string>(msg.dump());
 
-            m_ws.async_write(net::buffer(*message_ptr),
-                [this, message_ptr, channel](beast::error_code ec, std::size_t) {
-                    if (ec) {
-                        sLog_Error(QString("Subscription write error for channel %1: %2")
-                            .arg(QString::fromStdString(channel))
-                            .arg(QString::fromStdString(ec.message())));
-                        scheduleReconnect();
-                    }
-                });
+            // 🚨 FIX: Use write queue instead of direct async_write to prevent soft_mutex crash
+            enqueueWrite(message_ptr);
+            sLog_Data(QString("📤 Queued subscription for %1 channel").arg(QString::fromStdString(channel)));
         };
 
         // Send messages for both level2 and market_trades channels
         sendMessage("level2", type, symbols);
         sendMessage("market_trades", type, symbols);
     });
+}
+
+// 🚨 FIX: Beast WebSocket write queue implementation
+void MarketDataCore::enqueueWrite(std::shared_ptr<std::string> message) {
+    // MUST be called from strand context only
+    m_writeQueue.push_back(message);
+    if (!m_writeInProgress) {
+        doWrite();
+    }
+}
+
+void MarketDataCore::doWrite() {
+    // MUST be called from strand context only
+    if (m_writeQueue.empty()) {
+        m_writeInProgress = false;
+        return;
+    }
+    
+    m_writeInProgress = true;
+    auto message = m_writeQueue.front();
+    
+    m_ws.async_write(net::buffer(*message),
+        [this, message](beast::error_code ec, std::size_t) {
+            if (ec) {
+                sLog_Error(QString("WebSocket write error: %1").arg(QString::fromStdString(ec.message())));
+                scheduleReconnect();
+                return;
+            }
+            
+            // Write completed - process next message
+            m_writeQueue.pop_front();
+            doWrite();  // Process next message or set m_writeInProgress = false
+        });
 }
 
 void MarketDataCore::dispatch(const nlohmann::json& message) {

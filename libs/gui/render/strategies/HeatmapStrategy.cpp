@@ -11,19 +11,37 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 */
 #include "HeatmapStrategy.hpp"
 #include "../GridTypes.hpp"
+#include "../../../core/SentinelLogging.hpp"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
+#include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <algorithm>
+#include <iostream>
 
 
 QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
-    if (batch.cells.empty()) return nullptr;
+    // 🚨 PROOF: Add direct output that can't be cached or filtered
+    static int renderCounter = 0;
+    qDebug() << "🚨 HEATMAP buildNode() DEFINITELY EXECUTING - Counter:" << ++renderCounter;
+    std::cout << "🚨 DIRECT STDOUT: HeatmapStrategy::buildNode() called with " << batch.cells.size() << " cells!" << std::endl;
     
-    // Create geometry node for heatmap rendering
+    sLog_Render("🎯 HEATMAP ENTRY #" << renderCounter << ": buildNode called with " 
+                << batch.cells.size() << " cells");
+    
+    if (batch.cells.empty()) {
+        sLog_Render("🎯 HEATMAP EXIT: Returning nullptr - batch is empty");
+        return nullptr;
+    }
+    
+    sLog_Render("🎯 HEATMAP RENDER #" << renderCounter << ": Building geometry with " 
+                << batch.cells.size() << " cells, maxCells=" << batch.maxCells 
+                << " minVolumeFilter=" << batch.minVolumeFilter);
+    
+    // 🔍 DEBUGGING: Try solid color material instead of vertex color
     auto* node = new QSGGeometryNode;
-    auto* material = new QSGVertexColorMaterial;
-    material->setFlag(QSGMaterial::Blending);
+    auto* material = new QSGFlatColorMaterial;
+    material->setColor(QColor(255, 0, 0, 128)); // Solid red for visibility
     node->setMaterial(material);
     node->setFlag(QSGNode::OwnsMaterial);
     
@@ -31,14 +49,14 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     int cellCount = std::min(static_cast<int>(batch.cells.size()), batch.maxCells);
     int vertexCount = cellCount * 6;
     
-    // Create geometry
-    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
+    // Create geometry for flat color (simple Point2D instead of ColoredPoint2D)
+    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), vertexCount);
     geometry->setDrawingMode(QSGGeometry::DrawTriangles);
     node->setGeometry(geometry);
     node->setFlag(QSGNode::OwnsGeometry);
     
-    // Fill vertex buffer
-    auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
+    // Fill vertex buffer (simple Point2D coordinates)
+    auto* vertices = static_cast<QSGGeometry::Point2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
     for (int i = 0; i < cellCount; ++i) {
@@ -56,20 +74,25 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
         float top = cell.screenRect.top();
         float bottom = cell.screenRect.bottom();
         
-        // Triangle 1: top-left, top-right, bottom-left
-        vertices[vertexIndex++].set(left, top, color.red(), color.green(), color.blue(), color.alpha());
-        vertices[vertexIndex++].set(right, top, color.red(), color.green(), color.blue(), color.alpha());
-        vertices[vertexIndex++].set(left, bottom, color.red(), color.green(), color.blue(), color.alpha());
+        // Debug coordinates removed to reduce log spam
+        
+        // Triangle 1: top-left, top-right, bottom-left (simple coordinates, no color)
+        vertices[vertexIndex++].set(left, top);
+        vertices[vertexIndex++].set(right, top);
+        vertices[vertexIndex++].set(left, bottom);
         
         // Triangle 2: top-right, bottom-right, bottom-left
-        vertices[vertexIndex++].set(right, top, color.red(), color.green(), color.blue(), color.alpha());
-        vertices[vertexIndex++].set(right, bottom, color.red(), color.green(), color.blue(), color.alpha());
-        vertices[vertexIndex++].set(left, bottom, color.red(), color.green(), color.blue(), color.alpha());
+        vertices[vertexIndex++].set(right, top);
+        vertices[vertexIndex++].set(right, bottom);
+        vertices[vertexIndex++].set(left, bottom);
     }
     
     // Update geometry with actual vertex count used
     geometry->allocate(vertexIndex);
     node->markDirty(QSGNode::DirtyGeometry);
+    
+    sLog_Render("🎯 HEATMAP COMPLETE: Created geometry with " << vertexIndex << " vertices from " 
+                << batch.cells.size() << " cells (after volume filtering)");
     
     return node;
 }

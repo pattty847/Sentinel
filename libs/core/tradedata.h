@@ -195,4 +195,7 @@ private:
     mutable std::mutex m_mutex; // Thread safety for concurrent access
 };
 
+#include <QMetaType>
+Q_DECLARE_METATYPE(Trade)
+
 #endif // TRADEDATA_H 

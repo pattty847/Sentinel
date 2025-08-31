@@ -25,7 +25,14 @@ GridSceneNode::~GridSceneNode() {
 }
 
 void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy) {
-    if (!strategy) return;
+    if (!strategy) {
+        qDebug() << "🔍 GRIDSCENENODE: No strategy provided!";
+        return;
+    }
+    
+    qDebug() << "🔍 GRIDSCENENODE: updateContent called with" << batch.cells.size() << "cells, strategy:" << strategy->getStrategyName();
+    qDebug() << "🔍 GRIDSCENENODE: Strategy pointer address:" << (void*)strategy;
+    qDebug() << "🔍 GRIDSCENENODE: About to call strategy->buildNode()";
     
     // Remove old content node
     if (m_contentNode) {
@@ -36,8 +43,13 @@ void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* 
     
     // Create new content using strategy
     m_contentNode = strategy->buildNode(batch);
+    qDebug() << "🔍 GRIDSCENENODE: strategy->buildNode() returned, result:" << (void*)m_contentNode;
+    
     if (m_contentNode) {
+        qDebug() << "🔍 GRIDSCENENODE: Content node created successfully";
         appendChildNode(m_contentNode);
+    } else {
+        qDebug() << "🔍 GRIDSCENENODE: WARNING - strategy->buildNode() returned nullptr!";
     }
 }
 

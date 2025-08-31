@@ -15,6 +15,7 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QTimer>
+#include <QThread>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
@@ -22,7 +23,6 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <memory>
 #include <atomic>
 #include <mutex>
-#include "../core/LiquidityTimeSeriesEngine.h"
 #include "../core/TradeData.h"
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
@@ -75,9 +75,6 @@ public:
     Q_ENUM(RenderMode)
 
 private:
-    // 🚀 PHASE 3: Removed V1 violation - m_liquidityEngine deleted! All data goes through DataProcessor now
-    QTimer* m_orderBookTimer;
-    
     // Rendering configuration
     RenderMode m_renderMode = RenderMode::LiquidityHeatmap;
     bool m_showVolumeProfile = true;
@@ -145,12 +142,10 @@ public:
     
     // 🎯 DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
-    Q_INVOKABLE void updateOrderBook(std::shared_ptr<const OrderBook> orderBook);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
     // 🎯 GRID CONFIGURATION
-    Q_INVOKABLE void setTimeResolution(int resolution_ms);
     Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
@@ -179,7 +174,7 @@ public:
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     // PHASE 2.1: Dense data access
-    void setDataCache(class DataCache* cache) { m_dataCache = cache; }
+    void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
     
     // PHASE 2.2: Unified monitoring access
     void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
@@ -210,10 +205,6 @@ public slots:
     
     // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
     void onViewportChanged();
-
-private slots:
-    // Timer-based order book capture for liquidity time series
-    void captureOrderBookSnapshot();
 
 signals:
     void renderModeChanged();
@@ -262,6 +253,7 @@ private:
     std::unique_ptr<GridViewState> m_viewState;
     std::shared_ptr<SentinelMonitor> m_sentinelMonitor;  // PHASE 2.2: Unified monitoring
     std::unique_ptr<DataProcessor> m_dataProcessor;
+    std::unique_ptr<QThread> m_dataProcessorThread;  // Worker thread for DataProcessor
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
     std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
     std::unique_ptr<IRenderStrategy> m_candleStrategy;

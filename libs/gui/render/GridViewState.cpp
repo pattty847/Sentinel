@@ -10,7 +10,7 @@ Related: GridViewState.hpp.
 Assumptions: Zoom logic correctly implements "zoom-to-cursor" functionality.
 */
 #include "GridViewState.hpp"
-#include "../CoordinateSystem.h"
+// CoordinateSystem not used directly here
 #include <QMatrix4x4>
 #include <QSizeF>
 #include <QDebug>
@@ -62,14 +62,36 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
     if (!m_timeWindowValid || itemBounds.isEmpty()) {
         return QMatrix4x4();
     }
-    
-    QMatrix4x4 transform;
-    
-    // Apply visual offset during active dragging
-    if (m_isDragging && !m_panVisualOffset.isNull()) {
-        transform.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
+
+    // Map world (time ms, price) → screen pixels
+    // World X range: [m_visibleTimeStart_ms, m_visibleTimeEnd_ms]
+    // World Y range: [m_minPrice, m_maxPrice] (increase up)
+    // Screen: width x height with Y down. We flip Y with a negative scale.
+
+    const double timeRange = static_cast<double>(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
+    const double priceRange = (m_maxPrice - m_minPrice);
+    if (timeRange <= 0.0 || priceRange <= 0.0 || m_viewportWidth <= 0.0 || m_viewportHeight <= 0.0) {
+        return QMatrix4x4();
     }
-    
+
+    const double sx = m_viewportWidth / timeRange;
+    const double sy = -m_viewportHeight / priceRange; // flip Y so higher price is higher on screen
+
+    QMatrix4x4 transform;
+
+    // Scale world to pixels
+    transform.scale(sx, sy, 1.0);
+
+    // Translate world origin so timeStart→x=0, priceMax→y=0 after flip
+    transform.translate(-static_cast<double>(m_visibleTimeStart_ms), -m_maxPrice, 0.0);
+
+    // Apply visual pan offset in pixel space last (drag feedback)
+    if (m_isDragging && !m_panVisualOffset.isNull()) {
+        QMatrix4x4 screenSpace;
+        screenSpace.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
+        transform = screenSpace * transform;
+    }
+
     return transform;
 }
 
@@ -234,12 +256,6 @@ void GridViewState::handlePanEnd() {
     if (m_panVisualOffset.manhattanLength() > 0 && m_viewportWidth > 0 && m_viewportHeight > 0) {
         // Create viewport for coordinate conversion
         // TODO: figure out why we aren't using 'viewport'
-        Viewport viewport{
-            m_visibleTimeStart_ms, m_visibleTimeEnd_ms,
-            m_minPrice, m_maxPrice,
-            m_viewportWidth, m_viewportHeight
-        };
-        
         // Convert visual offset to data coordinates using CoordinateSystem
         int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
         double priceRange = m_maxPrice - m_minPrice;
@@ -348,10 +364,6 @@ void GridViewState::panDown() {
 
 double GridViewState::calculateOptimalPriceResolution() const {
     if (!m_timeWindowValid) return 1.0;  // Default fallback
-    
-    // Calculate time span in seconds  
-    // TODO: figure out why we aren't using 'timeSpanSeconds'
-    double timeSpanSeconds = (m_visibleTimeEnd_ms - m_visibleTimeStart_ms) / 1000.0;
     
     // Calculate price span (this is the key - how much price range is visible)
     double priceSpan = m_maxPrice - m_minPrice;
