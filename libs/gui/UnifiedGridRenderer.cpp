@@ -16,6 +16,9 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
+#include <QThread>
+#include <QMetaObject>
+#include <QMetaType>
 #include <QDateTime>
 #include <algorithm>
 #include <cmath>
@@ -43,44 +46,35 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     // 🐛 FIX: Only accept mouse events on empty areas, not over UI controls
     setAcceptHoverEvents(false);  // Reduce event capture
     
-    // Initialize geometry cache
-    m_geometryCache.isValid = false;
-    m_geometryCache.node = nullptr;
-    
-    // Order book polling timer removed - now handled by DataProcessor
-    
-    // 🚀 GEOMETRY CACHE CLEANUP: Periodic cache maintenance every 30 seconds
-    QTimer* cacheCleanupTimer = new QTimer(this);
-    connect(cacheCleanupTimer, &QTimer::timeout, [this]() {
-        // Reset cache occasionally to prevent stale data buildup
-        static int cleanupCount = 0;
-        sLog_Render("🧹 Cache cleanup #" << ++cleanupCount << " - geometry cache reset for fresh rendering");
-        m_geometryCache.isValid = false;  // Force refresh on next render
-        m_geometryDirty.store(true);  // Trigger rebuild
-    });
-    cacheCleanupTimer->start(30000);  // 30 seconds
-    
     // Initialize new modular architecture
     initializeV2Architecture();
-    sLog_App("🚀 UnifiedGridRenderer V2: Modular architecture initialized");
+    sLog_App("UnifiedGridRenderer V2: Modular architecture initialized");
 }
 
-UnifiedGridRenderer::~UnifiedGridRenderer() {}
+UnifiedGridRenderer::~UnifiedGridRenderer() {
+    // Properly shutdown worker thread
+    if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
+        m_dataProcessorThread->quit();
+        m_dataProcessorThread->wait(5000);  // Wait up to 5 seconds
+    }
+}
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
     if (m_dataProcessor) {
-        m_dataProcessor->onTradeReceived(trade);
+        QMetaObject::invokeMethod(m_dataProcessor.get(), "onTradeReceived", 
+                                 Qt::QueuedConnection, Q_ARG(Trade, trade));
     }
 }
 
-// 🚀 PHASE 3: Pure delegation to DataProcessor - no business logic in UGR!
+// Pure delegation to DataProcessor
 void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
     if (m_dataProcessor) {
-        m_dataProcessor->onLiveOrderBookUpdated(productId);
+        QMetaObject::invokeMethod(m_dataProcessor.get(), "onLiveOrderBookUpdated", 
+                                 Qt::QueuedConnection, Q_ARG(QString, productId));
     }
     
-    // 🔥 KEEP UI DIRTY FLAG: Signal that we need a repaint
+    // Signal that we need a repaint
     m_geometryDirty = true;
     update();
 }
@@ -96,54 +90,63 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     update();
     // GridViewState emits viewportChanged which is connected to us
     
-    // 🔥 ATOMIC THROTTLING: No more manual counters!
+    // Atomic throttling
     sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
                << " Price:[$" << minPrice << "-$" << maxPrice << "]");
 }
 
 void UnifiedGridRenderer::onViewportChanged() {
-    if (!m_viewState || !m_dataProcessor) {
-        sLog_Render("⚠️ VIEWPORT CHANGED: Missing components - ViewState:" << (m_viewState ? "YES" : "NO") 
-                   << " DataProcessor:" << (m_dataProcessor ? "YES" : "NO"));
-        return;
+    if (!m_viewState || !m_dataProcessor) return;
+    
+    // 🎯 DYNAMIC RESAMPLING: Auto-select timeframe based on pixel target (8-16px cell width)
+    qint64 timeStart = m_viewState->getVisibleTimeStart();
+    qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+    double viewportWidth = m_viewState->getViewportWidth();
+    
+    // Calculate target timeframe for 8-16px cell width
+    double timeSpan_ms = static_cast<double>(timeEnd - timeStart);
+    double targetCellWidth = 12.0; // Target 12px cells
+    double targetTimeframe_ms = (timeSpan_ms * targetCellWidth) / viewportWidth;
+    
+    // Available timeframes in LTSE
+    const std::vector<int64_t> timeframes = {100, 250, 500, 1000, 2000, 5000, 10000};
+    
+    // Find closest timeframe
+    int64_t bestTimeframe = timeframes[0];
+    double bestDiff = std::abs(targetTimeframe_ms - bestTimeframe);
+    
+    for (int64_t tf : timeframes) {
+        double diff = std::abs(targetTimeframe_ms - tf);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestTimeframe = tf;
+        }
     }
     
-    // 🚀 DYNAMIC PRICE LOD: Calculate optimal price resolution based on zoom level
-    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
-    double currentResolution = m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0;
-    
-    qint64 timeStart = m_viewState->getVisibleTimeStart();
-    qint64 timeEnd = m_viewState->getVisibleTimeEnd(); 
-    double timeSpanMs = timeEnd - timeStart;
-    // TODO: figure out why we aren't using 'timeSpanSeconds'
-    double timeSpanSeconds = timeSpanMs / 1000.0;
-    
-    double priceSpan = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
-    
-    sLog_Render("🔍 PRICE LOD CHECK: Current=$" << currentResolution 
-               << " Optimal=$" << optimalResolution 
-               << " TimeSpanMs=" << timeSpanMs << " PriceSpan=$" << priceSpan);
-    
-    // Only update if resolution changed significantly (avoid thrashing)
-    if (std::abs(optimalResolution - currentResolution) > 0.01) {
-        if (m_dataProcessor) m_dataProcessor->setPriceResolution(optimalResolution);
+    // Update timeframe if it changed significantly
+    if (m_dataProcessor && bestTimeframe != m_currentTimeframe_ms) {
+        m_currentTimeframe_ms = bestTimeframe;
+        m_dataProcessor->setTimeframe(bestTimeframe);
         m_geometryDirty.store(true);
         update();
-        
-        sLog_Render("🚀 AUTO PRICE LOD: $" << currentResolution << " → $" << optimalResolution 
-                   << " (viewport optimization)");
+        emit timeframeChanged();
+    }
+    
+    // Also update price resolution
+    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
+    double currentResolution = m_dataProcessor->getPriceResolution();
+    if (std::abs(optimalResolution - currentResolution) > 0.01) {
+        m_dataProcessor->setPriceResolution(optimalResolution);
+        m_geometryDirty.store(true);
+        update();
         emit priceResolutionChanged();
     }
 }
 
-void UnifiedGridRenderer::captureOrderBookSnapshot() {
-    // Delegated to DataProcessor - this method kept for compatibility
-    // but no longer used since DataProcessor handles snapshots
-}
 
 void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
     if (newGeometry.size() != oldGeometry.size()) {
-        // 🔥 ATOMIC THROTTLING: No more manual counters!
+        // Atomic throttling
         sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
         // Keep GridViewState in sync with the item size for accurate coord math
@@ -163,17 +166,19 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 }
 
 void UnifiedGridRenderer::updateVisibleCells() {
-    // 🚀 PHASE 3: Pure delegation to DataProcessor - no business logic in UGR!
+    // 🎯 THREADING FIX: Use thread-safe call like all other DataProcessor methods
     if (m_dataProcessor) {
-        m_dataProcessor->updateVisibleCells();
+        // Use thread-safe blocking call to ensure data is processed
+        QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", 
+                                 Qt::BlockingQueuedConnection);
         
-        // Get processed cells from DataProcessor
+        // Now safe to get the processed cells
         m_visibleCells = m_dataProcessor->getVisibleCells();
     } else {
         m_visibleCells.clear();
     }
     
-    // 🔥 KEEP UI DIRTY FLAG: Signal that we need a repaint
+    // Signal that we need a repaint
     m_geometryDirty = true;
     update();
 }
@@ -239,20 +244,7 @@ void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
 }
 
 // Public API methods
-void UnifiedGridRenderer::addTrade(const Trade& trade) {
-    onTradeReceived(trade);
-}
-
-void UnifiedGridRenderer::updateOrderBook(std::shared_ptr<const OrderBook> orderBook) {
-    // PHASE 2.1: Legacy API compatibility - extract productId and use new signal
-    if (orderBook && !orderBook->product_id.empty()) {
-        onLiveOrderBookUpdated(QString::fromStdString(orderBook->product_id));
-    }
-}
-
-void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) {
-    onViewChanged(timeStart, timeEnd, priceMin, priceMax);
-}
+// 🗑️ DELETED: Redundant wrapper methods - use direct calls instead
 
 void UnifiedGridRenderer::clearData() {
     // Delegate to DataProcessor
@@ -273,170 +265,46 @@ void UnifiedGridRenderer::clearData() {
     sLog_App("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
 }
 
-void UnifiedGridRenderer::setTimeResolution(int resolution_ms) {
-    // Note: Manual resolution override implemented via LiquidityTimeSeriesEngine
-    sLog_Render("🎯 Manual time resolution override requested: " << resolution_ms << "ms");
-}
-
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
     if (m_dataProcessor && resolution > 0) {
         m_dataProcessor->setPriceResolution(resolution);
-        m_geometryDirty.store(true); // Rebuild is necessary with new price buckets
+        m_geometryDirty.store(true);
         update();
-        sLog_Render("🎯 Manual price resolution override set to: $" << resolution);
     }
 }
 
-void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {
-    setTimeResolution(timeResMs);
-    setPriceResolution(priceRes);
-    sLog_Render("Grid resolution set to: " << timeResMs << " ms, $" << priceRes);
-}
+// 🗑️ DELETED: setTimeResolution (empty), setGridResolution (redundant)
 
-// Utility to round to a "nice" number
-static double getNiceNumber(double raw) {
-    if (raw == 0.0) return 0.0;
-    double exponent = std::pow(10.0, std::floor(std::log10(raw)));
-    double fraction = raw / exponent;
-    double niceFraction;
-    if (fraction <= 1.0) niceFraction = 1.0;
-    else if (fraction <= 2.0) niceFraction = 2.0;
-    else if (fraction <= 5.0) niceFraction = 5.0;
-    else niceFraction = 10.0;
-    return niceFraction * exponent;
-}
-
-UnifiedGridRenderer::GridResolution UnifiedGridRenderer::calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines, int targetHorizontalLines) {
-    double rawPriceChunk = priceSpan / targetHorizontalLines;
-    double nicePriceChunk = getNiceNumber(rawPriceChunk);
-    double rawTimeChunkMs = static_cast<double>(timeSpanMs) / targetVerticalLines;
-    int niceTimeChunkMs = static_cast<int>(getNiceNumber(rawTimeChunkMs));
-    if (nicePriceChunk < 0.00001) nicePriceChunk = 0.00001;
-    if (niceTimeChunkMs < 100) niceTimeChunkMs = 100;
-    return {niceTimeChunkMs, nicePriceChunk};
-}
-
-int UnifiedGridRenderer::getCurrentTimeResolution() const {
-    return static_cast<int>(m_currentTimeframe_ms);
-}
-
-double UnifiedGridRenderer::getCurrentPriceResolution() const {
-    return 1.0;  // $1 default price resolution
-}
-
-// 🚀 PHASE 3E: Debug info delegation
-QString UnifiedGridRenderer::getGridDebugInfo() const { 
-    return QString("Cells:%1 Time:%2-%3ms Price:$%4-$%5 Size:%6x%7")
-        .arg(m_visibleCells.size()).arg(getVisibleTimeStart()).arg(getVisibleTimeEnd())
-        .arg(getMinPrice()).arg(getMaxPrice()).arg(width()).arg(height()); 
-}
-
-// 🚀 PHASE 3E: Debug detailed delegation
-QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" OrderBook:%1").arg(m_dataProcessor && m_dataProcessor->hasValidOrderBook() ? "YES" : "NO"); }
+// 🗑️ DELETED: Grid calculation utilities, debug methods - use DataProcessor directly
 
 void UnifiedGridRenderer::setGridMode(int mode) {
-    // 0 = Fine (50ms, $2.50)
-    // 1 = Medium (100ms, $5.00)  
-    // 2 = Coarse (250ms, $10.00)
-    
-    int timeRes[] = {50, 100, 250};
     double priceRes[] = {2.5, 5.0, 10.0};
-    
+    int timeRes[] = {50, 100, 250};
     if (mode >= 0 && mode <= 2) {
-        setTimeResolution(timeRes[mode]);
         setPriceResolution(priceRes[mode]);
-        setTimeframe(timeRes[mode]);  // Also update the timeframe
-        
-        sLog_Render("🎯 Grid mode set to:" << (mode == 0 ? "FINE" : mode == 1 ? "MEDIUM" : "COARSE"));
+        setTimeframe(timeRes[mode]);
     }
 }
 
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     if (m_currentTimeframe_ms != timeframe_ms) {
         m_currentTimeframe_ms = timeframe_ms;
-        
-        // 🐛 FIX: Mark as manual timeframe change and start timer
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.start();
-        
-        // Ensure this timeframe exists in the engine
         if (m_dataProcessor) m_dataProcessor->addTimeframe(timeframe_ms);
-        
         m_geometryDirty.store(true);
         update();
-        
-        // 🚀 OPTIMIZATION 4: Emit signal for QML binding updates
         emit timeframeChanged();
-        
-        sLog_Render("🎯 MANUAL TIMEFRAME CHANGE: " << timeframe_ms << "ms (auto-suggestion disabled for 10s)");
     }
 }
 
-// Pan/Zoom Controls Implementation
-void UnifiedGridRenderer::zoomIn() {
-    if (m_viewState) {
-        // Use gentle zoom delta (0.1) and center of viewport for UI button zoom
-        m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("🔍 Zoom In");
-    }
-}
-
-void UnifiedGridRenderer::zoomOut() {
-    if (m_viewState) {
-        // Use gentle zoom delta (-0.1) and center of viewport for UI button zoom
-        m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height()));
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("🔍 Zoom Out");
-    }
-}
-
-void UnifiedGridRenderer::resetZoom() {
-    if (m_viewState) {
-        m_viewState->resetZoom();
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("🔍 Zoom Reset");
-    }
-}
-
-void UnifiedGridRenderer::panLeft() {
-    if (m_viewState) {
-        m_viewState->panLeft();
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("👈 Pan Left");
-    }
-}
-
-void UnifiedGridRenderer::panRight() {
-    if (m_viewState) {
-        m_viewState->panRight();
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("👉 Pan Right");
-    }
-}
-
-void UnifiedGridRenderer::panUp() {
-    if (m_viewState) {
-        m_viewState->panUp();
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("👆 Pan Up");
-    }
-}
-
-void UnifiedGridRenderer::panDown() {
-    if (m_viewState) {
-        m_viewState->panDown();
-        m_geometryDirty.store(true);
-        update();
-        sLog_Render("👇 Pan Down");
-    }
-}
+void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::panLeft() { if (m_viewState) { m_viewState->panLeft(); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::panRight() { if (m_viewState) { m_viewState->panRight(); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::panUp() { if (m_viewState) { m_viewState->panUp(); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::panDown() { if (m_viewState) { m_viewState->panDown(); m_geometryDirty.store(true); update(); } }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     if (m_viewState) {
@@ -488,17 +356,8 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     return CoordinateSystem::screenToWorld(adjustedScreen, viewport);
 }
 
-double UnifiedGridRenderer::getScreenWidth() const {
-    return width();
-}
+// 🗑️ DELETED: Redundant getScreenWidth/Height - use width()/height() directly
 
-double UnifiedGridRenderer::getScreenHeight() const {
-    return height();
-}
-
-// 🖱️ MOUSE INTERACTION IMPLEMENTATION
-
-// 🚀 PHASE 3E: Mouse press delegation
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
         m_viewState->setViewportSize(width(), height()); 
@@ -531,43 +390,61 @@ double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ?
 // 🚀 NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
 
 void UnifiedGridRenderer::initializeV2Architecture() {
-    m_viewState = std::make_unique<GridViewState>(this);
-    // m_sentinelMonitor is injected via setSentinelMonitor() - no local creation
-    m_dataProcessor = std::make_unique<DataProcessor>(this);
+    // Register metatypes for cross-thread signal/slot connections
+    qRegisterMetaType<Trade>("Trade");
     
-    // Initialize rendering strategies
+    m_viewState = std::make_unique<GridViewState>(this);
+    
+    // Create DataProcessor on worker thread for background processing
+    m_dataProcessorThread = std::make_unique<QThread>();
+    m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
+    m_dataProcessor->moveToThread(m_dataProcessorThread.get());
+    
+    // Connect signals with QueuedConnection for thread safety  
+    // THROTTLE: Only rebuild geometry every 250ms, not on every data update
+    connect(m_dataProcessor.get(), &DataProcessor::dataUpdated, 
+            this, [this]() { 
+                static QElapsedTimer lastUpdate;
+                if (!lastUpdate.isValid() || lastUpdate.elapsed() > 250) {
+                    m_geometryDirty.store(true); 
+                    update(); 
+                    lastUpdate.start();
+                }
+            }, Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
+            this, &UnifiedGridRenderer::viewportChanged, Qt::QueuedConnection);
+    
+    // Start the worker thread
+    m_dataProcessorThread->start();
+    
+    // Dependencies will be set later when setDataCache() is called
+    // Set ViewState immediately as it's available
+    QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
+        m_dataProcessor->setGridViewState(m_viewState.get());
+    }, Qt::QueuedConnection);
+    
     m_heatmapStrategy = std::make_unique<HeatmapStrategy>();
     m_tradeFlowStrategy = std::make_unique<TradeFlowStrategy>();
     m_candleStrategy = std::make_unique<CandleStrategy>();
     
-    // Wire up V2 components
-    m_dataProcessor->setGridViewState(m_viewState.get());
-    // 🚀 PHASE 3: DataProcessor owns LTSE now, no injection needed
-    m_dataProcessor->setDataCache(m_dataCache);  // 🚀 PHASE 3: Inject DataCache dependency
+    connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
+    connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
+    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
+    connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
-    // Connect view state signals to maintain existing API compatibility
-    connect(m_viewState.get(), &GridViewState::viewportChanged, 
-            this, &UnifiedGridRenderer::viewportChanged);
-    connect(m_viewState.get(), &GridViewState::viewportChanged, 
-            this, &UnifiedGridRenderer::onViewportChanged);
-    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged,
-            this, &UnifiedGridRenderer::panVisualOffsetChanged);
-    connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged,
-            this, &UnifiedGridRenderer::autoScrollEnabledChanged);
-    
-    // Connect data processor signals
-    connect(m_dataProcessor.get(), &DataProcessor::dataUpdated,
-            this, [this]() {
-                m_geometryDirty.store(true);
-                update();
-            });
-    connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
-            this, &UnifiedGridRenderer::viewportChanged);
-    
-    // Start data processing
     m_dataProcessor->startProcessing();
-            
-    sLog_App("🚀 V2 Architecture: GridViewState + DataProcessor + 3 render strategies initialized");
+}
+
+// PHASE 2.1: Dense data access - set cache on both UGR and DataProcessor
+void UnifiedGridRenderer::setDataCache(DataCache* cache) {
+    m_dataCache = cache;
+    
+    // Also set the cache on DataProcessor using thread-safe invocation
+    if (m_dataProcessor) {
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, cache]() {
+            m_dataProcessor->setDataCache(cache);
+        }, Qt::QueuedConnection);
+    }
 }
 
 IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
@@ -587,79 +464,53 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
-    if (m_sentinelMonitor) {
-        m_sentinelMonitor->startFrame();
-    }
-    
-    // 🔥 ATOMIC THROTTLING: No more manual counters!
-    sLog_Render("🚀 V2 PAINT mode=" << getCurrentStrategy()->getStrategyName()
-             << " size=" << width() << "x" << height() 
-             << " FPS=" << (m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0));
-    
+    qDebug() << "🔍 UGR: updatePaintNodeV2 called, size:" << width() << "x" << height();
+    if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
     if (width() <= 0 || height() <= 0) {
+        qDebug() << "🔍 UGR: Invalid size, returning oldNode";
         return oldNode;
     }
     
-    // Use GridSceneNode as root (maintains transform capabilities)
     auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
     bool isNewNode = !sceneNode;
     if (isNewNode) {
         sceneNode = new GridSceneNode();
-        if (m_sentinelMonitor) {
-            m_sentinelMonitor->recordGeometryRebuild();
-        }
+        if (m_sentinelMonitor) m_sentinelMonitor->recordGeometryRebuild();
     }
     
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
-        
-        // Check if we need to rebuild geometry
         bool needsRebuild = m_geometryDirty.load() || isNewNode;
         
         if (needsRebuild) {
-            // Update visible cells using existing logic
+            qDebug() << "🔍 UGR: needsRebuild=true, calling updateVisibleCells()";
             updateVisibleCells();
             
-            // Create batch for current strategy
-            GridSliceBatch batch;
-            batch.cells = m_visibleCells;
-            batch.intensityScale = m_intensityScale;
-            batch.minVolumeFilter = m_minVolumeFilter;
-            batch.maxCells = m_maxCells;
+            qDebug() << "🔍 UGR: Creating GridSliceBatch with" << m_visibleCells.size() << "cells";
+            // Render pipeline: passing cells to strategy
+            GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
             
-            // Update content using selected strategy
             IRenderStrategy* strategy = getCurrentStrategy();
-            sceneNode->updateContent(batch, strategy);
+            qDebug() << "🔍 UGR: Using strategy:" << (strategy ? strategy->getStrategyName() : "NULLPTR");
             
-            // Update volume profile if enabled
+            sceneNode->updateContent(batch, strategy);
             if (m_showVolumeProfile) {
                 updateVolumeProfile();
                 sceneNode->updateVolumeProfile(m_volumeProfile);
             }
             sceneNode->setShowVolumeProfile(m_showVolumeProfile);
-            
             m_geometryDirty.store(false);
-            if (m_sentinelMonitor) {
-                m_sentinelMonitor->recordCacheMiss();
-            }
-            
-            // sLog_Render("🚀 V2 REBUILD: " << batch.cells.size() << " cells, strategy=" 
-            //         << strategy->getStrategyName());
+            if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
         } else {
-            if (m_sentinelMonitor) {
-                m_sentinelMonitor->recordCacheHit();
-            }
+            qDebug() << "🔍 UGR: needsRebuild=false, using cache";
+            if (m_sentinelMonitor) m_sentinelMonitor->recordCacheHit();
         }
         
-        // Always update transform for smooth interaction
-        if (m_viewState) {
-            QMatrix4x4 transform = m_viewState->calculateViewportTransform(
-                QRectF(0, 0, width(), height()));
-            sceneNode->updateTransform(transform);
-            if (m_sentinelMonitor) {
-                m_sentinelMonitor->recordTransformApplied();
-            }
-        }
+        // 🎯 FIX: Use identity transform since DataProcessor already converts to screen pixels
+        // Double transformation was pushing geometry off-screen
+        QMatrix4x4 identityTransform;
+        sceneNode->updateTransform(identityTransform);
+        if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
     }
     
     if (m_sentinelMonitor) {
@@ -670,23 +521,19 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
 
 // 🚀 V2 VIEWPORT DELEGATION
 
-qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
-    return m_viewState ? m_viewState->getVisibleTimeStart() : 0;
-}
-
-qint64 UnifiedGridRenderer::getVisibleTimeEnd() const {
-    return m_viewState ? m_viewState->getVisibleTimeEnd() : 0;
-}
-
-double UnifiedGridRenderer::getMinPrice() const {
-    return m_viewState ? m_viewState->getMinPrice() : 0.0;
-}
-
-double UnifiedGridRenderer::getMaxPrice() const {
-    return m_viewState ? m_viewState->getMaxPrice() : 0.0;
-}
-
-QPointF UnifiedGridRenderer::getPanVisualOffset() const {
-    return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0);
-}
+// QML API - Minimal implementations for Q_PROPERTY/Q_INVOKABLE compatibility
+void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
+void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
+void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
+int UnifiedGridRenderer::getCurrentTimeResolution() const { return static_cast<int>(m_currentTimeframe_ms); }
+double UnifiedGridRenderer::getCurrentPriceResolution() const { return m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0; }
+QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
+QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
+double UnifiedGridRenderer::getScreenWidth() const { return width(); }
+double UnifiedGridRenderer::getScreenHeight() const { return height(); }
+qint64 UnifiedGridRenderer::getVisibleTimeStart() const { return m_viewState ? m_viewState->getVisibleTimeStart() : 0; }
+qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_viewState->getVisibleTimeEnd() : 0; }
+double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
+double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
+QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
 

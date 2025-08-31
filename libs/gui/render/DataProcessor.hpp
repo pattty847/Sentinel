@@ -30,11 +30,17 @@ class DataProcessor : public QObject {
 public:
     explicit DataProcessor(QObject* parent = nullptr);
     ~DataProcessor();
-    
-    // Data ingestion
+
+public slots:
+    // Data ingestion (slots for cross-thread invocation)
     void onTradeReceived(const Trade& trade);
     void onOrderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
-    void onLiveOrderBookUpdated(const QString& productId);  // 🚀 PHASE 3: Dense LiveOrderBook signal handler
+    void onLiveOrderBookUpdated(const QString& productId);  // Dense LiveOrderBook signal handler
+    
+    // 🎯 THREADING FIX: Move updateVisibleCells to slots for cross-thread calls
+    void updateVisibleCells();
+
+public:
     
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
@@ -50,7 +56,6 @@ public:
     void stopProcessing();
     
     // 🚀 PHASE 3: Business logic methods moved from UGR
-    void updateVisibleCells();
     void createCellsFromLiquiditySlice(const struct LiquidityTimeSlice& slice);
     void createLiquidityCell(const struct LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
     QRectF timeSliceToScreenRect(const struct LiquidityTimeSlice& slice, double price) const;
@@ -101,4 +106,7 @@ private:
     
     // 🚀 PHASE 3: Visible cells storage (moved from UGR)
     std::vector<struct CellInstance> m_visibleCells;
+    
+    // 🎯 PRICE LOD: Dynamic price resolution
+    double m_priceResolution = 1.0;
 };

@@ -26,6 +26,8 @@ public:
     qint64 getVisibleTimeEnd() const { return m_visibleTimeEnd_ms; }
     double getMinPrice() const { return m_minPrice; }
     double getMaxPrice() const { return m_maxPrice; }
+    double getViewportWidth() const { return m_viewportWidth; }
+    double getViewportHeight() const { return m_viewportHeight; }
     
     // Pan/zoom state
     double getZoomFactor() const { return m_zoomFactor; }

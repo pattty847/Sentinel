@@ -23,6 +23,7 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <chrono>
 #include <optional>
 #include <random>
+#include <deque>
 #include <QObject>
 #include <QTimer>
 #include "Authenticator.hpp"
@@ -80,6 +81,10 @@ private:
     // Helpers
     void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
     void dispatch(const nlohmann::json&);
+    
+    // 🚨 FIX: Beast WebSocket write queue methods (strand-only, no mutex)
+    void enqueueWrite(std::shared_ptr<std::string> message);
+    void doWrite();
 
     // Message handling sub-functions
     void handleMarketTrades(const nlohmann::json& message, 
@@ -127,7 +132,9 @@ private:
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
     
-    // 🚨 FIX: WebSocket subscription state guards
-    std::mutex                      m_subscriptionMutex;
-    std::atomic<bool>               m_subscriptionInProgress{false};
+    // 🗑️ CLEANED UP: Redundant mutexes removed - write queue handles serialization
+    
+    // 🚨 FIX: Beast WebSocket write queue (strand-local, no mutex needed)
+    std::deque<std::shared_ptr<std::string>> m_writeQueue;
+    bool                            m_writeInProgress{false};
 };
