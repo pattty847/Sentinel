@@ -39,6 +39,9 @@ public slots:
     
     // 🎯 THREADING FIX: Move updateVisibleCells to slots for cross-thread calls
     void updateVisibleCells();
+    
+    // LOD updates from GridViewState
+    void onLODChanged(std::chrono::milliseconds dtBucket, double priceBucket);
 
 public:
     

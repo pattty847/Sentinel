@@ -535,3 +535,12 @@ void DataProcessor::setTimeframe(int timeframe_ms) {
 bool DataProcessor::isManualTimeframeSet() const {
     return m_manualTimeframeSet;
 }
+
+void DataProcessor::onLODChanged(std::chrono::milliseconds dtBucket, double priceBucket) {
+    if (dtBucket.count() > 0) {
+        setTimeframe(static_cast<int>(dtBucket.count()));
+    }
+    if (priceBucket > 0.0) {
+        setPriceResolution(priceBucket);
+    }
+}

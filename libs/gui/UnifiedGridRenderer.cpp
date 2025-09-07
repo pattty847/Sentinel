@@ -389,6 +389,22 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
+    // LOD ownership: react to GVS changes only
+    connect(m_viewState.get(), &GridViewState::lodChanged, this, [this](GridViewState::LOD oldLod, GridViewState::LOD newLod){
+        Q_UNUSED(oldLod);
+        if (m_dataProcessor) {
+            if (newLod.dtBucket.count() > 0) {
+                m_currentTimeframe_ms = newLod.dtBucket.count();
+                m_dataProcessor->setTimeframe(static_cast<int>(m_currentTimeframe_ms));
+            }
+            if (newLod.priceBucket > 0.0) {
+                m_dataProcessor->setPriceResolution(newLod.priceBucket);
+            }
+            m_geometryDirty.store(true);
+            update();
+        }
+    });
+    
     m_dataProcessor->startProcessing();
 }
 
