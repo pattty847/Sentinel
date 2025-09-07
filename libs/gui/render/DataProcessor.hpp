@@ -17,9 +17,12 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <atomic>
+#include <chrono>
 #include "../../core/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
+#include "GridViewState.hpp"
 
 class GridViewState;
 class DataCache;  // 🚀 Forward declaration
@@ -42,6 +45,9 @@ public slots:
     
     // LOD updates from GridViewState
     void onLODChanged(std::chrono::milliseconds dtBucket, double priceBucket);
+    void onViewportChanged(qint64 t0, qint64 t1, double p0, double p1);
+    void beginInteraction();
+    void endInteraction();
 
 public:
     
@@ -77,6 +83,15 @@ public:
     
     // 🚀 PHASE 3: Data access for UGR slim adapter
     const std::vector<struct CellInstance>& getVisibleCells() const { return m_visibleCells; }
+    
+    // PHASE 2: Resample orchestration state
+    struct TimeRange { qint64 t0{0}; qint64 t1{0}; double p0{0}; double p1{0}; };
+    
+    GridViewState::LOD lastCommittedLod_{};
+    TimeRange lastCommittedView_{};
+    QTimer debounce_;
+    LiquidityTimeSeriesEngine::DenseGrid cachedGrid_;
+    std::atomic<bool> interactionActive_{false};
 
 signals:
     void dataUpdated();
@@ -88,6 +103,7 @@ private slots:
 private:
     void initializeViewportFromTrade(const Trade& trade);
     void initializeViewportFromOrderBook(const OrderBook& orderBook);
+    void commitNow();
     
     // Components
     GridViewState* m_viewState = nullptr;

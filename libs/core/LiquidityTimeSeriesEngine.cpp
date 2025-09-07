@@ -14,6 +14,73 @@ Assumptions: Time bucketing logic correctly assigns updates to their respective 
 #include <algorithm>
 #include <cmath>
 #include <set>
+LiquidityTimeSeriesEngine::DenseGrid LiquidityTimeSeriesEngine::resample(
+    const TimeRange& rangeWorld,
+    std::chrono::milliseconds dtBucket,
+    double priceBucket) const {
+    DenseGrid out;
+    if (dtBucket.count() <= 0 || priceBucket <= 0.0) return out;
+
+    // Snap ranges
+    int64_t stepT = dtBucket.count();
+    int64_t t0s = snapT(rangeWorld.t0, stepT);
+    int64_t t1s = snapT(rangeWorld.t1 + stepT - 1, stepT); // ceil
+    double p0s = snapP(rangeWorld.p0, priceBucket);
+    double p1s = std::ceil(rangeWorld.p1 / priceBucket) * priceBucket; // ceil
+
+    if (t1s <= t0s || p1s <= p0s) return out;
+
+    int cols = static_cast<int>((t1s - t0s) / stepT);
+    int rows = static_cast<int>(std::round((p1s - p0s) / priceBucket));
+    if (cols <= 0 || rows <= 0) return out;
+
+    out.bins.resize(static_cast<size_t>(cols * rows));
+    out.cols = cols;
+    out.rows = rows;
+    out.priceStep = priceBucket;
+    out.dtStep = stepT;
+    out.t0 = t0s; out.t1 = t1s; out.p0 = p0s; out.p1 = p1s;
+
+    // Prepare indexer
+    auto binIndex = [&](int c, int r) { return static_cast<size_t>(r * cols + c); };
+
+    // Initialize bins metadata
+    for (int r = 0; r < rows; ++r) {
+        double pl = p0s + static_cast<double>(r) * priceBucket;
+        double ph = pl + priceBucket;
+        for (int c = 0; c < cols; ++c) {
+            int64_t tb = t0s + static_cast<int64_t>(c) * stepT;
+            int64_t te = tb + stepT;
+            auto& b = out.bins[binIndex(c, r)];
+            b.priceLow = pl; b.priceHigh = ph; b.t0 = tb; b.t1 = te; b.value = 0.0f; b.missing = true;
+        }
+    }
+
+    // Aggregate from base 100ms snapshots
+    // We do a simple scan through stored snapshots; this can be optimized later.
+    for (const auto& snap : m_snapshots) {
+        if (snap.timestamp_ms < t0s || snap.timestamp_ms >= t1s) continue;
+        int c = static_cast<int>((snap.timestamp_ms - t0s) / stepT);
+        // Aggregate bids
+        for (const auto& [price, size] : snap.bids) {
+            if (price < p0s || price >= p1s) continue;
+            int r = static_cast<int>(std::floor((price - p0s) / priceBucket));
+            auto& b = out.bins[binIndex(c, r)];
+            b.value += static_cast<float>(size);
+            b.missing = false;
+        }
+        // Aggregate asks
+        for (const auto& [price, size] : snap.asks) {
+            if (price < p0s || price >= p1s) continue;
+            int r = static_cast<int>(std::floor((price - p0s) / priceBucket));
+            auto& b = out.bins[binIndex(c, r)];
+            b.value += static_cast<float>(size);
+            b.missing = false;
+        }
+    }
+
+    return out;
+}
 
 // LiquidityTimeSlice implementation - PHASE 2.2: O(1) tick-based access
 double LiquidityTimeSlice::getDisplayValue(double price, bool isBid, int displayMode) const {

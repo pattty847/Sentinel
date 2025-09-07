@@ -163,6 +163,28 @@ private:
 public:
     explicit LiquidityTimeSeriesEngine(QObject* parent = nullptr);
 
+    // PHASE 2: Dense resample output for deterministic grid rebuilds
+    struct DenseBin {
+        double priceLow = 0.0;
+        double priceHigh = 0.0;
+        int64_t t0 = 0;
+        int64_t t1 = 0;
+        float value = 0.0f;
+        bool missing = true;
+    };
+
+    struct DenseGrid {
+        std::vector<DenseBin> bins;
+        int cols = 0;               // time buckets
+        int rows = 0;               // price buckets
+        double priceStep = 0.0;
+        int64_t dtStep = 0;         // ms
+        int64_t t0 = 0, t1 = 0;
+        double p0 = 0.0, p1 = 0.0;
+    };
+
+    struct TimeRange { int64_t t0; int64_t t1; double p0; double p1; };
+
     // Core data interface
     void addOrderBookSnapshot(const OrderBook& book);
     void addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice);
@@ -172,6 +194,11 @@ public:
     std::vector<const LiquidityTimeSlice*> getVisibleSlices(int64_t timeframe_ms, 
                                                            int64_t viewStart_ms, 
                                                            int64_t viewEnd_ms) const;
+
+    // PHASE 2: Deterministic dense resample from 100ms base
+    DenseGrid resample(const TimeRange& rangeWorld,
+                       std::chrono::milliseconds dtBucket,
+                       double priceBucket) const;
     
     // Timeframe management
     void addTimeframe(int64_t duration_ms);
@@ -220,4 +247,12 @@ private:
     
     // Legacy compatibility
     double quantizePrice(double price) const;
+
+    // PHASE 2: Helpers
+    static inline int64_t snapT(int64_t t, int64_t step) {
+        return (t >= 0) ? (t / step) * step : -(((-t) / step) * step);
+    }
+    static inline double snapP(double p, double step) {
+        return std::floor(p / step) * step;
+    }
 };

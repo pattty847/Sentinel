@@ -19,6 +19,7 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <limits>
 #include <climits>
 #include <cmath>
+#include <atomic>
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
@@ -30,6 +31,8 @@ DataProcessor::DataProcessor(QObject* parent)
     m_liquidityEngine = new LiquidityTimeSeriesEngine(this);
     
     sLog_App("🚀 DataProcessor: Initialized for V2 architecture");
+    debounce_.setSingleShot(true);
+    connect(&debounce_, &QTimer::timeout, this, &DataProcessor::commitNow);
 }
 
 DataProcessor::~DataProcessor() {
@@ -251,6 +254,18 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
     
     sLog_Data("🎯 DataProcessor: LiveOrderBook processed - " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
     emit dataUpdated();
+}
+
+void DataProcessor::onViewportChanged(qint64 t0, qint64 t1, double p0, double p1) {
+    lastCommittedView_ = TimeRange{t0, t1, p0, p1};
+    if (interactionActive_.load()) {
+        // Preview mode: request scaled preview (renderer will use cachedGrid_)
+        debounce_.start(120);
+    } else {
+        // Commit immediately
+        debounce_.stop();
+        QMetaObject::invokeMethod(this, &DataProcessor::commitNow, Qt::QueuedConnection);
+    }
 }
 
 void DataProcessor::clearData() {
@@ -534,6 +549,27 @@ void DataProcessor::setTimeframe(int timeframe_ms) {
 
 bool DataProcessor::isManualTimeframeSet() const {
     return m_manualTimeframeSet;
+}
+
+void DataProcessor::beginInteraction() {
+    interactionActive_.store(true);
+}
+
+void DataProcessor::endInteraction() {
+    interactionActive_.store(false);
+    if (debounce_.isActive()) {
+        debounce_.stop();
+        QMetaObject::invokeMethod(this, &DataProcessor::commitNow, Qt::QueuedConnection);
+    }
+}
+
+void DataProcessor::commitNow() {
+    if (!m_viewState || !m_liquidityEngine) return;
+    auto lodMs = std::chrono::milliseconds(static_cast<int64_t>(lastCommittedLod_.dtBucket.count() > 0 ? lastCommittedLod_.dtBucket.count() : m_currentTimeframe_ms));
+    LiquidityTimeSeriesEngine::TimeRange tr{lastCommittedView_.t0, lastCommittedView_.t1, lastCommittedView_.p0, lastCommittedView_.p1};
+    auto grid = m_liquidityEngine->resample(tr, lodMs, m_priceResolution);
+    cachedGrid_ = std::move(grid);
+    emit dataUpdated();
 }
 
 void DataProcessor::onLODChanged(std::chrono::milliseconds dtBucket, double priceBucket) {
