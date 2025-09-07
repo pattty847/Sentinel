@@ -10,7 +10,7 @@ Related: GridViewState.hpp.
 Assumptions: Zoom logic correctly implements "zoom-to-cursor" functionality.
 */
 #include "GridViewState.hpp"
-// CoordinateSystem not used directly here
+#include "../CoordinateSystem.h"
 #include <QMatrix4x4>
 #include <QSizeF>
 #include <QDebug>
@@ -63,27 +63,15 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
         return QMatrix4x4();
     }
 
-    // Map world (time ms, price) → screen pixels
-    // World X range: [m_visibleTimeStart_ms, m_visibleTimeEnd_ms]
-    // World Y range: [m_minPrice, m_maxPrice] (increase up)
-    // Screen: width x height with Y down. We flip Y with a negative scale.
+    Viewport vp;
+    vp.timeStart_ms = m_visibleTimeStart_ms;
+    vp.timeEnd_ms = m_visibleTimeEnd_ms;
+    vp.priceMin = m_minPrice;
+    vp.priceMax = m_maxPrice;
+    vp.width = itemBounds.width();
+    vp.height = itemBounds.height();
 
-    const double timeRange = static_cast<double>(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
-    const double priceRange = (m_maxPrice - m_minPrice);
-    if (timeRange <= 0.0 || priceRange <= 0.0 || m_viewportWidth <= 0.0 || m_viewportHeight <= 0.0) {
-        return QMatrix4x4();
-    }
-
-    const double sx = m_viewportWidth / timeRange;
-    const double sy = -m_viewportHeight / priceRange; // flip Y so higher price is higher on screen
-
-    QMatrix4x4 transform;
-
-    // Scale world to pixels
-    transform.scale(sx, sy, 1.0);
-
-    // Translate world origin so timeStart→x=0, priceMax→y=0 after flip
-    transform.translate(-static_cast<double>(m_visibleTimeStart_ms), -m_maxPrice, 0.0);
+    QMatrix4x4 transform = CoordinateSystem::calculateTransform(vp);
 
     // Apply visual pan offset in pixel space last (drag feedback)
     if (m_isDragging && !m_panVisualOffset.isNull()) {
@@ -303,6 +291,59 @@ void GridViewState::resetZoom() {
     
     emit viewportChanged();
     emit panVisualOffsetChanged();
+}
+
+GridViewState::LOD GridViewState::computeLOD(const ViewMetrics& metrics) const {
+    LOD lod;
+    // Time bucket: aim ~10-16 time buckets across width
+    int targetBuckets = 12;
+    if (metrics.viewportWidth > 0 && metrics.timeSpanMs > 0) {
+        // keep bucket count approximately constant; simple proportional rule
+        qint64 approxDt = metrics.timeSpanMs / targetBuckets;
+        // snap to friendly steps
+        if (approxDt <= 50) lod.dtBucket = std::chrono::milliseconds(50);
+        else if (approxDt <= 100) lod.dtBucket = std::chrono::milliseconds(100);
+        else if (approxDt <= 250) lod.dtBucket = std::chrono::milliseconds(250);
+        else if (approxDt <= 500) lod.dtBucket = std::chrono::milliseconds(500);
+        else if (approxDt <= 1000) lod.dtBucket = std::chrono::milliseconds(1000);
+        else if (approxDt <= 2000) lod.dtBucket = std::chrono::milliseconds(2000);
+        else if (approxDt <= 5000) lod.dtBucket = std::chrono::milliseconds(5000);
+        else lod.dtBucket = std::chrono::milliseconds(10000);
+    }
+
+    // Price bucket based on span
+    double span = metrics.priceSpan;
+    if (span > 500) lod.priceBucket = 25.0;
+    else if (span > 100) lod.priceBucket = 5.0;
+    else if (span > 50) lod.priceBucket = 1.0;
+    else if (span > 10) lod.priceBucket = 0.50;
+    else lod.priceBucket = 0.25;
+
+    return lod;
+}
+
+void GridViewState::overrideLOD(std::chrono::milliseconds dtBucket, double priceBucket) {
+    LOD newLod{dtBucket, priceBucket};
+    if (!m_hasLod) {
+        m_hasLod = true;
+        m_lastLod = newLod;
+        emit lodChanged(m_lastLod, newLod);
+        return;
+    }
+
+    auto nearWithHysteresis = [](double oldV, double newV) {
+        double diff = std::abs(newV - oldV);
+        return diff <= (std::abs(oldV) * LOD_HYSTERESIS);
+    };
+
+    bool dtStable = std::abs((newLod.dtBucket - m_lastLod.dtBucket).count()) <= (m_lastLod.dtBucket.count() * LOD_HYSTERESIS);
+    bool priceStable = nearWithHysteresis(m_lastLod.priceBucket, newLod.priceBucket);
+
+    if (!(dtStable && priceStable)) {
+        LOD old = m_lastLod;
+        m_lastLod = newLod;
+        emit lodChanged(old, newLod);
+    }
 }
 
 // Directional pan methods

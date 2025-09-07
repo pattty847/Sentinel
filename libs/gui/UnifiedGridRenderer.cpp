@@ -20,6 +20,14 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QMetaObject>
 #include <QMetaType>
 #include <QDateTime>
+#include <QQuickItem>
+#include <QString>
+#include <QtGlobal>
+#include <QPointF>
+#include <QMatrix4x4>
+#include <QtCore>
+#include <QtQuick>
+#include <QtGui>
 // #include <algorithm>
 #include <cmath>
 
@@ -99,49 +107,8 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
     
-    // 🎯 DYNAMIC RESAMPLING: Auto-select timeframe based on pixel target (8-16px cell width)
-    qint64 timeStart = m_viewState->getVisibleTimeStart();
-    qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-    double viewportWidth = m_viewState->getViewportWidth();
-    
-    // Calculate target timeframe for 8-16px cell width
-    double timeSpan_ms = static_cast<double>(timeEnd - timeStart);
-    double targetCellWidth = 12.0; // Target 12px cells
-    double targetTimeframe_ms = (timeSpan_ms * targetCellWidth) / viewportWidth;
-    
-    // Available timeframes in LTSE
-    const std::vector<int64_t> timeframes = {100, 250, 500, 1000, 2000, 5000, 10000};
-    
-    // Find closest timeframe
-    int64_t bestTimeframe = timeframes[0];
-    double bestDiff = std::abs(targetTimeframe_ms - bestTimeframe);
-    
-    for (int64_t tf : timeframes) {
-        double diff = std::abs(targetTimeframe_ms - tf);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            bestTimeframe = tf;
-        }
-    }
-    
-    // Update timeframe if it changed significantly
-    if (m_dataProcessor && bestTimeframe != m_currentTimeframe_ms) {
-        m_currentTimeframe_ms = bestTimeframe;
-        m_dataProcessor->setTimeframe(bestTimeframe);
-        m_geometryDirty.store(true);
-        update();
-        emit timeframeChanged();
-    }
-    
-    // Also update price resolution
-    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
-    double currentResolution = m_dataProcessor->getPriceResolution();
-    if (std::abs(optimalResolution - currentResolution) > 0.01) {
-        m_dataProcessor->setPriceResolution(optimalResolution);
-        m_geometryDirty.store(true);
-        update();
-        emit priceResolutionChanged();
-    }
+    // 🎯 SSOT: LOD/timeframe/price resolution are owned by GridViewState
+    // UGR no longer computes or emits LOD-related changes here.
 }
 
 
@@ -166,23 +133,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     return updatePaintNodeV2(oldNode);
 }
 
-void UnifiedGridRenderer::updateVisibleCells() {
-    // 🎯 THREADING FIX: Use thread-safe call like all other DataProcessor methods
-    if (m_dataProcessor) {
-        // Force a synchronous recompute to avoid stale geometry after LOD/timeframe changes
-        QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", 
-                                 Qt::BlockingQueuedConnection);
-        
-        // Pull fresh cells computed on the worker thread
-        m_visibleCells = m_dataProcessor->getVisibleCells();
-    } else {
-        m_visibleCells.clear();
-    }
-    
-    // Signal that we need a repaint
-    m_geometryDirty = true;
-    update();
-}
+// Removed: UGR::updateVisibleCells pass-through (call DataProcessor directly)
 
 void UnifiedGridRenderer::updateVolumeProfile() {
     // TODO: Implement volume profile from liquidity time series
@@ -489,8 +440,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
         bool needsRebuild = m_geometryDirty.load() || isNewNode;
         
         if (needsRebuild) {
-            // needs rebuild
-            updateVisibleCells();
+            // needs rebuild: refresh visible cells from DataProcessor
+            if (m_dataProcessor) {
+                QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", Qt::BlockingQueuedConnection);
+                m_visibleCells = m_dataProcessor->getVisibleCells();
+            } else {
+                m_visibleCells.clear();
+            }
             
             // creating batch
             // Render pipeline: passing cells to strategy

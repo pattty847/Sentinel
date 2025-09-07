@@ -19,6 +19,10 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
+#include <QString>
+#include <QPointF>
+#include <QtGlobal>
+#include <QMetaObject>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -141,15 +145,15 @@ public:
     QPointF getPanVisualOffset() const;
     
     // 🎯 DATA INTERFACE
-    Q_INVOKABLE void addTrade(const Trade& trade);
-    Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
+    [[deprecated("Use DataProcessor::onTradeReceived")]] Q_INVOKABLE void addTrade(const Trade& trade);
+    [[deprecated("Use GridViewState::setViewport")]] Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
     // 🎯 GRID CONFIGURATION
-    Q_INVOKABLE void setPriceResolution(double resolution);
+    [[deprecated("Use GridViewState::computeLOD/lodChanged → DataProcessor")]] Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
-    Q_INVOKABLE void setGridResolution(int timeResMs, double priceRes);
+    [[deprecated("Use GridViewState LOD")]] Q_INVOKABLE void setGridResolution(int timeResMs, double priceRes);
     struct GridResolution {
         int timeMs;
         double price;
@@ -171,7 +175,7 @@ public:
     
     // 🔥 GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
-    Q_INVOKABLE void setTimeframe(int timeframe_ms);
+    [[deprecated("Use GridViewState as SSOT for timeframe; emit LOD from GVS")]] Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     // PHASE 2.1: Dense data access
     void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
@@ -190,8 +194,8 @@ public:
     Q_INVOKABLE void enableAutoScroll(bool enabled);
     
     // 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
-    Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
-    Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
+    [[deprecated("Use CoordinateSystem::worldToScreen")]] Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
+    [[deprecated("Use CoordinateSystem::screenToWorld")]] Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
 
@@ -238,7 +242,7 @@ private:
     void setMinVolumeFilter(double minVolume);
     
     // V2 data processing methods
-    void updateVisibleCells();
+    // Removed: UGR pass-throughs (call DataProcessor directly)
     void updateVolumeProfile();
     
     // PHASE 2.1: Dense data access

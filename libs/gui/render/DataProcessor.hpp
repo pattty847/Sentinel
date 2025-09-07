@@ -64,7 +64,7 @@ public:
     void setPriceResolution(double resolution);
     double getPriceResolution() const;
     void addTimeframe(int timeframe_ms);
-    int64_t suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const;
+    [[deprecated("Use GridViewState::computeLOD or LTSE::suggestTimeframe")]] int64_t suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const;
     std::vector<struct LiquidityTimeSlice> getVisibleSlices(qint64 timeStart, qint64 timeEnd, double minPrice, double maxPrice) const;
     int getDisplayMode() const;
     

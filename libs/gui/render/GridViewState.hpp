@@ -14,12 +14,25 @@ Assumptions: Driven by user input events forwarded from a UI component.
 #include <QPointF>
 #include <QMatrix4x4>
 #include <QElapsedTimer>
+#include <chrono>
 
 class GridViewState : public QObject {
     Q_OBJECT
     
 public:
     explicit GridViewState(QObject* parent = nullptr);
+    
+    // Level-of-Detail (LOD) policy
+    struct LOD {
+        std::chrono::milliseconds dtBucket{0};
+        double priceBucket{0.0};
+    };
+    
+    struct ViewMetrics {
+        qint64 timeSpanMs{0};
+        double priceSpan{0.0};
+        double viewportWidth{0.0};
+    };
     
     // Viewport bounds
     qint64 getVisibleTimeStart() const { return m_visibleTimeStart_ms; }
@@ -39,6 +52,12 @@ public:
     void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     void setViewportSize(double width, double height);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
+    
+    // Compute preferred LOD for current view; apply hysteresis in emitter
+    LOD computeLOD(const ViewMetrics& metrics) const;
+    
+    // External override to enforce a specific LOD (e.g., from legacy UI)
+    void overrideLOD(std::chrono::milliseconds dtBucket, double priceBucket);
     
     // Interaction handling
     void handleZoom(double delta, const QPointF& center);
@@ -64,6 +83,7 @@ signals:
     void viewportChanged();
     void panVisualOffsetChanged();
     void autoScrollEnabledChanged();
+    void lodChanged(LOD oldLOD, LOD newLOD);
 
 private:
     // Viewport bounds
@@ -93,4 +113,9 @@ private:
     QPointF m_initialMousePos;
     QPointF m_panVisualOffset;
     QElapsedTimer m_interactionTimer;
+    
+    // LOD state and hysteresis
+    LOD m_lastLod{};
+    bool m_hasLod = false;
+    static constexpr double LOD_HYSTERESIS = 0.15; // 15%
 };
