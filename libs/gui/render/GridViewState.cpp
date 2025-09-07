@@ -48,6 +48,7 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
     
     if (changed) {
         emit viewportChanged();
+        emit viewportChangedEx(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     }
 }
 
@@ -129,6 +130,7 @@ void GridViewState::handleZoom(double delta, const QPointF& center) {
         }
         
         emit viewportChanged();
+        emit viewportChangedEx(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     }
 }
 
@@ -210,6 +212,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
         }
         
         emit viewportChanged();
+        emit viewportChangedEx(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     }
 }
 
@@ -290,6 +293,7 @@ void GridViewState::resetZoom() {
     m_panVisualOffset = QPointF(0, 0);
     
     emit viewportChanged();
+    emit viewportChangedEx(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
     emit panVisualOffsetChanged();
 }
 

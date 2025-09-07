@@ -40,6 +40,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
+#include "../core/LiquidityTimeSeriesEngine.h"
 #include "render/strategies/TradeFlowStrategy.hpp"
 #include "render/strategies/CandleStrategy.hpp"
 
@@ -385,7 +386,10 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     m_candleStrategy = std::make_unique<CandleStrategy>();
     
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
-    connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
+    // Route rich viewport info directly to DataProcessor orchestration
+    connect(m_viewState.get(), &GridViewState::viewportChangedEx, this, [this](qint64 t0, qint64 t1, double p0, double p1){
+        if (m_dataProcessor) m_dataProcessor->onViewportChanged(t0, t1, p0, p1);
+    });
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
@@ -395,10 +399,7 @@ void UnifiedGridRenderer::initializeV2Architecture() {
         if (m_dataProcessor) {
             if (newLod.dtBucket.count() > 0) {
                 m_currentTimeframe_ms = newLod.dtBucket.count();
-                m_dataProcessor->setTimeframe(static_cast<int>(m_currentTimeframe_ms));
-            }
-            if (newLod.priceBucket > 0.0) {
-                m_dataProcessor->setPriceResolution(newLod.priceBucket);
+                m_dataProcessor->onLODChanged(std::chrono::milliseconds(m_currentTimeframe_ms), newLod.priceBucket);
             }
             m_geometryDirty.store(true);
             update();

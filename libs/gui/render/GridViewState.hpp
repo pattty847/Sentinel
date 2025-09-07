@@ -81,6 +81,7 @@ public:
 
 signals:
     void viewportChanged();
+    void viewportChangedEx(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     void panVisualOffsetChanged();
     void autoScrollEnabledChanged();
     void lodChanged(LOD oldLOD, LOD newLOD);

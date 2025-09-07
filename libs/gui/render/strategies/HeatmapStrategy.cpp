@@ -16,80 +16,89 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 #include <QSGVertexColorMaterial>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
+#include <QImage>
 #include <algorithm>
 // #include <iostream>
 
+bool HeatmapStrategy::setGrid(const LiquidityTimeSeriesEngine::DenseGrid& grid) {
+    if (grid.cols <= 0 || grid.rows <= 0 || grid.bins.empty()) return false;
+    m_texSize = QSize(grid.cols, grid.rows);
+    // Normalize values for preview; simple min/max
+    float vmin = std::numeric_limits<float>::infinity();
+    float vmax = 0.0f;
+    for (const auto& b : grid.bins) {
+        if (!b.missing) {
+            vmin = std::min(vmin, b.value);
+            vmax = std::max(vmax, b.value);
+        }
+    }
+    if (!std::isfinite(vmin) || vmax <= vmin) { vmin = 0.0f; vmax = 1.0f; }
+    QImage img(m_texSize, QImage::Format_Grayscale8);
+    for (int r = 0; r < grid.rows; ++r) {
+        uchar* row = img.scanLine(r);
+        for (int c = 0; c < grid.cols; ++c) {
+            const auto& b = grid.bins[static_cast<size_t>(r * grid.cols + c)];
+            float norm = b.missing ? 0.0f : (b.value - vmin) / (vmax - vmin);
+            norm = std::clamp(norm, 0.0f, 1.0f);
+            row[c] = static_cast<uchar>(norm * 255.0f);
+        }
+    }
+    // TODO(Phase 3): Upload to QSGTexture using scenegraph context, double-buffer and swap
+    // For now we just store preview intent
+    return true;
+}
+
+void HeatmapStrategy::setPreviewTransform(const QMatrix4x4& transform) {
+    m_previewTransform = transform;
+    m_hasPreview = true;
+}
 
 QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
-    // minimal local state; avoid noisy counters
-    
     if (batch.cells.empty()) {
         sLog_Render("🎯 HEATMAP EXIT: Returning nullptr - batch is empty");
         return nullptr;
     }
     
-    // reduced verbose logging
-    
-    // Use per-vertex colors with blending so cells have individual colors
     auto* node = new QSGGeometryNode;
     auto* material = new QSGVertexColorMaterial;
     material->setFlag(QSGMaterial::Blending);
     node->setMaterial(material);
     node->setFlag(QSGNode::OwnsMaterial);
     
-    // Calculate required vertex count (6 vertices per cell for 2 triangles)
     int cellCount = std::min(static_cast<int>(batch.cells.size()), batch.maxCells);
     int vertexCount = cellCount * 6;
     
-    // Create geometry with colors
     auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
     geometry->setDrawingMode(QSGGeometry::DrawTriangles);
     node->setGeometry(geometry);
     node->setFlag(QSGNode::OwnsGeometry);
     
-    // Fill vertex buffer with colored vertices
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
     for (int i = 0; i < cellCount; ++i) {
         const auto& cell = batch.cells[i];
-        
-        // Skip cells with insufficient volume
         if (cell.liquidity < batch.minVolumeFilter) continue;
-        
-        // Calculate color with intensity scaling
         double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
         QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
-        
         float left = cell.screenRect.left();
         float right = cell.screenRect.right();
         float top = cell.screenRect.top();
         float bottom = cell.screenRect.bottom();
-        
-        // Debug coordinates removed to reduce log spam
-        
-        // Vertex color
         const int r = color.red();
         const int g = color.green();
         const int b = color.blue();
         const int a = std::clamp(static_cast<int>(color.alpha()), 0, 255);
-
-        // Triangle 1: top-left, top-right, bottom-left
         vertices[vertexIndex++].set(left,  top,    r, g, b, a);
         vertices[vertexIndex++].set(right, top,    r, g, b, a);
         vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
-
-        // Triangle 2: top-right, bottom-right, bottom-left
         vertices[vertexIndex++].set(right, top,    r, g, b, a);
         vertices[vertexIndex++].set(right, bottom, r, g, b, a);
         vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
     }
     
-    // Update geometry with actual vertex count used
     geometry->allocate(vertexIndex);
     node->markDirty(QSGNode::DirtyGeometry);
-    
-    // minimal completion log removed to cut spam
     
     return node;
 }
