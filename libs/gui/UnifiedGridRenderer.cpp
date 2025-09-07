@@ -20,13 +20,14 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QMetaObject>
 #include <QMetaType>
 #include <QDateTime>
-#include <algorithm>
+// #include <algorithm>
 #include <cmath>
 
 // New modular architecture includes
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 #include "render/GridSceneNode.hpp" 
+// Keep include to satisfy member access in this TU
 #include "../core/SentinelMonitor.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
@@ -168,11 +169,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 void UnifiedGridRenderer::updateVisibleCells() {
     // 🎯 THREADING FIX: Use thread-safe call like all other DataProcessor methods
     if (m_dataProcessor) {
-        // Use thread-safe blocking call to ensure data is processed
+        // Force a synchronous recompute to avoid stale geometry after LOD/timeframe changes
         QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", 
                                  Qt::BlockingQueuedConnection);
         
-        // Now safe to get the processed cells
+        // Pull fresh cells computed on the worker thread
         m_visibleCells = m_dataProcessor->getVisibleCells();
     } else {
         m_visibleCells.clear();
@@ -417,6 +418,11 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     // Start the worker thread
     m_dataProcessorThread->start();
     
+    // Initialize viewport size immediately to avoid 0x0 transforms
+    if (width() > 0 && height() > 0) {
+        m_viewState->setViewportSize(width(), height());
+    }
+
     // Dependencies will be set later when setDataCache() is called
     // Set ViewState immediately as it's available
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
@@ -464,10 +470,10 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
-    qDebug() << "🔍 UGR: updatePaintNodeV2 called, size:" << width() << "x" << height();
+    // reduce noisy frame logs
     if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
     if (width() <= 0 || height() <= 0) {
-        qDebug() << "🔍 UGR: Invalid size, returning oldNode";
+        // invalid size; skip
         return oldNode;
     }
     
@@ -483,15 +489,15 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
         bool needsRebuild = m_geometryDirty.load() || isNewNode;
         
         if (needsRebuild) {
-            qDebug() << "🔍 UGR: needsRebuild=true, calling updateVisibleCells()";
+            // needs rebuild
             updateVisibleCells();
             
-            qDebug() << "🔍 UGR: Creating GridSliceBatch with" << m_visibleCells.size() << "cells";
+            // creating batch
             // Render pipeline: passing cells to strategy
             GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
             
             IRenderStrategy* strategy = getCurrentStrategy();
-            qDebug() << "🔍 UGR: Using strategy:" << (strategy ? strategy->getStrategyName() : "NULLPTR");
+            // selected strategy
             
             sceneNode->updateContent(batch, strategy);
             if (m_showVolumeProfile) {
@@ -502,14 +508,16 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
             m_geometryDirty.store(false);
             if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
         } else {
-            qDebug() << "🔍 UGR: needsRebuild=false, using cache";
             if (m_sentinelMonitor) m_sentinelMonitor->recordCacheHit();
         }
         
-        // 🎯 FIX: Use identity transform since DataProcessor already converts to screen pixels
-        // Double transformation was pushing geometry off-screen
-        QMatrix4x4 identityTransform;
-        sceneNode->updateTransform(identityTransform);
+        // Apply visual pan offset as a transform for smooth panning feedback
+        QMatrix4x4 transform;
+        if (m_viewState) {
+            QPointF pan = m_viewState->getPanVisualOffset();
+            transform.translate(pan.x(), pan.y());
+        }
+        sceneNode->updateTransform(transform);
         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
     }
     

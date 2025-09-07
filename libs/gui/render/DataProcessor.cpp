@@ -396,8 +396,32 @@ void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double 
     cell.isBid = isBid;
     cell.intensity = std::min(1.0, liquidity / 1000.0);
     cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
-    // Store world-space rect; it will be transformed by GridViewState
+    // Compute screen-space rect from world coordinates
     cell.screenRect = timeSliceToScreenRect(slice, price);
+
+    // Cull degenerate or off-screen rectangles
+    const double minPixel = 0.5;   // Avoid zero-area artifacts
+    const double maxPixel = 200.0; // Clamp pathological sizes
+    if (cell.screenRect.width() < minPixel || cell.screenRect.height() < minPixel) {
+        return;
+    }
+    if (cell.screenRect.width() > maxPixel) {
+        // Clamp width to prevent giant blocks due to bad transforms
+        cell.screenRect.setWidth(maxPixel);
+    }
+    if (cell.screenRect.height() > maxPixel) {
+        cell.screenRect.setHeight(maxPixel);
+    }
+
+    // Basic viewport culling using current item size from view state
+    const double viewportW = m_viewState ? m_viewState->getViewportWidth() : 0.0;
+    const double viewportH = m_viewState ? m_viewState->getViewportHeight() : 0.0;
+    if (viewportW > 0.0 && viewportH > 0.0) {
+        const QRectF viewportRect(0.0, 0.0, viewportW, viewportH);
+        if (!viewportRect.intersects(cell.screenRect)) {
+            return;
+        }
+    }
 
     m_visibleCells.push_back(cell);
     
