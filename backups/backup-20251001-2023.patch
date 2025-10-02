@@ -1,0 +1,2773 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 28929e7..4d4c0f5 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -2,6 +2,8 @@
+ 
+ **Sentinel**: High-performance real-time crypto trading terminal. C++20, Qt6, OpenGL, WebSocket. V2 Grid-Based Architecture with GPU-accelerated rendering.
+ 
++ABSOLUTELY NO EMOJIS IN CODE, ONLY (SOMETIMES!!!) IN LOGGING WHEN THEY ARE DESCRIPTIVE AND HELPFUL IN ORGANIZATION!
++
+ ## 🚨 CRITICAL CONSTRAINTS
+ 
+ ### File Size Limits - STRICTLY ENFORCED
+diff --git a/apps/sentinel_gui/main.cpp b/apps/sentinel_gui/main.cpp
+index 5c2ab5d..f3787b2 100644
+--- a/apps/sentinel_gui/main.cpp
++++ b/apps/sentinel_gui/main.cpp
+@@ -47,7 +47,7 @@ int main(int argc, char *argv[])
+     
+     // 🔥 CREATE GPU-POWERED MAIN WINDOW
+     std::cout << "🔧 Creating MainWindowGPU..." << std::endl;
+-    MainWindowGPU window;
++    MainWindowGpu window;
+     std::cout << "✅ MainWindowGPU created successfully" << std::endl;
+     
+     std::cout << "🔧 Calling window.show()..." << std::endl;
+diff --git a/docs/LOGGING_GUIDE.md b/docs/LOGGING_GUIDE.md
+index 27835bd..df9e2d3 100644
+--- a/docs/LOGGING_GUIDE.md
++++ b/docs/LOGGING_GUIDE.md
+@@ -26,6 +26,20 @@ export QT_LOGGING_RULES="*.debug=false"
+ ```
+ **Result**: Minimal output, perfect for a clean terminal experience.
+ 
++### 1.5. Reduced Spam Mode (Recommended for Development)
++Use the built-in throttling system to dramatically reduce log spam while keeping useful information:
++
++```bash
++# Run with default throttling (Data: every 100th, Render: every 500th)
++./build-mac-clang/apps/sentinel_gui/sentinel_gui
++
++# Or customize throttling intervals:
++export SENTINEL_LOG_Data_INTERVAL=200
++export SENTINEL_LOG_Render_INTERVAL=1000
++./build-mac-clang/apps/sentinel_gui/sentinel_gui
++```
++**Result**: Significantly reduced spam with periodic useful updates.
++
+ ### 2. Development Mode (Show Everything)
+ Enable all `sentinel` logs to get a complete picture of the application's activity.
+ 
+@@ -74,7 +88,20 @@ The logging system is highly flexible. You can combine rules by separating them
+ - **Enable everything except one category**: `sentinel.*.debug=true;sentinel.render.debug=false`
+ 
+ ### Built-in Throttling
+-High-frequency events (like rendering or mouse movement) now have **built-in throttling** directly in the logging macros. This means you get useful, periodic updates instead of a flood of messages, without needing any special configuration.
++High-frequency events (like rendering or mouse movement) now have **built-in throttling** directly in the logging macros. This means you get useful, periodic updates instead of a flood of messages.
++
++**Default Throttling Intervals:**
++- `sLog_App()`: Every message (interval = 1)
++- `sLog_Data()`: Every 100th message (interval = 100) 
++- `sLog_Render()`: Every 500th message (interval = 500)
++- `sLog_Debug()`: Every 50th message (interval = 50)
++
++**Customizing Throttling:**
++```bash
++export SENTINEL_LOG_Data_INTERVAL=50     # More frequent data logs
++export SENTINEL_LOG_Render_INTERVAL=1000 # Less frequent render logs
++export SENTINEL_LOG_Debug_INTERVAL=1     # Show all debug logs
++```
+ 
+ ### The `sentinel.debug` Category
+ The `sentinel.debug` category is reserved for extremely high-frequency, specialized diagnostics that are not useful for general development. It is disabled by default in all modes except when explicitly turned on.
+diff --git a/libs/core/Authenticator.cpp b/libs/core/Authenticator.cpp
+index e956ed3..8b11d73 100644
+--- a/libs/core/Authenticator.cpp
++++ b/libs/core/Authenticator.cpp
+@@ -26,14 +26,14 @@ Authenticator::Authenticator(const std::string& keyFile) {
+ 
+ std::string Authenticator::createJwt() const {
+     if (m_keyId.empty() || m_privateKey.empty()) {
+-        throw std::runtime_error("🔑 Authenticator: API key/secret missing – cannot create JWT");
++        throw std::runtime_error("Authenticator: API key/secret missing – cannot create JWT");
+     }
+     
+     try {
+         // Generate a random nonce (following the Coinbase tutorial exactly)
+         unsigned char nonce_raw[16];
+         if (RAND_bytes(nonce_raw, sizeof(nonce_raw)) != 1) {
+-            throw std::runtime_error("🔑 Authenticator: Failed to generate random nonce");
++            throw std::runtime_error("Authenticator: Failed to generate random nonce");
+         }
+         std::string nonce(reinterpret_cast<char*>(nonce_raw), sizeof(nonce_raw));
+ 
+@@ -50,14 +50,14 @@ std::string Authenticator::createJwt() const {
+         return token;
+     }
+     catch (const std::exception& ex) {
+-        throw std::runtime_error(std::string("🔑 Authenticator: JWT generation failed: ") + ex.what());
++        throw std::runtime_error(std::string("Authenticator: JWT generation failed: ") + ex.what());
+     }
+ }
+ 
+ void Authenticator::loadKeyFile(const std::string& path) {
+     std::ifstream key_file(path);
+     if (!key_file.is_open()) {
+-        throw std::runtime_error("🔑 Authenticator: Failed to open key file: " + path);
++        throw std::runtime_error("Authenticator: Failed to open key file: " + path);
+     }
+     
+     nlohmann::json j;
+@@ -65,18 +65,18 @@ void Authenticator::loadKeyFile(const std::string& path) {
+         key_file >> j;
+     }
+     catch (const std::exception& ex) {
+-        throw std::runtime_error("🔑 Authenticator: Failed to parse JSON from key file: " + std::string(ex.what()));
++        throw std::runtime_error("Authenticator: Failed to parse JSON from key file: " + std::string(ex.what()));
+     }
+     
+     m_keyId = j.value("key", "");
+     m_privateKey = j.value("secret", "");
+     
+     if (m_keyId.empty()) {
+-        throw std::runtime_error("🔑 Authenticator: Missing 'key' field in key file");
++        throw std::runtime_error("Authenticator: Missing 'key' field in key file");
+     }
+     if (m_privateKey.empty()) {
+-        throw std::runtime_error("🔑 Authenticator: Missing 'secret' field in key file");
++        throw std::runtime_error("Authenticator: Missing 'secret' field in key file");
+     }
+     
+-    std::cout << "✅ Authenticator: Successfully loaded API keys from " << path << std::endl;
++    std::cout << "Authenticator: Successfully loaded API keys from " << path << std::endl;
+ } 
+\ No newline at end of file
+diff --git a/libs/core/Cpp20Utils.hpp b/libs/core/Cpp20Utils.hpp
+index ab94157..770f9cc 100644
+--- a/libs/core/Cpp20Utils.hpp
++++ b/libs/core/Cpp20Utils.hpp
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-// 🚀 C++20 UTILITIES FOR SENTINEL TRADING APPLICATION
++// C++20 UTILITIES FOR SENTINEL TRADING APPLICATION
+ // Optimized helper functions for high-performance real-time trading
+ 
+ #include <string>
+@@ -25,7 +25,7 @@ namespace Cpp20Utils {
+  * All functions optimized for real-time trading data processing with minimal overhead.
+  */
+ 
+-// 🚀 FAST STRING-TO-NUMBER CONVERSION
++// FAST STRING-TO-NUMBER CONVERSION
+ // Optimized for real-time trading data processing
+ 
+ /**
+@@ -88,7 +88,7 @@ inline int fastStringToInt(std::string_view str, int defaultValue) {
+     return defaultValue;
+ }
+ 
+-// 🚀 FAST SIDE DETECTION
++// FAST SIDE DETECTION
+ // Optimized for trade processing
+ 
+ /**
+@@ -117,7 +117,7 @@ inline AggressorSide fastSideDetection(const std::string& side,
+     return AggressorSide::Unknown;
+ }
+ 
+-// 🚀 FAST STRING FORMATTING
++// FAST STRING FORMATTING
+ // Optimized logging and message formatting
+ 
+ /**
+@@ -134,7 +134,7 @@ inline std::string formatTradeLog(const std::string& productId,
+                                  double size, 
+                                  const std::string& side, 
+                                  int tradeCount) {
+-    return std::format("💰 {}: ${:.2f} size:{:.6f} ({}) [{} trades total]",
++    return std::format("{}: ${:.2f} size:{:.6f} ({}) [{} trades total]",
+         productId, price, size, side, tradeCount);
+ }
+ 
+@@ -151,10 +151,10 @@ inline std::string formatOrderBookLog(const std::string& productId,
+                                      size_t askCount, 
+                                      int updateCount = -1) {
+     if (updateCount >= 0) {
+-        return std::format("📸 ORDER BOOK {}: {} bids, {} asks (+{} changes)",
++        return std::format("ORDER BOOK {}: {} bids, {} asks (+{} changes)",
+             productId, bidCount, askCount, updateCount);
+     } else {
+-        return std::format("📸 ORDER BOOK {}: {} bids, {} asks",
++        return std::format("ORDER BOOK {}: {} bids, {} asks",
+             productId, bidCount, askCount);
+     }
+ }
+@@ -167,7 +167,7 @@ inline std::string formatOrderBookLog(const std::string& productId,
+  */
+ inline std::string formatErrorLog(const std::string& context, 
+                                  const std::string& message) {
+-    return std::format("❌ {}: {}", context, message);
++    return std::format("{}: {}", context, message);
+ }
+ 
+ /**
+@@ -178,10 +178,10 @@ inline std::string formatErrorLog(const std::string& context,
+  */
+ inline std::string formatSuccessLog(const std::string& context, 
+                                    const std::string& message) {
+-    return std::format("✅ {}: {}", context, message);
++    return std::format("{}: {}", context, message);
+ }
+ 
+-// 🚀 PERFORMANCE MONITORING
++// PERFORMANCE MONITORING
+ // Utilities for tracking performance in real-time systems
+ 
+ /**
+@@ -195,9 +195,9 @@ inline std::string formatPerformanceMetric(const std::string& metricName,
+                                           double value, 
+                                           const std::string& unit = "") {
+     if (unit.empty()) {
+-        return std::format("📊 {}: {:.2f}", metricName, value);
++        return std::format("{}: {:.2f}", metricName, value);
+     } else {
+-        return std::format("📊 {}: {:.2f} {}", metricName, value, unit);
++        return std::format("{}: {:.2f} {}", metricName, value, unit);
+     }
+ }
+ 
+@@ -212,11 +212,11 @@ inline std::string formatThroughput(const std::string& operationName,
+                                    int count, 
+                                    double timeMs) {
+     double opsPerSec = (timeMs > 0) ? (count * 1000.0 / timeMs) : 0.0;
+-    return std::format("⚡ {}: {} ops in {:.1f}ms ({:.0f} ops/sec)",
++    return std::format("{}: {} ops in {:.1f}ms ({:.0f} ops/sec)",
+         operationName, count, timeMs, opsPerSec);
+ }
+ 
+-// 🚀 FAST ISO8601 TIMESTAMP PARSING
++// FAST ISO8601 TIMESTAMP PARSING
+ // Optimized for Coinbase timestamp format: "2023-02-09T20:32:50.714964855Z"
+ 
+ /**
+diff --git a/libs/core/DataCache.cpp b/libs/core/DataCache.cpp
+index 6d5b62b..ea56664 100644
+--- a/libs/core/DataCache.cpp
++++ b/libs/core/DataCache.cpp
+@@ -114,7 +114,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
+     m_bids.resize(size, 0.0);
+     m_asks.resize(size, 0.0);
+ 
+-    sLog_App(QString("🏗️  O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
++    sLog_App(QString("O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
+               .arg(QString::fromStdString(m_productId)).arg(size)
+               .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
+ }
+@@ -126,7 +126,7 @@ void LiveOrderBook::applyUpdate(const std::string& side, double price, double qu
+     if (price < m_min_price || price > m_max_price) {
+         static int oob_count = 0;
+         if (++oob_count % 100 == 1) { // Log every 100th OOB update
+-            sLog_Data(QString("⚠️ Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update. [Hit #%5]")
++            sLog_Data(QString("Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update. [Hit #%5]")
+                         .arg(price).arg(m_min_price).arg(m_max_price).arg(QString::fromStdString(m_productId)).arg(oob_count));
+         }
+         return;
+@@ -165,7 +165,7 @@ bool LiveOrderBook::isEmpty() const {
+            std::all_of(m_asks.begin(), m_asks.end(), [](double q){ return q == 0.0; });
+ }
+ 
+-// 🔥 NEW: DataCache LiveOrderBook Methods
++// NEW: DataCache LiveOrderBook Methods
+ // =============================================================================
+ 
+ void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp) {
+@@ -193,7 +193,7 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::ve
+         liveBook.applyUpdate("ask", level.price, level.size, exchange_timestamp);
+     }
+     
+-    sLog_Data(QString("🔥 DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
++    sLog_Data(QString("DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
+ }
+ 
+ void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp) {
+@@ -207,7 +207,7 @@ void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string
+         // The first message for a product MUST be a snapshot.
+         static int missing_count = 0;
+         if (++missing_count % 100 == 1) { // Log every 100th time
+-             sLog_Data(QString("⚠️ Dropping update for uninitialized live book '%1'. Waiting for snapshot. [Hit #%2]")
++             sLog_Data(QString("Dropping update for uninitialized live book '%1'. Waiting for snapshot. [Hit #%2]")
+                         .arg(QString::fromStdString(symbol)).arg(missing_count));
+         }
+     }
+diff --git a/libs/core/DataCache.hpp b/libs/core/DataCache.hpp
+index 077c5d7..2a9743a 100644
+--- a/libs/core/DataCache.hpp
++++ b/libs/core/DataCache.hpp
+@@ -57,7 +57,7 @@ public:
+     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
+     [[nodiscard]] OrderBook            book(const std::string& s) const;
+     
+-    // 🔥 NEW: LiveOrderBook methods for stateful order book management - PHASE 1.4: Now use exchange timestamps
++    // NEW: LiveOrderBook methods for stateful order book management - PHASE 1.4: Now use exchange timestamps
+     void initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp);
+     void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp);
+     
+@@ -76,5 +76,5 @@ private:
+     mutable std::shared_mutex                     m_mxLiveBooks; // For stateful order books
+     std::unordered_map<std::string, TradeRing>    m_trades;
+     std::unordered_map<std::string, OrderBook>    m_books;
+-    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; // 🔥 NEW: Stateful order books
++    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; // NEW: Stateful order books
+ }; 
+\ No newline at end of file
+diff --git a/libs/core/LiquidityTimeSeriesEngine.cpp b/libs/core/LiquidityTimeSeriesEngine.cpp
+index 0b6a521..cc619ce 100644
+--- a/libs/core/LiquidityTimeSeriesEngine.cpp
++++ b/libs/core/LiquidityTimeSeriesEngine.cpp
+@@ -70,8 +70,9 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
+     }
+     
+     OrderBookSnapshot snapshot;
++    // 🎯 CRITICAL FIX: Use OrderBook's exchange timestamp instead of now()
+     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+-        std::chrono::system_clock::now().time_since_epoch()).count();
++        book.timestamp.time_since_epoch()).count();
+     
+     // LINUS FIX: No viewport filtering - store all depth-limited data
+     // Global storage strategy prevents black gaps on zoom-out
+@@ -533,5 +534,6 @@ void LiquidityTimeSeriesEngine::cleanupOldData() {
+ }
+ 
+ double LiquidityTimeSeriesEngine::quantizePrice(double price) const {
+-    return std::round(price / m_priceResolution) * m_priceResolution;
++    // 🎯 CRITICAL FIX: Use floor for consistent price binning (no drift)
++    return std::floor(price / m_priceResolution) * m_priceResolution;
+ }
+\ No newline at end of file
+diff --git a/libs/core/LiquidityTimeSeriesEngine.h b/libs/core/LiquidityTimeSeriesEngine.h
+index ef96235..261bf5a 100644
+--- a/libs/core/LiquidityTimeSeriesEngine.h
++++ b/libs/core/LiquidityTimeSeriesEngine.h
+@@ -19,7 +19,7 @@ Assumptions: Order book updates are processed to update the time-sliced liquidit
+ #include "../core/TradeData.h"
+ 
+ /**
+- * 🎯 LIQUIDITY TIME SERIES ENGINE
++ * LIQUIDITY TIME SERIES ENGINE
+  * 
+  * This class implements the core temporal order book analysis:
+  * - Captures 100ms order book snapshots
+@@ -98,7 +98,8 @@ struct LiquidityTimeSlice {
+     
+     // PHASE 2.2: Tick-based access methods
+     Tick priceToTick(double price) const {
+-        return static_cast<Tick>(std::round(price / tickSize));
++        // 🎯 CRITICAL FIX: Use floor for consistent tick mapping (no drift)
++        return static_cast<Tick>(std::floor(price / tickSize));
+     }
+     
+     double tickToPrice(Tick tick) const {
+@@ -135,8 +136,8 @@ private:
+     // Base 100ms snapshots (raw data)
+     std::deque<OrderBookSnapshot> m_snapshots;
+     
+-    // Dynamic timeframe configuration
+-    std::vector<int64_t> m_timeframes = {100, 250, 500, 1000, 2000, 5000, 10000}; // ms
++    // Dynamic timeframe configuration (start with base only; others added on-demand)
++    std::vector<int64_t> m_timeframes = {100}; // ms
+     
+     // Aggregated time slices for each timeframe
+     std::map<int64_t, std::deque<LiquidityTimeSlice>> m_timeSlices;
+@@ -211,7 +212,8 @@ private:
+     
+     // PHASE 2.2: Tick-based utilities
+     Tick priceToTick(double price) const {
+-        return static_cast<Tick>(std::round(price / m_priceResolution));
++        // 🎯 CRITICAL FIX: Use floor for consistent tick mapping (no drift)  
++        return static_cast<Tick>(std::floor(price / m_priceResolution));
+     }
+     
+     double tickToPrice(Tick tick) const {
+diff --git a/libs/core/MarketDataCore.cpp b/libs/core/MarketDataCore.cpp
+index 832ed6a..1c89121 100644
+--- a/libs/core/MarketDataCore.cpp
++++ b/libs/core/MarketDataCore.cpp
+@@ -577,9 +577,9 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
+         updateCount++;
+     }
+     
+-    // PHASE 2.1: Direct dense-only signal - NO CONVERSION!
+-    QMetaObject::invokeMethod(this, [this, productId = QString::fromStdString(product_id)]() {
+-        emit liveOrderBookUpdated(productId);  // Signal that dense book is ready
++    // PHASE 2.1: Direct dense-only signal with exchange timestamp - NO CONVERSION!
++    QMetaObject::invokeMethod(this, [this, productId = QString::fromStdString(product_id), exchangeTimestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(exchange_timestamp.time_since_epoch()).count()]() {
++        emit liveOrderBookUpdated(productId, exchangeTimestamp_ms);  // Signal with original exchange timestamp
+     }, Qt::QueuedConnection);
+     
+     // 🚀 PHASE 2.1: Record order book update metrics
+diff --git a/libs/core/MarketDataCore.hpp b/libs/core/MarketDataCore.hpp
+index 9dc8021..78ed000 100644
+--- a/libs/core/MarketDataCore.hpp
++++ b/libs/core/MarketDataCore.hpp
+@@ -61,7 +61,7 @@ public:
+ 
+ signals:
+     void tradeReceived(const Trade& trade);
+-    void liveOrderBookUpdated(const QString& productId);
++    void liveOrderBookUpdated(const QString& productId, qint64 exchangeTimestamp_ms);
+     void connectionStatusChanged(bool connected);
+     void errorOccurred(const QString& error);
+ 
+@@ -82,7 +82,7 @@ private:
+     void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
+     void dispatch(const nlohmann::json&);
+     
+-    // 🚨 FIX: Beast WebSocket write queue methods (strand-only, no mutex)
++    // FIX: Beast WebSocket write queue methods (strand-only, no mutex)
+     void enqueueWrite(std::shared_ptr<std::string> message);
+     void doWrite();
+ 
+@@ -132,9 +132,9 @@ private:
+     std::atomic<int>                m_tradeLogCount{0};
+     std::atomic<int>                m_orderBookLogCount{0};
+     
+-    // 🗑️ CLEANED UP: Redundant mutexes removed - write queue handles serialization
++    // CLEANED UP: Redundant mutexes removed - write queue handles serialization
+     
+-    // 🚨 FIX: Beast WebSocket write queue (strand-local, no mutex needed)
++    // FIX: Beast WebSocket write queue (strand-local, no mutex needed)
+     std::deque<std::shared_ptr<std::string>> m_writeQueue;
+     bool                            m_writeInProgress{false};
+ };
+\ No newline at end of file
+diff --git a/libs/core/SentinelLogging.hpp b/libs/core/SentinelLogging.hpp
+index 38e2b5a..7fd6184 100644
+--- a/libs/core/SentinelLogging.hpp
++++ b/libs/core/SentinelLogging.hpp
+@@ -3,6 +3,7 @@
+ #include <QLoggingCategory>
+ #include <QDebug>
+ #include <cstdlib>
++#include <atomic>
+ 
+ // =============================================================================
+ // SENTINEL LOGGING CATEGORIES - SIMPLIFIED 4-CATEGORY SYSTEM
+@@ -20,11 +21,11 @@ Q_DECLARE_LOGGING_CATEGORY(logDebug)    // Debug: detailed diagnostics (disabled
+ // =============================================================================
+ 
+ namespace sentinel::log_throttle {
+-    // Compile-time defaults (overridden by env vars)
+-    inline constexpr int kApp    = 1;    // Log every app event (low frequency)
+-    inline constexpr int kData   = 20;   // Log every 20th data operation  
+-    inline constexpr int kRender = 100;  // Log every 100th render operation
+-    inline constexpr int kDebug  = 10;   // Log every 10th debug message
++    // Compile-time defaults (overridden by env vars) - INCREASED FOR LESS SPAM
++    inline constexpr int kApp    = 1;     // Log every app event (low frequency)
++    inline constexpr int kData   = 100;   // Log every 100th data operation (was 20)
++    inline constexpr int kRender = 500;   // Log every 500th render operation (was 100)
++    inline constexpr int kDebug  = 50;    // Log every 50th debug message (was 10)
+ }
+ 
+ // Atomic throttling macro with runtime env var override
+@@ -58,68 +59,4 @@ namespace sentinel::log_throttle {
+ 
+ // Always-on macros (no throttling for critical messages)
+ #define sLog_Warning(...)  qCWarning(logApp) << __VA_ARGS__
+-#define sLog_Error(...)    qCCritical(logApp) << __VA_ARGS__
+-
+-// =============================================================================
+-// 🔥 MIGRATION COMPLETE! BACKWARD COMPATIBILITY ALIASES OBLITERATED! 🔥
+-// =============================================================================
+-// All logging now uses the pure 4-category system with atomic throttling:
+-// - sLog_App()    : Application lifecycle, config, auth
+-// - sLog_Data()   : Network, cache, trades, WebSocket operations  
+-// - sLog_Render() : Charts, rendering, GPU, coordinates
+-// - sLog_Debug()  : Debug diagnostics and detailed logging
+-//
+-// 📊 PERFORMANCE BENEFITS:
+-// ✅ Atomic throttling eliminates console spam
+-// ✅ Thread-safe counters (no race conditions)  
+-// ✅ Runtime tunable via environment variables
+-// ✅ Zero manual static counter maintenance
+-//
+-// 🎯 LINUS-APPROVED: No blocking, no races, no lies!
+-
+-// =============================================================================
+-// RUNTIME ENVIRONMENT VARIABLE CONTROL
+-// =============================================================================
+-// Override throttle intervals at runtime:
+-//   export SENTINEL_LOG_App_INTERVAL=1      # Log every app message  
+-//   export SENTINEL_LOG_Data_INTERVAL=5     # Log every 5th data operation
+-//   export SENTINEL_LOG_Render_INTERVAL=50  # Log every 50th render
+-//   export SENTINEL_LOG_Debug_INTERVAL=1    # Log every debug message
+-
+-// =============================================================================
+-// USAGE EXAMPLES & DOCUMENTATION
+-// =============================================================================
+-/*
+-NEW 4-CATEGORY SYSTEM WITH ATOMIC THROTTLING:
+-
+-BASIC USAGE:
+-sLog_App("🚀 CREATING GPU TRADING TERMINAL!");           // Application events
+-sLog_Data("💰 Trade processed:" << price << size);       // Data operations  
+-sLog_Render("🎨 Frame rendered:" << fps << "fps");       // Rendering operations
+-sLog_Debug("🔍 Debug info:" << variable);                // Debug details
+-
+-CUSTOM THROTTLING:
+-sLog_DataN(5, "Every 5th trade:" << trade);              // Custom interval
+-sLog_RenderN(50, "Every 50th frame:" << frame);          // Custom interval
+-
+-MIGRATION FROM OLD SYSTEM:
+-OLD: sLog_Connection("Connected to WebSocket");
+-NEW: sLog_Data("Connected to WebSocket");                // Network = Data
+-
+-OLD: sLog_Chart("Rendering chart with" << points << "points");  
+-NEW: sLog_Render("Rendering chart with" << points << "points"); // Chart = Render
+-
+-OLD: static int count; if (++count % 20 == 1) sLog_Trades(...);
+-NEW: sLog_Data(...);                                     // Automatic throttling!
+-
+-CATEGORY GUIDELINES:
+-- sLog_App():    Init, lifecycle, config, auth           (throttle: every 1)
+-- sLog_Data():   Network, cache, trades, WebSocket       (throttle: every 20)  
+-- sLog_Render(): Charts, GPU, coordinates, painting      (throttle: every 100)
+-- sLog_Debug():  Detailed diagnostics, variables         (throttle: every 10)
+-
+-RUNTIME CONTROL:
+-export SENTINEL_LOG_Data_INTERVAL=1    # See every data operation
+-export SENTINEL_LOG_Render_INTERVAL=10 # See every 10th render
+-export QT_LOGGING_RULES="*.debug=true" # Enable all categories
+-*/ 
+\ No newline at end of file
++#define sLog_Error(...)    qCCritical(logApp) << __VA_ARGS__
+\ No newline at end of file
+diff --git a/libs/gui/GPUTypes.h b/libs/gui/GPUTypes.h
+index de5a6bc..204c637 100644
+--- a/libs/gui/GPUTypes.h
++++ b/libs/gui/GPUTypes.h
+@@ -7,7 +7,7 @@ namespace GPUTypes {
+         float x, y;           // Screen coordinates
+         float r, g, b, a;     // Color (RGBA)
+         
+-        // 🔥 ADD: Raw data fields for grid system integration
++        // ADD: Raw data fields for grid system integration
+         double rawPrice = 0.0;      // Original price before coordinate transformation
+         double rawTimestamp = 0.0;  // Original timestamp in milliseconds
+         int64_t timestamp_ms = 0;   // Timestamp for aging/cleanup
+@@ -19,7 +19,7 @@ namespace GPUTypes {
+         float width, height;  // Quad dimensions
+         float r, g, b, a;     // Color (RGBA)
+         
+-        // 🔥 ADD: Raw data fields for grid system integration
++        // ADD: Raw data fields for grid system integration
+         double rawPrice = 0.0;      // Original price
+         double rawTimestamp = 0.0;  // Original timestamp in milliseconds
+         float intensity = 1.0f;     // Volume/liquidity intensity
+diff --git a/libs/gui/MainWindowGpu.cpp b/libs/gui/MainWindowGpu.cpp
+index c62db7e..29cf8a9 100644
+--- a/libs/gui/MainWindowGpu.cpp
++++ b/libs/gui/MainWindowGpu.cpp
+@@ -1,266 +1,139 @@
+-/*
+-Sentinel — MainWindowGpu
+-Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
+-Inputs/Outputs: Connects MarketDataCore signals to UnifiedGridRenderer slots.
+-Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
+-Performance: Connection logic is part of the user-initiated subscription setup.
+-Integration: Obtains MarketDataCore from CoinbaseStreamClient and wires it to the QML renderer.
+-Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
+-Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
+-Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
+-*/
+-
+ #include "MainWindowGpu.h"
+-#include "StatisticsController.h"
+-#include "ChartModeController.h"
+ #include "UnifiedGridRenderer.h"
+-#include "render/DataProcessor.hpp"  // 🚀 PHASE 3: Include for signal routing
+-#include "SentinelLogging.hpp"
++#include "../core/MarketDataCore.hpp"
++#include "../core/SentinelMonitor.hpp"
++#include "../core/SentinelLogging.hpp"
++#include "render/DataProcessor.hpp"
++#include <QVBoxLayout>
++#include <QHBoxLayout>
++#include <QPushButton>
++#include <QLineEdit>
++#include <QLabel>
++#include <QGroupBox>
++#include <QQuickWidget>
+ #include <QQmlContext>
+-#include <QDir>
+-#include <QFile>
+-#include <QTimer>
++#include <QQmlEngine>
++#include <QQuickItem>
++#include <QMessageBox>
++#include <QStatusBar>
+ 
+-MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {    
+-    // Initialize data components (was previously in facade)
+-    m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
++MainWindowGpu::MainWindowGpu(QWidget *parent)
++    : QMainWindow(parent)
++{
++    m_authenticator = std::make_unique<Authenticator>();
+     m_dataCache = std::make_unique<DataCache>();
+-    
+-    // 🚨 TESTING: Disable SentinelMonitor to isolate window hang issue
+-    // m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
+-    // m_sentinelMonitor->startMonitoring();
+-    // m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
+-    m_sentinelMonitor = nullptr;  // Temporarily disable
+-    
+-    sLog_App("🔧 Creating persistent MarketDataCore...");
+-    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
++    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache);
+     m_marketDataCore->start();
+-    sLog_App("✅ MarketDataCore created and started");
+-    
+-    sLog_App("🔧 Setting up UI...");
++
+     setupUI();
+-    sLog_App("✅ UI setup complete");
+-    
+-    sLog_App("🔧 Setting up connections...");
+-    setupConnections();
+-    sLog_App("✅ Connections setup complete");
+-    
+-    // Set window properties
+-    setWindowTitle("Sentinel - GPU Trading Terminal");
+-    resize(1400, 900);
+-    sLog_App("✅ Window properties set");
+-    
+-    sLog_App("🔧 Initializing QML components...");
++
++    connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGpu::onSubscribe);
++
++    setWindowTitle("Sentinel Trading Terminal");
++    resize(1800, 1200);
++
+     initializeQMLComponents();
+-    sLog_App("✅ QML components initialized");
+-    
+-    sLog_App("🔧 Connecting MarketData signals...");
+-    // 🚀 PHASE 3: Connect signals after QML components are ready
++
+     connectMarketDataSignals();
+-    sLog_App("✅ MarketData signals connected");
+-    
+-    sLog_App("✅ GPU MainWindow ready for 144Hz trading!");
+ }
+ 
+-MainWindowGPU::~MainWindowGPU() {
+-    sLog_App("🛑 MainWindowGPU destructor - cleaning up...");
+-    
+-    // Stop data streams first
++MainWindowGpu::~MainWindowGpu()
++{
+     if (m_marketDataCore) {
+         m_marketDataCore->stop();
+-        m_marketDataCore.reset();  // Clean shutdown of MarketDataCore
+-    }
+-    
+-    // Disconnect all signals to prevent callbacks during destruction
+-    if (m_gpuChart && m_gpuChart->rootObject()) {
+-        disconnect(m_gpuChart->rootObject(), nullptr, this, nullptr);
+-    }
+-    
+-    // Clear QML context to prevent dangling references
+-    if (m_gpuChart) {
+-        m_gpuChart->setSource(QUrl());
+     }
+-    
+-    sLog_App("✅ MainWindowGPU cleanup complete");
+ }
+ 
+-void MainWindowGPU::setupUI() {
+-    // Create GPU Chart (QML) - Load from file system first
+-    m_gpuChart = new QQuickWidget(this);
+-    m_gpuChart->setResizeMode(QQuickWidget::SizeRootObjectToView);
+-    
+-    // Try file system path first to bypass resource issues
+-    // TODO: move this to a config file - OS dependent paths
+-    QString qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
+-    sLog_App("🔍 Trying QML path:" << qmlPath);
+-    
+-    if (QFile::exists(qmlPath)) {
+-        m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
+-        sLog_App("✅ QML loaded from file system!");
+-    } else {
+-        sLog_App("❌ QML file not found, trying resource path...");
+-        m_gpuChart->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
+-    }
+-    
+-    // Check if QML loaded successfully
+-    if (m_gpuChart->status() == QQuickWidget::Error) {
+-        sLog_Error("🚨 QML FAILED TO LOAD!");
+-        sLog_Error("QML Errors:" << m_gpuChart->errors());
++void MainWindowGpu::setupUI()
++{
++    QWidget *centralWidget = new QWidget(this);
++    setCentralWidget(centralWidget);
++    QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
++
++    QQuickWidget *qmlWidget = new QQuickWidget(this);
++    qmlWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
++    QQmlContext *qmlContext = qmlWidget->rootContext();
++
++    qmlWidget->setSource(QUrl("qrc:/qml/main.qml"));
++
++    if (qmlWidget->status() == QQuickWidget::Error) {
++        QMessageBox::critical(this, "QML Error", "Failed to load QML. Please check logs.");
+     }
+-    
+-    // Set default symbol in QML context
+-    QQmlContext* context = m_gpuChart->rootContext();
+-    context->setContextProperty("symbol", "BTC-USD");
+-    m_modeController = new ChartModeController(this);
+-    context->setContextProperty("chartModeController", m_modeController);
+-    
+-    // Control panel
+-    m_cvdLabel = new QLabel("CVD: N/A", this);
+-    m_statusLabel = new QLabel("🔴 Disconnected", this);
++
++    mainLayout->addWidget(qmlWidget);
++
++    QStatusBar *statusBar = new QStatusBar(this);
++    setStatusBar(statusBar);
++    m_statusLabel = new QLabel("Disconnected", this);
++    statusBar->addWidget(m_statusLabel);
++
+     m_symbolInput = new QLineEdit("BTC-USD", this);
+-    m_subscribeButton = new QPushButton("🚀 Subscribe", this);
+-    
+-    // Styling
+-    m_cvdLabel->setStyleSheet("QLabel { color: white; font-size: 16px; font-weight: bold; }");
+-    m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
+-    m_symbolInput->setStyleSheet("QLineEdit { padding: 8px; font-size: 14px; }");
+-    m_subscribeButton->setStyleSheet("QPushButton { padding: 8px 16px; font-size: 14px; font-weight: bold; }");
+-    
+-    // Layout
+-    QVBoxLayout* mainLayout = new QVBoxLayout(this);
+-    
+-    // GPU chart takes most space
+-    mainLayout->addWidget(m_gpuChart, 1);
+-    
+-    // Control panel at bottom
+-    QGroupBox* controlGroup = new QGroupBox("🎯 Trading Controls");
+-    QHBoxLayout* controlLayout = new QHBoxLayout();
+-    controlLayout->addWidget(new QLabel("Symbol:"));
+-    controlLayout->addWidget(m_symbolInput);
+-    controlLayout->addWidget(m_subscribeButton);
+-    controlLayout->addStretch();
+-    controlLayout->addWidget(m_cvdLabel);
+-    controlLayout->addWidget(m_statusLabel);
+-    controlGroup->setLayout(controlLayout);
+-    
+-    mainLayout->addWidget(controlGroup);
+-    setLayout(mainLayout);
+-}
++    m_subscribeButton = new QPushButton("Subscribe", this);
+ 
+-void MainWindowGPU::setupConnections() {
+-    m_statsController = new StatisticsController(this);
++    QHBoxLayout *subscribeLayout = new QHBoxLayout();
++    subscribeLayout->addWidget(new QLabel("Symbol:"));
++    subscribeLayout->addWidget(m_symbolInput);
++    subscribeLayout->addWidget(m_subscribeButton);
+ 
+-    // UI connections
+-    connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
+-    
+-    // Stats pipeline
+-    connect(m_statsController, &StatisticsController::cvdUpdated, 
+-            this, &MainWindowGPU::onCVDUpdated);
+-    
+-    // PHASE 1.2: Remove scattered QML connection setup - moved to constructor-based initialization
+-    sLog_App("✅ GPU MainWindow basic connections established");
++    QGroupBox* controlGroup = new QGroupBox("Trading Controls");
++    controlGroup->setLayout(subscribeLayout);
++    mainLayout->insertWidget(0, controlGroup);
++
++    qmlContext->setContextProperty("mainWindow", this);
+ }
+ 
+-void MainWindowGPU::onSubscribe() {
++void MainWindowGpu::onSubscribe()
++{
+     QString symbol = m_symbolInput->text().trimmed().toUpper();
+     if (symbol.isEmpty()) {
+-        sLog_Warning("❌ Empty symbol input");
+         return;
+     }
+-    
+-    sLog_App(QString("🚀 Subscribing to symbol: %1").arg(symbol));
+-    
+-    // Update QML context with the new symbol
+-    m_gpuChart->rootContext()->setContextProperty("symbol", symbol);
+-    
+-    // 🚀 GEMINI'S REFACTOR: Use persistent MarketDataCore with subscribeToSymbols!
++
+     if (m_marketDataCore) {
+         m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
+-    } else {
+-        sLog_Error("❌ MarketDataCore not initialized!");
+     }
+ }
+ 
+-void MainWindowGPU::onCVDUpdated(double cvd) {
+-    m_cvdLabel->setText(QString("CVD: %1").arg(cvd, 0, 'f', 2));
+-}
++void MainWindowGpu::connectMarketDataSignals()
++{
++    if (m_marketDataCore && m_gridRenderer) {
++        connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
++                this, &MainWindowGpu::onConnectionStatusChanged);
+ 
+-// 🚀 GEMINI'S REFACTOR: Signal connections moved from onSubscribe to constructor
+-void MainWindowGPU::connectMarketDataSignals() {
+-    sLog_App("🔥 Setting up persistent MarketDataCore signal connections...");
+-    
+-    UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+-    if (m_marketDataCore && unifiedGridRenderer) {
+-        // PHASE 2.1: Provide dense data access to renderer
+-        unifiedGridRenderer->setDataCache(m_dataCache.get());
+-        
+-        // PHASE 2.2: Provide unified monitoring to renderer
+-        unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
+-        
+-        // Get DataProcessor from UGR to route signals correctly
+-        auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+-        if (dataProcessor) {
+-            // 🚀 PHASE 3: Route LiveOrderBook signal to DataProcessor (THE FIX!)
++        connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived,
++                m_gridRenderer, &UnifiedGridRenderer::onTradeReceived);
++
++        if (auto* dataProcessor = m_gridRenderer->getDataProcessor()) {
+             connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
+                     dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
+-            sLog_App("🚀 PHASE 3: LiveOrderBook signal routed to DataProcessor!");
+         }
+-        
+-        // Trade signal still goes to UGR
+-        connect(m_marketDataCore.get(), SIGNAL(tradeReceived(const Trade&)),
+-                unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
+-        
+-        // Connection status feedback
+-        connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, 
+-                this, [this](bool connected) {
+-            if (connected) {
+-                m_statusLabel->setText("🟢 Connected");
+-                m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
+-                m_subscribeButton->setText("Subscribe");
+-                m_subscribeButton->setEnabled(true);
+-            } else {
+-                m_statusLabel->setText("🔴 Disconnected");  
+-                m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
+-                m_subscribeButton->setText("Connect");
+-                m_subscribeButton->setEnabled(true);
+-            }
+-        });
+-        
+-        sLog_App("🔥 Persistent MarketDataCore → DataProcessor connections established!");
++
++        m_statusLabel->setText("Connected");
+     } else {
+-        sLog_Error("❌ MarketDataCore or UnifiedGridRenderer not found during signal setup!");
+-        if (!m_marketDataCore) sLog_Error("   MarketDataCore is null!");
+-        if (!unifiedGridRenderer) sLog_Error("   UnifiedGridRenderer not found!");
++        m_statusLabel->setText("Disconnected");
+     }
+ }
+ 
+-// PHASE 1.2: Proper QML component initialization without retry logic
+-void MainWindowGPU::initializeQMLComponents() {
+-    sLog_App("🔥 PHASE 1.2: Initializing QML components with proper lifecycle management");
+-    
+-    // Check if QML loaded successfully during setupUI()
+-    if (m_gpuChart->status() == QQuickWidget::Error) {
+-        sLog_Error("❌ QML failed to load during setupUI - cannot initialize components");
++void MainWindowGpu::onConnectionStatusChanged(bool connected)
++{
++    m_statusLabel->setText(connected ? "Connected" : "Disconnected");
++}
++
++void MainWindowGpu::initializeQMLComponents()
++{
++    QQuickWidget* qmlWidget = findChild<QQuickWidget*>();
++    if (!qmlWidget || qmlWidget->status() == QQuickWidget::Error) {
+         return;
+     }
+-    
+-    // Verify QML root object is available (should be ready after setupUI())
+-    QQuickItem* qmlRoot = m_gpuChart->rootObject();
+-    if (!qmlRoot) {
+-        sLog_Warning("❌ QML root object not available - QML may not be fully loaded");
++
++    QObject* qmlRootObject = qmlWidget->rootObject();
++    if (!qmlRootObject) {
+         return;
+     }
+-    
+-    // Verify UnifiedGridRenderer is available
+-    UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+-    if (!unifiedGridRenderer) {
+-        sLog_Warning("❌ UnifiedGridRenderer not found in QML");
+-        return;
++
++    m_gridRenderer = qmlRootObject->findChild<UnifiedGridRenderer*>("unifiedGrid");
++
++    if (m_gridRenderer) {
++        m_gridRenderer->setDataCache(m_dataCache.get());
+     }
+-    
+-    sLog_App("✅ PHASE 1.2: QML components verified and ready");
+-    sLog_App("   → QML Root: AVAILABLE");
+-    sLog_App("   → UnifiedGridRenderer: AVAILABLE");
+-    
+-    // Components are verified - data pipeline will be created on subscription
+-} 
+\ No newline at end of file
++}
+diff --git a/libs/gui/MainWindowGpu.h b/libs/gui/MainWindowGpu.h
+index 195d1ad..c077e22 100644
+--- a/libs/gui/MainWindowGpu.h
++++ b/libs/gui/MainWindowGpu.h
+@@ -1,80 +1,43 @@
+-/*
+-Sentinel — MainWindowGpu
+-Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
+-Inputs/Outputs: Manages the lifecycle of the CoinbaseStreamClient and UI controllers.
+-Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
+-Performance: UI setup is a one-time cost; not on the real-time data hot path.
+-Integration: Instantiated in main.cpp; hosts DepthChartView.qml in a QQuickWidget.
+-Observability: Logs lifecycle and connection status via qDebug.
+-Related: MainWindowGpu.cpp, CoinbaseStreamClient.hpp, DepthChartView.qml, UnifiedGridRenderer.h.
+-Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
+-*/
+-/*
+-Sentinel — MainWindowGpu
+-Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
+-Inputs/Outputs: Manages the lifecycle of the CoinbaseStreamClient and UI controllers.
+-Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
+-Performance: UI setup is a one-time cost; not on the real-time data hot path.
+-Integration: Uses CoinbaseStreamClient to create/manage MarketDataCore; wires it to the QML renderer.
+-Observability: Logs lifecycle and connection status via qDebug.
+-Related: MainWindowGpu.cpp, CoinbaseStreamClient.hpp, MarketDataCore.hpp, DepthChartView.qml.
+-Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
+-*/
+ #pragma once
+ 
+-#include <QWidget>
+-#include <QVBoxLayout>
+-#include <QHBoxLayout>
+-#include <QPushButton>
+-#include <QLabel>
+-#include <QLineEdit>
+-#include <QGroupBox>
+-#include <QtQuickWidgets/QQuickWidget>
++#include <QMainWindow>
+ #include <memory>
+-#include "../core/MarketDataCore.hpp"
+-#include "../core/Authenticator.hpp"
+-#include "../core/DataCache.hpp"
+-#include "../core/SentinelMonitor.hpp"
+ 
+ // Forward declarations
+-class StatisticsController;
+-class ChartModeController;
++class UnifiedGridRenderer;
++class MarketDataCore;
++class SentinelMonitor;
++class QLabel;
++class QLineEdit;
++class QPushButton;
++class Authenticator;
++class DataCache;
+ 
+-/**
+- * 🚀 GPU-Powered Trading Terminal MainWindow
+- * Clean, focused implementation for Phase 0 GPU rendering
+- */
+-class MainWindowGPU : public QWidget {
++class MainWindowGpu : public QMainWindow
++{
+     Q_OBJECT
+ 
+ public:
+-    explicit MainWindowGPU(QWidget* parent = nullptr);
+-    ~MainWindowGPU();
++    explicit MainWindowGpu(QWidget *parent = nullptr);
++    ~MainWindowGpu();
+ 
+ private slots:
+     void onSubscribe();
+-    void onCVDUpdated(double cvd);
++    void onConnectionStatusChanged(bool connected);
+ 
+ private:
+     void setupUI();
+-    void setupConnections();
+-    void initializeQMLComponents();  // 🔥 PHASE 1.2: Proper QML initialization
+-    void connectMarketDataSignals();  // 🚀 GEMINI'S REFACTOR: Signal connections moved to constructor
++    void initializeQMLComponents();
++    void connectMarketDataSignals();
++
++    UnifiedGridRenderer* m_gridRenderer = nullptr;
++
++    QLabel* m_statusLabel = nullptr;
++    QLineEdit* m_symbolInput = nullptr;
++    QPushButton* m_subscribeButton = nullptr;
+ 
+-    // 🔥 GPU CHART - Core component
+-    QQuickWidget* m_gpuChart;
+-    
+-    // UI Controls
+-    QLabel* m_cvdLabel;
+-    QLabel* m_statusLabel;
+-    QLineEdit* m_symbolInput;
+-    QPushButton* m_subscribeButton;
+-    
+-    // 🔥 PHASE 1.1: Direct MarketDataCore connection (facade OBLITERATED)
+-    std::unique_ptr<MarketDataCore> m_marketDataCore;
+     std::unique_ptr<Authenticator> m_authenticator;
+     std::unique_ptr<DataCache> m_dataCache;
++    std::unique_ptr<MarketDataCore> m_marketDataCore;
+     std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
+-    StatisticsController* m_statsController;
+-    ChartModeController* m_modeController{nullptr};
+ };
+diff --git a/libs/gui/UnifiedGridRenderer.cpp b/libs/gui/UnifiedGridRenderer.cpp
+index c091658..73b33bd 100644
+--- a/libs/gui/UnifiedGridRenderer.cpp
++++ b/libs/gui/UnifiedGridRenderer.cpp
+@@ -21,7 +21,6 @@ Assumptions: The render strategies are compatible and can be layered together.
+ #include <QMetaType>
+ #include <QDateTime>
+ // #include <algorithm>
+-#include <cmath>
+ 
+ // New modular architecture includes
+ #include "render/GridTypes.hpp"
+@@ -44,7 +43,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
+     setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+     setFlag(ItemAcceptsInputMethod, true);
+     
+-    // 🐛 FIX: Only accept mouse events on empty areas, not over UI controls
++    // FIX: Only accept mouse events on empty areas, not over UI controls
+     setAcceptHoverEvents(false);  // Reduce event capture
+     
+     // Initialize new modular architecture
+@@ -92,63 +91,25 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
+     // GridViewState emits viewportChanged which is connected to us
+     
+     // Atomic throttling
+-    sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
+-               << " Price:[$" << minPrice << "-$" << maxPrice << "]");
++    sLog_Debug("UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
++               << " Price: [$" << minPrice << "-$" << maxPrice << "]");
+ }
+ 
+ void UnifiedGridRenderer::onViewportChanged() {
+     if (!m_viewState || !m_dataProcessor) return;
+-    
+-    // 🎯 DYNAMIC RESAMPLING: Auto-select timeframe based on pixel target (8-16px cell width)
+-    qint64 timeStart = m_viewState->getVisibleTimeStart();
+-    qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+-    double viewportWidth = m_viewState->getViewportWidth();
+-    
+-    // Calculate target timeframe for 8-16px cell width
+-    double timeSpan_ms = static_cast<double>(timeEnd - timeStart);
+-    double targetCellWidth = 12.0; // Target 12px cells
+-    double targetTimeframe_ms = (timeSpan_ms * targetCellWidth) / viewportWidth;
+-    
+-    // Available timeframes in LTSE
+-    const std::vector<int64_t> timeframes = {100, 250, 500, 1000, 2000, 5000, 10000};
+-    
+-    // Find closest timeframe
+-    int64_t bestTimeframe = timeframes[0];
+-    double bestDiff = std::abs(targetTimeframe_ms - bestTimeframe);
+-    
+-    for (int64_t tf : timeframes) {
+-        double diff = std::abs(targetTimeframe_ms - tf);
+-        if (diff < bestDiff) {
+-            bestDiff = diff;
+-            bestTimeframe = tf;
+-        }
+-    }
+-    
+-    // Update timeframe if it changed significantly
+-    if (m_dataProcessor && bestTimeframe != m_currentTimeframe_ms) {
+-        m_currentTimeframe_ms = bestTimeframe;
+-        m_dataProcessor->setTimeframe(bestTimeframe);
+-        m_geometryDirty.store(true);
+-        update();
+-        emit timeframeChanged();
+-    }
+-    
+-    // Also update price resolution
+-    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
+-    double currentResolution = m_dataProcessor->getPriceResolution();
+-    if (std::abs(optimalResolution - currentResolution) > 0.01) {
+-        m_dataProcessor->setPriceResolution(optimalResolution);
+-        m_geometryDirty.store(true);
+-        update();
+-        emit priceResolutionChanged();
+-    }
++
++    // Slim adapter: viewport changes trigger geometry refresh only.
++    // Timeframe suggestion and price bucket decisions are handled by DataProcessor/LTSE.
++    m_visibleCells.clear();
++    m_geometryDirty.store(true);
++    update();
+ }
+ 
+ 
+ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
+     if (newGeometry.size() != oldGeometry.size()) {
+         // Atomic throttling
+-        sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
++        sLog_Render("UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
+         
+         // Keep GridViewState in sync with the item size for accurate coord math
+         if (m_viewState) {
+@@ -167,14 +128,14 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
+ }
+ 
+ void UnifiedGridRenderer::updateVisibleCells() {
+-    // 🎯 THREADING FIX: Use thread-safe call like all other DataProcessor methods
++    // THREADING FIX: Use thread-safe call like all other DataProcessor methods
+     if (m_dataProcessor) {
+         // Force a synchronous recompute to avoid stale geometry after LOD/timeframe changes
+         QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", 
+                                  Qt::BlockingQueuedConnection);
+         
+-        // Pull fresh cells computed on the worker thread
+-        m_visibleCells = m_dataProcessor->getVisibleCells();
++        // THREAD-SAFE: Pull fresh cells with proper synchronization
++        m_visibleCells = m_dataProcessor->getVisibleCellsCopy();
+     } else {
+         m_visibleCells.clear();
+     }
+@@ -187,19 +148,8 @@ void UnifiedGridRenderer::updateVisibleCells() {
+ void UnifiedGridRenderer::updateVolumeProfile() {
+     // TODO: Implement volume profile from liquidity time series
+     m_volumeProfile.clear();
+-    
+-    // For now, create a simple placeholder
+-    // In a full implementation, this would aggregate volume across time slices
+ }
+ 
+-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
+-
+-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
+-
+-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
+-
+-// Color/intensity now owned by render strategies (see HeatmapStrategy)
+-
+ // Property setters
+ void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
+     if (m_renderMode != mode) {
+@@ -245,7 +195,7 @@ void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
+ }
+ 
+ // Public API methods
+-// 🗑️ DELETED: Redundant wrapper methods - use direct calls instead
++// DELETED: Redundant wrapper methods - use direct calls instead
+ 
+ void UnifiedGridRenderer::clearData() {
+     // Delegate to DataProcessor
+@@ -254,7 +204,7 @@ void UnifiedGridRenderer::clearData() {
+     }
+     
+     // Reset liquidity engine
+-    // 🚀 PHASE 3: LiquidityTimeSeriesEngine now owned by DataProcessor, not UGR!
++    // PHASE 3: LiquidityTimeSeriesEngine now owned by DataProcessor, not UGR!
+     
+     // Clear rendering data
+     m_visibleCells.clear();
+@@ -263,7 +213,7 @@ void UnifiedGridRenderer::clearData() {
+     m_geometryDirty.store(true);
+     update();
+     
+-    sLog_App("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
++    sLog_App("UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
+ }
+ 
+ void UnifiedGridRenderer::setPriceResolution(double resolution) {
+@@ -274,9 +224,9 @@ void UnifiedGridRenderer::setPriceResolution(double resolution) {
+     }
+ }
+ 
+-// 🗑️ DELETED: setTimeResolution (empty), setGridResolution (redundant)
++// DELETED: setTimeResolution (empty), setGridResolution (redundant)
+ 
+-// 🗑️ DELETED: Grid calculation utilities, debug methods - use DataProcessor directly
++// DELETED: Grid calculation utilities, debug methods - use DataProcessor directly
+ 
+ void UnifiedGridRenderer::setGridMode(int mode) {
+     double priceRes[] = {2.5, 5.0, 10.0};
+@@ -293,6 +243,9 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
+         m_manualTimeframeSet = true;
+         m_manualTimeframeTimer.start();
+         if (m_dataProcessor) m_dataProcessor->addTimeframe(timeframe_ms);
++        
++        // CRITICAL FIX: Clear all existing cells when timeframe changes to prevent visual debris
++        m_visibleCells.clear();
+         m_geometryDirty.store(true);
+         update();
+         emit timeframeChanged();
+@@ -313,11 +266,11 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
+         m_geometryDirty.store(true);
+         update();
+         emit autoScrollEnabledChanged();
+-        sLog_Render("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
++        sLog_Render("Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
+     }
+ }
+ 
+-// 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
++// COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) const {
+     if (!m_viewState) return QPointF();
+     
+@@ -331,7 +284,7 @@ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) co
+     
+     QPointF screenPos = CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
+     
+-    // 🚀 SMOOTH DRAGGING: Apply visual pan offset for real-time feedback
++    // SMOOTH DRAGGING: Apply visual pan offset for real-time feedback
+     QPointF panOffset = getPanVisualOffset();
+     screenPos.setX(screenPos.x() + panOffset.x());
+     screenPos.setY(screenPos.y() + panOffset.y());
+@@ -350,14 +303,14 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
+     viewport.width = width();
+     viewport.height = height();
+     
+-    // 🚀 SMOOTH DRAGGING: Remove visual pan offset before world conversion
++    // SMOOTH DRAGGING: Remove visual pan offset before world conversion
+     QPointF panOffset = getPanVisualOffset();
+     QPointF adjustedScreen(screenX - panOffset.x(), screenY - panOffset.y());
+     
+     return CoordinateSystem::screenToWorld(adjustedScreen, viewport);
+ }
+ 
+-// 🗑️ DELETED: Redundant getScreenWidth/Height - use width()/height() directly
++// DELETED: Redundant getScreenWidth/Height - use width()/height() directly
+ 
+ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
+     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
+@@ -367,13 +320,13 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
+     } else event->ignore(); 
+ }
+ 
+-// 🚀 PHASE 3E: Mouse move delegation
++// PHASE 3E: Mouse move delegation
+ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
+ 
+-// 🚀 PHASE 3E: Mouse release delegation
++// PHASE 3E: Mouse release delegation
+ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->setViewportSize(width(), height()); m_viewState->handlePanEnd(); event->accept(); update(); m_geometryDirty.store(true); } }
+ 
+-// 🚀 PHASE 3E: Wheel event delegation
++// PHASE 3E: Wheel event delegation
+ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
+     if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
+         m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
+@@ -381,14 +334,14 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
+     } else event->ignore(); 
+ }
+ 
+-// 🚀 PHASE 3E: Performance API - Pure delegation to SentinelMonitor
++// PHASE 3E: Performance API - Pure delegation to SentinelMonitor
+ void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+ QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
+ double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
+ double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
+ double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
+ 
+-// 🚀 NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
++// NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
+ 
+ void UnifiedGridRenderer::initializeV2Architecture() {
+     // Register metatypes for cross-thread signal/slot connections
+@@ -476,6 +429,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
+         // invalid size; skip
+         return oldNode;
+     }
++    // Ensure viewport size is in sync before any coord math
++    if (m_viewState) {
++        m_viewState->setViewportSize(width(), height());
++    }
+     
+     auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
+     bool isNewNode = !sceneNode;
+@@ -511,11 +468,14 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
+             if (m_sentinelMonitor) m_sentinelMonitor->recordCacheHit();
+         }
+         
+-        // Apply visual pan offset as a transform for smooth panning feedback
++        // Apply visual pan offset only during active drag or significant offset
+         QMatrix4x4 transform;
+         if (m_viewState) {
+             QPointF pan = m_viewState->getPanVisualOffset();
+-            transform.translate(pan.x(), pan.y());
++            const double threshold = 0.5; // pixels
++            if (pan.x() > threshold || pan.x() < -threshold || pan.y() > threshold || pan.y() < -threshold) {
++                transform.translate(pan.x(), pan.y());
++            }
+         }
+         sceneNode->updateTransform(transform);
+         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
+@@ -527,7 +487,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
+     return sceneNode;
+ }
+ 
+-// 🚀 V2 VIEWPORT DELEGATION
++// V2 VIEWPORT DELEGATION
+ 
+ // QML API - Minimal implementations for Q_PROPERTY/Q_INVOKABLE compatibility
+ void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
+diff --git a/libs/gui/UnifiedGridRenderer.h b/libs/gui/UnifiedGridRenderer.h
+index 91351aa..f15640d 100644
+--- a/libs/gui/UnifiedGridRenderer.h
++++ b/libs/gui/UnifiedGridRenderer.h
+@@ -34,7 +34,7 @@ class DataProcessor;
+ class IRenderStrategy;
+ 
+ /**
+- * 🎯 UNIFIED GRID RENDERER - SLIM QML ADAPTER
++ * UNIFIED GRID RENDERER - SLIM QML ADAPTER
+  * 
+  * Slim QML adapter that delegates to the V2 modular architecture.
+  * Maintains QML interface compatibility while using the new modular system.
+@@ -53,16 +53,16 @@ class UnifiedGridRenderer : public QQuickItem {
+     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
+     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
+     
+-    // 🚀 VIEWPORT BOUNDS: Expose current viewport to QML for dynamic axis labels
++    // VIEWPORT BOUNDS: Expose current viewport to QML for dynamic axis labels
+     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
+     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
+     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
+     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
+     
+-    // 🚀 OPTIMIZATION 4: Timeframe property with proper QML binding
++    // OPTIMIZATION 4: Timeframe property with proper QML binding
+     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
+     
+-    // 🚀 VISUAL TRANSFORM: Expose pan offset for real-time grid sync
++    // VISUAL TRANSFORM: Expose pan offset for real-time grid sync
+     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
+ 
+ public:
+@@ -79,11 +79,11 @@ private:
+     RenderMode m_renderMode = RenderMode::LiquidityHeatmap;
+     bool m_showVolumeProfile = true;
+     double m_intensityScale = 1.0;
+-    int m_maxCells = 100000;
++    int m_maxCells = 2000;  // CRITICAL FIX: Reduced from 100k to 2k for smooth rendering
+     double m_minVolumeFilter = 0.0;      // Volume filter
+     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
+     
+-    // 🐛 FIX: Manual timeframe override tracking
++    // FIX: Manual timeframe override tracking
+     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
+     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
+     
+@@ -128,24 +128,24 @@ public:
+     double minVolumeFilter() const { return m_minVolumeFilter; }
+     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
+     
+-    // 🚀 VIEWPORT BOUNDS: Getters for QML properties
++    // VIEWPORT BOUNDS: Getters for QML properties
+     qint64 getVisibleTimeStart() const;
+     qint64 getVisibleTimeEnd() const; 
+     double getMinPrice() const;
+     double getMaxPrice() const;
+     
+-    // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
++    // OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
+     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
+     
+-    // 🚀 VISUAL TRANSFORM: Getter for QML pan offset
++    // VISUAL TRANSFORM: Getter for QML pan offset
+     QPointF getPanVisualOffset() const;
+     
+-    // 🎯 DATA INTERFACE
++    // DATA INTERFACE
+     Q_INVOKABLE void addTrade(const Trade& trade);
+     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
+     Q_INVOKABLE void clearData();
+     
+-    // 🎯 GRID CONFIGURATION
++    // GRID CONFIGURATION
+     Q_INVOKABLE void setPriceResolution(double resolution);
+     Q_INVOKABLE int getCurrentTimeResolution() const;
+     Q_INVOKABLE double getCurrentPriceResolution() const;
+@@ -156,20 +156,20 @@ public:
+     };
+     static GridResolution calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines = 10, int targetHorizontalLines = 15);
+     
+-    // 🔥 DEBUG: Check grid system state
++    // DEBUG: Check grid system state
+     Q_INVOKABLE QString getGridDebugInfo() const;
+     
+-    // 🔥 DEBUG: Detailed grid debug information
++    // DEBUG: Detailed grid debug information
+     Q_INVOKABLE QString getDetailedGridDebug() const;
+     
+-    // 📊 PERFORMANCE MONITORING API
++    // PERFORMANCE MONITORING API
+     Q_INVOKABLE void togglePerformanceOverlay();
+     Q_INVOKABLE QString getPerformanceStats() const;
+     Q_INVOKABLE double getCurrentFPS() const;
+     Q_INVOKABLE double getAverageRenderTime() const;
+     Q_INVOKABLE double getCacheHitRate() const;
+     
+-    // 🔥 GRID SYSTEM CONTROLS
++    // GRID SYSTEM CONTROLS
+     Q_INVOKABLE void setGridMode(int mode);
+     Q_INVOKABLE void setTimeframe(int timeframe_ms);
+     
+@@ -179,7 +179,7 @@ public:
+     // PHASE 2.2: Unified monitoring access
+     void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
+     
+-    // 🔥 PAN/ZOOM CONTROLS
++    // PAN/ZOOM CONTROLS
+     Q_INVOKABLE void zoomIn();
+     Q_INVOKABLE void zoomOut();
+     Q_INVOKABLE void resetZoom();
+@@ -189,7 +189,7 @@ public:
+     Q_INVOKABLE void panDown();
+     Q_INVOKABLE void enableAutoScroll(bool enabled);
+     
+-    // 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
++    // COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+     Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
+     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
+     Q_INVOKABLE double getScreenWidth() const;
+@@ -203,7 +203,7 @@ public slots:
+     void onLiveOrderBookUpdated(const QString& productId);
+     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
+     
+-    // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
++    // PRICE LOD: Automatic price resolution adjustment on viewport changes
+     void onViewportChanged();
+ 
+ signals:
+@@ -223,7 +223,7 @@ protected:
+     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
+     void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry);
+     
+-    // 🖱️ MOUSE INTERACTION EVENTS
++    // MOUSE INTERACTION EVENTS
+     void mousePressEvent(QMouseEvent* event) override;
+     void mouseMoveEvent(QMouseEvent* event) override;
+     void mouseReleaseEvent(QMouseEvent* event) override;
+@@ -244,12 +244,12 @@ private:
+     // PHASE 2.1: Dense data access
+     class DataCache* m_dataCache = nullptr;
+     
+-    // 🚀 PHASE 3C: Liquidity business logic moved to DataProcessor
++    // PHASE 3C: Liquidity business logic moved to DataProcessor
+     
+     // Color calculation methods (delegated to strategies in V2)
+     // Color/intensity delegated to strategies; no duplicates here
+     
+-    // 🚀 NEW MODULAR ARCHITECTURE (V2)
++    // NEW MODULAR ARCHITECTURE (V2)
+     std::unique_ptr<GridViewState> m_viewState;
+     std::shared_ptr<SentinelMonitor> m_sentinelMonitor;  // PHASE 2.2: Unified monitoring
+     std::unique_ptr<DataProcessor> m_dataProcessor;
+@@ -264,6 +264,6 @@ private:
+     QSGNode* updatePaintNodeV2(QSGNode* oldNode);
+ 
+ public:
+-    // 🚀 PHASE 3: DataProcessor access for signal routing
++    // PHASE 3: DataProcessor access for signal routing
+     DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }
+ };
+\ No newline at end of file
+diff --git a/libs/gui/models/PriceAxisModel.cpp b/libs/gui/models/PriceAxisModel.cpp
+index b69f095..86c79fc 100644
+--- a/libs/gui/models/PriceAxisModel.cpp
++++ b/libs/gui/models/PriceAxisModel.cpp
+@@ -1,5 +1,6 @@
+ #include "PriceAxisModel.hpp"
+ #include "../render/GridViewState.hpp"
++#include "../UnifiedGridRenderer.h"
+ #include <QDebug>
+ #include <cmath>
+ 
+@@ -31,6 +32,7 @@ void PriceAxisModel::calculateTicks() {
+     targetTicks = std::max(4, std::min(15, targetTicks));
+     
+     double step = calculateNicePriceStep(priceRange, targetTicks);
++
+     if (step <= 0) return;
+     
+     // Find first tick at or below priceMin
+@@ -122,4 +124,4 @@ double PriceAxisModel::calculateNicePriceStep(double range, int targetTicks) con
+     if (step < 0.01) step = 0.01;  // Minimum penny
+     
+     return step;
+-}
+\ No newline at end of file
++}
+diff --git a/libs/gui/performancemonitor.cpp b/libs/gui/performancemonitor.cpp
+index 0fc49f2..6366717 100644
+--- a/libs/gui/performancemonitor.cpp
++++ b/libs/gui/performancemonitor.cpp
+@@ -34,7 +34,7 @@ PerformanceMonitor::PerformanceMonitor(QObject* parent)
+     connect(m_updateTimer, &QTimer::timeout, this, &PerformanceMonitor::onUpdateTimer);
+     m_updateTimer->start(250); // Update display 4 times per second
+     
+-    qDebug() << "🎯 PerformanceMonitor initialized - Ready to track FPS, mouse latency, and memory usage";
++    qDebug() << "PerformanceMonitor initialized - Ready to track FPS, mouse latency, and memory usage";
+ }
+ 
+ void PerformanceMonitor::beginFrame() {
+diff --git a/libs/gui/performancemonitor.h b/libs/gui/performancemonitor.h
+index d6c1cae..eac1f7f 100644
+--- a/libs/gui/performancemonitor.h
++++ b/libs/gui/performancemonitor.h
+@@ -16,77 +16,74 @@
+  * Tracks FPS, frame times, mouse interaction latency, and memory usage
+  * without interfering with the existing rendering pipeline.
+  */
+-class PerformanceMonitor : public QObject {
++#include <QObject>
++#include <QTimer>
++#include <QElapsedTimer>
++#include <QLabel>
++
++class PerformanceMonitor : public QObject
++{
+     Q_OBJECT
+ 
+ public:
+-    explicit PerformanceMonitor(QObject* parent = nullptr);
+-    ~PerformanceMonitor() = default;
++    explicit PerformanceMonitor(QObject *parent = nullptr);
++    ~PerformanceMonitor();
++
++    void startMonitoring();
++    void stopMonitoring();
++    void reset();
+ 
+-    // 🎯 FPS Monitoring
+-    void beginFrame();
++    // Frame Timing
++    void startFrame();
+     void endFrame();
+-    double getCurrentFPS() const;
+-    double getAverageFrameTime() const;
+-    
+-    // 🎯 Mouse Interaction Monitoring
+-    void beginMouseInteraction();
+-    void endMouseInteraction();
+-    double getLastMouseLatency() const;
+-    double getAverageMouseLatency() const;
+-    
+-    // 🎯 Memory Usage Monitoring
+-    void recordMemoryUsage();
+-    size_t getCurrentMemoryUsage() const;
+-    size_t getPeakMemoryUsage() const;
+-    
+-    // 🎯 UI Display
+-    QWidget* createPerformanceWidget(QWidget* parent = nullptr);
+-    void updateDisplay();
+-    
+-    // 🎯 Performance Alerts
+-    bool isPerformanceGood() const;
+-    QString getPerformanceStatus() const;
+ 
+-public slots:
+-    void onUpdateTimer();
++    // Mouse Interaction
++    void recordMousePress(qint64 timestamp);
++    void recordMouseMove(qint64 timestamp);
++    void recordMouseRelease(qint64 timestamp);
+ 
+-signals:
+-    void performanceAlert(const QString& message);
+-    void fpsChanged(double fps);
++    // UI Display
++    void enableCliOutput(bool enable);
++    void attachToWidget(QWidget* widget);
++
++private slots:
++    void updateDisplay();
++    void printToCli();
+ 
+ private:
+-    // Frame timing data
+-    std::chrono::high_resolution_clock::time_point m_frameStartTime;
+-    std::vector<double> m_frameTimes;
+-    std::vector<double> m_fpsHistory;
+-    static constexpr size_t MAX_SAMPLES = 60; // 1 second of data at 60fps
+-    
+-    // Mouse interaction timing
+-    QElapsedTimer m_mouseTimer;
+-    std::vector<double> m_mouseLatencies;
+-    bool m_mouseInteractionActive = false;
+-    
+-    // Memory usage tracking
+-    std::vector<size_t> m_memoryUsageHistory;
+-    size_t m_peakMemoryUsage = 0;
+-    
+-    // UI components
++    // FPS Monitoring
++    QElapsedTimer m_frameTimer;
++    qint64 m_lastFrameTimestamp;
++    int m_frameCounter;
++    qint64 m_totalFrameTime;
++    qint64 m_maxFrameTime;
++    int m_framesDropped;
++
++    // Mouse Interaction Monitoring
++    qint64 m_mousePressTime;
++    qint64 m_mouseMoveLatency;
++    qint64 m_mouseReleaseLatency;
++    qint64 m_lastMousePressTimestamp;
++    qint64 m_lastMouseMoveTimestamp;
++    qint64 m_lastMouseReleaseTimestamp;
++
++    // Memory Usage Monitoring
++#ifdef Q_OS_WIN
++    // Windows-specific memory tracking
++#endif
++
++    // UI Display
++    QWidget* m_widget = nullptr;
+     QLabel* m_fpsLabel = nullptr;
+-    QLabel* m_frameTimeLabel = nullptr;
++    QLabel* m_avgFrameTimeLabel = nullptr;
++    QLabel* m_maxFrameTimeLabel = nullptr;
++    QLabel* m_framesDroppedLabel = nullptr;
+     QLabel* m_mouseLatencyLabel = nullptr;
+-    QLabel* m_memoryLabel = nullptr;
+-    QLabel* m_statusLabel = nullptr;
+-    QTimer* m_updateTimer = nullptr;
+-    
+-    // Performance thresholds
+-    static constexpr double TARGET_FPS = 60.0;
+-    static constexpr double MAX_FRAME_TIME = 16.67; // 60fps = 16.67ms per frame
+-    static constexpr double MAX_MOUSE_LATENCY = 5.0; // 5ms max for smooth interaction
+-    
+-    // Helper methods
+-    double calculateAverage(const std::vector<double>& values) const;
+-    void addSample(std::vector<double>& container, double value);
+-    size_t getMemoryUsage() const;
+-    QString formatMemorySize(size_t bytes) const;
++    QLabel* m_memoryUsageLabel = nullptr;
++    QTimer* m_displayTimer = nullptr;
++    QTimer* m_cliTimer = nullptr;
++
++    // Performance Alerts
++    bool m_isMonitoring;
++    static const int MAX_FRAME_TIME_MS = 33; // Corresponds to 30 FPS
+ }; 
+\ No newline at end of file
+diff --git a/libs/gui/render/DataProcessor.cpp b/libs/gui/render/DataProcessor.cpp
+index 9ede16c..309ba5d 100644
+--- a/libs/gui/render/DataProcessor.cpp
++++ b/libs/gui/render/DataProcessor.cpp
+@@ -1,19 +1,8 @@
+-/*
+-Sentinel — DataProcessor
+-Role: Implements the background data processing loop for the V2 rendering architecture.
+-Inputs/Outputs: Queues incoming data and processes it in batches using LiquidityTimeSeriesEngine.
+-Threading: The constructor moves the object to a worker QThread; processQueue runs on that thread.
+-Performance: A timer-driven loop processes data in batches, trading latency for throughput.
+-Integration: The concrete implementation of the V2 asynchronous data processing pipeline.
+-Observability: Logs the number of items processed in each batch via sLog_Render.
+-Related: DataProcessor.hpp, LiquidityTimeSeriesEngine.h.
+-Assumptions: The processing interval is a good balance between latency and efficiency.
+-*/
+ #include "DataProcessor.hpp"
+ #include "GridViewState.hpp"
+ #include "../../core/SentinelLogging.hpp"
+-#include "../../core/DataCache.hpp"  // 🚀 PHASE 3: Access to dense LiveOrderBook
+-#include "../CoordinateSystem.h"  // 🎯 FIX: Use proper coordinate transformation
++#include "../../core/DataCache.hpp"
++#include "../CoordinateSystem.h"
+ #include <QColor>
+ #include <chrono>
+ #include <limits>
+@@ -21,15 +10,13 @@ Assumptions: The processing interval is a good balance between latency and effic
+ #include <cmath>
+ 
+ DataProcessor::DataProcessor(QObject* parent)
+-    : QObject(parent) {
++    : QObject(parent)
++    , m_liquidityEngine(std::make_unique<LiquidityTimeSeriesEngine>()) {
+     
+     m_snapshotTimer = new QTimer(this);
+-    connect(m_snapshotTimer, &QTimer::timeout, this, &DataProcessor::captureOrderBookSnapshot);
++    connect(m_snapshotTimer, &QTimer::timeout, this, &DataProcessor::updateVisibleCells);
+     
+-    // 🚀 PHASE 3: DataProcessor now owns the LiquidityTimeSeriesEngine!
+-    m_liquidityEngine = new LiquidityTimeSeriesEngine(this);
+-    
+-    sLog_App("🚀 DataProcessor: Initialized for V2 architecture");
++    sLog_App("DataProcessor: Initialized for V2 architecture");
+ }
+ 
+ DataProcessor::~DataProcessor() {
+@@ -37,19 +24,10 @@ DataProcessor::~DataProcessor() {
+ }
+ 
+ void DataProcessor::startProcessing() {
+-    // 🚀 PHASE 3: No more timer-based polling! Real-time signal-driven processing
+-    sLog_App("🚀 DataProcessor: Ready for real-time signal-driven processing (no timer needed!)");
+-    
+-    // Keep timer code for backward compatibility but don't start it
+-    // if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
+-    //     m_snapshotTimer->start(100);
+-    //     sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
+-    // }
+-
+-    // Ensure all standard timeframes are built/maintained by LTSE
+-    if (m_liquidityEngine) {
+-        const int64_t tf[] = {100, 250, 500, 1000, 2000, 5000, 10000};
+-        for (int64_t t : tf) m_liquidityEngine->addTimeframe(t);
++    sLog_App("DataProcessor: Starting 100ms base sampler");
++    if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
++        m_snapshotTimer->start(100);
++        sLog_App("DataProcessor: Started processing with 100ms snapshots");
+     }
+ }
+ 
+@@ -62,476 +40,144 @@ void DataProcessor::stopProcessing() {
+ void DataProcessor::onTradeReceived(const Trade& trade) {
+     if (trade.product_id.empty()) return;
+     
+-    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+-        trade.timestamp.time_since_epoch()).count();
+-    
+-    {
+-        std::lock_guard<std::mutex> lock(m_dataMutex);
+-        
+-        if (m_viewState && !m_viewState->isTimeWindowValid()) {
+-            initializeViewportFromTrade(trade);
+-        }
+-        
+-        sLog_Data("📊 DataProcessor TRADE UPDATE: Processing trade");
++    if (m_viewState && !m_viewState->isTimeWindowValid()) {
++        initializeViewportFromData();
+     }
+     
+     emit dataUpdated();
+-    
+-    sLog_Data("🎯 DataProcessor TRADE: $" << trade.price 
+-                 << " vol:" << trade.size 
+-                 << " timestamp:" << timestamp);
+ }
+ 
+-void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
+-    if (!book || book->product_id.empty() || book->bids.empty() || book->asks.empty()) return;
+-    
+-    {
+-        std::lock_guard<std::mutex> lock(m_dataMutex);
+-        
+-        m_latestOrderBook = book;
+-        m_hasValidOrderBook = true;
+-        
+-        if (m_viewState && !m_viewState->isTimeWindowValid()) {
+-            initializeViewportFromOrderBook(*book);
+-        }
+-    }
+-    
+-    emit dataUpdated();
+-    
+-    sLog_Data("🎯 DataProcessor ORDER BOOK update"
+-             << " Bids:" << book->bids.size() << " Asks:" << book->asks.size());
+-}
+-
+-const OrderBook& DataProcessor::getLatestOrderBook() const {
+-    std::lock_guard<std::mutex> lock(m_dataMutex);
+-    // This might be problematic if m_latestOrderBook is null
+-    // but for now we assume it's valid when called.
+-    static OrderBook emptyBook;
+-    return m_latestOrderBook ? *m_latestOrderBook : emptyBook;
+-}
+-
+-void DataProcessor::captureOrderBookSnapshot() {
+-    if (!m_hasValidOrderBook || !m_liquidityEngine) return;
+-    
+-    std::shared_ptr<const OrderBook> book_copy;
+-    {
+-        std::lock_guard<std::mutex> lock(m_dataMutex);
+-        book_copy = m_latestOrderBook;
+-    }
+-
+-    if(book_copy) {
+-        m_liquidityEngine->addOrderBookSnapshot(*book_copy);
+-    }
+-    
+-    emit dataUpdated();
+-}
+-
+-void DataProcessor::initializeViewportFromTrade(const Trade& trade) {
+-    if (!m_viewState) return;
+-    
+-    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+-        trade.timestamp.time_since_epoch()).count();
+-    
+-    qint64 timeStart = timestamp - 30000;
+-    qint64 timeEnd = timestamp + 30000;
+-    double minPrice = trade.price - 100.0;
+-    double maxPrice = trade.price + 100.0;
+-    
+-    m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
+-    
+-    sLog_App("🎯 DataProcessor VIEWPORT FROM TRADE: $" << minPrice << "-$" << maxPrice << " at " << timestamp);
+-    
+-    emit viewportInitialized();
+-}
+-
+-void DataProcessor::initializeViewportFromOrderBook(const OrderBook& book) {
+-    if (!m_viewState) return;
+-    
+-    double bestBidPrice = std::numeric_limits<double>::quiet_NaN();
+-    if (!book.bids.empty()) {
+-        // Find the highest bid price (bids should be sorted highest to lowest)
+-        bestBidPrice = book.bids[0].price;
+-    }
+-
+-    double bestAskPrice = std::numeric_limits<double>::quiet_NaN();
+-    if (!book.asks.empty()) {
+-        // Find the lowest ask price (asks should be sorted lowest to highest)  
+-        bestAskPrice = book.asks[0].price;
+-    }
++void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
++    if (productId.isEmpty()) return;
+ 
+-    double midPrice;
+-    if (!std::isnan(bestBidPrice) && !std::isnan(bestAskPrice)) {
+-        midPrice = (bestBidPrice + bestAskPrice) / 2.0;
+-    } else if (!std::isnan(bestBidPrice)) {
+-        midPrice = bestBidPrice;
+-    } else if (!std::isnan(bestAskPrice)) {
+-        midPrice = bestAskPrice;
+-    } else {
+-        midPrice = 100000.0; // Default fallback for BTC
++    if (m_viewState && !m_viewState->isTimeWindowValid()) {
++        initializeViewportFromData();
+     }
+-    
+-    // Use the order book timestamp instead of system time for proper alignment
+-    auto bookTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+-        book.timestamp.time_since_epoch()).count();
+-    
+-    qint64 timeStart = bookTime - 30000;
+-    qint64 timeEnd = bookTime + 30000;
+-    double minPrice = midPrice - 100.0;
+-    double maxPrice = midPrice + 100.0;
+-    
+-    m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
+-    
+-    sLog_App("🎯 DataProcessor VIEWPORT FROM ORDER BOOK:");
+-    sLog_App("   Mid Price: $" << midPrice);
+-    sLog_App("   Price Window: $" << minPrice << " - $" << maxPrice);
+-    
+-    emit viewportInitialized();
+-}
+ 
+-// 🚀 PHASE 3: Handle dense LiveOrderBook updates directly! 
+-void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
+-    if (!m_dataCache || !m_liquidityEngine) {
+-        sLog_Render("❌ DataProcessor: DataCache or LiquidityEngine not set");
+-        return;
+-    }
+-    
+-    // Get direct dense LiveOrderBook access (no conversion!)
+-    const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
+-    
+-    sLog_Render("🚀 PHASE 3: DataProcessor processing dense LiveOrderBook - bids:" << liveBook.getBidCount() << " asks:" << liveBook.getAskCount());
+-    
+-    // Convert dense LiveOrderBook to sparse OrderBook for LTSE processing
+-    // TODO: Eventually LTSE should accept dense format directly
+-    OrderBook sparseBook;
+-    sparseBook.product_id = productId.toStdString();
+-    sparseBook.timestamp = std::chrono::system_clock::now();
+-    
+-    // Convert dense to sparse - OPTIMIZED: Only scan visible price window + margin
+-    const auto& denseBids = liveBook.getBids();
+-    const auto& denseAsks = liveBook.getAsks();
+-    
+-    // Get visible price range from ViewState (with 20% margin for smooth scrolling)
+-    double visibleMinPrice = m_viewState ? m_viewState->getMinPrice() : liveBook.getMinPrice();
+-    double visibleMaxPrice = m_viewState ? m_viewState->getMaxPrice() : liveBook.getMinPrice() + (denseBids.size() * liveBook.getTickSize());
+-    double priceRange = visibleMaxPrice - visibleMinPrice;
+-    double marginMinPrice = visibleMinPrice - (priceRange * 0.2);
+-    double marginMaxPrice = visibleMaxPrice + (priceRange * 0.2);
+-    
+-    // Calculate index bounds for visible window
+-    size_t minIndex = std::max(0.0, (marginMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+-    size_t maxIndex = std::min(static_cast<double>(std::max(denseBids.size(), denseAsks.size())), 
+-                              (marginMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+-    
+-    // Convert bids (scan only visible range from highest to lowest price)
+-    for (size_t i = std::min(maxIndex, denseBids.size()); i > minIndex && i > 0; --i) {
+-        size_t idx = i - 1;
+-        if (denseBids[idx] > 0.0) {
+-            double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
+-            sparseBook.bids.push_back({price, denseBids[idx]});
++    if (m_dataCache) {
++        const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
++        OrderBook book;
++        book.product_id = liveBook.getProductId();
++        book.timestamp = liveBook.getLastUpdate();
++        const auto& denseBids = liveBook.getBids();
++        for (size_t i = 0; i < denseBids.size(); ++i) {
++            if (denseBids[i] > 0) {
++                book.bids.push_back({liveBook.getMinPrice() + i * liveBook.getTickSize(), denseBids[i]});
++            }
+         }
+-    }
+-    
+-    // Convert asks (scan only visible range from lowest to highest price)
+-    for (size_t i = minIndex; i < std::min(maxIndex, denseAsks.size()); ++i) {
+-        if (denseAsks[i] > 0.0) {
+-            double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
+-            sparseBook.asks.push_back({price, denseAsks[i]});
++        const auto& denseAsks = liveBook.getAsks();
++        for (size_t i = 0; i < denseAsks.size(); ++i) {
++            if (denseAsks[i] > 0) {
++                book.asks.push_back({liveBook.getMinPrice() + i * liveBook.getTickSize(), denseAsks[i]});
++            }
+         }
++        m_liquidityEngine->addOrderBookSnapshot(book);
+     }
+-    
+-    // Process through LTSE
+-    sLog_Render("🔍 LTSE INPUT: Adding snapshot with " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
+-    m_liquidityEngine->addOrderBookSnapshot(sparseBook);
+-    
+-    // Check if LTSE has any data now
+-    auto testSlices = m_liquidityEngine->getVisibleSlices(m_currentTimeframe_ms, 
+-        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() - 60000,
+-        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() + 60000);
+-    sLog_Render("🔍 LTSE STATUS: Total slices available = " << testSlices.size());
+-    
+-    sLog_Data("🎯 DataProcessor: LiveOrderBook processed - " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
++
+     emit dataUpdated();
+ }
+ 
+ void DataProcessor::clearData() {
+-    std::lock_guard<std::mutex> lock(m_dataMutex);
+-    
+-    m_latestOrderBook = nullptr;
+-    m_hasValidOrderBook = false;
+-    
++    m_liquidityEngine->removeTimeframe(m_currentTimeframe_ms);
+     if (m_viewState) {
+         m_viewState->resetZoom();
+     }
+-    
+-    sLog_App("🎯 DataProcessor: Data cleared");
+     emit dataUpdated();
+ }
+ 
+-// 🚀 PHASE 3: Business logic methods moved from UGR
+-
+-void DataProcessor::updateVisibleCells() {
+-    m_visibleCells.clear();
+-    
+-    if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
+-    
+-    int64_t activeTimeframe = m_currentTimeframe_ms;
+-    
+-    // 🚀 OPTIMIZATION 1: Use manual timeframe if set, otherwise auto-suggest
+-    if (!m_manualTimeframeSet || 
+-        (m_manualTimeframeTimer.isValid() && m_manualTimeframeTimer.elapsed() > 10000)) {  // 10 second timeout
+-        
+-        // Auto-suggest timeframe when no manual override
+-        if (m_liquidityEngine) {
+-            int64_t optimalTimeframe = m_liquidityEngine->suggestTimeframe(
+-                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), 2000);
+-            
+-            if (optimalTimeframe != m_currentTimeframe_ms) {
+-                m_currentTimeframe_ms = optimalTimeframe;
+-                activeTimeframe = optimalTimeframe;
+-                sLog_Render("🔄 AUTO-TIMEFRAME UPDATE: " << optimalTimeframe << "ms (viewport-optimized)");
+-            }
+-        }
+-    } else {
+-        sLog_Render("🎯 MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
+-    }
+-    
+-    // Get liquidity slices for active timeframe within viewport
+-    if (m_liquidityEngine) {
+-        qint64 timeStart = m_viewState->getVisibleTimeStart();
+-        qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+-        sLog_Render("🔍 LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
+-        
+-        auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
+-        sLog_Render("🔍 LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
+-        
+-        // 🔍 DEBUG: Check if slices are being processed
+-        int processedSlices = 0;
+-        
+-        // Auto-fix viewport if no data found but data exists
+-        if (visibleSlices.empty()) {
+-            auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
+-            if (!allSlices.empty()) {
+-                qint64 oldestTime = allSlices.front()->startTime_ms;
+-                qint64 newestTime = allSlices.back()->endTime_ms;
+-                qint64 gap = timeStart - newestTime;
+-                sLog_Render("🔍 LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
+-                sLog_Render("🔍 TIME GAP: " << gap << "ms between newest data and viewport start");
+-                
+-                // AUTO-FIX: Snap viewport to actual data range
+-                if (gap > 60000) { // If gap > 1 minute, auto-adjust
+-                    qint64 newStart = newestTime - 30000; // 30s before newest data
+-                    qint64 newEnd = newestTime + 30000;   // 30s after newest data
+-                    sLog_Render("🔧 AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+-                    
+-                    m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+-                    
+-                    // Retry query with corrected viewport
+-                    visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
+-                    sLog_Render("🎯 VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+-                }
+-            }
+-        }
+-        
+-        // 🚀 Process all visible slices; viewport + transform handle GPU load
+-        for (const auto* slice : visibleSlices) {
+-            ++processedSlices;
+-            createCellsFromLiquiditySlice(*slice);
+-        }
+-        
+-        sLog_Render("🔍 SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
+-        
+-        sLog_Render("🎯 DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
+-                 << " TotalCells:" << m_visibleCells.size()
+-                 << " ActiveTimeframe:" << activeTimeframe << "ms"
+-                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+-    }
+-    
++void DataProcessor::setPriceResolution(double resolution) {
++    m_liquidityEngine->setPriceResolution(resolution);
+     emit dataUpdated();
+ }
+ 
+-void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {
+-    if (!m_viewState) return;
+-    
+-    double minPrice = m_viewState->getMinPrice();
+-    double maxPrice = m_viewState->getMaxPrice();
+-    
+-    // 🔍 DEBUG: Log slice processing details
+-    static int sliceCounter = 0;
+-    if (++sliceCounter % 10 == 0) {
+-        sLog_Render("🎯 SLICE DEBUG #" << sliceCounter << ": time=" << slice.startTime_ms 
+-                    << " bids=" << slice.bidMetrics.size() << " asks=" << slice.askMetrics.size() 
+-                    << " priceRange=$" << minPrice << "-$" << maxPrice);
+-    }
+-    
+-    // Create cells for bid levels (tick-based iteration)
+-    for (size_t i = 0; i < slice.bidMetrics.size(); ++i) {
+-        const auto& metrics = slice.bidMetrics[i];
+-        if (metrics.snapshotCount > 0) {
+-            double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+-            if (price >= minPrice && price <= maxPrice) {
+-                createLiquidityCell(slice, price, slice.getDisplayValue(price, true, 0), true);
+-            }
+-        }
+-    }
+-    
+-    // Create cells for ask levels (tick-based iteration)
+-    for (size_t i = 0; i < slice.askMetrics.size(); ++i) {
+-        const auto& metrics = slice.askMetrics[i];
+-        if (metrics.snapshotCount > 0) {
+-            double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+-            if (price >= minPrice && price <= maxPrice) {
+-                createLiquidityCell(slice, price, slice.getDisplayValue(price, false, 0), false);
+-            }
+-        }
+-    }
++void DataProcessor::setGridViewState(GridViewState* viewState) {
++    m_viewState = viewState;
+ }
+ 
+-void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid) {
+-    if (liquidity <= 0.0 || !m_viewState) return;
+-    
+-    CellInstance cell;
+-    cell.timeSlot = slice.startTime_ms;
+-    cell.priceLevel = price;
+-    cell.liquidity = liquidity;
+-    cell.isBid = isBid;
+-    cell.intensity = std::min(1.0, liquidity / 1000.0);
+-    cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
+-    // Compute screen-space rect from world coordinates
+-    cell.screenRect = timeSliceToScreenRect(slice, price);
+-
+-    // Cull degenerate or off-screen rectangles
+-    const double minPixel = 0.5;   // Avoid zero-area artifacts
+-    const double maxPixel = 200.0; // Clamp pathological sizes
+-    if (cell.screenRect.width() < minPixel || cell.screenRect.height() < minPixel) {
+-        return;
+-    }
+-    if (cell.screenRect.width() > maxPixel) {
+-        // Clamp width to prevent giant blocks due to bad transforms
+-        cell.screenRect.setWidth(maxPixel);
+-    }
+-    if (cell.screenRect.height() > maxPixel) {
+-        cell.screenRect.setHeight(maxPixel);
+-    }
++void DataProcessor::updateVisibleCells() {
++    if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
+ 
+-    // Basic viewport culling using current item size from view state
+-    const double viewportW = m_viewState ? m_viewState->getViewportWidth() : 0.0;
+-    const double viewportH = m_viewState ? m_viewState->getViewportHeight() : 0.0;
+-    if (viewportW > 0.0 && viewportH > 0.0) {
+-        const QRectF viewportRect(0.0, 0.0, viewportW, viewportH);
+-        if (!viewportRect.intersects(cell.screenRect)) {
+-            return;
++    int64_t activeTimeframe = m_currentTimeframe_ms;
++    if (!m_manualTimeframeSet) {
++        int64_t suggestedTimeframe = m_liquidityEngine->suggestTimeframe(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
++        if (suggestedTimeframe > 0) {
++            activeTimeframe = suggestedTimeframe;
+         }
+     }
+ 
+-    m_visibleCells.push_back(cell);
+-    
+-    // 🔍 DEBUG: Log cell creation occasionally
+-    static int cellCounter = 0;
+-    if (++cellCounter % 50 == 0) {
+-        sLog_Render("🎯 CELL DEBUG: Created cell #" << cellCounter << " at screenRect(" 
+-                    << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
+-                    << cell.screenRect.width() << "x" << cell.screenRect.height() 
+-                    << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+-    }
+-}
+-
+-QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const {
+-    if (!m_viewState) return QRectF();
+-    
+-    // 🎯 FIX: Use CoordinateSystem for proper world-to-screen transformation
+-    Viewport viewport{
+-        m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+-        m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+-        m_viewState->getViewportWidth(), m_viewState->getViewportHeight()
+-    };
+-
+-    const double priceResolution = getPriceResolution();  // Use dynamic price resolution from LOD system
+-    const double halfTick = priceResolution * 0.5;
+-
+-    // Ensure a non-zero time extent
+-    int64_t timeStart = slice.startTime_ms;
+-    int64_t timeEnd = slice.endTime_ms;
+-    if (timeEnd <= timeStart) {
+-        int64_t span = slice.duration_ms > 0 ? slice.duration_ms : std::max<int64_t>(m_currentTimeframe_ms, 1);
+-        timeEnd = timeStart + span;
+-    }
+-
+-    // Use CoordinateSystem for proper transformation like old renderer
+-    QPointF topLeft = CoordinateSystem::worldToScreen(timeStart, price + halfTick, viewport);
+-    QPointF bottomRight = CoordinateSystem::worldToScreen(timeEnd, price - halfTick, viewport);
+-    
+-    QRectF result(topLeft, bottomRight);
+-    
+-    // 🔍 DEBUG: Log coordinate transformation once per batch
+-    static int debugCounter = 0;
+-    if (++debugCounter % 100 == 0) {
+-        sLog_Render("🎯 COORD DEBUG: World(" << timeStart << "," << price << ") -> Screen(" 
+-                    << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
+-                    << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
+-                    << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
+-                    << viewport.width << "x" << viewport.height << "]");
+-    }
+-    
+-    return result;
+-}
++    auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd());
+ 
+-// 🚀 PHASE 3: LTSE delegation methods (moved from UGR)
++    std::lock_guard<std::mutex> lock(m_cellsMutex);
++    m_visibleCells.clear();
+ 
+-void DataProcessor::setPriceResolution(double resolution) {
+-    if (m_liquidityEngine && resolution > 0) {
+-        m_liquidityEngine->setPriceResolution(resolution);
+-        emit dataUpdated();
++    for (const auto* slice : visibleSlices) {
++        for (size_t i = 0; i < slice->bidMetrics.size(); ++i) {
++            const auto& metrics = slice->bidMetrics[i];
++            if (metrics.snapshotCount > 0) {
++                CellInstance cell;
++                cell.timeSlot = slice->startTime_ms;
++                cell.priceLevel = slice->tickToPrice(slice->minTick + i);
++                cell.liquidity = metrics.totalLiquidity;
++                m_visibleCells.push_back(cell);
++            }
++        }
++        for (size_t i = 0; i < slice->askMetrics.size(); ++i) {
++            const auto& metrics = slice->askMetrics[i];
++            if (metrics.snapshotCount > 0) {
++                CellInstance cell;
++                cell.timeSlot = slice->startTime_ms;
++                cell.priceLevel = slice->tickToPrice(slice->minTick + i);
++                cell.liquidity = metrics.totalLiquidity;
++                m_visibleCells.push_back(cell);
++            }
++        }
+     }
+-}
+ 
+-double DataProcessor::getPriceResolution() const {
+-    return m_liquidityEngine ? m_liquidityEngine->getPriceResolution() : 1.0;
++    emit dataUpdated();
+ }
+ 
+ void DataProcessor::addTimeframe(int timeframe_ms) {
+-    if (m_liquidityEngine) {
+-        m_liquidityEngine->addTimeframe(timeframe_ms);
+-    }
+-}
+-
+-int64_t DataProcessor::suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const {
+-    return m_liquidityEngine ? m_liquidityEngine->suggestTimeframe(timeStart, timeEnd, maxCells) : 100;
++    m_liquidityEngine->addTimeframe(timeframe_ms);
+ }
+ 
+-std::vector<LiquidityTimeSlice> DataProcessor::getVisibleSlices(qint64 timeStart, qint64 timeEnd, double minPrice, double maxPrice) const {
+-    if (m_liquidityEngine) {
+-        auto slicePtrs = m_liquidityEngine->getVisibleSlices(m_currentTimeframe_ms, timeStart, timeEnd);
+-        std::vector<LiquidityTimeSlice> slices;
+-        slices.reserve(slicePtrs.size());
+-        for (const auto* ptr : slicePtrs) {
+-            if (ptr) slices.push_back(*ptr);
+-        }
+-        return slices;
+-    }
+-    return {};
++void DataProcessor::setTimeframe(int timeframe_ms) {
++    m_currentTimeframe_ms = timeframe_ms;
++    m_manualTimeframeSet = true;
++    updateVisibleCells();
+ }
+ 
+-int DataProcessor::getDisplayMode() const {
+-    return m_liquidityEngine ? static_cast<int>(m_liquidityEngine->getDisplayMode()) : 0;
++std::vector<CellInstance> DataProcessor::getVisibleCellsCopy() {
++    std::lock_guard<std::mutex> lock(m_cellsMutex);
++    return m_visibleCells;
+ }
+ 
+-// 🚀 PHASE 3: Manual timeframe management (preserve existing logic)
++void DataProcessor::initializeViewportFromData() {
++    if (!m_dataCache || m_currentProductId.isEmpty()) return;
+ 
+-void DataProcessor::setTimeframe(int timeframe_ms) {
+-    if (timeframe_ms > 0) {
+-        m_currentTimeframe_ms = timeframe_ms;
+-        m_manualTimeframeSet = true;
+-        m_manualTimeframeTimer.restart();
++    auto recentTrades = m_dataCache->recentTrades(m_currentProductId.toStdString());
++    if (!recentTrades.empty()) {
++        const auto& lastTrade = recentTrades.back();
++        qint64 timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(lastTrade.timestamp.time_since_epoch()).count();
++        double price = lastTrade.price;
++        
++        qint64 timeStart = timestamp - 30000;
++        qint64 timeEnd = timestamp + 30000;
++        double minPrice = price - 100.0;
++        double maxPrice = price + 100.0;
+         
+-        if (m_liquidityEngine) {
+-            m_liquidityEngine->addTimeframe(timeframe_ms);
++        if (m_viewState) {
++            m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
+         }
+         
+-        sLog_Render("🎯 MANUAL TIMEFRAME SET: " << timeframe_ms << "ms");
+-        emit dataUpdated();
++        emit viewportInitialized(timeStart, timeEnd, minPrice, maxPrice);
++        return;
+     }
+ }
+ 
+-bool DataProcessor::isManualTimeframeSet() const {
+-    return m_manualTimeframeSet;
++void DataProcessor::setDisplayMode(LiquidityTimeSeriesEngine::LiquidityDisplayMode mode) {
++    m_liquidityEngine->setDisplayMode(mode);
++}
++
++double DataProcessor::getPriceResolution() const {
++    return m_liquidityEngine->getPriceResolution();
+ }
+\ No newline at end of file
+diff --git a/libs/gui/render/DataProcessor.hpp b/libs/gui/render/DataProcessor.hpp
+index e81025e..ab3e05e 100644
+--- a/libs/gui/render/DataProcessor.hpp
++++ b/libs/gui/render/DataProcessor.hpp
+@@ -1,112 +1,73 @@
+-/*
+-Sentinel — DataProcessor
+-Role: Decouples data processing from rendering by processing market data on a background thread.
+-Inputs/Outputs: Takes Trade/OrderBook data via slots; emits dataUpdated() when processing is done.
+-Threading: Lives and operates on a dedicated QThread; receives data from main and signals back.
+-Performance: Uses a queue and a timer-driven loop to batch-process data efficiently.
+-Integration: Owned by UnifiedGridRenderer; uses LiquidityTimeSeriesEngine for data aggregation.
+-Observability: Logs thread status and processing batches via sLog_Render.
+-Related: DataProcessor.cpp, UnifiedGridRenderer.h, LiquidityTimeSeriesEngine.h, GridViewState.hpp.
+-Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set before use.
+-*/
+ #pragma once
++
+ #include <QObject>
+ #include <QTimer>
+ #include <QElapsedTimer>
+-#include <QRectF>
+-#include <mutex>
+-#include <memory>
+ #include <vector>
++#include <memory>
++#include <mutex>
+ #include "../../core/TradeData.h"
+-#include "../../core/LiquidityTimeSeriesEngine.h"
+ #include "GridTypes.hpp"
++#include "GridViewState.hpp"
++#include "../../core/LiquidityTimeSeriesEngine.h"
+ 
++// Forward declarations
++class DataCache;
+ class GridViewState;
+-class DataCache;  // 🚀 Forward declaration
+ 
+ class DataProcessor : public QObject {
+     Q_OBJECT
+-    
++
+ public:
+     explicit DataProcessor(QObject* parent = nullptr);
+     ~DataProcessor();
+ 
+ public slots:
+-    // Data ingestion (slots for cross-thread invocation)
+     void onTradeReceived(const Trade& trade);
+-    void onOrderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
+-    void onLiveOrderBookUpdated(const QString& productId);  // Dense LiveOrderBook signal handler
+-    
+-    // 🎯 THREADING FIX: Move updateVisibleCells to slots for cross-thread calls
+-    void updateVisibleCells();
+-
+-public:
+-    
+-    // Configuration
+-    void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
+-    void setDataCache(DataCache* cache) { m_dataCache = cache; }  // 🚀 PHASE 3: Dependency injection
+-    
+-    // Data access
+-    bool hasValidOrderBook() const { return m_hasValidOrderBook; }
+-    const OrderBook& getLatestOrderBook() const;
+-    
+-    // Control
+-    void clearData();
++    void onLiveOrderBookUpdated(const QString& productId);
+     void startProcessing();
+     void stopProcessing();
+-    
+-    // 🚀 PHASE 3: Business logic methods moved from UGR
+-    void createCellsFromLiquiditySlice(const struct LiquidityTimeSlice& slice);
+-    void createLiquidityCell(const struct LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
+-    QRectF timeSliceToScreenRect(const struct LiquidityTimeSlice& slice, double price) const;
+-    
+-    // 🚀 PHASE 3: LTSE delegation methods (moved from UGR)
++    void clearData();
+     void setPriceResolution(double resolution);
+-    double getPriceResolution() const;
++    void setGridViewState(GridViewState* viewState);
++    void setDataCache(DataCache* cache) { m_dataCache = cache; }
++    void updateVisibleCells();
+     void addTimeframe(int timeframe_ms);
+-    int64_t suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const;
+-    std::vector<struct LiquidityTimeSlice> getVisibleSlices(qint64 timeStart, qint64 timeEnd, double minPrice, double maxPrice) const;
+-    int getDisplayMode() const;
+-    
+-    // 🚀 PHASE 3: Manual timeframe management (preserve existing logic)
+     void setTimeframe(int timeframe_ms);
+-    bool isManualTimeframeSet() const;
+-    
+-    // 🚀 PHASE 3: Data access for UGR slim adapter
+-    const std::vector<struct CellInstance>& getVisibleCells() const { return m_visibleCells; }
+ 
+ signals:
+     void dataUpdated();
+-    void viewportInitialized();
++    void viewportInitialized(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
++
++public:
++    std::vector<CellInstance> getVisibleCellsCopy();
++    double getPriceResolution() const;
++    void setDisplayMode(LiquidityTimeSeriesEngine::LiquidityDisplayMode mode);
+ 
+-private slots:
+-    void captureOrderBookSnapshot();
++private:
++    void initializeViewportFromData();
+ 
+ private:
+-    void initializeViewportFromTrade(const Trade& trade);
+-    void initializeViewportFromOrderBook(const OrderBook& orderBook);
+-    
+-    // Components
++    // Dependencies (injected)
+     GridViewState* m_viewState = nullptr;
+-    LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
+-    DataCache* m_dataCache = nullptr;  // 🚀 PHASE 3: Access to dense LiveOrderBook
+     
+-    // Data state
+-    std::shared_ptr<const OrderBook> m_latestOrderBook;
+-    bool m_hasValidOrderBook = false;
+-    
+-    // Processing
++    // Threading and timers
+     QTimer* m_snapshotTimer = nullptr;
+-    mutable std::mutex m_dataMutex;
+     
+-    // 🚀 PHASE 3: Manual timeframe management (moved from UGR)
++    // Data processing engine
++    std::unique_ptr<LiquidityTimeSeriesEngine> m_liquidityEngine;
++    
++    DataCache* m_dataCache = nullptr;  
++    
++    // State
++    QString m_currentProductId;
++    bool m_isViewportInitialized = false;
++    
+     bool m_manualTimeframeSet = false;
+-    QElapsedTimer m_manualTimeframeTimer;
+     int64_t m_currentTimeframe_ms = 100;
+     
+-    // 🚀 PHASE 3: Visible cells storage (moved from UGR)
+-    std::vector<struct CellInstance> m_visibleCells;
++    mutable std::mutex m_cellsMutex;
++    std::vector<CellInstance> m_visibleCells;
+     
+-    // 🎯 PRICE LOD: Dynamic price resolution
+     double m_priceResolution = 1.0;
+ };
+\ No newline at end of file
+diff --git a/libs/gui/render/GridSceneNode.cpp b/libs/gui/render/GridSceneNode.cpp
+index 06ec730..4a44f84 100644
+--- a/libs/gui/render/GridSceneNode.cpp
++++ b/libs/gui/render/GridSceneNode.cpp
+@@ -26,7 +26,7 @@ GridSceneNode::~GridSceneNode() {
+ 
+ void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy) {
+     if (!strategy) {
+-        qDebug() << "🔍 GRIDSCENENODE: No strategy provided!";
++        qDebug() << "GRIDSCENENODE: No strategy provided!";
+         return;
+     }
+     
+diff --git a/libs/gui/render/GridTypes.hpp b/libs/gui/render/GridTypes.hpp
+index 585c2bc..db3d5cd 100644
+--- a/libs/gui/render/GridTypes.hpp
++++ b/libs/gui/render/GridTypes.hpp
+@@ -16,8 +16,8 @@ struct CellInstance {
+ };
+ 
+ struct GridSliceBatch {
+-    std::vector<CellInstance> cells;
++    const std::vector<CellInstance>& cells;
+     double intensityScale = 1.0;
+     double minVolumeFilter = 0.0;
+-    int maxCells = 100000;
++    int maxCells = 2000;  // CRITICAL FIX: Reduced from 100k to 2k for smooth rendering
+ };
+\ No newline at end of file
+diff --git a/libs/gui/render/GridViewState.cpp b/libs/gui/render/GridViewState.cpp
+index f7122e7..5538192 100644
+--- a/libs/gui/render/GridViewState.cpp
++++ b/libs/gui/render/GridViewState.cpp
+@@ -96,52 +96,8 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
+ }
+ 
+ void GridViewState::handleZoom(double delta, const QPointF& center) {
+-    if (!m_timeWindowValid) return;
+-    
+-    double zoomMultiplier = 1.0 + (delta > 0 ? 0.1 : -0.1);
+-    double newZoom = m_zoomFactor * zoomMultiplier;
+-    
+-    // Clamp zoom levels (0.1x to 10x)
+-    newZoom = std::max(0.1, std::min(10.0, newZoom));
+-    
+-    if (newZoom != m_zoomFactor) {
+-        // 🎯 ZOOM TO MOUSE POINTER: Calculate center point in data coordinates
+-        if (center.x() >= 0 && center.y() >= 0) {  // Valid center point provided
+-            // Get current viewport ranges
+-            int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+-            double currentPriceRange = m_maxPrice - m_minPrice;
+-            
+-            // Calculate new ranges based on zoom factor
+-            int64_t newTimeRange = static_cast<int64_t>(currentTimeRange * (m_zoomFactor / newZoom));
+-            double newPriceRange = currentPriceRange * (m_zoomFactor / newZoom);
+-            
+-            // Calculate center point ratios (0.0 to 1.0) from pixel coordinates
+-            // Note: We need the viewport size to convert pixels to ratios
+-            // For now, we'll use a simple approach assuming the center is already normalized
+-            double centerTimeRatio = 0.5;  // Default to center for now
+-            double centerPriceRatio = 0.5;  // Default to center for now
+-            
+-            // Calculate current center in data coordinates
+-            int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
+-            double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
+-            
+-            // Update viewport bounds around the center point
+-            m_visibleTimeStart_ms = currentCenterTime - static_cast<int64_t>(newTimeRange * centerTimeRatio);
+-            m_visibleTimeEnd_ms = currentCenterTime + static_cast<int64_t>(newTimeRange * (1.0 - centerTimeRatio));
+-            m_minPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
+-            m_maxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
+-        }
+-        
+-        m_zoomFactor = newZoom;
+-        
+-        // Disable auto-scroll when user manually zooms
+-        if (m_autoScrollEnabled) {
+-            m_autoScrollEnabled = false;
+-            emit autoScrollEnabledChanged();
+-        }
+-        
+-        emit viewportChanged();
+-    }
++    // Delegate to the cursor-aware implementation using current viewport size
++    handleZoomWithViewport(delta, center, QSizeF(m_viewportWidth, m_viewportHeight));
+ }
+ 
+ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
+@@ -156,7 +112,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center,
+     newZoom = std::max(0.1, std::min(10.0, newZoom));
+     
+     if (newZoom != m_zoomFactor) {
+-        // 🎯 ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
++        // ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
+         if (center.x() >= 0 && center.y() >= 0) {
+             // Get current viewport ranges
+             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+@@ -168,7 +124,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center,
+             
+             // Validate ranges to prevent invalid coordinates
+             if (newTimeRange <= 0 || newPriceRange <= 0.0) {
+-                qDebug() << "🚨 ZOOM ABORT: Invalid range calculated - TimeRange:" << newTimeRange << "PriceRange:" << newPriceRange;
++                qDebug() << "ZOOM ABORT: Invalid range calculated - TimeRange:" << newTimeRange << "PriceRange:" << newPriceRange;
+                 return;
+             }
+             
+@@ -181,7 +137,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center,
+             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
+             
+             // Log zoom calculation (reduced verbosity)
+-            qDebug() << "🔍 ZOOM:" << "Delta:" << delta << "->" << clampedDelta
++            qDebug() << "ZOOM:" << "Delta:" << delta << "->" << clampedDelta
+                      << "Zoom:" << m_zoomFactor << "->" << newZoom
+                      << "Mouse(" << center.x() << "," << center.y() << ")";
+             
+@@ -197,7 +153,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center,
+             
+             // Final validation - ensure time range is positive and price range is valid
+             if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
+-                qDebug() << "🚨 ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
++                qDebug() << "ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
+                 return;
+             }
+             
+@@ -207,7 +163,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center,
+             m_minPrice = newMinPrice;
+             m_maxPrice = newMaxPrice;
+             
+-            qDebug() << "🔍 ZOOM RESULT:"
++            qDebug() << "ZOOM RESULT:"
+                      << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
+                      << "NewTime[" << currentCenterTime << "]"
+                      << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
+@@ -253,7 +209,9 @@ void GridViewState::handlePanEnd() {
+ 
+     m_isDragging = false;
+     
+-    if (m_panVisualOffset.manhattanLength() > 0 && m_viewportWidth > 0 && m_viewportHeight > 0) {
++    // Ignore tiny clicks: only apply if offset exceeds a small threshold
++    const double threshold = 1.0; // pixels
++    if (m_panVisualOffset.manhattanLength() > threshold && m_viewportWidth > 0 && m_viewportHeight > 0) {
+         // Create viewport for coordinate conversion
+         // TODO: figure out why we aren't using 'viewport'
+         // Convert visual offset to data coordinates using CoordinateSystem
+@@ -368,7 +326,7 @@ double GridViewState::calculateOptimalPriceResolution() const {
+     // Calculate price span (this is the key - how much price range is visible)
+     double priceSpan = m_maxPrice - m_minPrice;
+     
+-    // 🚀 PRICE-SPAN-BASED LOD: Use price range to determine resolution
++    // PRICE-SPAN-BASED LOD: Use price range to determine resolution
+     // When zoomed out (large price range), use coarser buckets
+     if (priceSpan > 500) {               // > $500 range: $25 buckets  
+         return 25.0;
+diff --git a/libs/gui/render/GridViewState.hpp b/libs/gui/render/GridViewState.hpp
+index 40c3df0..8209da4 100644
+--- a/libs/gui/render/GridViewState.hpp
++++ b/libs/gui/render/GridViewState.hpp
+@@ -57,7 +57,7 @@ public:
+     void enableAutoScroll(bool enabled);
+     void resetZoom();
+     
+-    // 🚀 PRICE LOD: Dynamic price resolution based on zoom level
++    // PRICE LOD: Dynamic price resolution based on zoom level
+     double calculateOptimalPriceResolution() const;
+ 
+ signals:
+diff --git a/libs/gui/render/strategies/HeatmapStrategy.cpp b/libs/gui/render/strategies/HeatmapStrategy.cpp
+index 6964df2..08a0540 100644
+--- a/libs/gui/render/strategies/HeatmapStrategy.cpp
++++ b/libs/gui/render/strategies/HeatmapStrategy.cpp
+@@ -24,7 +24,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
+     // minimal local state; avoid noisy counters
+     
+     if (batch.cells.empty()) {
+-        sLog_Render("🎯 HEATMAP EXIT: Returning nullptr - batch is empty");
++        sLog_Render("HEATMAP EXIT: Returning nullptr - batch is empty");
+         return nullptr;
+     }
+     
+diff --git a/scripts/log-modes.sh b/scripts/log-modes.sh
+index d4a978d..c25d135 100755
+--- a/scripts/log-modes.sh
++++ b/scripts/log-modes.sh
+@@ -17,31 +17,31 @@ log-development() {
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+-# 💰 TRADING FOCUS - Debug trading issues
+-log-trading() {
+-    export QT_LOGGING_RULES="sentinel.trades.debug=true;sentinel.cache.debug=true;sentinel.network.debug=true;sentinel.gpu.debug=true"
+-    echo "💰 TRADING FOCUS: Trade processing, data flow, GPU pipeline"
++# 💰 DATA FOCUS - Debug trading/data issues (NEW 4-CATEGORY SYSTEM)
++log-data() {
++    export QT_LOGGING_RULES="sentinel.data.debug=true;sentinel.render.debug=false;sentinel.debug.debug=false"
++    echo "💰 DATA FOCUS: WebSocket, trades, order books (throttled)"
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+-# 🎨 RENDERING FOCUS - Debug visual issues
++# 🎨 RENDERING FOCUS - Debug visual issues (NEW 4-CATEGORY SYSTEM)
+ log-rendering() {
+-    export QT_LOGGING_RULES="sentinel.chart.debug=true;sentinel.candles.debug=true;sentinel.render.debug=true;sentinel.camera.debug=true"
+-    echo "🎨 RENDERING FOCUS: Charts, candles, basic rendering, camera"
++    export QT_LOGGING_RULES="sentinel.render.debug=true;sentinel.data.debug=false;sentinel.debug.debug=false"
++    echo "🎨 RENDERING FOCUS: Charts, GPU, coordinates (throttled)"
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+-# ⚡ PERFORMANCE FOCUS - Debug performance issues
+-log-performance() {
+-    export QT_LOGGING_RULES="sentinel.performance.debug=true;sentinel.debug.timing.debug=true"
+-    echo "⚡ PERFORMANCE FOCUS: Performance metrics and timing"
++# 🔧 APP FOCUS - Debug app lifecycle issues (NEW 4-CATEGORY SYSTEM)
++log-app() {
++    export QT_LOGGING_RULES="sentinel.app.debug=true;sentinel.data.debug=false;sentinel.render.debug=false;sentinel.debug.debug=false"
++    echo "🔧 APP FOCUS: Init, lifecycle, config, auth"
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+-# 🔌 NETWORK FOCUS - Debug connection issues
+-log-network() {
+-    export QT_LOGGING_RULES="sentinel.network.debug=true;sentinel.connection.debug=true;sentinel.subscription.debug=true"
+-    echo "🔌 NETWORK FOCUS: WebSocket, connections, subscriptions"
++# 🔍 DEBUG FOCUS - Detailed diagnostics (NEW 4-CATEGORY SYSTEM)
++log-debug() {
++    export QT_LOGGING_RULES="sentinel.debug.debug=true;sentinel.data.debug=false;sentinel.render.debug=false"
++    echo "🔍 DEBUG FOCUS: Detailed diagnostics (throttled)"
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+@@ -54,8 +54,31 @@ log-deep() {
+ 
+ # 🧹 CLEAN MODE - Minimal spam, keep useful logs
+ log-clean() {
+-    export QT_LOGGING_RULES="sentinel.render.detail.debug=false;sentinel.debug.*.debug=false"
+-    echo "🧹 CLEAN MODE: Disable high-frequency spam, keep useful logs"
++    export QT_LOGGING_RULES="sentinel.*.debug=true"
++    export SENTINEL_LOG_Data_INTERVAL=200
++    export SENTINEL_LOG_Render_INTERVAL=1000
++    export SENTINEL_LOG_Debug_INTERVAL=100
++    echo "🧹 CLEAN MODE: Throttled logging (Data: 200, Render: 1000, Debug: 100)"
++    echo "   Rules: $QT_LOGGING_RULES"
++}
++
++# 🤫 QUIET MODE - Heavy throttling for minimal spam
++log-quiet() {
++    export QT_LOGGING_RULES="sentinel.*.debug=true"
++    export SENTINEL_LOG_Data_INTERVAL=500
++    export SENTINEL_LOG_Render_INTERVAL=2000
++    export SENTINEL_LOG_Debug_INTERVAL=200
++    echo "🤫 QUIET MODE: Heavy throttling (Data: 500, Render: 2000, Debug: 200)"
++    echo "   Rules: $QT_LOGGING_RULES"
++}
++
++# 📢 VERBOSE MODE - Show more logs (reduced throttling)
++log-verbose() {
++    export QT_LOGGING_RULES="sentinel.*.debug=true"
++    export SENTINEL_LOG_Data_INTERVAL=20
++    export SENTINEL_LOG_Render_INTERVAL=100
++    export SENTINEL_LOG_Debug_INTERVAL=10
++    echo "📢 VERBOSE MODE: Reduced throttling (Data: 20, Render: 100, Debug: 10)"
+     echo "   Rules: $QT_LOGGING_RULES"
+ }
+ 
+@@ -67,13 +90,19 @@ log-help() {
+     echo "📋 Usage: source scripts/log-modes.sh && log-<mode>"
+     echo ""
+     echo "🎯 log-production   - Only errors/warnings (5-10 lines)"
+-    echo "🚀 log-development  - All categories (200+ lines)"
+-    echo "💰 log-trading      - Trade processing & data flow"
+-    echo "🎨 log-rendering    - Charts, candles, basic rendering"
+-    echo "⚡ log-performance  - Performance metrics & timing"
+-    echo "🔌 log-network      - WebSocket & connections"
+-    echo "🔍 log-deep         - Everything + detailed debug (VERY VERBOSE!)"
+-    echo "🧹 log-clean        - Disable spam, keep useful logs"
++    echo "🚀 log-development  - All categories enabled"
++    echo ""
++    echo "📊 FOCUSED MODES (4-category system):"
++    echo "💰 log-data         - Data only (WebSocket, trades, order books)"
++    echo "🎨 log-rendering    - Rendering only (charts, GPU, coordinates)"
++    echo "🔧 log-app          - App only (init, lifecycle, config)"
++    echo "🔍 log-debug        - Debug only (detailed diagnostics)"
++    echo ""
++    echo "🔇 SPAM REDUCTION MODES:"
++    echo "🤫 log-quiet        - Heavy throttling (minimal spam)"
++    echo "🧹 log-clean        - Medium throttling (clean output)"
++    echo "📢 log-verbose      - Light throttling (more details)"
++    echo "🔍 log-deep         - Everything enabled (VERY VERBOSE!)"
+     echo ""
+     echo "💡 Then run: ./build/apps/sentinel_gui/sentinel"
+     echo ""
+diff --git a/scripts/reduce-log-spam.sh b/scripts/reduce-log-spam.sh
+deleted file mode 100755
+index 1254df3..0000000
+--- a/scripts/reduce-log-spam.sh
++++ /dev/null
+@@ -1,18 +0,0 @@
+-#!/bin/bash
+-
+-# 🔥 REDUCE LOG SPAM SCRIPT
+-# This script sets environment variables to reduce console output by 90%
+-
+-echo "🎛️  REDUCING LOG SPAM..."
+-echo "=========================="
+-
+-# Set Qt logging rules to disable verbose categories
+-export QT_LOGGING_RULES="sentinel.render.detail.debug=false;sentinel.debug.coords.debug=false;sentinel.gpu.debug=false;sentinel.chart.debug=false"
+-
+-echo "✅ Log spam reduced! Now run:"
+-echo "   ./build/apps/sentinel_gui/sentinel"
+-echo ""
+-echo "💡 To restore full logging, run:"
+-echo "   unset QT_LOGGING_RULES"
+-echo ""
+-echo "🎯 Current setting: $QT_LOGGING_RULES" 
+\ No newline at end of file
