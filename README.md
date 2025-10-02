@@ -14,7 +14,17 @@
 
 <div align="center">
   Legacy Heatmap: 
-  <img width="1101" height="801" alt="Screenshot 2025-07-18 at 1 22 08 AM" src="https://github.com/user-attachments/assets/542d2497-d4e3-43d9-9663-9fbb135423e5" />
+  <img width="1101" height="801" alt="Screenshot 2025-07-18 at 1 22 08 AM" src="https://github.com/user-attachments/assets/542d2497-d4e3-43d9-9663-9fbb135423e5" />
+
+  2D-Grid Heatmap:
+  <img width="1400" height="927" alt="Screenshot 2025-07-24 at 10 52 36 AM" src="https://github.com/user-attachments/assets/fd3a14c2-80e1-47d7-93b4-99d3623ba819" />
+</div>
+
+## 🎯 Project Vision
+
+Sentinel is a **professional-grade, high-performance market microstructure analysis tool** built for a single purpose: to render massive financial datasets in real-time with zero compromise. It's designed to visualize the full depth of a live market, inspired by institutional tools like BookMap, by leveraging a GPU-first architecture.
+
+## ⚡ Current Status: **GPU Rendering Engine Complete (Phase 4)** ✅
 
   2D-Grid Heatmap:
   <img width="1400" height="927" alt="Screenshot 2025-07-24 at 10 52 36 AM" src="https://github.com/user-attachments/assets/fd3a14c2-80e1-47d7-93b4-99d3623ba819" />
