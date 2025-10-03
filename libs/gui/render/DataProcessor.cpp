@@ -37,19 +37,11 @@ DataProcessor::~DataProcessor() {
 }
 
 void DataProcessor::startProcessing() {
-    // 🚀 PHASE 3: No more timer-based polling! Real-time signal-driven processing
-    sLog_App("🚀 DataProcessor: Ready for real-time signal-driven processing (no timer needed!)");
-    
-    // Keep timer code for backward compatibility but don't start it
-    // if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
-    //     m_snapshotTimer->start(100);
-    //     sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
-    // }
-
-    // Ensure all standard timeframes are built/maintained by LTSE
-    if (m_liquidityEngine) {
-        const int64_t tf[] = {100, 250, 500, 1000, 2000, 5000, 10000};
-        for (int64_t t : tf) m_liquidityEngine->addTimeframe(t);
+    // 🚀 Base 100ms sampler: ensure continuous time buckets
+    sLog_App("🚀 DataProcessor: Starting 100ms base sampler");
+    if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
+        m_snapshotTimer->start(100);
+        sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
     }
 }
 
@@ -111,19 +103,39 @@ const OrderBook& DataProcessor::getLatestOrderBook() const {
 }
 
 void DataProcessor::captureOrderBookSnapshot() {
-    if (!m_hasValidOrderBook || !m_liquidityEngine) return;
+    if (!m_liquidityEngine) return;
     
     std::shared_ptr<const OrderBook> book_copy;
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         book_copy = m_latestOrderBook;
     }
+    if (!book_copy) return;
 
-    if(book_copy) {
-        m_liquidityEngine->addOrderBookSnapshot(*book_copy);
+    // Align to system 100ms buckets; carry-forward if we skipped buckets
+    const qint64 nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const qint64 bucketStart = (nowMs / 100) * 100;
+
+    static qint64 lastBucket = 0;
+    if (lastBucket == 0) {
+        OrderBook ob = *book_copy;
+        ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
+        m_liquidityEngine->addOrderBookSnapshot(ob);
+        lastBucket = bucketStart;
+        emit dataUpdated();
+        return;
     }
-    
-    emit dataUpdated();
+
+    if (bucketStart > lastBucket) {
+        for (qint64 ts = lastBucket + 100; ts <= bucketStart; ts += 100) {
+            OrderBook ob = *book_copy;
+            ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ts));
+            m_liquidityEngine->addOrderBookSnapshot(ob);
+            lastBucket = ts;
+        }
+        emit dataUpdated();
+    }
 }
 
 void DataProcessor::initializeViewportFromTrade(const Trade& trade) {
@@ -206,21 +218,33 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
     sparseBook.product_id = productId.toStdString();
     sparseBook.timestamp = std::chrono::system_clock::now();
     
-    // Convert dense to sparse - OPTIMIZED: Only scan visible price window + margin
+    // Convert dense to sparse using a mid-price band (viewport-independent)
     const auto& denseBids = liveBook.getBids();
     const auto& denseAsks = liveBook.getAsks();
+    // Mid price
+    double bestBid = std::numeric_limits<double>::quiet_NaN();
+    double bestAsk = std::numeric_limits<double>::quiet_NaN();
+    // Find bests via dense arrays
+    for (size_t i = denseBids.size(); i > 0; --i) { if (denseBids[i-1] > 0.0) { bestBid = liveBook.getMinPrice() + (static_cast<double>(i-1) * liveBook.getTickSize()); break; } }
+    for (size_t i = 0; i < denseAsks.size(); ++i) { if (denseAsks[i] > 0.0) { bestAsk = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize()); break; } }
+    double mid = (!std::isnan(bestBid) && !std::isnan(bestAsk)) ? (bestBid + bestAsk) * 0.5
+               : (!std::isnan(bestBid) ? bestBid : (!std::isnan(bestAsk) ? bestAsk : liveBook.getMinPrice() + 0.5 * (denseBids.size() * liveBook.getTickSize())));
+    double halfBand = 0.0;
+    switch (m_bandMode) {
+        case BandMode::FixedDollar: halfBand = std::max(1e-6, m_bandValue); break;
+        case BandMode::PercentMid:  halfBand = std::max(1e-6, std::abs(mid) * m_bandValue); break;
+        case BandMode::Ticks:       halfBand = std::max(1.0, m_bandValue) * liveBook.getTickSize(); break;
+    }
+    // Safety caps
+    const double maxHalfBand = (denseBids.size() * liveBook.getTickSize()) * 0.5;
+    halfBand = std::min(halfBand, maxHalfBand);
+    double bandMinPrice = mid - halfBand;
+    double bandMaxPrice = mid + halfBand;
     
-    // Get visible price range from ViewState (with 20% margin for smooth scrolling)
-    double visibleMinPrice = m_viewState ? m_viewState->getMinPrice() : liveBook.getMinPrice();
-    double visibleMaxPrice = m_viewState ? m_viewState->getMaxPrice() : liveBook.getMinPrice() + (denseBids.size() * liveBook.getTickSize());
-    double priceRange = visibleMaxPrice - visibleMinPrice;
-    double marginMinPrice = visibleMinPrice - (priceRange * 0.2);
-    double marginMaxPrice = visibleMaxPrice + (priceRange * 0.2);
-    
-    // Calculate index bounds for visible window
-    size_t minIndex = std::max(0.0, (marginMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+    // Calculate index bounds for band window
+    size_t minIndex = std::max(0.0, (bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
     size_t maxIndex = std::min(static_cast<double>(std::max(denseBids.size(), denseAsks.size())), 
-                              (marginMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
+                              (bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
     
     // Convert bids (scan only visible range from highest to lowest price)
     for (size_t i = std::min(maxIndex, denseBids.size()); i > minIndex && i > 0; --i) {
@@ -239,17 +263,15 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
         }
     }
     
-    // Process through LTSE
-    sLog_Render("🔍 LTSE INPUT: Adding snapshot with " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
+    // Prime LTSE immediately and cache for sampler
     m_liquidityEngine->addOrderBookSnapshot(sparseBook);
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        m_latestOrderBook = std::make_shared<OrderBook>(sparseBook);
+        m_hasValidOrderBook = true;
+    }
     
-    // Check if LTSE has any data now
-    auto testSlices = m_liquidityEngine->getVisibleSlices(m_currentTimeframe_ms, 
-        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() - 60000,
-        std::chrono::duration_cast<std::chrono::milliseconds>(sparseBook.timestamp.time_since_epoch()).count() + 60000);
-    sLog_Render("🔍 LTSE STATUS: Total slices available = " << testSlices.size());
-    
-    sLog_Data("🎯 DataProcessor: LiveOrderBook processed - " << sparseBook.bids.size() << " bids, " << sparseBook.asks.size() << " asks");
+    sLog_Data("🎯 DataProcessor: LiveOrderBook cached + primed snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size());
     emit dataUpdated();
 }
 
@@ -445,8 +467,8 @@ QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, dou
         m_viewState->getViewportWidth(), m_viewState->getViewportHeight()
     };
 
-    const double priceResolution = getPriceResolution();  // Use dynamic price resolution from LOD system
-    const double halfTick = priceResolution * 0.5;
+    // Use slice's tick size for vertical sizing to match aggregation
+    const double halfTick = slice.tickSize * 0.5;
 
     // Ensure a non-zero time extent
     int64_t timeStart = slice.startTime_ms;

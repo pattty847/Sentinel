@@ -31,6 +31,14 @@ void PriceAxisModel::calculateTicks() {
     targetTicks = std::max(4, std::min(15, targetTicks));
     
     double step = calculateNicePriceStep(priceRange, targetTicks);
+    // Snap axis ticks to current bucket size hint to align grid with cells
+    if (m_viewState) {
+        double bucket = m_viewState->calculateOptimalPriceResolution();
+        if (bucket > 0.0) {
+            double multiples = std::max(1.0, std::round(step / bucket));
+            step = multiples * bucket;
+        }
+    }
     if (step <= 0) return;
     
     // Find first tick at or below priceMin

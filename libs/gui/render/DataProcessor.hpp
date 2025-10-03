@@ -67,6 +67,13 @@ public:
     int64_t suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const;
     std::vector<struct LiquidityTimeSlice> getVisibleSlices(qint64 timeStart, qint64 timeEnd, double minPrice, double maxPrice) const;
     int getDisplayMode() const;
+
+    // Band-based ingestion configuration
+    enum class BandMode { FixedDollar, PercentMid, Ticks };
+    void setBandMode(BandMode mode) { m_bandMode = mode; }
+    void setBandValue(double value) { m_bandValue = value; }
+    BandMode getBandMode() const { return m_bandMode; }
+    double getBandValue() const { return m_bandValue; }
     
     // 🚀 PHASE 3: Manual timeframe management (preserve existing logic)
     void setTimeframe(int timeframe_ms);
@@ -109,4 +116,8 @@ private:
     
     // 🎯 PRICE LOD: Dynamic price resolution
     double m_priceResolution = 1.0;
+
+    // Band-based ingestion settings (centered at mid price)
+    BandMode m_bandMode = BandMode::PercentMid; // default to percentage of mid
+    double m_bandValue = 0.01;                  // 1% default half-band (i.e., ±1%)
 };
