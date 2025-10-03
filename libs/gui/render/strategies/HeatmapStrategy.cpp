@@ -38,7 +38,9 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     node->setFlag(QSGNode::OwnsMaterial);
     
     // Calculate required vertex count (6 vertices per cell for 2 triangles)
-    int cellCount = std::min(static_cast<int>(batch.cells.size()), batch.maxCells);
+    int total = static_cast<int>(batch.cells.size());
+    int cellCount = std::min(total, batch.maxCells);
+    int startIndex = std::max(0, total - cellCount); // keep newest when clipping
     int vertexCount = cellCount * 6;
     
     // Create geometry with colors
@@ -52,7 +54,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     int vertexIndex = 0;
     
     for (int i = 0; i < cellCount; ++i) {
-        const auto& cell = batch.cells[i];
+        const auto& cell = batch.cells[startIndex + i];
         
         // Skip cells with insufficient volume
         if (cell.liquidity < batch.minVolumeFilter) continue;

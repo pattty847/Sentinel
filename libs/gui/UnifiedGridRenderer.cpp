@@ -28,6 +28,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/GridViewState.hpp"
 #include "render/GridSceneNode.hpp" 
 // Keep include to satisfy member access in this TU
+// Keep for type completeness used below
 #include "../core/SentinelMonitor.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
@@ -98,50 +99,9 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
-    
-    // 🎯 DYNAMIC RESAMPLING: Auto-select timeframe based on pixel target (8-16px cell width)
-    qint64 timeStart = m_viewState->getVisibleTimeStart();
-    qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-    double viewportWidth = m_viewState->getViewportWidth();
-    
-    // Calculate target timeframe for 8-16px cell width
-    double timeSpan_ms = static_cast<double>(timeEnd - timeStart);
-    double targetCellWidth = 12.0; // Target 12px cells
-    double targetTimeframe_ms = (timeSpan_ms * targetCellWidth) / viewportWidth;
-    
-    // Available timeframes in LTSE
-    const std::vector<int64_t> timeframes = {100, 250, 500, 1000, 2000, 5000, 10000};
-    
-    // Find closest timeframe
-    int64_t bestTimeframe = timeframes[0];
-    double bestDiff = std::abs(targetTimeframe_ms - bestTimeframe);
-    
-    for (int64_t tf : timeframes) {
-        double diff = std::abs(targetTimeframe_ms - tf);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            bestTimeframe = tf;
-        }
-    }
-    
-    // Update timeframe if it changed significantly
-    if (m_dataProcessor && bestTimeframe != m_currentTimeframe_ms) {
-        m_currentTimeframe_ms = bestTimeframe;
-        m_dataProcessor->setTimeframe(bestTimeframe);
-        m_geometryDirty.store(true);
-        update();
-        emit timeframeChanged();
-    }
-    
-    // Also update price resolution
-    double optimalResolution = m_viewState->calculateOptimalPriceResolution();
-    double currentResolution = m_dataProcessor->getPriceResolution();
-    if (std::abs(optimalResolution - currentResolution) > 0.01) {
-        m_dataProcessor->setPriceResolution(optimalResolution);
-        m_geometryDirty.store(true);
-        update();
-        emit priceResolutionChanged();
-    }
+    // Slim adapter: DP + LTSE handle timeframe/LOD; we just mark dirty
+    m_geometryDirty.store(true);
+    update();
 }
 
 
@@ -178,7 +138,10 @@ void UnifiedGridRenderer::updateVisibleCells() {
     } else {
         m_visibleCells.clear();
     }
-    
+    // Keep viewport size in sync every paint (prevents transform drift)
+    if (m_viewState) {
+        m_viewState->setViewportSize(width(), height());
+    }
     // Signal that we need a repaint
     m_geometryDirty = true;
     update();
