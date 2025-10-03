@@ -11,17 +11,13 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 */
 #include "MarketDataCore.hpp"
 #include "SentinelLogging.hpp"
-#include "Cpp20Utils.hpp"  // 🚀 C++20 UTILITIES
+#include "Cpp20Utils.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <QString>
 #include <QMetaObject>
-// 🚀 C++20 OPTIMIZATIONS
 #include <format>    // std::format for efficient string formatting
-#include <ranges>    // std::ranges for functional data processing
-
-// Stub implementation for Phase 1 compilation verification
 
 MarketDataCore::MarketDataCore(Authenticator& auth,
                                DataCache& cache,
@@ -43,9 +39,7 @@ MarketDataCore::~MarketDataCore() {
     sLog_App("🏗️ MarketDataCore destroyed");
 }
 
-void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {
-    // 🗑️ CLEANED UP: Redundant guards removed - write queue handles thread safety
-    
+void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {    
     std::vector<std::string> new_symbols;
     for (const auto& s : symbols) {
         if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
