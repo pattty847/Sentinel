@@ -1,50 +1,12 @@
 {
     "configurations": [
         {
-            "name": "Win32",
+            "name": "Default",
             "includePath": [
-                "${workspaceFolder}/**",
-                "${workspaceFolder}/libs/core",
-                "${workspaceFolder}/libs/gui",
-                "${workspaceFolder}/libs/gui/models",
-                "${workspaceFolder}/libs/gui/render",
-                "${workspaceFolder}/libs/gui/render/strategies",
-                "C:/Qt/6.9.1/mingw_64/include/**",
-                "C:/Qt/6.9.1/mingw_64/include/QtCore",
-                "C:/Qt/6.9.1/mingw_64/include/QtGui",
-                "C:/Qt/6.9.1/mingw_64/include/QtWidgets",
-                "C:/Qt/6.9.1/mingw_64/include/QtQuick",
-                "C:/Qt/6.9.1/mingw_64/include/QtQml",
-                "C:/Qt/6.9.1/mingw_64/include/QtCharts",
-                "C:/Qt/6.9.1/mingw_64/include/QtNetwork",
-                "C:/Qt/6.9.1/mingw_64/include/QtQuickWidgets",
-                "C:/Qt/6.9.1/mingw_64/include/QtOpenGL",
-                "C:/Qt/6.9.1/mingw_64/include/QtOpenGLWidgets",
-                "C:/msys64/mingw64/include",
-                "C:/msys64/mingw64/include/boost",
-                "C:/msys64/mingw64/include/openssl"
+                "${workspaceFolder}/**"
             ],
-            "defines": [
-                "_DEBUG",
-                "UNICODE",
-                "_UNICODE",
-                "WIN32",
-                "_WINDOWS",
-                "QT_CORE_LIB",
-                "QT_GUI_LIB",
-                "QT_WIDGETS_LIB",
-                "QT_QUICK_LIB",
-                "QT_QML_LIB",
-                "QT_CHARTS_LIB",
-                "QT_NETWORK_LIB",
-                "QT_OPENGL_LIB",
-                "QT_OPENGLWIDGETS_LIB"
-            ],
-            "windowsSdkVersion": "10.0.22621.0",
-            "compilerPath": "C:/msys64/mingw64/bin/g++.exe",
             "cStandard": "c17",
             "cppStandard": "c++20",
-            "intelliSenseMode": "windows-clang-x64",
             "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],

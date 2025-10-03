@@ -28,31 +28,3 @@ This document describes the core components found in the `libs/core` directory. 
 2.  The messages are passed to `MessageParser` to be converted into `TradeData` objects.
 3.  The `TradeData` objects are stored in `DataCache`.
 4.  `RuleEngine` and `StatisticsProcessor` consume data from `DataCache` to perform their respective tasks.
----
-# Core Components
-
-This document describes the core components found in the `libs/core` directory. These components are fundamental to the Sentinel application's backend and data processing capabilities.
-
-## Key Components
-
-- **`CoinbaseStreamClient`**: Manages the connection to the Coinbase WebSocket API. It handles authentication, subscription to market data channels, and message reception.
-
-- **`MessageParser`**: Parses incoming JSON messages from the WebSocket stream into structured C++ objects (e.g., `TradeData`).
-
-- **`DataCache`**: A thread-safe cache for storing and providing access to real-time market data. It is designed for high-throughput, low-latency access.
-
-- **`RuleEngine`**: Processes market data against a set of user-defined rules. It uses components like `CVDThresholdRule` to detect specific market events.
-
-- **`StatisticsProcessor`**: Computes various statistics from the market data, such as trading volume and price volatility.
-
-- **`Authenticator`**: Handles the generation of authentication tokens required for the Coinbase API.
-
-- **`SentinelLogging`**: A custom logging utility used throughout the core components to provide detailed and structured logging.
-
-## Data Flow
-
-1.  `CoinbaseStreamClient` receives raw JSON messages.
-2.  The messages are passed to `MessageParser` to be converted into `TradeData` objects.
-3.  The `TradeData` objects are stored in `DataCache`.
-4.  `RuleEngine` and `StatisticsProcessor` consume data from `DataCache` to perform their respective tasks.
----

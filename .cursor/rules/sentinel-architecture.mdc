@@ -45,7 +45,3 @@ The system processes and visualizes real-time market data as a 2D grid, where ea
     - `formatPerformanceMetric` / `formatThroughput`: Performance monitoring and throughput calculation.
   - All functions are optimized for real-time trading data processing with minimal overhead.
 - **OpenGL**: For high-performance GPU-accelerated chart rendering.
----
-  - All functions are optimized for real-time trading data processing with minimal overhead.
-- **OpenGL**: For high-performance GPU-accelerated chart rendering.
----

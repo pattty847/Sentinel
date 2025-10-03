@@ -1,6 +1,6 @@
 # IDE and Editor files
 .cursor/
-.vscode/
+# .vscode/ - Keep tracked for shared project settings (remove hardcoded paths manually)
 *.swp
 *.swo
 *~
@@ -85,6 +85,8 @@ bower_components/
 *.bak
 *.backup
 *.old
+backup/
+backups/*.patch
 
 # Profiling and debugging
 *.prof
