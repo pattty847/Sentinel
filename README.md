@@ -73,41 +73,15 @@ Built as a portfolio piece to showcase:
 
 ## Architecture
 
-```mermaid
-graph TD
-    A[WebSocket] --> B[MarketDataCore]
-    B --> C[DataCache]
-    C --> D[LiquidityTimeSeriesEngine]
-    D --> E[DataProcessor]
-    E --> F[IRenderStrategy]
-    F --> G[GPU]
-    H[GridViewState] --> E
+The system is designed for performance and modularity, with a clean separation between the C++ business logic (`libs/core`) and the Qt-based GUI (`libs/gui`). It uses a multi-threaded data pipeline to process real-time WebSocket data and render it efficiently on the GPU via the Qt Scene Graph.
 
-    subgraph "Core Layer (libs/core)"
-    B
-    C
-    D
-    end
+Key design principles include:
+- **Strict Separation of Concerns**: `core` has no GUI dependencies, `gui` contains no business logic.
+- **Strategy Pattern**: Pluggable rendering strategies allow for adding new visualizations without altering the core pipeline.
+- **Modern C++20**: Enforces memory safety and clean code with RAII, smart pointers, and concepts.
+- **Modularity**: A 300-line-of-code limit per file prevents monolithic classes.
 
-    subgraph "GUI Layer (libs/gui)"
-    E
-    F
-    H
-    I[UnifiedGridRenderer]
-    end
-```
-
-### Design Principles
-- **libs/core/**: Pure C++ business logic (Qt-independent except QtCore)
-- **libs/gui/**: Qt/QML adapters that delegate to core
-- **Strategy Pattern**: Pluggable rendering without code changes
-- **300 LOC Limit**: Files capped at 300 lines to enforce modularity
-- **RAII Everywhere**: Modern C++20 with smart pointers, no manual memory management
-
-For detailed architecture:
-- [System Architecture](docs/SYSTEM_ARCHITECTURE.md)
-- [V2 Rendering Architecture](docs/V2_RENDERING_ARCHITECTURE.md)
-- [Data Flow](docs/DATA_FLOW.md)
+For a complete overview of the components and data flow, see the main **[Architecture Document](docs/ARCHITECTURE.md)**.
 
 ---
 
@@ -165,44 +139,26 @@ Create `key.json` in the project root for Coinbase API access:
 
 ### Logging
 
-Control log verbosity with `QT_LOGGING_RULES`:
+Control log verbosity with `QT_LOGGING_RULES`. See the **[Logging Guide](docs/LOGGING_GUIDE.md)** for detailed instructions.
 
 ```bash
-# Clean output (production)
+# Example: Clean output for production use
 export QT_LOGGING_RULES="*.debug=false"
 
-# Debug rendering
+# Example: Debug rendering issues
 export QT_LOGGING_RULES="sentinel.render.debug=true"
-
-# Debug data/network
-export QT_LOGGING_RULES="sentinel.data.debug=true"
 ```
-
-See [Logging Guide](docs/LOGGING_GUIDE.md) for details.
 
 ---
 
 ## Documentation
 
-### Core Documentation
-- [System Architecture](docs/SYSTEM_ARCHITECTURE.md) - Overall design and components
-- [V2 Rendering Architecture](docs/V2_RENDERING_ARCHITECTURE.md) - GPU rendering pipeline
-- [Data Flow](docs/DATA_FLOW.md) - How data moves through the system
-- [Logging Guide](docs/LOGGING_GUIDE.md) - Using the logging system
-- [Live Architecture](docs/LIVE_ARCHITECTURE.md) - Current implementation status
+Project documentation is kept concise and focused.
 
-### External References
-- [Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)
-- [Qt Scene Graph](https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph.html)
-
----
-
-## Future Potential
-
-- Multi-symbol support (ETH, SOL, etc.)
-- Custom indicator framework
-- Alert system with webhooks
-- AI-powered market analysis (experimental/research)
+- **[Architecture](docs/ARCHITECTURE.md)**: A detailed explanation of the system's design, components, and data flow.
+- **[Logging Guide](docs/LOGGING_GUIDE.md)**: Instructions for using the categorized logging system for debugging.
+- **[Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)**: Official API documentation.
+- **[Qt Scene Graph](https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph.html)**: The underlying technology for GPU-accelerated rendering.
 
 ---
 

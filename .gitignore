@@ -1,5 +1,7 @@
 # IDE and Editor files
 .cursor/
+.cursorindexingignore
+.clangd
 # .vscode/ - Keep tracked for shared project settings (remove hardcoded paths manually)
 *.swp
 *.swo
@@ -156,3 +158,4 @@ dmypy.json
 
 # Claude AI settings
 .claude/
+CLAUDE.md
