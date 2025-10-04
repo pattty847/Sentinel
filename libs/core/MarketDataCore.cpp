@@ -17,6 +17,7 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <chrono>
 #include <QString>
 #include <QMetaObject>
+#include <QPointer>
 #include <format>    // std::format for efficient string formatting
 
 MarketDataCore::MarketDataCore(Authenticator& auth,
@@ -37,6 +38,15 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
 MarketDataCore::~MarketDataCore() {
     stop();
     sLog_App("🏗️ MarketDataCore destroyed");
+}
+
+inline void MarketDataCore::emitError(QString msg) {
+    QPointer<MarketDataCore> self(this);
+    QMetaObject::invokeMethod(this, [self, m = std::move(msg)]{
+        if (!self) return;
+        emit self->errorOccurred(m);
+        emit self->connectionStatusChanged(false);
+    }, Qt::QueuedConnection);
 }
 
 void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {    
@@ -136,6 +146,7 @@ void MarketDataCore::run() {
 void MarketDataCore::onResolve(beast::error_code ec, tcp::resolver::results_type results) {
     if (ec) {
         std::cerr << "❌ Resolve error: " << ec.message() << std::endl;
+        emitError(QString("Resolve error: %1").arg(QString::fromStdString(ec.message())));
         scheduleReconnect();
         return;
     }
@@ -153,6 +164,7 @@ void MarketDataCore::onResolve(beast::error_code ec, tcp::resolver::results_type
 void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type) {
     if (ec) {
         std::cerr << "❌ Connect error: " << ec.message() << std::endl;
+        emitError(QString("Connect error: %1").arg(QString::fromStdString(ec.message())));
         scheduleReconnect();
         return;
     }
@@ -163,6 +175,7 @@ void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type
     if (!SSL_set_tlsext_host_name(m_ws.next_layer().native_handle(), m_host.c_str())) {
         beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
         std::cerr << "❌ SSL SNI error: " << ssl_ec.message() << std::endl;
+        emitError(QString("SSL SNI error: %1").arg(QString::fromStdString(ssl_ec.message())));
         scheduleReconnect();
         return;
     }
@@ -172,6 +185,7 @@ void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type
     if (SSL_set1_host(ssl_handle, m_host.c_str()) != 1) {
         beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
         std::cerr << "❌ SSL hostname verification setup error: " << ssl_ec.message() << std::endl;
+        emitError(QString("SSL hostname verification setup error: %1").arg(QString::fromStdString(ssl_ec.message())));
         scheduleReconnect();
         return;
     }
@@ -190,6 +204,7 @@ void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type
 void MarketDataCore::onSslHandshake(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ SSL handshake error: " << ec.message() << std::endl;
+        emitError(QString("SSL handshake error: %1").arg(QString::fromStdString(ec.message())));
         scheduleReconnect();
         return;
     }
@@ -210,11 +225,16 @@ void MarketDataCore::onSslHandshake(beast::error_code ec) {
 void MarketDataCore::onWsHandshake(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ WebSocket handshake error: " << ec.message() << std::endl;
+        emitError(QString("WebSocket handshake error: %1").arg(QString::fromStdString(ec.message())));
         
         // 🚨 FIX: Emit disconnected status on handshake failure
-        QMetaObject::invokeMethod(this, [this]() {
-            emit connectionStatusChanged(false);
-        }, Qt::QueuedConnection);
+        {
+            QPointer<MarketDataCore> self(this);
+            QMetaObject::invokeMethod(this, [self]() {
+                if (!self) return;
+                emit self->connectionStatusChanged(false);
+            }, Qt::QueuedConnection);
+        }
         
         scheduleReconnect();
         return;
@@ -223,9 +243,21 @@ void MarketDataCore::onWsHandshake(beast::error_code ec) {
     sLog_Data("🌐 WebSocket connected! Waiting for subscription requests...");
     
     // 🚨 FIX: Emit connected status when WebSocket is ready
-    QMetaObject::invokeMethod(this, [this]() {
-        emit connectionStatusChanged(true);
-    }, Qt::QueuedConnection);
+    // Reset backoff on successful WS handshake
+    m_backoffDuration = std::chrono::seconds(1);
+    sLog_Data("🔁 Backoff reset to 1s after successful WS handshake");
+
+    {
+        QPointer<MarketDataCore> self(this);
+        QMetaObject::invokeMethod(this, [self]() {
+            if (!self) return;
+            emit self->connectionStatusChanged(true);
+        }, Qt::QueuedConnection);
+    }
+
+    // Replay desired subscriptions and start heartbeat
+    replaySubscriptionsOnConnect();
+    startHeartbeat();
     
     // Connection is live, start reading messages from the server.
     // Subscriptions will be sent on-demand via the public methods.
@@ -236,6 +268,7 @@ void MarketDataCore::onWsHandshake(beast::error_code ec) {
 void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
     if (ec) {
         std::cerr << "❌ Write error: " << ec.message() << std::endl;
+        emitError(QString("Write error: %1").arg(QString::fromStdString(ec.message())));
         scheduleReconnect();
         return;
     }
@@ -247,6 +280,7 @@ void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
 void MarketDataCore::onRead(beast::error_code ec, std::size_t) {
     if (ec) {
         std::cerr << "❌ Read error: " << ec.message() << std::endl;
+        emitError(QString("Read error: %1").arg(QString::fromStdString(ec.message())));
         scheduleReconnect();
         return;
     }
@@ -282,6 +316,7 @@ void MarketDataCore::doClose() {
 void MarketDataCore::onClose(beast::error_code ec) {
     if (ec) {
         std::cerr << "❌ Close error: " << ec.message() << std::endl;
+        emitError(QString("Close error: %1").arg(QString::fromStdString(ec.message())));
         
         // 🚀 PHASE 2.1: Record network error
         if (m_monitor) {
@@ -308,10 +343,11 @@ void MarketDataCore::scheduleReconnect() {
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
     
-    // Reset the stream state
+    // Reset the stream state and clear any queued writes
     if (m_ws.is_open()) {
         doClose();
     }
+    clearWriteQueue();
     
     // NON-BLOCKING timer-based reconnect
     m_reconnectTimer.expires_after(delay);
@@ -330,6 +366,12 @@ void MarketDataCore::scheduleReconnect() {
     });
 }
 
+void MarketDataCore::clearWriteQueue() {
+    // Strand context only
+    m_writeQueue.clear();
+    m_writeInProgress = false;
+}
+
 void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
     if (symbols.empty()) {
         return;
@@ -338,7 +380,20 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
     // Post to the strand to ensure thread-safe access to the WebSocket stream
     net::post(m_strand, [this, type, symbols]() {
         if (!m_ws.is_open()) {
-            sLog_Warning("WebSocket not open, cannot send subscription.");
+            sLog_Warning("WebSocket not open, staging subscription request for replay on connect.");
+            // Stage by updating desired product set; replay on handshake
+            if (type == "subscribe") {
+                for (const auto& s : symbols) {
+                    if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
+                        m_products.push_back(s);
+                    }
+                }
+            } else if (type == "unsubscribe") {
+                for (const auto& s : symbols) {
+                    auto it = std::find(m_products.begin(), m_products.end(), s);
+                    if (it != m_products.end()) m_products.erase(it);
+                }
+            }
             return;
         }
 
@@ -443,9 +498,13 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         
         // Emit real-time signal to GUI layer (Qt thread-safe)
         Trade tradeCopy = trade; // Make a copy for thread safety
-        QMetaObject::invokeMethod(this, [this, tradeCopy]() {
-            emit tradeReceived(tradeCopy);
-        }, Qt::QueuedConnection);
+        {
+            QPointer<MarketDataCore> self(this);
+            QMetaObject::invokeMethod(this, [self, tradeCopy]() {
+                if (!self) return;
+                emit self->tradeReceived(tradeCopy);
+            }, Qt::QueuedConnection);
+        }
         
         std::string logMessage = Cpp20Utils::formatTradeLog(
             trade.product_id, trade.price, trade.size, 
@@ -535,7 +594,7 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
             OrderBookLevel level = {price, quantity};
             if (side == "bid") {
                 sparse_bids.push_back(level);
-            } else if (side == "offer") {
+            } else if (side == "offer" || side == "ask") {
                 sparse_asks.push_back(level);
             }
         }
@@ -567,14 +626,20 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
         double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
         
         // Apply update to live order book (handles add/update/remove automatically)
+        if (side == "offer") side = "ask"; // normalize
         m_cache.updateLiveOrderBook(product_id, side, price, quantity, exchange_timestamp);
         updateCount++;
     }
     
     // PHASE 2.1: Direct dense-only signal - NO CONVERSION!
-    QMetaObject::invokeMethod(this, [this, productId = QString::fromStdString(product_id)]() {
-        emit liveOrderBookUpdated(productId);  // Signal that dense book is ready
-    }, Qt::QueuedConnection);
+    {
+        QPointer<MarketDataCore> self(this);
+        QString productIdQ = QString::fromStdString(product_id);
+        QMetaObject::invokeMethod(this, [self, productIdQ]() {
+            if (!self) return;
+            emit self->liveOrderBookUpdated(productIdQ);
+        }, Qt::QueuedConnection);
+    }
     
     // 🚀 PHASE 2.1: Record order book update metrics
     const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
@@ -600,4 +665,40 @@ void MarketDataCore::handleError(const nlohmann::json& message) {
     std::string logMessage = std::format("❌ Coinbase error: {}",
         message.value("message", "unknown error"));
     sLog_Error(QString::fromStdString(logMessage));
+    QString err = message.contains("message") ? QString::fromStdString(message.at("message").get<std::string>())
+                                               : QString("Provider error");
+    emitError(err);
+}
+
+void MarketDataCore::replaySubscriptionsOnConnect() {
+    if (m_products.empty()) return;
+    auto symbols = m_products;
+    sendSubscriptionMessage("subscribe", symbols);
+}
+
+void MarketDataCore::startHeartbeat() {
+    m_pingTimer.expires_after(std::chrono::seconds(25));
+    m_pingTimer.async_wait([this](beast::error_code ec){
+        if (ec || !m_running) return;
+        scheduleNextPing();
+    });
+}
+
+void MarketDataCore::scheduleNextPing() {
+    if (!m_ws.is_open()) {
+        return;
+    }
+    m_ws.async_ping({}, [this](beast::error_code ec){
+        if (ec) {
+            std::cerr << "❌ Ping error: " << ec.message() << std::endl;
+            emitError(QString("Ping error: %1").arg(QString::fromStdString(ec.message())));
+            scheduleReconnect();
+            return;
+        }
+        m_pingTimer.expires_after(std::chrono::seconds(25));
+        m_pingTimer.async_wait([this](beast::error_code ec2){
+            if (ec2 || !m_running) return;
+            scheduleNextPing();
+        });
+    });
 }

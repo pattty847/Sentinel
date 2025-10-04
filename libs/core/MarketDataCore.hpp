@@ -22,7 +22,6 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <thread>
 #include <chrono>
 #include <optional>
-#include <random>
 #include <deque>
 #include <QObject>
 #include <QTimer>
@@ -85,6 +84,7 @@ private:
     // 🚨 FIX: Beast WebSocket write queue methods (strand-only, no mutex)
     void enqueueWrite(std::shared_ptr<std::string> message);
     void doWrite();
+    void clearWriteQueue();
 
     // Message handling sub-functions
     void handleMarketTrades(const nlohmann::json& message, 
@@ -105,6 +105,13 @@ private:
     void handleError(const nlohmann::json& message);
 
     // Members
+    // Unified error emission to GUI and status surface
+    void emitError(QString msg);
+
+    // Subscription & heartbeat helpers
+    void replaySubscriptionsOnConnect();
+    void startHeartbeat();
+    void scheduleNextPing();
     const std::string               m_host   = "advanced-trade-ws.coinbase.com";
     const std::string               m_port   = "443";
     const std::string               m_target = "/";
@@ -122,6 +129,7 @@ private:
                                     m_ws{m_strand, m_sslCtx};
     beast::flat_buffer              m_buf;
     net::steady_timer               m_reconnectTimer{m_strand};
+    net::steady_timer               m_pingTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
     
     std::atomic<bool>               m_running{false};
