@@ -100,6 +100,7 @@ void MarketDataCore::stop() {
         
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
+        m_pingTimer.cancel();
         
         // Post close operation to strand for thread safety
         net::post(m_strand, [this]() {
@@ -107,6 +108,7 @@ void MarketDataCore::stop() {
             
             // Cancel any pending timer operations
             m_reconnectTimer.cancel();
+            m_pingTimer.cancel();
             
             // Close WebSocket gracefully if open
             if (m_ws.is_open()) {
@@ -347,7 +349,10 @@ void MarketDataCore::scheduleReconnect() {
     if (m_ws.is_open()) {
         doClose();
     }
-    clearWriteQueue();
+    // Clear write queue on the strand for safety
+    net::post(m_strand, [this]() {
+        clearWriteQueue();
+    });
     
     // NON-BLOCKING timer-based reconnect
     m_reconnectTimer.expires_after(delay);
