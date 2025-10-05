@@ -16,7 +16,7 @@ Assumptions: Order book updates are processed to update the time-sliced liquidit
 #include <deque>
 #include <map>
 #include <vector>
-#include "../core/TradeData.h"
+#include "marketdata/model/TradeData.h"
 
 /**
  * 🎯 LIQUIDITY TIME SERIES ENGINE

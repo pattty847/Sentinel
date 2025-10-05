@@ -9,10 +9,12 @@ Observability: Detailed logging of UI/QML initialization and data pipeline statu
 Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
 Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
 */
-
+#include <QQuickWidget>
+#include <QLabel>
+#include <QLineEdit>
+#include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "StatisticsController.h"
-#include "ChartModeController.h"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"  // 🚀 PHASE 3: Include for signal routing
 #include "SentinelLogging.hpp"

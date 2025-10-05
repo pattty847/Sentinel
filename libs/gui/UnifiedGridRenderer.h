@@ -23,7 +23,7 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <memory>
 #include <atomic>
 #include <mutex>
-#include "../core/TradeData.h"
+#include "../core/marketdata/model/TradeData.h"
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 

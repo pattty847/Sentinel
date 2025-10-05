@@ -11,8 +11,13 @@ Assumptions: The processing interval is a good balance between latency and effic
 */
 #include "DataProcessor.hpp"
 #include "GridViewState.hpp"
-#include "../../core/SentinelLogging.hpp"
-#include "../../core/DataCache.hpp"  // 🚀 PHASE 3: Access to dense LiveOrderBook
+#include "SentinelLogging.hpp"
+#include <QMetaObject>
+#include <QMetaType>
+#include <QDateTime>
+#include <cmath>
+#include "SentinelLogging.hpp"
+#include "../../core/marketdata/cache/DataCache.hpp"  // 🚀 PHASE 3: Access to dense LiveOrderBook
 #include "../CoordinateSystem.h"  // 🎯 FIX: Use proper coordinate transformation
 #include <QColor>
 #include <chrono>
