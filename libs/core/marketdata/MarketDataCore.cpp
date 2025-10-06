@@ -11,6 +11,7 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 */
 #include "MarketDataCore.hpp"
 #include "SentinelLogging.hpp"
+#include "marketdata/dispatch/MessageDispatcher.hpp"
 #include "Cpp20Utils.hpp"
 #include <iostream>
 #include <thread>
@@ -58,6 +59,10 @@ void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols)
         }
     }
     if (!new_symbols.empty()) {
+        // Keep subscription manager in sync
+        m_subscriptions.setDesiredProducts(m_products);
+    }
+    if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
     }
 }
@@ -72,6 +77,7 @@ void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symb
         }
     }
     if (!removed_symbols.empty()) {
+        m_subscriptions.setDesiredProducts(m_products);
         sendSubscriptionMessage("unsubscribe", removed_symbols);
     }
 }
@@ -465,6 +471,23 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     
     std::string channel = message.value("channel", "");
     std::string type = message.value("type", "");
+
+    // Phase 3: Minimal dispatcher wiring for non-data events (ack/errors)
+    // Keep existing hot-path handlers for trades and order book intact.
+    {
+        auto result = MessageDispatcher::parse(message);
+        for (const auto& evt : result.events) {
+            std::visit([this](auto&& ev) {
+                using T = std::decay_t<decltype(ev)>;
+                if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
+                    emitError(QString::fromStdString(ev.message));
+                } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
+                    std::string logMessage = std::format("✅ Subscription confirmed for {} symbols", ev.productIds.size());
+                    sLog_Data(QString::fromStdString(logMessage));
+                }
+            }, evt);
+        }
+    }
     
     if (channel == "market_trades") {
         handleMarketTrades(message, arrival_time);
@@ -493,8 +516,8 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
     for (const auto& trade_data : trades) {
         Trade trade = createTradeFromJson(trade_data, arrival_time);
         
-        // Store in DataCache
-        m_cache.addTrade(trade);
+        // Store through sink adapter
+        m_sink.onTrade(trade);
         
         // 🚀 PHASE 2.1: Record trade processed for throughput tracking
         if (m_monitor) {

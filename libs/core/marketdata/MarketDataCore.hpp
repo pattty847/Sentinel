@@ -26,7 +26,9 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <QObject>
 #include <QTimer>
 #include "Authenticator.hpp"
-#include "DataCache.hpp"
+#include "marketdata/cache/DataCache.hpp"
+#include "marketdata/sinks/DataCacheSinkAdapter.hpp"
+#include "marketdata/ws/SubscriptionManager.hpp"
 #include "SentinelMonitor.hpp"
 #include "TradeData.h"
 
@@ -119,6 +121,8 @@ private:
 
     Authenticator&                  m_auth;
     DataCache&                      m_cache;
+    DataCacheSinkAdapter            m_sink{m_cache};
+    SubscriptionManager             m_subscriptions;
     std::shared_ptr<SentinelMonitor> m_monitor;
 
     net::io_context                 m_ioc;

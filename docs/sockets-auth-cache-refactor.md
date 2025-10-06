@@ -377,6 +377,60 @@ libs/core/
 
 ---
 
+## PROGRESS LOG (PHASES 1–3 SCOPING)
+
+### Phase 1 — Surgical Fixes (implemented)
+- Unified error emission: added `MarketDataCore::emitError(QString)` guarded with `QPointer`; replaced error branches in `onResolve/onConnect/onSslHandshake/onWsHandshake/onWrite/onRead/onClose` to call it (and still log).
+- Backoff reset: set `m_backoffDuration=1s` on successful WebSocket handshake; logged reset.
+- QPointer guards: wrapped all Qt-queued lambdas (`connectionStatusChanged`, `tradeReceived`, `liveOrderBookUpdated`).
+- Subscription replay/staging: if WS is closed, stage desired products; on handshake success, replay consolidated subscribe; no double-subscribe.
+- Write queue hygiene: clear queue and set `m_writeInProgress=false` on reconnect via strand; ensured strand-safe `clearWriteQueue()`.
+- Side normalization: normalized provider side "offer" → "ask" in snapshot/update handling.
+- Heartbeat: added 25s async ping using Beast; ping error emits `errorOccurred` and triggers reconnect; ping timer is cancelled in `stop()`.
+
+Notes:
+- No GUI behavior change; signals preserved. Build and manual run verified. No perf-impacting changes on hot paths.
+
+### Phase 2 — Directory Migration (implemented)
+- New structure under `libs/core/marketdata/`:
+  - `marketdata/MarketDataCore.*`
+  - `marketdata/auth/Authenticator.*`
+  - `marketdata/cache/DataCache.*`
+  - `marketdata/dispatch/MessageParser.hpp` (placeholder)
+  - `marketdata/model/TradeData.h` (case-sensitive rename from `libs/core/tradedata.h`)
+- CMake updates:
+  - `libs/core/CMakeLists.txt` now sources from `marketdata/**` and adds public include dirs for all subfolders.
+- Include path updates (selected):
+  - GUI: `UnifiedGridRenderer.h/.cpp`, `MainWindowGpu.h`, `render/DataProcessor.hpp/.cpp` now include from `../core/marketdata/...`.
+  - Core: `LiquidityTimeSeriesEngine.h` includes `marketdata/model/TradeData.h`.
+
+Notes:
+- Case-only rename handled with `git mv` to avoid macOS case-insensitive FS pitfalls.
+- Project builds clean after migration.
+
+### Phase 3 — Scaffolding Introduced (no behavior change yet)
+- `ws/WsTransport.hpp`: transport interface (connect/close/send + callbacks).
+- `ws/SubscriptionManager.hpp`: desired-product set + message builders (stubs for now).
+- `dispatch/MessageDispatcher.hpp`: `Event`/`DispatchResult` types + `parse` (stub).
+- `sinks/IMarketDataSink.hpp` and `sinks/DataCacheSinkAdapter.hpp`.
+- `MarketDataCore` glue (non-functional wiring):
+  - Added `DataCacheSinkAdapter m_sink` and used for trades (`m_sink.onTrade(trade)`), preserving existing cache behavior.
+  - Added `SubscriptionManager m_subscriptions`; kept in sync with `m_products`.
+
+Planned next (Phase 3 continued):
+- Implement `MessageDispatcher::parse` for Coinbase channels (trades, `l2_data`, subscriptions, errors); rewire `dispatch()` to use it.
+- Extract current Beast transport logic from `MarketDataCore` into a concrete `WsTransport` (strand, timers, backoff, ping).
+- Expand sinks to handle book snapshot/update and optional `MetricsSink`.
+- Centralize channel/side constants (e.g., `ch::kTrades`, `ch::kL2Data`, side normalization).
+
+### Future Phases (heads-up)
+- Phase 4: `IAuthenticator` + `CoinbaseAuthenticator`; inject into `MarketDataCore`; externalize LiveOrderBook bounds/config.
+- Phase 5: Unit tests for `MessageDispatcher`, `SubscriptionManager`, transport smoke, and sink adapter. Add fixtures and golden JSON.
+
+Branch & Ops
+- Working branch: `refactor/marketdata-core` (draft PR recommended). Reindexing done; `compile_commands.json` symlinked to out-of-source build.
+
+
 ## FILES & BEHAVIOR YOU MUST HONOR (READ THEM)
 
 * **Trade & book models** (keep types/semantics; add events as needed for dispatcher):
