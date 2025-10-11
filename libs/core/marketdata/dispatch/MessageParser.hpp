@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include "TradeData.h"
+#include "../model/TradeData.h"
 
 namespace MessageParser {
 

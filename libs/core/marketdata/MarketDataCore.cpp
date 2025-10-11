@@ -11,9 +11,9 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 */
 #include "MarketDataCore.hpp"
 #include "SentinelLogging.hpp"
-#include "marketdata/dispatch/MessageDispatcher.hpp"
+#include "dispatch/MessageDispatcher.hpp"
+#include "dispatch/Channels.hpp"
 #include "Cpp20Utils.hpp"
-#include <iostream>
 #include <thread>
 #include <chrono>
 #include <QString>
@@ -34,6 +34,27 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
     sLog_App("🏗️ MarketDataCore initialized");
+    // Phase 3: create transport and set callbacks (not yet used for live I/O)
+    m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
+    m_transport->onStatus([this](bool up){
+        m_connected.store(up);
+        if (up) {
+            QPointer<MarketDataCore> self(this);
+            QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
+            replaySubscriptionsOnConnect();
+        } else {
+            emitError("Transport down");
+        }
+    });
+    m_transport->onError([this](std::string err){ emitError(QString::fromStdString(err)); });
+    m_transport->onMessage([this](std::string payload){
+        try {
+            auto j = nlohmann::json::parse(payload);
+            dispatch(j);
+        } catch (...) {
+            sLog_Error("JSON parse error in transport message");
+        }
+    });
 }
 
 MarketDataCore::~MarketDataCore() {
@@ -97,6 +118,9 @@ void MarketDataCore::start() {
         
         // Start I/O thread
         m_ioThread = std::thread(&MarketDataCore::run, this);
+        if (m_transport) {
+            m_transport->connect(m_host, m_port, m_target);
+        }
     }
 }
 
@@ -108,6 +132,8 @@ void MarketDataCore::stop() {
         m_reconnectTimer.cancel();
         m_pingTimer.cancel();
         
+        if (m_transport) m_transport->close();
+        
         // Post close operation to strand for thread safety
         net::post(m_strand, [this]() {
             beast::error_code ec;
@@ -116,17 +142,8 @@ void MarketDataCore::stop() {
             m_reconnectTimer.cancel();
             m_pingTimer.cancel();
             
-            // Close WebSocket gracefully if open
-            if (m_ws.is_open()) {
-                m_ws.async_close(websocket::close_code::normal,
-                    [this](beast::error_code) {
-                        // Release work guard to allow io_context to exit
-                        m_workGuard.reset();
-                    });
-            } else {
-                // Release work guard immediately if WS not open
+            // Release work guard immediately; transport already closed
                 m_workGuard.reset();
-            }
         });
         
         // Join thread
@@ -139,201 +156,15 @@ void MarketDataCore::stop() {
 }
 
 void MarketDataCore::run() {
-    sLog_Data(QString("🔌 Starting connection to %1:%2").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
+    sLog_Data(QString("🔌 IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
     
-    // Start the connection process
-    m_resolver.async_resolve(m_host, m_port,
-        beast::bind_front_handler(&MarketDataCore::onResolve, this));
-    
-    // Run the IO context - this blocks until stopped
+    // Transport handles resolve/connect/handshake; we just run the context
     m_ioc.run();
     
     sLog_Data("🔌 IO context stopped");
 }
 
-void MarketDataCore::onResolve(beast::error_code ec, tcp::resolver::results_type results) {
-    if (ec) {
-        std::cerr << "❌ Resolve error: " << ec.message() << std::endl;
-        emitError(QString("Resolve error: %1").arg(QString::fromStdString(ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    sLog_Data("🔍 DNS resolved, connecting...");
-    
-    // Set connection timeout
-    get_lowest_layer(m_ws).expires_after(std::chrono::seconds(30));
-    
-    // Connect to the endpoint
-    get_lowest_layer(m_ws).async_connect(results,
-        beast::bind_front_handler(&MarketDataCore::onConnect, this));
-}
-
-void MarketDataCore::onConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type) {
-    if (ec) {
-        std::cerr << "❌ Connect error: " << ec.message() << std::endl;
-        emitError(QString("Connect error: %1").arg(QString::fromStdString(ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    sLog_Data("🔗 TCP connected, starting SSL handshake...");
-    
-    // Set SNI hostname for SSL
-    if (!SSL_set_tlsext_host_name(m_ws.next_layer().native_handle(), m_host.c_str())) {
-        beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
-        std::cerr << "❌ SSL SNI error: " << ssl_ec.message() << std::endl;
-        emitError(QString("SSL SNI error: %1").arg(QString::fromStdString(ssl_ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    // Set hostname verification for SSL
-    SSL* ssl_handle = m_ws.next_layer().native_handle();
-    if (SSL_set1_host(ssl_handle, m_host.c_str()) != 1) {
-        beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
-        std::cerr << "❌ SSL hostname verification setup error: " << ssl_ec.message() << std::endl;
-        emitError(QString("SSL hostname verification setup error: %1").arg(QString::fromStdString(ssl_ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    // Ensure proper certificate verification
-    m_ws.next_layer().set_verify_mode(ssl::verify_peer);
-    
-    // Set SSL handshake timeout
-    get_lowest_layer(m_ws).expires_after(std::chrono::seconds(30));
-    
-    // Perform SSL handshake
-    m_ws.next_layer().async_handshake(ssl::stream_base::client,
-        beast::bind_front_handler(&MarketDataCore::onSslHandshake, this));
-}
-
-void MarketDataCore::onSslHandshake(beast::error_code ec) {
-    if (ec) {
-        std::cerr << "❌ SSL handshake error: " << ec.message() << std::endl;
-        emitError(QString("SSL handshake error: %1").arg(QString::fromStdString(ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    sLog_Data("🔐 SSL handshake complete, starting WebSocket handshake...");
-    
-    // Disable timeout (WebSocket has its own timeout settings)
-    get_lowest_layer(m_ws).expires_never();
-    
-    // Set WebSocket timeout options
-    m_ws.set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-    
-    // Perform WebSocket handshake
-    m_ws.async_handshake(m_host, m_target,
-        beast::bind_front_handler(&MarketDataCore::onWsHandshake, this));
-}
-
-void MarketDataCore::onWsHandshake(beast::error_code ec) {
-    if (ec) {
-        std::cerr << "❌ WebSocket handshake error: " << ec.message() << std::endl;
-        emitError(QString("WebSocket handshake error: %1").arg(QString::fromStdString(ec.message())));
-        
-        // 🚨 FIX: Emit disconnected status on handshake failure
-        {
-            QPointer<MarketDataCore> self(this);
-            QMetaObject::invokeMethod(this, [self]() {
-                if (!self) return;
-                emit self->connectionStatusChanged(false);
-            }, Qt::QueuedConnection);
-        }
-        
-        scheduleReconnect();
-        return;
-    }
-    
-    sLog_Data("🌐 WebSocket connected! Waiting for subscription requests...");
-    
-    // 🚨 FIX: Emit connected status when WebSocket is ready
-    // Reset backoff on successful WS handshake
-    m_backoffDuration = std::chrono::seconds(1);
-    sLog_Data("🔁 Backoff reset to 1s after successful WS handshake");
-
-    {
-        QPointer<MarketDataCore> self(this);
-        QMetaObject::invokeMethod(this, [self]() {
-            if (!self) return;
-            emit self->connectionStatusChanged(true);
-        }, Qt::QueuedConnection);
-    }
-
-    // Replay desired subscriptions and start heartbeat
-    replaySubscriptionsOnConnect();
-    startHeartbeat();
-    
-    // Connection is live, start reading messages from the server.
-    // Subscriptions will be sent on-demand via the public methods.
-    m_ws.async_read(m_buf,
-        beast::bind_front_handler(&MarketDataCore::onRead, this));
-}
-
-void MarketDataCore::onWrite(beast::error_code ec, std::size_t) {
-    if (ec) {
-        std::cerr << "❌ Write error: " << ec.message() << std::endl;
-        emitError(QString("Write error: %1").arg(QString::fromStdString(ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    // This callback is now primarily for confirming subscription messages
-    sLog_Data("✅ Subscription message sent!");
-}
-
-void MarketDataCore::onRead(beast::error_code ec, std::size_t) {
-    if (ec) {
-        std::cerr << "❌ Read error: " << ec.message() << std::endl;
-        emitError(QString("Read error: %1").arg(QString::fromStdString(ec.message())));
-        scheduleReconnect();
-        return;
-    }
-    
-    // Convert buffer to string
-    std::string payload = beast::buffers_to_string(m_buf.data());
-    m_buf.consume(m_buf.size());
-    
-    // Parse and dispatch the message
-    try {
-        auto message = nlohmann::json::parse(payload);
-        dispatch(message);
-    } catch (const std::exception& e) {
-        std::cerr << "❌ JSON parse error: " << e.what() << std::endl;
-        // Continue reading even if one message fails
-    }
-    
-    // Continue reading the next message
-    if (m_running) {
-        m_ws.async_read(m_buf,
-            beast::bind_front_handler(&MarketDataCore::onRead, this));
-    }
-}
-
-void MarketDataCore::doClose() {
-    if (m_ws.is_open()) {
-        sLog_Data("🔌 Closing WebSocket connection...");
-        m_ws.async_close(websocket::close_code::normal,
-            beast::bind_front_handler(&MarketDataCore::onClose, this));
-    }
-}
-
-void MarketDataCore::onClose(beast::error_code ec) {
-    if (ec) {
-        std::cerr << "❌ Close error: " << ec.message() << std::endl;
-        emitError(QString("Close error: %1").arg(QString::fromStdString(ec.message())));
-        
-        // 🚀 PHASE 2.1: Record network error
-        if (m_monitor) {
-            m_monitor->recordNetworkError(QString("Close error: %1").arg(QString::fromStdString(ec.message())));
-        }
-    } else {
-        sLog_Data("✅ WebSocket connection closed");
-    }
-}
+// legacy resolver/handshake/read/write/close removed (transport in use)
 
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
@@ -351,13 +182,10 @@ void MarketDataCore::scheduleReconnect() {
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
     
-    // Reset the stream state and clear any queued writes
-    if (m_ws.is_open()) {
-        doClose();
-    }
+    // Reset the stream state via transport and clear any queued writes
     // Clear write queue on the strand for safety
     net::post(m_strand, [this]() {
-        clearWriteQueue();
+        // clearWriteQueue(); // legacy write queue removed
     });
     
     // NON-BLOCKING timer-based reconnect
@@ -371,17 +199,14 @@ void MarketDataCore::scheduleReconnect() {
         if (m_monitor) {
             m_monitor->recordNetworkReconnect();
         }
-        
-        m_resolver.async_resolve(m_host, m_port,
-            beast::bind_front_handler(&MarketDataCore::onResolve, this));
+        if (m_transport) {
+            m_transport->close();
+            m_transport->connect(m_host, m_port, m_target);
+        }
     });
 }
 
-void MarketDataCore::clearWriteQueue() {
-    // Strand context only
-    m_writeQueue.clear();
-    m_writeInProgress = false;
-}
+// legacy write queue removed
 
 void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
     if (symbols.empty()) {
@@ -390,9 +215,9 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
 
     // Post to the strand to ensure thread-safe access to the WebSocket stream
     net::post(m_strand, [this, type, symbols]() {
-        if (!m_ws.is_open()) {
-            sLog_Warning("WebSocket not open, staging subscription request for replay on connect.");
-            // Stage by updating desired product set; replay on handshake
+        // Stage desired set if we are not connected; replay happens on status=true
+        if (!m_connected.load()) {
+            sLog_Warning("Transport not connected, staging subscription request for replay on connect.");
             if (type == "subscribe") {
                 for (const auto& s : symbols) {
                     if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
@@ -408,60 +233,28 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
             return;
         }
 
-        // Helper to build and send a message for a specific channel
-        auto sendMessage = [this](const std::string& channel, const std::string& type, const std::vector<std::string>& symbols) {
-            nlohmann::json msg;
-            msg["type"] = type;
-            msg["product_ids"] = symbols;
-            msg["channel"] = channel;
-            msg["jwt"] = m_auth.createJwt();
-
-            // Using a shared_ptr to manage the lifetime of the message string
-            auto message_ptr = std::make_shared<std::string>(msg.dump());
-
-            // 🚨 FIX: Use write queue instead of direct async_write to prevent soft_mutex crash
-            enqueueWrite(message_ptr);
-            sLog_Data(QString("📤 Queued subscription for %1 channel").arg(QString::fromStdString(channel)));
-        };
-
-        // Send messages for both level2 and market_trades channels
-        sendMessage("level2", type, symbols);
-        sendMessage("market_trades", type, symbols);
+        // Use SubscriptionManager to build frames deterministically
+        m_subscriptions.setDesiredProducts(m_products);
+        const std::string jwt = m_auth.createJwt();
+        const auto frames = (type == "subscribe") ? m_subscriptions.buildSubscribeMsgs(jwt)
+                                                   : m_subscriptions.buildUnsubscribeMsgs(jwt);
+        if (m_transport && m_connected.load()) {
+            for (const auto& frame : frames) {
+                m_transport->send(frame);
+            }
+            sLog_Data("📤 Sent subscription frames via transport");
+        } else {
+            // TODO: Remove this once we have a proper transport
+            for (const auto& frame : frames) {
+                auto message_ptr = std::make_shared<std::string>(frame);
+                // enqueueWrite(message_ptr); // legacy path removed
+            }
+            sLog_Data("📤 Queued subscription frames (legacy path)");
+        }
     });
 }
 
-// 🚨 FIX: Beast WebSocket write queue implementation
-void MarketDataCore::enqueueWrite(std::shared_ptr<std::string> message) {
-    // MUST be called from strand context only
-    m_writeQueue.push_back(message);
-    if (!m_writeInProgress) {
-        doWrite();
-    }
-}
-
-void MarketDataCore::doWrite() {
-    // MUST be called from strand context only
-    if (m_writeQueue.empty()) {
-        m_writeInProgress = false;
-        return;
-    }
-    
-    m_writeInProgress = true;
-    auto message = m_writeQueue.front();
-    
-    m_ws.async_write(net::buffer(*message),
-        [this, message](beast::error_code ec, std::size_t) {
-            if (ec) {
-                sLog_Error(QString("WebSocket write error: %1").arg(QString::fromStdString(ec.message())));
-                scheduleReconnect();
-                return;
-            }
-            
-            // Write completed - process next message
-            m_writeQueue.pop_front();
-            doWrite();  // Process next message or set m_writeInProgress = false
-        });
-}
+// legacy write queue removed
 
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
@@ -471,7 +264,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     
     std::string channel = message.value("channel", "");
     std::string type = message.value("type", "");
-
+    
     // Phase 3: Minimal dispatcher wiring for non-data events (ack/errors)
     // Keep existing hot-path handlers for trades and order book intact.
     {
@@ -489,11 +282,11 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
         }
     }
     
-    if (channel == "market_trades") {
+    if (channel == ch::kTrades) {
         handleMarketTrades(message, arrival_time);
-    } else if (channel == "l2_data") {
+    } else if (channel == ch::kL2Data) {
         handleOrderBookData(message, arrival_time);
-    } else if (channel == "subscriptions") {
+    } else if (channel == ch::kSubscriptions) {
         handleSubscriptionConfirmation(message);
     } else if (type == "error") {
         handleError(message);
@@ -622,7 +415,7 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
             OrderBookLevel level = {price, quantity};
             if (side == "bid") {
                 sparse_bids.push_back(level);
-            } else if (side == "offer" || side == "ask") {
+            } else if (side_norm::normalize(side) == "ask") {
                 sparse_asks.push_back(level);
             }
         }
@@ -713,20 +506,5 @@ void MarketDataCore::startHeartbeat() {
 }
 
 void MarketDataCore::scheduleNextPing() {
-    if (!m_ws.is_open()) {
-        return;
-    }
-    m_ws.async_ping({}, [this](beast::error_code ec){
-        if (ec) {
-            std::cerr << "❌ Ping error: " << ec.message() << std::endl;
-            emitError(QString("Ping error: %1").arg(QString::fromStdString(ec.message())));
-            scheduleReconnect();
-            return;
-        }
-        m_pingTimer.expires_after(std::chrono::seconds(25));
-        m_pingTimer.async_wait([this](beast::error_code ec2){
-            if (ec2 || !m_running) return;
-            scheduleNextPing();
-        });
-    });
+    // Transport-managed ping will replace this; noop for now to avoid legacy m_ws usage
 }

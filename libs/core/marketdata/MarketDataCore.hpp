@@ -13,7 +13,6 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <memory>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
-#include <boost/beast/websocket.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/executor_work_guard.hpp>
@@ -22,18 +21,16 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <thread>
 #include <chrono>
 #include <optional>
-#include <deque>
 #include <QObject>
 #include <QTimer>
-#include "Authenticator.hpp"
-#include "marketdata/cache/DataCache.hpp"
-#include "marketdata/sinks/DataCacheSinkAdapter.hpp"
-#include "marketdata/ws/SubscriptionManager.hpp"
+#include "auth/Authenticator.hpp"
+#include "cache/DataCache.hpp"
+#include "sinks/DataCacheSinkAdapter.hpp"
+#include "ws/SubscriptionManager.hpp"
+#include "ws/BeastWsTransport.hpp"
 #include "SentinelMonitor.hpp"
-#include "TradeData.h"
+#include "model/TradeData.h"
 
-namespace beast = boost::beast;
-namespace websocket = beast::websocket;
 namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
@@ -67,26 +64,15 @@ signals:
     void errorOccurred(const QString& error);
 
 private:
-    // Connection/handshake chain
+    // Connection lifecycle
     void run();
-    void onResolve(beast::error_code, tcp::resolver::results_type);
-    void onConnect(beast::error_code, tcp::resolver::results_type::endpoint_type);
-    void onSslHandshake(beast::error_code);
-    void onWsHandshake(beast::error_code);
-    void onWrite(beast::error_code, std::size_t);
-    void onRead(beast::error_code, std::size_t);
-    void doClose();
-    void onClose(beast::error_code);
     void scheduleReconnect();
 
     // Helpers
     void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
     void dispatch(const nlohmann::json&);
     
-    // 🚨 FIX: Beast WebSocket write queue methods (strand-only, no mutex)
-    void enqueueWrite(std::shared_ptr<std::string> message);
-    void doWrite();
-    void clearWriteQueue();
+    // (legacy write queue removed)
 
     // Message handling sub-functions
     void handleMarketTrades(const nlohmann::json& message, 
@@ -128,15 +114,14 @@ private:
     net::io_context                 m_ioc;
     ssl::context                    m_sslCtx{ssl::context::tlsv12_client};
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
-    tcp::resolver                   m_resolver{m_strand};
-    websocket::stream<beast::ssl_stream<beast::tcp_stream>>
-                                    m_ws{m_strand, m_sslCtx};
-    beast::flat_buffer              m_buf;
+    // (legacy resolver/websocket/buffer removed; transport owns I/O)
     net::steady_timer               m_reconnectTimer{m_strand};
     net::steady_timer               m_pingTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
+    std::unique_ptr<BeastWsTransport> m_transport; // Phase 3: not yet used for I/O
     
     std::atomic<bool>               m_running{false};
+    std::atomic<bool>               m_connected{false};
     std::chrono::seconds            m_backoffDuration{1};
     std::thread                     m_ioThread;
     
@@ -146,7 +131,5 @@ private:
     
     // 🗑️ CLEANED UP: Redundant mutexes removed - write queue handles serialization
     
-    // 🚨 FIX: Beast WebSocket write queue (strand-local, no mutex needed)
-    std::deque<std::shared_ptr<std::string>> m_writeQueue;
-    bool                            m_writeInProgress{false};
+    // (legacy write queue removed)
 };

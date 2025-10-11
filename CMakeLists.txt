@@ -122,6 +122,9 @@ add_subdirectory(libs/gui)
 add_subdirectory(apps/sentinel_gui)
 add_subdirectory(apps/stream_cli)
 # add_subdirectory(tests)  # TODO: Update tests for V2 architecture
+# TEMPORARY: Enable only Phase 5 marketdata tests (old tests are broken)
+enable_testing()
+add_subdirectory(tests/marketdata)
 
 # --- Print Configuration Summary ---
 message(STATUS "=== Sentinel Build Configuration ===")

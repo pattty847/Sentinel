@@ -1,6 +1,6 @@
 #pragma once
 #include "IMarketDataSink.hpp"
-#include "marketdata/cache/DataCache.hpp"
+#include "../cache/DataCache.hpp"
 
 class DataCacheSinkAdapter : public IMarketDataSink {
 public:

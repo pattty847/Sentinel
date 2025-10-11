@@ -300,6 +300,8 @@ Add unit tests under `libs/core/tests/` (or your test location). You can stub Be
 3. **Transport (smoke with fake stream)**
 
 * Simulate resolve/connect/read errors; assert error and status callbacks ordering; assert backoff reset on success.
+* Inject a fake transport into `MarketDataCore` (or adapt callbacks) so core tests do not open sockets.
+* Verify `onRead` payloads are owned strings; no dangling references after `consume()`.
 
 4. **DataCacheSinkAdapter**
 
@@ -364,6 +366,7 @@ libs/core/
 * **Risk:** queued Qt lambdas targeting dead `this`. **Mitigation:** `QPointer` in all lambdas.
 * **Risk:** subscription storms on reconnect. **Mitigation:** replay desired set exactly once after handshake; clear old write queue.
 * **Risk:** LiveOrderBook memory blowout with bad bounds. **Mitigation:** config strategy; log and cap.
+* **Risk:** transport payload copy in `onRead` (owning `std::string`). **Mitigation:** current copy avoids dangling views and is typically small vs 100ms OB cadence; revisit if profiling shows it hot (opt: custom buffer recycling or deferred parse without copy).
 * **Rollback plan:** branch isolates changes; Phase-1 commits are safe to keep even if Phase-3 extraction is reverted.
 
 ---
@@ -377,7 +380,7 @@ libs/core/
 
 ---
 
-## PROGRESS LOG (PHASES 1–3 SCOPING)
+## PROGRESS
 
 ### Phase 1 — Surgical Fixes (implemented)
 - Unified error emission: added `MarketDataCore::emitError(QString)` guarded with `QPointer`; replaced error branches in `onResolve/onConnect/onSslHandshake/onWsHandshake/onWrite/onRead/onClose` to call it (and still log).
@@ -408,20 +411,17 @@ Notes:
 - Case-only rename handled with `git mv` to avoid macOS case-insensitive FS pitfalls.
 - Project builds clean after migration.
 
-### Phase 3 — Scaffolding Introduced (no behavior change yet)
-- `ws/WsTransport.hpp`: transport interface (connect/close/send + callbacks).
-- `ws/SubscriptionManager.hpp`: desired-product set + message builders (stubs for now).
-- `dispatch/MessageDispatcher.hpp`: `Event`/`DispatchResult` types + `parse` (stub).
-- `sinks/IMarketDataSink.hpp` and `sinks/DataCacheSinkAdapter.hpp`.
-- `MarketDataCore` glue (non-functional wiring):
-  - Added `DataCacheSinkAdapter m_sink` and used for trades (`m_sink.onTrade(trade)`), preserving existing cache behavior.
-  - Added `SubscriptionManager m_subscriptions`; kept in sync with `m_products`.
+### Phase 3 — Transport/Dispatcher/Sinks (complete)
+- Added `WsTransport` and concrete `BeastWsTransport` (resolve/connect/SSL/WS handshake/read/write/close + 25s ping) with status/error/message callbacks.
+- Added `MessageDispatcher` (acks/errors handled now; trades/books remain in core handlers for the same GUI surface).
+- Added `SubscriptionManager` and replaced subscription frame builders in `sendSubscriptionMessage`.
+- Added `IMarketDataSink` and `DataCacheSinkAdapter`; trades now flow through the sink before signaling GUI.
+- Centralized channel constants and side normalization utility.
+- Slimmed `MarketDataCore`: removed legacy Beast resolver/handshake/read/write and write-queue; start/stop/reconnect and subscription sends now go via transport; subscription replay on status=true.
 
-Planned next (Phase 3 continued):
-- Implement `MessageDispatcher::parse` for Coinbase channels (trades, `l2_data`, subscriptions, errors); rewire `dispatch()` to use it.
-- Extract current Beast transport logic from `MarketDataCore` into a concrete `WsTransport` (strand, timers, backoff, ping).
-- Expand sinks to handle book snapshot/update and optional `MetricsSink`.
-- Centralize channel/side constants (e.g., `ch::kTrades`, `ch::kL2Data`, side normalization).
+Status: Build + lints green; GUI behavior unchanged; transport is the sole I/O.
+
+ 
 
 ### Future Phases (heads-up)
 - Phase 4: `IAuthenticator` + `CoinbaseAuthenticator`; inject into `MarketDataCore`; externalize LiveOrderBook bounds/config.

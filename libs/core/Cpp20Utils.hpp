@@ -7,7 +7,7 @@
 #include <string_view>
 #include <format>
 #include <stdexcept>
-#include "TradeData.h"
+#include "marketdata/model/TradeData.h"
 #include <charconv>
 #include <cstdlib>
 #include <chrono>

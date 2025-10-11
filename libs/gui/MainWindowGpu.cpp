@@ -29,6 +29,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     m_dataCache = std::make_unique<DataCache>();
     
     // 🚨 TESTING: Disable SentinelMonitor to isolate window hang issue
+    // TODO: Debug this
     // m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
     // m_sentinelMonitor->startMonitoring();
     // m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging

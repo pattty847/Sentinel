@@ -16,6 +16,9 @@ add_library(sentinel_core
     marketdata/cache/DataCache.cpp
     marketdata/cache/DataCache.hpp
     marketdata/dispatch/MessageParser.hpp
+    marketdata/ws/WsTransport.hpp
+    marketdata/ws/BeastWsTransport.hpp
+    marketdata/ws/BeastWsTransport.cpp
     PerformanceMonitor.cpp
     PerformanceMonitor.h
     Rule.h
@@ -39,15 +42,8 @@ find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 # jwt-cpp is fetched via FetchContent in main CMakeLists.txt
 
-target_include_directories(sentinel_core PUBLIC . ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(sentinel_core PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/auth
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/cache
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/dispatch
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/model
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/ws
-    ${CMAKE_CURRENT_SOURCE_DIR}/marketdata/sinks
+target_include_directories(sentinel_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(sentinel_core 

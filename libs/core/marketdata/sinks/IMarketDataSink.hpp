@@ -1,5 +1,5 @@
 #pragma once
-#include "marketdata/model/TradeData.h"
+#include "../model/TradeData.h"
 
 class IMarketDataSink {
 public:

@@ -3,8 +3,8 @@
 #include <vector>
 #include <string>
 #include <nlohmann/json.hpp>
-#include "marketdata/model/TradeData.h"
-#include "../../core/Cpp20Utils.hpp" 
+#include "../model/TradeData.h"
+#include "Cpp20Utils.hpp" 
 
 struct TradeEvent { Trade trade; };
 struct BookSnapshotEvent { std::string productId; };

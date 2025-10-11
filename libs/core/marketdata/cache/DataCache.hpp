@@ -17,7 +17,7 @@ Assumptions: Manages data for multiple independent products, identified by strin
 #include <vector>
 #include <shared_mutex>
 #include <memory>
-#include "TradeData.h"
+#include "../model/TradeData.h"
 
 template <typename T, std::size_t MaxN>
 class RingBuffer {

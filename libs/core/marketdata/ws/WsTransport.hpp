@@ -5,7 +5,7 @@
 // Phase 3 scaffold: Pure transport interface (no provider logic)
 class WsTransport {
 public:
-    using MessageCb = std::function<void(std::string_view)>;
+    using MessageCb = std::function<void(std::string)>; // own the data to avoid dangling views
     using StatusCb  = std::function<void(bool)>;
     using ErrorCb   = std::function<void(std::string)>;
 

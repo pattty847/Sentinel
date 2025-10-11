@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 class SubscriptionManager {
 public:
@@ -9,11 +10,30 @@ public:
     }
     const std::vector<std::string>& desired() const { return m_desired; }
 
-    std::vector<std::string> buildSubscribeMsgs(const std::string& jwt) const;
-    std::vector<std::string> buildUnsubscribeMsgs(const std::string& jwt) const;
+    std::vector<std::string> buildSubscribeMsgs(const std::string& jwt) const {
+        return buildMsgs("subscribe", jwt);
+    }
+    std::vector<std::string> buildUnsubscribeMsgs(const std::string& jwt) const {
+        return buildMsgs("unsubscribe", jwt);
+    }
 
 private:
     std::vector<std::string> m_desired;
+
+    std::vector<std::string> buildMsgs(const std::string& type, const std::string& jwt) const {
+        std::vector<std::string> out;
+        if (m_desired.empty()) return out;
+        // level2 + market_trades
+        for (const char* channel : {"level2", "market_trades"}) {
+            nlohmann::json msg;
+            msg["type"] = type;
+            msg["product_ids"] = m_desired;
+            msg["channel"] = channel;
+            msg["jwt"] = jwt;
+            out.emplace_back(msg.dump());
+        }
+        return out;
+    }
 };
 
 
