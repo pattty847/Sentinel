@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include "../dispatch/Channels.hpp"
 
 class SubscriptionManager {
 public:
@@ -23,8 +24,8 @@ private:
     std::vector<std::string> buildMsgs(const std::string& type, const std::string& jwt) const {
         std::vector<std::string> out;
         if (m_desired.empty()) return out;
-        // level2 + market_trades
-        for (const char* channel : {"level2", "market_trades"}) {
+        // level2 (subscribe) + market_trades
+        for (const char* channel : {ch::kL2Subscribe, ch::kTrades}) {
             nlohmann::json msg;
             msg["type"] = type;
             msg["product_ids"] = m_desired;
@@ -35,5 +36,3 @@ private:
         return out;
     }
 };
-
-

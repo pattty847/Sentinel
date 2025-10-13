@@ -4,6 +4,7 @@
 
 namespace ch {
     inline constexpr const char* kTrades         = "market_trades";
+    inline constexpr const char* kL2Subscribe    = "level2";
     inline constexpr const char* kL2Data        = "l2_data";
     inline constexpr const char* kSubscriptions = "subscriptions";
 }

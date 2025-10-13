@@ -1,92 +1,117 @@
 # Sentinel Architecture
 
-**Version**: 2.0  
-**Status**: Production
+**Version**: 2.1  
+**Status**: Active Development
 
-## 1. Core Principles
+Sentinel delivers a GPU-accelerated trading terminal built on modern C++20 with Qt 6. The architecture is designed to stream exchange data with low latency, aggregate it into a dense time/price grid, and render it interactively while remaining modular enough for headless or CLI workflows.
 
-The Sentinel architecture is designed for performance, modularity, and maintainability.
+---
 
-- **Separation of Concerns**: The codebase is strictly divided into three layers:
-    - `libs/core/`: Pure, non-GUI C++ business logic. The only Qt dependency allowed is `QtCore`.
-    - `libs/gui/`: Qt/QML adapter layer. Connects the UI to the core logic but contains no business logic itself.
-    - `apps/`: The main application entry point, responsible for initialization.
-- **Modularity**: Functionality is broken down into small, single-responsibility components.
-- **Strict File Size Limits**: Files are kept under 300 lines of code to enforce modularity and prevent monolithic classes.
-- **Modern C++**: The project uses C++20 features like concepts, ranges, and smart pointers for robust, memory-safe code.
-- **Strategy Pattern**: Pluggable `IRenderStrategy` components allow for adding new visualization modes (e.g., Heatmap, Trade Flow) without changing the core rendering pipeline.
+## 1. Architectural Principles
 
-## 2. Data Pipeline: WebSocket to GPU
+- **Layered Ownership**: `libs/core` owns networking, domain logic, and data stores; `libs/gui` adapts that data to Qt/QML; `apps/` bootstrap executables only.
+- **Performance First**: Hot paths avoid allocations, copies, or blocking calls. A 500-line soft cap keeps modules approachable for refactors.
+- **Deterministic Threads**: Network IO runs on dedicated workers, GUI mutations occur via queued signals on the main thread, and lock-free queues bridge the two.
+- **Modularity**: Transport, dispatcher, cache, aggregation, and render layers sit behind clear seams so new providers or visualizations slot in without upheaval.
+- **Observability**: `SentinelLogging` channels (`sentinel.app|data|render|debug`) and performance monitors provide visibility across the stack.
 
-The system uses a high-performance, multi-threaded pipeline to process real-time data from the WebSocket API and render it on the GPU.
+---
+
+## 2. Layered Layout
+
+```
+apps/
+  ├─ sentinel_gui/      # Desktop entry point
+  └─ stream_cli/        # Headless data harness
+
+libs/
+  ├─ core/
+  │   └─ marketdata/
+  │        ├─ ws/ (BeastWsTransport, SubscriptionManager)
+  │        ├─ dispatch/ (MessageDispatcher, event types)
+  │        ├─ cache/ (DataCache, DataCacheSinkAdapter)
+  │        ├─ auth/ (Authenticator)
+  │        └─ model/ (Trade, OrderBook, LiveOrderBook DTOs)
+  └─ gui/
+       ├─ UnifiedGridRenderer (QML façade)
+       ├─ GridViewState (viewport state)
+       ├─ render/ (DataProcessor, LiquidityTimeSeriesEngine, strategies)
+       └─ qml/ (scene components)
+
+scripts/              # Tooling and analysis helpers
+tests/marketdata/     # Active GoogleTest suites
+```
+
+Only `QtCore` is permitted in `libs/core`. All UI code remains in `libs/gui`, and executables never house business logic.
+
+---
+
+## 3. Data Pipeline (Exchange → GPU)
 
 ```mermaid
 graph TD
-    subgraph "Network Thread"
-        A[Coinbase WebSocket] -->|Raw JSON| B[MarketDataCore]
-        B -->|Parsed Data| C[DataCache]
+    subgraph "Worker Thread"
+        A[Exchange WebSocket] --> B[BeastWsTransport]
+        B --> C[MessageDispatcher]
+        C --> D[DataCache]
     end
 
     subgraph "GUI Thread"
-        C -->|Qt::QueuedConnection| D[DataProcessor]
-        D -->|Aggregated Data| E[LiquidityTimeSeriesEngine]
-        E -->|Grid Cells| F[UnifiedGridRenderer]
+        D -->|Queued signals| E[DataProcessor]
+        E --> F[LiquidityTimeSeriesEngine]
+        F --> G[UnifiedGridRenderer]
     end
 
-    subgraph "Render Thread (Qt Scene Graph)"
-        F -->|QSGNode| G[GridSceneNode]
-        G -->|Vertex Data| H[IRenderStrategy]
-        H -->|GPU Commands| I[GPU]
+    subgraph "Qt Scene Graph"
+        G --> H[Render Strategy]
+        H --> I[GridSceneNode]
+        I --> J[GPU]
     end
-
-    A --> B --> C --> D --> E --> F --> G --> H --> I
 ```
 
-**Pipeline Stages:**
+1. **Transport (`marketdata/ws`)** establishes TLS connections, heartbeats, and reconnection backoff via `BeastWsTransport`. `SubscriptionManager` generates deterministic subscribe/unsubscribe frames.
+2. **Dispatch (`marketdata/dispatch`)** parses raw frames into typed events using `MessageDispatcher`, surfacing provider acks or errors alongside trade/book payloads.
+3. **Cache (`marketdata/cache`)** stores rolling trades and live order book snapshots. `DataCacheSinkAdapter` exposes the only write API so other layers stay decoupled.
+4. **Aggregation (`libs/gui/render`)**: `DataProcessor` pulls from the cache when new data arrives, funnels it into `LiquidityTimeSeriesEngine`, and prepares multi-timeframe grid slices.
+5. **Rendering (`libs/gui`)**: `UnifiedGridRenderer` bridges QML, `GridViewState`, and the active render strategy (heatmap, trade flow, etc.). Strategies build GPU buffers that `GridSceneNode` submits through the Qt Scene Graph.
 
-1.  **Data Ingestion (Network Thread)**: `MarketDataCore` connects to the Coinbase WebSocket, authenticates, and asynchronously receives market data. It parses the incoming JSON and stores it in the `DataCache`.
-2.  **Processing (GUI Thread)**: The `DataProcessor` is notified of new data via a thread-safe Qt signal. It fetches the data and feeds it into the `LiquidityTimeSeriesEngine`.
-3.  **Aggregation**: The `LiquidityTimeSeriesEngine` aggregates the raw order book snapshots into multiple timeframes (100ms, 500ms, 1s, etc.), creating time/price grid cells.
-4.  **Rendering (Render Thread)**: The `UnifiedGridRenderer` takes the aggregated grid cells and, using the currently selected `IRenderStrategy`, generates the necessary geometry. This geometry is passed to the `GridSceneNode`, which manages the Qt Scene Graph nodes and efficiently sends rendering commands to the GPU.
+Thread boundaries are explicit: the transport/dispatcher work never blocks the GUI, and GUI updates defer to queued lambdas guarded by `QPointer` to avoid dangling captures.
 
-## 3. Rendering Architecture
+---
 
-The rendering system is a modular, strategy-based design. A monolithic `UnifiedGridRenderer` was refactored into a set of cooperating components.
+## 4. Rendering Architecture
 
-### Component Breakdown
+Sentinel’s renderer is intentionally modular so adding a visualization does not disturb the façade.
 
--   **`UnifiedGridRenderer` (The Slim Adapter)**
-    -   **Role**: A thin QML-to-C++ bridge.
-    -   **Responsibilities**: Exposes properties to QML, routes UI events (mouse, keyboard) to the appropriate components, and selects the active rendering strategy. It contains **no business logic**.
+- **UnifiedGridRenderer**: Exposes properties and signals to QML, forwards input events, and schedules scene graph updates. Contains no business logic.
+- **GridViewState**: Tracks pan, zoom, selection, and axis ranges. All interaction logic routes through it for consistent behavior.
+- **Render Strategies (`render/strategies`)**: Each strategy implements geometry generation for a visualization mode. Strategies receive pre-aggregated cells and return `QSGNode` updates.
+- **GridSceneNode**: Owns GPU buffers, applies viewport transforms, and orchestrates child nodes for overlays and indicators.
+- **QML & Controls**: Declaratively compose the window, axis components, tool panels, and wire user actions back into C++ controllers.
 
--   **`GridViewState` (The State Manager)**
-    -   **Role**: The single source of truth for all UI state.
-    -   **Responsibilities**: Manages the viewport's time/price range, zoom level, and pan offset. It handles all user interaction logic for smooth, sensitivity-controlled navigation.
+---
 
--   **`DataProcessor` (The Data Hub)**
-    -   **Role**: Orchestrates incoming data for the rendering pipeline.
-    -   **Responsibilities**: Receives data from the `core` library, feeds it to the `LiquidityTimeSeriesEngine`, and signals the renderer when new data is ready.
+## 5. Testing & Quality Gates
 
--   **`IRenderStrategy` (The Strategy Interface)**
-    -   **Role**: An interface for pluggable visualization modes.
-    -   **Responsibilities**: Defines a contract for rendering different types of data. Concrete implementations like `HeatmapStrategy`, `TradeFlowStrategy`, and `CandleStrategy` encapsulate the specific logic for generating GPU geometry for that mode.
+- GoogleTest suites under `tests/marketdata` cover transports, dispatch, and subscription logic. As new subsystems come online, add suites beside the relevant domain.
+- Smoke-test the GUI manually after changes that touch rendering or threading boundaries.
+- No pull request ships without a clean `cmake --build --preset <preset>` and `ctest --preset <preset> --output-on-failure` run.
+- Hot-path modifications should include notes on performance impact and, where possible, benchmark evidence.
 
--   **`GridSceneNode` (The GPU Interface)**
-    -   **Role**: A custom `QSGNode` that manages the scene graph.
-    -   **Responsibilities**: Applies viewport transformations (pan/zoom), updates GPU vertex buffers with geometry from the current strategy, and manages other visual elements like the volume profile.
+---
 
--   **`AxisModel` Family (The QML Data Models)**
-    -   **Role**: Provides data for the QML-based price and time axes.
-    -   **Responsibilities**: `TimeAxisModel` and `PriceAxisModel` are `QAbstractListModel` implementations that dynamically generate axis labels and tick marks based on the `GridViewState`'s current viewport.
+## 6. Tooling & Observability
 
-### UI Interaction Flow (Pan & Zoom)
+- **Logging**: Configure `QT_LOGGING_RULES` to enable or suppress `sentinel.*` categories. See `docs/LOGGING_GUIDE.md` for examples.
+- **Analysis Scripts**: `scripts/quick_cpp_overview.sh` and `scripts/extract_functions.sh` provide structure and function lists for large files prior to refactors.
+- **Monitoring**: `PerformanceMonitor` exposes render and data throughput metrics. Activate it for profiling sessions instead of ad-hoc prints.
 
-User interactions like panning and zooming are designed for a smooth, "buttery" feel.
+---
 
-1.  **Event**: A `QWheelEvent` (for zooming) or `QMouseEvent` (for panning) is captured in the `UnifiedGridRenderer`.
-2.  **Delegation**: The event is immediately passed to the `GridViewState`.
-3.  **State Update**: `GridViewState` updates its internal state (e.g., zoom factor, pan offset). It uses sensitivity controls and clamping to prevent jarring jumps. For panning, it provides an immediate visual offset for real-time feedback before committing the change.
-4.  **Signal**: `GridViewState` emits a signal indicating the viewport has changed.
-5.  **Re-render**: The `UnifiedGridRenderer` catches this signal and schedules a scene graph update. The `GridSceneNode` then applies the new transformation matrix, resulting in a smooth visual update.
+## 7. Related Documentation
 
-This ensures that the UI remains responsive and fluid, as expensive geometry regeneration is decoupled from simple viewport transformations.
+- `docs/sockets-auth-cache-refactor.md`: phased plan for the MarketDataCore decomposition and future modularization steps.
+- `docs/LOGGING_GUIDE.md`: logging categories, verbosity controls, and best practices.
+- `README.md`: platform-specific setup instructions, build presets, and prerequisite tooling.
+
+Stay within these architectural boundaries, keep hot paths lean, and favor modular seams when adding new capability.

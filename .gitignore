@@ -2,6 +2,7 @@
 .cursor/
 .cursorindexingignore
 .clangd
+
 # .vscode/ - Keep tracked for shared project settings
 *.swp
 *.swo
@@ -29,6 +30,7 @@ _deps/
 
 # Configuration files (secrets and sensitive data)
 key.json
+key2.json
 config.json
 *.key
 *.pem
@@ -111,6 +113,7 @@ ENV/
 # Claude AI settings
 .claude/
 CLAUDE.md
+AGENTS.md
 
 # Documentation subdirectories (keep only base docs/)
 docs/archive/

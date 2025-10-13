@@ -2,28 +2,21 @@
 globs: libs/gui/*/*
 alwaysApply: false
 ---
+
 # GUI Components
 
-This document provides an overview of the GUI components located in the `libs/gui` directory. These components are built using Qt and QML and are responsible for the visualization of market data.
+## Rendering Stack
+- `UnifiedGridRenderer` is the QML-facing façade; it forwards interactions to state controllers and selects render strategies.
+- `GridViewState` owns viewport, pan/zoom, and interaction smoothing—keep it authoritative for UI state.
+- `render/DataProcessor` aggregates data from core, feeds the `LiquidityTimeSeriesEngine`, and signals the renderer when buffers need regeneration.
+- `render/strategies/*Strategy` classes build GPU geometry for specific visualizations; add new modes here without touching the façade.
+- `qml/` controls and scenes define layout; keep heavy logic in C++ counterparts.
 
-## Key Components
+## Supporting Infrastructure
+- `MainWindowGpu` wires the persistent `MarketDataCore` instance to QML; ensure queued connections guard against cross-thread issues.
+- `PerformanceMonitor` and diagnostics helpers surface stats to the UI—use them instead of ad-hoc logging for render metrics.
 
-- **`MainWindowGPU`**: The main application window. It sets up the QML engine and integrates the various GUI components.
-
-- **`GPUChartWidget`**: A QQuickItem that hosts the OpenGL-rendered charts. It manages the rendering pipeline and user interactions.
-
-- **`GPUDataAdapter`**: Acts as a bridge between the core data processing components (like `DataCache`) and the GUI. It prepares and transforms data for rendering on the GPU.
-
-- **`StreamController`**: Manages the data flow to the GUI. It connects to the `CoinbaseStreamClient` and pushes data to the `GPUDataAdapter`.
-
-- **`CandlestickBatched` / `HeatmapInstanced`**: These are specialized rendering classes that use modern OpenGL techniques (instancing, batching) to draw large amounts of data efficiently.
-
-- **`UnifiedGridRenderer`**: A component responsible for drawing the chart grid, which is shared across different chart types (e.g., candlestick, depth).
-
-## Rendering Pipeline
-
-1.  `StreamController` receives market data.
-2.  Data is passed to `GPUDataAdapter`, which converts it into a format suitable for the GPU (e.g., vertices, colors).
-3.  `GPUChartWidget` orchestrates the rendering process, calling the appropriate rendering classes (`CandlestickBatched`, etc.).
-4.  The renderers draw the data using OpenGL.
-5.  QML components (`CandleChartView.qml`, etc.) are used to define the layout and user interface elements around the chart.
+## Expectations
+- No business logic in GUI code: treat these files as adapters that consume DTOs from `libs/core`.
+- Coordinate changes with matching QML updates so signals, properties, and bindings stay aligned.
+- Monitor file size and keep refactors modular; render hot paths must avoid unnecessary allocations on the GUI thread.
