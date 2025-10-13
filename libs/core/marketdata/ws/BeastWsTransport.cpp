@@ -49,6 +49,10 @@ void BeastWsTransport::onConnect(beast::error_code ec, tcp::resolver::results_ty
         beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
         if (onError_) onError_(ssl_ec.message()); if (onStatus_) onStatus_(false); return;
     }
+    if (!SSL_set1_host(ws_.next_layer().native_handle(), host_.c_str())) {
+        beast::error_code ssl_ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
+        if (onError_) onError_(ssl_ec.message()); if (onStatus_) onStatus_(false); return;
+    }
     ws_.next_layer().set_verify_mode(ssl::verify_peer);
     ws_.next_layer().async_handshake(ssl::stream_base::client,
         [this](beast::error_code ec){ onSslHandshake(ec); });
@@ -114,4 +118,3 @@ void BeastWsTransport::schedulePing() {
         });
     });
 }
-

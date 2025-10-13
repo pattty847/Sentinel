@@ -8,7 +8,7 @@ namespace fixtures {
 
 /// Trade message with a single trade event
 /// MessageDispatcher expects "trades" array at root level (not inside "events")
-/// Note: Coinbase uses lowercase "buy"/"sell", but fastSideDetection expects uppercase
+/// Coinbase emits lowercase "buy"/"sell"; detection is case-insensitive
 inline nlohmann::json coinbaseTrade(
     const std::string& product_id,
     double price,

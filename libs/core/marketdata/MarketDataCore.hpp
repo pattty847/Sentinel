@@ -22,7 +22,6 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <chrono>
 #include <optional>
 #include <QObject>
-#include <QTimer>
 #include "auth/Authenticator.hpp"
 #include "cache/DataCache.hpp"
 #include "sinks/DataCacheSinkAdapter.hpp"
@@ -71,8 +70,6 @@ private:
     // Helpers
     void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
     void dispatch(const nlohmann::json&);
-    
-    // (legacy write queue removed)
 
     // Message handling sub-functions
     void handleMarketTrades(const nlohmann::json& message, 
@@ -89,17 +86,13 @@ private:
     void handleOrderBookUpdate(const nlohmann::json& event,
                              const std::string& product_id,
                              const std::chrono::system_clock::time_point& exchange_timestamp);
-    void handleSubscriptionConfirmation(const nlohmann::json& message);
-    void handleError(const nlohmann::json& message);
 
     // Members
     // Unified error emission to GUI and status surface
     void emitError(QString msg);
 
-    // Subscription & heartbeat helpers
+    // Subscription helpers
     void replaySubscriptionsOnConnect();
-    void startHeartbeat();
-    void scheduleNextPing();
     const std::string               m_host   = "advanced-trade-ws.coinbase.com";
     const std::string               m_port   = "443";
     const std::string               m_target = "/";
@@ -114,9 +107,8 @@ private:
     net::io_context                 m_ioc;
     ssl::context                    m_sslCtx{ssl::context::tlsv12_client};
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
-    // (legacy resolver/websocket/buffer removed; transport owns I/O)
+    // Beast transport owns resolver/websocket/buffer state internally
     net::steady_timer               m_reconnectTimer{m_strand};
-    net::steady_timer               m_pingTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
     std::unique_ptr<BeastWsTransport> m_transport; // Phase 3: not yet used for I/O
     
@@ -129,7 +121,5 @@ private:
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
     
-    // 🗑️ CLEANED UP: Redundant mutexes removed - write queue handles serialization
-    
-    // (legacy write queue removed)
+    // Transport-level serialization keeps cross-thread access safe
 };

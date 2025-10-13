@@ -119,9 +119,8 @@ TEST(MessageDispatcher, ParseOrderBookUpdate) {
 // =============================================================================
 // Side Detection Tests - Document Current Behavior
 // =============================================================================
-// IMPORTANT: fastSideDetection() ONLY recognizes uppercase "BUY"/"SELL"
-// Lowercase or "offer" → AggressorSide::Unknown (line 37: Cpp20Utils::fastSideDetection)
-// Side normalization for order books ("offer"→"ask") happens in MarketDataCore, NOT dispatcher
+// fastSideDetection() handles lowercase Coinbase tokens directly
+// Order book side normalization ("offer"→"ask") still happens in MarketDataCore, not dispatcher
 
 TEST(MessageDispatcher, UppercaseBuySideRecognized) {
     auto json = fixtures::coinbaseTrade("BTC-USD", 95000, 0.1, "BUY");
@@ -143,17 +142,15 @@ TEST(MessageDispatcher, UppercaseSellSideRecognized) {
     EXPECT_EQ(trade_event->trade.side, AggressorSide::Sell);
 }
 
-TEST(MessageDispatcher, LowercaseSideBecomesUnknown) {
-    // BUG/LIMITATION: Cpp20Utils::fastSideDetection only checks uppercase
-    // Real Coinbase messages may use lowercase "buy"/"sell"
+TEST(MessageDispatcher, LowercaseSideRecognizedAsBuy) {
+    // fastSideDetection handles lowercase input without additional normalization
     auto json = fixtures::coinbaseTrade("BTC-USD", 95000, 0.1, "buy");
     auto result = MessageDispatcher::parse(json);
 
     ASSERT_EQ(result.events.size(), 1);
     auto* trade_event = std::get_if<TradeEvent>(&result.events[0]);
     ASSERT_NE(trade_event, nullptr);
-    // Documents current behavior - should be fixed to handle lowercase
-    EXPECT_EQ(trade_event->trade.side, AggressorSide::Unknown);
+    EXPECT_EQ(trade_event->trade.side, AggressorSide::Buy);
 }
 
 TEST(MessageDispatcher, OfferSideInTradesBecomesUnknown) {

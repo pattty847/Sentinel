@@ -34,7 +34,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
     sLog_App("🏗️ MarketDataCore initialized");
-    // Phase 3: create transport and set callbacks (not yet used for live I/O)
+    // Create transport and bind callbacks
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
@@ -51,8 +51,10 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
         try {
             auto j = nlohmann::json::parse(payload);
             dispatch(j);
-        } catch (...) {
-            sLog_Error("JSON parse error in transport message");
+        } catch (const nlohmann::json::parse_error& e) {
+            sLog_Error(QString("JSON parse error in transport message: %1").arg(e.what()));
+        } catch (const std::exception& e) {
+            sLog_Error(QString("Error processing transport message: %1").arg(e.what()));
         }
     });
 }
@@ -130,7 +132,6 @@ void MarketDataCore::stop() {
         
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
-        m_pingTimer.cancel();
         
         if (m_transport) m_transport->close();
         
@@ -140,7 +141,6 @@ void MarketDataCore::stop() {
             
             // Cancel any pending timer operations
             m_reconnectTimer.cancel();
-            m_pingTimer.cancel();
             
             // Release work guard immediately; transport already closed
                 m_workGuard.reset();
@@ -163,9 +163,6 @@ void MarketDataCore::run() {
     
     sLog_Data("🔌 IO context stopped");
 }
-
-// legacy resolver/handshake/read/write/close removed (transport in use)
-
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
     
@@ -181,12 +178,6 @@ void MarketDataCore::scheduleReconnect() {
     sLog_Data(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
-    
-    // Reset the stream state via transport and clear any queued writes
-    // Clear write queue on the strand for safety
-    net::post(m_strand, [this]() {
-        // clearWriteQueue(); // legacy write queue removed
-    });
     
     // NON-BLOCKING timer-based reconnect
     m_reconnectTimer.expires_after(delay);
@@ -205,8 +196,6 @@ void MarketDataCore::scheduleReconnect() {
         }
     });
 }
-
-// legacy write queue removed
 
 void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
     if (symbols.empty()) {
@@ -243,19 +232,9 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
                 m_transport->send(frame);
             }
             sLog_Data("📤 Sent subscription frames via transport");
-        } else {
-            // TODO: Remove this once we have a proper transport
-            for (const auto& frame : frames) {
-                auto message_ptr = std::make_shared<std::string>(frame);
-                // enqueueWrite(message_ptr); // legacy path removed
-            }
-            sLog_Data("📤 Queued subscription frames (legacy path)");
         }
     });
 }
-
-// legacy write queue removed
-
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     
@@ -263,7 +242,6 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     auto arrival_time = std::chrono::system_clock::now();
     
     std::string channel = message.value("channel", "");
-    std::string type = message.value("type", "");
     
     // Phase 3: Minimal dispatcher wiring for non-data events (ack/errors)
     // Keep existing hot-path handlers for trades and order book intact.
@@ -286,10 +264,6 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
         handleMarketTrades(message, arrival_time);
     } else if (channel == ch::kL2Data) {
         handleOrderBookData(message, arrival_time);
-    } else if (channel == ch::kSubscriptions) {
-        handleSubscriptionConfirmation(message);
-    } else if (type == "error") {
-        handleError(message);
     }
 }
 
@@ -344,7 +318,7 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
     trade.size = Cpp20Utils::fastStringToDouble(trade_data.value("size", "0"));
     
     // Parse side
-    std::string side = trade_data.value("side", "");
+    const std::string side = trade_data.value("side", "");
     trade.side = Cpp20Utils::fastSideDetection(side);
     
     // Parse timestamp from trade data or use exchange timestamp
@@ -476,35 +450,8 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     sLog_Data(QString::fromStdString(logMessage));
 }
 
-void MarketDataCore::handleSubscriptionConfirmation(const nlohmann::json& message) {
-    std::string logMessage = std::format("✅ Subscription confirmed for {}",
-        message.value("product_ids", nlohmann::json::array()).dump());
-    sLog_Data(QString::fromStdString(logMessage));
-}
-
-void MarketDataCore::handleError(const nlohmann::json& message) {
-    std::string logMessage = std::format("❌ Coinbase error: {}",
-        message.value("message", "unknown error"));
-    sLog_Error(QString::fromStdString(logMessage));
-    QString err = message.contains("message") ? QString::fromStdString(message.at("message").get<std::string>())
-                                               : QString("Provider error");
-    emitError(err);
-}
-
 void MarketDataCore::replaySubscriptionsOnConnect() {
     if (m_products.empty()) return;
     auto symbols = m_products;
     sendSubscriptionMessage("subscribe", symbols);
-}
-
-void MarketDataCore::startHeartbeat() {
-    m_pingTimer.expires_after(std::chrono::seconds(25));
-    m_pingTimer.async_wait([this](beast::error_code ec){
-        if (ec || !m_running) return;
-        scheduleNextPing();
-    });
-}
-
-void MarketDataCore::scheduleNextPing() {
-    // Transport-managed ping will replace this; noop for now to avoid legacy m_ws usage
 }
