@@ -129,28 +129,23 @@ void MarketDataCore::start() {
 void MarketDataCore::stop() {
     if (m_running.exchange(false)) {
         sLog_App("🛑 Stopping MarketDataCore...");
-        
+
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
-        
+
         if (m_transport) m_transport->close();
-        
-        // Post close operation to strand for thread safety
-        net::post(m_strand, [this]() {
-            beast::error_code ec;
-            
-            // Cancel any pending timer operations
-            m_reconnectTimer.cancel();
-            
-            // Release work guard immediately; transport already closed
-                m_workGuard.reset();
-        });
-        
+
+        // Release work guard to allow io_context to exit
+        m_workGuard.reset();
+
+        // Stop io_context to unblock the I/O thread
+        m_ioc.stop();
+
         // Join thread
         if (m_ioThread.joinable()) {
             m_ioThread.join();
         }
-        
+
         sLog_App("✅ MarketDataCore stopped");
     }
 }
