@@ -89,8 +89,8 @@ struct OrderBook {
 /*
 Order Book:
 
-Level2 Channel
-The level2 channel guarantees delivery of all updates and is the easiest way to keep a snapshot of the order book.
+Level2 Subscribe / l2_data Receive
+Coinbase expects clients to subscribe using the legacy "level2" channel name, but responses arrive on "l2_data". This pair guarantees delivery of all updates and is the easiest way to keep a snapshot of the order book.
 
 // Request
 {
@@ -99,8 +99,7 @@ The level2 channel guarantees delivery of all updates and is the easiest way to 
   "channel": "level2",
   "jwt": "XYZ"
 }
-Subscribe to the level2 channel to guarantee that messages are delivered and your order book is in sync.
-The level2 channel sends a message with fields, type ("snapshot" or "update"), product_id, and updates. The field 
+Subscribe using the level2 channel to guarantee that messages are delivered and your order book is in sync. Server payloads fan back out on "l2_data" with fields type ("snapshot" or "update"), product_id, and updates. The field 
 updates is an array of objects of {price_level, new_quantity, event_time, side} to represent the entire order book. 
 Theevent_time property is the time of the event as recorded by our trading engine.
 The new_quantity property is the updated size at that price level, not a delta. A new_quantity of "0" indicates the 

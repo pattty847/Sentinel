@@ -17,7 +17,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <mutex>
 #include <memory>
 #include <vector>
-#include "../../core/TradeData.h"
+#include "../../core/marketdata/model/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
 

@@ -20,7 +20,7 @@ Assumptions: Exchange timestamps are parsed correctly for latency calculations.
 #include <atomic>
 #include <memory>
 #include <mutex>
-#include "TradeData.h"
+#include "marketdata/model/TradeData.h"
 
 /**
  * 🚀 SENTINEL UNIFIED MONITORING SYSTEM

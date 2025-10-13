@@ -31,9 +31,9 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QGroupBox>
 #include <QtQuickWidgets/QQuickWidget>
 #include <memory>
-#include "../core/MarketDataCore.hpp"
-#include "../core/Authenticator.hpp"
-#include "../core/DataCache.hpp"
+#include "../core/marketdata/MarketDataCore.hpp"
+#include "../core/marketdata/auth/Authenticator.hpp"
+#include "../core/marketdata/cache/DataCache.hpp"
 #include "../core/SentinelMonitor.hpp"
 
 // Forward declarations

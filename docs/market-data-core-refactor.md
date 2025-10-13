@@ -300,6 +300,8 @@ Add unit tests under `libs/core/tests/` (or your test location). You can stub Be
 3. **Transport (smoke with fake stream)**
 
 * Simulate resolve/connect/read errors; assert error and status callbacks ordering; assert backoff reset on success.
+* Inject a fake transport into `MarketDataCore` (or adapt callbacks) so core tests do not open sockets.
+* Verify `onRead` payloads are owned strings; no dangling references after `consume()`.
 
 4. **DataCacheSinkAdapter**
 
@@ -364,6 +366,7 @@ libs/core/
 * **Risk:** queued Qt lambdas targeting dead `this`. **Mitigation:** `QPointer` in all lambdas.
 * **Risk:** subscription storms on reconnect. **Mitigation:** replay desired set exactly once after handshake; clear old write queue.
 * **Risk:** LiveOrderBook memory blowout with bad bounds. **Mitigation:** config strategy; log and cap.
+* **Risk:** transport payload copy in `onRead` (owning `std::string`). **Mitigation:** current copy avoids dangling views and is typically small vs 100ms OB cadence; revisit if profiling shows it hot (opt: custom buffer recycling or deferred parse without copy).
 * **Rollback plan:** branch isolates changes; Phase-1 commits are safe to keep even if Phase-3 extraction is reverted.
 
 ---
@@ -376,6 +379,57 @@ libs/core/
 * No perf hit on trade throughput or book updates.
 
 ---
+
+## PROGRESS
+
+### Phase 1 — Surgical Fixes (implemented)
+- Unified error emission: added `MarketDataCore::emitError(QString)` guarded with `QPointer`; replaced error branches in `onResolve/onConnect/onSslHandshake/onWsHandshake/onWrite/onRead/onClose` to call it (and still log).
+- Backoff reset: set `m_backoffDuration=1s` on successful WebSocket handshake; logged reset.
+- QPointer guards: wrapped all Qt-queued lambdas (`connectionStatusChanged`, `tradeReceived`, `liveOrderBookUpdated`).
+- Subscription replay/staging: if WS is closed, stage desired products; on handshake success, replay consolidated subscribe; no double-subscribe.
+- Write queue hygiene: clear queue and set `m_writeInProgress=false` on reconnect via strand; ensured strand-safe `clearWriteQueue()`.
+- Side normalization: normalized provider side "offer" → "ask" in snapshot/update handling.
+- Heartbeat: added 25s async ping using Beast; ping error emits `errorOccurred` and triggers reconnect; ping timer is cancelled in `stop()`.
+
+Notes:
+- No GUI behavior change; signals preserved. Build and manual run verified. No perf-impacting changes on hot paths.
+
+### Phase 2 — Directory Migration (implemented)
+- New structure under `libs/core/marketdata/`:
+  - `marketdata/MarketDataCore.*`
+  - `marketdata/auth/Authenticator.*`
+  - `marketdata/cache/DataCache.*`
+  - `marketdata/dispatch/MessageParser.hpp` (placeholder)
+  - `marketdata/model/TradeData.h` (case-sensitive rename from `libs/core/tradedata.h`)
+- CMake updates:
+  - `libs/core/CMakeLists.txt` now sources from `marketdata/**` and adds public include dirs for all subfolders.
+- Include path updates (selected):
+  - GUI: `UnifiedGridRenderer.h/.cpp`, `MainWindowGpu.h`, `render/DataProcessor.hpp/.cpp` now include from `../core/marketdata/...`.
+  - Core: `LiquidityTimeSeriesEngine.h` includes `marketdata/model/TradeData.h`.
+
+Notes:
+- Case-only rename handled with `git mv` to avoid macOS case-insensitive FS pitfalls.
+- Project builds clean after migration.
+
+### Phase 3 — Transport/Dispatcher/Sinks (complete)
+- Added `WsTransport` and concrete `BeastWsTransport` (resolve/connect/SSL/WS handshake/read/write/close + 25s ping) with status/error/message callbacks.
+- Added `MessageDispatcher` (acks/errors handled now; trades/books remain in core handlers for the same GUI surface).
+- Added `SubscriptionManager` and replaced subscription frame builders in `sendSubscriptionMessage`.
+- Added `IMarketDataSink` and `DataCacheSinkAdapter`; trades now flow through the sink before signaling GUI.
+- Centralized channel constants and side normalization utility.
+- Slimmed `MarketDataCore`: removed legacy Beast resolver/handshake/read/write and write-queue; start/stop/reconnect and subscription sends now go via transport; subscription replay on status=true.
+
+Status: Build + lints green; GUI behavior unchanged; transport is the sole I/O.
+
+ 
+
+### Future Phases (heads-up)
+- Phase 4: `IAuthenticator` + `CoinbaseAuthenticator`; inject into `MarketDataCore`; externalize LiveOrderBook bounds/config.
+- Phase 5: Unit tests for `MessageDispatcher`, `SubscriptionManager`, transport smoke, and sink adapter. Add fixtures and golden JSON.
+
+Branch & Ops
+- Working branch: `refactor/marketdata-core` (draft PR recommended). Reindexing done; `compile_commands.json` symlinked to out-of-source build.
+
 
 ## FILES & BEHAVIOR YOU MUST HONOR (READ THEM)
 

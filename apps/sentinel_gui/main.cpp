@@ -13,7 +13,7 @@ Assumptions: Executed as the primary entry point of a Qt application.
 #include <QApplication>
 #include <QDebug>
 #include <iostream>
-#include "TradeData.h"
+#include "marketdata/model/TradeData.h"
 #include <QMetaType>
 #include <QQmlEngine>
 #include "UnifiedGridRenderer.h"

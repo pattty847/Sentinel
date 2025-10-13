@@ -11,7 +11,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 */
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "../core/DataCache.hpp"
+#include "../core/marketdata/cache/DataCache.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>

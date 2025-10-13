@@ -7,13 +7,30 @@
 #include <string_view>
 #include <format>
 #include <stdexcept>
-#include "TradeData.h"
+#include "marketdata/model/TradeData.h"
 #include <charconv>
 #include <cstdlib>
 #include <chrono>
 #include <ctime>
 
 namespace Cpp20Utils {
+
+inline char asciiToLower(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<char>(c + ('a' - 'A'));
+    }
+    return static_cast<char>(c);
+}
+
+inline bool equalsIgnoreCase(std::string_view lhs, std::string_view rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (asciiToLower(static_cast<unsigned char>(lhs[i])) != asciiToLower(static_cast<unsigned char>(rhs[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
 /**
  * Cpp20Utils provides high-performance trading utilities:
  * - fastStringToDouble/Int: Optimized string-to-number conversion with error handling
@@ -97,8 +114,8 @@ inline int fastStringToInt(std::string_view str, int defaultValue) {
  * @return AggressorSide enum value
  */
 inline AggressorSide fastSideDetection(std::string_view side) {
-    if (side == "BUY") return AggressorSide::Buy;
-    if (side == "SELL") return AggressorSide::Sell;
+    if (equalsIgnoreCase(side, "BUY")) return AggressorSide::Buy;
+    if (equalsIgnoreCase(side, "SELL")) return AggressorSide::Sell;
     return AggressorSide::Unknown;
 }
 
@@ -112,8 +129,8 @@ inline AggressorSide fastSideDetection(std::string_view side) {
 inline AggressorSide fastSideDetection(const std::string& side, 
                                       const std::string& buyStr = "BUY", 
                                       const std::string& sellStr = "SELL") {
-    if (side == buyStr) return AggressorSide::Buy;
-    if (side == sellStr) return AggressorSide::Sell;
+    if (equalsIgnoreCase(side, buyStr)) return AggressorSide::Buy;
+    if (equalsIgnoreCase(side, sellStr)) return AggressorSide::Sell;
     return AggressorSide::Unknown;
 }
 

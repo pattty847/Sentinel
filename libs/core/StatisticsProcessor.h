@@ -1,8 +1,8 @@
 #ifndef STATISTICSPROCESSOR_H
 #define STATISTICSPROCESSOR_H
 
-#include "TradeData.h"
-#include <functional> // Include for std::function
+#include "marketdata/model/TradeData.h"
+#include <functional>
 
 /**
  * StatisticsProcessor class: A pure C++ data processor for calculating statistics.

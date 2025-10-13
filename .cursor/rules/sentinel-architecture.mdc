@@ -2,46 +2,74 @@
 alwaysApply: true
 ---
 
-# Sentinel Architecture
+# Repository Guidelines
 
-The system processes and visualizes real-time market data as a 2D grid, where each cell represents aggregated liquidity for a specific time interval and price level. The end goal is a sophisticated high frequency trading terminal with intelligent markings and alerts of events like spoofing, absorption, hidden liquidity or iceberg orders, advanced LLM data synthesis, reports, and more. It will be ran as a gui or in daemon mode. 
+## Mission & Scope
+Sentinel is a C++20 trading terminal with a hard separation between pure core logic, Qt-based adapters, and thin app entry points. Every contribution should preserve low-latency data handling, GPU-driven visualization, and modular maintainability.
 
-## Core Principles
+## Architecture Boundaries & Constraints
+- Keep `libs/core` free of Qt (QtCore only), `libs/gui` as adapter/render layers, and `apps/` limited to bootstrapping.
+- Treat 500 LOC as the soft ceiling (warn above 450); crossing 500 requires a refactor plan or justification.
+- Respect thread ownership: network/IO off the GUI thread, UI updates via queued signals, lock-free queues for cross-thread handoffs.
+- Use the categorized logging system (`SentinelLogging.hpp/.cpp`) with `sentinel.app|data|render|debug`; avoid temporary or secret-bearing logs.
 
-- **Mission**: Sentinel is a professional, open-source trading terminal, engineered to match or exceed the capabilities of Bloomberg, Bookmap, and TradingView, with a focus on real-time market microstructure analysis.
-- **Performance Philosophy**: The architecture is C++-first for deterministic, as-fast-as-possible execution. All code should be written with high performance and low latency in mind. Performance is continuously tested and improved; hard metrics are subject to ongoing validation as the system evolves.
-- **Modularity**: All logic is split into independent, reusable libraries. No monoliths. Every module must be independently testable and swappable.
-- **Migration-First**: The system is actively migrating from legacy scatter-plot to a unified grid-based architecture. All new features should target the grid pipeline unless otherwise justified.
-- **Domain Intelligence**: The system must intelligently detect and visualize spoofing, absorption, hidden liquidity, and other advanced trading phenomena.
-- **Extensibility**: New features, analytics, and visualizations should be easy to add without breaking existing workflows.
-- **AI-Driven**: LLM agents are expected to synthesize data, generate reports, and flag anomalies, not just answer questions.
-- **Logging & Observability**: Use the filtered logging system (see docs/LOGGING_GUIDE.md) for all diagnostics. All critical paths must be observable.
-- **Open Source Ethos**: No vendor lock-in. All code, data, and build systems are open and auditable.
+## Project Layout
+- `libs/core/marketdata`: Transport, dispatcher, auth, cache, and sink adapters for the data pipeline.
+- `libs/gui`: UnifiedGridRenderer façade, GridViewState, DataProcessor, render strategies, and QML controls.
+- `apps/`: `sentinel_gui` and `stream_cli` entry points only.
+- `tests/`: Legacy suites exist, but only `tests/marketdata` is currently wired into CMake. Stage new coverage here until the broader matrix is revived.
+- `docs/`: Architecture and refactor guidance (`docs/ARCHITECTURE.md`, `docs/sockets-auth-cache-refactor.md`, `docs/LOGGING_GUIDE.md`).
+- `scripts/`: Tooling and code-analysis helpers (`scripts/README_CODE_ANALYSIS.md`).
 
-> **Note:** Performance metrics and quality gates are under continuous review as new tests and benchmarks are developed. The goal is always deterministic, best-in-class speed and reliability for a C++ architecture.
+## Build & Test Workflow
+- Configure/build via `cmake --preset <preset>` followed by `cmake --build --preset <preset>` (mac-clang, linux-gcc, windows-mingw).
+- Run active tests with `cmake --build --preset <preset> --target marketdata_tests` or `ctest --preset <preset> --output-on-failure`.
+- Launch the GUI using `./build-<preset>/apps/sentinel_gui/sentinel_gui`.
+- Need a snapshot of a large file before diving in? Use the analysis utilities (`quick_cpp_overview.sh`, `extract_functions.sh`) documented in `scripts/README_CODE_ANALYSIS.md` for a quick pass at function lists or structure.
 
-## Directory Structure
+## Coding Style & Expectations
+- Favor modern C++20 idioms: RAII, smart pointers, standard library first; reach for Qt types only at integration seams.
+- Formatting: 4-space indent, Qt brace style for classes, headers as `.hpp`; classes/enums in `PascalCase`, methods/signals `camelCase`, private members `m_`, constants `kPascalCase`.
+- Keep cross-domain DTOs lightweight and avoid business logic in GUI layers.
+- Comment intent when the domain is subtle; otherwise rely on expressive naming.
 
-- `apps/`: Contains the main application executables.
-  - `sentinel_gui/`: The main graphical user interface for data visualization.
-  - `stream_cli/`: A command-line tool for interacting with data streams.
-- `libs/`: Contains the core logic and reusable components.
-  - `core/`: Core functionalities like data handling, networking, and business logic.
-  - `gui/`: Components related to the Qt-based graphical user interface.
-- `tests/`: Contains unit and integration tests for the libraries.
-- `docs/`: Project documentation.
+## Quality Gates
+- No pull request without a passing build and `ctest`.
+- Add or update tests with the code change; keep runs deterministic (mock transports, reuse fixtures).
+- Watch for performance regressions on hot paths and call them out in PR notes if unavoidable.
+- Document migrations, manual steps, and UI screenshots in commits/PRs, following the `Component: concise change` convention.
 
-## Key Technologies
+## References
+- Architecture overview: `docs/ARCHITECTURE.md`
+- Market data refactor guide: `docs/sockets-auth-cache-refactor.md`
+- Logging details: `docs/LOGGING_GUIDE.md`
+- Code analysis tooling: `scripts/README_CODE_ANALYSIS.md`
 
-- **C++**: The primary programming language for performance-critical components.
-- **Qt/QML**: Used for the graphical user interface in `libs/gui/qml`.
-- **CMake**: The build system used for the project.
-- **CPP20**:  
-  - `Cpp20Utils` provides high-performance trading utilities, including:
-    - `fastStringToDouble` / `fastStringToInt`: Optimized string-to-number conversion with error handling.
-    - `fastSideDetection`: Efficient trade side detection (Buy/Sell/Unknown).
-    - `formatTradeLog` / `formatOrderBookLog`: Fast logging message formatting for trades and order books.
-    - `formatErrorLog` / `formatSuccessLog`: Error and success message formatting.
-    - `formatPerformanceMetric` / `formatThroughput`: Performance monitoring and throughput calculation.
-  - All functions are optimized for real-time trading data processing with minimal overhead.
-- **OpenGL**: For high-performance GPU-accelerated chart rendering.
+# Sentinel Architecture Details
+
+Sentinel models exchange feeds as a dense time/price grid rendered on the GPU. Keep the data path deterministic, exchange-agnostic, and safe for both GUI and headless runtimes.
+
+## Data Pipeline
+```
+Exchange WS → BeastWsTransport → MessageDispatcher → DataCache/DataCacheSinkAdapter
+            (worker thread)        (worker thread)         (shared state)
+
+DataCache → DataProcessor → LiquidityTimeSeriesEngine → UnifiedGridRenderer
+(Qt queued to GUI thread)      (GUI thread aggregation)      (QML façade)
+
+UnifiedGridRenderer → Render Strategy → GridSceneNode → GPU
+             (per-mode geometry)        (Qt Scene Graph)
+```
+
+## Layer Highlights
+- **Transport (`marketdata/ws`)**: TLS handshakes, reconnect backoff, heartbeats, and deterministic subscription frames via `SubscriptionManager`.
+- **Dispatch (`marketdata/dispatch`)**: Parses provider payloads, surfaces acks/errors, and normalizes trade/book events before they hit the cache.
+- **Cache (`marketdata/cache`)**: Thread-safe recent trades and live order books exposed through `DataCacheSinkAdapter` and DTOs.
+- **Aggregation & Rendering (`libs/gui/render`)**: DataProcessor pulls from the cache, LiquidityTimeSeriesEngine builds multi-timeframe cells, and strategies convert them into GPU buffers managed by Qt Scene Graph nodes.
+
+## Testing & Documentation
+- Add market data tests under `tests/marketdata`; other suites remain offline until modernized.
+- For transport/cache evolution, consult `docs/sockets-auth-cache-refactor.md` to stay aligned with the phased refactor plan.
+- `docs/ARCHITECTURE.md` expands on the render stack, while `docs/LOGGING_GUIDE.md` covers logging categories and verbosity controls.
+
+Preserve these boundaries and the GPU-first focus when extending Sentinel.

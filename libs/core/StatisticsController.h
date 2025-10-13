@@ -14,7 +14,7 @@ Assumptions: The consumer of the cvdUpdated signal can handle high-frequency upd
 
 #include <QObject>
 #include "StatisticsProcessor.h"
-#include "TradeData.h"
+#include "marketdata/model/TradeData.h"
 
 class StatisticsController : public QObject
 {

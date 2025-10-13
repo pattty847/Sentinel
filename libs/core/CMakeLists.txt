@@ -3,19 +3,22 @@ cmake_minimum_required(VERSION 3.22)
 project(sentinel_core)
 
 add_library(sentinel_core
-    Authenticator.cpp
-    Authenticator.hpp
     Cpp20Utils.hpp
     CvdThresholdRule.cpp
     CvdThresholdRule.h
-    DataCache.cpp
-    DataCache.hpp
     LiquidityTimeSeriesEngine.cpp
     LiquidityTimeSeriesEngine.h
     LockFreeQueue.h
-    MarketDataCore.cpp
-    MarketDataCore.hpp
-    MessageParser.hpp
+    marketdata/MarketDataCore.cpp
+    marketdata/MarketDataCore.hpp
+    marketdata/auth/Authenticator.cpp
+    marketdata/auth/Authenticator.hpp
+    marketdata/cache/DataCache.cpp
+    marketdata/cache/DataCache.hpp
+    marketdata/dispatch/MessageParser.hpp
+    marketdata/ws/WsTransport.hpp
+    marketdata/ws/BeastWsTransport.hpp
+    marketdata/ws/BeastWsTransport.cpp
     PerformanceMonitor.cpp
     PerformanceMonitor.h
     Rule.h
@@ -29,7 +32,7 @@ add_library(sentinel_core
     StatisticsController.h
     StatisticsProcessor.cpp
     StatisticsProcessor.h
-    TradeData.h
+    marketdata/model/TradeData.h
 )
 
 # Find required packages
@@ -39,7 +42,9 @@ find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 # jwt-cpp is fetched via FetchContent in main CMakeLists.txt
 
-target_include_directories(sentinel_core PUBLIC .)
+target_include_directories(sentinel_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 target_link_libraries(sentinel_core 
     PUBLIC
