@@ -10,6 +10,7 @@
 #include "marketdata/model/TradeData.h"
 #include <charconv>
 #include <cstdlib>
+#include <cstdint>
 #include <chrono>
 #include <ctime>
 
@@ -249,47 +250,85 @@ inline std::chrono::system_clock::time_point parseISO8601(std::string_view iso86
     try {
         // Parse format: "2023-02-09T20:32:50.714964855Z"
         // Extract main components: YYYY-MM-DDTHH:MM:SS
-        int year = fastStringToInt(iso8601_str.substr(0, 4));
-        int month = fastStringToInt(iso8601_str.substr(5, 2));
-        int day = fastStringToInt(iso8601_str.substr(8, 2));
-        int hour = fastStringToInt(iso8601_str.substr(11, 2));
-        int minute = fastStringToInt(iso8601_str.substr(14, 2));
-        int second = fastStringToInt(iso8601_str.substr(17, 2));
-        
-        // Parse fractional seconds if present
-        double fractional_seconds = 0.0;
-        if (iso8601_str.size() > 19 && iso8601_str[19] == '.') {
-            // Find the end of fractional part (before 'Z')
-            size_t z_pos = iso8601_str.find('Z', 20);
-            if (z_pos != std::string_view::npos) {
-                std::string frac_str = "0." + std::string(iso8601_str.substr(20, z_pos - 20));
-                fractional_seconds = fastStringToDouble(frac_str);
+        const int yearValue = fastStringToInt(iso8601_str.substr(0, 4));
+        const unsigned int monthValue = static_cast<unsigned int>(fastStringToInt(iso8601_str.substr(5, 2)));
+        const unsigned int dayValue = static_cast<unsigned int>(fastStringToInt(iso8601_str.substr(8, 2)));
+        const int hourValue = fastStringToInt(iso8601_str.substr(11, 2));
+        const int minuteValue = fastStringToInt(iso8601_str.substr(14, 2));
+        const int secondValue = fastStringToInt(iso8601_str.substr(17, 2));
+
+        // Parse fractional seconds if present (supports up to microsecond precision)
+        size_t pos = 19;
+        int64_t fractional_microseconds = 0;
+        int fractional_digits = 0;
+        if (pos < iso8601_str.size() && iso8601_str[pos] == '.') {
+            ++pos;  // skip '.'
+            while (pos < iso8601_str.size()) {
+                char ch = iso8601_str[pos];
+                if (ch < '0' || ch > '9') {
+                    break;
+                }
+                if (fractional_digits < 6) {
+                    fractional_microseconds = fractional_microseconds * 10 + (ch - '0');
+                    ++fractional_digits;
+                }
+                ++pos;
+            }
+            while (fractional_digits > 0 && fractional_digits < 6) {
+                fractional_microseconds *= 10;
+                ++fractional_digits;
             }
         }
-        
-        // Create time_point using std::tm
-        std::tm tm = {};
-        tm.tm_year = year - 1900;  // Years since 1900
-        tm.tm_mon = month - 1;     // Months since January (0-11)
-        tm.tm_mday = day;
-        tm.tm_hour = hour;
-        tm.tm_min = minute;
-        tm.tm_sec = second;
-        
-        // Convert to time_t (UTC)
-        std::time_t time_t_val = std::mktime(&tm);
-        
-        // Adjust for UTC (mktime assumes local time)
-        // This is a simplified approach - for production, consider using date library
-        auto time_point = std::chrono::system_clock::from_time_t(time_t_val);
-        
-        // Add fractional seconds
-        auto microseconds = std::chrono::microseconds(
-            static_cast<int64_t>(fractional_seconds * 1000000)
-        );
-        
-        return time_point + microseconds;
-        
+
+        // Parse timezone offset (Z, +HH:MM, -HH:MM)
+        int tzSign = 0;
+        int tzHours = 0;
+        int tzMinutes = 0;
+        if (pos < iso8601_str.size()) {
+            const char tzChar = iso8601_str[pos];
+            if (tzChar == 'Z' || tzChar == 'z') {
+                ++pos;
+            } else if (tzChar == '+' || tzChar == '-') {
+                tzSign = (tzChar == '+') ? 1 : -1;
+                ++pos;
+                if (pos + 1 < iso8601_str.size()) {
+                    tzHours = fastStringToInt(iso8601_str.substr(pos, 2));
+                    pos += 2;
+                }
+                if (pos < iso8601_str.size() && iso8601_str[pos] == ':') {
+                    ++pos;
+                }
+                if (pos + 1 < iso8601_str.size()) {
+                    tzMinutes = fastStringToInt(iso8601_str.substr(pos, 2));
+                    pos += 2;
+                }
+            }
+        }
+
+        using namespace std::chrono;
+
+        const auto y = year{yearValue};
+        const auto m = month{monthValue};
+        const auto d = day{dayValue};
+
+        if (!y.ok() || !m.ok() || !d.ok()) {
+            return std::chrono::system_clock::now();
+        }
+
+        sys_days days_since_epoch{y / m / d};
+        auto time_point = sys_time<microseconds>(days_since_epoch);
+        time_point += hours(hourValue);
+        time_point += minutes(minuteValue);
+        time_point += seconds(secondValue);
+        time_point += microseconds(fractional_microseconds);
+
+        if (tzSign != 0) {
+            auto offset = hours(tzHours) + minutes(tzMinutes);
+            time_point -= offset * tzSign;
+        }
+
+        return time_point;
+
     } catch (...) {
         // On any parsing error, return current time
         return std::chrono::system_clock::now();

@@ -25,6 +25,11 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <climits>
 #include <cmath>
 
+namespace {
+constexpr bool kTraceCellDebug = false;
+constexpr bool kTraceCoordinateDebug = false;
+}
+
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
     
@@ -304,6 +309,7 @@ void DataProcessor::updateVisibleCells() {
     int64_t activeTimeframe = m_currentTimeframe_ms;
     
     // 🚀 OPTIMIZATION 1: Use manual timeframe if set, otherwise auto-suggest
+    // TODO: Investigate dynamic zoom/timeframe: ensure viewportChanged triggers re-suggest and manual override timeout resets
     if (!m_manualTimeframeSet || 
         (m_manualTimeframeTimer.isValid() && m_manualTimeframeTimer.elapsed() > 10000)) {  // 10 second timeout
         
@@ -452,13 +458,14 @@ void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double 
 
     m_visibleCells.push_back(cell);
     
-    // 🔍 DEBUG: Log cell creation occasionally
-    static int cellCounter = 0;
-    if (++cellCounter % 50 == 0) {
-        sLog_Render("🎯 CELL DEBUG: Created cell #" << cellCounter << " at screenRect(" 
-                    << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
-                    << cell.screenRect.width() << "x" << cell.screenRect.height() 
-                    << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+    if constexpr (kTraceCellDebug) {
+        static int cellCounter = 0;
+        if (++cellCounter % 50 == 0) {
+            sLog_Render("🎯 CELL DEBUG: Created cell #" << cellCounter << " at screenRect(" 
+                        << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
+                        << cell.screenRect.width() << "x" << cell.screenRect.height() 
+                        << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+        }
     }
 }
 
@@ -489,14 +496,15 @@ QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, dou
     
     QRectF result(topLeft, bottomRight);
     
-    // 🔍 DEBUG: Log coordinate transformation once per batch
-    static int debugCounter = 0;
-    if (++debugCounter % 100 == 0) {
-        sLog_Render("🎯 COORD DEBUG: World(" << timeStart << "," << price << ") -> Screen(" 
-                    << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
-                    << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
-                    << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
-                    << viewport.width << "x" << viewport.height << "]");
+    if constexpr (kTraceCoordinateDebug) {
+        static int debugCounter = 0;
+        if (++debugCounter % 100 == 0) {
+            sLog_Render("🎯 COORD DEBUG: World(" << timeStart << "," << price << ") -> Screen(" 
+                        << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
+                        << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
+                        << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
+                        << viewport.width << "x" << viewport.height << "]");
+        }
     }
     
     return result;

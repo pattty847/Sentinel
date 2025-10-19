@@ -123,12 +123,10 @@ void LiveOrderBook::applyUpdate(const std::string& side, double price, double qu
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Bounds check
+    // CHECKPOINT: This is a potential performance bottleneck. We should consider using a more efficient bounds check.
     if (price < m_min_price || price > m_max_price) {
-        static int oob_count = 0;
-        if (++oob_count % 100 == 1) { // Log every 100th OOB update
-            sLog_Data(QString("⚠️ Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update. [Hit #%5]")
-                        .arg(price).arg(m_min_price).arg(m_max_price).arg(QString::fromStdString(m_productId)).arg(oob_count));
-        }
+        //sLog_Data(QString("⚠️ Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update.")
+        //            .arg(price).arg(m_min_price).arg(m_max_price).arg(QString::fromStdString(m_productId)));
         return;
     }
 

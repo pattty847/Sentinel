@@ -433,12 +433,12 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
-    // reduce noisy frame logs
-    if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
     if (width() <= 0 || height() <= 0) {
         // invalid size; skip
         return oldNode;
     }
+    // reduce noisy frame logs
+    if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
     
     auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
     bool isNewNode = !sceneNode;
@@ -507,4 +507,3 @@ qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_v
 double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
 double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
 QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
-

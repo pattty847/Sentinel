@@ -30,7 +30,6 @@ _deps/
 
 # Configuration files (secrets and sensitive data)
 key.json
-key2.json
 config.json
 *.key
 *.pem

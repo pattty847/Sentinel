@@ -16,6 +16,10 @@ Assumptions: Zoom logic correctly implements "zoom-to-cursor" functionality.
 #include <QDebug>
 #include <algorithm>
 
+namespace {
+constexpr bool kTraceZoomInteractions = false;
+}
+
 GridViewState::GridViewState(QObject* parent) 
     : QObject(parent) {
     m_interactionTimer.start();
@@ -136,10 +140,11 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
             
-            // Log zoom calculation (reduced verbosity)
-            qDebug() << "🔍 ZOOM:" << "Delta:" << delta << "->" << clampedDelta
-                     << "Zoom:" << m_zoomFactor << "->" << newZoom
-                     << "Mouse(" << center.x() << "," << center.y() << ")";
+            if constexpr (kTraceZoomInteractions) {
+                qDebug() << "🔍 ZOOM:" << "Delta:" << delta << "->" << clampedDelta
+                         << "Zoom:" << m_zoomFactor << "->" << newZoom
+                         << "Mouse(" << center.x() << "," << center.y() << ")";
+            }
             
             // Calculate current center point in data coordinates
             int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
@@ -163,10 +168,12 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             m_minPrice = newMinPrice;
             m_maxPrice = newMaxPrice;
             
-            qDebug() << "🔍 ZOOM RESULT:"
-                     << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
-                     << "NewTime[" << currentCenterTime << "]"
-                     << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
+            if constexpr (kTraceZoomInteractions) {
+                qDebug() << "🔍 ZOOM RESULT:"
+                         << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
+                         << "NewTime[" << currentCenterTime << "]"
+                         << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
+            }
         }
         
         m_zoomFactor = newZoom;

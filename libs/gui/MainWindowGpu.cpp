@@ -21,6 +21,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QQmlContext>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTimer>
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {    
@@ -28,12 +29,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
     m_dataCache = std::make_unique<DataCache>();
     
-    // 🚨 TESTING: Disable SentinelMonitor to isolate window hang issue
-    // TODO: Debug this
-    // m_sentinelMonitor = std::make_shared<SentinelMonitor>(this);
-    // m_sentinelMonitor->startMonitoring();
-    // m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
-    m_sentinelMonitor = nullptr;  // Temporarily disable
+    m_sentinelMonitor = std::make_shared<SentinelMonitor>();
+    m_sentinelMonitor->startMonitoring();
+    m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
     
     sLog_App("🔧 Creating persistent MarketDataCore...");
     m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
@@ -83,7 +81,11 @@ MainWindowGPU::~MainWindowGPU() {
     if (m_gpuChart) {
         m_gpuChart->setSource(QUrl());
     }
-    
+
+    if (m_sentinelMonitor) {
+        m_sentinelMonitor->stopMonitoring();
+    }
+
     sLog_App("✅ MainWindowGPU cleanup complete");
 }
 
@@ -92,10 +94,21 @@ void MainWindowGPU::setupUI() {
     m_gpuChart = new QQuickWidget(this);
     m_gpuChart->setResizeMode(QQuickWidget::SizeRootObjectToView);
     
-    // Try file system path first to bypass resource issues
-    // TODO: move this to a config file - OS dependent paths
-    QString qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
-    sLog_App("🔍 Trying QML path:" << qmlPath);
+    // Allow environment override for QML path (SENTINEL_QML_PATH)
+    QString qmlPath;
+    const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
+    if (!qmlEnv.isEmpty()) {
+        QFileInfo envInfo(qmlEnv);
+        qmlPath = envInfo.isDir()
+            ? QDir(envInfo.absoluteFilePath()).filePath("DepthChartView.qml")
+            : envInfo.absoluteFilePath();
+        sLog_App("🔍 Using SENTINEL_QML_PATH override:" << qmlPath);
+    } else {
+        // Try file system path first to bypass resource issues
+        // TODO: move this to a config file - OS dependent paths
+        qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
+        sLog_App("🔍 Trying QML path:" << qmlPath);
+    }
     
     if (QFile::exists(qmlPath)) {
         m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
@@ -266,4 +279,4 @@ void MainWindowGPU::initializeQMLComponents() {
     sLog_App("   → UnifiedGridRenderer: AVAILABLE");
     
     // Components are verified - data pipeline will be created on subscription
-} 
+}

@@ -19,8 +19,6 @@ add_library(sentinel_core
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
-    PerformanceMonitor.cpp
-    PerformanceMonitor.h
     Rule.h
     RuleEngine.cpp
     RuleEngine.h
