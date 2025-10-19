@@ -18,8 +18,6 @@ Assumptions: The linked JWT library supports ES256 signing.
 #include <iostream>
 #include <chrono>
 
-// Stub implementation for Phase 1 compilation verification
-
 Authenticator::Authenticator(const std::string& keyFile) {
     loadKeyFile(keyFile);
 }

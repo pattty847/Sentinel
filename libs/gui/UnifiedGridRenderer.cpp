@@ -155,14 +155,6 @@ void UnifiedGridRenderer::updateVolumeProfile() {
     // In a full implementation, this would aggregate volume across time slices
 }
 
-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
-
-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
-
-// 🚀 PHASE 3C: DELETED! Duplicate business logic moved to DataProcessor
-
-// Color/intensity now owned by render strategies (see HeatmapStrategy)
-
 // Property setters
 void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
     if (m_renderMode != mode) {
@@ -215,9 +207,6 @@ void UnifiedGridRenderer::clearData() {
     if (m_dataProcessor) {
         m_dataProcessor->clearData();
     }
-    
-    // Reset liquidity engine
-    // 🚀 PHASE 3: LiquidityTimeSeriesEngine now owned by DataProcessor, not UGR!
     
     // Clear rendering data
     m_visibleCells.clear();
@@ -330,28 +319,12 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
     } else event->ignore(); 
 }
 
-// 🚀 PHASE 3E: Mouse move delegation
-void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
-
-// 🚀 PHASE 3E: Mouse release delegation
-void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->setViewportSize(width(), height()); m_viewState->handlePanEnd(); event->accept(); update(); m_geometryDirty.store(true); } }
-
-// 🚀 PHASE 3E: Wheel event delegation
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
     if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
         m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
         m_geometryDirty.store(true); update(); event->accept(); 
     } else event->ignore(); 
 }
-
-// 🚀 PHASE 3E: Performance API - Pure delegation to SentinelMonitor
-void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
-QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
-double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
-double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
-double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
-
-// 🚀 NEW MODULAR ARCHITECTURE (V2) IMPLEMENTATION
 
 void UnifiedGridRenderer::initializeV2Architecture() {
     // Register metatypes for cross-thread signal/slot connections
@@ -404,7 +377,7 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     m_dataProcessor->startProcessing();
 }
 
-// PHASE 2.1: Dense data access - set cache on both UGR and DataProcessor
+// Dense data access - set cache on both UGR and DataProcessor
 void UnifiedGridRenderer::setDataCache(DataCache* cache) {
     m_dataCache = cache;
     
@@ -490,8 +463,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
     return sceneNode;
 }
 
-// 🚀 V2 VIEWPORT DELEGATION
-
 // QML API - Minimal implementations for Q_PROPERTY/Q_INVOKABLE compatibility
 void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
@@ -507,3 +478,10 @@ qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_v
 double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
 double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
 QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
+void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
+double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
+double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
+double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
+void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
+void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->setViewportSize(width(), height()); m_viewState->handlePanEnd(); event->accept(); update(); m_geometryDirty.store(true); } }

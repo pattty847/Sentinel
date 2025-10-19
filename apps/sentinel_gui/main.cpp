@@ -26,14 +26,10 @@ int main(int argc, char *argv[])
     std::cout << "🚀 [Sentinel GPU Trading Terminal Starting...]" << std::endl;
     QApplication app(argc, argv);
     
-    // PHASE 1.3: Consolidated type registrations (no duplicates)
     qRegisterMetaType<Trade>();
     qRegisterMetaType<OrderBook>();
     qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
-    
-    // PHASE 2.1: Dense-only signal uses QString productId (no complex type needed)
-    
-    // 🎯 PHASE 5: Pure grid-only QML component registration
+
     std::cout << "🎯 Registering pure grid-only QML components..." << std::endl;
     
     qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");

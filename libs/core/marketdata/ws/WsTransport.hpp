@@ -2,7 +2,7 @@
 #include <functional>
 #include <string>
 
-// Phase 3 scaffold: Pure transport interface (no provider logic)
+// Pure transport interface (no provider logic)
 class WsTransport {
 public:
     using MessageCb = std::function<void(std::string)>; // own the data to avoid dangling views

@@ -1,6 +1,3 @@
-# =============================================================================
-# PHASE 5: MARKET DATA REFACTOR TESTS (Standalone)
-# =============================================================================
 
 # Find Qt components needed for tests
 find_package(Qt6 REQUIRED COMPONENTS Core Test)
@@ -53,7 +50,7 @@ add_custom_target(marketdata_tests
         test_message_dispatcher
         test_subscription_manager
         test_datacache_sink_adapter
-    COMMENT "Running Phase 5 market data refactor tests"
+    COMMENT "Running market data refactor tests"
 )
 
-message(STATUS "Phase 5 marketdata tests configured (3 test suites)")
+message(STATUS "Marketdata tests configured (3 test suites)")

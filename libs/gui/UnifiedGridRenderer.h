@@ -173,10 +173,7 @@ public:
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
-    // PHASE 2.1: Dense data access
     void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
-    
-    // PHASE 2.2: Unified monitoring access
     void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
     
     // 🔥 PAN/ZOOM CONTROLS
@@ -199,11 +196,11 @@ public slots:
     // Real-time data integration
     void onTradeReceived(const Trade& trade);
     
-    // PHASE 2.1: Dense-only order book signal (no sparse conversion)
+    // Dense-only order book signal (no sparse conversion)
     void onLiveOrderBookUpdated(const QString& productId);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
     
-    // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
+    // Automatic price resolution adjustment on viewport changes
     void onViewportChanged();
 
 signals:
@@ -236,34 +233,25 @@ private:
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
-    
-    // V2 data processing methods
     void updateVisibleCells();
     void updateVolumeProfile();
     
-    // PHASE 2.1: Dense data access
     class DataCache* m_dataCache = nullptr;
     
-    // 🚀 PHASE 3C: Liquidity business logic moved to DataProcessor
-    
-    // Color calculation methods (delegated to strategies in V2)
-    // Color/intensity delegated to strategies; no duplicates here
-    
-    // 🚀 NEW MODULAR ARCHITECTURE (V2)
     std::unique_ptr<GridViewState> m_viewState;
-    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;  // PHASE 2.2: Unified monitoring
+    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
     std::unique_ptr<DataProcessor> m_dataProcessor;
-    std::unique_ptr<QThread> m_dataProcessorThread;  // Worker thread for DataProcessor
+    std::unique_ptr<QThread> m_dataProcessorThread;
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
     std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
     std::unique_ptr<IRenderStrategy> m_candleStrategy;
-    
-    // Helper methods for V2 architecture
+
     IRenderStrategy* getCurrentStrategy() const;
+    
     void initializeV2Architecture();
+    
     QSGNode* updatePaintNodeV2(QSGNode* oldNode);
 
 public:
-    // 🚀 PHASE 3: DataProcessor access for signal routing
     DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }
 };

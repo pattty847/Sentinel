@@ -1,4 +1,3 @@
-# Phase 4: Core grid components (always included)
 set(GRID_CORE_SOURCES
     # Main window and controllers
     MainWindowGpu.cpp
@@ -43,11 +42,7 @@ set(GRID_CORE_SOURCES
     render/strategies/CandleStrategy.cpp
 )
 
-# 🎯 PHASE 5: Legacy components ANNIHILATED! Pure grid-only now!
-
-# 🎯 PHASE 5: Pure grid-only configuration
 set(GUI_SOURCES ${GRID_CORE_SOURCES})
-message(STATUS "🎯 PHASE 5: Building PURE GRID-ONLY components - legacy DESTROYED!")
 
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})
@@ -65,7 +60,7 @@ target_include_directories(sentinel_gui_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 target_link_libraries(sentinel_gui_lib
@@ -79,7 +74,7 @@ target_link_libraries(sentinel_gui_lib
         Qt::Quick
         Qt::Qml
         Qt::QuickWidgets
-        Boost::system
+        Boost::headers
         OpenSSL::SSL
         OpenSSL::Crypto
 )
@@ -102,11 +97,8 @@ set(CMAKE_AUTORCC ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(sentinel_gui_lib PRIVATE
         -Wall -Wextra
-        -Wno-unused-parameter  # Temporary for legacy code
+        -Wno-unused-parameter
         -Wno-sign-conversion   # Qt/Boost has many sign conversions
         -Wno-shadow           # Qt macros cause shadow warnings
     )
 endif()
-
-# 🎯 PHASE 5: Legacy build system ANNIHILATED! 
-# No more conditional builds - pure grid supremacy! 

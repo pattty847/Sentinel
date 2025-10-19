@@ -16,8 +16,11 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include "Cpp20Utils.hpp"
 #include <thread>
 #include <chrono>
+#include <span>
+#include <utility>
 #include <QString>
 #include <QMetaObject>
+#include <QMetaType>
 #include <QPointer>
 #include <format>    // std::format for efficient string formatting
 
@@ -29,6 +32,9 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     , m_cache(cache)
     , m_monitor(monitor)
 {
+    qRegisterMetaType<BookDelta>("BookDelta");
+    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
+
     // Configure SSL context
     m_sslCtx.set_default_verify_paths();
     m_sslCtx.set_verify_mode(ssl::verify_peer);
@@ -181,7 +187,7 @@ void MarketDataCore::scheduleReconnect() {
         
         sLog_Data("🔄 Attempting reconnection...");
         
-        // 🚀 PHASE 2.1: Record network reconnection
+        // Record network reconnection
         if (m_monitor) {
             m_monitor->recordNetworkReconnect();
         }
@@ -233,12 +239,12 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     
-    // 🚀 PHASE 2.1: Record message arrival time for latency analysis
+    // Record message arrival time for latency analysis
     auto arrival_time = std::chrono::system_clock::now();
     
     std::string channel = message.value("channel", "");
     
-    // Phase 3: Minimal dispatcher wiring for non-data events (ack/errors)
+    // Minimal dispatcher wiring for non-data events (ack/errors)
     // Keep existing hot-path handlers for trades and order book intact.
     {
         auto result = MessageDispatcher::parse(message);
@@ -281,7 +287,7 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         // Store through sink adapter
         m_sink.onTrade(trade);
         
-        // 🚀 PHASE 2.1: Record trade processed for throughput tracking
+        // Record trade processed for throughput tracking
         if (m_monitor) {
             m_monitor->recordTradeProcessed(trade);
         }
@@ -321,7 +327,7 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
         std::string trade_timestamp_str = trade_data["time"];
         trade.timestamp = Cpp20Utils::parseISO8601(trade_timestamp_str);
         
-        // 🚀 PHASE 2.1: Record trade latency (exchange → arrival)
+        // Record trade latency (exchange → arrival)
         if (m_monitor) {
             m_monitor->recordTradeLatency(trade.timestamp, arrival_time);
         }
@@ -334,14 +340,14 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
 
 void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
                                        const std::chrono::system_clock::time_point& arrival_time) {
-    // PHASE 1.4: Parse exchange timestamp from root-level JSON
+    // Parse exchange timestamp from root-level JSON
     std::chrono::system_clock::time_point exchange_timestamp = std::chrono::system_clock::now();
     if (message.contains("timestamp")) {
         // Parse ISO8601 timestamp: "2023-02-09T20:32:50.714964855Z"
         std::string timestamp_str = message["timestamp"];
         exchange_timestamp = Cpp20Utils::parseISO8601(timestamp_str);
         
-        // 🚀 PHASE 2.1: Record order book latency (exchange → arrival)
+        // Record order book latency (exchange → arrival)
         if (m_monitor) {
             m_monitor->recordOrderBookLatency(exchange_timestamp, arrival_time);
         }
@@ -404,34 +410,55 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     if (!event.contains("updates") || product_id.empty()) return;
     
     // UPDATE: Apply incremental changes to stateful order book
-    int updateCount = 0;
-    
+    thread_local std::vector<BookLevelUpdate> levelUpdates;
+    levelUpdates.clear();
+    levelUpdates.reserve(event["updates"].size());
+
     for (const auto& update : event["updates"]) {
         if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
             continue;
         }
-        
+
         std::string side = update["side"];
+        if (side == "offer") {
+            side = "ask";
+        }
+
+        const bool isBid = (side == "bid");
+        if (!isBid && side != "ask") {
+            continue;
+        }
+
         double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
         double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-        
-        // Apply update to live order book (handles add/update/remove automatically)
-        if (side == "offer") side = "ask"; // normalize
-        m_cache.updateLiveOrderBook(product_id, side, price, quantity, exchange_timestamp);
-        updateCount++;
+
+        levelUpdates.push_back(BookLevelUpdate{isBid, price, quantity});
     }
+
+    thread_local std::vector<BookDelta> deltas;
+    if (!levelUpdates.empty()) {
+        m_cache.applyLiveOrderBookUpdates(product_id,
+                                          std::span<const BookLevelUpdate>(levelUpdates.data(), levelUpdates.size()),
+                                          exchange_timestamp,
+                                          deltas);
+    } else {
+        deltas.clear();
+    }
+    const int updateCount = static_cast<int>(deltas.size());
     
-    // PHASE 2.1: Direct dense-only signal - NO CONVERSION!
+    // Direct dense-only signal - NO CONVERSION!
+    std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
+    deltas.clear();
     {
         QPointer<MarketDataCore> self(this);
         QString productIdQ = QString::fromStdString(product_id);
-        QMetaObject::invokeMethod(this, [self, productIdQ]() {
+        QMetaObject::invokeMethod(this, [self, productIdQ, deltasMove = std::move(deltasPayload)]() mutable {
             if (!self) return;
-            emit self->liveOrderBookUpdated(productIdQ);
+            emit self->liveOrderBookUpdated(productIdQ, deltasMove);
         }, Qt::QueuedConnection);
     }
     
-    // 🚀 PHASE 2.1: Record order book update metrics
+    // Record order book update metrics
     const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
     size_t bidCount = liveBook.getBidCount();
     size_t askCount = liveBook.getAskCount();

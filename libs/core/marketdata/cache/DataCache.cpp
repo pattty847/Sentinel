@@ -13,6 +13,7 @@ Assumptions: Assumes order book updates can be applied incrementally to the stor
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <mutex>
+#include <span>
 #include <QString>
 
 void DataCache::addTrade(const Trade& t) {
@@ -114,53 +115,114 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_bids.resize(size, 0.0);
     m_asks.resize(size, 0.0);
 
+    m_nonZeroBidCount = 0;
+    m_nonZeroAskCount = 0;
+    m_totalBidVolume = 0.0;
+    m_totalAskVolume = 0.0;
+
     sLog_App(QString("🏗️  O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
               .arg(QString::fromStdString(m_productId)).arg(size)
               .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
 }
 
-void LiveOrderBook::applyUpdate(const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp) {
+void LiveOrderBook::applyUpdates(std::span<const BookLevelUpdate> updates,
+                                 std::chrono::system_clock::time_point exchange_timestamp,
+                                 std::vector<BookDelta>* outDeltas) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Bounds check
-    // CHECKPOINT: This is a potential performance bottleneck. We should consider using a more efficient bounds check.
-    if (price < m_min_price || price > m_max_price) {
-        //sLog_Data(QString("⚠️ Price %1 is out of configured book bounds [%2, %3] for %4. Ignoring update.")
-        //            .arg(price).arg(m_min_price).arg(m_max_price).arg(QString::fromStdString(m_productId)));
+    if (updates.empty()) {
         return;
     }
 
-    size_t index = price_to_index(price);
-    m_lastUpdate = exchange_timestamp;  // PHASE 1.4: Use exchange timestamp, not system time!
+    if (outDeltas) {
+        outDeltas->clear();
+        outDeltas->reserve(updates.size());
+    }
 
-    if (side == "bid") {
-        if (index < m_bids.size()) {
-            m_bids[index] = quantity;
-        }
-    } else if (side == "offer" || side == "ask") {
-        if (index < m_asks.size()) {
-            m_asks[index] = quantity;
-        }
+    m_lastUpdate = exchange_timestamp;  // Use exchange timestamp, not system time!
+
+    for (const auto& update : updates) {
+        applyLevelLocked(update.isBid, update.price, update.quantity, outDeltas);
     }
 }
 
 size_t LiveOrderBook::getBidCount() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    // Count non-zero elements
-    return std::count_if(m_bids.begin(), m_bids.end(), [](double q){ return q > 0.0; });
+    return m_nonZeroBidCount;
 }
 
 size_t LiveOrderBook::getAskCount() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    // Count non-zero elements
-    return std::count_if(m_asks.begin(), m_asks.end(), [](double q){ return q > 0.0; });
+    return m_nonZeroAskCount;
+}
+
+double LiveOrderBook::getBidVolume() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_totalBidVolume;
+}
+
+double LiveOrderBook::getAskVolume() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_totalAskVolume;
 }
 
 bool LiveOrderBook::isEmpty() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    // Check if all elements are zero
-    return std::all_of(m_bids.begin(), m_bids.end(), [](double q){ return q == 0.0; }) &&
-           std::all_of(m_asks.begin(), m_asks.end(), [](double q){ return q == 0.0; });
+    return m_nonZeroBidCount == 0 && m_nonZeroAskCount == 0;
+}
+
+void LiveOrderBook::applyLevelLocked(bool isBid,
+                                     double price,
+                                     double quantity,
+                                     std::vector<BookDelta>* outDeltas) {
+    if (price < m_min_price || price > m_max_price || m_tick_size <= 0.0) {
+        return;
+    }
+
+    size_t index = price_to_index(price);
+    auto& levels = isBid ? m_bids : m_asks;
+    if (index >= levels.size()) {
+        return;
+    }
+
+    double& slot = levels[index];
+    const double previous = slot;
+    const double newValue = quantity > 0.0 ? quantity : 0.0;
+
+    if (previous == newValue) {
+        return;
+    }
+
+    auto& totalVolume = isBid ? m_totalBidVolume : m_totalAskVolume;
+    auto& nonZeroLevels = isBid ? m_nonZeroBidCount : m_nonZeroAskCount;
+
+    const bool wasNonZero = previous > 0.0;
+    const bool isNonZero = newValue > 0.0;
+
+    if (wasNonZero) {
+        totalVolume -= previous;
+    }
+    if (isNonZero) {
+        totalVolume += newValue;
+    }
+
+    if (wasNonZero != isNonZero) {
+        if (isNonZero) {
+            ++nonZeroLevels;
+        } else if (nonZeroLevels > 0) {
+            --nonZeroLevels;
+        }
+    }
+
+    slot = newValue;
+
+    if (totalVolume < 0.0) {
+        totalVolume = 0.0;
+    }
+
+    if (outDeltas) {
+        outDeltas->push_back({static_cast<uint32_t>(index), static_cast<float>(newValue), isBid});
+    }
 }
 
 // 🔥 NEW: DataCache LiveOrderBook Methods
@@ -183,23 +245,30 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::ve
         liveBook.initialize(75000.0, 125000.0, 0.01);
     }
 
-    // Apply the snapshot levels to the new book structure - PHASE 1.4: Use exchange timestamp
+    // Apply the snapshot levels to the new book structure - Use exchange timestamp
+    std::vector<BookLevelUpdate> snapshotUpdates;
+    snapshotUpdates.reserve(bids.size() + asks.size());
     for (const auto& level : bids) {
-        liveBook.applyUpdate("bid", level.price, level.size, exchange_timestamp);
+        snapshotUpdates.push_back(BookLevelUpdate{true, level.price, level.size});
     }
     for (const auto& level : asks) {
-        liveBook.applyUpdate("ask", level.price, level.size, exchange_timestamp);
+        snapshotUpdates.push_back(BookLevelUpdate{false, level.price, level.size});
     }
-    
+
+    liveBook.applyUpdates(snapshotUpdates, exchange_timestamp, nullptr);
+
     sLog_Data(QString("🔥 DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
-void DataCache::updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp) {
+void DataCache::applyLiveOrderBookUpdates(const std::string& symbol,
+                                          std::span<const BookLevelUpdate> updates,
+                                          std::chrono::system_clock::time_point exchange_timestamp,
+                                          std::vector<BookDelta>& outDeltas) {
     std::unique_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     auto it = m_liveBooks.find(symbol);
     if (it != m_liveBooks.end()) {
-        it->second.applyUpdate(side, price, quantity, exchange_timestamp);  // PHASE 1.4: Pass exchange timestamp
+        it->second.applyUpdates(updates, exchange_timestamp, &outDeltas);  // Pass exchange timestamp
     } else {
         // If book doesn't exist, we can't initialize it without a snapshot.
         // The first message for a product MUST be a snapshot.
@@ -219,7 +288,7 @@ std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& 
         const auto& liveBook = it->second;
         auto book = std::make_shared<OrderBook>();
         book->product_id = liveBook.getProductId();
-        book->timestamp = liveBook.getLastUpdate();  // PHASE 1.4: Use exchange timestamp, not system time!
+        book->timestamp = liveBook.getLastUpdate();  // Use exchange timestamp, not system time!
 
         // Convert dense LiveOrderBook to sparse OrderBook format
         const auto& denseBids = liveBook.getBids();
@@ -247,7 +316,7 @@ std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& 
     return nullptr; // Return nullptr if not found
 }
 
-// PHASE 2.1: Direct dense access (no conversion)
+// Direct dense access (no conversion)
 const LiveOrderBook& DataCache::getDirectLiveOrderBook(const std::string& symbol) const {
     std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
     

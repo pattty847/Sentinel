@@ -58,7 +58,7 @@ public:
 
 signals:
     void tradeReceived(const Trade& trade);
-    void liveOrderBookUpdated(const QString& productId);
+    void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
 
@@ -110,7 +110,7 @@ private:
     // Beast transport owns resolver/websocket/buffer state internally
     net::steady_timer               m_reconnectTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
-    std::unique_ptr<BeastWsTransport> m_transport; // Phase 3: not yet used for I/O
+    std::unique_ptr<BeastWsTransport> m_transport; // not yet used for I/O
     
     std::atomic<bool>               m_running{false};
     std::atomic<bool>               m_connected{false};

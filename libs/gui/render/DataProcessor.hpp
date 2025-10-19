@@ -22,7 +22,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include "GridTypes.hpp"
 
 class GridViewState;
-class DataCache;  // 🚀 Forward declaration
+class DataCache;
 
 class DataProcessor : public QObject {
     Q_OBJECT
@@ -35,16 +35,16 @@ public slots:
     // Data ingestion (slots for cross-thread invocation)
     void onTradeReceived(const Trade& trade);
     void onOrderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
-    void onLiveOrderBookUpdated(const QString& productId);  // Dense LiveOrderBook signal handler
+    void onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);  // Dense LiveOrderBook signal handler
     
-    // 🎯 THREADING FIX: Move updateVisibleCells to slots for cross-thread calls
+    // Move updateVisibleCells to slots for cross-thread calls
     void updateVisibleCells();
 
 public:
     
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
-    void setDataCache(DataCache* cache) { m_dataCache = cache; }  // 🚀 PHASE 3: Dependency injection
+    void setDataCache(DataCache* cache) { m_dataCache = cache; }
     
     // Data access
     bool hasValidOrderBook() const { return m_hasValidOrderBook; }
@@ -55,12 +55,10 @@ public:
     void startProcessing();
     void stopProcessing();
     
-    // 🚀 PHASE 3: Business logic methods moved from UGR
     void createCellsFromLiquiditySlice(const struct LiquidityTimeSlice& slice);
     void createLiquidityCell(const struct LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
     QRectF timeSliceToScreenRect(const struct LiquidityTimeSlice& slice, double price) const;
     
-    // 🚀 PHASE 3: LTSE delegation methods (moved from UGR)
     void setPriceResolution(double resolution);
     double getPriceResolution() const;
     void addTimeframe(int timeframe_ms);
@@ -75,11 +73,9 @@ public:
     BandMode getBandMode() const { return m_bandMode; }
     double getBandValue() const { return m_bandValue; }
     
-    // 🚀 PHASE 3: Manual timeframe management (preserve existing logic)
     void setTimeframe(int timeframe_ms);
     bool isManualTimeframeSet() const;
     
-    // 🚀 PHASE 3: Data access for UGR slim adapter
     const std::vector<struct CellInstance>& getVisibleCells() const { return m_visibleCells; }
 
 signals:
@@ -96,7 +92,7 @@ private:
     // Components
     GridViewState* m_viewState = nullptr;
     LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
-    DataCache* m_dataCache = nullptr;  // 🚀 PHASE 3: Access to dense LiveOrderBook
+    DataCache* m_dataCache = nullptr;
     
     // Data state
     std::shared_ptr<const OrderBook> m_latestOrderBook;
@@ -106,15 +102,14 @@ private:
     QTimer* m_snapshotTimer = nullptr;
     mutable std::mutex m_dataMutex;
     
-    // 🚀 PHASE 3: Manual timeframe management (moved from UGR)
+    // Manual timeframe management
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
     int64_t m_currentTimeframe_ms = 100;
     
-    // 🚀 PHASE 3: Visible cells storage (moved from UGR)
     std::vector<struct CellInstance> m_visibleCells;
     
-    // 🎯 PRICE LOD: Dynamic price resolution
+    // Dynamic price resolution
     double m_priceResolution = 1.0;
 
     // Band-based ingestion settings (centered at mid price)

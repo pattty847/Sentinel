@@ -80,11 +80,6 @@ add_test(NAME OrderBookStateTest COMMAND test_order_book_state)
 # add_executable(test_rendering_performance test_rendering_performance.cpp)
 # target_link_libraries(test_rendering_performance PRIVATE ${COMMON_TEST_LIBS})
 # add_test(NAME RenderingPerformanceTest COMMAND test_rendering_performance)
-
-# =============================================================================
-# PHASE 5: MARKET DATA REFACTOR TESTS
-# =============================================================================
-
 # Test Target: test_message_dispatcher
 add_executable(test_message_dispatcher marketdata/test_message_dispatcher.cpp)
 target_include_directories(test_message_dispatcher PRIVATE
@@ -138,14 +133,13 @@ add_custom_target(professional_tests
     COMMENT "Running comprehensive professional test suite"
 )
 
-# Custom target to run Phase 5 market data tests
 add_custom_target(marketdata_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "MessageDispatcher|SubscriptionManager|DataCacheSinkAdapter"
     DEPENDS
         test_message_dispatcher
         test_subscription_manager
         test_datacache_sink_adapter
-    COMMENT "Running Phase 5 market data refactor tests"
+    COMMENT "Running market data refactor tests"
 )
 
 # Custom target to run performance validation

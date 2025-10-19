@@ -35,7 +35,7 @@ add_library(sentinel_core
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(Boost REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 # jwt-cpp is fetched via FetchContent in main CMakeLists.txt
@@ -44,11 +44,11 @@ target_include_directories(sentinel_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(sentinel_core 
+target_link_libraries(sentinel_core
     PUBLIC
         Qt6::Core
     PRIVATE
-        Boost::system
+        Boost::headers
         nlohmann_json::nlohmann_json
         OpenSSL::SSL
         OpenSSL::Crypto

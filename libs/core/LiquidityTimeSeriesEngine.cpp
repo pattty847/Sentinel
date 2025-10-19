@@ -15,7 +15,7 @@ Assumptions: Time bucketing logic correctly assigns updates to their respective 
 #include <cmath>
 #include <set>
 
-// LiquidityTimeSlice implementation - PHASE 2.2: O(1) tick-based access
+// LiquidityTimeSlice implementation - O(1) tick-based access
 double LiquidityTimeSlice::getDisplayValue(double price, bool isBid, int displayMode) const {
     const auto* metrics = getMetrics(price, isBid);
     if (!metrics) return 0.0;
@@ -241,9 +241,7 @@ void LiquidityTimeSeriesEngine::setDisplayMode(LiquidityDisplayMode mode) {
 
 // Private implementation methods
 
-void LiquidityTimeSeriesEngine::updateAllTimeframes(const OrderBookSnapshot& snapshot) {
-    // PHASE 2.3: ROLLING SUM OPTIMIZATION - Only update timeframes that need it!
-    
+void LiquidityTimeSeriesEngine::updateAllTimeframes(const OrderBookSnapshot& snapshot) {    
     for (int64_t timeframe_ms : m_timeframes) {
         // Calculate the slice boundary for this timeframe
         int64_t sliceStart = (snapshot.timestamp_ms / timeframe_ms) * timeframe_ms;
@@ -286,7 +284,7 @@ void LiquidityTimeSeriesEngine::updateAllTimeframes(const OrderBookSnapshot& sna
                 }
             }
         }
-        sLog_Data("🚀 PHASE 2.3: Rolling optimization - " << actualUpdates << "/" << m_timeframes.size() 
+        sLog_Data("🚀 Rolling optimization - " << actualUpdates << "/" << m_timeframes.size() 
                  << " timeframes updated (saved " << (m_timeframes.size() - actualUpdates) << " redundant updates)");
     }
 }
@@ -319,10 +317,8 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
 }
 
 void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot) {
-    // PHASE 2.4: Increment global sequence for version stamp presence detection
     ++m_globalSequence;
     
-    // PHASE 2.2: Determine tick range for this snapshot
     Tick minSnapshotTick = std::numeric_limits<Tick>::max();
     Tick maxSnapshotTick = std::numeric_limits<Tick>::min();
     
@@ -372,15 +368,13 @@ void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, co
         }
     }
     
-    // PHASE 2.2: O(1) vector access instead of O(log N) map access
-    // PHASE 2.4: O(1) version stamp marking
     // Process bids
     for (const auto& [price, size] : snapshot.bids) {
         Tick tick = priceToTick(price);
         size_t index = static_cast<size_t>(tick - slice.minTick);
         if (index < slice.bidMetrics.size()) {
             updatePriceLevelMetrics(slice.bidMetrics[index], size, snapshot.timestamp_ms, slice);
-            slice.bidMetrics[index].lastSeenSeq = m_globalSequence;  // PHASE 2.4: Mark as present this snapshot
+            slice.bidMetrics[index].lastSeenSeq = m_globalSequence;
         }
     }
     
@@ -390,7 +384,7 @@ void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, co
         size_t index = static_cast<size_t>(tick - slice.minTick);
         if (index < slice.askMetrics.size()) {
             updatePriceLevelMetrics(slice.askMetrics[index], size, snapshot.timestamp_ms, slice);
-            slice.askMetrics[index].lastSeenSeq = m_globalSequence;  // PHASE 2.4: Mark as present this snapshot
+            slice.askMetrics[index].lastSeenSeq = m_globalSequence;
         }
     }
     
@@ -425,7 +419,6 @@ void LiquidityTimeSeriesEngine::updatePriceLevelMetrics(
 }
 
 void LiquidityTimeSeriesEngine::updateDisappearingLevels(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot) {
-    // PHASE 2.4: O(1) VERSION STAMP DISAPPEARING LEVEL DETECTION!
     // No more O(L) scans - use sequence stamps for instant presence detection
     
     for (auto& metrics : slice.bidMetrics) {
@@ -445,12 +438,11 @@ void LiquidityTimeSeriesEngine::updateDisappearingLevels(LiquidityTimeSlice& sli
     // Debug: Log efficiency gains for first few snapshots
     static int disappearCount = 0;
     if (++disappearCount <= 5) {
-        sLog_Data("🚀 PHASE 2.4: O(1) version stamp disappearing level detection - sequence " << m_globalSequence);
+        sLog_Data("🚀 O(1) version stamp disappearing level detection - sequence " << m_globalSequence);
     }
 }
 
 void LiquidityTimeSeriesEngine::finalizeLiquiditySlice(LiquidityTimeSlice& slice) {
-    // PHASE 2.2: Vector-based final calculations for all price levels
     for (auto& metrics : slice.bidMetrics) {
         if (metrics.snapshotCount > 0) {  // Only process levels that have data
             // Calculate final resting liquidity based on persistence

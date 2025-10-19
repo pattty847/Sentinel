@@ -52,7 +52,7 @@ struct OrderBookSnapshot {
     }
 };
 
-// PHASE 2.2: Tick-based price indexing for O(1) performance
+// Tick-based price indexing for O(1) performance
 using Tick = int32_t;  // Price levels as integer ticks for O(1) vector access
 
 // Aggregated liquidity data for one time bucket
@@ -61,7 +61,7 @@ struct LiquidityTimeSlice {
     int64_t endTime_ms;
     int64_t duration_ms;
     
-    // PHASE 2.2: Tick-based price range for this slice
+    // Tick-based price range for this slice
     Tick minTick = 0;      // Lowest price tick seen in this slice
     Tick maxTick = 0;      // Highest price tick seen in this slice
     double tickSize = 1.0; // Price increment per tick ($1 default)
@@ -77,7 +77,7 @@ struct LiquidityTimeSlice {
         int64_t firstSeen_ms = 0;            // When this price level first appeared
         int64_t lastSeen_ms = 0;             // When this price level last had liquidity
         
-        // PHASE 2.4: Version stamp for O(1) presence detection
+        // Version stamp for O(1) presence detection
         uint32_t lastSeenSeq = 0;            // Global sequence number of last snapshot containing this level
         
         // Anti-spoofing detection
@@ -92,11 +92,11 @@ struct LiquidityTimeSlice {
         }
     };
     
-    // 🚀 PHASE 2.2: O(1) vector storage instead of O(log N) std::map
+    // 🚀 O(1) vector storage instead of O(log N) std::map
     std::vector<PriceLevelMetrics> bidMetrics;  // Index = (tick - minTick)
     std::vector<PriceLevelMetrics> askMetrics;  // Index = (tick - minTick)
     
-    // PHASE 2.2: Tick-based access methods
+    // Tick-based access methods
     Tick priceToTick(double price) const {
         return static_cast<Tick>(std::round(price / tickSize));
     }
@@ -115,7 +115,7 @@ struct LiquidityTimeSlice {
         return (index < metrics.size()) ? &metrics[index] : nullptr;
     }
     
-    // Get display value for rendering (PHASE 2.2: O(1) access)
+    // Get display value for rendering (O(1) access)
     double getDisplayValue(double price, bool isBid, int displayMode) const;
 };
 
@@ -144,13 +144,13 @@ private:
     // 🚀 TIMEFRAME SUGGESTION TRACKING: Only log when suggestion changes
     mutable int64_t m_lastSuggestedTimeframe = 0;
     
-    // PHASE 2.3: Efficient rolling timeframe tracking
+    // Efficient rolling timeframe tracking
     std::map<int64_t, LiquidityTimeSlice> m_currentSlices;
     
-    // PHASE 2.3: Track last update timestamps for each timeframe (rolling efficiency)
+    // Track last update timestamps for each timeframe (rolling efficiency)
     std::map<int64_t, int64_t> m_lastUpdateTimestamp;
     
-    // PHASE 2.4: Global sequence number for O(1) presence detection
+    // Global sequence number for O(1) presence detection
     uint32_t m_globalSequence = 0;
     
     // Configuration
@@ -209,7 +209,7 @@ private:
     // Cleanup
     void cleanupOldData();
     
-    // PHASE 2.2: Tick-based utilities
+    // Tick-based utilities
     Tick priceToTick(double price) const {
         return static_cast<Tick>(std::round(price / m_priceResolution));
     }

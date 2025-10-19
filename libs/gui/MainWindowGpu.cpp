@@ -16,7 +16,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "MainWindowGpu.h"
 #include "StatisticsController.h"
 #include "UnifiedGridRenderer.h"
-#include "render/DataProcessor.hpp"  // 🚀 PHASE 3: Include for signal routing
+#include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include <QQmlContext>
 #include <QDir>
@@ -56,7 +56,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     sLog_App("✅ QML components initialized");
     
     sLog_App("🔧 Connecting MarketData signals...");
-    // 🚀 PHASE 3: Connect signals after QML components are ready
     connectMarketDataSignals();
     sLog_App("✅ MarketData signals connected");
     
@@ -173,7 +172,6 @@ void MainWindowGPU::setupConnections() {
     connect(m_statsController, &StatisticsController::cvdUpdated, 
             this, &MainWindowGPU::onCVDUpdated);
     
-    // PHASE 1.2: Remove scattered QML connection setup - moved to constructor-based initialization
     sLog_App("✅ GPU MainWindow basic connections established");
 }
 
@@ -201,25 +199,24 @@ void MainWindowGPU::onCVDUpdated(double cvd) {
     m_cvdLabel->setText(QString("CVD: %1").arg(cvd, 0, 'f', 2));
 }
 
-// 🚀 GEMINI'S REFACTOR: Signal connections moved from onSubscribe to constructor
 void MainWindowGPU::connectMarketDataSignals() {
     sLog_App("🔥 Setting up persistent MarketDataCore signal connections...");
     
     UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
     if (m_marketDataCore && unifiedGridRenderer) {
-        // PHASE 2.1: Provide dense data access to renderer
+        // Provide dense data access to renderer
         unifiedGridRenderer->setDataCache(m_dataCache.get());
         
-        // PHASE 2.2: Provide unified monitoring to renderer
+        // Provide unified monitoring to renderer
         unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
         
         // Get DataProcessor from UGR to route signals correctly
         auto dataProcessor = unifiedGridRenderer->getDataProcessor();
         if (dataProcessor) {
-            // 🚀 PHASE 3: Route LiveOrderBook signal to DataProcessor (THE FIX!)
+            // Route LiveOrderBook signal to DataProcessor (THE FIX!)
             connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
                     dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
-            sLog_App("🚀 PHASE 3: LiveOrderBook signal routed to DataProcessor!");
+            sLog_App("🚀 LiveOrderBook signal routed to DataProcessor!");
         }
         
         // Trade signal still goes to UGR
@@ -250,9 +247,9 @@ void MainWindowGPU::connectMarketDataSignals() {
     }
 }
 
-// PHASE 1.2: Proper QML component initialization without retry logic
+// Proper QML component initialization without retry logic
 void MainWindowGPU::initializeQMLComponents() {
-    sLog_App("🔥 PHASE 1.2: Initializing QML components with proper lifecycle management");
+    sLog_App("🔥 Initializing QML components with proper lifecycle management");
     
     // Check if QML loaded successfully during setupUI()
     if (m_gpuChart->status() == QQuickWidget::Error) {
@@ -274,7 +271,7 @@ void MainWindowGPU::initializeQMLComponents() {
         return;
     }
     
-    sLog_App("✅ PHASE 1.2: QML components verified and ready");
+    sLog_App("✅ QML components verified and ready");
     sLog_App("   → QML Root: AVAILABLE");
     sLog_App("   → UnifiedGridRenderer: AVAILABLE");
     
