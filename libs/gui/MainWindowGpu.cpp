@@ -19,6 +19,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include <QQmlContext>
+#include <QMetaObject>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -219,9 +220,22 @@ void MainWindowGPU::connectMarketDataSignals() {
             sLog_App("🚀 LiveOrderBook signal routed to DataProcessor!");
         }
         
-        // Trade signal still goes to UGR
-        connect(m_marketDataCore.get(), SIGNAL(tradeReceived(const Trade&)),
-                unifiedGridRenderer, SLOT(onTradeReceived(const Trade&)), Qt::QueuedConnection);
+        // Route trades through StatisticsController before forwarding to renderer
+        connect(
+            m_marketDataCore.get(),
+            &MarketDataCore::tradeReceived,
+            this,
+            [this, unifiedGridRenderer](const Trade& trade) {
+                m_statsController->processTrade(trade);
+                const Trade tradeCopy = trade;
+                QMetaObject::invokeMethod(
+                    unifiedGridRenderer,
+                    [unifiedGridRenderer, tradeCopy]() {
+                        unifiedGridRenderer->onTradeReceived(tradeCopy);
+                    },
+                    Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
         
         // Connection status feedback
         connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, 
