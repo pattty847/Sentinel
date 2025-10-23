@@ -37,7 +37,6 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include "../core/SentinelMonitor.hpp"
 
 // Forward declarations
-class StatisticsController;
 class ChartModeController;
 
 /**
@@ -53,7 +52,6 @@ public:
 
 private slots:
     void onSubscribe();
-    void onCVDUpdated(double cvd);
 
 private:
     void setupUI();
@@ -65,7 +63,6 @@ private:
     QQuickWidget* m_gpuChart;
     
     // UI Controls
-    QLabel* m_cvdLabel;
     QLabel* m_statusLabel;
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
@@ -74,6 +71,5 @@ private:
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<DataCache> m_dataCache;
     std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
-    StatisticsController* m_statsController;
     ChartModeController* m_modeController{nullptr};
 };

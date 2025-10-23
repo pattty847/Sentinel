@@ -14,7 +14,6 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QLineEdit>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
-#include "StatisticsController.h"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
@@ -131,13 +130,11 @@ void MainWindowGPU::setupUI() {
     context->setContextProperty("chartModeController", m_modeController);
     
     // Control panel
-    m_cvdLabel = new QLabel("CVD: N/A", this);
     m_statusLabel = new QLabel("🔴 Disconnected", this);
     m_symbolInput = new QLineEdit("BTC-USD", this);
     m_subscribeButton = new QPushButton("🚀 Subscribe", this);
     
     // Styling
-    m_cvdLabel->setStyleSheet("QLabel { color: white; font-size: 16px; font-weight: bold; }");
     m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
     m_symbolInput->setStyleSheet("QLineEdit { padding: 8px; font-size: 14px; }");
     m_subscribeButton->setStyleSheet("QPushButton { padding: 8px 16px; font-size: 14px; font-weight: bold; }");
@@ -155,7 +152,6 @@ void MainWindowGPU::setupUI() {
     controlLayout->addWidget(m_symbolInput);
     controlLayout->addWidget(m_subscribeButton);
     controlLayout->addStretch();
-    controlLayout->addWidget(m_cvdLabel);
     controlLayout->addWidget(m_statusLabel);
     controlGroup->setLayout(controlLayout);
     
@@ -164,14 +160,8 @@ void MainWindowGPU::setupUI() {
 }
 
 void MainWindowGPU::setupConnections() {
-    m_statsController = new StatisticsController(this);
-
     // UI connections
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
-    
-    // Stats pipeline
-    connect(m_statsController, &StatisticsController::cvdUpdated, 
-            this, &MainWindowGPU::onCVDUpdated);
     
     sLog_App("✅ GPU MainWindow basic connections established");
 }
@@ -196,10 +186,6 @@ void MainWindowGPU::onSubscribe() {
     }
 }
 
-void MainWindowGPU::onCVDUpdated(double cvd) {
-    m_cvdLabel->setText(QString("CVD: %1").arg(cvd, 0, 'f', 2));
-}
-
 void MainWindowGPU::connectMarketDataSignals() {
     sLog_App("🔥 Setting up persistent MarketDataCore signal connections...");
     
@@ -220,13 +206,12 @@ void MainWindowGPU::connectMarketDataSignals() {
             sLog_App("🚀 LiveOrderBook signal routed to DataProcessor!");
         }
         
-        // Route trades through StatisticsController before forwarding to renderer
+        // Route trades to renderer
         connect(
             m_marketDataCore.get(),
             &MarketDataCore::tradeReceived,
             this,
-            [this, unifiedGridRenderer](const Trade& trade) {
-                m_statsController->processTrade(trade);
+            [unifiedGridRenderer](const Trade& trade) {
                 const Trade tradeCopy = trade;
                 QMetaObject::invokeMethod(
                     unifiedGridRenderer,

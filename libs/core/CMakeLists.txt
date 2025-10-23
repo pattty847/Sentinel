@@ -4,8 +4,6 @@ project(sentinel_core)
 
 add_library(sentinel_core
     Cpp20Utils.hpp
-    CvdThresholdRule.cpp
-    CvdThresholdRule.h
     LiquidityTimeSeriesEngine.cpp
     LiquidityTimeSeriesEngine.h
     LockFreeQueue.h
@@ -19,17 +17,10 @@ add_library(sentinel_core
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
-    Rule.h
-    RuleEngine.cpp
-    RuleEngine.h
     SentinelLogging.cpp
     SentinelLogging.hpp
     SentinelMonitor.cpp
     SentinelMonitor.hpp
-    StatisticsController.cpp
-    StatisticsController.h
-    StatisticsProcessor.cpp
-    StatisticsProcessor.h
     marketdata/model/TradeData.h
 )
 
