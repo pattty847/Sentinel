@@ -318,6 +318,10 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
 
 void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, const OrderBookSnapshot& snapshot) {
     ++m_globalSequence;
+    // Guard against empty snapshots to avoid deriving invalid tick ranges
+    if (snapshot.bids.empty() && snapshot.asks.empty()) {
+        return; // Nothing to aggregate for this 100ms bucket
+    }
     
     Tick minSnapshotTick = std::numeric_limits<Tick>::max();
     Tick maxSnapshotTick = std::numeric_limits<Tick>::min();

@@ -46,7 +46,7 @@ DataProcessor::~DataProcessor() {
 }
 
 void DataProcessor::startProcessing() {
-    // 🚀 Base 100ms sampler: ensure continuous time buckets
+    // Base 100ms sampler: ensure continuous time buckets
     sLog_App("🚀 DataProcessor: Starting 100ms base sampler");
     if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
         m_snapshotTimer->start(100);
@@ -218,68 +218,93 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
     const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
     
     sLog_Render("🚀 DataProcessor processing dense LiveOrderBook - bids:" << liveBook.getBidCount() << " asks:" << liveBook.getAskCount());
-    
-    // Convert dense LiveOrderBook to sparse OrderBook for LTSE processing
-    // TODO: Eventually LTSE should accept dense format directly
+    // Build a mid-centered banded sparse snapshot from dense book
     OrderBook sparseBook;
     sparseBook.product_id = productId.toStdString();
     sparseBook.timestamp = std::chrono::system_clock::now();
-    
-    // Convert dense to sparse using a mid-price band (viewport-independent)
+
     const auto& denseBids = liveBook.getBids();
     const auto& denseAsks = liveBook.getAsks();
-    // Mid price
+
+    // Determine best bid/ask
     double bestBid = std::numeric_limits<double>::quiet_NaN();
     double bestAsk = std::numeric_limits<double>::quiet_NaN();
-    // Find bests via dense arrays
-    for (size_t i = denseBids.size(); i > 0; --i) { if (denseBids[i-1] > 0.0) { bestBid = liveBook.getMinPrice() + (static_cast<double>(i-1) * liveBook.getTickSize()); break; } }
-    for (size_t i = 0; i < denseAsks.size(); ++i) { if (denseAsks[i] > 0.0) { bestAsk = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize()); break; } }
+    size_t bestBidIdx = 0;
+    size_t bestAskIdx = 0;
+    for (size_t i = denseBids.size(); i > 0; --i) {
+        size_t idx = i - 1;
+        if (denseBids[idx] > 0.0) { bestBidIdx = idx; bestBid = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize()); break; }
+    }
+    for (size_t i = 0; i < denseAsks.size(); ++i) {
+        if (denseAsks[i] > 0.0) { bestAskIdx = i; bestAsk = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize()); break; }
+    }
     double mid = (!std::isnan(bestBid) && !std::isnan(bestAsk)) ? (bestBid + bestAsk) * 0.5
                : (!std::isnan(bestBid) ? bestBid : (!std::isnan(bestAsk) ? bestAsk : liveBook.getMinPrice() + 0.5 * (denseBids.size() * liveBook.getTickSize())));
+    
+    // Compute band width according to mode
+    // TODO: Make band width dynamic per-asset and user-configurable, and eventually
+    //       move banding to render-time (Phase 1+) so history isn't pruned at ingest.
     double halfBand = 0.0;
     switch (m_bandMode) {
         case BandMode::FixedDollar: halfBand = std::max(1e-6, m_bandValue); break;
         case BandMode::PercentMid:  halfBand = std::max(1e-6, std::abs(mid) * m_bandValue); break;
         case BandMode::Ticks:       halfBand = std::max(1.0, m_bandValue) * liveBook.getTickSize(); break;
     }
-    // Safety caps
-    const double maxHalfBand = (denseBids.size() * liveBook.getTickSize()) * 0.5;
+    // Ensure a sensible default if unset
+    if (halfBand <= 0.0) {
+        halfBand = 100.0; // $100 default window for BTC testing; TODO: derive from asset volatility/profile
+    }
+    // Clamp band to available data range
+    const double maxHalfBand = (std::max(denseBids.size(), denseAsks.size()) * liveBook.getTickSize()) * 0.5;
     halfBand = std::min(halfBand, maxHalfBand);
-    double bandMinPrice = mid - halfBand;
-    double bandMaxPrice = mid + halfBand;
-    
-    // Calculate index bounds for band window
-    size_t minIndex = std::max(0.0, (bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
-    size_t maxIndex = std::min(static_cast<double>(std::max(denseBids.size(), denseAsks.size())), 
-                              (bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
-    
-    // Convert bids (scan only visible range from highest to lowest price)
-    for (size_t i = std::min(maxIndex, denseBids.size()); i > minIndex && i > 0; --i) {
-        size_t idx = i - 1;
-        if (denseBids[idx] > 0.0) {
-            double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
-            sparseBook.bids.push_back({price, denseBids[idx]});
+    const double bandMinPrice = mid - halfBand;
+    const double bandMaxPrice = mid + halfBand;
+
+    // Convert bids (scan from highest to lowest within band)
+    if (!denseBids.empty()) {
+        size_t maxIndex = static_cast<size_t>(std::min<double>(denseBids.size(), std::ceil((bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize()) + 1));
+        size_t minIndex = static_cast<size_t>(std::max<double>(0.0, std::floor((bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize())));
+        for (size_t i = maxIndex; i > minIndex && i > 0; --i) {
+            size_t idx = i - 1;
+            double qty = denseBids[idx];
+            if (qty > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
+                sparseBook.bids.push_back({price, qty});
+            }
         }
     }
-    
-    // Convert asks (scan only visible range from lowest to highest price)
-    for (size_t i = minIndex; i < std::min(maxIndex, denseAsks.size()); ++i) {
-        if (denseAsks[i] > 0.0) {
-            double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
-            sparseBook.asks.push_back({price, denseAsks[i]});
+    // Convert asks (scan from lowest to highest within band)
+    if (!denseAsks.empty()) {
+        size_t minIndex = static_cast<size_t>(std::max<double>(0.0, std::floor((bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize())));
+        size_t maxIndex = static_cast<size_t>(
+            std::min<double>(denseAsks.size(), std::ceil((bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize()) + 1));
+        for (size_t i = minIndex; i < maxIndex; ++i) {
+            double qty = denseAsks[i];
+            if (qty > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
+                sparseBook.asks.push_back({price, qty});
+            }
         }
     }
-    
-    // Prime LTSE immediately and cache for sampler
-    m_liquidityEngine->addOrderBookSnapshot(sparseBook);
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_latestOrderBook = std::make_shared<OrderBook>(sparseBook);
-        m_hasValidOrderBook = true;
+
+    // Fallback: if band yielded no levels, inject top-of-book so LTSE advances time
+    if (sparseBook.bids.empty() && !std::isnan(bestBid)) {
+        sparseBook.bids.push_back({bestBid, denseBids[bestBidIdx]});
     }
-    
-    sLog_Data("🎯 DataProcessor: LiveOrderBook cached + primed snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size()
-             << " deltas=" << deltas.size());
+    if (sparseBook.asks.empty() && !std::isnan(bestAsk)) {
+        sparseBook.asks.push_back({bestAsk, denseAsks[bestAskIdx]});
+    }
+
+    if (!sparseBook.bids.empty() || !sparseBook.asks.empty()) {
+        m_liquidityEngine->addOrderBookSnapshot(sparseBook);
+        {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+            m_latestOrderBook = std::make_shared<OrderBook>(sparseBook);
+            m_hasValidOrderBook = true;
+        }
+        sLog_Data("🎯 DataProcessor: Primed LTSE with banded snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size()
+                 << " deltas=" << deltas.size());
+    }
     emit dataUpdated();
 }
 
