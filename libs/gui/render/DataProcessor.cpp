@@ -216,7 +216,26 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
     }
     
     const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
-    
+
+    // Phase 1: Dense ingestion path (behind feature flag)
+    if (m_useDenseIngestion) {
+        static thread_local std::vector<std::pair<uint32_t, double>> bidBuf;
+        static thread_local std::vector<std::pair<uint32_t, double>> askBuf;
+        constexpr size_t kMaxPerSide = 4000; // bounded ingestion per side
+
+        auto view = liveBook.captureDenseNonZero(bidBuf, askBuf, kMaxPerSide);
+        if (!view.bidLevels.empty() || !view.askLevels.empty()) {
+            m_liquidityEngine->addDenseSnapshot(view);
+            {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                // Keep m_latestOrderBook for viewport init via existing path (optional)
+                m_hasValidOrderBook = true;
+            }
+            emit dataUpdated();
+            return; // Do not execute sparse-banding path when dense path is enabled
+        }
+    }
+
     sLog_Render("🚀 DataProcessor processing dense LiveOrderBook - bids:" << liveBook.getBidCount() << " asks:" << liveBook.getAskCount());
     // Build a mid-centered banded sparse snapshot from dense book
     OrderBook sparseBook;

@@ -15,6 +15,7 @@ Assumptions: Assumes order book updates can be applied incrementally to the stor
 #include <mutex>
 #include <span>
 #include <QString>
+#include <utility>
 
 void DataCache::addTrade(const Trade& t) {
     // Use exclusive lock for writing
@@ -328,3 +329,40 @@ const LiveOrderBook& DataCache::getDirectLiveOrderBook(const std::string& symbol
     static LiveOrderBook empty;  // Return empty if not found
     return empty;
 } 
+
+// LiveOrderBook: captureDenseNonZero implementation
+LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
+    std::vector<std::pair<uint32_t, double>>& bidBuffer,
+    std::vector<std::pair<uint32_t, double>>& askBuffer,
+    size_t maxPerSide) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    bidBuffer.clear();
+    askBuffer.clear();
+    bidBuffer.reserve(std::min(maxPerSide, m_bids.size()));
+    askBuffer.reserve(std::min(maxPerSide, m_asks.size()));
+
+    // Collect non-zero bids from high to low (best bid downward)
+    for (size_t i = m_bids.size(); i-- > 0 && bidBuffer.size() < maxPerSide; ) {
+        double qty = m_bids[i];
+        if (qty > 0.0) {
+            bidBuffer.emplace_back(static_cast<uint32_t>(i), qty);
+        }
+    }
+
+    // Collect non-zero asks from low to high (best ask upward)
+    for (size_t i = 0; i < m_asks.size() && askBuffer.size() < maxPerSide; ++i) {
+        double qty = m_asks[i];
+        if (qty > 0.0) {
+            askBuffer.emplace_back(static_cast<uint32_t>(i), qty);
+        }
+    }
+
+    DenseBookSnapshotView view;
+    view.minPrice = m_min_price;
+    view.tickSize = m_tick_size;
+    view.timestamp = m_lastUpdate; // exchange timestamp
+    view.bidLevels = std::span<const std::pair<uint32_t, double>>(bidBuffer.data(), bidBuffer.size());
+    view.askLevels = std::span<const std::pair<uint32_t, double>>(askBuffer.data(), askBuffer.size());
+    return view;
+}

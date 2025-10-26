@@ -6,8 +6,8 @@
 #include <vector>
 #include <span>
 #include <cstdint>
-#include <map>
 #include <mutex>
+#include <utility>
 
 // An enumeration to represent the side of a trade in a type-safe way
 // This is better than using raw strings like "buy" or "sell"
@@ -189,6 +189,20 @@ public:
     
     // Exchange timestamp access
     std::chrono::system_clock::time_point getLastUpdate() const { return m_lastUpdate; }
+
+    // Thread-safe dense snapshot capture of non-zero levels (bounded)
+    struct DenseBookSnapshotView {
+        double minPrice = 0.0;
+        double tickSize = 1.0;
+        std::chrono::system_clock::time_point timestamp;
+        std::span<const std::pair<uint32_t, double>> bidLevels; // (index, quantity)
+        std::span<const std::pair<uint32_t, double>> askLevels; // (index, quantity)
+    };
+
+    DenseBookSnapshotView captureDenseNonZero(
+        std::vector<std::pair<uint32_t, double>>& bidBuffer,
+        std::vector<std::pair<uint32_t, double>>& askBuffer,
+        size_t maxPerSide) const;
 
 private:
     // Helper to convert a price to a vector index

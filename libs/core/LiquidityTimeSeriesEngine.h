@@ -166,6 +166,8 @@ public:
     // Core data interface
     void addOrderBookSnapshot(const OrderBook& book);
     void addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice);
+    // Dense ingestion path (Phase 1)
+    void addDenseSnapshot(const LiveOrderBook::DenseBookSnapshotView& view);
     
     // Query interface
     const LiquidityTimeSlice* getTimeSlice(int64_t timeframe_ms, int64_t timestamp_ms) const;

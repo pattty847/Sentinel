@@ -115,4 +115,7 @@ private:
     // Band-based ingestion settings (centered at mid price)
     BandMode m_bandMode = BandMode::PercentMid; // default to percentage of mid
     double m_bandValue = 0.01;                  // 1% default half-band (i.e., ±1%)
+
+    // Phase 1: feature gate for dense ingestion
+    bool m_useDenseIngestion = true;
 };

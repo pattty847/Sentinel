@@ -54,6 +54,28 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book) {
     addOrderBookSnapshot(book, -999999.0, 999999.0);
 }
 
+// Dense ingestion path: convert compact non-zero indices into snapshot and reuse existing pipeline
+void LiquidityTimeSeriesEngine::addDenseSnapshot(const LiveOrderBook::DenseBookSnapshotView& view) {
+    OrderBookSnapshot snapshot;
+    snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(view.timestamp.time_since_epoch()).count();
+
+    // Quantize prices and aggregate. Use the same quantization as sparse path.
+    for (const auto& [idx, qty] : view.bidLevels) {
+        double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        double qPrice = quantizePrice(price);
+        snapshot.bids[qPrice] += qty;
+    }
+    for (const auto& [idx, qty] : view.askLevels) {
+        double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        double qPrice = quantizePrice(price);
+        snapshot.asks[qPrice] += qty;
+    }
+
+    m_snapshots.push_back(snapshot);
+    updateAllTimeframes(snapshot);
+    cleanupOldData();
+}
+
 void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice) {
     if (book.product_id.empty()) return;
     
