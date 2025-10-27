@@ -1,0 +1,471 @@
+# Sentinel Rendering Bottleneck Analysis
+
+**Date**: 2025-10-26  
+**Status**: Investigation Phase  
+**Goal**: Determine optimal path forward for high-frequency GPU rendering
+
+---
+
+## Current Architecture Summary
+
+### Container: QQuickWidget (THE PROBLEM)
+
+**Location**: `libs/gui/MainWindowGpu.cpp:93`
+```cpp
+m_gpuChart = new QQuickWidget(this);  // QWidget-based QML embedding
+```
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────┐
+│ MainWindowGPU (QWidget)                             │
+│  ┌───────────────────────────────────────────────┐  │
+│  │ QQuickWidget (m_gpuChart)                     │  │
+│  │  • Separate scenegraph context               │  │
+│  │  • Renders to FBO, copies to widget          │  │
+│  │  • Extra CPU overhead for integration        │  │
+│  │  ┌─────────────────────────────────────────┐ │  │
+│  │  │ QML Scene (DepthChartView.qml)          │ │  │
+│  │  │  ┌───────────────────────────────────┐  │ │  │
+│  │  │  │ UnifiedGridRenderer (QQuickItem)  │  │ │  │
+│  │  │  │  • updatePaintNode() ✅           │  │ │  │
+│  │  │  │  • QSGNode hierarchy ✅           │  │ │  │
+│  │  │  │  • Strategies ✅                  │  │ │  │
+│  │  │  └───────────────────────────────────┘  │ │  │
+│  │  └─────────────────────────────────────────┘ │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+### What's RIGHT With Your Code
+
+1. **✅ Proper Scenegraph Implementation**
+   - `UnifiedGridRenderer::updatePaintNode()` correctly implemented
+   - Returns `QSGNode*` with proper geometry
+   - Uses `GridSceneNode` as root transform node
+   - Proper material usage (`QSGVertexColorMaterial`, `QSGFlatColorMaterial`)
+
+2. **✅ Modular Render Strategies**
+   - `HeatmapStrategy`, `TradeFlowStrategy`, `CandleStrategy`
+   - Implement `IRenderStrategy` interface
+   - Generate `QSGGeometryNode` hierarchies
+   - Proper vertex buffer management
+
+3. **✅ Threading Architecture**
+   - DataProcessor on dedicated QThread
+   - Queued connections for cross-thread signals
+   - Proper mutex usage for data safety
+   - No blocking on GUI thread
+
+4. **✅ Data Pipeline**
+   - Clean separation: MarketDataCore → DataProcessor → Renderer
+   - LiquidityTimeSeriesEngine for aggregation
+   - GridViewState for viewport management
+   - Throttled updates (250ms in `initializeV2Architecture`)
+
+5. **✅ QML Integration**
+   - Proper Q_PROPERTY bindings
+   - Clean signal/slot connections
+   - Axis models (TimeAxisModel, PriceAxisModel)
+   - Modular QML controls
+
+### What's WRONG: QQuickWidget Bottlenecks
+
+#### Problem 1: Scenegraph Isolation
+- QQuickWidget creates **separate OpenGL context** from main window
+- Scene graph must be **composited** back into widget hierarchy
+- Extra **framebuffer copies**: scenegraph FBO → widget backing store → screen
+
+#### Problem 2: Render Thread Constraints
+- QQuickWidget uses **"basic" render loop** instead of "threaded" loop
+- Rendering happens on **GUI thread**, blocking other UI operations
+- Cannot leverage Qt Quick's threaded scenegraph renderer optimally
+
+#### Problem 3: Event Loop Integration
+- Widget events must be **translated** to QML events
+- Extra overhead in mouse/wheel/key event propagation
+- Potential for event handling conflicts (widget vs QML)
+
+#### Problem 4: Multiple Passes
+For 120 Hz updates, this pipeline runs every 8.3ms:
+```
+1. DataProcessor signals update (worker thread)
+2. UnifiedGridRenderer::update() called (GUI thread)
+3. updatePaintNode() builds QSGNode tree (GUI thread)
+4. Scene graph renders to FBO (render thread)
+5. FBO contents copied to QImage (blocking)
+6. QImage painted to widget backing store (GUI thread)
+7. Widget backing store composited to window (compositor)
+```
+
+Steps 5-7 are **QQuickWidget overhead** not present in QQuickView/QQuickWindow.
+
+---
+
+## Alternative Architectures
+
+### Option A: QQuickView (Full Qt Quick Window)
+
+**Architecture**:
+```cpp
+// main.cpp
+QGuiApplication app(argc, argv);  // Note: QGuiApplication, not QApplication
+
+QQmlApplicationEngine engine;
+engine.load(QUrl(QStringLiteral("qrc:/main.qml")));
+
+return app.exec();
+```
+
+**Pros**:
+- ✅ Native Qt Quick rendering (no widget overhead)
+- ✅ Threaded scenegraph renderer by default
+- ✅ Direct GPU rendering (no FBO copies)
+- ✅ Best performance for pure QML UIs
+- ✅ Your scenegraph code works **identically**
+
+**Cons**:
+- ❌ Requires converting MainWindowGPU from QWidget to QML
+- ❌ Native widgets (QPushButton, QLineEdit) require QQuickWidget (ironic!)
+- ❌ Docking, complex layouts harder in pure QML
+- ❌ ~40 GUI classes might need QML equivalents or Qt Quick Controls
+
+**Migration Effort**: HIGH (2-4 weeks)
+- Convert widget-based UI controls to QML/Qt Quick Controls 2
+- Rewrite MainWindowGPU as QML Window
+- Keep UnifiedGridRenderer exactly as-is (QQuickItem)
+- Adapt signal/slot connections
+
+---
+
+### Option B: QQuickWindow (Hybrid - Best of Both)
+
+**Architecture**:
+```cpp
+// Create QQuickWindow for chart only
+QQuickWindow* chartWindow = new QQuickWindow();
+chartWindow->setColor(Qt::black);
+
+// Load QML scene
+QQmlComponent component(&engine, QUrl("qrc:/ChartScene.qml"));
+QQuickItem* rootItem = qobject_cast<QQuickItem*>(component.create());
+rootItem->setParentItem(chartWindow->contentItem());
+
+// Keep QWidget window for controls
+MainWindowWidget* mainWindow = new MainWindowWidget();
+QWidget* chartContainer = QWidget::createWindowContainer(chartWindow, mainWindow);
+mainWindow->setChartWidget(chartContainer);
+```
+
+**Pros**:
+- ✅ Native Qt Quick rendering for chart (no widget overhead)
+- ✅ Keep QWidget controls (minimal porting)
+- ✅ Direct GPU path for high-frequency rendering
+- ✅ `QWidget::createWindowContainer()` embeds QQuickWindow
+
+**Cons**:
+- ⚠️ Hybrid complexity (two window systems)
+- ⚠️ Focus/event handling between container and native window
+- ⚠️ Platform quirks (macOS/Windows/Linux behavior differences)
+
+**Migration Effort**: MEDIUM (1-2 weeks)
+- Extract chart rendering to standalone QQuickWindow
+- Minimal changes to MainWindowGPU (becomes pure QWidget)
+- Keep all controls as-is
+- UnifiedGridRenderer unchanged
+
+---
+
+### Option C: ImGui + Custom Renderer
+
+**Architecture**:
+```cpp
+// Abandon Qt Quick, use ImGui for UI
+ImGui::Begin("Chart");
+renderCustomHeatmap(trades, orderBook);  // Your custom OpenGL/Vulkan
+ImGui::End();
+
+ImGui::Begin("Controls");
+ImGui::InputText("Symbol", symbolBuffer);
+if (ImGui::Button("Subscribe")) { /* ... */ }
+ImGui::End();
+```
+
+**Pros**:
+- ✅ Complete control over rendering pipeline
+- ✅ Minimal overhead (immediate mode)
+- ✅ Excellent for game-like visualizations
+- ✅ Cross-platform OpenGL/Vulkan/Metal backends
+
+**Cons**:
+- ❌ **LOSE 40 GUI CLASSES** (complete rewrite)
+- ❌ Lose Qt Quick scenegraph (your current investment)
+- ❌ No declarative UI (ImGui is immediate mode C++)
+- ❌ Manual layout, styling, window management
+- ❌ ~2-3 months rewrite for feature parity
+
+**Migration Effort**: EXTREME (8-12 weeks)
+- Rewrite entire GUI in ImGui
+- Implement custom OpenGL/Vulkan renderer
+- Manual vertex buffer management
+- Re-implement axis rendering, controls, interactions
+
+---
+
+## Detailed Comparison Matrix
+
+| Aspect | QQuickWidget (Current) | QQuickView (Pure QML) | QQuickWindow (Hybrid) | ImGui |
+|--------|----------------------|----------------------|----------------------|-------|
+| **Rendering Path** | Widget → FBO → Copy | Direct GPU | Direct GPU | Direct GPU |
+| **Thread Safety** | GUI thread render | Threaded scenegraph | Threaded scenegraph | Manual |
+| **120 Hz Capability** | ⚠️ Marginal | ✅ Yes | ✅ Yes | ✅ Yes |
+| **CPU Overhead** | HIGH (copies) | LOW | LOW | MINIMAL |
+| **GPU Efficiency** | GOOD (scenegraph) | EXCELLENT | EXCELLENT | EXCELLENT |
+| **Code Reuse** | 100% | 90% (QML port) | 95% (container) | 10% (total rewrite) |
+| **Migration Risk** | None (current) | MEDIUM | LOW | EXTREME |
+| **Time to Ship** | 0 days | 2-4 weeks | 1-2 weeks | 8-12 weeks |
+| **Native Widgets** | ✅ Yes | ❌ QML only | ✅ Yes | ❌ ImGui only |
+| **Docking/Layouts** | ✅ QDockWidget | ⚠️ Limited | ✅ QDockWidget | Manual |
+| **Theming** | Qt stylesheets | QML styling | Both | Manual |
+
+---
+
+## Performance Characteristics
+
+### Current (QQuickWidget) - Measured
+- **Frame Budget**: 8.3ms @ 120 Hz, 16.67ms @ 60 Hz
+- **Current Bottleneck**: FBO copy + widget composition (estimated 2-4ms)
+- **DataProcessor**: ~150µs update latency (GOOD)
+- **updatePaintNode**: Depends on cell count, <5ms target (GOOD)
+- **Scenegraph Render**: GPU-bound, depends on strategy (GOOD)
+
+### Projected (QQuickView/QQuickWindow)
+- **Eliminated Overhead**: 2-4ms saved (no FBO copy)
+- **Threaded Scenegraph**: Overlap data processing + rendering
+- **Expected Frame Time**: 4-6ms (easily 120+ Hz capable)
+
+---
+
+## Investment Protection Analysis
+
+### Your Current Assets (Don't Lose These!)
+
+1. **UnifiedGridRenderer** (487 lines)
+   - ✅ Portable to QQuickView/QQuickWindow unchanged
+   - ✅ QQuickItem subclass (framework-agnostic)
+   - ❌ Lost if moving to ImGui
+
+2. **Render Strategies** (3 strategies × ~200 lines)
+   - ✅ Portable (build QSGNode trees)
+   - ❌ Lost if moving to ImGui (QSG-specific)
+
+3. **GridSceneNode** (QSGNode hierarchy)
+   - ✅ Portable to Qt Quick alternatives
+   - ❌ Lost if moving to ImGui
+
+4. **DataProcessor + LiquidityTimeSeriesEngine**
+   - ✅ **Portable everywhere** (Qt-free core logic)
+   - ✅ Reusable with any rendering backend
+
+5. **QML Controls** (~7 files in qml/controls/)
+   - ✅ Portable to QQuickView
+   - ⚠️ Require adaptation for QQuickWindow hybrid
+   - ❌ Lost if moving to ImGui
+
+6. **Axis Models** (TimeAxisModel, PriceAxisModel)
+   - ✅ Portable to Qt Quick
+   - ❌ Lost if moving to ImGui
+
+**Summary**: ~85-90% of your code is portable to QQuickView/QQuickWindow. Only ~10% portable to ImGui.
+
+---
+
+## Recommended Path Forward
+
+### Phase 1: Diagnose QQuickWidget Bottleneck (1 day)
+
+**Goal**: Confirm QQuickWidget is the bottleneck, not your rendering code.
+
+**Tools**:
+1. `QSG_INFO=1` environment variable - scenegraph debug info
+2. Qt Quick Profiler (QML Profiler in Qt Creator)
+3. RenderDoc frame capture
+4. Add timing to `updatePaintNode()`:
+   ```cpp
+   QElapsedTimer timer;
+   timer.start();
+   QSGNode* node = updatePaintNodeV2(oldNode);
+   sLog_Render("updatePaintNode took" << timer.nsecsElapsed() / 1000 << "µs");
+   return node;
+   ```
+
+**Key Metrics**:
+- Time in `updatePaintNode()` (should be <5ms)
+- Time between `update()` call and screen refresh (should be <8ms @ 120Hz)
+- GPU utilization (should be high for heatmap)
+- CPU utilization during rendering (should be low)
+
+**Acceptance**: If >3ms overhead outside your rendering code → QQuickWidget is the problem.
+
+---
+
+### Phase 2A: QQuickWindow Hybrid (Recommended - 1-2 weeks)
+
+**Why This Path**:
+- ✅ Minimal risk (keep 95% of code)
+- ✅ Direct GPU rendering for chart
+- ✅ Keep Qt Widgets controls
+- ✅ Proven pattern (many apps use this)
+
+**Implementation**:
+1. Create `ChartWindow.hpp` (QQuickWindow wrapper)
+2. Load DepthChartView.qml into QQuickWindow
+3. Use `QWidget::createWindowContainer()` in MainWindowGPU
+4. Route signals between widget controls and chart window
+
+**Prototype** (2-3 days):
+```cpp
+// New file: libs/gui/ChartWindow.hpp
+class ChartWindow : public QObject {
+    Q_OBJECT
+public:
+    ChartWindow(QQmlEngine* engine);
+    QQuickWindow* window() const { return m_window; }
+    UnifiedGridRenderer* renderer() const { return m_renderer; }
+    
+private:
+    QQuickWindow* m_window;
+    UnifiedGridRenderer* m_renderer;
+};
+
+// Modified MainWindowGpu.cpp
+ChartWindow* chartWindow = new ChartWindow(&m_engine);
+QWidget* chartContainer = QWidget::createWindowContainer(
+    chartWindow->window(), this);
+// Add chartContainer to layout instead of m_gpuChart
+```
+
+**Testing**:
+- Profile again with same metrics
+- Compare frame times to Phase 1 baseline
+- Verify 120 Hz capability
+
+---
+
+### Phase 2B: QQuickView (Alternative - 2-4 weeks)
+
+**Why This Path**:
+- ✅ Maximum performance (pure Qt Quick)
+- ✅ Long-term maintainability
+- ⚠️ More porting effort (QML controls)
+
+**Implementation**:
+1. Convert MainWindowGPU to QML Window
+2. Port control panel to Qt Quick Controls 2
+3. Use QQmlApplicationEngine instead of QApplication
+
+**Prototype** (1 week):
+```qml
+// New file: qml/MainWindow.qml
+ApplicationWindow {
+    DepthChartView {
+        anchors.fill: parent
+        anchors.rightMargin: controlPanel.width
+    }
+    
+    ControlPanel {
+        id: controlPanel
+        anchors.right: parent.right
+    }
+}
+```
+
+---
+
+### Phase 3: ImGui (Only If Abandoning Qt)
+
+**When to Consider**:
+- ❌ QQuickWindow still can't hit 120 Hz
+- ❌ Qt licensing becomes an issue
+- ❌ Need ultimate performance control
+
+**Reality Check**:
+- Your scenegraph code is already efficient
+- QQuickWindow can easily do 240+ Hz with simple scenes
+- Your bottleneck is likely FBO copies, not Qt Quick itself
+
+---
+
+## Open Questions for Research
+
+### Qt Quick Rendering
+1. What is the **exact overhead** of QQuickWidget vs QQuickView/QQuickWindow?
+2. How does the **threaded scenegraph** work in Qt 6.x?
+3. Can we use **QRhi** (Qt Rendering Hardware Interface) for cross-platform GPU pipelines?
+4. What are **persistent-mapped buffers** and can we use them with QSGGeometry?
+5. How do we profile the scenegraph with **QSG_INFO** and Qt Quick Profiler?
+
+### High-Frequency Rendering
+1. What strategies exist for **120 Hz QML rendering**?
+2. How do we **batch updates** to avoid flooding the scenegraph?
+3. Can we use **compute shaders** with Qt Quick for aggregation?
+4. What's the best way to handle **large vertex buffers** (50k+ cells)?
+5. How do we implement **LOD** (level of detail) for zoom levels?
+
+### Hybrid Approaches
+1. What are the **pitfalls** of QWidget::createWindowContainer()?
+2. How do we handle **focus** between QWidget controls and QQuickWindow?
+3. Are there **event handling issues** with this hybrid approach?
+4. What are **platform-specific quirks** (macOS Metal vs Linux OpenGL)?
+
+### Alternatives
+1. When is **ImGui** genuinely superior to Qt Quick?
+2. Can we achieve **sub-frame latency** with Qt Quick?
+3. What's the **minimum overhead** rendering stack for financial visualizations?
+
+---
+
+## Success Criteria
+
+### Must Have
+- ✅ 120 Hz sustained rendering with typical BTC feed
+- ✅ <8.3ms frame budget (including data processing)
+- ✅ Smooth pan/zoom with <16ms input latency
+- ✅ No visual artifacts or tearing
+
+### Should Have
+- ✅ 60 Hz minimum on integrated GPUs
+- ✅ Graceful degradation under load
+- ✅ <150µs data processing latency (already achieved)
+
+### Nice to Have
+- ✅ 240 Hz capability on high-end GPUs
+- ✅ Multi-monitor support
+- ✅ 4K resolution rendering
+
+---
+
+## Timeline & Risk Assessment
+
+| Approach | Duration | Risk | Code Reuse | Performance Gain |
+|----------|----------|------|------------|------------------|
+| **QQuickWindow Hybrid** | 1-2 weeks | LOW | 95% | 2-4ms saved |
+| **QQuickView (Pure QML)** | 2-4 weeks | MEDIUM | 85% | 2-5ms saved |
+| **ImGui Rewrite** | 8-12 weeks | HIGH | 10% | 5-8ms saved |
+| **Do Nothing** | 0 | NONE | 100% | 0ms |
+
+---
+
+## References
+
+- Qt Documentation: [QQuickWidget vs QQuickView](https://doc.qt.io/qt-6/qquickwidget.html)
+- Qt Blog: [Scene Graph Rendering](https://www.qt.io/blog/2015/08/14/qt-quick-scene-graph-renderer)
+- Your Code: `libs/gui/UnifiedGridRenderer.cpp` - already implements proper scenegraph usage
+- Your Docs: `docs/ARCHITECTURE.md` - describes current pipeline
+
+---
+
+## Next Action
+
+**Run Phase 1 profiling to confirm bottleneck, then choose Phase 2A (recommended) or 2B.**
+

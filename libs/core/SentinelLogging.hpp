@@ -28,16 +28,20 @@ namespace sentinel::log_throttle {
 }
 
 // Atomic throttling macro with runtime env var override
-#define SLOG_THROTTLED(cat, defaultInterval, ...)                                    \
-    do {                                                                             \
-        static std::atomic<uint32_t> _counter{0};                                    \
-        static int _interval = []() {                                                \
-            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");         \
-            return env ? std::atoi(env) : (defaultInterval);                         \
-        }();                                                                         \
-        if ((++_counter % _interval) == 0) {                                         \
-            qCDebug(log##cat) << __VA_ARGS__;                                        \
-        }                                                                            \
+#define SLOG_THROTTLED(cat, defaultInterval, ...)                                      \
+    do {                                                                               \
+        static std::atomic<uint32_t> _counter{0};                                      \
+        static int _interval = []() {                                                  \
+            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");           \
+            if (env) {                                                                 \
+                int envVal = std::atoi(env);                                           \
+                if (envVal > 0 && envVal < (defaultInterval)) return envVal;           \
+            }                                                                          \
+            return (defaultInterval);                                                  \
+        }();                                                                           \
+        if ((++_counter % _interval) == 0) {                                           \
+            qCDebug(log##cat) << __VA_ARGS__;                                          \
+        }                                                                              \
     } while(false)
 
 // =============================================================================

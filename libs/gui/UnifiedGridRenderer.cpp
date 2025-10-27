@@ -12,6 +12,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
 #include "../core/marketdata/cache/DataCache.hpp"
+#include "../core/SentinelMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
@@ -21,15 +22,12 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QMetaType>
 #include <QDateTime>
 // #include <algorithm>
-#include <cmath>
+// #include <cmath>
 
 // New modular architecture includes
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 #include "render/GridSceneNode.hpp" 
-// Keep include to satisfy member access in this TU
-// Keep for type completeness used below
-#include "../core/SentinelMonitor.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
@@ -121,30 +119,18 @@ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRect
     }
 }
 
-QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
-    // Route to V2 implementation
-    return updatePaintNodeV2(oldNode);
-}
-
 void UnifiedGridRenderer::updateVisibleCells() {
-    // 🎯 THREADING FIX: Use thread-safe call like all other DataProcessor methods
+    // Non-blocking: consume latest snapshot, request async recompute if needed
     if (m_dataProcessor) {
-        // Force a synchronous recompute to avoid stale geometry after LOD/timeframe changes
-        QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", 
-                                 Qt::BlockingQueuedConnection);
-        
-        // Pull fresh cells computed on the worker thread
-        m_visibleCells = m_dataProcessor->getVisibleCells();
+        // Try to grab the latest published cells without blocking the worker
+        auto snapshot = m_dataProcessor->getPublishedCellsSnapshot();
+        if (snapshot) {
+            m_visibleCells.assign(snapshot->begin(), snapshot->end());
+        }
     } else {
         m_visibleCells.clear();
     }
-    // Keep viewport size in sync every paint (prevents transform drift)
-    if (m_viewState) {
-        m_viewState->setViewportSize(width(), height());
-    }
-    // Signal that we need a repaint
-    m_geometryDirty = true;
-    update();
+    // Avoid writing viewport state from the render thread; size is handled in geometryChanged
 }
 
 void UnifiedGridRenderer::updateVolumeProfile() {
@@ -341,12 +327,9 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     // THROTTLE: Only rebuild geometry every 250ms, not on every data update
     connect(m_dataProcessor.get(), &DataProcessor::dataUpdated, 
             this, [this]() { 
-                static QElapsedTimer lastUpdate;
-                if (!lastUpdate.isValid() || lastUpdate.elapsed() > 250) {
-                    m_geometryDirty.store(true); 
-                    update(); 
-                    lastUpdate.start();
-                }
+                // Non-blocking refresh: just mark dirty and schedule a frame
+                m_geometryDirty.store(true);
+                update();
             }, Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
             this, &UnifiedGridRenderer::viewportChanged, Qt::QueuedConnection);
@@ -405,14 +388,19 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
     return m_heatmapStrategy.get(); // Default fallback
 }
 
-QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
+QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
+    Q_UNUSED(data)  // Not needed for this implementation
     if (width() <= 0 || height() <= 0) {
         // invalid size; skip
         return oldNode;
     }
+
+    QElapsedTimer timer;
+    timer.start();
+
     // reduce noisy frame logs
     if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
-    
+
     auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
     bool isNewNode = !sceneNode;
     if (isNewNode) {
@@ -420,13 +408,18 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
         if (m_sentinelMonitor) m_sentinelMonitor->recordGeometryRebuild();
     }
     
+    qint64 cacheUs = 0;
+    qint64 contentUs = 0;
+    size_t cellsCount = 0;
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         bool needsRebuild = m_geometryDirty.load() || isNewNode;
         
         if (needsRebuild) {
             // needs rebuild
-            updateVisibleCells();
+            QElapsedTimer cacheTimer; cacheTimer.start();
+            updateVisibleCells(); // now non-blocking; just consumes snapshot
+            cacheUs = cacheTimer.nsecsElapsed() / 1000;
             
             // creating batch
             // Render pipeline: passing cells to strategy
@@ -435,7 +428,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
             IRenderStrategy* strategy = getCurrentStrategy();
             // selected strategy
             
+            QElapsedTimer contentTimer; contentTimer.start();
             sceneNode->updateContent(batch, strategy);
+            contentUs = contentTimer.nsecsElapsed() / 1000;
             if (m_showVolumeProfile) {
                 updateVolumeProfile();
                 sceneNode->updateVolumeProfile(m_volumeProfile);
@@ -455,11 +450,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNodeV2(QSGNode* oldNode) {
         }
         sceneNode->updateTransform(transform);
         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
+        
+        cellsCount = m_visibleCells.size();
     }
     
     if (m_sentinelMonitor) {
         m_sentinelMonitor->endFrame();
     }
+
+    const qint64 totalUs = timer.nsecsElapsed() / 1000;
+    sLog_RenderN(10, "UGR paint: total=" << totalUs << "µs"
+                       << " cache=" << cacheUs << "µs"
+                       << " content=" << contentUs << "µs"
+                       << " cells=" << static_cast<unsigned long long>(cellsCount));
+
     return sceneNode;
 }
 

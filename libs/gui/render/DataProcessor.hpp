@@ -77,6 +77,11 @@ public:
     bool isManualTimeframeSet() const;
     
     const std::vector<struct CellInstance>& getVisibleCells() const { return m_visibleCells; }
+    // Thread-safe snapshot access for renderer (swap-only on render thread)
+    std::shared_ptr<const std::vector<struct CellInstance>> getPublishedCellsSnapshot() const {
+        std::lock_guard<std::mutex> lock(m_snapshotMutex);
+        return m_publishedCells;
+    }
 
 signals:
     void dataUpdated();
@@ -108,6 +113,10 @@ private:
     int64_t m_currentTimeframe_ms = 100;
     
     std::vector<struct CellInstance> m_visibleCells;
+
+    // Renderer handoff buffer: atomically swapped shared_ptr to avoid copies
+    mutable std::mutex m_snapshotMutex;
+    std::shared_ptr<const std::vector<struct CellInstance>> m_publishedCells;
     
     // Dynamic price resolution
     double m_priceResolution = 1.0;

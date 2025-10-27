@@ -76,7 +76,8 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
         sLog_Data("📊 DataProcessor TRADE UPDATE: Processing trade");
     }
     
-    emit dataUpdated();
+    // Recompute visible cells and publish a snapshot for the renderer
+    updateVisibleCells();
     
     sLog_Data("🎯 DataProcessor TRADE: $" << trade.price 
                  << " vol:" << trade.size 
@@ -97,7 +98,8 @@ void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
         }
     }
     
-    emit dataUpdated();
+    // Recompute visible cells and publish a snapshot for the renderer
+    updateVisibleCells();
     
     sLog_Data("🎯 DataProcessor ORDER BOOK update"
              << " Bids:" << book->bids.size() << " Asks:" << book->asks.size());
@@ -132,7 +134,7 @@ void DataProcessor::captureOrderBookSnapshot() {
         ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
         m_liquidityEngine->addOrderBookSnapshot(ob);
         lastBucket = bucketStart;
-        emit dataUpdated();
+        updateVisibleCells();
         return;
     }
 
@@ -143,7 +145,7 @@ void DataProcessor::captureOrderBookSnapshot() {
             m_liquidityEngine->addOrderBookSnapshot(ob);
             lastBucket = ts;
         }
-        emit dataUpdated();
+        updateVisibleCells();
     }
 }
 
@@ -231,7 +233,7 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
                 // Keep m_latestOrderBook for viewport init via existing path (optional)
                 m_hasValidOrderBook = true;
             }
-            emit dataUpdated();
+            updateVisibleCells();
             return; // Do not execute sparse-banding path when dense path is enabled
         }
     }
@@ -324,7 +326,7 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
         sLog_Data("🎯 DataProcessor: Primed LTSE with banded snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size()
                  << " deltas=" << deltas.size());
     }
-    emit dataUpdated();
+    updateVisibleCells();
 }
 
 void DataProcessor::clearData() {
@@ -337,6 +339,10 @@ void DataProcessor::clearData() {
         m_viewState->resetZoom();
     }
     
+    {
+        std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+        m_publishedCells.reset();
+    }
     sLog_App("🎯 DataProcessor: Data cleared");
     emit dataUpdated();
 }
@@ -419,6 +425,11 @@ void DataProcessor::updateVisibleCells() {
                  << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
     }
     
+    // Publish snapshot for renderer consumption without blocking the render thread
+    {
+        std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+        m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
+    }
     emit dataUpdated();
 }
 

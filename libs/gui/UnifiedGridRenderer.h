@@ -43,7 +43,6 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
     
-    // Rendering mode selection
     Q_PROPERTY(RenderMode renderMode READ renderMode WRITE setRenderMode NOTIFY renderModeChanged)
     Q_PROPERTY(bool showVolumeProfile READ showVolumeProfile WRITE setShowVolumeProfile NOTIFY showVolumeProfileChanged)
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
@@ -53,16 +52,13 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
     
-    // 🚀 VIEWPORT BOUNDS: Expose current viewport to QML for dynamic axis labels
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
     
-    // 🚀 OPTIMIZATION 4: Timeframe property with proper QML binding
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
     
-    // 🚀 VISUAL TRANSFORM: Expose pan offset for real-time grid sync
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
 public:
@@ -83,33 +79,19 @@ private:
     double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
     
-    // 🐛 FIX: Manual timeframe override tracking
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
     // Thread safety
     mutable std::mutex m_dataMutex;
     std::atomic<bool> m_geometryDirty{true};
-    
-    // CellInstance now defined in render/GridTypes.hpp
-    
+        
     // Rendering data
     std::vector<CellInstance> m_visibleCells;
+    // Snapshot buffer swapped from DataProcessor on dataUpdated()/updatePaintNode
+    std::shared_ptr<const std::vector<CellInstance>> m_publishedCells;
     std::vector<std::pair<double, double>> m_volumeProfile;
     
-    // Legacy geometry cache (simplified for V2)
-    struct CachedGeometry {
-        QSGGeometryNode* node = nullptr;
-        QMatrix4x4 originalTransform;
-        std::vector<CellInstance> cachedCells;
-        bool isValid = false;
-        int64_t cacheTimeStart_ms = 0;
-        int64_t cacheTimeEnd_ms = 0;
-        double cacheMinPrice = 0.0;
-        double cacheMaxPrice = 0.0;
-    };
-    
-    CachedGeometry m_geometryCache;
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
     
@@ -217,7 +199,7 @@ signals:
     void panVisualOffsetChanged();
 
 protected:
-    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
+    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
     void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry);
     
     // 🖱️ MOUSE INTERACTION EVENTS
