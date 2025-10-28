@@ -46,6 +46,15 @@ target_link_libraries(sentinel_core
         jwt-cpp::jwt-cpp
 )
 
+# Windows-specific libraries for networking
+if(WIN32)
+    target_link_libraries(sentinel_core PRIVATE
+        ws2_32
+        wsock32
+        mswsock
+    )
+endif()
+
 # C++20 standard is set globally in root CMakeLists.txt
 
 set(CMAKE_AUTOMOC ON)
