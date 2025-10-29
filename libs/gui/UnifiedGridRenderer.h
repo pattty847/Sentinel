@@ -206,7 +206,8 @@ signals:
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
-    void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry);
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void componentComplete() override;
     
     // 🖱️ MOUSE INTERACTION EVENTS
     void mousePressEvent(QMouseEvent* event) override;
@@ -236,7 +237,7 @@ private:
 
     IRenderStrategy* getCurrentStrategy() const;
     
-    void initializeV2Architecture();
+    void init();
     
     QSGNode* updatePaintNodeV2(QSGNode* oldNode);
 

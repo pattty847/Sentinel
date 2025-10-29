@@ -29,7 +29,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QLabel>
 #include <QLineEdit>
 #include <QGroupBox>
-#include <QtQuickWidgets/QQuickWidget>
+#include <QQuickView>
 #include <memory>
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
@@ -59,8 +59,9 @@ private:
     void initializeQMLComponents();
     void connectMarketDataSignals();
 
-    // GPU CHART - Core component
-    QQuickWidget* m_gpuChart;
+    // GPU CHART - Core component (QQuickView within a QWidget container)
+    QQuickView* m_qquickView = nullptr;
+    QWidget* m_qmlContainer = nullptr;
     
     // UI Controls
     QLabel* m_statusLabel;

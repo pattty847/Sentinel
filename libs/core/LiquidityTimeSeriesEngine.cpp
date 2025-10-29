@@ -95,9 +95,6 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     
-    // LINUS FIX: No viewport filtering - store all depth-limited data
-    // Global storage strategy prevents black gaps on zoom-out
-    
     // Convert sparse OrderBook to snapshot format with price quantization  
     for (const auto& bid : limitedBook.bids) {
         double quantizedPrice = quantizePrice(bid.price);
@@ -331,6 +328,10 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
         currentSlice = LiquidityTimeSlice();
         currentSlice.startTime_ms = sliceStart;
         currentSlice.endTime_ms = sliceStart + timeframe_ms;
+        
+        // NEW SLICE LOGGING
+        sLog_RenderN(50, "🧱 NEW SLICE " << timeframe_ms << "ms: [" << sliceStart
+                     << "-" << (sliceStart + timeframe_ms) << "]");
         currentSlice.duration_ms = timeframe_ms;
     }
     

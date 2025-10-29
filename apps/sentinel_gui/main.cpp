@@ -20,10 +20,12 @@ Assumptions: Executed as the primary entry point of a Qt application.
 #include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
+#include <QSurfaceFormat>
 
 int main(int argc, char *argv[])
 {
     std::cout << "🚀 [Sentinel GPU Trading Terminal Starting...]" << std::endl;
+    qputenv("QSG_RENDER_LOOP", "threaded");
     QApplication app(argc, argv);
     
     qRegisterMetaType<Trade>();

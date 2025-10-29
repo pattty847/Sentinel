@@ -43,12 +43,11 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
     setFlag(ItemAcceptsInputMethod, true);
     
-    // 🐛 FIX: Only accept mouse events on empty areas, not over UI controls
     setAcceptHoverEvents(false);  // Reduce event capture
     
     // Initialize new modular architecture
-    initializeV2Architecture();
-    sLog_App("UnifiedGridRenderer V2: Modular architecture initialized");
+    init();
+    sLog_App("UnifiedGridRenderer V2: Initialized successfully");
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
@@ -60,14 +59,12 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
-    // Delegate to DataProcessor - UnifiedGridRenderer is now a slim adapter
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), "onTradeReceived", 
                                  Qt::QueuedConnection, Q_ARG(Trade, trade));
     }
 }
 
-// Pure delegation to DataProcessor
 void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), "onLiveOrderBookUpdated", 
@@ -81,16 +78,13 @@ void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
                                        double minPrice, double maxPrice) {
-    // Delegate viewport management to GridViewState
     if (m_viewState) {
         m_viewState->setViewport(startTimeMs, endTimeMs, minPrice, maxPrice);
     }
     
     m_transformDirty.store(true);
     update();
-    // GridViewState emits viewportChanged which is connected to us
     
-    // Atomic throttling
     sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
                << " Price:[$" << minPrice << "-$" << maxPrice << "]");
 }
@@ -103,9 +97,10 @@ void UnifiedGridRenderer::onViewportChanged() {
 }
 
 
-void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) {
+void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
+    QQuickItem::geometryChange(newGeometry, oldGeometry);
+    
     if (newGeometry.size() != oldGeometry.size()) {
-        // Atomic throttling
         sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
         // Keep GridViewState in sync with the item size for accurate coord math
@@ -116,6 +111,16 @@ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRect
         // Size change only affects transform, not geometry topology
         m_transformDirty.store(true);
         update();
+    }
+}
+
+void UnifiedGridRenderer::componentComplete() {
+    QQuickItem::componentComplete();
+    
+    // Set viewport size immediately when component is ready
+    if (m_viewState && width() > 0 && height() > 0) {
+        m_viewState->setViewportSize(width(), height());
+        sLog_App("🎯 Component complete: Set initial viewport size to " << width() << "x" << height());
     }
 }
 
@@ -302,7 +307,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     } else event->ignore(); 
 }
 
-void UnifiedGridRenderer::initializeV2Architecture() {
+void UnifiedGridRenderer::init() {
     // Register metatypes for cross-thread signal/slot connections
     qRegisterMetaType<Trade>("Trade");
     
@@ -500,5 +505,12 @@ QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMoni
 double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
 double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
-void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
+void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { 
+    if (m_viewState) { 
+        m_viewState->handlePanMove(event->position()); 
+        m_transformDirty.store(true);  // Mark transform dirty for immediate visual feedback
+        event->accept(); 
+        update(); 
+    } else event->ignore(); 
+}
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanEnd(); event->accept(); m_transformDirty.store(true); update(); } }

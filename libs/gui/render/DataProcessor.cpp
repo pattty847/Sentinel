@@ -383,30 +383,47 @@ void DataProcessor::updateVisibleCells() {
         auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
         sLog_Render("🔍 LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
         
+        // TIME WRAP DETECTION
+        if (!visibleSlices.empty()) {
+            static qint64 prevFirst = LLONG_MIN, prevLast = LLONG_MIN;
+            const qint64 first = visibleSlices.front()->startTime_ms;
+            const qint64 last  = visibleSlices.back()->startTime_ms;
+            if (prevFirst != LLONG_MIN && (first < prevFirst || last < prevLast)) {
+                sLog_RenderN(1, "🚨 TIME WRAP DETECTED: first " << first << " (prev " << prevFirst
+                            << "), last " << last << " (prev " << prevLast << ")");
+            }
+            prevFirst = first; prevLast = last;
+        }
+        
         // Check if slices are being processed
         int processedSlices = 0;
         
-        // Auto-fix viewport if no data found but data exists
+        // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
         if (visibleSlices.empty()) {
-            auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
-            if (!allSlices.empty()) {
-                qint64 oldestTime = allSlices.front()->startTime_ms;
-                qint64 newestTime = allSlices.back()->endTime_ms;
-                qint64 gap = timeStart - newestTime;
-                sLog_Render("🔍 LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
-                sLog_Render("🔍 TIME GAP: " << gap << "ms between newest data and viewport start");
-                
-                // AUTO-FIX: Snap viewport to actual data range
-                if (gap > 60000) { // If gap > 1 minute, auto-adjust
-                    qint64 newStart = newestTime - 30000; // 30s before newest data
-                    qint64 newEnd = newestTime + 30000;   // 30s after newest data
-                    sLog_Render("🔧 AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+            const bool canAutoFix = (m_viewState && m_viewState->isAutoScrollEnabled());
+            if (!canAutoFix) {
+                sLog_Render("🔧 SKIP AUTO-ADJUST: auto-scroll disabled (user interaction in progress)");
+            } else {
+                auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
+                if (!allSlices.empty()) {
+                    qint64 oldestTime = allSlices.front()->startTime_ms;
+                    qint64 newestTime = allSlices.back()->endTime_ms;
+                    qint64 gap = timeStart - newestTime;
+                    sLog_Render("🔍 LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
+                    sLog_Render("🔍 TIME GAP: " << gap << "ms between newest data and viewport start");
                     
-                    m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
-                    
-                    // Retry query with corrected viewport
-                    visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
-                    sLog_Render("🎯 VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                    // AUTO-FIX: Snap viewport to actual data range
+                    if (gap > 60000) { // If gap > 1 minute, auto-adjust
+                        qint64 newStart = newestTime - 30000; // 30s before newest data
+                        qint64 newEnd = newestTime + 30000;   // 30s after newest data
+                        sLog_Render("🔧 AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+                        
+                        m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+                        
+                        // Retry query with corrected viewport
+                        visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
+                        sLog_Render("🎯 VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                    }
                 }
             }
         }

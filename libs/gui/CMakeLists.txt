@@ -73,7 +73,6 @@ target_link_libraries(sentinel_gui_lib
         Qt::Network
         Qt::Quick
         Qt::Qml
-        Qt::QuickWidgets
         Boost::headers
         OpenSSL::SSL
         OpenSSL::Crypto

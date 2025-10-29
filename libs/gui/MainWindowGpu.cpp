@@ -9,7 +9,7 @@ Observability: Detailed logging of UI/QML initialization and data pipeline statu
 Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
 Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
 */
-#include <QQuickWidget>
+#include <QQuickView>
 #include <QLabel>
 #include <QLineEdit>
 #include "ChartModeController.h"
@@ -67,18 +67,32 @@ MainWindowGPU::~MainWindowGPU() {
     
     // Stop data streams first
     if (m_marketDataCore) {
+        sLog_App("🛑 Stopping MarketDataCore...");
         m_marketDataCore->stop();
+        sLog_App("✅ MarketDataCore stopped");
         m_marketDataCore.reset();  // Clean shutdown of MarketDataCore
+        sLog_App("✅ MarketDataCore destroyed");
     }
     
-    // Disconnect all signals to prevent callbacks during destruction
-    if (m_gpuChart && m_gpuChart->rootObject()) {
-        disconnect(m_gpuChart->rootObject(), nullptr, this, nullptr);
+    // Stop DataProcessor explicitly before destroying QML
+    if (m_qquickView && m_qquickView->rootObject()) {
+        UnifiedGridRenderer* unifiedGridRenderer = m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+        if (unifiedGridRenderer) {
+            auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+            if (dataProcessor) {
+                sLog_App("🛑 Stopping DataProcessor...");
+                dataProcessor->stopProcessing();
+                sLog_App("✅ DataProcessor stopped");
+            }
+        }
+        
+        // Disconnect all signals to prevent callbacks during destruction
+        disconnect(m_qquickView->rootObject(), nullptr, this, nullptr);
     }
     
     // Clear QML context to prevent dangling references
-    if (m_gpuChart) {
-        m_gpuChart->setSource(QUrl());
+    if (m_qquickView) {
+        m_qquickView->setSource(QUrl());
     }
 
     if (m_sentinelMonitor) {
@@ -89,9 +103,12 @@ MainWindowGPU::~MainWindowGPU() {
 }
 
 void MainWindowGPU::setupUI() {
-    // Create GPU Chart (QML) - Load from file system first
-    m_gpuChart = new QQuickWidget(this);
-    m_gpuChart->setResizeMode(QQuickWidget::SizeRootObjectToView);
+    // Create GPU Chart (QML) with threaded scene graph via QQuickView
+    m_qquickView = new QQuickView;
+    m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
+    m_qquickView->setColor(Qt::black);
+    m_qmlContainer = QWidget::createWindowContainer(m_qquickView, this);
+    m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     
     // Allow environment override for QML path (SENTINEL_QML_PATH)
     QString qmlPath;
@@ -110,21 +127,21 @@ void MainWindowGPU::setupUI() {
     }
     
     if (QFile::exists(qmlPath)) {
-        m_gpuChart->setSource(QUrl::fromLocalFile(qmlPath));
+        m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));
         sLog_App("✅ QML loaded from file system!");
     } else {
         sLog_App("❌ QML file not found, trying resource path...");
-        m_gpuChart->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
+        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
     }
     
     // Check if QML loaded successfully
-    if (m_gpuChart->status() == QQuickWidget::Error) {
+    if (m_qquickView->status() == QQuickView::Error) {
         sLog_Error("🚨 QML FAILED TO LOAD!");
-        sLog_Error("QML Errors:" << m_gpuChart->errors());
+        sLog_Error("QML Errors:" << m_qquickView->errors());
     }
     
     // Set default symbol in QML context
-    QQmlContext* context = m_gpuChart->rootContext();
+    QQmlContext* context = m_qquickView->rootContext();
     context->setContextProperty("symbol", "BTC-USD");
     m_modeController = new ChartModeController(this);
     context->setContextProperty("chartModeController", m_modeController);
@@ -142,8 +159,8 @@ void MainWindowGPU::setupUI() {
     // Layout
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     
-    // GPU chart takes most space
-    mainLayout->addWidget(m_gpuChart, 1);
+    // GPU chart takes most space (QQuickView container)
+    mainLayout->addWidget(m_qmlContainer, 1);
     
     // Control panel at bottom
     QGroupBox* controlGroup = new QGroupBox("🎯 Trading Controls");
@@ -176,7 +193,7 @@ void MainWindowGPU::onSubscribe() {
     sLog_App(QString("🚀 Subscribing to symbol: %1").arg(symbol));
     
     // Update QML context with the new symbol
-    m_gpuChart->rootContext()->setContextProperty("symbol", symbol);
+    if (m_qquickView) m_qquickView->rootContext()->setContextProperty("symbol", symbol);
     
     // 🚀 GEMINI'S REFACTOR: Use persistent MarketDataCore with subscribeToSymbols!
     if (m_marketDataCore) {
@@ -189,7 +206,7 @@ void MainWindowGPU::onSubscribe() {
 void MainWindowGPU::connectMarketDataSignals() {
     sLog_App("🔥 Setting up persistent MarketDataCore signal connections...");
     
-    UnifiedGridRenderer* unifiedGridRenderer = m_gpuChart->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    UnifiedGridRenderer* unifiedGridRenderer = m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
     if (m_marketDataCore && unifiedGridRenderer) {
         // Provide dense data access to renderer
         unifiedGridRenderer->setDataCache(m_dataCache.get());
@@ -251,13 +268,13 @@ void MainWindowGPU::initializeQMLComponents() {
     sLog_App("🔥 Initializing QML components with proper lifecycle management");
     
     // Check if QML loaded successfully during setupUI()
-    if (m_gpuChart->status() == QQuickWidget::Error) {
+    if (m_qquickView->status() == QQuickView::Error) {
         sLog_Error("❌ QML failed to load during setupUI - cannot initialize components");
         return;
     }
     
     // Verify QML root object is available (should be ready after setupUI())
-    QQuickItem* qmlRoot = m_gpuChart->rootObject();
+    QQuickItem* qmlRoot = m_qquickView->rootObject();
     if (!qmlRoot) {
         sLog_Warning("❌ QML root object not available - QML may not be fully loaded");
         return;

@@ -87,6 +87,14 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
         vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
     }
     
+    // HEATMAP X-RANGE LOGGING
+    static int frame = 0;
+    if ((++frame % 30) == 0 && vertexIndex >= 6) {
+        const auto* v = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
+        const float firstX = v[0].x, lastX = v[vertexIndex - 1].x;
+        sLog_RenderN(1, "🎯 HEATMAP X-RANGE: " << firstX << " → " << lastX << " (verts=" << vertexIndex << ")");
+    }
+    
     // Update geometry with actual vertex count used
     geometry->allocate(vertexIndex);
     node->markDirty(QSGNode::DirtyGeometry);
