@@ -48,8 +48,8 @@ SentinelMonitor::SentinelMonitor(QObject* parent) : QObject(parent) {
     m_rendering.frameTimer.start();
     m_rendering.frameProcessingTimer.invalidate();
     
-    sLog_App("🚀 SentinelMonitor: Unified monitoring system initialized");
-    sLog_App("📊 Monitoring: Network latency, rendering performance, market data flow");
+    sLog_App("SentinelMonitor: Unified monitoring system initialized");
+    sLog_App("Monitoring: Network latency, rendering performance, market data flow");
 }
 
 // 🌐 NETWORK & LATENCY MONITORING
@@ -67,7 +67,7 @@ void SentinelMonitor::recordTradeLatency(std::chrono::system_clock::time_point e
     // Alert on high latency
     if (latency_ms > MAX_ACCEPTABLE_LATENCY_MS) {
         emit latencyAlert(latency_ms);
-        sLog_Warning("⚠️ High trade latency detected:" << latency_ms << "ms");
+        sLog_Warning("High trade latency detected:" << latency_ms << "ms");
     }
     
     emit latencyChanged(getAverageTradeLatency());
@@ -89,13 +89,13 @@ void SentinelMonitor::recordNetworkReconnect() {
     m_network.lastReconnect = std::chrono::steady_clock::now();
     
     emit networkIssue(QString("Network reconnection #%1").arg(m_network.reconnectCount.load()));
-    sLog_Warning("🔌 Network reconnect detected, count:" << m_network.reconnectCount.load());
+    sLog_Warning("Network reconnect detected, count:" << m_network.reconnectCount.load());
 }
 
 void SentinelMonitor::recordNetworkError(const QString& error) {
     m_network.networkErrors.fetch_add(1);
     emit networkIssue(QString("Network error: %1").arg(error));
-    sLog_Error("❌ Network error:" << error);
+    sLog_Error("Network error:" << error);
 }
 
 // 🎮 RENDERING & GPU MONITORING
@@ -183,7 +183,7 @@ void SentinelMonitor::recordTransformApplied() {
     m_rendering.transformsApplied.fetch_add(1);
 }
 
-// 📊 MARKET DATA MONITORING
+//  MARKET DATA MONITORING
 
 void SentinelMonitor::recordTradeProcessed(const Trade& trade) {
     m_marketData.tradesProcessed.fetch_add(1);
@@ -272,7 +272,7 @@ void SentinelMonitor::recordCPUUsage() {
     }
 }
 
-// 📈 PERFORMANCE METRICS ACCESS
+//  PERFORMANCE METRICS ACCESS
 
 double SentinelMonitor::getCurrentFPS() const {
     std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
@@ -362,11 +362,11 @@ bool SentinelMonitor::isNetworkStable() const {
 
 QString SentinelMonitor::getPerformanceStatus() const {
     if (isPerformanceHealthy()) {
-        return "🟢 EXCELLENT - All systems optimal";
+        return "EXCELLENT - All systems optimal";
     } else if (isLatencyAcceptable() && isNetworkStable()) {
-        return "🟡 GOOD - Minor performance issues";
+        return "GOOD - Minor performance issues";
     } else {
-        return "🔴 ISSUES - Performance degraded";
+        return "ISSUES - Performance degraded";
     }
 }
 
@@ -384,11 +384,11 @@ QString SentinelMonitor::getComprehensiveStats() const {
     .arg(static_cast<int>(m_network.reconnectCount.load()));
 }
 
-// 🎯 CONTROL & MANAGEMENT
+//  CONTROL & MANAGEMENT
 
 void SentinelMonitor::enablePerformanceOverlay(bool enabled) {
     m_overlayEnabled = enabled;
-    sLog_App("📊 Performance overlay:" << (enabled ? "ENABLED" : "DISABLED"));
+    sLog_App("Performance overlay:" << (enabled ? "ENABLED" : "DISABLED"));
 }
 
 void SentinelMonitor::enableCLIOutput(bool enabled) {
@@ -396,10 +396,10 @@ void SentinelMonitor::enableCLIOutput(bool enabled) {
     
     if (enabled) {
         m_performanceTimer->start(1000); // Dump every second
-        sLog_App("📊 CLI monitoring output: ENABLED (1s interval)");
+        sLog_App("CLI monitoring output: ENABLED (1s interval)");
     } else {
         m_performanceTimer->stop();
-        sLog_App("📊 CLI monitoring output: DISABLED");
+        sLog_App("CLI monitoring output: DISABLED");
     }
 }
 
@@ -442,7 +442,7 @@ void SentinelMonitor::reset() {
         m_system.peakMemoryUsage = 0;
     }
     
-    sLog_App("🔄 SentinelMonitor: All metrics reset");
+    sLog_App("SentinelMonitor: All metrics reset");
 }
 
 void SentinelMonitor::startMonitoring() {
@@ -456,7 +456,7 @@ void SentinelMonitor::startMonitoring() {
         m_rendering.frameTimingActive = false;
     }
     m_marketData.startTime = std::chrono::steady_clock::now();
-    sLog_App("▶️ SentinelMonitor: Monitoring started");
+    sLog_App("SentinelMonitor: Monitoring started");
 }
 
 void SentinelMonitor::stopMonitoring() {
@@ -466,7 +466,7 @@ void SentinelMonitor::stopMonitoring() {
         std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
         m_rendering.frameTimingActive = false;
     }
-    sLog_App("⏹️ SentinelMonitor: Monitoring stopped");
+    sLog_App("SentinelMonitor: Monitoring stopped");
 }
 
 void SentinelMonitor::onPerformanceTimer() {
@@ -480,7 +480,7 @@ void SentinelMonitor::onPerformanceTimer() {
     checkPerformanceThresholds();
 }
 
-// 🔧 HELPER METHODS
+//  HELPER METHODS
 
 double SentinelMonitor::getElapsedSeconds() const {
     auto now = std::chrono::steady_clock::now();
@@ -548,7 +548,7 @@ QString SentinelMonitor::buildPerformanceSummary() const {
     const double memoryMb = static_cast<double>(getCurrentMemoryUsage()) / (1024.0 * 1024.0);
     const QString status = getPerformanceStatus();
 
-    return QStringLiteral("📊 SENTINEL PERFORMANCE: Update Hz: %1 | CPU/frame: %2 ms | Latency: %3 ms | Trades/s: %4 | Cache: %5% | Memory: %6 MB | Status: \"%7\"")
+    return QStringLiteral("SENTINEL PERFORMANCE: Update Hz: %1 | CPU/frame: %2 ms | Latency: %3 ms | Trades/s: %4 | Cache: %5% | Memory: %6 MB | Status: \"%7\"")
         .arg(updateHz, 0, 'f', 1)
         .arg(cpuFrameMs, 0, 'f', 2)
         .arg(latencyMs, 0, 'f', 0)

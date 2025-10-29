@@ -1,6 +1,6 @@
 #pragma once
 
-// 🚀 C++20 UTILITIES FOR SENTINEL TRADING APPLICATION
+//  C++20 UTILITIES FOR SENTINEL TRADING APPLICATION
 // Optimized helper functions for high-performance real-time trading
 
 #include <string>
@@ -43,7 +43,7 @@ inline bool equalsIgnoreCase(std::string_view lhs, std::string_view rhs) {
  * All functions optimized for real-time trading data processing with minimal overhead.
  */
 
-// 🚀 FAST STRING-TO-NUMBER CONVERSION
+//  FAST STRING-TO-NUMBER CONVERSION
 // Optimized for real-time trading data processing
 
 /**
@@ -106,7 +106,7 @@ inline int fastStringToInt(std::string_view str, int defaultValue) {
     return defaultValue;
 }
 
-// 🚀 FAST SIDE DETECTION
+//  FAST SIDE DETECTION
 // Optimized for trade processing
 
 /**
@@ -135,7 +135,7 @@ inline AggressorSide fastSideDetection(const std::string& side,
     return AggressorSide::Unknown;
 }
 
-// 🚀 FAST STRING FORMATTING
+//  FAST STRING FORMATTING
 // Optimized logging and message formatting
 
 /**
@@ -152,7 +152,7 @@ inline std::string formatTradeLog(const std::string& productId,
                                  double size, 
                                  const std::string& side, 
                                  int tradeCount) {
-    return std::format("💰 {}: ${:.2f} size:{:.6f} ({}) [{} trades total]",
+    return std::format("{}: ${:.2f} size:{:.6f} ({}) [{} trades total]",
         productId, price, size, side, tradeCount);
 }
 
@@ -169,10 +169,10 @@ inline std::string formatOrderBookLog(const std::string& productId,
                                      size_t askCount, 
                                      int updateCount = -1) {
     if (updateCount >= 0) {
-        return std::format("📸 ORDER BOOK {}: {} bids, {} asks (+{} changes)",
+        return std::format("ORDER BOOK {}: {} bids, {} asks (+{} changes)",
             productId, bidCount, askCount, updateCount);
     } else {
-        return std::format("📸 ORDER BOOK {}: {} bids, {} asks",
+        return std::format("ORDER BOOK {}: {} bids, {} asks",
             productId, bidCount, askCount);
     }
 }
@@ -185,7 +185,7 @@ inline std::string formatOrderBookLog(const std::string& productId,
  */
 inline std::string formatErrorLog(const std::string& context, 
                                  const std::string& message) {
-    return std::format("❌ {}: {}", context, message);
+    return std::format(" {}: {}", context, message);
 }
 
 /**
@@ -196,10 +196,10 @@ inline std::string formatErrorLog(const std::string& context,
  */
 inline std::string formatSuccessLog(const std::string& context, 
                                    const std::string& message) {
-    return std::format("✅ {}: {}", context, message);
+    return std::format(" {}: {}", context, message);
 }
 
-// 🚀 PERFORMANCE MONITORING
+//  PERFORMANCE MONITORING
 // Utilities for tracking performance in real-time systems
 
 /**
@@ -213,9 +213,9 @@ inline std::string formatPerformanceMetric(const std::string& metricName,
                                           double value, 
                                           const std::string& unit = "") {
     if (unit.empty()) {
-        return std::format("📊 {}: {:.2f}", metricName, value);
+        return std::format(" {}: {:.2f}", metricName, value);
     } else {
-        return std::format("📊 {}: {:.2f} {}", metricName, value, unit);
+        return std::format(" {}: {:.2f} {}", metricName, value, unit);
     }
 }
 
@@ -230,11 +230,11 @@ inline std::string formatThroughput(const std::string& operationName,
                                    int count, 
                                    double timeMs) {
     double opsPerSec = (timeMs > 0) ? (count * 1000.0 / timeMs) : 0.0;
-    return std::format("⚡ {}: {} ops in {:.1f}ms ({:.0f} ops/sec)",
+    return std::format(" {}: {} ops in {:.1f}ms ({:.0f} ops/sec)",
         operationName, count, timeMs, opsPerSec);
 }
 
-// 🚀 FAST ISO8601 TIMESTAMP PARSING
+//  FAST ISO8601 TIMESTAMP PARSING
 // Optimized for Coinbase timestamp format: "2023-02-09T20:32:50.714964855Z"
 
 /**

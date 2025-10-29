@@ -47,6 +47,8 @@ public:
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd();
+    // Clear the transient visual pan offset after geometry resync
+    void clearPanVisualOffset();
     
     // Directional pan methods
     void panLeft();
@@ -57,7 +59,7 @@ public:
     void enableAutoScroll(bool enabled);
     void resetZoom();
     
-    // 🚀 PRICE LOD: Dynamic price resolution based on zoom level
+    //  PRICE LOD: Dynamic price resolution based on zoom level
     double calculateOptimalPriceResolution() const;
 
 signals:

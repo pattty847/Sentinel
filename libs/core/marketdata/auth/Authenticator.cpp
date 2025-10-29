@@ -76,5 +76,5 @@ void Authenticator::loadKeyFile(const std::string& path) {
         throw std::runtime_error("🔑 Authenticator: Missing 'secret' field in key file");
     }
     
-    std::cout << "✅ Authenticator: Successfully loaded API keys from " << path << std::endl;
+    std::cout << " Authenticator: Successfully loaded API keys from " << path << std::endl;
 } 

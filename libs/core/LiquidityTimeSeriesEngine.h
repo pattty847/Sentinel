@@ -19,7 +19,7 @@ Assumptions: Order book updates are processed to update the time-sliced liquidit
 #include "marketdata/model/TradeData.h"
 
 /**
- * 🎯 LIQUIDITY TIME SERIES ENGINE
+ *  LIQUIDITY TIME SERIES ENGINE
  * 
  * This class implements the core temporal order book analysis:
  * - Captures 100ms order book snapshots
@@ -92,7 +92,7 @@ struct LiquidityTimeSlice {
         }
     };
     
-    // 🚀 O(1) vector storage instead of O(log N) std::map
+    //  O(1) vector storage instead of O(log N) std::map
     std::vector<PriceLevelMetrics> bidMetrics;  // Index = (tick - minTick)
     std::vector<PriceLevelMetrics> askMetrics;  // Index = (tick - minTick)
     
@@ -141,7 +141,7 @@ private:
     // Aggregated time slices for each timeframe
     std::map<int64_t, std::deque<LiquidityTimeSlice>> m_timeSlices;
     
-    // 🚀 TIMEFRAME SUGGESTION TRACKING: Only log when suggestion changes
+    //  TIMEFRAME SUGGESTION TRACKING: Only log when suggestion changes
     mutable int64_t m_lastSuggestedTimeframe = 0;
     
     // Efficient rolling timeframe tracking
@@ -157,7 +157,7 @@ private:
     int64_t m_baseTimeframe_ms = 100;           // Snapshot interval
     size_t m_maxHistorySlices = 5000;           // Keep 5000 slices per timeframe
     double m_priceResolution = 1.0;             // $1 price buckets
-    size_t m_depthLimit = 2000;                 // 🚀 PERFORMANCE FIX: Max bids/asks to process
+    size_t m_depthLimit = 2000;                 //  PERFORMANCE FIX: Max bids/asks to process
     LiquidityDisplayMode m_displayMode = LiquidityDisplayMode::Average;
 
 public:
@@ -180,7 +180,7 @@ public:
     void removeTimeframe(int64_t duration_ms);
     std::vector<int64_t> getAvailableTimeframes() const;
     
-    // 🚀 OPTIMIZATION: Suggest optimal timeframe based on viewport size
+    //  OPTIMIZATION: Suggest optimal timeframe based on viewport size
     int64_t suggestTimeframe(int64_t viewStart_ms, int64_t viewEnd_ms, int maxSlices = 4000) const;
     
     // Configuration

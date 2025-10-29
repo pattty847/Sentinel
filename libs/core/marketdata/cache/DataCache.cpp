@@ -121,7 +121,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_totalBidVolume = 0.0;
     m_totalAskVolume = 0.0;
 
-    sLog_App(QString("🏗️  O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
+    sLog_App(QString("O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
               .arg(QString::fromStdString(m_productId)).arg(size)
               .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
 }
@@ -226,7 +226,7 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
     }
 }
 
-// 🔥 NEW: DataCache LiveOrderBook Methods
+//  NEW: DataCache LiveOrderBook Methods
 // =============================================================================
 
 void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp) {
@@ -258,7 +258,7 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::ve
 
     liveBook.applyUpdates(snapshotUpdates, exchange_timestamp, nullptr);
 
-    sLog_Data(QString("🔥 DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
+    sLog_Data(QString(" DataCache: Initialized O(1) LiveOrderBook for %1").arg(QString::fromStdString(symbol)));
 }
 
 void DataCache::applyLiveOrderBookUpdates(const std::string& symbol,
@@ -275,7 +275,7 @@ void DataCache::applyLiveOrderBookUpdates(const std::string& symbol,
         // The first message for a product MUST be a snapshot.
         static int missing_count = 0;
         if (++missing_count % 100 == 1) { // Log every 100th time
-             sLog_Data(QString("⚠️ Dropping update for uninitialized live book '%1'. Waiting for snapshot. [Hit #%2]")
+             sLog_Data(QString(" Dropping update for uninitialized live book '%1'. Waiting for snapshot. [Hit #%2]")
                         .arg(QString::fromStdString(symbol)).arg(missing_count));
         }
     }

@@ -24,7 +24,7 @@ Assumptions: Executed as the primary entry point of a Qt application.
 
 int main(int argc, char *argv[])
 {
-    std::cout << "🚀 [Sentinel GPU Trading Terminal Starting...]" << std::endl;
+    std::cout << "[Sentinel GPU Trading Terminal Starting...]" << std::endl;
     qputenv("QSG_RENDER_LOOP", "threaded");
     QApplication app(argc, argv);
     
@@ -32,7 +32,7 @@ int main(int argc, char *argv[])
     qRegisterMetaType<OrderBook>();
     qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
 
-    std::cout << "🎯 Registering pure grid-only QML components..." << std::endl;
+    std::cout << "Registering pure grid-only QML components..." << std::endl;
     
     qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<CoordinateSystem>("Sentinel.Charts", 1, 0, "CoordinateSystem");
@@ -41,19 +41,19 @@ int main(int argc, char *argv[])
     qmlRegisterType<TimeAxisModel>("Sentinel.Charts", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel.Charts", 1, 0, "PriceAxisModel");
     
-    std::cout << "✅ Pure grid-only mode: Legacy components permanently removed" << std::endl;
+    std::cout << "Pure grid-only mode: Legacy components permanently removed" << std::endl;
     
-    // 🔥 CREATE GPU-POWERED MAIN WINDOW
-    std::cout << "🔧 Creating MainWindowGPU..." << std::endl;
+    //  CREATE GPU-POWERED MAIN WINDOW
+    std::cout << "Creating MainWindowGPU..." << std::endl;
     MainWindowGPU window;
-    std::cout << "✅ MainWindowGPU created successfully" << std::endl;
+    std::cout << "MainWindowGPU created successfully" << std::endl;
     
-    std::cout << "🔧 Calling window.show()..." << std::endl;
+    std::cout << "Calling window.show()..." << std::endl;
     window.show();
-    std::cout << "✅ window.show() completed" << std::endl;
+    std::cout << "window.show() completed" << std::endl;
     
-    std::cout << "🔧 Starting Qt event loop with app.exec()..." << std::endl;
-    qDebug() << "✅ GPU Trading Terminal ready for 144Hz action!";
+    std::cout << "Starting Qt event loop with app.exec()..." << std::endl;
+    qDebug() << "GPU Trading Terminal ready for 144Hz action!";
     
     return app.exec();
 }

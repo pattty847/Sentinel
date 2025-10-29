@@ -7,7 +7,6 @@ namespace GPUTypes {
         float x, y;           // Screen coordinates
         float r, g, b, a;     // Color (RGBA)
         
-        // 🔥 ADD: Raw data fields for grid system integration
         double rawPrice = 0.0;      // Original price before coordinate transformation
         double rawTimestamp = 0.0;  // Original timestamp in milliseconds
         int64_t timestamp_ms = 0;   // Timestamp for aging/cleanup
@@ -19,7 +18,6 @@ namespace GPUTypes {
         float width, height;  // Quad dimensions
         float r, g, b, a;     // Color (RGBA)
         
-        // 🔥 ADD: Raw data fields for grid system integration
         double rawPrice = 0.0;      // Original price
         double rawTimestamp = 0.0;  // Original timestamp in milliseconds
         float intensity = 1.0f;     // Volume/liquidity intensity

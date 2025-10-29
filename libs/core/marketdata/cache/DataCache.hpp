@@ -58,7 +58,7 @@ public:
     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
     [[nodiscard]] OrderBook            book(const std::string& s) const;
     
-    // 🔥 NEW: LiveOrderBook methods for stateful order book management - Now use exchange timestamps
+    //  NEW: LiveOrderBook methods for stateful order book management - Now use exchange timestamps
     void initializeLiveOrderBook(const std::string& symbol,
                                  const std::vector<OrderBookLevel>& bids,
                                  const std::vector<OrderBookLevel>& asks,
@@ -83,5 +83,5 @@ private:
     mutable std::shared_mutex                     m_mxLiveBooks; // For stateful order books
     std::unordered_map<std::string, TradeRing>    m_trades;
     std::unordered_map<std::string, OrderBook>    m_books;
-    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; // 🔥 NEW: Stateful order books
+    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; //  NEW: Stateful order books
 }; 

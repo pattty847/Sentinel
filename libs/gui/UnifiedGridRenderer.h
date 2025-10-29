@@ -34,7 +34,7 @@ class DataProcessor;
 class IRenderStrategy;
 
 /**
- * 🎯 UNIFIED GRID RENDERER - SLIM QML ADAPTER
+ *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
  * 
  * Slim QML adapter that delegates to the V2 modular architecture.
  * Maintains QML interface compatibility while using the new modular system.
@@ -85,7 +85,7 @@ private:
     // Thread safety
     mutable std::mutex m_dataMutex;
     
-    // 🎯 FOUR DIRTY FLAGS SYSTEM
+    //  FOUR DIRTY FLAGS SYSTEM
     // Each flag triggers a different update path in updatePaintNode
     std::atomic<bool> m_geometryDirty{true};     // Topology/LOD/mode changed (RARE - full rebuild)
     std::atomic<bool> m_appendPending{false};    // New data arrived (COMMON - append cells)
@@ -100,6 +100,7 @@ private:
     
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
+    bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied
     
     // V1 state (removed - now delegated to DataProcessor)
 
@@ -116,24 +117,24 @@ public:
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     
-    // 🚀 VIEWPORT BOUNDS: Getters for QML properties
+    //  VIEWPORT BOUNDS: Getters for QML properties
     qint64 getVisibleTimeStart() const;
     qint64 getVisibleTimeEnd() const; 
     double getMinPrice() const;
     double getMaxPrice() const;
     
-    // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
+    //  OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
-    // 🚀 VISUAL TRANSFORM: Getter for QML pan offset
+    //  VISUAL TRANSFORM: Getter for QML pan offset
     QPointF getPanVisualOffset() const;
     
-    // 🎯 DATA INTERFACE
+    //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
-    // 🎯 GRID CONFIGURATION
+    //  GRID CONFIGURATION
     Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
@@ -144,27 +145,27 @@ public:
     };
     static GridResolution calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines = 10, int targetHorizontalLines = 15);
     
-    // 🔥 DEBUG: Check grid system state
+    //  DEBUG: Check grid system state
     Q_INVOKABLE QString getGridDebugInfo() const;
     
-    // 🔥 DEBUG: Detailed grid debug information
+    //  DEBUG: Detailed grid debug information
     Q_INVOKABLE QString getDetailedGridDebug() const;
     
-    // 📊 PERFORMANCE MONITORING API
+    //  PERFORMANCE MONITORING API
     Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
     Q_INVOKABLE double getCurrentFPS() const;
     Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
     
-    // 🔥 GRID SYSTEM CONTROLS
+    //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
     void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
     
-    // 🔥 PAN/ZOOM CONTROLS
+    //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void resetZoom();
@@ -174,7 +175,7 @@ public:
     Q_INVOKABLE void panDown();
     Q_INVOKABLE void enableAutoScroll(bool enabled);
     
-    // 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+    //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
     Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
@@ -209,7 +210,7 @@ protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void componentComplete() override;
     
-    // 🖱️ MOUSE INTERACTION EVENTS
+    //  MOUSE INTERACTION EVENTS
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;

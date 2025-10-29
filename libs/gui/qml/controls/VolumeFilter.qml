@@ -27,7 +27,7 @@ Column {
             color: "white"
             font.pixelSize: 12
             font.bold: true
-            text: "🔍 VOLUME FILTER"
+            text: " VOLUME FILTER"
         }
     }
     

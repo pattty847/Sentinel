@@ -43,10 +43,10 @@ LiquidityTimeSeriesEngine::LiquidityTimeSeriesEngine(QObject* parent)
         m_timeSlices[timeframe] = std::deque<LiquidityTimeSlice>();
     }
     
-    sLog_App("🎯 LiquidityTimeSeriesEngine: Initialized with " << m_timeframes.size() << " timeframes");
-    sLog_App("   Base resolution: " << m_baseTimeframe_ms << "ms");
-    sLog_App("   Price resolution: $" << m_priceResolution);
-    sLog_App("   Max history per timeframe: " << m_maxHistorySlices << " slices");
+    sLog_App("LiquidityTimeSeriesEngine: Initialized with " << m_timeframes.size() << " timeframes");
+    sLog_App("  Base resolution: " << m_baseTimeframe_ms << "ms");
+    sLog_App("  Price resolution: $" << m_priceResolution);
+    sLog_App("  Max history per timeframe: " << m_maxHistorySlices << " slices");
 }
 
 void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book) {
@@ -82,7 +82,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     // Create a mutable copy to apply the depth limit
     OrderBook limitedBook = book;
     
-    // 🚀 PERFORMANCE OPTIMIZATION: Apply depth limit to the raw order book data
+    //  PERFORMANCE OPTIMIZATION: Apply depth limit to the raw order book data
     // This is the primary fix for CPU bottlenecking with large books.
     if (limitedBook.bids.size() > m_depthLimit) {
         limitedBook.bids.resize(m_depthLimit);
@@ -116,7 +116,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     // Debug logging for first few snapshots
     static int snapshotCount = 0;
     if (++snapshotCount <= 5) {
-        sLog_Data("🎯 GLOBAL SNAPSHOT #" << snapshotCount 
+        sLog_Data("GLOBAL SNAPSHOT #" << snapshotCount 
                  << " Bids:" << snapshot.bids.size() << " Asks:" << snapshot.asks.size()
                  << " timestamp:" << snapshot.timestamp_ms);
     }
@@ -171,7 +171,7 @@ void LiquidityTimeSeriesEngine::addTimeframe(int64_t duration_ms) {
         // Rebuild historical data for new timeframe from base snapshots
         rebuildTimeframe(duration_ms);
         
-        sLog_App("🎯 Added timeframe: " << duration_ms << "ms");
+        sLog_App("Added timeframe: " << duration_ms << "ms");
     }
 }
 
@@ -182,7 +182,7 @@ void LiquidityTimeSeriesEngine::removeTimeframe(int64_t duration_ms) {
         m_timeSlices.erase(duration_ms);
         m_currentSlices.erase(duration_ms);
         
-        sLog_App("🎯 Removed timeframe: " << duration_ms << "ms");
+        sLog_App("Removed timeframe: " << duration_ms << "ms");
     }
 }
 
@@ -205,10 +205,10 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
             // Ensure this timeframe has data available
             auto tf_it = m_timeSlices.find(timeframe);
             if (tf_it != m_timeSlices.end() && !tf_it->second.empty()) {
-                // 🚀 ONLY LOG WHEN TIMEFRAME SUGGESTION CHANGES
+                //  ONLY LOG WHEN TIMEFRAME SUGGESTION CHANGES
                 if (timeframe != m_lastSuggestedTimeframe) {
-                    sLog_Render("🚀 SUGGEST TIMEFRAME: " << timeframe << "ms for span " 
-                             << viewTimeSpan << "ms (" << expectedSlices << "/" << maxSlices << " slices, FINEST available)");
+                    sLog_Render("SUGGEST TIMEFRAME: " << timeframe << "ms for span " 
+                             << viewTimeSpan << "ms ("<< expectedSlices << "/" << maxSlices << " slices, FINEST available)");
                     m_lastSuggestedTimeframe = timeframe;
                 }
                 return timeframe;
@@ -216,7 +216,7 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
                 // Only log skipping if we haven't logged this specific timeframe being skipped before
                 static std::set<int64_t> loggedSkippedTimeframes;
                 if (loggedSkippedTimeframes.find(timeframe) == loggedSkippedTimeframes.end()) {
-                    sLog_Render("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (no data available)");
+                    sLog_Render("SKIPPING TIMEFRAME: " << timeframe << "ms (no data available)");
                     loggedSkippedTimeframes.insert(timeframe);
                 }
             }
@@ -224,7 +224,7 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
             // Only log skipping if we haven't logged this specific timeframe being skipped before
             static std::set<int64_t> loggedSkippedTimeframes;
             if (loggedSkippedTimeframes.find(timeframe) == loggedSkippedTimeframes.end()) {
-                sLog_Render("🔍 SKIPPING TIMEFRAME: " << timeframe << "ms (" << expectedSlices << " > " << maxSlices << " slices)");
+                sLog_Render("SKIPPING TIMEFRAME: " << timeframe << "ms ("<< expectedSlices << " > " << maxSlices << " slices)");
                 loggedSkippedTimeframes.insert(timeframe);
             }
         }
@@ -234,9 +234,9 @@ int64_t LiquidityTimeSeriesEngine::suggestTimeframe(int64_t viewStart_ms, int64_
     for (int64_t timeframe : m_timeframes) {
         auto tf_it = m_timeSlices.find(timeframe);
         if (tf_it != m_timeSlices.end() && !tf_it->second.empty()) {
-            // 🚀 ONLY LOG WHEN TIMEFRAME SUGGESTION CHANGES
+            //  ONLY LOG WHEN TIMEFRAME SUGGESTION CHANGES
             if (timeframe != m_lastSuggestedTimeframe) {
-                sLog_Render("🚀 FALLBACK TIMEFRAME: " << timeframe << "ms (finest with data)");
+                sLog_Render("FALLBACK TIMEFRAME: " << timeframe << "ms (finest with data)");
                 m_lastSuggestedTimeframe = timeframe;
             }
             return timeframe;
@@ -251,7 +251,7 @@ void LiquidityTimeSeriesEngine::setDisplayMode(LiquidityDisplayMode mode) {
         m_displayMode = mode;
         emit displayModeChanged(mode);
         
-        sLog_App("🎯 Display mode changed to: " << 
+        sLog_App("Display mode changed to: " << 
                  (mode == LiquidityDisplayMode::Average ? "Average" :
                   mode == LiquidityDisplayMode::Maximum ? "Maximum" :
                   mode == LiquidityDisplayMode::Resting ? "Resting" : "Total"));
@@ -303,7 +303,7 @@ void LiquidityTimeSeriesEngine::updateAllTimeframes(const OrderBookSnapshot& sna
                 }
             }
         }
-        sLog_Data("🚀 Rolling optimization - " << actualUpdates << "/" << m_timeframes.size() 
+        sLog_Data("Rolling optimization - " << actualUpdates << "/" << m_timeframes.size() 
                  << " timeframes updated (saved " << (m_timeframes.size() - actualUpdates) << " redundant updates)");
     }
 }
@@ -330,7 +330,7 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
         currentSlice.endTime_ms = sliceStart + timeframe_ms;
         
         // NEW SLICE LOGGING
-        sLog_RenderN(50, "🧱 NEW SLICE " << timeframe_ms << "ms: [" << sliceStart
+        sLog_RenderN(50, "NEW SLICE " << timeframe_ms << "ms: [" << sliceStart
                      << "-" << (sliceStart + timeframe_ms) << "]");
         currentSlice.duration_ms = timeframe_ms;
     }
@@ -465,7 +465,7 @@ void LiquidityTimeSeriesEngine::updateDisappearingLevels(LiquidityTimeSlice& sli
     // Debug: Log efficiency gains for first few snapshots
     static int disappearCount = 0;
     if (++disappearCount <= 5) {
-        sLog_Data("🚀 O(1) version stamp disappearing level detection - sequence " << m_globalSequence);
+        sLog_Data("O(1) version stamp disappearing level detection - sequence " << m_globalSequence);
     }
 }
 
@@ -494,7 +494,7 @@ void LiquidityTimeSeriesEngine::finalizeLiquiditySlice(LiquidityTimeSlice& slice
     // Debug logging for first few slices
     static int sliceCount = 0;
     if (++sliceCount <= 5) {
-        sLog_Data("🎯 FINALIZED SLICE #" << sliceCount
+        sLog_Data("FINALIZED SLICE #" << sliceCount
                  << " Duration:" << slice.duration_ms << "ms"
                  << " BidLevels:" << slice.bidMetrics.size()
                  << " AskLevels:" << slice.askMetrics.size()
@@ -531,7 +531,7 @@ void LiquidityTimeSeriesEngine::rebuildTimeframe(int64_t timeframe_ms) {
         slices.push_back(slice);
     }
     
-    sLog_App("🎯 Rebuilt timeframe " << timeframe_ms << "ms: " << slices.size() << " slices");
+    sLog_App("Rebuilt timeframe " << timeframe_ms << "ms: " << slices.size() << " slices");
 }
 
 void LiquidityTimeSeriesEngine::cleanupOldData() {

@@ -217,7 +217,7 @@ private:
 
     std::string m_productId;
 
-    // 🚀 CORE: Vectors for O(1) price level management
+    // Vectors for O(1) price level management
     std::vector<double> m_bids;
     std::vector<double> m_asks;
 

@@ -24,7 +24,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     // minimal local state; avoid noisy counters
     
     if (batch.cells.empty()) {
-        sLog_Render("🎯 HEATMAP EXIT: Returning nullptr - batch is empty");
+        sLog_Render(" HEATMAP EXIT: Returning nullptr - batch is empty");
         return nullptr;
     }
     
@@ -92,7 +92,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     if ((++frame % 30) == 0 && vertexIndex >= 6) {
         const auto* v = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
         const float firstX = v[0].x, lastX = v[vertexIndex - 1].x;
-        sLog_RenderN(1, "🎯 HEATMAP X-RANGE: " << firstX << " → " << lastX << " (verts=" << vertexIndex << ")");
+        sLog_RenderN(1, " HEATMAP X-RANGE: " << firstX << " → " << lastX << " (verts=" << vertexIndex << ")");
     }
     
     // Update geometry with actual vertex count used

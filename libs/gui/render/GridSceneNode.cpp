@@ -26,7 +26,7 @@ GridSceneNode::~GridSceneNode() {
 
 void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy) {
     if (!strategy) {
-        qDebug() << "🔍 GRIDSCENENODE: No strategy provided!";
+        qDebug() << " GRIDSCENENODE: No strategy provided!";
         return;
     }
     

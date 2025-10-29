@@ -116,7 +116,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     newZoom = std::max(0.1, std::min(10.0, newZoom));
     
     if (newZoom != m_zoomFactor) {
-        // 🎯 ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
+        //  ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
         if (center.x() >= 0 && center.y() >= 0) {
             // Get current viewport ranges
             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
@@ -141,7 +141,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
             
             if constexpr (kTraceZoomInteractions) {
-                qDebug() << "🔍 ZOOM:" << "Delta:" << delta << "->" << clampedDelta
+                qDebug() << " ZOOM:" << "Delta:" << delta << "->" << clampedDelta
                          << "Zoom:" << m_zoomFactor << "->" << newZoom
                          << "Mouse(" << center.x() << "," << center.y() << ")";
             }
@@ -169,7 +169,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             m_maxPrice = newMaxPrice;
             
             if constexpr (kTraceZoomInteractions) {
-                qDebug() << "🔍 ZOOM RESULT:"
+                qDebug() << " ZOOM RESULT:"
                          << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
                          << "NewTime[" << currentCenterTime << "]"
                          << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
@@ -237,8 +237,8 @@ void GridViewState::handlePanEnd() {
                    m_maxPrice + priceDelta);
     }
     
-    m_panVisualOffset = QPointF(0, 0);
-    emit panVisualOffsetChanged();
+    // Do not clear visual offset here; let the renderer clear it
+    // after geometry is resynchronized to avoid visual snap-back.
 }
 
 void GridViewState::handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize) {
@@ -267,6 +267,13 @@ void GridViewState::resetZoom() {
     
     emit viewportChanged();
     emit panVisualOffsetChanged();
+}
+
+void GridViewState::clearPanVisualOffset() {
+    if (!m_panVisualOffset.isNull()) {
+        m_panVisualOffset = QPointF(0, 0);
+        emit panVisualOffsetChanged();
+    }
 }
 
 // Directional pan methods
@@ -332,7 +339,7 @@ double GridViewState::calculateOptimalPriceResolution() const {
     // Calculate price span (this is the key - how much price range is visible)
     double priceSpan = m_maxPrice - m_minPrice;
     
-    // 🚀 PRICE-SPAN-BASED LOD: Use price range to determine resolution
+    //  PRICE-SPAN-BASED LOD: Use price range to determine resolution
     // When zoomed out (large price range), use coarser buckets
     if (priceSpan > 500) {               // > $500 range: $25 buckets  
         return 25.0;

@@ -51,7 +51,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-    sLog_App("🛑 UnifiedGridRenderer destructor - cleaning up...");
+    sLog_App("UnifiedGridRenderer destructor - cleaning up...");
     
     if (m_dataProcessor) {
         m_dataProcessor->stopProcessing();
@@ -63,7 +63,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
         
         // Wait for thread to finish and process all pending events
         if (!m_dataProcessorThread->wait(5000)) {
-            sLog_App("⚠️ Thread did not finish in time, terminating...");
+            sLog_App("Thread did not finish in time, terminating...");
             m_dataProcessorThread->terminate();
             m_dataProcessorThread->wait(1000);
         }
@@ -74,7 +74,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
     m_dataProcessor.reset();
     m_dataProcessorThread.reset();
     
-    sLog_App("✅ UnifiedGridRenderer cleanup complete");
+    sLog_App("UnifiedGridRenderer cleanup complete");
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
@@ -104,8 +104,8 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
     m_transformDirty.store(true);
     update();
     
-    sLog_Debug("🎯 UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
-               << " Price:[$" << minPrice << "-$" << maxPrice << "]");
+    sLog_Debug("UNIFIED RENDERER VIEWPORT Time:[" << startTimeMs << "-" << endTimeMs << "]"
+               << "Price:[$" << minPrice << "-$" << maxPrice << "]");
 }
 
 void UnifiedGridRenderer::onViewportChanged() {
@@ -120,7 +120,7 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF
     QQuickItem::geometryChange(newGeometry, oldGeometry);
     
     if (newGeometry.size() != oldGeometry.size()) {
-        sLog_Render("🎯 UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
+        sLog_Render("UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
         // Keep GridViewState in sync with the item size for accurate coord math
         if (m_viewState) {
@@ -139,7 +139,7 @@ void UnifiedGridRenderer::componentComplete() {
     // Set viewport size immediately when component is ready
     if (m_viewState && width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
-        sLog_App("🎯 Component complete: Set initial viewport size to " << width() << "x" << height());
+        sLog_App("Component complete: Set initial viewport size to " << width() << "x" << height());
     }
 }
 
@@ -266,11 +266,11 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
         m_transformDirty.store(true);
         update();
         emit autoScrollEnabledChanged();
-        sLog_Render("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
+        sLog_Render("Auto-scroll: "<< (enabled ? "ENABLED" : "DISABLED"));
     }
 }
 
-// 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+//  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
 QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) const {
     if (!m_viewState) return QPointF();
     
@@ -316,6 +316,12 @@ void UnifiedGridRenderer::init() {
     // THROTTLE: Only rebuild geometry every 250ms, not on every data update
     connect(m_dataProcessor.get(), &DataProcessor::dataUpdated, 
             this, [this]() { 
+                // If a pan sync is pending, clear the visual offset now (GUI thread)
+                if (m_panSyncPending && m_viewState) {
+                    m_viewState->clearPanVisualOffset();
+                    m_panSyncPending = false;
+                    m_transformDirty.store(true);
+                }
                 // Non-blocking refresh: new data arrived, append cells
                 m_appendPending.store(true);
                 update();
@@ -400,11 +406,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     size_t cellsCount = 0;
     
     // TODO: REMOVE COMMENTS AFTER IMPLEMENTING THE 4 DIRTY FLAGS SYSTEM
-    // 🎯 FOUR DIRTY FLAGS SYSTEM - No mutex needed, atomic exchange
+    //  FOUR DIRTY FLAGS SYSTEM - No mutex needed, atomic exchange
     
     // 1. FULL GEOMETRY REBUILD (rare, expensive)
     if (m_geometryDirty.exchange(false) || isNewNode) {
-        sLog_Render("⚠️  FULL GEOMETRY REBUILD (mode/LOD/timeframe changed)");
+        sLog_Render("FULL GEOMETRY REBUILD (mode/LOD/timeframe changed)");
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
@@ -429,7 +435,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     // 2. INCREMENTAL APPEND (common, will be cheap once implemented)
     if (m_appendPending.exchange(false)) {
         // TODO: For now, fallback to full update until we implement true incremental append
-        sLog_RenderN(5, "📝 APPEND PENDING (fallback to full update for now)");
+        sLog_RenderN(5, "APPEND PENDING (fallback to full update for now)");
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
@@ -453,13 +459,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
         sceneNode->updateTransform(transform);
         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
-        sLog_RenderN(20, "🔄 TRANSFORM UPDATE (pan/zoom)");
+        sLog_RenderN(20, "TRANSFORM UPDATE (pan/zoom)");
     }
     
     // 4. MATERIAL UPDATE (occasional, cheap)
     if (m_materialDirty.exchange(false)) {
         // TODO: Implement material parameter updates without geometry rebuild
-        sLog_RenderN(10, "🎨 MATERIAL UPDATE (intensity/palette)");
+        sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
         // For now, trigger a full update as fallback
         updateVisibleCells();
         GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
@@ -473,9 +479,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     const qint64 totalUs = timer.nsecsElapsed() / 1000;
     sLog_RenderN(10, "UGR paint: total=" << totalUs << "µs"
-                       << " cache=" << cacheUs << "µs"
-                       << " content=" << contentUs << "µs"
-                       << " cells=" << cellsCount);
+                       << "cache=" << cacheUs << "µs"
+                       << "content=" << contentUs << "µs"
+                       << "cells=" << cellsCount);
 
     return sceneNode;
 }
@@ -502,7 +508,7 @@ QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m
 // ===== QML DEBUG API =====
 // Debug and monitoring methods for QML
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
-QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
+QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
 double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
 double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
@@ -526,7 +532,20 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
     } else event->ignore(); 
 }
 
-void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanEnd(); event->accept(); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
+    if (m_viewState) {
+        m_viewState->handlePanEnd();
+        event->accept();
+        // Request immediate resync of geometry based on new viewport
+        if (m_dataProcessor) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", Qt::QueuedConnection);
+        }
+        // Keep visual pan until resync arrives to avoid snap-back
+        m_panSyncPending = true;
+        m_transformDirty.store(true);
+        update();
+    }
+}
 
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
     if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 

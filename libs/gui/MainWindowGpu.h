@@ -40,7 +40,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 class ChartModeController;
 
 /**
- * 🚀 GPU-Powered Trading Terminal MainWindow
+ *  GPU-Powered Trading Terminal MainWindow
  * Clean, focused implementation for GPU rendering
  */
 class MainWindowGPU : public QWidget {

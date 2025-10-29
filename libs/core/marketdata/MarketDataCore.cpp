@@ -39,7 +39,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_sslCtx.set_default_verify_paths();
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
-    sLog_App("🏗️ MarketDataCore initialized");
+    sLog_App("MarketDataCore initialized");
     // Create transport and bind callbacks
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
@@ -67,7 +67,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
 
 MarketDataCore::~MarketDataCore() {
     stop();
-    sLog_App("✅ MarketDataCore destroyed");
+    sLog_App("MarketDataCore destroyed");
 }
 
 inline void MarketDataCore::emitError(QString msg) {
@@ -113,7 +113,7 @@ void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symb
 
 void MarketDataCore::start() {
     if (!m_running.exchange(true)) {
-        sLog_App("🚀 Starting MarketDataCore...");
+        sLog_App("Starting MarketDataCore...");
         
         // Reset backoff on fresh start
         m_backoffDuration = std::chrono::seconds(1);
@@ -134,7 +134,7 @@ void MarketDataCore::start() {
 
 void MarketDataCore::stop() {
     if (m_running.exchange(false)) {
-        sLog_App("🛑 Stopping MarketDataCore...");
+        sLog_App("Stopping MarketDataCore...");
 
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
@@ -152,17 +152,17 @@ void MarketDataCore::stop() {
             m_ioThread.join();
         }
 
-        sLog_App("✅ MarketDataCore stopped");
+        sLog_App("MarketDataCore stopped");
     }
 }
 
 void MarketDataCore::run() {
-    sLog_Data(QString("🔌 IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
+    sLog_Data(QString("IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
     
     // Transport handles resolve/connect/handshake; we just run the context
     m_ioc.run();
     
-    sLog_Data("🔌 IO context stopped");
+    sLog_Data("IO context stopped");
 }
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
@@ -176,7 +176,7 @@ void MarketDataCore::scheduleReconnect() {
     std::uniform_int_distribution<> jitter(0, 250);
     auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
     
-    sLog_Data(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
+    sLog_Data(QString("Scheduling reconnect in %1ms (backoff: %2s)...")
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
     
@@ -185,7 +185,7 @@ void MarketDataCore::scheduleReconnect() {
     m_reconnectTimer.async_wait([this](beast::error_code ec) {
         if (ec || !m_running) return;
         
-        sLog_Data("🔄 Attempting reconnection...");
+        sLog_Data("Attempting reconnection...");
         
         // Record network reconnection
         if (m_monitor) {
@@ -254,7 +254,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
                     emitError(QString::fromStdString(ev.message));
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
-                    std::string logMessage = std::format("✅ Subscription confirmed for {} symbols", ev.productIds.size());
+                    std::string logMessage = std::format("Subscription confirmed for {} symbols", ev.productIds.size());
                     sLog_Data(QString::fromStdString(logMessage));
                 }
             }, evt);
