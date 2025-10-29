@@ -75,7 +75,7 @@ void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
     }
     
     // Signal that we need a repaint
-    m_geometryDirty = true;
+    m_appendPending.store(true);
     update();
 }
 
@@ -86,7 +86,7 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
         m_viewState->setViewport(startTimeMs, endTimeMs, minPrice, maxPrice);
     }
     
-    m_geometryDirty.store(true);
+    m_transformDirty.store(true);
     update();
     // GridViewState emits viewportChanged which is connected to us
     
@@ -97,8 +97,8 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
-    // Slim adapter: DP + LTSE handle timeframe/LOD; we just mark dirty
-    m_geometryDirty.store(true);
+    // Slim adapter: DP + LTSE handle timeframe/LOD; we just mark transform dirty
+    m_transformDirty.store(true);
     update();
 }
 
@@ -113,8 +113,8 @@ void UnifiedGridRenderer::geometryChanged(const QRectF &newGeometry, const QRect
             m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
         }
 
-        // Force redraw with new geometry
-        m_geometryDirty.store(true);
+        // Size change only affects transform, not geometry topology
+        m_transformDirty.store(true);
         update();
     }
 }
@@ -154,7 +154,7 @@ void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
 void UnifiedGridRenderer::setShowVolumeProfile(bool show) {
     if (m_showVolumeProfile != show) {
         m_showVolumeProfile = show;
-        m_geometryDirty.store(true);
+        m_materialDirty.store(true);
         update();
         emit showVolumeProfileChanged();
     }
@@ -163,7 +163,7 @@ void UnifiedGridRenderer::setShowVolumeProfile(bool show) {
 void UnifiedGridRenderer::setIntensityScale(double scale) {
     if (m_intensityScale != scale) {
         m_intensityScale = scale;
-        m_geometryDirty.store(true);
+        m_materialDirty.store(true);
         update();
         emit intensityScaleChanged();
     }
@@ -179,7 +179,7 @@ void UnifiedGridRenderer::setMaxCells(int max) {
 void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
     if (m_minVolumeFilter != minVolume) {
         m_minVolumeFilter = minVolume;
-        m_geometryDirty.store(true);
+        m_materialDirty.store(true);
         update();
         emit minVolumeFilterChanged();
     }
@@ -237,18 +237,18 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     }
 }
 
-void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::panLeft() { if (m_viewState) { m_viewState->panLeft(); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::panRight() { if (m_viewState) { m_viewState->panRight(); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::panUp() { if (m_viewState) { m_viewState->panUp(); m_geometryDirty.store(true); update(); } }
-void UnifiedGridRenderer::panDown() { if (m_viewState) { m_viewState->panDown(); m_geometryDirty.store(true); update(); } }
+void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::panLeft() { if (m_viewState) { m_viewState->panLeft(); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::panRight() { if (m_viewState) { m_viewState->panRight(); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::panUp() { if (m_viewState) { m_viewState->panUp(); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::panDown() { if (m_viewState) { m_viewState->panDown(); m_transformDirty.store(true); update(); } }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     if (m_viewState) {
         m_viewState->enableAutoScroll(enabled);
-        m_geometryDirty.store(true);
+        m_transformDirty.store(true);
         update();
         emit autoScrollEnabledChanged();
         sLog_Render("🕐 Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
@@ -267,14 +267,8 @@ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) co
     viewport.width = width();
     viewport.height = height();
     
-    QPointF screenPos = CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
-    
-    // 🚀 SMOOTH DRAGGING: Apply visual pan offset for real-time feedback
-    QPointF panOffset = getPanVisualOffset();
-    screenPos.setX(screenPos.x() + panOffset.x());
-    screenPos.setY(screenPos.y() + panOffset.y());
-    
-    return screenPos;
+    // NO pan offset applied - that's handled by the node transform in updatePaintNode
+    return CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
 }
 
 QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const {
@@ -288,18 +282,14 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     viewport.width = width();
     viewport.height = height();
     
-    // 🚀 SMOOTH DRAGGING: Remove visual pan offset before world conversion
-    QPointF panOffset = getPanVisualOffset();
-    QPointF adjustedScreen(screenX - panOffset.x(), screenY - panOffset.y());
-    
-    return CoordinateSystem::screenToWorld(adjustedScreen, viewport);
+    // NO pan offset removed - node transform handles it
+    return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
 }
 
 // 🗑️ DELETED: Redundant getScreenWidth/Height - use width()/height() directly
 
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
-        m_viewState->setViewportSize(width(), height()); 
         m_viewState->handlePanStart(event->position()); 
         event->accept(); 
     } else event->ignore(); 
@@ -308,7 +298,7 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) {
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
     if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
         m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
-        m_geometryDirty.store(true); update(); event->accept(); 
+        m_transformDirty.store(true); update(); event->accept(); 
     } else event->ignore(); 
 }
 
@@ -327,8 +317,8 @@ void UnifiedGridRenderer::initializeV2Architecture() {
     // THROTTLE: Only rebuild geometry every 250ms, not on every data update
     connect(m_dataProcessor.get(), &DataProcessor::dataUpdated, 
             this, [this]() { 
-                // Non-blocking refresh: just mark dirty and schedule a frame
-                m_geometryDirty.store(true);
+                // Non-blocking refresh: new data arrived, append cells
+                m_appendPending.store(true);
                 update();
             }, Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
@@ -389,16 +379,14 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
-    Q_UNUSED(data)  // Not needed for this implementation
+    Q_UNUSED(data)
     if (width() <= 0 || height() <= 0) {
-        // invalid size; skip
         return oldNode;
     }
 
     QElapsedTimer timer;
     timer.start();
 
-    // reduce noisy frame logs
     if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
 
     auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
@@ -411,38 +399,53 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     qint64 cacheUs = 0;
     qint64 contentUs = 0;
     size_t cellsCount = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        bool needsRebuild = m_geometryDirty.load() || isNewNode;
+    
+    // 🎯 FOUR DIRTY FLAGS SYSTEM - No mutex needed, atomic exchange
+    
+    // 1. FULL GEOMETRY REBUILD (rare, expensive)
+    if (m_geometryDirty.exchange(false) || isNewNode) {
+        sLog_Render("⚠️  FULL GEOMETRY REBUILD (mode/LOD/timeframe changed)");
+        QElapsedTimer cacheTimer; cacheTimer.start();
+        updateVisibleCells();
+        cacheUs = cacheTimer.nsecsElapsed() / 1000;
         
-        if (needsRebuild) {
-            // needs rebuild
-            QElapsedTimer cacheTimer; cacheTimer.start();
-            updateVisibleCells(); // now non-blocking; just consumes snapshot
-            cacheUs = cacheTimer.nsecsElapsed() / 1000;
-            
-            // creating batch
-            // Render pipeline: passing cells to strategy
-            GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
-            
-            IRenderStrategy* strategy = getCurrentStrategy();
-            // selected strategy
-            
-            QElapsedTimer contentTimer; contentTimer.start();
-            sceneNode->updateContent(batch, strategy);
-            contentUs = contentTimer.nsecsElapsed() / 1000;
-            if (m_showVolumeProfile) {
-                updateVolumeProfile();
-                sceneNode->updateVolumeProfile(m_volumeProfile);
-            }
-            sceneNode->setShowVolumeProfile(m_showVolumeProfile);
-            m_geometryDirty.store(false);
-            if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
-        } else {
-            if (m_sentinelMonitor) m_sentinelMonitor->recordCacheHit();
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        IRenderStrategy* strategy = getCurrentStrategy();
+        
+        QElapsedTimer contentTimer; contentTimer.start();
+        sceneNode->updateContent(batch, strategy);
+        contentUs = contentTimer.nsecsElapsed() / 1000;
+        
+        if (m_showVolumeProfile) {
+            updateVolumeProfile();
+            sceneNode->updateVolumeProfile(m_volumeProfile);
         }
+        sceneNode->setShowVolumeProfile(m_showVolumeProfile);
         
-        // Apply visual pan offset as a transform for smooth panning feedback
+        if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
+        cellsCount = m_visibleCells.size();
+    }
+    
+    // 2. INCREMENTAL APPEND (common, will be cheap once implemented)
+    if (m_appendPending.exchange(false)) {
+        // TODO: For now, fallback to full update until we implement true incremental append
+        sLog_RenderN(5, "📝 APPEND PENDING (fallback to full update for now)");
+        QElapsedTimer cacheTimer; cacheTimer.start();
+        updateVisibleCells();
+        cacheUs = cacheTimer.nsecsElapsed() / 1000;
+        
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        IRenderStrategy* strategy = getCurrentStrategy();
+        
+        QElapsedTimer contentTimer; contentTimer.start();
+        sceneNode->updateContent(batch, strategy);
+        contentUs = contentTimer.nsecsElapsed() / 1000;
+        
+        cellsCount = m_visibleCells.size();
+    }
+    
+    // 3. TRANSFORM UPDATE ONLY (very common, very cheap)
+    if (m_transformDirty.exchange(false) || isNewNode) {
         QMatrix4x4 transform;
         if (m_viewState) {
             QPointF pan = m_viewState->getPanVisualOffset();
@@ -450,8 +453,18 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
         sceneNode->updateTransform(transform);
         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
-        
-        cellsCount = m_visibleCells.size();
+        sLog_RenderN(20, "🔄 TRANSFORM UPDATE (pan/zoom)");
+    }
+    
+    // 4. MATERIAL UPDATE (occasional, cheap)
+    if (m_materialDirty.exchange(false)) {
+        // TODO: Implement material parameter updates without geometry rebuild
+        sLog_RenderN(10, "🎨 MATERIAL UPDATE (intensity/palette)");
+        // For now, trigger a full update as fallback
+        updateVisibleCells();
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        IRenderStrategy* strategy = getCurrentStrategy();
+        sceneNode->updateContent(batch, strategy);
     }
     
     if (m_sentinelMonitor) {
@@ -462,7 +475,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     sLog_RenderN(10, "UGR paint: total=" << totalUs << "µs"
                        << " cache=" << cacheUs << "µs"
                        << " content=" << contentUs << "µs"
-                       << " cells=" << static_cast<unsigned long long>(cellsCount));
+                       << " cells=" << cellsCount);
 
     return sceneNode;
 }
@@ -488,4 +501,4 @@ double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m
 double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
 void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanMove(event->position()); event->accept(); update(); } else event->ignore(); }
-void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->setViewportSize(width(), height()); m_viewState->handlePanEnd(); event->accept(); update(); m_geometryDirty.store(true); } }
+void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanEnd(); event->accept(); m_transformDirty.store(true); update(); } }

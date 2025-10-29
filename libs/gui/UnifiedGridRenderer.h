@@ -84,7 +84,13 @@ private:
     
     // Thread safety
     mutable std::mutex m_dataMutex;
-    std::atomic<bool> m_geometryDirty{true};
+    
+    // 🎯 FOUR DIRTY FLAGS SYSTEM
+    // Each flag triggers a different update path in updatePaintNode
+    std::atomic<bool> m_geometryDirty{true};     // Topology/LOD/mode changed (RARE - full rebuild)
+    std::atomic<bool> m_appendPending{false};    // New data arrived (COMMON - append cells)
+    std::atomic<bool> m_transformDirty{false};   // Pan/zoom/follow (VERY COMMON - transform only)
+    std::atomic<bool> m_materialDirty{false};    // Visual params changed (OCCASIONAL - uniforms/material)
         
     // Rendering data
     std::vector<CellInstance> m_visibleCells;
