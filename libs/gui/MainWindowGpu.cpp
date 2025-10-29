@@ -65,32 +65,30 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
 MainWindowGPU::~MainWindowGPU() {
     sLog_App("🛑 MainWindowGPU destructor - cleaning up...");
     
-    // Stop data streams first
+    // This prevents queued signals from reaching DataProcessor during shutdown
     if (m_marketDataCore) {
-        sLog_App("🛑 Stopping MarketDataCore...");
-        m_marketDataCore->stop();
-        sLog_App("✅ MarketDataCore stopped");
-        m_marketDataCore.reset();  // Clean shutdown of MarketDataCore
-        sLog_App("✅ MarketDataCore destroyed");
+        disconnect(m_marketDataCore.get(), nullptr, nullptr, nullptr);
     }
     
-    // Stop DataProcessor explicitly before destroying QML
+    // This ensures cleanup happens synchronously, not async after QML destruction
     if (m_qquickView && m_qquickView->rootObject()) {
         UnifiedGridRenderer* unifiedGridRenderer = m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
         if (unifiedGridRenderer) {
             auto dataProcessor = unifiedGridRenderer->getDataProcessor();
             if (dataProcessor) {
-                sLog_App("🛑 Stopping DataProcessor...");
+                sLog_App("🛑 Stopping DataProcessor from MainWindowGPU...");
                 dataProcessor->stopProcessing();
-                sLog_App("✅ DataProcessor stopped");
             }
         }
-        
-        // Disconnect all signals to prevent callbacks during destruction
-        disconnect(m_qquickView->rootObject(), nullptr, this, nullptr);
     }
     
-    // Clear QML context to prevent dangling references
+    if (m_marketDataCore) {
+        m_marketDataCore->stop();
+        m_marketDataCore.reset();
+        sLog_App("✅ MarketDataCore destroyed");
+    }
+    
+    // This will trigger UnifiedGridRenderer destructor
     if (m_qquickView) {
         m_qquickView->setSource(QUrl());
     }

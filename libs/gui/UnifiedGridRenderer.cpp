@@ -51,11 +51,30 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-    // Properly shutdown worker thread
+    sLog_App("🛑 UnifiedGridRenderer destructor - cleaning up...");
+    
+    if (m_dataProcessor) {
+        m_dataProcessor->stopProcessing();
+        disconnect(m_dataProcessor.get(), nullptr, this, nullptr);
+    }
+    
     if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
         m_dataProcessorThread->quit();
-        m_dataProcessorThread->wait(5000);  // Wait up to 5 seconds
+        
+        // Wait for thread to finish and process all pending events
+        if (!m_dataProcessorThread->wait(5000)) {
+            sLog_App("⚠️ Thread did not finish in time, terminating...");
+            m_dataProcessorThread->terminate();
+            m_dataProcessorThread->wait(1000);
+        }
     }
+    
+    // Since the thread is finished, we can safely destroy the objects
+    // Qt will handle cleanup automatically
+    m_dataProcessor.reset();
+    m_dataProcessorThread.reset();
+    
+    sLog_App("✅ UnifiedGridRenderer cleanup complete");
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
@@ -190,9 +209,6 @@ void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
     }
 }
 
-// Public API methods
-// 🗑️ DELETED: Redundant wrapper methods - use direct calls instead
-
 void UnifiedGridRenderer::clearData() {
     // Delegate to DataProcessor
     if (m_dataProcessor) {
@@ -205,8 +221,6 @@ void UnifiedGridRenderer::clearData() {
     
     m_geometryDirty.store(true);
     update();
-    
-    sLog_App("🎯 UnifiedGridRenderer: Data cleared - delegated to DataProcessor");
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
@@ -216,10 +230,6 @@ void UnifiedGridRenderer::setPriceResolution(double resolution) {
         update();
     }
 }
-
-// 🗑️ DELETED: setTimeResolution (empty), setGridResolution (redundant)
-
-// 🗑️ DELETED: Grid calculation utilities, debug methods - use DataProcessor directly
 
 void UnifiedGridRenderer::setGridMode(int mode) {
     double priceRes[] = {2.5, 5.0, 10.0};
@@ -289,22 +299,6 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     
     // NO pan offset removed - node transform handles it
     return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
-}
-
-// 🗑️ DELETED: Redundant getScreenWidth/Height - use width()/height() directly
-
-void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
-    if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
-        m_viewState->handlePanStart(event->position()); 
-        event->accept(); 
-    } else event->ignore(); 
-}
-
-void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
-    if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
-        m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
-        m_transformDirty.store(true); update(); event->accept(); 
-    } else event->ignore(); 
 }
 
 void UnifiedGridRenderer::init() {
@@ -405,6 +399,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     qint64 contentUs = 0;
     size_t cellsCount = 0;
     
+    // TODO: REMOVE COMMENTS AFTER IMPLEMENTING THE 4 DIRTY FLAGS SYSTEM
     // 🎯 FOUR DIRTY FLAGS SYSTEM - No mutex needed, atomic exchange
     
     // 1. FULL GEOMETRY REBUILD (rare, expensive)
@@ -485,14 +480,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     return sceneNode;
 }
 
-// QML API - Minimal implementations for Q_PROPERTY/Q_INVOKABLE compatibility
+// ===== QML DATA API =====
+// Methods for data input and manipulation from QML
 void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
+void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+
+// ===== QML PROPERTY GETTERS =====
+// Read-only property access for QML bindings
 int UnifiedGridRenderer::getCurrentTimeResolution() const { return static_cast<int>(m_currentTimeframe_ms); }
 double UnifiedGridRenderer::getCurrentPriceResolution() const { return m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0; }
-QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
-QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 double UnifiedGridRenderer::getScreenWidth() const { return width(); }
 double UnifiedGridRenderer::getScreenHeight() const { return height(); }
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const { return m_viewState ? m_viewState->getVisibleTimeStart() : 0; }
@@ -500,11 +498,25 @@ qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_v
 double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
 double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
 QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
-void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+
+// ===== QML DEBUG API =====
+// Debug and monitoring methods for QML
+QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
+QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString(" DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
 double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
 double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
+
+// ===== QT EVENT HANDLERS =====
+// Mouse and wheel event handling for user interaction
+void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
+    if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
+        m_viewState->handlePanStart(event->position()); 
+        event->accept(); 
+    } else event->ignore(); 
+}
+
 void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { 
     if (m_viewState) { 
         m_viewState->handlePanMove(event->position()); 
@@ -513,4 +525,12 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
         update(); 
     } else event->ignore(); 
 }
+
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { if (m_viewState) { m_viewState->handlePanEnd(); event->accept(); m_transformDirty.store(true); update(); } }
+
+void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
+    if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
+        m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
+        m_transformDirty.store(true); update(); event->accept(); 
+    } else event->ignore(); 
+}

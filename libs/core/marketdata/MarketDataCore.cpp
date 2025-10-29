@@ -67,7 +67,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
 
 MarketDataCore::~MarketDataCore() {
     stop();
-    sLog_App("🏗️ MarketDataCore destroyed");
+    sLog_App("✅ MarketDataCore destroyed");
 }
 
 inline void MarketDataCore::emitError(QString msg) {

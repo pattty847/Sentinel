@@ -42,11 +42,18 @@ DataProcessor::DataProcessor(QObject* parent)
 }
 
 DataProcessor::~DataProcessor() {
+    // Log even if stopProcessing() returns early (idempotent)
+    if (!m_shuttingDown.load()) {
+        sLog_App("🛑 DataProcessor destructor - stopProcessing() not called yet");
+    }
     stopProcessing();
+    // This log will always appear, even if stopProcessing() returned early
+    sLog_App("✅ DataProcessor destructor complete");
 }
 
 void DataProcessor::startProcessing() {
     // Base 100ms sampler: ensure continuous time buckets
+    // This is the rate at whicch we sample the order book with 'captureOrderBookSnapshot'
     sLog_App("🚀 DataProcessor: Starting 100ms base sampler");
     if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
         m_snapshotTimer->start(100);
@@ -55,12 +62,35 @@ void DataProcessor::startProcessing() {
 }
 
 void DataProcessor::stopProcessing() {
+    // Idempotent: if already shutting down, return immediately
+    bool expected = false;
+    if (!m_shuttingDown.compare_exchange_strong(expected, true)) {
+        // Already shutting down, skip redundant work
+        return;
+    }
+    
+    sLog_App("🛑 DataProcessor::stopProcessing() - shutting down...");
+    
+    // Stop timer first to prevent new processing
     if (m_snapshotTimer) {
         m_snapshotTimer->stop();
     }
+    
+    // Disconnect all signals to prevent callbacks during shutdown
+    disconnect(this, nullptr, nullptr, nullptr);
+    
+    // Clear data to free memory
+    clearData();
+    
+    sLog_App("✅ DataProcessor stopped");
 }
 
 void DataProcessor::onTradeReceived(const Trade& trade) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (trade.product_id.empty()) return;
     
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -85,6 +115,11 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
 }
 
 void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (!book || book->product_id.empty() || book->bids.empty() || book->asks.empty()) return;
     
     {
@@ -114,6 +149,20 @@ const OrderBook& DataProcessor::getLatestOrderBook() const {
 }
 
 void DataProcessor::captureOrderBookSnapshot() {
+    /*  
+        This function captures the current state of an order book and aligns it to a 100ms time bucket.
+        If there are skipped buckets since the last snapshot (e.g., no activity in the last 100ms),
+        it carries forward the latest order book state into each bucket up to the current time.
+        This ensures that order book snapshots are recorded at consistent intervals in the liquidity engine.
+        The periodic snapshot promotes proper time alignment for rendering historical order flow and downstream analysis.
+        Early exits occur if the system is shutting down or if no valid liquidity engine exists.
+    */
+
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (!m_liquidityEngine) return;
     
     std::shared_ptr<const OrderBook> book_copy;
@@ -124,6 +173,7 @@ void DataProcessor::captureOrderBookSnapshot() {
     if (!book_copy) return;
 
     // Align to system 100ms buckets; carry-forward if we skipped buckets
+    // TODO: See if this is the best way to align the order book to the 100ms bucket.
     const qint64 nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     const qint64 bucketStart = (nowMs / 100) * 100;
@@ -212,6 +262,11 @@ void DataProcessor::initializeViewportFromOrderBook(const OrderBook& book) {
 }
 
 void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (!m_dataCache || !m_liquidityEngine) {
         sLog_Render("❌ DataProcessor: DataCache or LiquidityEngine not set");
         return;
@@ -343,11 +398,15 @@ void DataProcessor::clearData() {
         std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
         m_publishedCells.reset();
     }
-    sLog_App("🎯 DataProcessor: Data cleared");
     emit dataUpdated();
 }
 
 void DataProcessor::updateVisibleCells() {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     m_visibleCells.clear();
     
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;

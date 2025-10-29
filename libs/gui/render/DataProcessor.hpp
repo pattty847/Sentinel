@@ -15,6 +15,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <QElapsedTimer>
 #include <QRectF>
 #include <mutex>
+#include <atomic>
 #include <memory>
 #include <vector>
 #include "../../core/marketdata/model/TradeData.h"
@@ -127,4 +128,7 @@ private:
 
     // Phase 1: feature gate for dense ingestion
     bool m_useDenseIngestion = true;
+    
+    // Shutdown flag to prevent processing after stopProcessing() is called
+    std::atomic<bool> m_shuttingDown{false};
 };
