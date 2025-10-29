@@ -379,7 +379,7 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
-    if (width() <= 0 || height() <= 0) {
+    if (width() <= 0 || height() <= 0) { 
         return oldNode;
     }
 
