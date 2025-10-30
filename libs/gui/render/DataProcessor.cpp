@@ -433,72 +433,39 @@ void DataProcessor::updateVisibleCells() {
         sLog_Render("MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
     }
     
-    // Get liquidity slices for active timeframe within viewport
+    // Get liquidity slices within viewport with append-only + version gating
     if (m_liquidityEngine) {
         qint64 timeStart = m_viewState->getVisibleTimeStart();
         qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-        sLog_Render("LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
-        
-        auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
-        sLog_Render("LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
-        
-        // TIME WRAP DETECTION
-        if (!visibleSlices.empty()) {
-            static qint64 prevFirst = LLONG_MIN, prevLast = LLONG_MIN;
-            const qint64 first = visibleSlices.front()->startTime_ms;
-            const qint64 last  = visibleSlices.back()->startTime_ms;
-            if (prevFirst != LLONG_MIN && (first < prevFirst || last < prevLast)) {
-                sLog_RenderN(1, "🚨 TIME WRAP DETECTED: first " << first << " (prev " << prevFirst
-                            << "), last " << last << " (prev " << prevLast << ")");
-            }
-            prevFirst = first; prevLast = last;
+        const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
+
+        bool viewportChanged = (m_lastViewportVersion != currentViewportVersion);
+        if (viewportChanged) {
+            m_visibleCells.clear();
+            m_lastProcessedTime = timeStart;
+        } else if (m_lastProcessedTime == 0 || m_lastProcessedTime < timeStart || m_lastProcessedTime > timeEnd) {
+            m_lastProcessedTime = timeStart;
         }
-        
-        // Check if slices are being processed
+
+        const qint64 queryStart = viewportChanged ? timeStart : m_lastProcessedTime;
+        sLog_Render("LTSE QUERY (" << (viewportChanged ? "rebuild" : "append") << "): timeframe=" << activeTimeframe << "ms, window=[" << queryStart << "-" << timeEnd << "]");
+        auto slices = m_liquidityEngine->getVisibleSlices(activeTimeframe, queryStart, timeEnd);
+        sLog_Render("LTSE RESULT: Found " << slices.size() << (viewportChanged ? " slices" : " new slices"));
+
         int processedSlices = 0;
-        
-        // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
-        if (visibleSlices.empty()) {
-            const bool canAutoFix = (m_viewState && m_viewState->isAutoScrollEnabled());
-            if (!canAutoFix) {
-                sLog_Render("SKIP AUTO-ADJUST: auto-scroll disabled (user interaction in progress)");
-            } else {
-                auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
-                if (!allSlices.empty()) {
-                    qint64 oldestTime = allSlices.front()->startTime_ms;
-                    qint64 newestTime = allSlices.back()->endTime_ms;
-                    qint64 gap = timeStart - newestTime;
-                    sLog_Render("LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
-                    sLog_Render("TIME GAP: " << gap << "ms between newest data and viewport start");
-                    
-                    // AUTO-FIX: Snap viewport to actual data range
-                    if (gap > 60000) { // If gap > 1 minute, auto-adjust
-                        qint64 newStart = newestTime - 30000; // 30s before newest data
-                        qint64 newEnd = newestTime + 30000;   // 30s after newest data
-                        sLog_Render("AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
-                        
-                        m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
-                        
-                        // Retry query with corrected viewport
-                        visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
-                        sLog_Render("VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
-                    }
-                }
+        int64_t newCursor = queryStart;
+        for (const auto* slice : slices) {
+            if (!slice) continue;
+            if (viewportChanged || slice->startTime_ms > m_lastProcessedTime) {
+                createCellsFromLiquiditySlice(*slice);
+                ++processedSlices;
+                newCursor = std::max<int64_t>(newCursor, slice->endTime_ms);
             }
         }
-        
-        // Process all visible slices; viewport + transform handle GPU load
-        for (const auto* slice : visibleSlices) {
-            ++processedSlices;
-            createCellsFromLiquiditySlice(*slice);
-        }
-        
-        sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
-        
-        sLog_Render("DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
-                 << " TotalCells:" << m_visibleCells.size()
-                 << " ActiveTimeframe:" << activeTimeframe << "ms"
-                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+
+        m_lastProcessedTime = std::max<int64_t>(newCursor, timeStart);
+        m_lastViewportVersion = currentViewportVersion;
+        sLog_Render("DP COVERAGE TotalCells=" << m_visibleCells.size() << " processed=" << processedSlices);
     }
     
     // Publish snapshot for renderer consumption without blocking the render thread
@@ -549,49 +516,30 @@ void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slic
 void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid) {
     if (liquidity <= 0.0 || !m_viewState) return;
     
+    // World-space culling
+    if (price < m_viewState->getMinPrice() || price > m_viewState->getMaxPrice()) return;
+    if (slice.endTime_ms < m_viewState->getVisibleTimeStart() || slice.startTime_ms > m_viewState->getVisibleTimeEnd()) return;
+
     CellInstance cell;
-    cell.timeSlot = slice.startTime_ms;
-    cell.priceLevel = price;
+    cell.timeStart_ms = slice.startTime_ms;
+    cell.timeEnd_ms = (slice.endTime_ms > slice.startTime_ms) ? slice.endTime_ms : (slice.startTime_ms + std::max<int64_t>(m_currentTimeframe_ms, 1));
+    const double halfTick = slice.tickSize * 0.5;
+    cell.priceMin = price - halfTick;
+    cell.priceMax = price + halfTick;
     cell.liquidity = liquidity;
     cell.isBid = isBid;
     cell.intensity = std::min(1.0, liquidity / 1000.0);
     cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
-    // Compute screen-space rect from world coordinates
-    cell.screenRect = timeSliceToScreenRect(slice, price);
-
-    // Cull degenerate or off-screen rectangles
-    const double minPixel = 0.5;   // Avoid zero-area artifacts
-    const double maxPixel = 200.0; // Clamp pathological sizes
-    if (cell.screenRect.width() < minPixel || cell.screenRect.height() < minPixel) {
-        return;
-    }
-    if (cell.screenRect.width() > maxPixel) {
-        // Clamp width to prevent giant blocks due to bad transforms
-        cell.screenRect.setWidth(maxPixel);
-    }
-    if (cell.screenRect.height() > maxPixel) {
-        cell.screenRect.setHeight(maxPixel);
-    }
-
-    // Basic viewport culling using current item size from view state
-    const double viewportW = m_viewState ? m_viewState->getViewportWidth() : 0.0;
-    const double viewportH = m_viewState ? m_viewState->getViewportHeight() : 0.0;
-    if (viewportW > 0.0 && viewportH > 0.0) {
-        const QRectF viewportRect(0.0, 0.0, viewportW, viewportH);
-        if (!viewportRect.intersects(cell.screenRect)) {
-            return;
-        }
-    }
+    cell.snapshotCount = slice.duration_ms > 0 ? static_cast<int>(slice.duration_ms / std::max<int64_t>(m_currentTimeframe_ms, 1)) : 1;
 
     m_visibleCells.push_back(cell);
     
     if constexpr (kTraceCellDebug) {
         static int cellCounter = 0;
         if (++cellCounter % 50 == 0) {
-            sLog_Render("CELL DEBUG: Created cell #" << cellCounter << " at screenRect("
-                        << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
-                        << cell.screenRect.width() << "x" << cell.screenRect.height() 
-                        << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+            sLog_Render("CELL DEBUG: Created cell #" << cellCounter << " world=[" 
+                        << cell.timeStart_ms << "," << cell.timeEnd_ms << "] $[" 
+                        << cell.priceMin << "," << cell.priceMax << "] liquidity=" << cell.liquidity);
         }
     }
 }

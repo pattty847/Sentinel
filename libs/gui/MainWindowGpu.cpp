@@ -104,7 +104,7 @@ void MainWindowGPU::setupUI() {
     // Create GPU Chart (QML) with threaded scene graph via QQuickView
     m_qquickView = new QQuickView;
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
-    m_qquickView->setColor(Qt::black);
+    m_qquickView->setColor(Qt::black); // TODO: Route a configuration option
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, this);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     

@@ -11,6 +11,7 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 */
 #include "HeatmapStrategy.hpp"
 #include "../GridTypes.hpp"
+#include "../../CoordinateSystem.h"
 #include "../../../core/SentinelLogging.hpp"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
@@ -21,14 +22,16 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 
 
 QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
-    // minimal local state; avoid noisy counters
-    
+
+    /*
+        Build a GPU scene graph node for rendering the heatmap. 
+        Take our CellInstance data and convert them to colored triangles in world space.
+    */
+
     if (batch.cells.empty()) {
         sLog_Render(" HEATMAP EXIT: Returning nullptr - batch is empty");
         return nullptr;
     }
-    
-    // reduced verbose logging
     
     // Use per-vertex colors with blending so cells have individual colors
     auto* node = new QSGGeometryNode;
@@ -49,32 +52,30 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     node->setGeometry(geometry);
     node->setFlag(QSGNode::OwnsGeometry);
     
-    // Fill vertex buffer with colored vertices
+    // Fill vertex buffer with colored vertices (world→screen per cell)
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
     for (int i = 0; i < cellCount; ++i) {
         const auto& cell = batch.cells[startIndex + i];
-        
-        // Skip cells with insufficient volume
         if (cell.liquidity < batch.minVolumeFilter) continue;
-        
-        // Calculate color with intensity scaling
+
+        // Color with intensity scaling
         double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
         QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
-        
-        float left = cell.screenRect.left();
-        float right = cell.screenRect.right();
-        float top = cell.screenRect.top();
-        float bottom = cell.screenRect.bottom();
-        
-        // Debug coordinates removed to reduce log spam
-        
-        // Vertex color
         const int r = color.red();
         const int g = color.green();
         const int b = color.blue();
         const int a = std::clamp(static_cast<int>(color.alpha()), 0, 255);
+
+        // Convert world→screen using batch.viewport
+        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
+        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+
+        const float left = static_cast<float>(topLeft.x());
+        const float top = static_cast<float>(topLeft.y());
+        const float right = static_cast<float>(bottomRight.x());
+        const float bottom = static_cast<float>(bottomRight.y());
 
         // Triangle 1: top-left, top-right, bottom-left
         vertices[vertexIndex++].set(left,  top,    r, g, b, a);
@@ -98,8 +99,6 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     // Update geometry with actual vertex count used
     geometry->allocate(vertexIndex);
     node->markDirty(QSGNode::DirtyGeometry);
-    
-    // minimal completion log removed to cut spam
     
     return node;
 }

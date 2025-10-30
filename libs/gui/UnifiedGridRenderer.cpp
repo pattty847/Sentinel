@@ -45,7 +45,6 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     
     setAcceptHoverEvents(false);  // Reduce event capture
     
-    // Initialize new modular architecture
     init();
     sLog_App("UnifiedGridRenderer V2: Initialized successfully");
 }
@@ -68,9 +67,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
             m_dataProcessorThread->wait(1000);
         }
     }
-    
-    // Since the thread is finished, we can safely destroy the objects
-    // Qt will handle cleanup automatically
+
     m_dataProcessor.reset();
     m_dataProcessorThread.reset();
     
@@ -134,12 +131,13 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF
 }
 
 void UnifiedGridRenderer::componentComplete() {
+    // Called by Qt upon component initialization
     QQuickItem::componentComplete();
     
     // Set viewport size immediately when component is ready
     if (m_viewState && width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
-        sLog_App("Component complete: Set initial viewport size to " << width() << "x" << height());
+        sLog_App("Component complete: Set initial viewport size to " << width() << "x" << height() << " pixels");
     }
 }
 
@@ -415,7 +413,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
         
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        Viewport vp{};
+        if (m_viewState) {
+            vp = Viewport{
+                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+                static_cast<double>(width()), static_cast<double>(height())
+            };
+        } else {
+            vp = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
+        }
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
         IRenderStrategy* strategy = getCurrentStrategy();
         
         QElapsedTimer contentTimer; contentTimer.start();
@@ -434,13 +442,22 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     
     // 2. INCREMENTAL APPEND (common, will be cheap once implemented)
     if (m_appendPending.exchange(false)) {
-        // TODO: For now, fallback to full update until we implement true incremental append
-        sLog_RenderN(5, "APPEND PENDING (fallback to full update for now)");
+        sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
         
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        Viewport vp2{};
+        if (m_viewState) {
+            vp2 = Viewport{
+                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+                static_cast<double>(width()), static_cast<double>(height())
+            };
+        } else {
+            vp2 = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
+        }
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
         IRenderStrategy* strategy = getCurrentStrategy();
         
         QElapsedTimer contentTimer; contentTimer.start();
@@ -466,9 +483,19 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     if (m_materialDirty.exchange(false)) {
         // TODO: Implement material parameter updates without geometry rebuild
         sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
-        // For now, trigger a full update as fallback
+        // For now, rebuild content
         updateVisibleCells();
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells};
+        Viewport vp3{};
+        if (m_viewState) {
+            vp3 = Viewport{
+                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
+                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+                static_cast<double>(width()), static_cast<double>(height())
+            };
+        } else {
+            vp3 = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
+        }
+        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
         IRenderStrategy* strategy = getCurrentStrategy();
         sceneNode->updateContent(batch, strategy);
     }

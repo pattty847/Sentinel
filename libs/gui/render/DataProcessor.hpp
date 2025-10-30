@@ -131,4 +131,8 @@ private:
     
     // Shutdown flag to prevent processing after stopProcessing() is called
     std::atomic<bool> m_shuttingDown{false};
+
+    // Append-only state with viewport version gating
+    int64_t m_lastProcessedTime = 0;
+    uint64_t m_lastViewportVersion = 0;
 };

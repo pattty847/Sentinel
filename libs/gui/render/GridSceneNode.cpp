@@ -20,9 +20,6 @@ GridSceneNode::GridSceneNode() {
     setFlag(QSGNode::OwnedByParent);
 }
 
-GridSceneNode::~GridSceneNode() {
-    // Qt handles child node cleanup automatically
-}
 
 void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy) {
     if (!strategy) {

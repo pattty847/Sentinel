@@ -28,6 +28,7 @@ public:
     double getMaxPrice() const { return m_maxPrice; }
     double getViewportWidth() const { return m_viewportWidth; }
     double getViewportHeight() const { return m_viewportHeight; }
+    uint64_t getViewportVersion() const { return m_viewportVersion; }
     
     // Pan/zoom state
     double getZoomFactor() const { return m_zoomFactor; }
@@ -95,4 +96,5 @@ private:
     QPointF m_initialMousePos;
     QPointF m_panVisualOffset;
     QElapsedTimer m_interactionTimer;
+    uint64_t m_viewportVersion = 1; // incremented on viewport/size changes
 };

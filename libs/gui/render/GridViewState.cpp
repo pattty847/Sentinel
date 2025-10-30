@@ -51,6 +51,7 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
     m_timeWindowValid = true;
     
     if (changed) {
+        ++m_viewportVersion;
         emit viewportChanged();
     }
 }
@@ -59,6 +60,7 @@ void GridViewState::setViewportSize(double width, double height) {
     if (width > 0 && height > 0) {
         m_viewportWidth = width;
         m_viewportHeight = height;
+        ++m_viewportVersion;
     }
 }
 

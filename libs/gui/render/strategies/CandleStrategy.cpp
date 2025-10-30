@@ -11,6 +11,7 @@ Assumptions: Cells contain OHLC data; uses a single material for all rendered ge
 */
 #include "CandleStrategy.hpp"
 #include "../GridTypes.hpp"
+#include "../../CoordinateSystem.h"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QSGGeometry>
@@ -51,15 +52,18 @@ QSGNode* CandleStrategy::buildNode(const GridSliceBatch& batch) {
         double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
         QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
         
-        // Volume-weighted candle width (80% of cell width based on intensity)
-        float baseWidth = cell.screenRect.width();
+        // Convert world→screen to derive base rectangle
+        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
+        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+        float baseWidth = static_cast<float>(bottomRight.x() - topLeft.x());
+        float baseTop = static_cast<float>(topLeft.y());
+        float baseBottom = static_cast<float>(bottomRight.y());
+        float centerX = static_cast<float>((topLeft.x() + bottomRight.x()) * 0.5);
         float volumeWidth = baseWidth * std::min(1.0f, static_cast<float>(scaledIntensity * 0.8));
-        
-        float centerX = cell.screenRect.center().x();
         float left = centerX - volumeWidth * 0.5f;
         float right = centerX + volumeWidth * 0.5f;
-        float top = cell.screenRect.top();
-        float bottom = cell.screenRect.bottom();
+        float top = baseTop;
+        float bottom = baseBottom;
         
         // Triangle 1: top-left, top-right, bottom-left
         vertices[vertexIndex++].set(left, top, color.red(), color.green(), color.blue(), color.alpha());
