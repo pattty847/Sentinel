@@ -55,8 +55,12 @@ This conversion maintains the existing lifecycle logic in `initializeQMLComponen
    QSizePolicy::Expanding); setCentralWidget(spacer);`.
 3. Add the dock to the default location with `addDockWidget(Qt::RightDockWidgetArea, heatmapDock);`
    and enable floating via `heatmapDock->setFeatures(QDockWidget::AllDockWidgetFeatures);`.
-4. Persist layouts by saving/restore state in the constructor and destructor (`saveState()`/
-   `restoreState()`) so users keep their docking preferences between sessions.
+4. Persist layouts by saving/restoring state: in the constructor instantiate `QSettings settings(
+   "MyCompany", "Sentinel");` and call `restoreState(settings.value("windowState").toByteArray());`.
+   Override `closeEvent()` to create a fresh `QSettings` and invoke
+   `settings.setValue("windowState", saveState());` before delegating to `QMainWindow::closeEvent()`.
+   Using `QSettings` in this way keeps the layout across sessions by reading the stored
+   `windowState` on start and writing it back when closing.
 
 Because the heatmap is still driven by `QQuickView`, no changes are required in QML or rendering
 logic.
@@ -106,8 +110,7 @@ entries for show/hide and serialization hooks.
    * Build the UI with standard Qt widgets (`QLineEdit` for ticker, `QComboBox` for form type,
      `QTableView` bound to `QStandardItemModel` for filings/transactions, `QTextEdit` for financial
      summaries).
-   * Use `QNetworkAccessManager` or `QtHttpServer` client to call the Python service asynchronously;
-     parse JSON into models.
+   * Use `QNetworkAccessManager` to call the Python service asynchronously; parse JSON into models.
    * Provide loading indicators and error banners similar to the `_update_status` logic in the
      DearPyGui version.
 2. Register the dock from `MainWindowGPU` (`createSecDock()` helper) and add it to a default area,
