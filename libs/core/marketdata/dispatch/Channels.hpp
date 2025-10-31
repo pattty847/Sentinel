@@ -7,6 +7,7 @@ namespace ch {
     inline constexpr const char* kL2Subscribe    = "level2";
     inline constexpr const char* kL2Data        = "l2_data";
     inline constexpr const char* kSubscriptions = "subscriptions";
+    inline constexpr const char* kHeartbeats    = "heartbeats";
 }
 
 namespace side_norm {

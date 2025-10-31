@@ -24,6 +24,14 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <QPointer>
 #include <format>    // std::format for efficient string formatting
 
+namespace {
+    inline int64_t steadyClockMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
+}
+
 MarketDataCore::MarketDataCore(Authenticator& auth,
                                DataCache& cache,
                                std::shared_ptr<SentinelMonitor> monitor)
@@ -45,9 +53,18 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
         if (up) {
+            // Reset sequencing and heartbeat tracking on fresh connect
+            m_lastSeqByProduct.clear();
+            m_lastHeartbeatMs.store(steadyClockMs());
+            {
+                std::lock_guard<std::mutex> lock(m_seqMutex);
+                m_lastSeqByProduct.clear();
+            }
             QPointer<MarketDataCore> self(this);
             QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
             replaySubscriptionsOnConnect();
+            startHeartbeatWatchdog();
+            sendHeartbeatSubscribe();
         } else {
             emitError("Transport down");
         }
@@ -243,6 +260,12 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     auto arrival_time = std::chrono::system_clock::now();
     
     std::string channel = message.value("channel", "");
+    // Consider any incoming message as liveness to avoid premature reconnection before first heartbeat arrives
+    m_lastHeartbeatMs.store(steadyClockMs());
+    if (channel == ch::kHeartbeats) {
+        handleHeartbeats(message);
+        return;
+    }
     
     // Minimal dispatcher wiring for non-data events (ack/errors)
     // Keep existing hot-path handlers for trades and order book intact.
@@ -340,6 +363,16 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
 
 void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
                                        const std::chrono::system_clock::time_point& arrival_time) {
+    // Sequence number at message root
+    uint64_t seq = 0;
+    if (message.contains("sequence_num")) {
+        try {
+            seq = message["sequence_num"].get<uint64_t>();
+        } catch (const nlohmann::json::exception& e) {
+            sLog_Warning(QString("sequence_num parse issue: %1").arg(e.what()));
+            seq = 0;
+        }
+    }
     // Parse exchange timestamp from root-level JSON
     std::chrono::system_clock::time_point exchange_timestamp = std::chrono::system_clock::now();
     if (message.contains("timestamp")) {
@@ -359,6 +392,8 @@ void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
         std::string eventType = event.value("type", "");
         std::string product_id = event.value("product_id", "");
         
+        // For l2_data, Coinbase guarantees delivery; do not enforce sequence gating.
+
         if (eventType == "snapshot") {
             handleOrderBookSnapshot(event, product_id, exchange_timestamp);
         } else if (eventType == "update") {
@@ -476,4 +511,71 @@ void MarketDataCore::replaySubscriptionsOnConnect() {
     if (m_products.empty()) return;
     auto symbols = m_products;
     sendSubscriptionMessage("subscribe", symbols);
+}
+
+void MarketDataCore::handleHeartbeats(const nlohmann::json& message) {
+    // Update last heartbeat timestamp; optionally validate counter
+    m_lastHeartbeatMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void MarketDataCore::startHeartbeatWatchdog() {
+    // Run periodic checks on the strand
+    net::post(m_strand, [this](){
+        m_heartbeatTimer.expires_after(std::chrono::seconds(2));
+        m_heartbeatTimer.async_wait([this](beast::error_code ec){
+            if (ec || !m_running.load()) return;
+            const int64_t nowMs = steadyClockMs();
+            const int64_t lastMs = m_lastHeartbeatMs.load();
+            if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
+                sLog_Error("Heartbeat stale (>10s); reconnecting...");
+                triggerImmediateReconnect("stale heartbeat");
+                return; // watchdog will be restarted on connect
+            }
+            // reschedule
+            startHeartbeatWatchdog();
+        });
+    });
+}
+
+void MarketDataCore::triggerImmediateReconnect(const char* reason) {
+    net::post(m_strand, [this, r = std::string(reason)](){
+        sLog_Data(QString("Immediate reconnect: %1").arg(QString::fromStdString(r)));
+        // Reset backoff and cancel any pending reconnect
+        m_backoffDuration = std::chrono::seconds(1);
+        m_reconnectTimer.cancel();
+        if (m_transport) {
+            m_transport->close();
+            // Use standard backoff-based reconnect to avoid transport state races
+            scheduleReconnect();
+        }
+    });
+}
+
+int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
+    // For Advanced Trade l2_data, delivery is guaranteed; treat sequence as informational only.
+    // Keep latest observed sequence per product for diagnostics, but never gate processing.
+    std::lock_guard<std::mutex> lock(m_seqMutex);
+    if (isSnapshot) {
+        m_lastSeqByProduct[product_id] = seq;
+        return 0;
+    }
+    auto it = m_lastSeqByProduct.find(product_id);
+    if (it == m_lastSeqByProduct.end() || seq >= it->second) {
+        m_lastSeqByProduct[product_id] = seq;
+    }
+    return 0;
+}
+
+void MarketDataCore::sendHeartbeatSubscribe() {
+    net::post(m_strand, [this]() {
+        if (!m_connected.load() || !m_transport) return;
+        nlohmann::json msg;
+        msg["type"] = "subscribe";
+        msg["channel"] = ch::kHeartbeats;
+        // Heartbeats do not require product_ids
+        msg["jwt"] = m_auth.createJwt();
+        m_transport->send(msg.dump());
+        sLog_Data("📤 Subscribed to heartbeats");
+    });
 }
