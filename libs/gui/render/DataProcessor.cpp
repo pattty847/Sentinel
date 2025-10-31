@@ -108,7 +108,7 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
     }
     
     // Recompute visible cells and publish a snapshot for the renderer
-    updateVisibleCells();
+    // updateVisibleCells();
     
     sLog_Data("DataProcessor TRADE: $" << trade.price 
                  << " vol:" << trade.size 

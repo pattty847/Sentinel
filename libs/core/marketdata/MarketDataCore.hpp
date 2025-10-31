@@ -21,6 +21,7 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <thread>
 #include <chrono>
 #include <optional>
+#include <unordered_map>
 #include <QObject>
 #include "auth/Authenticator.hpp"
 #include "cache/DataCache.hpp"
@@ -87,6 +88,14 @@ private:
                              const std::string& product_id,
                              const std::chrono::system_clock::time_point& exchange_timestamp);
 
+    // Reliability helpers
+    void handleHeartbeats(const nlohmann::json& message);
+    void startHeartbeatWatchdog();
+    void triggerImmediateReconnect(const char* reason);
+    // Sequencing: 0=ok, 1=drop (out-of-order/duplicate), -1=gap (needs resync)
+    int checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot);
+    void sendHeartbeatSubscribe();
+
     // Members
     // Unified error emission to GUI and status surface
     void emitError(QString msg);
@@ -109,6 +118,7 @@ private:
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     // Beast transport owns resolver/websocket/buffer state internally
     net::steady_timer               m_reconnectTimer{m_strand};
+    net::steady_timer               m_heartbeatTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
     std::unique_ptr<BeastWsTransport> m_transport; // not yet used for I/O
     
@@ -120,6 +130,8 @@ private:
     // Thread-safe counters (no more static!)
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
+    std::unordered_map<std::string, uint64_t> m_lastSeqByProduct; // l2 sequence tracking
+    std::atomic<int64_t>            m_lastHeartbeatMs{0};
     
     // Transport-level serialization keeps cross-thread access safe
 };
