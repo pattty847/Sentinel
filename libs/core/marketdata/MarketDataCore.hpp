@@ -22,6 +22,7 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <chrono>
 #include <optional>
 #include <unordered_map>
+#include <mutex>
 #include <QObject>
 #include "auth/Authenticator.hpp"
 #include "cache/DataCache.hpp"
@@ -92,7 +93,7 @@ private:
     void handleHeartbeats(const nlohmann::json& message);
     void startHeartbeatWatchdog();
     void triggerImmediateReconnect(const char* reason);
-    // Sequencing: 0=ok, 1=drop (out-of-order/duplicate), -1=gap (needs resync)
+    // Tracks sequence numbers for diagnostics. Returns 0 (no gating enforced).
     int checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot);
     void sendHeartbeatSubscribe();
 
@@ -130,7 +131,8 @@ private:
     // Thread-safe counters (no more static!)
     std::atomic<int>                m_tradeLogCount{0};
     std::atomic<int>                m_orderBookLogCount{0};
-    std::unordered_map<std::string, uint64_t> m_lastSeqByProduct; // l2 sequence tracking
+    std::unordered_map<std::string, uint64_t> m_lastSeqByProduct; // l2 sequence tracking (guarded by m_seqMutex)
+    std::mutex                      m_seqMutex;
     std::atomic<int64_t>            m_lastHeartbeatMs{0};
     
     // Transport-level serialization keeps cross-thread access safe

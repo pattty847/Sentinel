@@ -24,6 +24,14 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <QPointer>
 #include <format>    // std::format for efficient string formatting
 
+namespace {
+    inline int64_t steadyClockMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
+}
+
 MarketDataCore::MarketDataCore(Authenticator& auth,
                                DataCache& cache,
                                std::shared_ptr<SentinelMonitor> monitor)
@@ -47,8 +55,11 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
         if (up) {
             // Reset sequencing and heartbeat tracking on fresh connect
             m_lastSeqByProduct.clear();
-            m_lastHeartbeatMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now().time_since_epoch()).count());
+            m_lastHeartbeatMs.store(steadyClockMs());
+            {
+                std::lock_guard<std::mutex> lock(m_seqMutex);
+                m_lastSeqByProduct.clear();
+            }
             QPointer<MarketDataCore> self(this);
             QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
             replaySubscriptionsOnConnect();
@@ -250,8 +261,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     
     std::string channel = message.value("channel", "");
     // Consider any incoming message as liveness to avoid premature reconnection before first heartbeat arrives
-    m_lastHeartbeatMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch()).count());
+    m_lastHeartbeatMs.store(steadyClockMs());
     if (channel == ch::kHeartbeats) {
         handleHeartbeats(message);
         return;
@@ -356,7 +366,12 @@ void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
     // Sequence number at message root
     uint64_t seq = 0;
     if (message.contains("sequence_num")) {
-        try { seq = message["sequence_num"].get<uint64_t>(); } catch (...) { seq = 0; }
+        try {
+            seq = message["sequence_num"].get<uint64_t>();
+        } catch (const nlohmann::json::exception& e) {
+            sLog_Warning(QString("sequence_num parse issue: %1").arg(e.what()));
+            seq = 0;
+        }
     }
     // Parse exchange timestamp from root-level JSON
     std::chrono::system_clock::time_point exchange_timestamp = std::chrono::system_clock::now();
@@ -510,10 +525,9 @@ void MarketDataCore::startHeartbeatWatchdog() {
         m_heartbeatTimer.expires_after(std::chrono::seconds(2));
         m_heartbeatTimer.async_wait([this](beast::error_code ec){
             if (ec || !m_running.load()) return;
-            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            const int64_t nowMs = steadyClockMs();
             const int64_t lastMs = m_lastHeartbeatMs.load();
-            if (lastMs > 0 && (nowMs - lastMs) > 10000) {
+            if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
                 sLog_Error("Heartbeat stale (>10s); reconnecting...");
                 triggerImmediateReconnect("stale heartbeat");
                 return; // watchdog will be restarted on connect
@@ -541,6 +555,7 @@ void MarketDataCore::triggerImmediateReconnect(const char* reason) {
 int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
     // For Advanced Trade l2_data, delivery is guaranteed; treat sequence as informational only.
     // Keep latest observed sequence per product for diagnostics, but never gate processing.
+    std::lock_guard<std::mutex> lock(m_seqMutex);
     if (isSnapshot) {
         m_lastSeqByProduct[product_id] = seq;
         return 0;
