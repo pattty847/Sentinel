@@ -86,6 +86,7 @@ void DataProcessor::stopProcessing() {
 }
 
 void DataProcessor::onTradeReceived(const Trade& trade) {
+    // TODO: Batch N trades per update, should we even call updateVisibleCells here? 
     // Early return if shutting down
     if (m_shuttingDown.load()) {
         return;
@@ -407,8 +408,6 @@ void DataProcessor::updateVisibleCells() {
         return;
     }
     
-    m_visibleCells.clear();
-    
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
     int64_t activeTimeframe = m_currentTimeframe_ms;
@@ -468,12 +467,28 @@ void DataProcessor::updateVisibleCells() {
         sLog_Render("DP COVERAGE TotalCells=" << m_visibleCells.size() << " processed=" << processedSlices);
     }
     
+    // Prune cells that are now outside the viewport time range
+    {
+        const qint64 pruneStart = m_viewState->getVisibleTimeStart();
+        const qint64 pruneEnd = m_viewState->getVisibleTimeEnd();
+        auto it = std::remove_if(m_visibleCells.begin(), m_visibleCells.end(),
+            [pruneStart, pruneEnd](const CellInstance& c){
+                return c.timeEnd_ms < pruneStart || c.timeStart_ms > pruneEnd;
+            });
+        if (it != m_visibleCells.end()) {
+            m_visibleCells.erase(it, m_visibleCells.end());
+        }
+    }
+
     // Publish snapshot for renderer consumption without blocking the render thread
     {
         std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
     }
-    emit dataUpdated();
+    if (!m_emitTimer.isValid() || m_emitTimer.elapsed() >= kMinEmitIntervalMs) {
+        emit dataUpdated();
+        m_emitTimer.restart();
+    }
 }
 
 void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {

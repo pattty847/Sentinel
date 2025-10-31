@@ -98,3 +98,13 @@ QColor CandleStrategy::calculateColor(double liquidity, bool isBid, double inten
         return QColor(static_cast<int>(red), static_cast<int>(orange), 0, static_cast<int>(alpha * 255));
     }
 }
+
+QColor CandleStrategy::getBullishColor(double intensity) const {
+    Q_UNUSED(intensity)  // Reserved for future customization
+    return QColor(0, 255, 0, 255);  // Solid green
+}
+
+QColor CandleStrategy::getBearishColor(double intensity) const {
+    Q_UNUSED(intensity)  // Reserved for future customization
+    return QColor(255, 0, 0, 255);  // Solid red
+}

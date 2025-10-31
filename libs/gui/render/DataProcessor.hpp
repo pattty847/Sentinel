@@ -135,4 +135,8 @@ private:
     // Append-only state with viewport version gating
     int64_t m_lastProcessedTime = 0;
     uint64_t m_lastViewportVersion = 0;
+
+    // Emit throttling for UI updates (~60 FPS)
+    QElapsedTimer m_emitTimer;
+    static constexpr int kMinEmitIntervalMs = 16;
 };

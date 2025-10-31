@@ -21,6 +21,7 @@ enum class AggressorSide {
 // This is our C++ equivalent of a Pydantic model for trade data
 struct Trade // match
 {
+    // TODO: Why are we using system time or are we using the exchange timestamp available from the trade data?
     std::chrono::system_clock::time_point timestamp;
     std::string product_id; // The symbol, e.g., "BTC-USD"
     std::string trade_id;  // Added for deduplication

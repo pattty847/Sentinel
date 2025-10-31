@@ -24,7 +24,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QFileInfo>
 #include <QTimer>
 
-MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {    
+MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     // Initialize data components (was previously in facade)
     m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
     m_dataCache = std::make_unique<DataCache>();
@@ -104,11 +104,12 @@ void MainWindowGPU::setupUI() {
     // Create GPU Chart (QML) with threaded scene graph via QQuickView
     m_qquickView = new QQuickView;
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
-    m_qquickView->setColor(Qt::black); // TODO: Route a configuration option
+    // TODO: Route a configuration option for the chart color
+    m_qquickView->setColor(Qt::black);
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, this);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     
-    // Allow environment override for QML path (SENTINEL_QML_PATH)
+    // TODO: Allow environment override for QML path (SENTINEL_QML_PATH) - move this to a config file - OS dependent paths
     QString qmlPath;
     const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
     if (!qmlEnv.isEmpty()) {
@@ -140,9 +141,9 @@ void MainWindowGPU::setupUI() {
     
     // Set default symbol in QML context
     QQmlContext* context = m_qquickView->rootContext();
-    context->setContextProperty("symbol", "BTC-USD");
     m_modeController = new ChartModeController(this);
     context->setContextProperty("chartModeController", m_modeController);
+    context->setContextProperty("symbol", "BTC-USD");
     
     // Control panel
     m_statusLabel = new QLabel("Disconnected", this);

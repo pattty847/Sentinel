@@ -27,6 +27,19 @@ int main(int argc, char *argv[])
     std::cout << "[Sentinel GPU Trading Terminal Starting...]" << std::endl;
     qputenv("QSG_RENDER_LOOP", "threaded");
     QApplication app(argc, argv);
+
+    // TODO: Set the graphics environment based on the platform - OS dependent paths
+    // This is a temporary solution to ensure the correct graphics environment is used
+    // We will need to revisit this when we have a more robust graphics environment setup
+    // QString graphicsEnv;
+    // if (QSysInfo::productType() == "windows") {
+    //     graphicsEnv = "direct3d";
+    // } else if (QSysInfo::productType() == "macos") {
+    //     graphicsEnv = "metal";
+    // } else if (QSysInfo::productType() == "linux") {
+    //     graphicsEnv = "opengl";
+    // }
+    // qputenv("QT_GRAPHICS_ENV", graphicsEnv.toUtf8());
     
     qRegisterMetaType<Trade>();
     qRegisterMetaType<OrderBook>();
