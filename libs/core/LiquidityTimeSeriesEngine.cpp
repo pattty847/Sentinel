@@ -14,6 +14,7 @@ Assumptions: Time bucketing logic correctly assigns updates to their respective 
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <fstream>
 
 // LiquidityTimeSlice implementation - O(1) tick-based access
 double LiquidityTimeSlice::getDisplayValue(double price, bool isBid, int displayMode) const {
@@ -332,6 +333,13 @@ void LiquidityTimeSeriesEngine::updateTimeframe(int64_t timeframe_ms, const Orde
         // NEW SLICE LOGGING
         sLog_RenderN(50, "NEW SLICE " << timeframe_ms << "ms: [" << sliceStart
                      << "-" << (sliceStart + timeframe_ms) << "]");
+        // Dump log message to a text file
+        static std::ofstream logFile("liquidity_timeseries_log.txt", std::ios::app);
+        if (logFile.is_open()) {
+            logFile << "NEW SLICE " << timeframe_ms << "ms: [" << sliceStart
+                    << "-" << (sliceStart + timeframe_ms) << "]\n";
+            logFile.flush();
+        }
         currentSlice.duration_ms = timeframe_ms;
     }
     

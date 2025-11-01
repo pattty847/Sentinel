@@ -86,7 +86,6 @@ void DataProcessor::stopProcessing() {
 }
 
 void DataProcessor::onTradeReceived(const Trade& trade) {
-    // TODO: Batch N trades per update, should we even call updateVisibleCells here? 
     // Early return if shutting down
     if (m_shuttingDown.load()) {
         return;
@@ -408,6 +407,8 @@ void DataProcessor::updateVisibleCells() {
         return;
     }
     
+    m_visibleCells.clear();
+    
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
     int64_t activeTimeframe = m_currentTimeframe_ms;
@@ -432,63 +433,80 @@ void DataProcessor::updateVisibleCells() {
         sLog_Render("MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
     }
     
-    // Get liquidity slices within viewport with append-only + version gating
+    // Get liquidity slices for active timeframe within viewport
     if (m_liquidityEngine) {
         qint64 timeStart = m_viewState->getVisibleTimeStart();
         qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-        const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
-
-        bool viewportChanged = (m_lastViewportVersion != currentViewportVersion);
-        if (viewportChanged) {
-            m_visibleCells.clear();
-            m_lastProcessedTime = timeStart;
-        } else if (m_lastProcessedTime == 0 || m_lastProcessedTime < timeStart || m_lastProcessedTime > timeEnd) {
-            m_lastProcessedTime = timeStart;
+        sLog_Render("LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
+        
+        auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
+        sLog_Render("LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
+        
+        // TIME WRAP DETECTION
+        if (!visibleSlices.empty()) {
+            static qint64 prevFirst = LLONG_MIN, prevLast = LLONG_MIN;
+            const qint64 first = visibleSlices.front()->startTime_ms;
+            const qint64 last  = visibleSlices.back()->startTime_ms;
+            if (prevFirst != LLONG_MIN && (first < prevFirst || last < prevLast)) {
+                sLog_RenderN(1, "🚨 TIME WRAP DETECTED: first " << first << " (prev " << prevFirst
+                            << "), last " << last << " (prev " << prevLast << ")");
+            }
+            prevFirst = first; prevLast = last;
         }
-
-        const qint64 queryStart = viewportChanged ? timeStart : m_lastProcessedTime;
-        sLog_Render("LTSE QUERY (" << (viewportChanged ? "rebuild" : "append") << "): timeframe=" << activeTimeframe << "ms, window=[" << queryStart << "-" << timeEnd << "]");
-        auto slices = m_liquidityEngine->getVisibleSlices(activeTimeframe, queryStart, timeEnd);
-        sLog_Render("LTSE RESULT: Found " << slices.size() << (viewportChanged ? " slices" : " new slices"));
-
+        
+        // Check if slices are being processed
         int processedSlices = 0;
-        int64_t newCursor = queryStart;
-        for (const auto* slice : slices) {
-            if (!slice) continue;
-            if (viewportChanged || slice->startTime_ms > m_lastProcessedTime) {
-                createCellsFromLiquiditySlice(*slice);
-                ++processedSlices;
-                newCursor = std::max<int64_t>(newCursor, slice->endTime_ms);
+        
+        // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
+        if (visibleSlices.empty()) {
+            const bool canAutoFix = (m_viewState && m_viewState->isAutoScrollEnabled());
+            if (!canAutoFix) {
+                sLog_Render("SKIP AUTO-ADJUST: auto-scroll disabled (user interaction in progress)");
+            } else {
+                auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
+                if (!allSlices.empty()) {
+                    qint64 oldestTime = allSlices.front()->startTime_ms;
+                    qint64 newestTime = allSlices.back()->endTime_ms;
+                    qint64 gap = timeStart - newestTime;
+                    sLog_Render("LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
+                    sLog_Render("TIME GAP: " << gap << "ms between newest data and viewport start");
+                    
+                    // AUTO-FIX: Snap viewport to actual data range
+                    if (gap > 60000) { // If gap > 1 minute, auto-adjust
+                        qint64 newStart = newestTime - 30000; // 30s before newest data
+                        qint64 newEnd = newestTime + 30000;   // 30s after newest data
+                        sLog_Render("AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+                        
+                        m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+                        
+                        // Retry query with corrected viewport
+                        visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
+                        sLog_Render("VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                    }
+                }
             }
         }
-
-        m_lastProcessedTime = std::max<int64_t>(newCursor, timeStart);
-        m_lastViewportVersion = currentViewportVersion;
-        sLog_Render("DP COVERAGE TotalCells=" << m_visibleCells.size() << " processed=" << processedSlices);
+        
+        // Process all visible slices; viewport + transform handle GPU load
+        for (const auto* slice : visibleSlices) {
+            ++processedSlices;
+            createCellsFromLiquiditySlice(*slice);
+        }
+        
+        sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
+        
+        sLog_Render("DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
+                 << " TotalCells:" << m_visibleCells.size()
+                 << " ActiveTimeframe:" << activeTimeframe << "ms"
+                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
     }
     
-    // Prune cells that are now outside the viewport time range
-    {
-        const qint64 pruneStart = m_viewState->getVisibleTimeStart();
-        const qint64 pruneEnd = m_viewState->getVisibleTimeEnd();
-        auto it = std::remove_if(m_visibleCells.begin(), m_visibleCells.end(),
-            [pruneStart, pruneEnd](const CellInstance& c){
-                return c.timeEnd_ms < pruneStart || c.timeStart_ms > pruneEnd;
-            });
-        if (it != m_visibleCells.end()) {
-            m_visibleCells.erase(it, m_visibleCells.end());
-        }
-    }
-
     // Publish snapshot for renderer consumption without blocking the render thread
     {
         std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
     }
-    if (!m_emitTimer.isValid() || m_emitTimer.elapsed() >= kMinEmitIntervalMs) {
-        emit dataUpdated();
-        m_emitTimer.restart();
-    }
+    emit dataUpdated();
 }
 
 void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {

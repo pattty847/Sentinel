@@ -67,7 +67,7 @@ void SentinelMonitor::recordTradeLatency(std::chrono::system_clock::time_point e
     // Alert on high latency
     if (latency_ms > MAX_ACCEPTABLE_LATENCY_MS) {
         emit latencyAlert(latency_ms);
-        sLog_Warning("High trade latency detected:" << latency_ms << "ms");
+        // sLog_Warning("High trade latency detected:" << latency_ms << "ms");
     }
     
     emit latencyChanged(getAverageTradeLatency());

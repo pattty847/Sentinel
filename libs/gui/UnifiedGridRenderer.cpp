@@ -142,12 +142,6 @@ void UnifiedGridRenderer::componentComplete() {
 }
 
 void UnifiedGridRenderer::updateVisibleCells() {
-    /**
-     * @brief Updates the visible cells of the UnifiedGridRenderer.
-     * 
-     * This method fetches the latest snapshot of cells from the DataProcessor and updates
-     * the visible cells vector. It is called when the geometry needs to be rebuilt or updated.
-     */
     // Non-blocking: consume latest snapshot, request async recompute if needed
     if (m_dataProcessor) {
         // Try to grab the latest published cells without blocking the worker
@@ -162,12 +156,6 @@ void UnifiedGridRenderer::updateVisibleCells() {
 }
 
 void UnifiedGridRenderer::updateVolumeProfile() {
-    /**
-     * @brief Updates the volume profile of the UnifiedGridRenderer Heatmap.
-     * 
-     * This method creates a simple volume profile from the liquidity time series data.
-     * It is called when the volume profile needs to be updated.
-     */
     // TODO: Implement volume profile from liquidity time series
     m_volumeProfile.clear();
     
@@ -177,12 +165,6 @@ void UnifiedGridRenderer::updateVolumeProfile() {
 
 // Property setters
 void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
-    /**
-     * @brief Sets the render mode of the UnifiedGridRenderer.
-     * 
-     * This method sets the render mode of the UnifiedGridRenderer and updates the geometry.
-     * It is called when the render mode needs to be changed.
-     */
     if (m_renderMode != mode) {
         m_renderMode = mode;
         m_geometryDirty.store(true);
@@ -192,12 +174,6 @@ void UnifiedGridRenderer::setRenderMode(RenderMode mode) {
 }
 
 void UnifiedGridRenderer::setShowVolumeProfile(bool show) {
-    /**
-     * @brief Sets the show volume profile flag of the UnifiedGridRenderer.
-     * 
-     * This method sets the show volume profile flag of the UnifiedGridRenderer and updates the geometry.
-     * It is called when the show volume profile flag needs to be changed.
-     */
     if (m_showVolumeProfile != show) {
         m_showVolumeProfile = show;
         m_materialDirty.store(true);
@@ -207,12 +183,6 @@ void UnifiedGridRenderer::setShowVolumeProfile(bool show) {
 }
 
 void UnifiedGridRenderer::setIntensityScale(double scale) {
-    /**
-     * @brief Sets the intensity scale of the UnifiedGridRenderer.
-     * 
-     * This method sets the intensity scale of the UnifiedGridRenderer and updates the geometry.
-     * It is called when the intensity scale needs to be changed.
-     */
     if (m_intensityScale != scale) {
         m_intensityScale = scale;
         m_materialDirty.store(true);
@@ -222,12 +192,6 @@ void UnifiedGridRenderer::setIntensityScale(double scale) {
 }
 
 void UnifiedGridRenderer::setMaxCells(int max) {
-    /**
-     * @brief Sets the max cells of the UnifiedGridRenderer.
-     * 
-     * This method sets the max cells of the UnifiedGridRenderer and updates the geometry.
-     * It is called when the max cells needs to be changed.
-     */
     if (m_maxCells != max) {
         m_maxCells = max;
         emit maxCellsChanged();
@@ -235,12 +199,6 @@ void UnifiedGridRenderer::setMaxCells(int max) {
 }
 
 void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
-    /**
-     * @brief Sets the min volume filter of the UnifiedGridRenderer.
-     * 
-     * This method sets the min volume filter of the UnifiedGridRenderer and updates the geometry.
-     * It is called when the min volume filter needs to be changed.
-     */
     if (m_minVolumeFilter != minVolume) {
         m_minVolumeFilter = minVolume;
         m_materialDirty.store(true);
@@ -322,6 +280,7 @@ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) co
     viewport.width = width();
     viewport.height = height();
     
+    // NO pan offset applied - that's handled by the node transform in updatePaintNode
     return CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
 }
 
@@ -336,6 +295,7 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     viewport.width = width();
     viewport.height = height();
     
+    // NO pan offset removed - node transform handles it
     return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
 }
 
@@ -422,18 +382,6 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
-    /**
-     * @brief Updates the paint node containing the graphical items of the UnifiedGridRenderer.
-     * 
-     * This method prepares the scene graph node for rendering the grid visual elements.
-     * It handles scenes where the node needs complete geometry reconstruction, due to changes
-     * in mode, level of detail, or timeframe. The function ensures that visible cells are current,
-     * and applies the chosen rendering strategy to update the node content efficiently.
-     * 
-     * @param oldNode The existing QSGNode instance if any.
-     * @param data Additional data used for updating the paint node (currently unused).
-     * @return QSGNode* Updated node containing the new grid geometries and render data.
-     */
     Q_UNUSED(data)
     if (width() <= 0 || height() <= 0) { 
         return oldNode;
@@ -557,9 +505,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     }
 
     const qint64 totalUs = timer.nsecsElapsed() / 1000;
-    sLog_RenderN(10, "UGR paint: total=" << totalUs << "µs"
-                       << "cache=" << cacheUs << "µs"
-                       << "content=" << contentUs << "µs"
+    sLog_RenderN(10, "UGR paint: total=" << totalUs << "microseconds"
+                       << "cache=" << cacheUs << "microseconds"
+                       << "content=" << contentUs << "microseconds"
                        << "cells=" << cellsCount);
 
     return sceneNode;
