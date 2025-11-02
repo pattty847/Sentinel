@@ -100,7 +100,7 @@ private:
     
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
-    bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied
+    bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
     
     // V1 state (removed - now delegated to DataProcessor)
 
@@ -181,12 +181,9 @@ public:
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
 
-public slots:
+public:
     // Real-time data integration
     void onTradeReceived(const Trade& trade);
-    
-    // Dense-only order book signal (no sparse conversion)
-    void onLiveOrderBookUpdated(const QString& productId);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
     
     // Automatic price resolution adjustment on viewport changes
@@ -239,8 +236,6 @@ private:
     IRenderStrategy* getCurrentStrategy() const;
     
     void init();
-    
-    QSGNode* updatePaintNodeV2(QSGNode* oldNode);
 
 public:
     DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }

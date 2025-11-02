@@ -23,6 +23,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QFile>
 #include <QFileInfo>
 #include <QTimer>
+#include <QSGRendererInterface>
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     // Initialize data components (was previously in facade)
@@ -31,7 +32,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
     
     m_sentinelMonitor = std::make_shared<SentinelMonitor>();
     m_sentinelMonitor->startMonitoring();
-    m_sentinelMonitor->enableCLIOutput(true);  // Enable performance logging
+    m_sentinelMonitor->enableCLIOutput(false);  // Enable performance logging
     
     sLog_App("Creating persistent MarketDataCore...");
     m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
@@ -103,9 +104,12 @@ MainWindowGPU::~MainWindowGPU() {
 void MainWindowGPU::setupUI() {
     // Create GPU Chart (QML) with threaded scene graph via QQuickView
     m_qquickView = new QQuickView;
+    
+    // GPU Configuration: Enable persistent scene graph and hardware acceleration
+    m_qquickView->setPersistentSceneGraph(true);
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
-    // TODO: Route a configuration option for the chart color
-    m_qquickView->setColor(Qt::black);
+    m_qquickView->setColor(Qt::black); // TODO: Allow route to a config file - OS dependent paths
+    
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, this);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     
@@ -133,10 +137,28 @@ void MainWindowGPU::setupUI() {
         m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
     }
     
-    // Check if QML loaded successfully
+    // Check if QML loaded successfully and verify GPU acceleration
     if (m_qquickView->status() == QQuickView::Error) {
         sLog_Error("QML FAILED TO LOAD!");
         sLog_Error("QML Errors:" << m_qquickView->errors());
+    } else if (m_qquickView->status() == QQuickView::Ready) {
+        // Verify GPU acceleration is working
+        auto* rhi = m_qquickView->rendererInterface();
+        if (rhi) {
+            QString apiName;
+            switch (rhi->graphicsApi()) {
+                case QSGRendererInterface::OpenGL: apiName = "OpenGL"; break;
+                case QSGRendererInterface::Direct3D11: apiName = "Direct3D 11"; break;
+                case QSGRendererInterface::Vulkan: apiName = "Vulkan"; break;
+                case QSGRendererInterface::Metal: apiName = "Metal"; break;
+                case QSGRendererInterface::Null: apiName = "Null (Software)"; break;
+                default: apiName = "Unknown"; break;
+            }
+            sLog_App("🎮 GPU ACCELERATION ACTIVE: " << apiName);
+            sLog_App("   Shader Type: " << rhi->shaderType());
+        } else {
+            sLog_Error("❌ NO GPU ACCELERATION - RHI interface not available!");
+        }
     }
     
     // Set default symbol in QML context
@@ -216,7 +238,6 @@ void MainWindowGPU::connectMarketDataSignals() {
         // Get DataProcessor from UGR to route signals correctly
         auto dataProcessor = unifiedGridRenderer->getDataProcessor();
         if (dataProcessor) {
-            // Route LiveOrderBook signal to DataProcessor (THE FIX!)
             connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
                     dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
             sLog_App("LiveOrderBook signal routed to DataProcessor!");

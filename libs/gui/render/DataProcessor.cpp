@@ -24,6 +24,7 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <limits>
 #include <climits>
 #include <cmath>
+#include <algorithm>
 
 namespace {
 constexpr bool kTraceCellDebug = false;
@@ -406,11 +407,18 @@ void DataProcessor::updateVisibleCells() {
     if (m_shuttingDown.load()) {
         return;
     }
-    
-    m_visibleCells.clear();
-    
+
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
+    // Viewport version gating: full rebuild only when viewport changes
+    const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
+    const bool viewportChanged = (currentViewportVersion != m_lastViewportVersion);
+    if (viewportChanged) {
+        m_visibleCells.clear();
+        m_lastProcessedTime = 0;
+        m_lastViewportVersion = currentViewportVersion;
+    }
+
     int64_t activeTimeframe = m_currentTimeframe_ms;
     
     // Use manual timeframe if set, otherwise auto-suggest
@@ -442,22 +450,8 @@ void DataProcessor::updateVisibleCells() {
         auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
         sLog_Render("LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
         
-        // TIME WRAP DETECTION
-        if (!visibleSlices.empty()) {
-            static qint64 prevFirst = LLONG_MIN, prevLast = LLONG_MIN;
-            const qint64 first = visibleSlices.front()->startTime_ms;
-            const qint64 last  = visibleSlices.back()->startTime_ms;
-            if (prevFirst != LLONG_MIN && (first < prevFirst || last < prevLast)) {
-                sLog_RenderN(1, "🚨 TIME WRAP DETECTED: first " << first << " (prev " << prevFirst
-                            << "), last " << last << " (prev " << prevLast << ")");
-            }
-            prevFirst = first; prevLast = last;
-        }
-        
-        // Check if slices are being processed
-        int processedSlices = 0;
-        
         // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
+        // TODO: Only works on startup; need to fix for dynamic viewport changes
         if (visibleSlices.empty()) {
             const bool canAutoFix = (m_viewState && m_viewState->isAutoScrollEnabled());
             if (!canAutoFix) {
@@ -486,22 +480,55 @@ void DataProcessor::updateVisibleCells() {
                 }
             }
         }
-        
-        // Process all visible slices; viewport + transform handle GPU load
-        for (const auto* slice : visibleSlices) {
-            ++processedSlices;
-            createCellsFromLiquiditySlice(*slice);
+
+        // Do not prune off-viewport cells here; allow smooth pans. Rendering strategies will cull.
+
+        // Track processed slices and append only new data when viewport is stable
+        const size_t beforeSize = m_visibleCells.size();
+        int processedSlices = 0;
+
+        if (viewportChanged || m_lastProcessedTime == 0) {
+            for (const auto* slice : visibleSlices) {
+                ++processedSlices;
+                createCellsFromLiquiditySlice(*slice);
+                if (slice && slice->endTime_ms > m_lastProcessedTime) {
+                    m_lastProcessedTime = slice->endTime_ms;
+                }
+            }
+        } else {
+            for (const auto* slice : visibleSlices) {
+                if (!slice) continue;
+                if (slice->startTime_ms >= m_lastProcessedTime) {
+                    ++processedSlices;
+                    createCellsFromLiquiditySlice(*slice);
+                    if (slice->endTime_ms > m_lastProcessedTime) {
+                        m_lastProcessedTime = slice->endTime_ms;
+                    }
+                }
+            }
         }
-        
-        sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
-        
+
+        const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize);
+
+        sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices ("
+                    << (viewportChanged ? "rebuild" : "append") << ")");
         sLog_Render("DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
-                 << " TotalCells:" << m_visibleCells.size()
-                 << " ActiveTimeframe:" << activeTimeframe << "ms"
-                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+                    << " TotalCells:" << m_visibleCells.size()
+                    << " ActiveTimeframe:" << activeTimeframe << "ms"
+                    << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+
+        // Publish snapshot only when something changed
+        if (changed) {
+            {
+                std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+                m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
+            }
+            emit dataUpdated();
+        }
+        return; // Avoid duplicate publish below
     }
     
-    // Publish snapshot for renderer consumption without blocking the render thread
+    // Fallback: if no liquidity engine, publish current state (likely empty)
     {
         std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);

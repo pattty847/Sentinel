@@ -81,16 +81,7 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     }
 }
 
-void UnifiedGridRenderer::onLiveOrderBookUpdated(const QString& productId) {
-    if (m_dataProcessor) {
-        QMetaObject::invokeMethod(m_dataProcessor.get(), "onLiveOrderBookUpdated", 
-                                 Qt::QueuedConnection, Q_ARG(QString, productId));
-    }
-    
-    // Signal that we need a repaint
-    m_appendPending.store(true);
-    update();
-}
+// onLiveOrderBookUpdated(QString) removed: legacy pass-through; MainWindow connects Core→DataProcessor directly
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
                                        double minPrice, double maxPrice) {
@@ -311,7 +302,6 @@ void UnifiedGridRenderer::init() {
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
     
     // Connect signals with QueuedConnection for thread safety  
-    // THROTTLE: Only rebuild geometry every 250ms, not on every data update
     connect(m_dataProcessor.get(), &DataProcessor::dataUpdated, 
             this, [this]() { 
                 // If a pan sync is pending, clear the visual offset now (GUI thread)
@@ -381,6 +371,15 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
     return m_heatmapStrategy.get(); // Default fallback
 }
 
+namespace {
+    inline Viewport buildViewport(const GridViewState* view, double w, double h) {
+        if (view) {
+            return Viewport{view->getVisibleTimeStart(), view->getVisibleTimeEnd(), view->getMinPrice(), view->getMaxPrice(), w, h};
+        }
+        return Viewport{0, 0, 0.0, 0.0, w, h};
+    }
+}
+
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
     if (width() <= 0 || height() <= 0) { 
@@ -392,82 +391,69 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
 
-    auto* sceneNode = static_cast<GridSceneNode*>(oldNode);
-    bool isNewNode = !sceneNode;
-    if (isNewNode) {
+    auto* sceneNode = static_cast<GridSceneNode*>(oldNode); // cast the old node to a GridSceneNode
+    bool isNewNode = !sceneNode; // check if the node is new
+    if (isNewNode) { // if the node is new, create a new GridSceneNode
         sceneNode = new GridSceneNode();
-        if (m_sentinelMonitor) m_sentinelMonitor->recordGeometryRebuild();
+        if (m_sentinelMonitor) m_sentinelMonitor->recordGeometryRebuild(); // record the geometry rebuild
     }
     
-    qint64 cacheUs = 0;
-    qint64 contentUs = 0;
-    size_t cellsCount = 0;
+    qint64 cacheUs = 0; // cache time in microseconds
+    qint64 contentUs = 0; // content time in microseconds
+    size_t cellsCount = 0; // number of cells
     
     // TODO: REMOVE COMMENTS AFTER IMPLEMENTING THE 4 DIRTY FLAGS SYSTEM
     //  FOUR DIRTY FLAGS SYSTEM - No mutex needed, atomic exchange
     
-    // 1. FULL GEOMETRY REBUILD (rare, expensive)
+    // Priority: geometry → append → material → transform
     if (m_geometryDirty.exchange(false) || isNewNode) {
         sLog_Render("FULL GEOMETRY REBUILD (mode/LOD/timeframe changed)");
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
-        
-        Viewport vp{};
-        if (m_viewState) {
-            vp = Viewport{
-                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
-                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
-                static_cast<double>(width()), static_cast<double>(height())
-            };
-        } else {
-            vp = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
-        }
+
+        Viewport vp = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
+        // create a new GridSliceBatch with the visible cells, intensity scale, min volume filter, max cells, and viewport
         GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
         IRenderStrategy* strategy = getCurrentStrategy();
-        
+
         QElapsedTimer contentTimer; contentTimer.start();
-        sceneNode->updateContent(batch, strategy);
+        sceneNode->updateContent(batch, strategy); // update the content of the scene node with the new batch and strategy
         contentUs = contentTimer.nsecsElapsed() / 1000;
-        
+
         if (m_showVolumeProfile) {
             updateVolumeProfile();
             sceneNode->updateVolumeProfile(m_volumeProfile);
         }
         sceneNode->setShowVolumeProfile(m_showVolumeProfile);
-        
+
         if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
         cellsCount = m_visibleCells.size();
-    }
-    
-    // 2. INCREMENTAL APPEND (common, will be cheap once implemented)
-    if (m_appendPending.exchange(false)) {
+    } else if (m_appendPending.exchange(false)) {
         sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
-        
-        Viewport vp2{};
-        if (m_viewState) {
-            vp2 = Viewport{
-                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
-                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
-                static_cast<double>(width()), static_cast<double>(height())
-            };
-        } else {
-            vp2 = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
-        }
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
-        IRenderStrategy* strategy = getCurrentStrategy();
-        
-        QElapsedTimer contentTimer; contentTimer.start();
-        sceneNode->updateContent(batch, strategy);
-        contentUs = contentTimer.nsecsElapsed() / 1000;
-        
+
+        Viewport vp2 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
+        GridSliceBatch batch2{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
+        IRenderStrategy* strategy2 = getCurrentStrategy();
+
+        QElapsedTimer contentTimer2; contentTimer2.start();
+        sceneNode->updateContent(batch2, strategy2);
+        contentUs = contentTimer2.nsecsElapsed() / 1000;
         cellsCount = m_visibleCells.size();
     }
-    
-    // 3. TRANSFORM UPDATE ONLY (very common, very cheap)
+
+    if (m_materialDirty.exchange(false)) {
+        sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
+        updateVisibleCells();
+        Viewport vp3 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
+        GridSliceBatch batch3{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
+        IRenderStrategy* strategy3 = getCurrentStrategy();
+        sceneNode->updateContent(batch3, strategy3);
+    }
+
     if (m_transformDirty.exchange(false) || isNewNode) {
         QMatrix4x4 transform;
         if (m_viewState) {
@@ -477,27 +463,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         sceneNode->updateTransform(transform);
         if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
         sLog_RenderN(20, "TRANSFORM UPDATE (pan/zoom)");
-    }
-    
-    // 4. MATERIAL UPDATE (occasional, cheap)
-    if (m_materialDirty.exchange(false)) {
-        // TODO: Implement material parameter updates without geometry rebuild
-        sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
-        // For now, rebuild content
-        updateVisibleCells();
-        Viewport vp3{};
-        if (m_viewState) {
-            vp3 = Viewport{
-                m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
-                m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
-                static_cast<double>(width()), static_cast<double>(height())
-            };
-        } else {
-            vp3 = Viewport{0, 0, 0.0, 0.0, static_cast<double>(width()), static_cast<double>(height())};
-        }
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
-        IRenderStrategy* strategy = getCurrentStrategy();
-        sceneNode->updateContent(batch, strategy);
     }
     
     if (m_sentinelMonitor) {
@@ -512,6 +477,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     return sceneNode;
 }
+
+// helper methods inlined above; no separate member helpers to avoid private access issues in free functions
+
 
 // ===== QML DATA API =====
 // Methods for data input and manipulation from QML
