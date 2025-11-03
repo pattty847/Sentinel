@@ -55,17 +55,6 @@ void registerMetaTypesAndQml() {
     sLog_App("Pure grid-only mode: Legacy components permanently removed");
 }
 
-// --- Main window creation ---
-MainWindowGPU* createAndShowMainWindow() {
-    sLog_App("Creating MainWindowGPU...");
-    auto* window = new MainWindowGPU();
-    sLog_App("MainWindowGPU created successfully");
-    sLog_App("Calling window.show()...");
-    window->show();
-    sLog_App("window.show() completed");
-    return window;
-}
-
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
@@ -77,7 +66,13 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
 
     registerMetaTypesAndQml();
-    createAndShowMainWindow();
+
+    sLog_App("Creating MainWindowGPU...");
+    MainWindowGPU window;
+    sLog_App("MainWindowGPU created successfully");
+    sLog_App("Calling window.show()...");
+    window.show();
+    sLog_App("window.show() completed");
 
     sLog_App("Starting Qt event loop with app.exec()...");
     sLog_App("GPU Trading Terminal ready for 144Hz action!");
