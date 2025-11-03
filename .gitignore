@@ -114,6 +114,7 @@ ENV/
 .claude/
 CLAUDE.md
 AGENTS.md
+GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
 docs/archive/
