@@ -4,8 +4,6 @@ project(sentinel_core)
 
 add_library(sentinel_core
     Cpp20Utils.hpp
-    CvdThresholdRule.cpp
-    CvdThresholdRule.h
     LiquidityTimeSeriesEngine.cpp
     LiquidityTimeSeriesEngine.h
     LockFreeQueue.h
@@ -19,25 +17,16 @@ add_library(sentinel_core
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
-    PerformanceMonitor.cpp
-    PerformanceMonitor.h
-    Rule.h
-    RuleEngine.cpp
-    RuleEngine.h
     SentinelLogging.cpp
     SentinelLogging.hpp
     SentinelMonitor.cpp
     SentinelMonitor.hpp
-    StatisticsController.cpp
-    StatisticsController.h
-    StatisticsProcessor.cpp
-    StatisticsProcessor.h
     marketdata/model/TradeData.h
 )
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(Boost REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 # jwt-cpp is fetched via FetchContent in main CMakeLists.txt
@@ -46,11 +35,11 @@ target_include_directories(sentinel_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(sentinel_core 
+target_link_libraries(sentinel_core
     PUBLIC
         Qt6::Core
     PRIVATE
-        Boost::system
+        Boost::headers
         nlohmann_json::nlohmann_json
         OpenSSL::SSL
         OpenSSL::Crypto

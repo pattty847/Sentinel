@@ -17,6 +17,7 @@ Assumptions: Manages data for multiple independent products, identified by strin
 #include <vector>
 #include <shared_mutex>
 #include <memory>
+#include <span>
 #include "../model/TradeData.h"
 
 template <typename T, std::size_t MaxN>
@@ -57,14 +58,20 @@ public:
     [[nodiscard]] std::vector<Trade>   tradesSince(const std::string& s, const std::string& lastId) const;
     [[nodiscard]] OrderBook            book(const std::string& s) const;
     
-    // 🔥 NEW: LiveOrderBook methods for stateful order book management - PHASE 1.4: Now use exchange timestamps
-    void initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp);
-    void updateLiveOrderBook(const std::string& symbol, const std::string& side, double price, double quantity, std::chrono::system_clock::time_point exchange_timestamp);
+    //  NEW: LiveOrderBook methods for stateful order book management - Now use exchange timestamps
+    void initializeLiveOrderBook(const std::string& symbol,
+                                 const std::vector<OrderBookLevel>& bids,
+                                 const std::vector<OrderBookLevel>& asks,
+                                 std::chrono::system_clock::time_point exchange_timestamp);
+    void applyLiveOrderBookUpdates(const std::string& symbol,
+                                   std::span<const BookLevelUpdate> updates,
+                                   std::chrono::system_clock::time_point exchange_timestamp,
+                                   std::vector<BookDelta>& outDeltas);
     
-    // LEGACY: Remove in Phase 2 cleanup - kept for backwards compatibility during transition
+    // Remove in cleanup - kept for backwards compatibility during transition
     [[nodiscard]] std::shared_ptr<const OrderBook> getLiveOrderBook(const std::string& symbol) const;
     
-    // PHASE 2.1: Direct dense access (no conversion)
+    // Direct dense access (no conversion)
     [[nodiscard]] const LiveOrderBook& getDirectLiveOrderBook(const std::string& symbol) const;
     
 
@@ -76,5 +83,5 @@ private:
     mutable std::shared_mutex                     m_mxLiveBooks; // For stateful order books
     std::unordered_map<std::string, TradeRing>    m_trades;
     std::unordered_map<std::string, OrderBook>    m_books;
-    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; // 🔥 NEW: Stateful order books
+    std::unordered_map<std::string, LiveOrderBook> m_liveBooks; //  NEW: Stateful order books
 }; 

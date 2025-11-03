@@ -104,7 +104,7 @@ Sentinel’s renderer is intentionally modular so adding a visualization does no
 
 - **Logging**: Configure `QT_LOGGING_RULES` to enable or suppress `sentinel.*` categories. See `docs/LOGGING_GUIDE.md` for examples.
 - **Analysis Scripts**: `scripts/quick_cpp_overview.sh` and `scripts/extract_functions.sh` provide structure and function lists for large files prior to refactors.
-- **Monitoring**: `PerformanceMonitor` exposes render and data throughput metrics. Activate it for profiling sessions instead of ad-hoc prints.
+- **Monitoring**: `SentinelMonitor` exposes unified render/data metrics and replaces prior ad-hoc profilers. Activate it for profiling sessions instead of console prints.
 
 ---
 

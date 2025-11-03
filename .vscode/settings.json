@@ -12,7 +12,8 @@
     "C_Cpp.default.cppStandard": "c++20",
     "C_Cpp.default.cStandard": "c17",
     "clangd.arguments": [
-        "--compile-commands-dir=${workspaceFolder}",
+        "--compile-commands-dir=${workspaceFolder}/build-windows-mingw",
+        "--query-driver=C:/msys64/mingw64/bin/*",
         "--background-index",
         "--clang-tidy",
         "--header-insertion=iwyu"

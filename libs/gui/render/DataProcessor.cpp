@@ -17,13 +17,19 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <QDateTime>
 #include <cmath>
 #include "SentinelLogging.hpp"
-#include "../../core/marketdata/cache/DataCache.hpp"  // 🚀 PHASE 3: Access to dense LiveOrderBook
-#include "../CoordinateSystem.h"  // 🎯 FIX: Use proper coordinate transformation
+#include "../../core/marketdata/cache/DataCache.hpp"
+#include "../CoordinateSystem.h"
 #include <QColor>
 #include <chrono>
 #include <limits>
 #include <climits>
 #include <cmath>
+#include <algorithm>
+
+namespace {
+constexpr bool kTraceCellDebug = false;
+constexpr bool kTraceCoordinateDebug = false;
+}
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
@@ -31,32 +37,61 @@ DataProcessor::DataProcessor(QObject* parent)
     m_snapshotTimer = new QTimer(this);
     connect(m_snapshotTimer, &QTimer::timeout, this, &DataProcessor::captureOrderBookSnapshot);
     
-    // 🚀 PHASE 3: DataProcessor now owns the LiquidityTimeSeriesEngine!
     m_liquidityEngine = new LiquidityTimeSeriesEngine(this);
     
-    sLog_App("🚀 DataProcessor: Initialized for V2 architecture");
+    sLog_App("DataProcessor: Initialized for V2 architecture");
 }
 
 DataProcessor::~DataProcessor() {
+    // Log even if stopProcessing() returns early (idempotent)
+    if (!m_shuttingDown.load()) {
+        sLog_App("DataProcessor destructor - stopProcessing() not called yet");
+    }
     stopProcessing();
+    // This log will always appear, even if stopProcessing() returned early
+    sLog_App("DataProcessor destructor complete");
 }
 
 void DataProcessor::startProcessing() {
-    // 🚀 Base 100ms sampler: ensure continuous time buckets
-    sLog_App("🚀 DataProcessor: Starting 100ms base sampler");
+    // Base 100ms sampler: ensure continuous time buckets
+    // This is the rate at whicch we sample the order book with 'captureOrderBookSnapshot'
+    sLog_App("DataProcessor: Starting 100ms base sampler");
     if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
         m_snapshotTimer->start(100);
-        sLog_App("🚀 DataProcessor: Started processing with 100ms snapshots");
+        sLog_App("DataProcessor: Started processing with 100ms snapshots");
     }
 }
 
 void DataProcessor::stopProcessing() {
+    // Idempotent: if already shutting down, return immediately
+    bool expected = false;
+    if (!m_shuttingDown.compare_exchange_strong(expected, true)) {
+        // Already shutting down, skip redundant work
+        return;
+    }
+    
+    sLog_App("DataProcessor::stopProcessing() - shutting down...");
+    
+    // Stop timer first to prevent new processing
     if (m_snapshotTimer) {
         m_snapshotTimer->stop();
     }
+    
+    // Disconnect all signals to prevent callbacks during shutdown
+    disconnect(this, nullptr, nullptr, nullptr);
+    
+    // Clear data to free memory
+    clearData();
+    
+    sLog_App("DataProcessor stopped");
 }
 
 void DataProcessor::onTradeReceived(const Trade& trade) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (trade.product_id.empty()) return;
     
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -69,17 +104,23 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
             initializeViewportFromTrade(trade);
         }
         
-        sLog_Data("📊 DataProcessor TRADE UPDATE: Processing trade");
+        sLog_Data("DataProcessor TRADE UPDATE: Processing trade");
     }
     
-    emit dataUpdated();
+    // Recompute visible cells and publish a snapshot for the renderer
+    // updateVisibleCells();
     
-    sLog_Data("🎯 DataProcessor TRADE: $" << trade.price 
+    sLog_Data("DataProcessor TRADE: $" << trade.price 
                  << " vol:" << trade.size 
                  << " timestamp:" << timestamp);
 }
 
 void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (!book || book->product_id.empty() || book->bids.empty() || book->asks.empty()) return;
     
     {
@@ -93,9 +134,10 @@ void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
         }
     }
     
-    emit dataUpdated();
+    // Recompute visible cells and publish a snapshot for the renderer
+    updateVisibleCells();
     
-    sLog_Data("🎯 DataProcessor ORDER BOOK update"
+    sLog_Data("DataProcessor ORDER BOOK update"
              << " Bids:" << book->bids.size() << " Asks:" << book->asks.size());
 }
 
@@ -108,6 +150,20 @@ const OrderBook& DataProcessor::getLatestOrderBook() const {
 }
 
 void DataProcessor::captureOrderBookSnapshot() {
+    /*  
+        This function captures the current state of an order book and aligns it to a 100ms time bucket.
+        If there are skipped buckets since the last snapshot (e.g., no activity in the last 100ms),
+        it carries forward the latest order book state into each bucket up to the current time.
+        This ensures that order book snapshots are recorded at consistent intervals in the liquidity engine.
+        The periodic snapshot promotes proper time alignment for rendering historical order flow and downstream analysis.
+        Early exits occur if the system is shutting down or if no valid liquidity engine exists.
+    */
+
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    
     if (!m_liquidityEngine) return;
     
     std::shared_ptr<const OrderBook> book_copy;
@@ -118,6 +174,7 @@ void DataProcessor::captureOrderBookSnapshot() {
     if (!book_copy) return;
 
     // Align to system 100ms buckets; carry-forward if we skipped buckets
+    // TODO: See if this is the best way to align the order book to the 100ms bucket.
     const qint64 nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     const qint64 bucketStart = (nowMs / 100) * 100;
@@ -128,7 +185,7 @@ void DataProcessor::captureOrderBookSnapshot() {
         ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
         m_liquidityEngine->addOrderBookSnapshot(ob);
         lastBucket = bucketStart;
-        emit dataUpdated();
+        updateVisibleCells();
         return;
     }
 
@@ -139,7 +196,7 @@ void DataProcessor::captureOrderBookSnapshot() {
             m_liquidityEngine->addOrderBookSnapshot(ob);
             lastBucket = ts;
         }
-        emit dataUpdated();
+        updateVisibleCells();
     }
 }
 
@@ -156,7 +213,7 @@ void DataProcessor::initializeViewportFromTrade(const Trade& trade) {
     
     m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
     
-    sLog_App("🎯 DataProcessor VIEWPORT FROM TRADE: $" << minPrice << "-$" << maxPrice << " at " << timestamp);
+    sLog_App("DataProcessor VIEWPORT FROM TRADE: $" << minPrice << "-$" << maxPrice << " at " << timestamp);
     
     emit viewportInitialized();
 }
@@ -198,86 +255,134 @@ void DataProcessor::initializeViewportFromOrderBook(const OrderBook& book) {
     
     m_viewState->setViewport(timeStart, timeEnd, minPrice, maxPrice);
     
-    sLog_App("🎯 DataProcessor VIEWPORT FROM ORDER BOOK:");
-    sLog_App("   Mid Price: $" << midPrice);
-    sLog_App("   Price Window: $" << minPrice << " - $" << maxPrice);
+    sLog_App("DataProcessor VIEWPORT FROM ORDER BOOK:");
+    sLog_App("  Mid Price: $" << midPrice);
+    sLog_App("  Price Window: $" << minPrice << " - $" << maxPrice);
     
     emit viewportInitialized();
 }
 
-// 🚀 PHASE 3: Handle dense LiveOrderBook updates directly! 
-void DataProcessor::onLiveOrderBookUpdated(const QString& productId) {
-    if (!m_dataCache || !m_liquidityEngine) {
-        sLog_Render("❌ DataProcessor: DataCache or LiquidityEngine not set");
+void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas) {
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
         return;
     }
     
-    // Get direct dense LiveOrderBook access (no conversion!)
+    if (!m_dataCache || !m_liquidityEngine) {
+        sLog_Render("DataProcessor: DataCache or LiquidityEngine not set");
+        return;
+    }
+    
     const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
-    
-    sLog_Render("🚀 PHASE 3: DataProcessor processing dense LiveOrderBook - bids:" << liveBook.getBidCount() << " asks:" << liveBook.getAskCount());
-    
-    // Convert dense LiveOrderBook to sparse OrderBook for LTSE processing
-    // TODO: Eventually LTSE should accept dense format directly
+
+    // Phase 1: Dense ingestion path (behind feature flag)
+    if (m_useDenseIngestion) {
+        static thread_local std::vector<std::pair<uint32_t, double>> bidBuf;
+        static thread_local std::vector<std::pair<uint32_t, double>> askBuf;
+        constexpr size_t kMaxPerSide = 4000; // bounded ingestion per side
+
+        auto view = liveBook.captureDenseNonZero(bidBuf, askBuf, kMaxPerSide);
+        if (!view.bidLevels.empty() || !view.askLevels.empty()) {
+            m_liquidityEngine->addDenseSnapshot(view);
+            {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                // Keep m_latestOrderBook for viewport init via existing path (optional)
+                m_hasValidOrderBook = true;
+            }
+            updateVisibleCells();
+            return; // Do not execute sparse-banding path when dense path is enabled
+        }
+    }
+
+    sLog_Render("DataProcessor processing dense LiveOrderBook - bids:" << liveBook.getBidCount() << " asks:" << liveBook.getAskCount());
+    // Build a mid-centered banded sparse snapshot from dense book
     OrderBook sparseBook;
     sparseBook.product_id = productId.toStdString();
     sparseBook.timestamp = std::chrono::system_clock::now();
-    
-    // Convert dense to sparse using a mid-price band (viewport-independent)
+
     const auto& denseBids = liveBook.getBids();
     const auto& denseAsks = liveBook.getAsks();
-    // Mid price
+
+    // Determine best bid/ask
     double bestBid = std::numeric_limits<double>::quiet_NaN();
     double bestAsk = std::numeric_limits<double>::quiet_NaN();
-    // Find bests via dense arrays
-    for (size_t i = denseBids.size(); i > 0; --i) { if (denseBids[i-1] > 0.0) { bestBid = liveBook.getMinPrice() + (static_cast<double>(i-1) * liveBook.getTickSize()); break; } }
-    for (size_t i = 0; i < denseAsks.size(); ++i) { if (denseAsks[i] > 0.0) { bestAsk = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize()); break; } }
+    size_t bestBidIdx = 0;
+    size_t bestAskIdx = 0;
+    for (size_t i = denseBids.size(); i > 0; --i) {
+        size_t idx = i - 1;
+        if (denseBids[idx] > 0.0) { bestBidIdx = idx; bestBid = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize()); break; }
+    }
+    for (size_t i = 0; i < denseAsks.size(); ++i) {
+        if (denseAsks[i] > 0.0) { bestAskIdx = i; bestAsk = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize()); break; }
+    }
     double mid = (!std::isnan(bestBid) && !std::isnan(bestAsk)) ? (bestBid + bestAsk) * 0.5
                : (!std::isnan(bestBid) ? bestBid : (!std::isnan(bestAsk) ? bestAsk : liveBook.getMinPrice() + 0.5 * (denseBids.size() * liveBook.getTickSize())));
+    
+    // Compute band width according to mode
+    // TODO: Make band width dynamic per-asset and user-configurable, and eventually
+    //       move banding to render-time (Phase 1+) so history isn't pruned at ingest.
     double halfBand = 0.0;
     switch (m_bandMode) {
         case BandMode::FixedDollar: halfBand = std::max(1e-6, m_bandValue); break;
         case BandMode::PercentMid:  halfBand = std::max(1e-6, std::abs(mid) * m_bandValue); break;
         case BandMode::Ticks:       halfBand = std::max(1.0, m_bandValue) * liveBook.getTickSize(); break;
     }
-    // Safety caps
-    const double maxHalfBand = (denseBids.size() * liveBook.getTickSize()) * 0.5;
+    // Ensure a sensible default if unset
+    if (halfBand <= 0.0) {
+        halfBand = 100.0; // $100 default window for BTC testing; TODO: derive from asset volatility/profile
+    }
+    // Clamp band to available data range
+    const double maxHalfBand = (std::max(denseBids.size(), denseAsks.size()) * liveBook.getTickSize()) * 0.5;
     halfBand = std::min(halfBand, maxHalfBand);
-    double bandMinPrice = mid - halfBand;
-    double bandMaxPrice = mid + halfBand;
-    
-    // Calculate index bounds for band window
-    size_t minIndex = std::max(0.0, (bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
-    size_t maxIndex = std::min(static_cast<double>(std::max(denseBids.size(), denseAsks.size())), 
-                              (bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize());
-    
-    // Convert bids (scan only visible range from highest to lowest price)
-    for (size_t i = std::min(maxIndex, denseBids.size()); i > minIndex && i > 0; --i) {
-        size_t idx = i - 1;
-        if (denseBids[idx] > 0.0) {
-            double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
-            sparseBook.bids.push_back({price, denseBids[idx]});
+    const double bandMinPrice = mid - halfBand;
+    const double bandMaxPrice = mid + halfBand;
+
+    // Convert bids (scan from highest to lowest within band)
+    if (!denseBids.empty()) {
+        size_t maxIndex = static_cast<size_t>(std::min<double>(denseBids.size(), std::ceil((bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize()) + 1));
+        size_t minIndex = static_cast<size_t>(std::max<double>(0.0, std::floor((bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize())));
+        for (size_t i = maxIndex; i > minIndex && i > 0; --i) {
+            size_t idx = i - 1;
+            double qty = denseBids[idx];
+            if (qty > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(idx) * liveBook.getTickSize());
+                sparseBook.bids.push_back({price, qty});
+            }
         }
     }
-    
-    // Convert asks (scan only visible range from lowest to highest price)
-    for (size_t i = minIndex; i < std::min(maxIndex, denseAsks.size()); ++i) {
-        if (denseAsks[i] > 0.0) {
-            double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
-            sparseBook.asks.push_back({price, denseAsks[i]});
+    // Convert asks (scan from lowest to highest within band)
+    if (!denseAsks.empty()) {
+        size_t minIndex = static_cast<size_t>(std::max<double>(0.0, std::floor((bandMinPrice - liveBook.getMinPrice()) / liveBook.getTickSize())));
+        size_t maxIndex = static_cast<size_t>(
+            std::min<double>(denseAsks.size(), std::ceil((bandMaxPrice - liveBook.getMinPrice()) / liveBook.getTickSize()) + 1));
+        for (size_t i = minIndex; i < maxIndex; ++i) {
+            double qty = denseAsks[i];
+            if (qty > 0.0) {
+                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
+                sparseBook.asks.push_back({price, qty});
+            }
         }
     }
-    
-    // Prime LTSE immediately and cache for sampler
-    m_liquidityEngine->addOrderBookSnapshot(sparseBook);
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_latestOrderBook = std::make_shared<OrderBook>(sparseBook);
-        m_hasValidOrderBook = true;
+
+    // Fallback: if band yielded no levels, inject top-of-book so LTSE advances time
+    if (sparseBook.bids.empty() && !std::isnan(bestBid)) {
+        sparseBook.bids.push_back({bestBid, denseBids[bestBidIdx]});
     }
-    
-    sLog_Data("🎯 DataProcessor: LiveOrderBook cached + primed snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size());
-    emit dataUpdated();
+    if (sparseBook.asks.empty() && !std::isnan(bestAsk)) {
+        sparseBook.asks.push_back({bestAsk, denseAsks[bestAskIdx]});
+    }
+
+    if (!sparseBook.bids.empty() || !sparseBook.asks.empty()) {
+        m_liquidityEngine->addOrderBookSnapshot(sparseBook);
+        {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+            m_latestOrderBook = std::make_shared<OrderBook>(sparseBook);
+            m_hasValidOrderBook = true;
+        }
+        sLog_Data("DataProcessor: Primed LTSE with banded snapshot - bids=" << sparseBook.bids.size() << " asks=" << sparseBook.asks.size()
+                 << " deltas=" << deltas.size());
+    }
+    updateVisibleCells();
 }
 
 void DataProcessor::clearData() {
@@ -290,20 +395,34 @@ void DataProcessor::clearData() {
         m_viewState->resetZoom();
     }
     
-    sLog_App("🎯 DataProcessor: Data cleared");
+    {
+        std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+        m_publishedCells.reset();
+    }
     emit dataUpdated();
 }
 
-// 🚀 PHASE 3: Business logic methods moved from UGR
-
 void DataProcessor::updateVisibleCells() {
-    m_visibleCells.clear();
-    
+    // Early return if shutting down
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
+    // Viewport version gating: full rebuild only when viewport changes
+    const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
+    const bool viewportChanged = (currentViewportVersion != m_lastViewportVersion);
+    if (viewportChanged) {
+        m_visibleCells.clear();
+        m_lastProcessedTime = 0;
+        m_lastViewportVersion = currentViewportVersion;
+    }
+
     int64_t activeTimeframe = m_currentTimeframe_ms;
     
-    // 🚀 OPTIMIZATION 1: Use manual timeframe if set, otherwise auto-suggest
+    // Use manual timeframe if set, otherwise auto-suggest
+    // TODO: Investigate dynamic zoom/timeframe: ensure viewportChanged triggers re-suggest and manual override timeout resets
     if (!m_manualTimeframeSet || 
         (m_manualTimeframeTimer.isValid() && m_manualTimeframeTimer.elapsed() > 10000)) {  // 10 second timeout
         
@@ -315,64 +434,110 @@ void DataProcessor::updateVisibleCells() {
             if (optimalTimeframe != m_currentTimeframe_ms) {
                 m_currentTimeframe_ms = optimalTimeframe;
                 activeTimeframe = optimalTimeframe;
-                sLog_Render("🔄 AUTO-TIMEFRAME UPDATE: " << optimalTimeframe << "ms (viewport-optimized)");
+                sLog_Render("AUTO-TIMEFRAME UPDATE: " << optimalTimeframe << "ms (viewport-optimized)");
             }
         }
     } else {
-        sLog_Render("🎯 MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
+        sLog_Render("MANUAL TIMEFRAME: Using " << m_currentTimeframe_ms << "ms (user-selected)");
     }
     
     // Get liquidity slices for active timeframe within viewport
     if (m_liquidityEngine) {
         qint64 timeStart = m_viewState->getVisibleTimeStart();
         qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-        sLog_Render("🔍 LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
+        sLog_Render("LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
         
         auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
-        sLog_Render("🔍 LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
+        sLog_Render("LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
         
-        // 🔍 DEBUG: Check if slices are being processed
-        int processedSlices = 0;
-        
-        // Auto-fix viewport if no data found but data exists
+        // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
+        // TODO: Only works on startup; need to fix for dynamic viewport changes
         if (visibleSlices.empty()) {
-            auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
-            if (!allSlices.empty()) {
-                qint64 oldestTime = allSlices.front()->startTime_ms;
-                qint64 newestTime = allSlices.back()->endTime_ms;
-                qint64 gap = timeStart - newestTime;
-                sLog_Render("🔍 LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
-                sLog_Render("🔍 TIME GAP: " << gap << "ms between newest data and viewport start");
-                
-                // AUTO-FIX: Snap viewport to actual data range
-                if (gap > 60000) { // If gap > 1 minute, auto-adjust
-                    qint64 newStart = newestTime - 30000; // 30s before newest data
-                    qint64 newEnd = newestTime + 30000;   // 30s after newest data
-                    sLog_Render("🔧 AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+            const bool canAutoFix = (m_viewState && m_viewState->isAutoScrollEnabled());
+            if (!canAutoFix) {
+                sLog_Render("SKIP AUTO-ADJUST: auto-scroll disabled (user interaction in progress)");
+            } else {
+                auto allSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, 0, LLONG_MAX);
+                if (!allSlices.empty()) {
+                    qint64 oldestTime = allSlices.front()->startTime_ms;
+                    qint64 newestTime = allSlices.back()->endTime_ms;
+                    qint64 gap = timeStart - newestTime;
+                    sLog_Render("LTSE TIME MISMATCH: Have " << allSlices.size() << " slices in range [" << oldestTime << "-" << newestTime << "], but viewport is [" << timeStart << "-" << timeEnd << "]");
+                    sLog_Render("TIME GAP: " << gap << "ms between newest data and viewport start");
                     
-                    m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
-                    
-                    // Retry query with corrected viewport
-                    visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
-                    sLog_Render("🎯 VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                    // AUTO-FIX: Snap viewport to actual data range
+                    if (gap > 60000) { // If gap > 1 minute, auto-adjust
+                        qint64 newStart = newestTime - 30000; // 30s before newest data
+                        qint64 newEnd = newestTime + 30000;   // 30s after newest data
+                        sLog_Render("AUTO-ADJUSTING VIEWPORT: [" << newStart << "-" << newEnd << "] to match data");
+                        
+                        m_viewState->setViewport(newStart, newEnd, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+                        
+                        // Retry query with corrected viewport
+                        visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, newStart, newEnd);
+                        sLog_Render("VIEWPORT FIX RESULT: Found " << visibleSlices.size() << " slices after adjustment");
+                    }
                 }
             }
         }
-        
-        // 🚀 Process all visible slices; viewport + transform handle GPU load
-        for (const auto* slice : visibleSlices) {
-            ++processedSlices;
-            createCellsFromLiquiditySlice(*slice);
+
+        // Track processed slices and append only new data when viewport is stable
+        const size_t beforeSize = m_visibleCells.size();
+        int processedSlices = 0;
+
+        if (viewportChanged || m_lastProcessedTime == 0) {
+            for (const auto* slice : visibleSlices) {
+                ++processedSlices;
+                createCellsFromLiquiditySlice(*slice);
+                if (slice && slice->endTime_ms > m_lastProcessedTime) {
+                    m_lastProcessedTime = slice->endTime_ms;
+                }
+            }
+        } else {
+            for (const auto* slice : visibleSlices) {
+                if (!slice) continue;
+                if (slice->startTime_ms >= m_lastProcessedTime) {
+                    ++processedSlices;
+                    createCellsFromLiquiditySlice(*slice);
+                    if (slice->endTime_ms > m_lastProcessedTime) {
+                        m_lastProcessedTime = slice->endTime_ms;
+                    }
+                }
+            }
         }
-        
-        sLog_Render("🔍 SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices");
-        
-        sLog_Render("🎯 DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
-                 << " TotalCells:" << m_visibleCells.size()
-                 << " ActiveTimeframe:" << activeTimeframe << "ms"
-                 << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+
+        // Prune cells that are no longer within the visible time range to prevent
+        // unbounded growth when the viewport is stable and data streams indefinitely.
+        // Keep pruning tight (no padding) because UGR now rebuilds on zoom-out.
+        std::erase_if(m_visibleCells, [timeStart, timeEnd](const CellInstance& cell) {
+            return cell.timeEnd_ms < timeStart || cell.timeStart_ms > timeEnd;
+        });
+
+        const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize);
+
+        sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices ("
+                    << (viewportChanged ? "rebuild" : "append") << ")");
+        sLog_Render("DATA PROCESSOR COVERAGE Slices:" << visibleSlices.size()
+                    << " TotalCells:" << m_visibleCells.size()
+                    << " ActiveTimeframe:" << activeTimeframe << "ms"
+                    << " (Manual:" << (m_manualTimeframeSet ? "YES" : "NO") << ")");
+
+        // Publish snapshot only when something changed
+        if (changed) {
+            {
+                std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+                m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
+            }
+            emit dataUpdated();
+        }
+        return; // Avoid duplicate publish below
     }
     
+    // Fallback: if no liquidity engine, publish current state (likely empty)
+    {
+        std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+        m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
+    }
     emit dataUpdated();
 }
 
@@ -382,10 +547,10 @@ void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slic
     double minPrice = m_viewState->getMinPrice();
     double maxPrice = m_viewState->getMaxPrice();
     
-    // 🔍 DEBUG: Log slice processing details
+    // Log slice processing details
     static int sliceCounter = 0;
     if (++sliceCounter % 10 == 0) {
-        sLog_Render("🎯 SLICE DEBUG #" << sliceCounter << ": time=" << slice.startTime_ms 
+        sLog_Render("SLICE DEBUG #" << sliceCounter << ": time=" << slice.startTime_ms 
                     << " bids=" << slice.bidMetrics.size() << " asks=" << slice.askMetrics.size() 
                     << " priceRange=$" << minPrice << "-$" << maxPrice);
     }
@@ -416,56 +581,38 @@ void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slic
 void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid) {
     if (liquidity <= 0.0 || !m_viewState) return;
     
+    // World-space culling
+    if (price < m_viewState->getMinPrice() || price > m_viewState->getMaxPrice()) return;
+    if (slice.endTime_ms < m_viewState->getVisibleTimeStart() || slice.startTime_ms > m_viewState->getVisibleTimeEnd()) return;
+
     CellInstance cell;
-    cell.timeSlot = slice.startTime_ms;
-    cell.priceLevel = price;
+    cell.timeStart_ms = slice.startTime_ms;
+    cell.timeEnd_ms = (slice.endTime_ms > slice.startTime_ms) ? slice.endTime_ms : (slice.startTime_ms + std::max<int64_t>(m_currentTimeframe_ms, 1));
+    const double halfTick = slice.tickSize * 0.5;
+    cell.priceMin = price - halfTick;
+    cell.priceMax = price + halfTick;
     cell.liquidity = liquidity;
     cell.isBid = isBid;
     cell.intensity = std::min(1.0, liquidity / 1000.0);
     cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
-    // Compute screen-space rect from world coordinates
-    cell.screenRect = timeSliceToScreenRect(slice, price);
-
-    // Cull degenerate or off-screen rectangles
-    const double minPixel = 0.5;   // Avoid zero-area artifacts
-    const double maxPixel = 200.0; // Clamp pathological sizes
-    if (cell.screenRect.width() < minPixel || cell.screenRect.height() < minPixel) {
-        return;
-    }
-    if (cell.screenRect.width() > maxPixel) {
-        // Clamp width to prevent giant blocks due to bad transforms
-        cell.screenRect.setWidth(maxPixel);
-    }
-    if (cell.screenRect.height() > maxPixel) {
-        cell.screenRect.setHeight(maxPixel);
-    }
-
-    // Basic viewport culling using current item size from view state
-    const double viewportW = m_viewState ? m_viewState->getViewportWidth() : 0.0;
-    const double viewportH = m_viewState ? m_viewState->getViewportHeight() : 0.0;
-    if (viewportW > 0.0 && viewportH > 0.0) {
-        const QRectF viewportRect(0.0, 0.0, viewportW, viewportH);
-        if (!viewportRect.intersects(cell.screenRect)) {
-            return;
-        }
-    }
+    cell.snapshotCount = slice.duration_ms > 0 ? static_cast<int>(slice.duration_ms / std::max<int64_t>(m_currentTimeframe_ms, 1)) : 1;
 
     m_visibleCells.push_back(cell);
     
-    // 🔍 DEBUG: Log cell creation occasionally
-    static int cellCounter = 0;
-    if (++cellCounter % 50 == 0) {
-        sLog_Render("🎯 CELL DEBUG: Created cell #" << cellCounter << " at screenRect(" 
-                    << cell.screenRect.x() << "," << cell.screenRect.y() << "," 
-                    << cell.screenRect.width() << "x" << cell.screenRect.height() 
-                    << ") liquidity=" << cell.liquidity << " isBid=" << cell.isBid);
+    if constexpr (kTraceCellDebug) {
+        static int cellCounter = 0;
+        if (++cellCounter % 50 == 0) {
+            sLog_Render("CELL DEBUG: Created cell #" << cellCounter << " world=[" 
+                        << cell.timeStart_ms << "," << cell.timeEnd_ms << "] $[" 
+                        << cell.priceMin << "," << cell.priceMax << "] liquidity=" << cell.liquidity);
+        }
     }
 }
 
 QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, double price) const {
     if (!m_viewState) return QRectF();
     
-    // 🎯 FIX: Use CoordinateSystem for proper world-to-screen transformation
+    // Use CoordinateSystem for proper world-to-screen transformation
     Viewport viewport{
         m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(),
         m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
@@ -489,20 +636,19 @@ QRectF DataProcessor::timeSliceToScreenRect(const LiquidityTimeSlice& slice, dou
     
     QRectF result(topLeft, bottomRight);
     
-    // 🔍 DEBUG: Log coordinate transformation once per batch
-    static int debugCounter = 0;
-    if (++debugCounter % 100 == 0) {
-        sLog_Render("🎯 COORD DEBUG: World(" << timeStart << "," << price << ") -> Screen(" 
-                    << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
-                    << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
-                    << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
-                    << viewport.width << "x" << viewport.height << "]");
+    if constexpr (kTraceCoordinateDebug) {
+        static int debugCounter = 0;
+        if (++debugCounter % 100 == 0) {
+            sLog_Render("COORD DEBUG: World("<< timeStart << "," << price << ") -> Screen("
+                        << topLeft.x() << "," << topLeft.y() << ") Viewport[" 
+                        << viewport.timeStart_ms << "-" << viewport.timeEnd_ms << ", $" 
+                        << viewport.priceMin << "-$" << viewport.priceMax << "] Size[" 
+                        << viewport.width << "x" << viewport.height << "]");
+        }
     }
     
     return result;
 }
-
-// 🚀 PHASE 3: LTSE delegation methods (moved from UGR)
 
 void DataProcessor::setPriceResolution(double resolution) {
     if (m_liquidityEngine && resolution > 0) {
@@ -542,8 +688,6 @@ int DataProcessor::getDisplayMode() const {
     return m_liquidityEngine ? static_cast<int>(m_liquidityEngine->getDisplayMode()) : 0;
 }
 
-// 🚀 PHASE 3: Manual timeframe management (preserve existing logic)
-
 void DataProcessor::setTimeframe(int timeframe_ms) {
     if (timeframe_ms > 0) {
         m_currentTimeframe_ms = timeframe_ms;
@@ -554,7 +698,7 @@ void DataProcessor::setTimeframe(int timeframe_ms) {
             m_liquidityEngine->addTimeframe(timeframe_ms);
         }
         
-        sLog_Render("🎯 MANUAL TIMEFRAME SET: " << timeframe_ms << "ms");
+        sLog_Render("MANUAL TIMEFRAME SET: " << timeframe_ms << "ms");
         emit dataUpdated();
     }
 }

@@ -23,7 +23,7 @@ Column {
             anchors.centerIn: parent
             color: "white"
             font.pixelSize: 12
-            text: "🔍 ZOOM CONTROLS"
+            text: " ZOOM CONTROLS"
         }
     }
     

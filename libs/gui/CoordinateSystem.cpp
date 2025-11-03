@@ -22,10 +22,8 @@ QPointF CoordinateSystem::worldToScreen(int64_t timestamp_ms, double price, cons
     double normalizedTime = normalizeTime(timestamp_ms, viewport);
     double normalizedPrice = normalizePrice(price, viewport);
     
-    // Clamp to avoid rendering outside viewport
-    normalizedTime = qBound(0.0, normalizedTime, 1.0);
-    normalizedPrice = qBound(0.0, normalizedPrice, 1.0);
-    
+    // IMPORTANT: Do not clamp here. We let callers cull off-viewport primitives
+    // so we don't fold out-of-range timestamps back to x=0 or x=width.
     double x = normalizedTime * viewport.width;
     double y = (1.0 - normalizedPrice) * viewport.height;  // Flip Y for screen coordinates
     

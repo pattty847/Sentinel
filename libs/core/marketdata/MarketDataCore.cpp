@@ -16,10 +16,21 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include "Cpp20Utils.hpp"
 #include <thread>
 #include <chrono>
+#include <span>
+#include <utility>
 #include <QString>
 #include <QMetaObject>
+#include <QMetaType>
 #include <QPointer>
 #include <format>    // std::format for efficient string formatting
+
+namespace {
+    inline int64_t steadyClockMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
+}
 
 MarketDataCore::MarketDataCore(Authenticator& auth,
                                DataCache& cache,
@@ -29,19 +40,31 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     , m_cache(cache)
     , m_monitor(monitor)
 {
+    qRegisterMetaType<BookDelta>("BookDelta");
+    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
+
     // Configure SSL context
     m_sslCtx.set_default_verify_paths();
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
-    sLog_App("🏗️ MarketDataCore initialized");
+    sLog_App("MarketDataCore initialized");
     // Create transport and bind callbacks
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
         if (up) {
+            // Reset sequencing and heartbeat tracking on fresh connect
+            m_lastSeqByProduct.clear();
+            m_lastHeartbeatMs.store(steadyClockMs());
+            {
+                std::lock_guard<std::mutex> lock(m_seqMutex);
+                m_lastSeqByProduct.clear();
+            }
             QPointer<MarketDataCore> self(this);
             QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
             replaySubscriptionsOnConnect();
+            startHeartbeatWatchdog();
+            sendHeartbeatSubscribe();
         } else {
             emitError("Transport down");
         }
@@ -61,7 +84,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
 
 MarketDataCore::~MarketDataCore() {
     stop();
-    sLog_App("🏗️ MarketDataCore destroyed");
+    sLog_App("MarketDataCore destroyed");
 }
 
 inline void MarketDataCore::emitError(QString msg) {
@@ -107,7 +130,7 @@ void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symb
 
 void MarketDataCore::start() {
     if (!m_running.exchange(true)) {
-        sLog_App("🚀 Starting MarketDataCore...");
+        sLog_App("Starting MarketDataCore...");
         
         // Reset backoff on fresh start
         m_backoffDuration = std::chrono::seconds(1);
@@ -128,7 +151,7 @@ void MarketDataCore::start() {
 
 void MarketDataCore::stop() {
     if (m_running.exchange(false)) {
-        sLog_App("🛑 Stopping MarketDataCore...");
+        sLog_App("Stopping MarketDataCore...");
 
         // Cancel reconnect timer
         m_reconnectTimer.cancel();
@@ -146,17 +169,17 @@ void MarketDataCore::stop() {
             m_ioThread.join();
         }
 
-        sLog_App("✅ MarketDataCore stopped");
+        sLog_App("MarketDataCore stopped");
     }
 }
 
 void MarketDataCore::run() {
-    sLog_Data(QString("🔌 IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
+    sLog_Data(QString("IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
     
     // Transport handles resolve/connect/handshake; we just run the context
     m_ioc.run();
     
-    sLog_Data("🔌 IO context stopped");
+    sLog_Data("IO context stopped");
 }
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
@@ -170,7 +193,7 @@ void MarketDataCore::scheduleReconnect() {
     std::uniform_int_distribution<> jitter(0, 250);
     auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
     
-    sLog_Data(QString("🔄 Scheduling reconnect in %1ms (backoff: %2s)...")
+    sLog_Data(QString("Scheduling reconnect in %1ms (backoff: %2s)...")
         .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
         .arg(m_backoffDuration.count()));
     
@@ -179,9 +202,9 @@ void MarketDataCore::scheduleReconnect() {
     m_reconnectTimer.async_wait([this](beast::error_code ec) {
         if (ec || !m_running) return;
         
-        sLog_Data("🔄 Attempting reconnection...");
+        sLog_Data("Attempting reconnection...");
         
-        // 🚀 PHASE 2.1: Record network reconnection
+        // Record network reconnection
         if (m_monitor) {
             m_monitor->recordNetworkReconnect();
         }
@@ -233,12 +256,18 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     
-    // 🚀 PHASE 2.1: Record message arrival time for latency analysis
+    // Record message arrival time for latency analysis
     auto arrival_time = std::chrono::system_clock::now();
     
     std::string channel = message.value("channel", "");
+    // Consider any incoming message as liveness to avoid premature reconnection before first heartbeat arrives
+    m_lastHeartbeatMs.store(steadyClockMs());
+    if (channel == ch::kHeartbeats) {
+        handleHeartbeats(message);
+        return;
+    }
     
-    // Phase 3: Minimal dispatcher wiring for non-data events (ack/errors)
+    // Minimal dispatcher wiring for non-data events (ack/errors)
     // Keep existing hot-path handlers for trades and order book intact.
     {
         auto result = MessageDispatcher::parse(message);
@@ -248,7 +277,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
                     emitError(QString::fromStdString(ev.message));
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
-                    std::string logMessage = std::format("✅ Subscription confirmed for {} symbols", ev.productIds.size());
+                    std::string logMessage = std::format("Subscription confirmed for {} symbols", ev.productIds.size());
                     sLog_Data(QString::fromStdString(logMessage));
                 }
             }, evt);
@@ -281,7 +310,7 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         // Store through sink adapter
         m_sink.onTrade(trade);
         
-        // 🚀 PHASE 2.1: Record trade processed for throughput tracking
+        // Record trade processed for throughput tracking
         if (m_monitor) {
             m_monitor->recordTradeProcessed(trade);
         }
@@ -321,7 +350,7 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
         std::string trade_timestamp_str = trade_data["time"];
         trade.timestamp = Cpp20Utils::parseISO8601(trade_timestamp_str);
         
-        // 🚀 PHASE 2.1: Record trade latency (exchange → arrival)
+        // Record trade latency (exchange → arrival)
         if (m_monitor) {
             m_monitor->recordTradeLatency(trade.timestamp, arrival_time);
         }
@@ -334,14 +363,24 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
 
 void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
                                        const std::chrono::system_clock::time_point& arrival_time) {
-    // PHASE 1.4: Parse exchange timestamp from root-level JSON
+    // Sequence number at message root
+    uint64_t seq = 0;
+    if (message.contains("sequence_num")) {
+        try {
+            seq = message["sequence_num"].get<uint64_t>();
+        } catch (const nlohmann::json::exception& e) {
+            sLog_Warning(QString("sequence_num parse issue: %1").arg(e.what()));
+            seq = 0;
+        }
+    }
+    // Parse exchange timestamp from root-level JSON
     std::chrono::system_clock::time_point exchange_timestamp = std::chrono::system_clock::now();
     if (message.contains("timestamp")) {
         // Parse ISO8601 timestamp: "2023-02-09T20:32:50.714964855Z"
         std::string timestamp_str = message["timestamp"];
         exchange_timestamp = Cpp20Utils::parseISO8601(timestamp_str);
         
-        // 🚀 PHASE 2.1: Record order book latency (exchange → arrival)
+        // Record order book latency (exchange → arrival)
         if (m_monitor) {
             m_monitor->recordOrderBookLatency(exchange_timestamp, arrival_time);
         }
@@ -353,6 +392,8 @@ void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
         std::string eventType = event.value("type", "");
         std::string product_id = event.value("product_id", "");
         
+        // For l2_data, Coinbase guarantees delivery; do not enforce sequence gating.
+
         if (eventType == "snapshot") {
             handleOrderBookSnapshot(event, product_id, exchange_timestamp);
         } else if (eventType == "update") {
@@ -404,34 +445,55 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     if (!event.contains("updates") || product_id.empty()) return;
     
     // UPDATE: Apply incremental changes to stateful order book
-    int updateCount = 0;
-    
+    thread_local std::vector<BookLevelUpdate> levelUpdates;
+    levelUpdates.clear();
+    levelUpdates.reserve(event["updates"].size());
+
     for (const auto& update : event["updates"]) {
         if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
             continue;
         }
-        
+
         std::string side = update["side"];
+        if (side == "offer") {
+            side = "ask";
+        }
+
+        const bool isBid = (side == "bid");
+        if (!isBid && side != "ask") {
+            continue;
+        }
+
         double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
         double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-        
-        // Apply update to live order book (handles add/update/remove automatically)
-        if (side == "offer") side = "ask"; // normalize
-        m_cache.updateLiveOrderBook(product_id, side, price, quantity, exchange_timestamp);
-        updateCount++;
+
+        levelUpdates.push_back(BookLevelUpdate{isBid, price, quantity});
     }
+
+    thread_local std::vector<BookDelta> deltas;
+    if (!levelUpdates.empty()) {
+        m_cache.applyLiveOrderBookUpdates(product_id,
+                                          std::span<const BookLevelUpdate>(levelUpdates.data(), levelUpdates.size()),
+                                          exchange_timestamp,
+                                          deltas);
+    } else {
+        deltas.clear();
+    }
+    const int updateCount = static_cast<int>(deltas.size());
     
-    // PHASE 2.1: Direct dense-only signal - NO CONVERSION!
+    // Direct dense-only signal - NO CONVERSION!
+    std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
+    deltas.clear();
     {
         QPointer<MarketDataCore> self(this);
         QString productIdQ = QString::fromStdString(product_id);
-        QMetaObject::invokeMethod(this, [self, productIdQ]() {
+        QMetaObject::invokeMethod(this, [self, productIdQ, deltasMove = std::move(deltasPayload)]() mutable {
             if (!self) return;
-            emit self->liveOrderBookUpdated(productIdQ);
+            emit self->liveOrderBookUpdated(productIdQ, deltasMove);
         }, Qt::QueuedConnection);
     }
     
-    // 🚀 PHASE 2.1: Record order book update metrics
+    // Record order book update metrics
     const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
     size_t bidCount = liveBook.getBidCount();
     size_t askCount = liveBook.getAskCount();
@@ -449,4 +511,71 @@ void MarketDataCore::replaySubscriptionsOnConnect() {
     if (m_products.empty()) return;
     auto symbols = m_products;
     sendSubscriptionMessage("subscribe", symbols);
+}
+
+void MarketDataCore::handleHeartbeats(const nlohmann::json& message) {
+    // Update last heartbeat timestamp; optionally validate counter
+    m_lastHeartbeatMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void MarketDataCore::startHeartbeatWatchdog() {
+    // Run periodic checks on the strand
+    net::post(m_strand, [this](){
+        m_heartbeatTimer.expires_after(std::chrono::seconds(2));
+        m_heartbeatTimer.async_wait([this](beast::error_code ec){
+            if (ec || !m_running.load()) return;
+            const int64_t nowMs = steadyClockMs();
+            const int64_t lastMs = m_lastHeartbeatMs.load();
+            if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
+                sLog_Error("Heartbeat stale (>10s); reconnecting...");
+                triggerImmediateReconnect("stale heartbeat");
+                return; // watchdog will be restarted on connect
+            }
+            // reschedule
+            startHeartbeatWatchdog();
+        });
+    });
+}
+
+void MarketDataCore::triggerImmediateReconnect(const char* reason) {
+    net::post(m_strand, [this, r = std::string(reason)](){
+        sLog_Data(QString("Immediate reconnect: %1").arg(QString::fromStdString(r)));
+        // Reset backoff and cancel any pending reconnect
+        m_backoffDuration = std::chrono::seconds(1);
+        m_reconnectTimer.cancel();
+        if (m_transport) {
+            m_transport->close();
+            // Use standard backoff-based reconnect to avoid transport state races
+            scheduleReconnect();
+        }
+    });
+}
+
+int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
+    // For Advanced Trade l2_data, delivery is guaranteed; treat sequence as informational only.
+    // Keep latest observed sequence per product for diagnostics, but never gate processing.
+    std::lock_guard<std::mutex> lock(m_seqMutex);
+    if (isSnapshot) {
+        m_lastSeqByProduct[product_id] = seq;
+        return 0;
+    }
+    auto it = m_lastSeqByProduct.find(product_id);
+    if (it == m_lastSeqByProduct.end() || seq >= it->second) {
+        m_lastSeqByProduct[product_id] = seq;
+    }
+    return 0;
+}
+
+void MarketDataCore::sendHeartbeatSubscribe() {
+    net::post(m_strand, [this]() {
+        if (!m_connected.load() || !m_transport) return;
+        nlohmann::json msg;
+        msg["type"] = "subscribe";
+        msg["channel"] = ch::kHeartbeats;
+        // Heartbeats do not require product_ids
+        msg["jwt"] = m_auth.createJwt();
+        m_transport->send(msg.dump());
+        sLog_Data("📤 Subscribed to heartbeats");
+    });
 }

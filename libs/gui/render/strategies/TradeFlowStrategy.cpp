@@ -11,6 +11,7 @@ Assumptions: The 'liquidity' field of a cell is used to determine the rendered l
 */
 #include "TradeFlowStrategy.hpp"
 #include "../GridTypes.hpp"
+#include "../../CoordinateSystem.h"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QSGGeometry>
@@ -55,8 +56,11 @@ QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
         // Trade dot size based on liquidity (min 2px, max 8px)
         float radius = std::max(2.0f, std::min(8.0f, static_cast<float>(scaledIntensity * 6.0)));
         
-        float centerX = cell.screenRect.center().x();
-        float centerY = cell.screenRect.center().y();
+        // Compute center from world→screen
+        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
+        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+        float centerX = static_cast<float>((topLeft.x() + bottomRight.x()) * 0.5);
+        float centerY = static_cast<float>((topLeft.y() + bottomRight.y()) * 0.5);
         
         // Create triangulated circle approximation (6 triangles from center)
         for (int tri = 0; tri < 6; ++tri) {

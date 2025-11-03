@@ -28,16 +28,20 @@ namespace sentinel::log_throttle {
 }
 
 // Atomic throttling macro with runtime env var override
-#define SLOG_THROTTLED(cat, defaultInterval, ...)                                    \
-    do {                                                                             \
-        static std::atomic<uint32_t> _counter{0};                                    \
-        static int _interval = []() {                                                \
-            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");         \
-            return env ? std::atoi(env) : (defaultInterval);                         \
-        }();                                                                         \
-        if ((++_counter % _interval) == 0) {                                         \
-            qCDebug(log##cat) << __VA_ARGS__;                                        \
-        }                                                                            \
+#define SLOG_THROTTLED(cat, defaultInterval, ...)                                      \
+    do {                                                                               \
+        static std::atomic<uint32_t> _counter{0};                                      \
+        static int _interval = []() {                                                  \
+            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");           \
+            if (env) {                                                                 \
+                int envVal = std::atoi(env);                                           \
+                if (envVal > 0 && envVal < (defaultInterval)) return envVal;           \
+            }                                                                          \
+            return (defaultInterval);                                                  \
+        }();                                                                           \
+        if ((++_counter % _interval) == 0) {                                           \
+            qCDebug(log##cat) << __VA_ARGS__;                                          \
+        }                                                                              \
     } while(false)
 
 // =============================================================================
@@ -61,7 +65,7 @@ namespace sentinel::log_throttle {
 #define sLog_Error(...)    qCCritical(logApp) << __VA_ARGS__
 
 // =============================================================================
-// 🔥 MIGRATION COMPLETE! BACKWARD COMPATIBILITY ALIASES OBLITERATED! 🔥
+//  MIGRATION COMPLETE! BACKWARD COMPATIBILITY ALIASES OBLITERATED! 
 // =============================================================================
 // All logging now uses the pure 4-category system with atomic throttling:
 // - sLog_App()    : Application lifecycle, config, auth
@@ -69,13 +73,13 @@ namespace sentinel::log_throttle {
 // - sLog_Render() : Charts, rendering, GPU, coordinates
 // - sLog_Debug()  : Debug diagnostics and detailed logging
 //
-// 📊 PERFORMANCE BENEFITS:
-// ✅ Atomic throttling eliminates console spam
-// ✅ Thread-safe counters (no race conditions)  
-// ✅ Runtime tunable via environment variables
-// ✅ Zero manual static counter maintenance
+//  PERFORMANCE BENEFITS:
+//  Atomic throttling eliminates console spam
+//  Thread-safe counters (no race conditions)  
+//  Runtime tunable via environment variables
+//  Zero manual static counter maintenance
 //
-// 🎯 LINUS-APPROVED: No blocking, no races, no lies!
+//  LINUS-APPROVED: No blocking, no races, no lies!
 
 // =============================================================================
 // RUNTIME ENVIRONMENT VARIABLE CONTROL
@@ -93,10 +97,10 @@ namespace sentinel::log_throttle {
 NEW 4-CATEGORY SYSTEM WITH ATOMIC THROTTLING:
 
 BASIC USAGE:
-sLog_App("🚀 CREATING GPU TRADING TERMINAL!");           // Application events
+sLog_App(" CREATING GPU TRADING TERMINAL!");           // Application events
 sLog_Data("💰 Trade processed:" << price << size);       // Data operations  
-sLog_Render("🎨 Frame rendered:" << fps << "fps");       // Rendering operations
-sLog_Debug("🔍 Debug info:" << variable);                // Debug details
+sLog_Render(" Frame rendered:" << fps << "fps");       // Rendering operations
+sLog_Debug(" Debug info:" << variable);                // Debug details
 
 CUSTOM THROTTLING:
 sLog_DataN(5, "Every 5th trade:" << trade);              // Custom interval

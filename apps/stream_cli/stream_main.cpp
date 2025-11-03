@@ -17,7 +17,6 @@ int main() {
     DataCache cache;
     std::vector<std::string> symbols = {"BTC-USD"};
     
-    // 🚀 PHASE 3: Fixed constructor order (auth, cache, monitor)
     auto monitor = std::make_shared<SentinelMonitor>(nullptr);
     MarketDataCore client(auth, cache, monitor);
     client.subscribeToSymbols(symbols);

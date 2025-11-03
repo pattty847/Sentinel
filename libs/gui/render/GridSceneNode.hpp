@@ -21,7 +21,6 @@ struct GridSliceBatch;
 class GridSceneNode : public QSGTransformNode {
 public:
     GridSceneNode();
-    ~GridSceneNode() override;
     
     void updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy);
     void updateTransform(const QMatrix4x4& transform);

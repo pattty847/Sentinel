@@ -1,6 +1,3 @@
-# =============================================================================
-# PHASE 5: MARKET DATA REFACTOR TESTS (Standalone)
-# =============================================================================
 
 # Find Qt components needed for tests
 find_package(Qt6 REQUIRED COMPONENTS Core Test)
@@ -18,6 +15,7 @@ target_link_libraries(test_message_dispatcher PRIVATE
     Qt6::Core
 )
 add_test(NAME MessageDispatcherTests COMMAND test_message_dispatcher)
+set_tests_properties(MessageDispatcherTests PROPERTIES LABELS "marketdata")
 
 # Test Target: test_subscription_manager
 add_executable(test_subscription_manager test_subscription_manager.cpp)
@@ -32,6 +30,7 @@ target_link_libraries(test_subscription_manager PRIVATE
     Qt6::Core
 )
 add_test(NAME SubscriptionManagerTests COMMAND test_subscription_manager)
+set_tests_properties(SubscriptionManagerTests PROPERTIES LABELS "marketdata")
 
 # Test Target: test_datacache_sink_adapter
 add_executable(test_datacache_sink_adapter test_datacache_sink_adapter.cpp)
@@ -45,15 +44,16 @@ target_link_libraries(test_datacache_sink_adapter PRIVATE
     Qt6::Core
 )
 add_test(NAME DataCacheSinkAdapterTests COMMAND test_datacache_sink_adapter)
+set_tests_properties(DataCacheSinkAdapterTests PROPERTIES LABELS "marketdata")
 
 # Custom target to run all marketdata tests
 add_custom_target(marketdata_tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "MessageDispatcher|SubscriptionManager|DataCacheSinkAdapter"
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L marketdata
     DEPENDS
         test_message_dispatcher
         test_subscription_manager
         test_datacache_sink_adapter
-    COMMENT "Running Phase 5 market data refactor tests"
+    COMMENT "Running market data refactor tests"
 )
 
-message(STATUS "Phase 5 marketdata tests configured (3 test suites)")
+message(STATUS "Marketdata tests configured (3 test suites)")

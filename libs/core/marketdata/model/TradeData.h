@@ -4,8 +4,10 @@
 #include <chrono>
 #include <string>
 #include <vector>
-#include <map>
+#include <span>
+#include <cstdint>
 #include <mutex>
+#include <utility>
 
 // An enumeration to represent the side of a trade in a type-safe way
 // This is better than using raw strings like "buy" or "sell"
@@ -19,6 +21,7 @@ enum class AggressorSide {
 // This is our C++ equivalent of a Pydantic model for trade data
 struct Trade // match
 {
+    // TODO: Why are we using system time or are we using the exchange timestamp available from the trade data?
     std::chrono::system_clock::time_point timestamp;
     std::string product_id; // The symbol, e.g., "BTC-USD"
     std::string trade_id;  // Added for deduplication
@@ -134,7 +137,19 @@ price level can be removed.
 }
 */
 
-// 🔥 NEW: LiveOrderBook - Stateful Order Book for Professional Visualization (O(1) complexity)
+// Stateful Order Book for Professional Visualization (O(1) complexity)
+struct BookDelta {
+    uint32_t idx;
+    float qty;
+    bool isBid;
+};
+
+struct BookLevelUpdate {
+    bool isBid;
+    double price;
+    double quantity;
+};
+
 class LiveOrderBook {
 public:
     LiveOrderBook() = default;
@@ -143,9 +158,10 @@ public:
     // Initialize the fixed-size order book
     void initialize(double min_price, double max_price, double tick_size);
 
-    // Apply incremental updates (l2update messages) - PHASE 1.4: Now requires exchange timestamp
-    void applyUpdate(const std::string& side, double price, double quantity, 
-                    std::chrono::system_clock::time_point exchange_timestamp);
+    // Apply incremental updates (l2update messages) - captures deltas without scanning
+    void applyUpdates(std::span<const BookLevelUpdate> updates,
+                      std::chrono::system_clock::time_point exchange_timestamp,
+                      std::vector<BookDelta>* outDeltas);
 
     // Get dense data for heatmap rendering
     const std::vector<double>& getBids() const { return m_bids; }
@@ -154,6 +170,8 @@ public:
     // Statistics
     size_t getBidCount() const;
     size_t getAskCount() const;
+    double getBidVolume() const;
+    double getAskVolume() const;
     bool isEmpty() const;
 
     // Configuration Accessors
@@ -170,8 +188,22 @@ public:
     void setProductId(const std::string& productId) { m_productId = productId; }
     std::string getProductId() const { return m_productId; }
     
-    // PHASE 1.4: Exchange timestamp access
+    // Exchange timestamp access
     std::chrono::system_clock::time_point getLastUpdate() const { return m_lastUpdate; }
+
+    // Thread-safe dense snapshot capture of non-zero levels (bounded)
+    struct DenseBookSnapshotView {
+        double minPrice = 0.0;
+        double tickSize = 1.0;
+        std::chrono::system_clock::time_point timestamp;
+        std::span<const std::pair<uint32_t, double>> bidLevels; // (index, quantity)
+        std::span<const std::pair<uint32_t, double>> askLevels; // (index, quantity)
+    };
+
+    DenseBookSnapshotView captureDenseNonZero(
+        std::vector<std::pair<uint32_t, double>>& bidBuffer,
+        std::vector<std::pair<uint32_t, double>>& askBuffer,
+        size_t maxPerSide) const;
 
 private:
     // Helper to convert a price to a vector index
@@ -179,9 +211,14 @@ private:
         return static_cast<size_t>((price - m_min_price) / m_tick_size);
     }
 
+    void applyLevelLocked(bool isBid,
+                           double price,
+                           double quantity,
+                           std::vector<BookDelta>* outDeltas);
+
     std::string m_productId;
 
-    // 🚀 CORE: Vectors for O(1) price level management
+    // Vectors for O(1) price level management
     std::vector<double> m_bids;
     std::vector<double> m_asks;
 
@@ -190,11 +227,18 @@ private:
     double m_max_price = 0.0;
     double m_tick_size = 0.0;
 
+    size_t m_nonZeroBidCount = 0;
+    size_t m_nonZeroAskCount = 0;
+    double m_totalBidVolume = 0.0;
+    double m_totalAskVolume = 0.0;
+
     std::chrono::system_clock::time_point m_lastUpdate;
     mutable std::mutex m_mutex; // Thread safety for concurrent access
 };
 
 #include <QMetaType>
 Q_DECLARE_METATYPE(Trade)
+Q_DECLARE_METATYPE(BookDelta)
+Q_DECLARE_METATYPE(std::vector<BookDelta>)
 
 #endif // TRADEDATA_H 

@@ -34,7 +34,7 @@ class DataProcessor;
 class IRenderStrategy;
 
 /**
- * 🎯 UNIFIED GRID RENDERER - SLIM QML ADAPTER
+ *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
  * 
  * Slim QML adapter that delegates to the V2 modular architecture.
  * Maintains QML interface compatibility while using the new modular system.
@@ -43,7 +43,6 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
     
-    // Rendering mode selection
     Q_PROPERTY(RenderMode renderMode READ renderMode WRITE setRenderMode NOTIFY renderModeChanged)
     Q_PROPERTY(bool showVolumeProfile READ showVolumeProfile WRITE setShowVolumeProfile NOTIFY showVolumeProfileChanged)
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
@@ -53,16 +52,13 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
     
-    // 🚀 VIEWPORT BOUNDS: Expose current viewport to QML for dynamic axis labels
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
     
-    // 🚀 OPTIMIZATION 4: Timeframe property with proper QML binding
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
     
-    // 🚀 VISUAL TRANSFORM: Expose pan offset for real-time grid sync
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
 public:
@@ -83,35 +79,28 @@ private:
     double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
     
-    // 🐛 FIX: Manual timeframe override tracking
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
     // Thread safety
     mutable std::mutex m_dataMutex;
-    std::atomic<bool> m_geometryDirty{true};
     
-    // CellInstance now defined in render/GridTypes.hpp
-    
+    //  FOUR DIRTY FLAGS SYSTEM
+    // Each flag triggers a different update path in updatePaintNode
+    std::atomic<bool> m_geometryDirty{true};     // Topology/LOD/mode changed (RARE - full rebuild)
+    std::atomic<bool> m_appendPending{false};    // New data arrived (COMMON - append cells)
+    std::atomic<bool> m_transformDirty{false};   // Pan/zoom/follow (VERY COMMON - transform only)
+    std::atomic<bool> m_materialDirty{false};    // Visual params changed (OCCASIONAL - uniforms/material)
+        
     // Rendering data
     std::vector<CellInstance> m_visibleCells;
+    // Snapshot buffer swapped from DataProcessor on dataUpdated()/updatePaintNode
+    std::shared_ptr<const std::vector<CellInstance>> m_publishedCells;
     std::vector<std::pair<double, double>> m_volumeProfile;
     
-    // Legacy geometry cache (simplified for V2)
-    struct CachedGeometry {
-        QSGGeometryNode* node = nullptr;
-        QMatrix4x4 originalTransform;
-        std::vector<CellInstance> cachedCells;
-        bool isValid = false;
-        int64_t cacheTimeStart_ms = 0;
-        int64_t cacheTimeEnd_ms = 0;
-        double cacheMinPrice = 0.0;
-        double cacheMaxPrice = 0.0;
-    };
-    
-    CachedGeometry m_geometryCache;
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
+    bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
     
     // V1 state (removed - now delegated to DataProcessor)
 
@@ -128,24 +117,24 @@ public:
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     
-    // 🚀 VIEWPORT BOUNDS: Getters for QML properties
+    //  VIEWPORT BOUNDS: Getters for QML properties
     qint64 getVisibleTimeStart() const;
     qint64 getVisibleTimeEnd() const; 
     double getMinPrice() const;
     double getMaxPrice() const;
     
-    // 🚀 OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
+    //  OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
-    // 🚀 VISUAL TRANSFORM: Getter for QML pan offset
+    //  VISUAL TRANSFORM: Getter for QML pan offset
     QPointF getPanVisualOffset() const;
     
-    // 🎯 DATA INTERFACE
+    //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
-    // 🎯 GRID CONFIGURATION
+    //  GRID CONFIGURATION
     Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
@@ -156,30 +145,27 @@ public:
     };
     static GridResolution calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines = 10, int targetHorizontalLines = 15);
     
-    // 🔥 DEBUG: Check grid system state
+    //  DEBUG: Check grid system state
     Q_INVOKABLE QString getGridDebugInfo() const;
     
-    // 🔥 DEBUG: Detailed grid debug information
+    //  DEBUG: Detailed grid debug information
     Q_INVOKABLE QString getDetailedGridDebug() const;
     
-    // 📊 PERFORMANCE MONITORING API
+    //  PERFORMANCE MONITORING API
     Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
     Q_INVOKABLE double getCurrentFPS() const;
     Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
     
-    // 🔥 GRID SYSTEM CONTROLS
+    //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
-    // PHASE 2.1: Dense data access
     void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
-    
-    // PHASE 2.2: Unified monitoring access
     void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
     
-    // 🔥 PAN/ZOOM CONTROLS
+    //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void resetZoom();
@@ -189,21 +175,18 @@ public:
     Q_INVOKABLE void panDown();
     Q_INVOKABLE void enableAutoScroll(bool enabled);
     
-    // 🎯 COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
+    //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
     Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
 
-public slots:
+public:
     // Real-time data integration
     void onTradeReceived(const Trade& trade);
-    
-    // PHASE 2.1: Dense-only order book signal (no sparse conversion)
-    void onLiveOrderBookUpdated(const QString& productId);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
     
-    // 🚀 PRICE LOD: Automatic price resolution adjustment on viewport changes
+    // Automatic price resolution adjustment on viewport changes
     void onViewportChanged();
 
 signals:
@@ -220,10 +203,11 @@ signals:
     void panVisualOffsetChanged();
 
 protected:
-    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
-    void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry);
+    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+    void componentComplete() override;
     
-    // 🖱️ MOUSE INTERACTION EVENTS
+    //  MOUSE INTERACTION EVENTS
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -236,34 +220,23 @@ private:
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
-    
-    // V2 data processing methods
     void updateVisibleCells();
     void updateVolumeProfile();
     
-    // PHASE 2.1: Dense data access
     class DataCache* m_dataCache = nullptr;
     
-    // 🚀 PHASE 3C: Liquidity business logic moved to DataProcessor
-    
-    // Color calculation methods (delegated to strategies in V2)
-    // Color/intensity delegated to strategies; no duplicates here
-    
-    // 🚀 NEW MODULAR ARCHITECTURE (V2)
     std::unique_ptr<GridViewState> m_viewState;
-    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;  // PHASE 2.2: Unified monitoring
+    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
     std::unique_ptr<DataProcessor> m_dataProcessor;
-    std::unique_ptr<QThread> m_dataProcessorThread;  // Worker thread for DataProcessor
+    std::unique_ptr<QThread> m_dataProcessorThread;
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
     std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
     std::unique_ptr<IRenderStrategy> m_candleStrategy;
-    
-    // Helper methods for V2 architecture
+
     IRenderStrategy* getCurrentStrategy() const;
-    void initializeV2Architecture();
-    QSGNode* updatePaintNodeV2(QSGNode* oldNode);
+    
+    void init();
 
 public:
-    // 🚀 PHASE 3: DataProcessor access for signal routing
     DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }
 };

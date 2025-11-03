@@ -46,9 +46,10 @@ SentinelMonitor::SentinelMonitor(QObject* parent) : QObject(parent) {
     // Initialize timing
     m_marketData.startTime = std::chrono::steady_clock::now();
     m_rendering.frameTimer.start();
+    m_rendering.frameProcessingTimer.invalidate();
     
-    sLog_App("🚀 SentinelMonitor: Unified monitoring system initialized");
-    sLog_App("📊 Monitoring: Network latency, rendering performance, market data flow");
+    sLog_App("SentinelMonitor: Unified monitoring system initialized");
+    sLog_App("Monitoring: Network latency, rendering performance, market data flow");
 }
 
 // 🌐 NETWORK & LATENCY MONITORING
@@ -66,7 +67,7 @@ void SentinelMonitor::recordTradeLatency(std::chrono::system_clock::time_point e
     // Alert on high latency
     if (latency_ms > MAX_ACCEPTABLE_LATENCY_MS) {
         emit latencyAlert(latency_ms);
-        sLog_Warning("⚠️ High trade latency detected:" << latency_ms << "ms");
+        // sLog_Warning("High trade latency detected:" << latency_ms << "ms");
     }
     
     emit latencyChanged(getAverageTradeLatency());
@@ -88,45 +89,78 @@ void SentinelMonitor::recordNetworkReconnect() {
     m_network.lastReconnect = std::chrono::steady_clock::now();
     
     emit networkIssue(QString("Network reconnection #%1").arg(m_network.reconnectCount.load()));
-    sLog_Warning("🔌 Network reconnect detected, count:" << m_network.reconnectCount.load());
+    sLog_Warning("Network reconnect detected, count:" << m_network.reconnectCount.load());
 }
 
 void SentinelMonitor::recordNetworkError(const QString& error) {
     m_network.networkErrors.fetch_add(1);
     emit networkIssue(QString("Network error: %1").arg(error));
-    sLog_Error("❌ Network error:" << error);
+    sLog_Error("Network error:" << error);
 }
 
 // 🎮 RENDERING & GPU MONITORING
 
 void SentinelMonitor::startFrame() {
     std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
-    m_rendering.frameTimer.restart();
+    m_rendering.frameProcessingTimer.restart();
     m_rendering.frameTimingActive = true;
 }
 
 void SentinelMonitor::endFrame() {
-    std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
-    
-    if (!m_rendering.frameTimingActive) return;
-    
-    qint64 frameTime = m_rendering.frameTimer.nsecsElapsed() / 1000; // Convert to microseconds
-    m_rendering.lastFrameTime_us = frameTime;
-    addFrameSample(frameTime);
-    
-    // Check for frame drops
-    double frameTimeMs = frameTime / 1000.0;
-    if (frameTimeMs > MAX_FRAME_TIME_MS) {
-        m_rendering.frameDrops.fetch_add(1);
-        emit frameDropDetected(frameTimeMs);
-        
-        if (frameTimeMs > ALERT_FRAME_TIME_MS) {
-            emit performanceAlert(QString("Severe frame drop: %1ms").arg(frameTimeMs, 0, 'f', 2));
+    double frameTimeMs = 0.0;
+    double currentFps = 0.0;
+    bool frameDropOccurred = false;
+    bool severeFrameDrop = false;
+    QString severeDropMessage;
+    bool hasBaseline = false;
+
+    {
+        std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
+        if (!m_rendering.frameTimingActive) {
+            return;
         }
+
+        qint64 frameIntervalNs = m_rendering.frameTimer.nsecsElapsed();
+        qint64 frameTimeUs = frameIntervalNs / 1000; // Convert to microseconds
+        m_rendering.lastFrameTime_us = frameTimeUs;
+        m_rendering.lastCpuTime_us = m_rendering.frameProcessingTimer.nsecsElapsed() / 1000;
+
+        frameTimeMs = frameTimeUs / 1000.0;
+
+        hasBaseline = m_rendering.hasFrameBaseline;
+
+        // Restart timer to measure interval until the next frame
+        m_rendering.frameTimer.restart();
+
+        if (!hasBaseline) {
+            m_rendering.hasFrameBaseline = true;
+        } else {
+            addFrameSample(frameTimeUs);
+
+            if (frameTimeMs > MAX_FRAME_TIME_MS) {
+                m_rendering.frameDrops.fetch_add(1);
+                frameDropOccurred = true;
+
+                if (frameTimeMs > ALERT_FRAME_TIME_MS) {
+                    severeFrameDrop = true;
+                    severeDropMessage = QString("Severe frame drop: %1ms").arg(frameTimeMs, 0, 'f', 2);
+                }
+            }
+        }
+
+        m_rendering.frameTimingActive = false;
+        currentFps = computeCurrentFPSLocked();
     }
-    
-    m_rendering.frameTimingActive = false;
-    emit fpsChanged(getCurrentFPS());
+
+    if (frameDropOccurred) {
+        emit frameDropDetected(frameTimeMs);
+    }
+
+    if (severeFrameDrop) {
+        emit performanceAlert(severeDropMessage);
+    }
+
+    emit fpsChanged(currentFps);
 }
 
 void SentinelMonitor::recordCacheHit() {
@@ -149,7 +183,7 @@ void SentinelMonitor::recordTransformApplied() {
     m_rendering.transformsApplied.fetch_add(1);
 }
 
-// 📊 MARKET DATA MONITORING
+//  MARKET DATA MONITORING
 
 void SentinelMonitor::recordTradeProcessed(const Trade& trade) {
     m_marketData.tradesProcessed.fetch_add(1);
@@ -238,32 +272,16 @@ void SentinelMonitor::recordCPUUsage() {
     }
 }
 
-// 📈 PERFORMANCE METRICS ACCESS
+//  PERFORMANCE METRICS ACCESS
 
 double SentinelMonitor::getCurrentFPS() const {
     std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
-    
-    if (m_rendering.frameTimes.size() < 2) return 0.0;
-    
-    qint64 totalTime = 0;
-    for (qint64 time : m_rendering.frameTimes) {
-        totalTime += time;
-    }
-    
-    return (m_rendering.frameTimes.size() - 1) * 1000000.0 / totalTime;  // Convert μs to FPS
+    return computeCurrentFPSLocked();
 }
 
 double SentinelMonitor::getAverageFrameTime() const {
     std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
-    
-    if (m_rendering.frameTimes.empty()) return 0.0;
-    
-    qint64 totalTime = 0;
-    for (qint64 time : m_rendering.frameTimes) {
-        totalTime += time;
-    }
-    
-    return totalTime / (m_rendering.frameTimes.size() * 1000.0);  // Convert μs to ms
+    return computeAverageFrameTimeLocked();
 }
 
 double SentinelMonitor::getAverageTradeLatency() const {
@@ -314,6 +332,11 @@ size_t SentinelMonitor::getCurrentMemoryUsage() const {
     return getMemoryUsage();
 }
 
+double SentinelMonitor::getLastCpuTimeMs() const {
+    std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
+    return m_rendering.lastCpuTime_us / 1000.0;
+}
+
 // 🚨 PERFORMANCE ANALYSIS
 
 bool SentinelMonitor::isPerformanceHealthy() const {
@@ -339,11 +362,11 @@ bool SentinelMonitor::isNetworkStable() const {
 
 QString SentinelMonitor::getPerformanceStatus() const {
     if (isPerformanceHealthy()) {
-        return "🟢 EXCELLENT - All systems optimal";
+        return "EXCELLENT - All systems optimal";
     } else if (isLatencyAcceptable() && isNetworkStable()) {
-        return "🟡 GOOD - Minor performance issues";
+        return "GOOD - Minor performance issues";
     } else {
-        return "🔴 ISSUES - Performance degraded";
+        return "ISSUES - Performance degraded";
     }
 }
 
@@ -361,11 +384,11 @@ QString SentinelMonitor::getComprehensiveStats() const {
     .arg(static_cast<int>(m_network.reconnectCount.load()));
 }
 
-// 🎯 CONTROL & MANAGEMENT
+//  CONTROL & MANAGEMENT
 
 void SentinelMonitor::enablePerformanceOverlay(bool enabled) {
     m_overlayEnabled = enabled;
-    sLog_App("📊 Performance overlay:" << (enabled ? "ENABLED" : "DISABLED"));
+    sLog_App("Performance overlay:" << (enabled ? "ENABLED" : "DISABLED"));
 }
 
 void SentinelMonitor::enableCLIOutput(bool enabled) {
@@ -373,10 +396,10 @@ void SentinelMonitor::enableCLIOutput(bool enabled) {
     
     if (enabled) {
         m_performanceTimer->start(1000); // Dump every second
-        sLog_App("📊 CLI monitoring output: ENABLED (1s interval)");
+        sLog_App("CLI monitoring output: ENABLED (1s interval)");
     } else {
         m_performanceTimer->stop();
-        sLog_App("📊 CLI monitoring output: DISABLED");
+        sLog_App("CLI monitoring output: DISABLED");
     }
 }
 
@@ -391,6 +414,12 @@ void SentinelMonitor::reset() {
         m_rendering.transformsApplied.store(0);
         m_rendering.gpuBytesUploaded.store(0);
         m_rendering.frameDrops.store(0);
+        m_rendering.lastFrameTime_us = 0;
+        m_rendering.lastCpuTime_us = 0;
+        m_rendering.frameTimingActive = false;
+        m_rendering.hasFrameBaseline = false;
+        m_rendering.frameTimer.restart();
+        m_rendering.frameProcessingTimer.invalidate();
     }
     
     {
@@ -413,18 +442,31 @@ void SentinelMonitor::reset() {
         m_system.peakMemoryUsage = 0;
     }
     
-    sLog_App("🔄 SentinelMonitor: All metrics reset");
+    sLog_App("SentinelMonitor: All metrics reset");
 }
 
 void SentinelMonitor::startMonitoring() {
     m_monitoringActive = true;
-    sLog_App("▶️ SentinelMonitor: Monitoring started");
+    {
+        std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
+        m_rendering.frameTimer.restart();
+        m_rendering.frameProcessingTimer.invalidate();
+        m_rendering.frameTimes.clear();
+        m_rendering.hasFrameBaseline = false;
+        m_rendering.frameTimingActive = false;
+    }
+    m_marketData.startTime = std::chrono::steady_clock::now();
+    sLog_App("SentinelMonitor: Monitoring started");
 }
 
 void SentinelMonitor::stopMonitoring() {
     m_monitoringActive = false;
     m_performanceTimer->stop();
-    sLog_App("⏹️ SentinelMonitor: Monitoring stopped");
+    {
+        std::lock_guard<std::mutex> lock(m_rendering.frameMutex);
+        m_rendering.frameTimingActive = false;
+    }
+    sLog_App("SentinelMonitor: Monitoring stopped");
 }
 
 void SentinelMonitor::onPerformanceTimer() {
@@ -432,18 +474,13 @@ void SentinelMonitor::onPerformanceTimer() {
     
     updateSystemMetrics();
     
-    qDebug() << "📊 SENTINEL PERFORMANCE:"
-             << "FPS:" << static_cast<int>(getCurrentFPS())
-             << "Latency:" << static_cast<int>(getAverageTradeLatency()) << "ms"
-             << "Trades/s:" << static_cast<int>(getTradesThroughput())
-             << "Cache:" << static_cast<int>(getCacheHitRate()) << "%"
-             << "Memory:" << static_cast<int>(getCurrentMemoryUsage() / (1024 * 1024)) << "MB"
-             << "Status:" << getPerformanceStatus();
+    const QString summary = buildPerformanceSummary();
+    qDebug().noquote() << summary;
     
     checkPerformanceThresholds();
 }
 
-// 🔧 HELPER METHODS
+//  HELPER METHODS
 
 double SentinelMonitor::getElapsedSeconds() const {
     auto now = std::chrono::steady_clock::now();
@@ -463,6 +500,62 @@ void SentinelMonitor::addFrameSample(qint64 frame_time_us) {
     if (m_rendering.frameTimes.size() > MAX_FRAME_SAMPLES) {
         m_rendering.frameTimes.erase(m_rendering.frameTimes.begin());
     }
+}
+
+double SentinelMonitor::computeCurrentFPSLocked() const {
+    const size_t sampleCount = m_rendering.frameTimes.size();
+    if (sampleCount == 0) {
+        return 0.0;
+    }
+
+    qint64 totalTime = std::accumulate(
+        m_rendering.frameTimes.begin(),
+        m_rendering.frameTimes.end(),
+        qint64{0}
+    );
+
+    if (totalTime <= 0) {
+        return 0.0;
+    }
+
+    return sampleCount * 1'000'000.0 / static_cast<double>(totalTime);
+}
+
+double SentinelMonitor::computeAverageFrameTimeLocked() const {
+    if (m_rendering.frameTimes.empty()) {
+        return 0.0;
+    }
+
+    qint64 totalTime = std::accumulate(
+        m_rendering.frameTimes.begin(),
+        m_rendering.frameTimes.end(),
+        qint64{0}
+    );
+
+    if (totalTime <= 0) {
+        return 0.0;
+    }
+
+    return static_cast<double>(totalTime) / (m_rendering.frameTimes.size() * 1'000.0);
+}
+
+QString SentinelMonitor::buildPerformanceSummary() const {
+    const double updateHz = getCurrentFPS();
+    const double cpuFrameMs = getLastCpuTimeMs();
+    const double latencyMs = getAverageTradeLatency();
+    const double tradesPerSecond = getTradesThroughput();
+    const double cachePercent = getCacheHitRate();
+    const double memoryMb = static_cast<double>(getCurrentMemoryUsage()) / (1024.0 * 1024.0);
+    const QString status = getPerformanceStatus();
+
+    return QStringLiteral("SENTINEL PERFORMANCE: Update Hz: %1 | CPU/frame: %2 ms | Latency: %3 ms | Trades/s: %4 | Cache: %5% | Memory: %6 MB | Status: \"%7\"")
+        .arg(updateHz, 0, 'f', 1)
+        .arg(cpuFrameMs, 0, 'f', 2)
+        .arg(latencyMs, 0, 'f', 0)
+        .arg(tradesPerSecond, 0, 'f', 0)
+        .arg(cachePercent, 0, 'f', 0)
+        .arg(memoryMb, 0, 'f', 0)
+        .arg(status);
 }
 
 void SentinelMonitor::checkPerformanceThresholds() {

@@ -28,6 +28,7 @@ public:
     double getMaxPrice() const { return m_maxPrice; }
     double getViewportWidth() const { return m_viewportWidth; }
     double getViewportHeight() const { return m_viewportHeight; }
+    uint64_t getViewportVersion() const { return m_viewportVersion; }
     
     // Pan/zoom state
     double getZoomFactor() const { return m_zoomFactor; }
@@ -47,6 +48,8 @@ public:
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd();
+    // Clear the transient visual pan offset after geometry resync
+    void clearPanVisualOffset();
     
     // Directional pan methods
     void panLeft();
@@ -57,7 +60,7 @@ public:
     void enableAutoScroll(bool enabled);
     void resetZoom();
     
-    // 🚀 PRICE LOD: Dynamic price resolution based on zoom level
+    //  PRICE LOD: Dynamic price resolution based on zoom level
     double calculateOptimalPriceResolution() const;
 
 signals:
@@ -93,4 +96,5 @@ private:
     QPointF m_initialMousePos;
     QPointF m_panVisualOffset;
     QElapsedTimer m_interactionTimer;
+    uint64_t m_viewportVersion = 1; // incremented on viewport/size changes
 };

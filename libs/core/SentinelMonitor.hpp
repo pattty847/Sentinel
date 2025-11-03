@@ -23,7 +23,7 @@ Assumptions: Exchange timestamps are parsed correctly for latency calculations.
 #include "marketdata/model/TradeData.h"
 
 /**
- * 🚀 SENTINEL UNIFIED MONITORING SYSTEM
+ *  SENTINEL UNIFIED MONITORING SYSTEM
  * 
  * Consolidates all monitoring functionality into a single, professional-grade system:
  * - Network & Exchange Latency Analysis
@@ -56,7 +56,7 @@ public:
     void recordGPUUpload(size_t bytes);
     void recordTransformApplied();
     
-    // 📊 MARKET DATA MONITORING
+    //  MARKET DATA MONITORING
     void recordTradeProcessed(const Trade& trade);
     void recordOrderBookUpdate(const QString& symbol, size_t bidLevels, size_t askLevels);
     void recordCVDUpdate(double cvd);
@@ -67,7 +67,7 @@ public:
     void recordCPUUsage();
     void recordPointsPushed(size_t count);
     
-    // 📈 PERFORMANCE METRICS ACCESS
+    //  PERFORMANCE METRICS ACCESS
     double getCurrentFPS() const;
     double getAverageFrameTime() const;
     double getAverageTradeLatency() const;
@@ -77,6 +77,7 @@ public:
     double getTradesThroughput() const;
     double getPointsThroughput() const;
     size_t getCurrentMemoryUsage() const;
+    double getLastCpuTimeMs() const;
     
     // 🚨 PERFORMANCE ANALYSIS
     bool isPerformanceHealthy() const;
@@ -85,13 +86,13 @@ public:
     QString getPerformanceStatus() const;
     QString getComprehensiveStats() const;
     
-    // 🎯 PROFESSIONAL DASHBOARD
+    //  PROFESSIONAL DASHBOARD
     void enablePerformanceOverlay(bool enabled);
     void enableCLIOutput(bool enabled);
     bool isOverlayEnabled() const { return m_overlayEnabled; }
     // Note: Dashboard creation moved to GUI layer to avoid QWidget dependency
     
-    // 🔄 CONTROL
+    //  CONTROL
     void reset();
     void startMonitoring();
     void stopMonitoring();
@@ -123,6 +124,7 @@ private:
     
     struct RenderingMetrics {
         QElapsedTimer frameTimer;
+        QElapsedTimer frameProcessingTimer;
         std::vector<qint64> frameTimes;             // Frame times in microseconds
         std::atomic<qint64> cacheHits{0};
         std::atomic<qint64> cacheMisses{0};
@@ -131,7 +133,9 @@ private:
         std::atomic<size_t> gpuBytesUploaded{0};
         std::atomic<size_t> frameDrops{0};
         qint64 lastFrameTime_us = 0;
+        qint64 lastCpuTime_us = 0;
         bool frameTimingActive = false;
+        bool hasFrameBaseline = false;
         mutable std::mutex frameMutex;
     };
     
@@ -175,8 +179,11 @@ private:
     double getElapsedSeconds() const;
     void addLatencySample(std::vector<double>& samples, double latency_ms);
     void addFrameSample(qint64 frame_time_us);
+    double computeCurrentFPSLocked() const;
+    double computeAverageFrameTimeLocked() const;
     void checkPerformanceThresholds();
     void updateSystemMetrics();
+    QString buildPerformanceSummary() const;
     
     // System-specific memory tracking
     size_t getMemoryUsage() const;

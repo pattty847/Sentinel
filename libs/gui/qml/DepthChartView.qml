@@ -14,7 +14,7 @@ Rectangle {
     // Track current active timeframe for button highlighting
     property int currentActiveTimeframe: 100  // Default
     
-    // 🚀 ASSET-AWARE VOLUME SCALING: Dynamic range based on asset type
+    //  ASSET-AWARE VOLUME SCALING: Dynamic range based on asset type
     property real maxVolumeRange: {
         if (symbol.includes("BTC")) return 100.0;  // BTC range: 0-100
         if (symbol.includes("ETH")) return 500.0;  // ETH range: 0-500
@@ -29,7 +29,7 @@ Rectangle {
     // 🔬 VISUAL DEBUG: Grid line toggle (Ctrl+G to toggle)
     property bool showTimeGrid: true
     
-    // 🚀 SIGNAL CONNECTIONS: Update axes when viewport or timeframe changes
+    //  SIGNAL CONNECTIONS: Update axes when viewport or timeframe changes
     Connections {
         target: unifiedGridRenderer
         function onViewportChanged() {
@@ -61,7 +61,7 @@ Rectangle {
         // Update our tracked timeframe when it changes
         onTimeframeChanged: {
             root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
-            console.log("🎯 Timeframe changed to:", root.currentActiveTimeframe, "ms")
+            console.log(" Timeframe changed to:", root.currentActiveTimeframe, "ms")
         }
         
         Component.onCompleted: {
@@ -77,10 +77,10 @@ Rectangle {
         visible: root.showTimeGrid
         z: 3  // Above chart and ensure visibility
         
-        // 🎯 MOUSE EVENT TRANSPARENCY: Don't interfere with chart mouse events
+        //  MOUSE EVENT TRANSPARENCY: Don't interfere with chart mouse events
         enabled: false  // Make this item transparent to mouse events
         
-        // 🎯 COORDINATE SYSTEM INTEGRATION: Use proper CoordinateSystem
+        //  COORDINATE SYSTEM INTEGRATION: Use proper CoordinateSystem
         function getXForTimePoint(timePoint) {
             // Use the same coordinate system as the heatmap cells (without visual pan offset)
             // Create viewport object matching the C++ CoordinateSystem
@@ -117,7 +117,7 @@ Rectangle {
             return unifiedGridRenderer.visibleTimeStart + (index * step * timeframe);
         }
         
-        // 🔄 DYNAMIC GRID LINES: Synchronized with TimeAxisModel
+        //  DYNAMIC GRID LINES: Synchronized with TimeAxisModel
         Repeater {
             id: gridRepeater
             model: root.showTimeGrid ? timeAxisModel : null
@@ -133,7 +133,7 @@ Rectangle {
         }
     }
     
-    // 📊 PRICE AXIS (Y-AXIS) - LEFT SIDE with PriceAxisModel
+    //  PRICE AXIS (Y-AXIS) - LEFT SIDE with PriceAxisModel
     Rectangle {
         id: priceAxis
         anchors.left: parent.left
@@ -185,7 +185,7 @@ Rectangle {
         }
     }
     
-    // ⏰ TIME AXIS (X-AXIS) - BOTTOM with TimeAxisModel
+    //  TIME AXIS (X-AXIS) - BOTTOM with TimeAxisModel
     Rectangle {
         id: timeAxis
         anchors.left: parent.left
@@ -244,7 +244,7 @@ Rectangle {
         spacing: 5
         z: 10
         
-        // 🎯 MOUSE EVENT ISOLATION: Ensure controls don't interfere with chart
+        //  MOUSE EVENT ISOLATION: Ensure controls don't interfere with chart
         // The controls have their own MouseArea components that handle their events
 
         NavigationControls {
@@ -253,7 +253,7 @@ Rectangle {
         
         Text {
             width: 150
-            text: "✅ Active: " + root.currentActiveTimeframe + "ms"
+            text: " Active: " + root.currentActiveTimeframe + "ms"
             color: "#00FF00"
             font.pixelSize: 12
             font.bold: true

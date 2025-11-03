@@ -29,7 +29,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QLabel>
 #include <QLineEdit>
 #include <QGroupBox>
-#include <QtQuickWidgets/QQuickWidget>
+#include <QQuickView>
 #include <memory>
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
@@ -37,12 +37,11 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include "../core/SentinelMonitor.hpp"
 
 // Forward declarations
-class StatisticsController;
 class ChartModeController;
 
 /**
- * 🚀 GPU-Powered Trading Terminal MainWindow
- * Clean, focused implementation for Phase 0 GPU rendering
+ *  GPU-Powered Trading Terminal MainWindow
+ * Clean, focused implementation for GPU rendering
  */
 class MainWindowGPU : public QWidget {
     Q_OBJECT
@@ -53,28 +52,25 @@ public:
 
 private slots:
     void onSubscribe();
-    void onCVDUpdated(double cvd);
 
 private:
     void setupUI();
     void setupConnections();
-    void initializeQMLComponents();  // 🔥 PHASE 1.2: Proper QML initialization
-    void connectMarketDataSignals();  // 🚀 GEMINI'S REFACTOR: Signal connections moved to constructor
+    void initializeQMLComponents();
+    void connectMarketDataSignals();
 
-    // 🔥 GPU CHART - Core component
-    QQuickWidget* m_gpuChart;
+    // GPU CHART - Core component (QQuickView within a QWidget container)
+    QQuickView* m_qquickView = nullptr;
+    QWidget* m_qmlContainer = nullptr;
     
     // UI Controls
-    QLabel* m_cvdLabel;
     QLabel* m_statusLabel;
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
     
-    // 🔥 PHASE 1.1: Direct MarketDataCore connection (facade OBLITERATED)
     std::unique_ptr<MarketDataCore> m_marketDataCore;
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<DataCache> m_dataCache;
     std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
-    StatisticsController* m_statsController;
     ChartModeController* m_modeController{nullptr};
 };

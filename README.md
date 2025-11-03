@@ -117,6 +117,7 @@ cmake --build --preset windows-mingw  # Windows
 
 # Run
 ./build-mac-clang/apps/sentinel_gui/sentinel_gui
+
 ```
 
 ### Configuration

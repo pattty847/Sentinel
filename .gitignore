@@ -30,7 +30,6 @@ _deps/
 
 # Configuration files (secrets and sensitive data)
 key.json
-key2.json
 config.json
 *.key
 *.pem
@@ -43,6 +42,7 @@ config.json
 # Log files
 *.log
 logs/
+liquidity_timeseries_log.txt
 
 # OS files
 .DS_Store
@@ -114,9 +114,8 @@ ENV/
 .claude/
 CLAUDE.md
 AGENTS.md
+GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
 docs/archive/
-docs/features/
-docs/knowledge_base/
-docs/pics/
+docs/refactor
