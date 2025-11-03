@@ -27,15 +27,7 @@
 <td width="50%">
 
 **Liquidity Heatmap**
-<img width="100%" alt="Order book heatmap" src="https://github.com/user-attachments/assets/fd3a14c2-80e1-47d7-93b4-99d3623ba819" />
-<sub>Real-time order book visualization with density-based rendering</sub>
-
-</td>
-<td width="50%">
-
-**Trade Flow Analysis**
-<img width="100%" alt="Trade flow" src="https://github.com/user-attachments/assets/542d2497-d4e3-43d9-9663-9fbb135423e5" />
-<sub>Market microstructure analysis</sub>
+<img width="2559" height="1385" alt="image" src="https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779" />
 
 </td>
 </tr>
