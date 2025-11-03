@@ -18,6 +18,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <chrono>
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
@@ -46,6 +47,15 @@ public:
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
     void setDataCache(DataCache* cache) { m_dataCache = cache; }
+    
+    // Trade batching configuration
+    void setTradeBatchInterval(std::chrono::milliseconds interval) { m_tradeBatchConfig.batchInterval = interval; }
+    void setSignificantPriceThreshold(double threshold) { m_tradeBatchConfig.significantPriceThreshold = threshold; }
+    void setMaxBatchSize(size_t maxSize) { m_tradeBatchConfig.maxBatchSize = maxSize; }
+    
+    std::chrono::milliseconds getTradeBatchInterval() const { return m_tradeBatchConfig.batchInterval; }
+    double getSignificantPriceThreshold() const { return m_tradeBatchConfig.significantPriceThreshold; }
+    size_t getMaxBatchSize() const { return m_tradeBatchConfig.maxBatchSize; }
     
     // Data access
     bool hasValidOrderBook() const { return m_hasValidOrderBook; }
@@ -95,6 +105,11 @@ private:
     void initializeViewportFromTrade(const Trade& trade);
     void initializeViewportFromOrderBook(const OrderBook& orderBook);
     
+    // Trade batching helpers
+    void processSignificantTrades();
+    bool isSignificantTrade(const Trade& trade, double midPrice) const;
+    double calculateMidPrice() const;
+    
     // Components
     GridViewState* m_viewState = nullptr;
     LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
@@ -135,4 +150,29 @@ private:
     // Append-only state with viewport version gating
     int64_t m_lastProcessedTime = 0;
     uint64_t m_lastViewportVersion = 0;
+
+    // Trade batching configuration and state
+    struct TradeBatchConfig {
+        std::chrono::milliseconds batchInterval{75};  // Configurable batch interval
+        double significantPriceThreshold = 0.001;     // 0.1% price impact threshold
+        size_t maxBatchSize = 50;                     // Max trades per batch
+    };
+    
+    struct TradeBatch {
+        std::vector<Trade> trades;
+        std::chrono::steady_clock::time_point lastFlush = std::chrono::steady_clock::now();
+        
+        bool shouldFlush(const TradeBatchConfig& config) const {
+            auto elapsed = std::chrono::steady_clock::now() - lastFlush;
+            return elapsed >= config.batchInterval || trades.size() >= config.maxBatchSize;
+        }
+        
+        void clear() {
+            trades.clear();
+            lastFlush = std::chrono::steady_clock::now();
+        }
+    };
+    
+    TradeBatchConfig m_tradeBatchConfig;
+    TradeBatch m_tradeBatch;
 };

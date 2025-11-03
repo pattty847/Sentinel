@@ -5,17 +5,16 @@ This version modularizes startup logic for maintainability and clarity.
 */
 #include "MainWindowGpu.h"
 #include <QApplication>
-#include <QDebug>
-#include <iostream>
-#include "marketdata/model/TradeData.h"
 #include <QMetaType>
 #include <QQmlEngine>
+#include "marketdata/model/TradeData.h"
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
 #include <QSurfaceFormat>
 #include <QSysInfo>
+#include "SentinelLogging.hpp" // Sentinel categorized logging
 
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
@@ -48,29 +47,29 @@ void registerMetaTypesAndQml() {
     qRegisterMetaType<OrderBook>();
     qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
 
-    std::cout << "Registering pure grid-only QML components..." << std::endl;
+    sLog_App("Registering pure grid-only QML components...");
     qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<CoordinateSystem>("Sentinel.Charts", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel.Charts", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel.Charts", 1, 0, "PriceAxisModel");
-    std::cout << "Pure grid-only mode: Legacy components permanently removed" << std::endl;
+    sLog_App("Pure grid-only mode: Legacy components permanently removed");
 }
 
 // --- Main window creation ---
 MainWindowGPU* createAndShowMainWindow() {
-    std::cout << "Creating MainWindowGPU..." << std::endl;
+    sLog_App("Creating MainWindowGPU...");
     auto* window = new MainWindowGPU();
-    std::cout << "MainWindowGPU created successfully" << std::endl;
-    std::cout << "Calling window.show()..." << std::endl;
+    sLog_App("MainWindowGPU created successfully");
+    sLog_App("Calling window.show()...");
     window->show();
-    std::cout << "window.show() completed" << std::endl;
+    sLog_App("window.show() completed");
     return window;
 }
 
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
-    std::cout << "[Sentinel GPU Trading Terminal Starting...]" << std::endl;
+    sLog_App("[Sentinel GPU Trading Terminal Starting...]");
 
     configureGraphicsBackend();
     configureSurfaceFormat();
@@ -80,8 +79,8 @@ int main(int argc, char *argv[])
     registerMetaTypesAndQml();
     createAndShowMainWindow();
 
-    std::cout << "Starting Qt event loop with app.exec()..." << std::endl;
-    qDebug() << "GPU Trading Terminal ready for 144Hz action!";
+    sLog_App("Starting Qt event loop with app.exec()...");
+    sLog_App("GPU Trading Terminal ready for 144Hz action!");
 
     return app.exec();
 }

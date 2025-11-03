@@ -18,6 +18,7 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <algorithm>
+#include <vector>
 // #include <iostream>
 
 
@@ -32,75 +33,120 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
         sLog_Render(" HEATMAP EXIT: Returning nullptr - batch is empty");
         return nullptr;
     }
-    
-    // Use per-vertex colors with blending so cells have individual colors
-    auto* node = new QSGGeometryNode;
-    auto* material = new QSGVertexColorMaterial;
-    material->setFlag(QSGMaterial::Blending);
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial);
-    
-    // Calculate required vertex count (6 vertices per cell for 2 triangles)
+
+    // Calculate required vertex count window (6 vertices per cell for 2 triangles)
     int total = static_cast<int>(batch.cells.size());
     int cellCount = std::min(total, batch.maxCells);
     int startIndex = std::max(0, total - cellCount); // keep newest when clipping
-    int vertexCount = cellCount * 6;
-    
-    // Create geometry with colors
-    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry);
-    
-    // Fill vertex buffer with colored vertices (world→screen per cell)
-    auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
-    int vertexIndex = 0;
-    
+
+    // First pass: count how many cells pass the min volume filter
+    int keptCells = 0;
     for (int i = 0; i < cellCount; ++i) {
         const auto& cell = batch.cells[startIndex + i];
-        if (cell.liquidity < batch.minVolumeFilter) continue;
-
-        // Color with intensity scaling
-        double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
-        QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
-        const int r = color.red();
-        const int g = color.green();
-        const int b = color.blue();
-        const int a = std::clamp(static_cast<int>(color.alpha()), 0, 255);
-
-        // Convert world→screen using batch.viewport
-        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
-        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
-
-        const float left = static_cast<float>(topLeft.x());
-        const float top = static_cast<float>(topLeft.y());
-        const float right = static_cast<float>(bottomRight.x());
-        const float bottom = static_cast<float>(bottomRight.y());
-
-        // Triangle 1: top-left, top-right, bottom-left
-        vertices[vertexIndex++].set(left,  top,    r, g, b, a);
-        vertices[vertexIndex++].set(right, top,    r, g, b, a);
-        vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
-
-        // Triangle 2: top-right, bottom-right, bottom-left
-        vertices[vertexIndex++].set(right, top,    r, g, b, a);
-        vertices[vertexIndex++].set(right, bottom, r, g, b, a);
-        vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
+        if (cell.liquidity >= batch.minVolumeFilter) {
+            ++keptCells;
+        }
     }
-    
-    // HEATMAP X-RANGE LOGGING
+    if (keptCells == 0) {
+        sLog_Render(" HEATMAP EXIT: No cells above minVolumeFilter");
+        return nullptr;
+    }
+
+    // Windows/ANGLE can enforce 16-bit index limits. Keep each geometry node under
+    // a safe vertex threshold to avoid wrapping/overpaint artifacts.
+    static constexpr int kMaxVerticesPerNode = 60000; // safety margin under 65535
+    static constexpr int kVertsPerCell = 6;
+    const int cellsPerChunk = std::max(1, kMaxVerticesPerNode / kVertsPerCell);
+
+    // Root container holding one or more geometry chunks
+    auto* root = new QSGNode;
+
+    int producedKeptCells = 0;
+    int streamPos = 0; // relative to startIndex
+    int totalVerticesDrawn = 0;
+
+    while (producedKeptCells < keptCells) {
+        const int remaining = keptCells - producedKeptCells;
+        const int targetCells = std::min(cellsPerChunk, remaining);
+
+        // Collect up to targetCells that pass the filter for this chunk
+        std::vector<const CellInstance*> chunkCells;
+        chunkCells.reserve(targetCells);
+
+        for (; streamPos < cellCount && static_cast<int>(chunkCells.size()) < targetCells; ++streamPos) {
+            const auto& c = batch.cells[startIndex + streamPos];
+            if (c.liquidity >= batch.minVolumeFilter) {
+                chunkCells.push_back(&c);
+            }
+        }
+
+        if (chunkCells.empty()) {
+            break; // safety; shouldn't happen given keptCells accounting
+        }
+
+        const int vertexCount = static_cast<int>(chunkCells.size()) * kVertsPerCell;
+
+        auto* node = new QSGGeometryNode;
+        auto* material = new QSGVertexColorMaterial;
+        material->setFlag(QSGMaterial::Blending);
+        node->setMaterial(material);
+        node->setFlag(QSGNode::OwnsMaterial);
+
+        auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
+        geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+        node->setGeometry(geometry);
+        node->setFlag(QSGNode::OwnsGeometry);
+
+        auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
+        int vertexIndex = 0;
+
+        for (const CellInstance* cellPtr : chunkCells) {
+            const auto& cell = *cellPtr;
+
+            // Color with intensity scaling
+            double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
+            QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
+            const int r = color.red();
+            const int g = color.green();
+            const int b = color.blue();
+            const int a = std::clamp(static_cast<int>(color.alpha()), 0, 255);
+
+            // Convert world→screen using batch.viewport
+            QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
+            QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+
+            const float left = static_cast<float>(topLeft.x());
+            const float top = static_cast<float>(topLeft.y());
+            const float right = static_cast<float>(bottomRight.x());
+            const float bottom = static_cast<float>(bottomRight.y());
+
+            // Triangle 1: top-left, top-right, bottom-left
+            vertices[vertexIndex++].set(left,  top,    r, g, b, a);
+            vertices[vertexIndex++].set(right, top,    r, g, b, a);
+            vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
+
+            // Triangle 2: top-right, bottom-right, bottom-left
+            vertices[vertexIndex++].set(right, top,    r, g, b, a);
+            vertices[vertexIndex++].set(right, bottom, r, g, b, a);
+            vertices[vertexIndex++].set(left,  bottom, r, g, b, a);
+        }
+
+        node->markDirty(QSGNode::DirtyGeometry);
+        root->appendChildNode(node);
+
+        producedKeptCells += static_cast<int>(chunkCells.size());
+        totalVerticesDrawn += vertexCount;
+    }
+
+    // HEATMAP CHUNK LOGGING (throttled)
     static int frame = 0;
-    if ((++frame % 30) == 0 && vertexIndex >= 6) {
-        const auto* v = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
-        const float firstX = v[0].x, lastX = v[vertexIndex - 1].x;
-        sLog_RenderN(1, " HEATMAP X-RANGE: " << firstX << " → " << lastX << " (verts=" << vertexIndex << ")");
+    if ((++frame % 30) == 0) {
+        sLog_RenderN(1, " HEATMAP CHUNKS: cells=" << keptCells
+                         << " verts=" << totalVerticesDrawn
+                         << " chunks=" << root->childCount());
     }
-    
-    // Update geometry with actual vertex count used
-    geometry->allocate(vertexIndex);
-    node->markDirty(QSGNode::DirtyGeometry);
-    
-    return node;
+
+    return root;
 }
 
 QColor HeatmapStrategy::calculateColor(double liquidity, bool isBid, double intensity) const {

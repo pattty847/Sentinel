@@ -1,0 +1,22 @@
+Render(Windows): fix heatmap wrap/overpaint by chunking geometry under ANGLE
+
+Root cause
+- Qt Quick on Windows commonly runs through ANGLE (ES -> D3D11). Many paths use 16-bit indices.
+- Our heatmap built ALL cells into a single QSGGeometryNode. At ~65k vertices, indices wrap on Windows and columns re-render over earlier X positions, creating a bright band and apparent "wrap back" after ~10s.
+- macOS/Metal and OpenGL core paths didn’t show this because pruning happened before overflow and/or 32-bit indices were available.
+
+Fix
+- Chunk geometry: split the heatmap into multiple QSGGeometryNode children, each <= 60k vertices (safety margin under 65535). Append chunks under a root QSGNode.
+- Added throttled logging to confirm chunk count and total vertices.
+
+Files
+- libs/gui/render/strategies/HeatmapStrategy.cpp: implement chunking and logging.
+- libs/gui/UnifiedGridRenderer.cpp: mark appendPending on zoom-in/out and wheel zoom so zoom-out immediately rebuilds content.
+
+Operational notes
+- Each cell = 6 vertices; 60k cap -> ~10k cells per node. With maxCells=50k you’ll see ~5 chunks per frame; this is fine on RTX-class GPUs.
+- Dynamic LOD should keep vertex counts modest; chunking guarantees correctness regardless.
+
+Future
+- Consider indexed quads (4 verts + 6 indices) to cut vertex traffic ~33%.
+- Long-term: Qt RHI backends with 32-bit index buffers remove this class of limits, but chunking is portable and safe.

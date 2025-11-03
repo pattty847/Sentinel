@@ -1,7 +1,3 @@
----
-alwaysApply: true
----
-
 # Repository Guidelines
 
 ## Mission & Scope
@@ -45,32 +41,3 @@ Sentinel is a C++20 trading terminal with a hard separation between pure core lo
 - Market data refactor guide: `docs/sockets-auth-cache-refactor.md`
 - Logging details: `docs/LOGGING_GUIDE.md`
 - Code analysis tooling: `scripts/README_CODE_ANALYSIS.md`
-
-# Sentinel Architecture Details
-
-Sentinel models exchange feeds as a dense time/price grid rendered on the GPU. Keep the data path deterministic, exchange-agnostic, and safe for both GUI and headless runtimes.
-
-## Data Pipeline
-```
-Exchange WS → BeastWsTransport → MessageDispatcher → DataCache/DataCacheSinkAdapter
-            (worker thread)        (worker thread)         (shared state)
-
-DataCache → DataProcessor → LiquidityTimeSeriesEngine → UnifiedGridRenderer
-(Qt queued to GUI thread)      (GUI thread aggregation)      (QML façade)
-
-UnifiedGridRenderer → Render Strategy → GridSceneNode → GPU
-             (per-mode geometry)        (Qt Scene Graph)
-```
-
-## Layer Highlights
-- **Transport (`marketdata/ws`)**: TLS handshakes, reconnect backoff, heartbeats, and deterministic subscription frames via `SubscriptionManager`.
-- **Dispatch (`marketdata/dispatch`)**: Parses provider payloads, surfaces acks/errors, and normalizes trade/book events before they hit the cache.
-- **Cache (`marketdata/cache`)**: Thread-safe recent trades and live order books exposed through `DataCacheSinkAdapter` and DTOs.
-- **Aggregation & Rendering (`libs/gui/render`)**: DataProcessor pulls from the cache, LiquidityTimeSeriesEngine builds multi-timeframe cells, and strategies convert them into GPU buffers managed by Qt Scene Graph nodes.
-
-## Testing & Documentation
-- Add market data tests under `tests/marketdata`; other suites remain offline until modernized.
-- For transport/cache evolution, consult `docs/sockets-auth-cache-refactor.md` to stay aligned with the phased refactor plan.
-- `docs/ARCHITECTURE.md` expands on the render stack, while `docs/LOGGING_GUIDE.md` covers logging categories and verbosity controls.
-
-Preserve these boundaries and the GPU-first focus when extending Sentinel.

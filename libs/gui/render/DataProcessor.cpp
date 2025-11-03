@@ -94,25 +94,18 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
     
     if (trade.product_id.empty()) return;
     
-    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        trade.timestamp.time_since_epoch()).count();
-    
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         
-        if (m_viewState && !m_viewState->isTimeWindowValid()) {
-            initializeViewportFromTrade(trade);
-        }
+        // Add trade to batch
+        m_tradeBatch.trades.push_back(trade);
         
-        sLog_Data("DataProcessor TRADE UPDATE: Processing trade");
+        // Process batch if ready (time interval, max size, or significant trade)
+        if (m_tradeBatch.shouldFlush(m_tradeBatchConfig)) {
+            processSignificantTrades();
+            m_tradeBatch.clear();
+        }
     }
-    
-    // Recompute visible cells and publish a snapshot for the renderer
-    // updateVisibleCells();
-    
-    sLog_Data("DataProcessor TRADE: $" << trade.price 
-                 << " vol:" << trade.size 
-                 << " timestamp:" << timestamp);
 }
 
 void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
@@ -700,4 +693,90 @@ void DataProcessor::setTimeframe(int timeframe_ms) {
 
 bool DataProcessor::isManualTimeframeSet() const {
     return m_manualTimeframeSet;
+}
+
+void DataProcessor::processSignificantTrades() {
+    if (m_tradeBatch.trades.empty()) return;
+    
+    // Check if viewport needs initialization (only once)
+    bool needsViewportInit = m_viewState && !m_viewState->isTimeWindowValid();
+    
+    if (needsViewportInit) {
+        // Prefer OrderBook initialization if available
+        if (m_hasValidOrderBook && m_latestOrderBook) {
+            sLog_Data("DataProcessor: Initializing viewport from OrderBook (preferred)");
+            initializeViewportFromOrderBook(*m_latestOrderBook);
+        } else {
+            // Find most significant trade for viewport initialization
+            double midPrice = calculateMidPrice();
+            const Trade* mostSignificant = nullptr;
+            double maxImpact = 0.0;
+            
+            for (const auto& trade : m_tradeBatch.trades) {
+                if (isSignificantTrade(trade, midPrice)) {
+                    double impact = std::abs(trade.price - midPrice) / midPrice;
+                    if (impact > maxImpact) {
+                        maxImpact = impact;
+                        mostSignificant = &trade;
+                    }
+                }
+            }
+            
+            if (mostSignificant) {
+                sLog_Data("DataProcessor: Initializing viewport from significant trade (impact: " 
+                          << (maxImpact * 100.0) << "%)");
+                initializeViewportFromTrade(*mostSignificant);
+            } else if (!m_tradeBatch.trades.empty()) {
+                // Fallback: use latest trade if no significant ones found
+                sLog_Data("DataProcessor: Initializing viewport from latest trade (fallback)");
+                initializeViewportFromTrade(m_tradeBatch.trades.back());
+            }
+        }
+    }
+    
+    // Log batch processing stats
+    size_t significantCount = 0;
+    double midPrice = calculateMidPrice();
+    for (const auto& trade : m_tradeBatch.trades) {
+        if (isSignificantTrade(trade, midPrice)) {
+            significantCount++;
+        }
+    }
+    
+    sLog_Data("DataProcessor BATCH: " << m_tradeBatch.trades.size() << " trades, " 
+              << significantCount << " significant (>" 
+              << (m_tradeBatchConfig.significantPriceThreshold * 100.0) << "%)");
+}
+
+bool DataProcessor::isSignificantTrade(const Trade& trade, double midPrice) const {
+    if (midPrice <= 0.0) return true; // No mid price available, consider significant
+    
+    double priceDiff = std::abs(trade.price - midPrice) / midPrice;
+    return priceDiff >= m_tradeBatchConfig.significantPriceThreshold;
+}
+
+double DataProcessor::calculateMidPrice() const {
+    if (!m_hasValidOrderBook || !m_latestOrderBook) {
+        return 0.0; // No order book available
+    }
+    
+    double bestBid = 0.0, bestAsk = 0.0;
+    
+    if (!m_latestOrderBook->bids.empty()) {
+        bestBid = m_latestOrderBook->bids[0].price;
+    }
+    
+    if (!m_latestOrderBook->asks.empty()) {
+        bestAsk = m_latestOrderBook->asks[0].price;
+    }
+    
+    if (bestBid > 0.0 && bestAsk > 0.0) {
+        return (bestBid + bestAsk) / 2.0;
+    } else if (bestBid > 0.0) {
+        return bestBid;
+    } else if (bestAsk > 0.0) {
+        return bestAsk;
+    }
+    
+    return 0.0;
 }

@@ -241,8 +241,8 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     }
 }
 
-void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); update(); } }
-void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); update(); } }
+void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); m_appendPending.store(true); update(); } }
+void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); m_transformDirty.store(true); m_appendPending.store(true); update(); } }
 void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); m_transformDirty.store(true); update(); } }
 void UnifiedGridRenderer::panLeft() { if (m_viewState) { m_viewState->panLeft(); m_transformDirty.store(true); update(); } }
 void UnifiedGridRenderer::panRight() { if (m_viewState) { m_viewState->panRight(); m_transformDirty.store(true); update(); } }
@@ -545,6 +545,6 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { 
     if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) { 
         m_viewState->handleZoomWithSensitivity(event->angleDelta().y(), event->position(), QSizeF(width(), height())); 
-        m_transformDirty.store(true); update(); event->accept(); 
+        m_transformDirty.store(true); m_appendPending.store(true); update(); event->accept(); 
     } else event->ignore(); 
 }
