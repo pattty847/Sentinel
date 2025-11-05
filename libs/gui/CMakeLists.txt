@@ -38,6 +38,8 @@ set(GRID_CORE_SOURCES
     render/strategies/HeatmapStrategy.cpp
     render/strategies/TradeFlowStrategy.hpp
     render/strategies/TradeFlowStrategy.cpp
+    render/strategies/TradeBubbleStrategy.hpp
+    render/strategies/TradeBubbleStrategy.cpp
     render/strategies/CandleStrategy.hpp
     render/strategies/CandleStrategy.cpp
 )

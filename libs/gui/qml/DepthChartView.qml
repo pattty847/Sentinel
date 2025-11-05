@@ -1,4 +1,5 @@
 import QtQuick 2.15
+import QtQuick.Controls 2.15
 import Sentinel.Charts 1.0
 import "controls"
 
@@ -275,6 +276,115 @@ Rectangle {
         
         GridResolutionSelector {
             target: unifiedGridRenderer
+        }
+        
+        // Layer Toggle Controls
+        Column {
+            spacing: 3
+            
+            Text {
+                text: "Render Layers"
+                color: "#FFD700"
+                font.pixelSize: 10
+                font.bold: true
+            }
+            
+            Row {
+                spacing: 8
+                Rectangle {
+                    width: 16; height: 16
+                    border.color: "white"
+                    color: unifiedGridRenderer.showHeatmapLayer ? "#00FF00" : "transparent"
+                    radius: 2
+                    
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: unifiedGridRenderer.showHeatmapLayer = !unifiedGridRenderer.showHeatmapLayer
+                    }
+                }
+                Text { text: "Heatmap"; color: "white"; font.pixelSize: 9 }
+            }
+            
+            Row {
+                spacing: 8
+                Rectangle {
+                    width: 16; height: 16
+                    border.color: "white"
+                    color: unifiedGridRenderer.showTradeBubbleLayer ? "#00FFFF" : "transparent"
+                    radius: 2
+                    
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: unifiedGridRenderer.showTradeBubbleLayer = !unifiedGridRenderer.showTradeBubbleLayer
+                    }
+                }
+                Text { text: "Trade Bubbles"; color: "white"; font.pixelSize: 9 }
+            }
+            
+            Row {
+                spacing: 8
+                Rectangle {
+                    width: 16; height: 16
+                    border.color: "white"
+                    color: unifiedGridRenderer.showTradeFlowLayer ? "#FF8800" : "transparent"
+                    radius: 2
+                    
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: unifiedGridRenderer.showTradeFlowLayer = !unifiedGridRenderer.showTradeFlowLayer
+                    }
+                }
+                Text { text: "Trade Flow"; color: "white"; font.pixelSize: 9 }
+            }
+        }
+        
+        // Trade Bubble Controls (only visible when bubble layer is active)
+        Column {
+            spacing: 2
+            visible: unifiedGridRenderer.showTradeBubbleLayer
+            
+            Text {
+                text: "Bubble Settings"
+                color: "#FFD700"
+                font.pixelSize: 10
+                font.bold: true
+            }
+            
+            Row {
+                spacing: 5
+                Text { text: "Size:"; color: "white"; font.pixelSize: 9; width: 30 }
+                Slider {
+                    width: 80
+                    from: 2; to: 30; stepSize: 1
+                    value: unifiedGridRenderer.minBubbleRadius
+                    onValueChanged: unifiedGridRenderer.minBubbleRadius = value
+                }
+                Text { text: unifiedGridRenderer.minBubbleRadius.toFixed(0); color: "white"; font.pixelSize: 9; width: 20 }
+            }
+            
+            Row {
+                spacing: 5
+                Text { text: "Max:"; color: "white"; font.pixelSize: 9; width: 30 }
+                Slider {
+                    width: 80
+                    from: 10; to: 50; stepSize: 1
+                    value: unifiedGridRenderer.maxBubbleRadius
+                    onValueChanged: unifiedGridRenderer.maxBubbleRadius = value
+                }
+                Text { text: unifiedGridRenderer.maxBubbleRadius.toFixed(0); color: "white"; font.pixelSize: 9; width: 20 }
+            }
+            
+            Row {
+                spacing: 5
+                Text { text: "Alpha:"; color: "white"; font.pixelSize: 9; width: 30 }
+                Slider {
+                    width: 80
+                    from: 0.1; to: 1.0; stepSize: 0.05
+                    value: unifiedGridRenderer.bubbleOpacity
+                    onValueChanged: unifiedGridRenderer.bubbleOpacity = value
+                }
+                Text { text: (unifiedGridRenderer.bubbleOpacity * 100).toFixed(0) + "%"; color: "white"; font.pixelSize: 9; width: 20 }
+            }
         }
     }
 

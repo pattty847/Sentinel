@@ -52,6 +52,16 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
     
+    // Trade Bubble Properties
+    Q_PROPERTY(double minBubbleRadius READ minBubbleRadius WRITE setMinBubbleRadius NOTIFY minBubbleRadiusChanged)
+    Q_PROPERTY(double maxBubbleRadius READ maxBubbleRadius WRITE setMaxBubbleRadius NOTIFY maxBubbleRadiusChanged)
+    Q_PROPERTY(double bubbleOpacity READ bubbleOpacity WRITE setBubbleOpacity NOTIFY bubbleOpacityChanged)
+    
+    // Overlay Properties for Layered Rendering
+    Q_PROPERTY(bool showHeatmapLayer READ showHeatmapLayer WRITE setShowHeatmapLayer NOTIFY showHeatmapLayerChanged)
+    Q_PROPERTY(bool showTradeBubbleLayer READ showTradeBubbleLayer WRITE setShowTradeBubbleLayer NOTIFY showTradeBubbleLayerChanged)
+    Q_PROPERTY(bool showTradeFlowLayer READ showTradeFlowLayer WRITE setShowTradeFlowLayer NOTIFY showTradeFlowLayerChanged)
+    
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
@@ -65,6 +75,7 @@ public:
     enum class RenderMode {
         LiquidityHeatmap,    // Bookmap-style dense grid
         TradeFlow,           // Trade dots with density
+        TradeBubbles,        // Size-relative bubbles on heatmap
         VolumeCandles,       // Volume-weighted candles
         OrderBookDepth       // Depth chart style
     };
@@ -78,6 +89,16 @@ private:
     int m_maxCells = 100000;
     double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
+    
+    // Trade Bubble configuration
+    double m_minBubbleRadius = 4.0;      // Minimum bubble size (pixels)
+    double m_maxBubbleRadius = 20.0;     // Maximum bubble size (pixels) 
+    double m_bubbleOpacity = 0.85;       // Base opacity for bubbles
+    
+    // Overlay layer toggles
+    bool m_showHeatmapLayer = true;      // Base heatmap layer
+    bool m_showTradeBubbleLayer = true;  // Trade bubble overlay
+    bool m_showTradeFlowLayer = false;   // Trade flow overlay
     
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
@@ -96,6 +117,7 @@ private:
     std::vector<CellInstance> m_visibleCells;
     // Snapshot buffer swapped from DataProcessor on dataUpdated()/updatePaintNode
     std::shared_ptr<const std::vector<CellInstance>> m_publishedCells;
+    std::vector<Trade> m_recentTrades;  // Recent trades for bubble rendering
     std::vector<std::pair<double, double>> m_volumeProfile;
     
     QSGTransformNode* m_rootTransformNode = nullptr;
@@ -116,6 +138,16 @@ public:
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
+    
+    // Trade Bubble accessors
+    double minBubbleRadius() const { return m_minBubbleRadius; }
+    double maxBubbleRadius() const { return m_maxBubbleRadius; }
+    double bubbleOpacity() const { return m_bubbleOpacity; }
+    
+    // Overlay layer accessors
+    bool showHeatmapLayer() const { return m_showHeatmapLayer; }
+    bool showTradeBubbleLayer() const { return m_showTradeBubbleLayer; }
+    bool showTradeFlowLayer() const { return m_showTradeFlowLayer; }
     
     //  VIEWPORT BOUNDS: Getters for QML properties
     qint64 getVisibleTimeStart() const;
@@ -198,6 +230,12 @@ signals:
     void autoScrollEnabledChanged();
     void minVolumeFilterChanged();
     void priceResolutionChanged();
+    void minBubbleRadiusChanged();
+    void maxBubbleRadiusChanged(); 
+    void bubbleOpacityChanged();
+    void showHeatmapLayerChanged();
+    void showTradeBubbleLayerChanged();
+    void showTradeFlowLayerChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -220,6 +258,12 @@ private:
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
+    void setMinBubbleRadius(double radius);
+    void setMaxBubbleRadius(double radius);
+    void setBubbleOpacity(double opacity);
+    void setShowHeatmapLayer(bool show);
+    void setShowTradeBubbleLayer(bool show);
+    void setShowTradeFlowLayer(bool show);
     void updateVisibleCells();
     void updateVolumeProfile();
     
@@ -231,6 +275,7 @@ private:
     std::unique_ptr<QThread> m_dataProcessorThread;
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
     std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
+    std::unique_ptr<IRenderStrategy> m_tradeBubbleStrategy;
     std::unique_ptr<IRenderStrategy> m_candleStrategy;
 
     IRenderStrategy* getCurrentStrategy() const;

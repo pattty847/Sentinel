@@ -1,6 +1,6 @@
 # Sentinel: Professional Trading Terminal
 
-> Open-source market analysis platform with GPU-accelerated visualization
+> This project is licensed under the GNU AGPL v3—open source with strong copyleft.
 
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue.svg" alt="C++20">

@@ -45,6 +45,66 @@ void GridSceneNode::updateContent(const GridSliceBatch& batch, IRenderStrategy* 
     }
 }
 
+void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch, 
+                                        IRenderStrategy* heatmapStrategy, bool showHeatmap,
+                                        IRenderStrategy* bubbleStrategy, bool showBubbles,
+                                        IRenderStrategy* flowStrategy, bool showFlow) {
+    
+    // Update heatmap layer
+    if (showHeatmap && heatmapStrategy) {
+        qDebug() << "🟩 RENDERING HEATMAP with" << heatmapStrategy->getStrategyName();
+        if (m_heatmapNode) {
+            removeChildNode(m_heatmapNode);
+            delete m_heatmapNode;
+        }
+        m_heatmapNode = heatmapStrategy->buildNode(batch);
+        if (m_heatmapNode) {
+            appendChildNode(m_heatmapNode);
+        }
+    } else if (m_heatmapNode) {
+        qDebug() << "🚫 REMOVING HEATMAP";
+        removeChildNode(m_heatmapNode);
+        delete m_heatmapNode;
+        m_heatmapNode = nullptr;
+    }
+    
+    // Update bubble layer
+    if (showBubbles && bubbleStrategy) {
+        qDebug() << "🔵 RENDERING BUBBLES with" << bubbleStrategy->getStrategyName();
+        if (m_bubbleNode) {
+            removeChildNode(m_bubbleNode);
+            delete m_bubbleNode;
+        }
+        m_bubbleNode = bubbleStrategy->buildNode(batch);
+        if (m_bubbleNode) {
+            appendChildNode(m_bubbleNode);
+        }
+    } else if (m_bubbleNode) {
+        qDebug() << "🚫 REMOVING BUBBLES";
+        removeChildNode(m_bubbleNode);
+        delete m_bubbleNode;
+        m_bubbleNode = nullptr;
+    }
+    
+    // Update flow layer  
+    if (showFlow && flowStrategy) {
+        qDebug() << "🟠 RENDERING FLOW with" << flowStrategy->getStrategyName();
+        if (m_flowNode) {
+            removeChildNode(m_flowNode);
+            delete m_flowNode;
+        }
+        m_flowNode = flowStrategy->buildNode(batch);
+        if (m_flowNode) {
+            appendChildNode(m_flowNode);
+        }
+    } else if (m_flowNode) {
+        qDebug() << "🚫 REMOVING FLOW";
+        removeChildNode(m_flowNode);
+        delete m_flowNode;
+        m_flowNode = nullptr;
+    }
+}
+
 void GridSceneNode::updateTransform(const QMatrix4x4& transform) {
     setMatrix(transform);
     markDirty(QSGNode::DirtyMatrix);

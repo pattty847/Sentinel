@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include "../CoordinateSystem.h"
+#include "../../core/marketdata/model/TradeData.h"
 
 // Shared grid rendering types to avoid circular dependencies
 // World-space cell; screen-space is derived in the renderer per-frame
@@ -26,6 +27,7 @@ struct CellInstance {
 
 struct GridSliceBatch {
     std::vector<CellInstance> cells;
+    std::vector<Trade> recentTrades;  // Raw trade data for bubble rendering
     double intensityScale = 1.0;
     double minVolumeFilter = 0.0;
     int maxCells = 100000;

@@ -23,6 +23,10 @@ public:
     GridSceneNode();
     
     void updateContent(const GridSliceBatch& batch, IRenderStrategy* strategy);
+    void updateLayeredContent(const GridSliceBatch& batch, 
+                             IRenderStrategy* heatmapStrategy, bool showHeatmap,
+                             IRenderStrategy* bubbleStrategy, bool showBubbles,
+                             IRenderStrategy* flowStrategy, bool showFlow);
     void updateTransform(const QMatrix4x4& transform);
     
     void setShowVolumeProfile(bool show);
@@ -30,6 +34,9 @@ public:
     
 private:
     QSGNode* m_contentNode = nullptr;
+    QSGNode* m_heatmapNode = nullptr;
+    QSGNode* m_bubbleNode = nullptr;
+    QSGNode* m_flowNode = nullptr;
     QSGNode* m_volumeProfileNode = nullptr;
     bool m_showVolumeProfile = true;
     

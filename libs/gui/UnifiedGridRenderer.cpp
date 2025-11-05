@@ -32,6 +32,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/IRenderStrategy.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
 #include "render/strategies/TradeFlowStrategy.hpp"
+#include "render/strategies/TradeBubbleStrategy.hpp"
 #include "render/strategies/CandleStrategy.hpp"
 
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
@@ -75,6 +76,15 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
+    // Store recent trades for bubble rendering (keep last 1000 trades)
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        m_recentTrades.push_back(trade);
+        if (m_recentTrades.size() > 1000) {
+            m_recentTrades.erase(m_recentTrades.begin(), m_recentTrades.begin() + 100); // Remove oldest 100
+        }
+    }
+    
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), "onTradeReceived", 
                                  Qt::QueuedConnection, Q_ARG(Trade, trade));
@@ -195,6 +205,72 @@ void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
         m_materialDirty.store(true);
         update();
         emit minVolumeFilterChanged();
+    }
+}
+
+void UnifiedGridRenderer::setMinBubbleRadius(double radius) {
+    if (m_minBubbleRadius != radius && radius > 0) {
+        m_minBubbleRadius = radius;
+        if (m_tradeBubbleStrategy) {
+            auto* bubbleStrategy = static_cast<TradeBubbleStrategy*>(m_tradeBubbleStrategy.get());
+            bubbleStrategy->setMinBubbleRadius(static_cast<float>(radius));
+        }
+        m_materialDirty.store(true);
+        update();
+        emit minBubbleRadiusChanged();
+    }
+}
+
+void UnifiedGridRenderer::setMaxBubbleRadius(double radius) {
+    if (m_maxBubbleRadius != radius && radius > 0) {
+        m_maxBubbleRadius = radius;
+        if (m_tradeBubbleStrategy) {
+            auto* bubbleStrategy = static_cast<TradeBubbleStrategy*>(m_tradeBubbleStrategy.get());
+            bubbleStrategy->setMaxBubbleRadius(static_cast<float>(radius));
+        }
+        m_materialDirty.store(true);
+        update();
+        emit maxBubbleRadiusChanged();
+    }
+}
+
+void UnifiedGridRenderer::setBubbleOpacity(double opacity) {
+    if (m_bubbleOpacity != opacity && opacity >= 0.0 && opacity <= 1.0) {
+        m_bubbleOpacity = opacity;
+        if (m_tradeBubbleStrategy) {
+            auto* bubbleStrategy = static_cast<TradeBubbleStrategy*>(m_tradeBubbleStrategy.get());
+            bubbleStrategy->setBubbleOpacity(static_cast<float>(opacity));
+        }
+        m_materialDirty.store(true);
+        update();
+        emit bubbleOpacityChanged();
+    }
+}
+
+void UnifiedGridRenderer::setShowHeatmapLayer(bool show) {
+    if (m_showHeatmapLayer != show) {
+        m_showHeatmapLayer = show;
+        m_geometryDirty.store(true);
+        update();
+        emit showHeatmapLayerChanged();
+    }
+}
+
+void UnifiedGridRenderer::setShowTradeBubbleLayer(bool show) {
+    if (m_showTradeBubbleLayer != show) {
+        m_showTradeBubbleLayer = show;
+        m_geometryDirty.store(true);
+        update();
+        emit showTradeBubbleLayerChanged();
+    }
+}
+
+void UnifiedGridRenderer::setShowTradeFlowLayer(bool show) {
+    if (m_showTradeFlowLayer != show) {
+        m_showTradeFlowLayer = show;
+        m_geometryDirty.store(true);
+        update();
+        emit showTradeFlowLayerChanged();
     }
 }
 
@@ -333,7 +409,14 @@ void UnifiedGridRenderer::init() {
     
     m_heatmapStrategy = std::make_unique<HeatmapStrategy>();
     m_tradeFlowStrategy = std::make_unique<TradeFlowStrategy>();
+    m_tradeBubbleStrategy = std::make_unique<TradeBubbleStrategy>();
     m_candleStrategy = std::make_unique<CandleStrategy>();
+    
+    // Initialize bubble strategy with default configuration
+    auto* bubbleStrategy = static_cast<TradeBubbleStrategy*>(m_tradeBubbleStrategy.get());
+    bubbleStrategy->setMinBubbleRadius(static_cast<float>(m_minBubbleRadius));
+    bubbleStrategy->setMaxBubbleRadius(static_cast<float>(m_maxBubbleRadius));
+    bubbleStrategy->setBubbleOpacity(static_cast<float>(m_bubbleOpacity));
     
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
@@ -363,6 +446,9 @@ IRenderStrategy* UnifiedGridRenderer::getCurrentStrategy() const {
             
         case RenderMode::TradeFlow:
             return m_tradeFlowStrategy.get();
+            
+        case RenderMode::TradeBubbles:
+            return m_tradeBubbleStrategy.get();
             
         case RenderMode::VolumeCandles:
             return m_candleStrategy.get();
@@ -413,12 +499,14 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        // create a new GridSliceBatch with the visible cells, intensity scale, min volume filter, max cells, and viewport
-        GridSliceBatch batch{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
-        IRenderStrategy* strategy = getCurrentStrategy();
+        // create a new GridSliceBatch with the visible cells, recent trades, intensity scale, min volume filter, max cells, and viewport
+        GridSliceBatch batch{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
 
         QElapsedTimer contentTimer; contentTimer.start();
-        sceneNode->updateContent(batch, strategy); // update the content of the scene node with the new batch and strategy
+        sceneNode->updateLayeredContent(batch,
+                                       m_heatmapStrategy.get(), m_showHeatmapLayer,
+                                       m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
+                                       m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
         contentUs = contentTimer.nsecsElapsed() / 1000;
 
         if (m_showVolumeProfile) {
@@ -436,11 +524,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp2 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch2{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
-        IRenderStrategy* strategy2 = getCurrentStrategy();
+        GridSliceBatch batch2{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
 
         QElapsedTimer contentTimer2; contentTimer2.start();
-        sceneNode->updateContent(batch2, strategy2);
+        sceneNode->updateLayeredContent(batch2,
+                                       m_heatmapStrategy.get(), m_showHeatmapLayer,
+                                       m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
+                                       m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
         contentUs = contentTimer2.nsecsElapsed() / 1000;
         cellsCount = m_visibleCells.size();
     }
@@ -449,9 +539,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
         updateVisibleCells();
         Viewport vp3 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch3{m_visibleCells, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
-        IRenderStrategy* strategy3 = getCurrentStrategy();
-        sceneNode->updateContent(batch3, strategy3);
+        GridSliceBatch batch3{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
+        sceneNode->updateLayeredContent(batch3,
+                                       m_heatmapStrategy.get(), m_showHeatmapLayer,
+                                       m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
+                                       m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
     }
 
     if (m_transformDirty.exchange(false) || isNewNode) {
