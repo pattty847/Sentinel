@@ -108,7 +108,9 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
-    // Slim adapter: DP + LTSE handle timeframe/LOD; we just mark transform dirty
+    // Trigger data processor to recalculate visible cells for new viewport
+    QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", Qt::QueuedConnection);
+    // Mark transform dirty for rendering update
     m_transformDirty.store(true);
     update();
 }

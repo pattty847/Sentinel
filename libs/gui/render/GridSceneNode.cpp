@@ -52,7 +52,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
     
     // Update heatmap layer
     if (showHeatmap && heatmapStrategy) {
-        qDebug() << "🟩 RENDERING HEATMAP with" << heatmapStrategy->getStrategyName();
         if (m_heatmapNode) {
             removeChildNode(m_heatmapNode);
             delete m_heatmapNode;
@@ -62,7 +61,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             appendChildNode(m_heatmapNode);
         }
     } else if (m_heatmapNode) {
-        qDebug() << "🚫 REMOVING HEATMAP";
         removeChildNode(m_heatmapNode);
         delete m_heatmapNode;
         m_heatmapNode = nullptr;
@@ -70,7 +68,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
     
     // Update bubble layer
     if (showBubbles && bubbleStrategy) {
-        qDebug() << "🔵 RENDERING BUBBLES with" << bubbleStrategy->getStrategyName();
         if (m_bubbleNode) {
             removeChildNode(m_bubbleNode);
             delete m_bubbleNode;
@@ -80,7 +77,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             appendChildNode(m_bubbleNode);
         }
     } else if (m_bubbleNode) {
-        qDebug() << "🚫 REMOVING BUBBLES";
         removeChildNode(m_bubbleNode);
         delete m_bubbleNode;
         m_bubbleNode = nullptr;
@@ -88,7 +84,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
     
     // Update flow layer  
     if (showFlow && flowStrategy) {
-        qDebug() << "🟠 RENDERING FLOW with" << flowStrategy->getStrategyName();
         if (m_flowNode) {
             removeChildNode(m_flowNode);
             delete m_flowNode;
@@ -98,7 +93,6 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             appendChildNode(m_flowNode);
         }
     } else if (m_flowNode) {
-        qDebug() << "🚫 REMOVING FLOW";
         removeChildNode(m_flowNode);
         delete m_flowNode;
         m_flowNode = nullptr;

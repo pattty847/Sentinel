@@ -164,11 +164,8 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                 return;
             }
             
-            // Apply validated bounds
-            m_visibleTimeStart_ms = newTimeStart;
-            m_visibleTimeEnd_ms = newTimeEnd;
-            m_minPrice = newMinPrice;
-            m_maxPrice = newMaxPrice;
+            // Apply validated bounds via central setter to bump version and signal change
+            setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
             
             if constexpr (kTraceZoomInteractions) {
                 qDebug() << " ZOOM RESULT:"
@@ -185,8 +182,6 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             m_autoScrollEnabled = false;
             emit autoScrollEnabledChanged();
         }
-        
-        emit viewportChanged();
     }
 }
 

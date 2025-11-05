@@ -506,12 +506,8 @@ void DataProcessor::updateVisibleCells() {
             }
         }
 
-        // Prune cells that are no longer within the visible time range to prevent
-        // unbounded growth when the viewport is stable and data streams indefinitely.
-        // Keep pruning tight (no padding) because UGR now rebuilds on zoom-out.
-        std::erase_if(m_visibleCells, [timeStart, timeEnd](const CellInstance& cell) {
-            return cell.timeEnd_ms < timeStart || cell.timeStart_ms > timeEnd;
-        });
+        // Do NOT prune off-viewport cells here; retain history so zoom-out can
+        // immediately reveal older columns without requiring a recompute.
 
         const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize);
 
