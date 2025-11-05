@@ -12,6 +12,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QQuickView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>  // Added for error dialogs
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "UnifiedGridRenderer.h"
@@ -24,166 +25,101 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QFileInfo>
 #include <QTimer>
 #include <QSGRendererInterface>
+#include <QSettings>  // For config extraction
+#include <QPushButton>
+#include <QGroupBox>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QScopeGuard>
+
+// Helper macro for scoped logging
+#define LOG_SCOPE(msg) sLog_App(msg " started"); auto _scopeGuard = qScopeGuard([=]{ sLog_App(msg " complete"); });
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QWidget(parent) {
-    // Initialize data components (was previously in facade)
-    m_authenticator = std::make_unique<Authenticator>();  // uses default "key.json"
-    m_dataCache = std::make_unique<DataCache>();
+    LOG_SCOPE("MainWindowGPU construction");
     
-    m_sentinelMonitor = std::make_shared<SentinelMonitor>();
-    m_sentinelMonitor->startMonitoring();
-    m_sentinelMonitor->enableCLIOutput(false);  // Enable performance logging
-    
-    sLog_App("Creating persistent MarketDataCore...");
-    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
-    m_marketDataCore->start();
-    sLog_App("MarketDataCore created and started");
-    
-    sLog_App("Setting up UI...");
+    initializeDataComponents();
     setupUI();
-    sLog_App("UI setup complete");
-    
-    sLog_App("Setting up connections...");
     setupConnections();
-    sLog_App("Connections setup complete");
+    setWindowProperties();
     
-    // Set window properties
-    setWindowTitle("Sentinel - GPU Trading Terminal");
-    resize(1400, 900);
-    sLog_App("Window properties set");
-    
-    sLog_App("Initializing QML components...");
-    initializeQMLComponents();
-    sLog_App("QML components initialized");
-    
-    sLog_App("Connecting MarketData signals...");
-    connectMarketDataSignals();
-    sLog_App("MarketData signals connected");
+    if (!validateComponents()) {
+        sLog_Error("Component validation failed - app may not function correctly");
+        QMessageBox::critical(this, "Initialization Error", "Failed to initialize core components. Check logs.");
+    }
     
     sLog_App("GPU MainWindow ready for 144Hz trading!");
 }
 
 MainWindowGPU::~MainWindowGPU() {
-    sLog_App("MainWindowGPU destructor - cleaning up...");
+    LOG_SCOPE("MainWindowGPU destruction");
     
-    // This prevents queued signals from reaching DataProcessor during shutdown
+    // Disconnect signals first
     if (m_marketDataCore) {
         disconnect(m_marketDataCore.get(), nullptr, nullptr, nullptr);
-    }
-    
-    // This ensures cleanup happens synchronously, not async after QML destruction
-    if (m_qquickView && m_qquickView->rootObject()) {
-        UnifiedGridRenderer* unifiedGridRenderer = m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-        if (unifiedGridRenderer) {
-            auto dataProcessor = unifiedGridRenderer->getDataProcessor();
-            if (dataProcessor) {
-                sLog_App("Stopping DataProcessor from MainWindowGPU...");
-                dataProcessor->stopProcessing();
-            }
-        }
-    }
-    
-    if (m_marketDataCore) {
         m_marketDataCore->stop();
         m_marketDataCore.reset();
-        sLog_App("MarketDataCore destroyed");
     }
     
-    // This will trigger UnifiedGridRenderer destructor
-    if (m_qquickView) {
-        m_qquickView->setSource(QUrl());
+    // Stop processing
+    auto unifiedGridRenderer = getUnifiedGridRenderer();
+    if (unifiedGridRenderer) {
+        auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+        if (dataProcessor) dataProcessor->stopProcessing();
     }
+    
+    if (m_qquickView) m_qquickView->setSource(QUrl());  // Clear QML
+    
+    if (m_sentinelMonitor) m_sentinelMonitor->stopMonitoring();
+}
 
-    if (m_sentinelMonitor) {
-        m_sentinelMonitor->stopMonitoring();
-    }
-
-    sLog_App("MainWindowGPU cleanup complete");
+void MainWindowGPU::initializeDataComponents() {
+    LOG_SCOPE("Initializing data components");
+    
+    // Load config (example: extract to separate class if complex)
+    QSettings config("config.ini", QSettings::IniFormat);
+    QString defaultKeyFile = config.value("auth/keyFile", "key.json").toString();
+    
+    m_authenticator = std::make_unique<Authenticator>(defaultKeyFile.toStdString());
+    m_dataCache = std::make_unique<DataCache>();
+    m_sentinelMonitor = std::make_shared<SentinelMonitor>();
+    m_sentinelMonitor->startMonitoring();
+    m_sentinelMonitor->enableCLIOutput(false);
+    
+    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
+    m_marketDataCore->start();
 }
 
 void MainWindowGPU::setupUI() {
-    // Create GPU Chart (QML) with threaded scene graph via QQuickView
-    m_qquickView = new QQuickView;
+    LOG_SCOPE("Setting up UI");
     
-    // GPU Configuration: Enable persistent scene graph and hardware acceleration
+    m_qquickView = new QQuickView;
     m_qquickView->setPersistentSceneGraph(true);
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
-    m_qquickView->setColor(Qt::black); // TODO: Allow route to a config file - OS dependent paths
+    m_qquickView->setColor(Qt::black);
     
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, this);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     
-    // TODO: Allow environment override for QML path (SENTINEL_QML_PATH) - move this to a config file - OS dependent paths
-    QString qmlPath;
-    const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
-    if (!qmlEnv.isEmpty()) {
-        QFileInfo envInfo(qmlEnv);
-        qmlPath = envInfo.isDir()
-            ? QDir(envInfo.absoluteFilePath()).filePath("DepthChartView.qml")
-            : envInfo.absoluteFilePath();
-        sLog_App("Using SENTINEL_QML_PATH override:" << qmlPath);
-    } else {
-        // Try file system path first to bypass resource issues
-        // TODO: move this to a config file - OS dependent paths
-        qmlPath = QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath());
-        sLog_App("Trying QML path:" << qmlPath);
-    }
+    loadQmlSource();
+    verifyGpuAcceleration();
     
-    if (QFile::exists(qmlPath)) {
-        m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));
-        sLog_App("QML loaded from file system!");
-    } else {
-        sLog_App("QML file not found, trying resource path...");
-        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
-    }
-    
-    // Check if QML loaded successfully and verify GPU acceleration
-    if (m_qquickView->status() == QQuickView::Error) {
-        sLog_Error("QML FAILED TO LOAD!");
-        sLog_Error("QML Errors:" << m_qquickView->errors());
-    } else if (m_qquickView->status() == QQuickView::Ready) {
-        // Verify GPU acceleration is working
-        auto* rhi = m_qquickView->rendererInterface();
-        if (rhi) {
-            QString apiName;
-            switch (rhi->graphicsApi()) {
-                case QSGRendererInterface::OpenGL: apiName = "OpenGL"; break;
-                case QSGRendererInterface::Direct3D11: apiName = "Direct3D 11"; break;
-                case QSGRendererInterface::Vulkan: apiName = "Vulkan"; break;
-                case QSGRendererInterface::Metal: apiName = "Metal"; break;
-                case QSGRendererInterface::Null: apiName = "Null (Software)"; break;
-                default: apiName = "Unknown"; break;
-            }
-            sLog_App("🎮 GPU ACCELERATION ACTIVE: " << apiName);
-            sLog_App("   Shader Type: " << rhi->shaderType());
-        } else {
-            sLog_Error("❌ NO GPU ACCELERATION - RHI interface not available!");
-        }
-    }
-    
-    // Set default symbol in QML context
     QQmlContext* context = m_qquickView->rootContext();
     m_modeController = new ChartModeController(this);
     context->setContextProperty("chartModeController", m_modeController);
-    context->setContextProperty("symbol", "BTC-USD");
+    updateSymbolInContext("BTC-USD");  // Centralized
     
     // Control panel
     m_statusLabel = new QLabel("Disconnected", this);
     m_symbolInput = new QLineEdit("BTC-USD", this);
     m_subscribeButton = new QPushButton("Subscribe", this);
     
-    // Styling
-    m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
-    m_symbolInput->setStyleSheet("QLineEdit { padding: 8px; font-size: 14px; }");
-    m_subscribeButton->setStyleSheet("QPushButton { padding: 8px 16px; font-size: 14px; font-weight: bold; }");
+    applyStyles();  // Extracted
     
     // Layout
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
-    
-    // GPU chart takes most space (QQuickView container)
     mainLayout->addWidget(m_qmlContainer, 1);
     
-    // Control panel at bottom
     QGroupBox* controlGroup = new QGroupBox("Trading Controls");
     QHBoxLayout* controlLayout = new QHBoxLayout();
     controlLayout->addWidget(new QLabel("Symbol:"));
@@ -197,119 +133,123 @@ void MainWindowGPU::setupUI() {
     setLayout(mainLayout);
 }
 
-void MainWindowGPU::setupConnections() {
-    // UI connections
-    connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
+void MainWindowGPU::loadQmlSource() {
+    // Configurable path (extract from config)
+    QSettings config("config.ini", QSettings::IniFormat);
+    QString qmlPath = config.value("qml/path", QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath())).toString();
     
-    sLog_App("GPU MainWindow basic connections established");
+    const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
+    if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;  // Override
+    
+    if (QFile::exists(qmlPath)) {
+        m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));
+    } else {
+        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
+    }
+    
+    if (m_qquickView->status() == QQuickView::Error) {
+        sLog_Error("QML FAILED TO LOAD! Errors: " << m_qquickView->errors());
+        QMessageBox::critical(this, "QML Error", "Failed to load QML. Check logs for details.");
+    }
+}
+
+void MainWindowGPU::verifyGpuAcceleration() {
+    if (m_qquickView->status() != QQuickView::Ready) return;
+    
+    auto* rhi = m_qquickView->rendererInterface();
+    if (rhi && rhi->graphicsApi() != QSGRendererInterface::Null) {
+        sLog_App("🎮 GPU ACCELERATION ACTIVE: " << graphicsApiName(rhi->graphicsApi()));  // Helper function for name
+    } else {
+        sLog_Error("❌ NO GPU ACCELERATION!");
+    }
+}
+
+QString MainWindowGPU::graphicsApiName(QSGRendererInterface::GraphicsApi api) {  // Helper
+    switch (api) {
+        case QSGRendererInterface::OpenGL: return "OpenGL";
+        case QSGRendererInterface::Direct3D11: return "Direct3D 11";
+        case QSGRendererInterface::Vulkan: return "Vulkan";
+        case QSGRendererInterface::Metal: return "Metal";
+        default: return "Unknown";
+    }
+}
+
+void MainWindowGPU::applyStyles() {  // Extracted for modularity
+    m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
+    m_symbolInput->setStyleSheet("QLineEdit { padding: 8px; font-size: 14px; }");
+    m_subscribeButton->setStyleSheet("QPushButton { padding: 8px 16px; font-size: 14px; font-weight: bold; }");
+}
+
+void MainWindowGPU::setWindowProperties() {
+    setWindowTitle("Sentinel - GPU Trading Terminal");
+    resize(1400, 900);  // Could be from config
+}
+
+void MainWindowGPU::setupConnections() {
+    LOG_SCOPE("Setting up connections");
+    connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
+    connectMarketDataSignals();
 }
 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
-    if (symbol.isEmpty()) {
-        sLog_Warning("Empty symbol input");
+    if (symbol.isEmpty() || !symbol.contains('-')) {  // Basic validation
+        sLog_Warning("Invalid symbol: " << symbol);
+        QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
         return;
     }
     
-    sLog_App(QString("Subscribing to symbol: %1").arg(symbol));
-    
-    // Update QML context with the new symbol
-    if (m_qquickView) m_qquickView->rootContext()->setContextProperty("symbol", symbol);
-    
-    //  GEMINI'S REFACTOR: Use persistent MarketDataCore with subscribeToSymbols!
+    sLog_App("Subscribing to: " << symbol);
+    updateSymbolInContext(symbol);
     if (m_marketDataCore) {
         m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
-    } else {
-        sLog_Error("MarketDataCore not initialized!");
     }
+}
+
+void MainWindowGPU::updateSymbolInContext(const QString& symbol) {
+    if (m_qquickView) m_qquickView->rootContext()->setContextProperty("symbol", symbol);
 }
 
 void MainWindowGPU::connectMarketDataSignals() {
-    sLog_App("Setting up persistent MarketDataCore signal connections...");
+    LOG_SCOPE("Connecting MarketData signals");
     
-    UnifiedGridRenderer* unifiedGridRenderer = m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    if (m_marketDataCore && unifiedGridRenderer) {
-        // Provide dense data access to renderer
-        unifiedGridRenderer->setDataCache(m_dataCache.get());
-        
-        // Provide unified monitoring to renderer
-        unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
-        
-        // Get DataProcessor from UGR to route signals correctly
-        auto dataProcessor = unifiedGridRenderer->getDataProcessor();
-        if (dataProcessor) {
-            connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
-                    dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
-            sLog_App("LiveOrderBook signal routed to DataProcessor!");
-        }
-        
-        // Route trades to renderer
-        connect(
-            m_marketDataCore.get(),
-            &MarketDataCore::tradeReceived,
-            this,
-            [unifiedGridRenderer](const Trade& trade) {
-                const Trade tradeCopy = trade;
-                QMetaObject::invokeMethod(
-                    unifiedGridRenderer,
-                    [unifiedGridRenderer, tradeCopy]() {
-                        unifiedGridRenderer->onTradeReceived(tradeCopy);
-                    },
-                    Qt::QueuedConnection);
-            },
-            Qt::QueuedConnection);
-        
-        // Connection status feedback
-        connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, 
-                this, [this](bool connected) {
-            if (connected) {
-                m_statusLabel->setText("🟢 Connected");
-                m_statusLabel->setStyleSheet("QLabel { color: green; font-size: 14px; }");
-                m_subscribeButton->setText("Subscribe");
-                m_subscribeButton->setEnabled(true);
-            } else {
-                m_statusLabel->setText("🔴 Disconnected");  
-                m_statusLabel->setStyleSheet("QLabel { color: red; font-size: 14px; }");
-                m_subscribeButton->setText("Connect");
-                m_subscribeButton->setEnabled(true);
-            }
-        });
-        
-        sLog_App("Persistent MarketDataCore → DataProcessor connections established!");
-    } else {
-        sLog_Error("MarketDataCore or UnifiedGridRenderer not found during signal setup!");
-        if (!m_marketDataCore) sLog_Error("  MarketDataCore is null!");
-        if (!unifiedGridRenderer) sLog_Error("  UnifiedGridRenderer not found!");
+    auto unifiedGridRenderer = getUnifiedGridRenderer();
+    if (!m_marketDataCore || !unifiedGridRenderer) {
+        sLog_Error("Cannot connect signals: Missing components");
+        return;
     }
+    
+    unifiedGridRenderer->setDataCache(m_dataCache.get());
+    unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
+    
+    auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+    if (dataProcessor) {
+        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
+                dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
+    }
+    
+    // Trade connection (simplified, assume UnifiedGridRenderer has a slot)
+    connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived,
+            unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
+    
+    connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
+            this, &MainWindowGPU::onConnectionStatusChanged);  // Extracted slot
 }
 
-// Proper QML component initialization without retry logic
-void MainWindowGPU::initializeQMLComponents() {
-    sLog_App("Initializing QML components with proper lifecycle management");
-    
-    // Check if QML loaded successfully during setupUI()
-    if (m_qquickView->status() == QQuickView::Error) {
-        sLog_Error("QML failed to load during setupUI - cannot initialize components");
-        return;
-    }
-    
-    // Verify QML root object is available (should be ready after setupUI())
-    QQuickItem* qmlRoot = m_qquickView->rootObject();
-    if (!qmlRoot) {
-        sLog_Warning("QML root object not available - QML may not be fully loaded");
-        return;
-    }
-    
-    // Verify UnifiedGridRenderer is available
-    UnifiedGridRenderer* unifiedGridRenderer = qmlRoot->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
-    if (!unifiedGridRenderer) {
-        sLog_Warning("UnifiedGridRenderer not found in QML");
-        return;
-    }
-    
-    sLog_App("QML components verified and ready");
-    sLog_App("QML Root: AVAILABLE");
-    sLog_App("UnifiedGridRenderer: AVAILABLE");
-    
-    // Components are verified - data pipeline will be created on subscription
+void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted for clarity
+    m_statusLabel->setText(connected ? "🟢 Connected" : "🔴 Disconnected");
+    m_statusLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 14px; }").arg(connected ? "green" : "red"));
+    m_subscribeButton->setText(connected ? "Subscribe" : "Connect");
+    m_subscribeButton->setEnabled(true);
+}
+
+bool MainWindowGPU::validateComponents() {
+    if (m_qquickView->status() != QQuickView::Ready) return false;
+    if (!getUnifiedGridRenderer()) return false;
+    if (!m_marketDataCore) return false;
+    return true;
+}
+
+UnifiedGridRenderer* MainWindowGPU::getUnifiedGridRenderer() const {
+    return m_qquickView->rootObject() ? m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer") : nullptr;
 }

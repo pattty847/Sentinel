@@ -30,6 +30,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QQuickView>
+#include <QSGRendererInterface>
 #include <memory>
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
@@ -38,6 +39,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 
 // Forward declarations
 class ChartModeController;
+class UnifiedGridRenderer;
 
 /**
  *  GPU-Powered Trading Terminal MainWindow
@@ -52,12 +54,22 @@ public:
 
 private slots:
     void onSubscribe();
+    void onConnectionStatusChanged(bool connected);
 
 private:
     void setupUI();
     void setupConnections();
     void initializeQMLComponents();
     void connectMarketDataSignals();
+    void initializeDataComponents();
+    void loadQmlSource();
+    void verifyGpuAcceleration();
+    void applyStyles();
+    void setWindowProperties();
+    void updateSymbolInContext(const QString& symbol);
+    bool validateComponents();
+    UnifiedGridRenderer* getUnifiedGridRenderer() const;
+    QString graphicsApiName(QSGRendererInterface::GraphicsApi api);
 
     // GPU CHART - Core component (QQuickView within a QWidget container)
     QQuickView* m_qquickView = nullptr;
