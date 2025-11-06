@@ -19,8 +19,6 @@ add_library(sentinel_core
     marketdata/ws/BeastWsTransport.cpp
     SentinelLogging.cpp
     SentinelLogging.hpp
-    SentinelMonitor.cpp
-    SentinelMonitor.hpp
     marketdata/model/TradeData.h
 )
 

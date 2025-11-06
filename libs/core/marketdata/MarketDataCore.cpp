@@ -33,12 +33,10 @@ namespace {
 }
 
 MarketDataCore::MarketDataCore(Authenticator& auth,
-                               DataCache& cache,
-                               std::shared_ptr<SentinelMonitor> monitor)
+                               DataCache& cache)
     : QObject(nullptr)
     , m_auth(auth)
     , m_cache(cache)
-    , m_monitor(monitor)
 {
     qRegisterMetaType<BookDelta>("BookDelta");
     qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
@@ -205,9 +203,6 @@ void MarketDataCore::scheduleReconnect() {
         sLog_Data("Attempting reconnection...");
         
         // Record network reconnection
-        if (m_monitor) {
-            m_monitor->recordNetworkReconnect();
-        }
         if (m_transport) {
             m_transport->close();
             m_transport->connect(m_host, m_port, m_target);
@@ -311,9 +306,6 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         m_sink.onTrade(trade);
         
         // Record trade processed for throughput tracking
-        if (m_monitor) {
-            m_monitor->recordTradeProcessed(trade);
-        }
         
         // Emit real-time signal to GUI layer (Qt thread-safe)
         Trade tradeCopy = trade; // Make a copy for thread safety
@@ -351,9 +343,6 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
         trade.timestamp = Cpp20Utils::parseISO8601(trade_timestamp_str);
         
         // Record trade latency (exchange → arrival)
-        if (m_monitor) {
-            m_monitor->recordTradeLatency(trade.timestamp, arrival_time);
-        }
     } else {
         trade.timestamp = std::chrono::system_clock::now();
     }
@@ -381,9 +370,6 @@ void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
         exchange_timestamp = Cpp20Utils::parseISO8601(timestamp_str);
         
         // Record order book latency (exchange → arrival)
-        if (m_monitor) {
-            m_monitor->recordOrderBookLatency(exchange_timestamp, arrival_time);
-        }
     }
     
     if (!message.contains("events")) return;
@@ -498,9 +484,6 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     size_t bidCount = liveBook.getBidCount();
     size_t askCount = liveBook.getAskCount();
     
-    if (m_monitor) {
-        m_monitor->recordOrderBookUpdate(QString::fromStdString(product_id), bidCount, askCount);
-    }
     
     std::string logMessage = Cpp20Utils::formatOrderBookLog(
         product_id, bidCount, askCount, updateCount);

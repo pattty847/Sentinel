@@ -12,7 +12,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
 #include "../core/marketdata/cache/DataCache.hpp"
-#include "../core/SentinelMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
@@ -477,13 +476,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     QElapsedTimer timer;
     timer.start();
 
-    if (m_sentinelMonitor) m_sentinelMonitor->startFrame();
-
     auto* sceneNode = static_cast<GridSceneNode*>(oldNode); // cast the old node to a GridSceneNode
     bool isNewNode = !sceneNode; // check if the node is new
     if (isNewNode) { // if the node is new, create a new GridSceneNode
         sceneNode = new GridSceneNode();
-        if (m_sentinelMonitor) m_sentinelMonitor->recordGeometryRebuild(); // record the geometry rebuild
     }
     
     qint64 cacheUs = 0; // cache time in microseconds
@@ -517,7 +513,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
         sceneNode->setShowVolumeProfile(m_showVolumeProfile);
 
-        if (m_sentinelMonitor) m_sentinelMonitor->recordCacheMiss();
         cellsCount = m_visibleCells.size();
     } else if (m_appendPending.exchange(false)) {
         sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");
@@ -555,12 +550,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             transform.translate(pan.x(), pan.y());
         }
         sceneNode->updateTransform(transform);
-        if (m_sentinelMonitor) m_sentinelMonitor->recordTransformApplied();
         sLog_RenderN(20, "TRANSFORM UPDATE (pan/zoom)");
-    }
-    
-    if (m_sentinelMonitor) {
-        m_sentinelMonitor->endFrame();
     }
 
     const qint64 totalUs = timer.nsecsElapsed() / 1000;
@@ -580,7 +570,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
-void UnifiedGridRenderer::togglePerformanceOverlay() { if (m_sentinelMonitor) m_sentinelMonitor->enablePerformanceOverlay(!m_sentinelMonitor->isOverlayEnabled()); }
+void UnifiedGridRenderer::togglePerformanceOverlay() { /* No-op: SentinelMonitor removed */ }
 
 // ===== QML PROPERTY GETTERS =====
 // Read-only property access for QML bindings
@@ -598,10 +588,10 @@ QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m
 // Debug and monitoring methods for QML
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
-QString UnifiedGridRenderer::getPerformanceStats() const { return m_sentinelMonitor ? m_sentinelMonitor->getComprehensiveStats() : "N/A"; }
-double UnifiedGridRenderer::getCurrentFPS() const { return m_sentinelMonitor ? m_sentinelMonitor->getCurrentFPS() : 0.0; }
-double UnifiedGridRenderer::getAverageRenderTime() const { return m_sentinelMonitor ? m_sentinelMonitor->getAverageFrameTime() : 0.0; }
-double UnifiedGridRenderer::getCacheHitRate() const { return m_sentinelMonitor ? m_sentinelMonitor->getCacheHitRate() : 0.0; }
+QString UnifiedGridRenderer::getPerformanceStats() const { return "N/A (SentinelMonitor removed)"; }
+double UnifiedGridRenderer::getCurrentFPS() const { return 0.0; }
+double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }
+double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 
 // ===== QT EVENT HANDLERS =====
 // Mouse and wheel event handling for user interaction

@@ -69,8 +69,6 @@ MainWindowGPU::~MainWindowGPU() {
     }
     
     if (m_qquickView) m_qquickView->setSource(QUrl());  // Clear QML
-    
-    if (m_sentinelMonitor) m_sentinelMonitor->stopMonitoring();
 }
 
 void MainWindowGPU::initializeDataComponents() {
@@ -82,11 +80,8 @@ void MainWindowGPU::initializeDataComponents() {
     
     m_authenticator = std::make_unique<Authenticator>(defaultKeyFile.toStdString());
     m_dataCache = std::make_unique<DataCache>();
-    m_sentinelMonitor = std::make_shared<SentinelMonitor>();
-    m_sentinelMonitor->startMonitoring();
-    m_sentinelMonitor->enableCLIOutput(false);
-    
-    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache, m_sentinelMonitor);
+
+    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache);
     m_marketDataCore->start();
 }
 
@@ -220,8 +215,7 @@ void MainWindowGPU::connectMarketDataSignals() {
     }
     
     unifiedGridRenderer->setDataCache(m_dataCache.get());
-    unifiedGridRenderer->setSentinelMonitor(m_sentinelMonitor);
-    
+
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
         connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,

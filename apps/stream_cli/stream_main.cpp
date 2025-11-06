@@ -2,7 +2,6 @@
 #include "marketdata/auth/Authenticator.hpp"
 #include "marketdata/cache/DataCache.hpp"
 #include "marketdata/model/TradeData.h"
-#include "SentinelMonitor.hpp"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -16,9 +15,8 @@ int main() {
     Authenticator auth;  // uses default "key.json"
     DataCache cache;
     std::vector<std::string> symbols = {"BTC-USD"};
-    
-    auto monitor = std::make_shared<SentinelMonitor>(nullptr);
-    MarketDataCore client(auth, cache, monitor);
+
+    MarketDataCore client(auth, cache);
     client.subscribeToSymbols(symbols);
     client.start();
 

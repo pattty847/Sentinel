@@ -29,7 +29,6 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 
 // Forward declarations for new modular architecture
 class GridSceneNode;
-class SentinelMonitor;
 class DataProcessor;
 class IRenderStrategy;
 
@@ -195,7 +194,6 @@ public:
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
-    void setSentinelMonitor(std::shared_ptr<SentinelMonitor> monitor) { m_sentinelMonitor = monitor; }
     
     //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
@@ -268,9 +266,8 @@ private:
     void updateVolumeProfile();
     
     class DataCache* m_dataCache = nullptr;
-    
+
     std::unique_ptr<GridViewState> m_viewState;
-    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
     std::unique_ptr<DataProcessor> m_dataProcessor;
     std::unique_ptr<QThread> m_dataProcessorThread;
     std::unique_ptr<IRenderStrategy> m_heatmapStrategy;

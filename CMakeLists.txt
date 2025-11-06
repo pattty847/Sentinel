@@ -83,7 +83,8 @@ if(WIN32)
     pkg_check_modules(OPENSSL REQUIRED openssl)
     find_package(nlohmann_json REQUIRED)
 else()
-    # macOS/Linux: Use FetchContent as before
+    # macOS/Linux: Use system OpenSSL and FetchContent for JSON
+    find_package(OpenSSL REQUIRED)
     FetchContent_Declare(
       nlohmann_json
       GIT_REPOSITORY https://github.com/nlohmann/json.git

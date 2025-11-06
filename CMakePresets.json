@@ -38,8 +38,17 @@
         }
     ],
     "buildPresets": [
-        { "name": "windows-mingw", "configurePreset": "windows-mingw" },
-        { "name": "mac-clang", "configurePreset": "mac-clang" },
-        { "name": "linux-gcc", "configurePreset": "linux-gcc" }
+        {
+            "name": "windows-mingw",
+            "configurePreset": "windows-mingw"
+        },
+        {
+            "name": "mac-clang",
+            "configurePreset": "mac-clang"
+        },
+        {
+            "name": "linux-gcc",
+            "configurePreset": "linux-gcc"
+        }
     ]
 }

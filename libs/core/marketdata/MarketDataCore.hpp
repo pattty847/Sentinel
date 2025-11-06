@@ -29,7 +29,6 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include "sinks/DataCacheSinkAdapter.hpp"
 #include "ws/SubscriptionManager.hpp"
 #include "ws/BeastWsTransport.hpp"
-#include "SentinelMonitor.hpp"
 #include "model/TradeData.h"
 
 namespace net = boost::asio;
@@ -41,8 +40,7 @@ class MarketDataCore : public QObject {
 
 public:
     MarketDataCore(Authenticator& auth,
-                   DataCache& cache,
-                   std::shared_ptr<SentinelMonitor> monitor = nullptr);
+                   DataCache& cache);
 
     ~MarketDataCore();
     void start();
@@ -112,7 +110,6 @@ private:
     DataCache&                      m_cache;
     DataCacheSinkAdapter            m_sink{m_cache};
     SubscriptionManager             m_subscriptions;
-    std::shared_ptr<SentinelMonitor> m_monitor;
 
     net::io_context                 m_ioc;
     ssl::context                    m_sslCtx{ssl::context::tlsv12_client};

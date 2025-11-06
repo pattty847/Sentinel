@@ -35,7 +35,6 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
 #include "../core/marketdata/cache/DataCache.hpp"
-#include "../core/SentinelMonitor.hpp"
 
 // Forward declarations
 class ChartModeController;
@@ -83,6 +82,5 @@ private:
     std::unique_ptr<MarketDataCore> m_marketDataCore;
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<DataCache> m_dataCache;
-    std::shared_ptr<SentinelMonitor> m_sentinelMonitor;
     ChartModeController* m_modeController{nullptr};
 };
