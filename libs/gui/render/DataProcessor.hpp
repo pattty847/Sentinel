@@ -19,6 +19,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <unordered_set>
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
@@ -150,6 +151,24 @@ private:
     // Append-only state with viewport version gating
     int64_t m_lastProcessedTime = 0;
     uint64_t m_lastViewportVersion = 0;
+
+    // Track processed slices by time range (slices are reused in memory, so can't use pointers)
+    struct SliceTimeRange {
+        int64_t startTime;
+        int64_t endTime;
+
+        bool operator==(const SliceTimeRange& other) const {
+            return startTime == other.startTime && endTime == other.endTime;
+        }
+    };
+
+    struct SliceTimeRangeHash {
+        size_t operator()(const SliceTimeRange& range) const {
+            return std::hash<int64_t>()(range.startTime) ^ (std::hash<int64_t>()(range.endTime) << 1);
+        }
+    };
+
+    std::unordered_set<SliceTimeRange, SliceTimeRangeHash> m_processedTimeRanges;
 
     // Trade batching configuration and state
     struct TradeBatchConfig {

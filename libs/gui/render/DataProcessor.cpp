@@ -415,6 +415,7 @@ void DataProcessor::updateVisibleCells() {
     const bool viewportChanged = (currentViewportVersion != m_lastViewportVersion);
     if (viewportChanged) {
         m_visibleCells.clear();
+        m_processedTimeRanges.clear();
         m_lastProcessedTime = 0;
         m_lastViewportVersion = currentViewportVersion;
     }
@@ -486,22 +487,34 @@ void DataProcessor::updateVisibleCells() {
         int processedSlices = 0;
 
         if (viewportChanged || m_lastProcessedTime == 0) {
+            // Full rebuild: clear processed time range tracking and process everything
+            m_processedTimeRanges.clear();
             for (const auto* slice : visibleSlices) {
                 ++processedSlices;
                 createCellsFromLiquiditySlice(*slice);
+                m_processedTimeRanges.insert({slice->startTime_ms, slice->endTime_ms});
                 if (slice && slice->endTime_ms > m_lastProcessedTime) {
                     m_lastProcessedTime = slice->endTime_ms;
                 }
             }
         } else {
+            // Append mode: process only slices with NEW time ranges
+            // CRITICAL: LTSE reuses slice objects in memory, so we MUST track by time range, not pointer
             for (const auto* slice : visibleSlices) {
                 if (!slice) continue;
-                if (slice->startTime_ms >= m_lastProcessedTime) {
+
+                SliceTimeRange range{slice->startTime_ms, slice->endTime_ms};
+
+                // Check if we've already processed a slice with this time range
+                if (m_processedTimeRanges.find(range) == m_processedTimeRanges.end()) {
                     ++processedSlices;
                     createCellsFromLiquiditySlice(*slice);
-                    if (slice->endTime_ms > m_lastProcessedTime) {
-                        m_lastProcessedTime = slice->endTime_ms;
-                    }
+                    m_processedTimeRanges.insert(range);
+                }
+
+                // Update last processed time to newest slice
+                if (slice->endTime_ms > m_lastProcessedTime) {
+                    m_lastProcessedTime = slice->endTime_ms;
                 }
             }
         }

@@ -424,7 +424,10 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
-    m_dataProcessor->startProcessing();
+    QMetaObject::invokeMethod(
+        m_dataProcessor.get(),
+        &DataProcessor::startProcessing,
+        Qt::QueuedConnection);
 }
 
 // Dense data access - set cache on both UGR and DataProcessor
@@ -558,6 +561,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                        << "cache=" << cacheUs << "microseconds"
                        << "content=" << contentUs << "microseconds"
                        << "cells=" << cellsCount);
+
+    // DIAGNOSTIC: Check if we have cells but they're not distributed properly
+    if (cellsCount > 0 && cellsCount % 100 == 0) {
+        std::map<int64_t, size_t> cellsPerTimeSlice;
+        for (const auto& cell : m_visibleCells) {
+            cellsPerTimeSlice[cell.timeStart_ms]++;
+        }
+        sLog_Debug("CELL DISTRIBUTION: " << cellsPerTimeSlice.size() << " time slices, "
+                   << "first=" << (cellsPerTimeSlice.empty() ? 0 : cellsPerTimeSlice.begin()->first)
+                   << " count=" << (cellsPerTimeSlice.empty() ? 0 : cellsPerTimeSlice.begin()->second));
+    }
 
     return sceneNode;
 }
