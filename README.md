@@ -1,7 +1,19 @@
-# Sentinel: GPU-Accelerated Trading Terminal
+# **Sentinel: GPU-Accelerated Trading Terminal**
 
-> High-performance market analysis platform with sub-millisecond rendering  
-> This project is licensed under the GNU AGPL v3—open source with strong copyleft.
+> Sub-millisecond market visualization powered by modern C++20 and Qt 6.
+> Licensed under the **GNU AGPL v3** — open source with strong copyleft.
+
+---
+
+## 🖥️ Screenshots
+
+| Dockable Widget Layout *(branch: dockable-widgets)* | Liquidity Heatmap *(branch: main)* |
+|:-----------------------------------------:|:--------------------------------:|
+| <img src="https://github.com/user-attachments/assets/9d3ac4b5-eedb-44d3-855c-b03a7d6ac66b" width="600"/> | <img src="https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779" width="600"/> |
+
+> *Sneak peek of the new dockable UI framework — modular panels, tabbing, and detachable layouts like professional trading terminals.*
+
+---
 
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue.svg" alt="C++20">
@@ -9,11 +21,10 @@
   <img src="https://img.shields.io/badge/Architecture-GPU_Accelerated-purple" alt="GPU Accelerated">
   <img src="https://img.shields.io/badge/Platform-Cross_Platform-lightgrey.svg" alt="Cross-Platform">
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License">
+  <img src="https://img.shields.io/badge/status-under_development-orange" alt="Status">
 </p>
 
 <div align="center">
-
-**Real-time cryptocurrency market visualization with GPU-accelerated order book heatmaps**
 
 **[🚀 Quick Start](#quick-start) • [⚡ Performance](#performance) • [🏗️ Architecture](#architecture) • [📚 Documentation](#documentation)**
 
@@ -21,187 +32,168 @@
 
 ---
 
-## Screenshots
+## 🧭 Why Sentinel Exists
 
-<table>
-<tr>
-<td width="50%">
-
-**Liquidity Heatmap**
-<img width="2559" height="1385" alt="image" src="https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779" />
-
-</td>
-</tr>
-</table>
+Existing crypto visualizers are either laggy, CPU-bound, or stuck in browsers.
+Sentinel pushes GPU-accelerated rendering to its limits — native, real-time, and extensible.
+It’s a sandbox for exploring lock-free architectures, high-frequency visualization, and next-gen UI design.
 
 ---
 
-## What is Sentinel?
+## ⚙️ What Is Sentinel?
 
-Sentinel is a high-performance trading terminal built with modern C++20 and Qt 6, demonstrating professional-grade architecture patterns and GPU-accelerated visualization. It processes live cryptocurrency market data from Coinbase Advanced Trade API and renders order book heatmaps with multi-timeframe aggregation at institutional-grade speeds.
+A professional-grade trading terminal built in **C++20 / Qt 6**, streaming live market data from Coinbase Advanced Trade API and rendering dense order-book heatmaps at institutional speed.
 
-Built to showcase:
-- **Production-Ready Performance**: Sub-millisecond rendering with GPU acceleration
-- **Modern C++20 Patterns**: Concepts, ranges, RAII, and zero-allocation hot paths
-- **Clean Architecture**: Strict separation between core business logic and presentation layers
-- **Cross-Platform Excellence**: Native GPU backends on Windows (D3D11), macOS (Metal), and Linux (OpenGL)
+**Highlights**
+
+* **Sub-ms Rendering:** GPU-driven scene graph with triple buffering
+* **Modern C++:** Concepts, ranges, and zero-allocation hot paths
+* **Threaded Pipelines:** Lock-free cross-thread handoff between data + renderer
+* **Cross-Platform:** D3D11 (Windows), Metal (macOS), OpenGL (Linux)
 
 ---
 
-## Performance
+## 🚀 TL;DR Quickstart
 
-### Rendering Metrics
-
-| Metric | Before Optimization | After GPU Acceleration | Improvement |
-|--------|---------------------|------------------------|-------------|
-| **Paint Time** | ~1,500 ms | 0.7–1.7 ms | **2,000x faster** |
-| **Cache Lookup** | ~1,100,000 µs | 20–130 µs | **10,000x faster** |
-| **Slice Coverage** | 8–9 time slices | 54+ time slices | **6x more data** |
-| **Frame Rate** | Constant stalls | 28–30 Hz stable | **Smooth 30 FPS** |
-| **Cell Rendering** | N/A | 6,000+ cells/frame | **Zero stalls** |
-
-### System Efficiency
-
-- **CPU Temperature**: 70°C → 45–55°C (24% reduction)
-- **GPU Utilization**: 0% → 15–30% (proper hardware acceleration)
-- **Memory**: Lock-free pipelines, zero malloc in hot paths
-- **Latency**: Non-blocking async snapshot handoff between threads
-
-### GPU Backend Selection
-
-Platform-optimized rendering backends automatically selected in `main.cpp`:
-
-```cpp
-#ifdef Q_OS_WIN
-    qputenv("QSG_RHI_BACKEND", "d3d11");    // Windows: Direct3D 11
-#elif defined(Q_OS_MACOS)
-    qputenv("QSG_RHI_BACKEND", "metal");    // macOS: Metal
-#else
-    qputenv("QSG_RHI_BACKEND", "opengl");   // Linux: OpenGL
-#endif
+```bash
+git clone https://github.com/pattty847/Sentinel.git
+cmake --preset windows-mingw && cmake --build --preset windows-mingw -j
+./build-windows-mingw/apps/sentinel_gui/sentinel_gui
 ```
 
----
-
-## Key Features
-
-### Market Visualization
-- **Order Book Heatmap**: Real-time liquidity visualization with temporal intensity decay
-- **Multi-Timeframe Aggregation**: 100ms to 10s temporal bucketing for pattern recognition
-- **Volume-at-Price Analysis**: Dense price-level depth visualization
-- **O(1) Order Book**: 5M+ price level capacity with constant-time lookups
-
-### Technical Architecture
-- **GPU-Accelerated Rendering**: Qt Scene Graph with platform-native backends (Metal/D3D11/OpenGL)
-- **Append-Only Scene Graph**: Incremental updates, no full rebuilds
-- **Lock-Free Data Pipelines**: SPSC queues for zero-contention cross-thread communication
-- **Async Snapshot Handoff**: Non-blocking data transfer between processing and render threads
-- **Chunked Geometry**: Overcomes ANGLE vertex limits on Windows (fixes rendering artifacts)
-
-### Cross-Platform Support
-- **Windows**: Direct3D 11 backend, MSYS2/MinGW build chain
-- **macOS**: Metal backend, Clang toolchain
-- **Linux**: OpenGL backend, GCC toolchain
-- **CMake Presets**: One-command configuration and build per platform
+> Detailed setup for macOS, Linux, and Windows below.
 
 ---
 
-## Architecture
+## 📦 Quick Start (Detailed)
 
-Sentinel follows a strict modular architecture with three primary layers:
-
-### Core Layer (`libs/core`)
-Pure C++20 business logic with **zero Qt dependencies** (QtCore only for types):
-- **Market Data Pipeline**: WebSocket transport, message dispatch, authentication, caching
-- **Order Book Engine**: O(1) lookup with 5M price level capacity
-- **Time Series Engine**: Multi-timeframe aggregation (100ms to 10s)
-- **Performance Monitor**: Unified latency and throughput tracking
-
-### GUI Layer (`libs/gui`)
-Qt-based adapters and rendering strategies:
-- **UnifiedGridRenderer**: Facade for GPU-accelerated scene graph rendering
-- **DataProcessor**: Snapshot publisher on worker thread, async handoff to renderer
-- **Render Strategies**: Pluggable visualization modes (Heatmap, Candles, Trade Flow)
-- **QML Integration**: Declarative UI with C++ backend bindings
-
-### App Layer (`apps/`)
-Minimal bootstrap entry points:
-- **sentinel_gui**: Main trading terminal application
-- **stream_cli**: Headless market data streaming utility
-
-### Design Principles
-
-- **Separation of Concerns**: Core has no GUI dependencies; GUI contains no business logic
-- **Strategy Pattern**: Pluggable rendering strategies for extensibility
-- **RAII + Smart Pointers**: Automatic resource management, no manual memory handling
-- **500 LOC Limit**: Enforced file size limit prevents monolithic classes
-
-For detailed component diagrams and data flow, see **[Architecture Document](docs/ARCHITECTURE.md)**.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-<details>
-<summary><strong>macOS</strong></summary>
+<details><summary><b>macOS</b></summary>
 
 ```bash
 xcode-select --install
 brew install qt cmake ninja
 ```
+
 </details>
 
-<details>
-<summary><strong>Linux (Ubuntu/Debian)</strong></summary>
+<details><summary><b>Linux (Ubuntu/Debian)</b></summary>
 
 ```bash
 sudo apt update
 sudo apt install build-essential cmake ninja-build qt6-base-dev \
     qt6-declarative-dev libgl1-mesa-dev libssl-dev
 ```
+
 </details>
 
-<details>
-<summary><strong>Windows</strong></summary>
+<details><summary><b>Windows</b></summary>
 
-- Install [MSYS2](https://www.msys2.org/)
-- Install [Qt 6.5+](https://www.qt.io/download-qt-installer)
-- In MSYS2 terminal:
+1. Install [MSYS2](https://www.msys2.org/)
+2. Install [Qt 6.5+](https://www.qt.io/download-qt-installer)
+3. In MSYS2 terminal:
+
 ```bash
 pacman -S cmake ninja mingw-w64-x86_64-gcc
 ```
+
 </details>
 
-### Build & Run
+---
 
-```bash
-# Clone repository
-git clone https://github.com/pattty847/Sentinel.git
-cd Sentinel
+## 📊 Performance
 
-# Configure (choose your platform preset)
-cmake --preset mac-clang      # macOS
-cmake --preset linux-gcc      # Linux
-cmake --preset windows-mingw  # Windows
+| Metric         | Before   | After GPU Acceleration | Δ              |
+| -------------- | -------- | ---------------------- | -------------- |
+| Paint Time     | ~1500 ms | **0.7–1.7 ms**         | 2 000× faster  |
+| Cache Lookup   | 1.1 s    | **20–130 µs**          | 10 000× faster |
+| Slice Coverage | 8–9      | **54+**                | 6× denser      |
+| Frame Rate     | Stalls   | **28–30 Hz**           | Vsynced Match  |
+| Cells Rendered | —        | **6 000 +/frame**      | Zero stalls    |
 
-# Build with all CPU cores
-cmake --build --preset mac-clang -j$(sysctl -n hw.ncpu)      # macOS
-cmake --build --preset linux-gcc -j$(nproc)                  # Linux
-cmake --build --preset windows-mingw -j$(nproc)              # Windows
+**System Impact**
 
-# Run tests
-cd build-mac-clang && ctest --output-on-failure
+* GPU Utilization ↑ to 30 % (true acceleration)
+* Zero mallocs in hot paths
+* Asynchronous thread-safe snapshots
 
-# Launch GUI
-./build-mac-clang/apps/sentinel_gui/sentinel_gui       # macOS/Linux
-./build-windows-mingw/apps/sentinel_gui/sentinel_gui   # Windows
+---
+
+## 🧠 Architecture Overview
+
+Sentinel uses a **three-layer modular architecture**:
+
+### 1. Core (`libs/core`)
+
+Pure C++ business logic (no Qt GUI deps)
+
+* Market data transport + cache
+* O(1) order-book engine (5 M levels, *adjustable*)
+* Dyanmic Time-series LOD aggregation (100 ms → 10 s, *configurable*)
+* Unified performance monitor
+
+### 2. GUI (`libs/gui`)
+
+Qt6-based architecture + render strategies
+
+* GPU scene-graph renderer
+* DataProcessor thread handoff
+* Pluggable render modes (Heatmap, Trades, Flow)
+* Future: dockable panels, AI commentary, multi-chart layouts
+
+### 3. Apps (`apps/`)
+
+Thin launchers:
+
+* **sentinel_gui:** full trading terminal
+* **stream_cli:** headless data streamer for an upcoming client/server architecture
+
+### 4. Upcoming Module: SEC Filing Viewer
+
+> **Status:** In Development
+> *Real-time insider trading, filings, and financial data integrated directly into Sentinel’s AI and dockable layout.*
+
+The **SEC Filing Viewer** will bring corporate fundamentals into the same interface as market data — letting you visualize **insider Form 4 trades**, **earnings filings**, and **company financials** right beside live price action.
+It’s powered by the U.S. SEC EDGAR API and a custom async fetch/cache pipeline (see [SEC API README](https://github.com/pattty847/Sentinel/blob/main/sec/SEC_API_README.md)).
+
+**Planned Capabilities**
+
+* **Form 4 Insider Transactions** — visualized chronologically or overlaid on the chart
+* **Recent Filings** — timeline markers for 10-K, 8-K, S-1, etc.
+* **Financial Summaries** — key metrics (EPS, revenue, assets) cached and AI-readable
+* **AI Integration** — natural-language summaries, “why did insiders buy?”-type explanations
+
+```text
+Sentinel Core ↔ SEC Viewer Dock ↔ AI Commentary Module
 ```
 
-### Configuration
+**Design Principles**
 
-Create `key.json` in the project root with your Coinbase Advanced Trade API credentials:
+* Separation of concerns
+* Strategy pattern for render modes
+* RAII + smart pointers everywhere
+* <500 LOC per file enforcement
+
+---
+
+## 🧩 GPU Backend Selection
+
+```cpp
+#ifdef Q_OS_WIN
+qputenv("QSG_RHI_BACKEND", "d3d11");
+#elif defined(Q_OS_MACOS)
+qputenv("QSG_RHI_BACKEND", "metal");
+#else
+qputenv("QSG_RHI_BACKEND", "opengl");
+#endif
+```
+
+Platform-optimized graphics backends are automatically selected at runtime.
+
+---
+
+## 🔐 Configuration
+
+Create a `key.json` file in the project root with your Coinbase Advanced Trade API credentials:
 
 ```json
 {
@@ -210,84 +202,67 @@ Create `key.json` in the project root with your Coinbase Advanced Trade API cred
 }
 ```
 
-> **Note**: Get API keys from [Coinbase Cloud](https://cloud.coinbase.com/)
+---
 
-### Logging
+## 🧰 Logging & Debugging
 
-Control log verbosity using Qt's categorized logging system. See **[Logging Guide](docs/LOGGING_GUIDE.md)** for details.
+Use Qt’s categorized logging:
 
 ```bash
-# Production: minimal output
-export QT_LOGGING_RULES="*.debug=false"
-
-# Debug rendering performance
-export QT_LOGGING_RULES="sentinel.render=true;sentinel.render.debug=true"
-
-# Debug data processing
-export QT_LOGGING_RULES="sentinel.data=true;sentinel.data.debug=true"
+export QT_LOGGING_RULES="sentinel.render=true;sentinel.data.debug=true"
 ```
 
----
-
-## Documentation
-
-- **[Architecture](docs/ARCHITECTURE.md)**: System design, components, and data flow
-- **[Logging Guide](docs/LOGGING_GUIDE.md)**: Categorized logging system usage
-- **[Code Analysis Tools](scripts/README_CODE_ANALYSIS.md)**: Function extraction and overview utilities
-- **[Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)**: Official API reference
-- **[Qt Scene Graph](https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph.html)**: GPU rendering technology
+See [docs/LOGGING_GUIDE.md](docs/LOGGING_GUIDE.md) for full details.
 
 ---
 
-## Contributing
+## 📚 Documentation
 
-We follow modern C++20 best practices and enforce strict quality standards:
-
-### Code Standards
-- **C++20 Standard**: Use concepts, ranges, structured bindings, and smart pointers
-- **RAII Everywhere**: No manual resource management
-- **Lock-Free Hot Paths**: Zero malloc/contention in rendering and data processing loops
-- **500 LOC Limit**: Files over 450 lines require justification; 500+ triggers mandatory refactor
-- **Separation of Concerns**: Business logic in `core`, GUI adapters in `gui`, apps are thin shells
-
-### Contribution Workflow
-
-1. **Fork & Branch**: Create a feature branch from `main`
-2. **Code**: Follow existing patterns and file organization
-3. **Test**: Ensure all tests pass
-   ```bash
-   cd build-<platform>
-   ctest --output-on-failure
-   ```
-4. **Build**: Verify clean builds on your platform
-5. **PR**: Submit with clear description of changes and performance impact (if applicable)
-
-### Recent Achievements
-
-Major refactors that improved performance by orders of magnitude:
-
-- ✅ **GPU Acceleration**: Append-only scene graph rendering (2,000x paint speedup)
-- ✅ **Async Snapshots**: Non-blocking handoff between data processor and renderer
-- ✅ **Chunked Geometry**: Fixed Windows ANGLE vertex limit (eliminated rendering artifacts)
-- ✅ **Platform Backends**: Native D3D11/Metal/OpenGL selection per OS
-- ✅ **Lifecycle Management**: Graceful shutdown, thread cleanup, no QThread warnings
+* [Architecture](docs/ARCHITECTURE.md) — detailed component flow
+* [Logging Guide](docs/LOGGING_GUIDE.md) — categorized Qt logging
+* [Code Analysis Tools](scripts/README_CODE_ANALYSIS.md)
+* [Coinbase WebSocket API](https://docs.cloud.coinbase.com/exchange/docs/websocket-overview)
+* [Qt Scene Graph](https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph.html)
 
 ---
 
-## License
+## 🧪 Contribution Standards
+
+* **C++ 20 only** — concepts, ranges, structured bindings
+* **RAII everywhere** — no manual delete
+* **Lock-free hot paths** — zero contention
+* **File limit:** 500 LOC hard cap
+* **Core ≠ GUI** — strict separation
+
+**Workflow**
+
+1. Fork + feature branch
+2. Implement & test
+3. Run `ctest`
+4. Submit PR with performance notes
+
+**Recent Wins**
+
+* ✅ GPU scene graph acceleration (2000× paint speedup)
+* ✅ Async snapshots (no frame blocking)
+* ✅ Chunked geometry for Windows ANGLE limit
+* ✅ Platform-native backends (Metal/D3D11/OpenGL)
+* ✅ Graceful shutdown / thread cleanup
+
+---
+
+## 📄 License
 
 Licensed under **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+Any network service built with Sentinel must remain open-source.
 
-This ensures that any network service built with Sentinel must also be open-sourced.
-
-See [LICENSE](LICENSE) for full terms.
+See [LICENSE](LICENSE) for full text.
 
 ---
 
 <div align="center">
 
 **Built for institutional-grade market analysis**
-
 *Sub-millisecond rendering • Lock-free pipelines • GPU acceleration*
 
 </div>
