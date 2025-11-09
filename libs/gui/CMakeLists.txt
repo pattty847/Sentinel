@@ -44,7 +44,17 @@ set(GRID_CORE_SOURCES
     render/strategies/CandleStrategy.cpp
 )
 
-set(GUI_SOURCES ${GRID_CORE_SOURCES})
+# Widget sources (auto-discovered for easier expansion)
+file(GLOB WIDGET_SOURCES
+    "widgets/*.cpp"
+)
+
+# Theme sources
+file(GLOB THEME_SOURCES
+    "themes/*.cpp"
+)
+
+set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
 
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})

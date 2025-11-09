@@ -119,3 +119,7 @@ GEMINI.md
 # Documentation subdirectories (keep only base docs/)
 docs/archive/
 docs/refactor
+docs/untracked
+
+# Random files
+liquidity_timeseries_log.txt

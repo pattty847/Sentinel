@@ -151,12 +151,12 @@ const OrderBook& DataProcessor::getLatestOrderBook() const {
 
 void DataProcessor::captureOrderBookSnapshot() {
     /*  
-        This function captures the current state of an order book and aligns it to a 100ms time bucket.
-        If there are skipped buckets since the last snapshot (e.g., no activity in the last 100ms),
-        it carries forward the latest order book state into each bucket up to the current time.
-        This ensures that order book snapshots are recorded at consistent intervals in the liquidity engine.
-        The periodic snapshot promotes proper time alignment for rendering historical order flow and downstream analysis.
-        Early exits occur if the system is shutting down or if no valid liquidity engine exists.
+    This function captures the current state of an order book and aligns it to a 100ms time bucket.
+    If there are skipped buckets since the last snapshot (e.g., no activity in the last 100ms),
+    it carries forward the latest order book state into each bucket up to the current time.
+    This ensures that order book snapshots are recorded at consistent intervals in the liquidity engine.
+    The periodic snapshot promotes proper time alignment for rendering historical order flow and downstream analysis.
+    Early exits occur if the system is shutting down or if no valid liquidity engine exists.
     */
 
     // Early return if shutting down
