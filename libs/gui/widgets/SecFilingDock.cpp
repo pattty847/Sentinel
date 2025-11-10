@@ -12,19 +12,18 @@
 
 SecFilingDock::SecFilingDock(QWidget* parent)
     : DockablePanel("SecFilingDock", "SEC Filing Viewer", parent)
-    , m_serviceBridge(new SecServiceBridge(this))
-    , m_networkManager(new QNetworkAccessManager(this))
+    , m_apiClient(new SecApiClient(this))
     , m_filingsModel(new QStandardItemModel(this))
     , m_transactionsModel(new QStandardItemModel(this))
 {
     buildUi();
     
-    connect(m_serviceBridge, &SecServiceBridge::serviceError, this, &SecFilingDock::onServiceError);
-    
-    // Start service
-    if (!m_serviceBridge->startService()) {
-        updateStatus("Failed to start SEC service", true);
-    }
+    // Connect to API client signals
+    connect(m_apiClient, &SecApiClient::filingsReady, this, &SecFilingDock::onFilingsReady);
+    connect(m_apiClient, &SecApiClient::transactionsReady, this, &SecFilingDock::onTransactionsReady);
+    connect(m_apiClient, &SecApiClient::financialsReady, this, &SecFilingDock::onFinancialsReady);
+    connect(m_apiClient, &SecApiClient::apiError, this, &SecFilingDock::onApiError);
+    connect(m_apiClient, &SecApiClient::statusUpdate, this, &SecFilingDock::onStatusUpdate);
 }
 
 void SecFilingDock::buildUi() {
@@ -113,14 +112,7 @@ void SecFilingDock::fetchFilings() {
     QString formType = m_formTypeCombo->currentText();
     if (formType == "All") formType = "";
     
-    QString url = QString("%1/api/filings?ticker=%2").arg(m_serviceBridge->serviceUrl().toString(), ticker);
-    if (!formType.isEmpty()) {
-        url += QString("&form_type=%1").arg(formType);
-    }
-    
-    updateStatus("Fetching filings...");
-    QNetworkReply* reply = m_networkManager->get(QNetworkRequest(QUrl(url)));
-    connect(reply, &QNetworkReply::finished, this, &SecFilingDock::onFilingsReply);
+    m_apiClient->fetchFilings(ticker, formType);
 }
 
 void SecFilingDock::fetchInsiderTransactions() {
@@ -130,11 +122,7 @@ void SecFilingDock::fetchInsiderTransactions() {
         return;
     }
     
-    QString url = QString("%1/api/insider-transactions?ticker=%2").arg(m_serviceBridge->serviceUrl().toString(), ticker);
-    
-    updateStatus("Fetching insider transactions...");
-    QNetworkReply* reply = m_networkManager->get(QNetworkRequest(QUrl(url)));
-    connect(reply, &QNetworkReply::finished, this, &SecFilingDock::onTransactionsReply);
+    m_apiClient->fetchInsiderTransactions(ticker);
 }
 
 void SecFilingDock::fetchFinancialSummary() {
@@ -144,109 +132,68 @@ void SecFilingDock::fetchFinancialSummary() {
         return;
     }
     
-    QString url = QString("%1/api/financial-summary?ticker=%2").arg(m_serviceBridge->serviceUrl().toString(), ticker);
-    
-    updateStatus("Fetching financial summary...");
-    QNetworkReply* reply = m_networkManager->get(QNetworkRequest(QUrl(url)));
-    connect(reply, &QNetworkReply::finished, this, &SecFilingDock::onFinancialsReply);
+    m_apiClient->fetchFinancialSummary(ticker);
 }
 
-void SecFilingDock::onFilingsReply() {
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-    if (!reply) return;
-    
-    if (reply->error() != QNetworkReply::NoError) {
-        updateStatus("Error fetching filings: " + reply->errorString(), true);
-        reply->deleteLater();
-        return;
-    }
-    
-    QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-    parseFilings(doc);
-    reply->deleteLater();
+void SecFilingDock::onFilingsReady(const QList<SecApiClient::Filing>& filings) {
+    displayFilings(filings);
 }
 
-void SecFilingDock::onTransactionsReply() {
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-    if (!reply) return;
-    
-    if (reply->error() != QNetworkReply::NoError) {
-        updateStatus("Error fetching transactions: " + reply->errorString(), true);
-        reply->deleteLater();
-        return;
-    }
-    
-    QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-    parseTransactions(doc);
-    reply->deleteLater();
+void SecFilingDock::onTransactionsReady(const QList<SecApiClient::Transaction>& transactions) {
+    displayTransactions(transactions);
 }
 
-void SecFilingDock::onFinancialsReply() {
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-    if (!reply) return;
-    
-    if (reply->error() != QNetworkReply::NoError) {
-        updateStatus("Error fetching financials: " + reply->errorString(), true);
-        reply->deleteLater();
-        return;
-    }
-    
-    QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-    parseFinancials(doc);
-    reply->deleteLater();
+void SecFilingDock::onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics) {
+    displayFinancials(metrics);
 }
 
-void SecFilingDock::parseFilings(const QJsonDocument& doc) {
+void SecFilingDock::onApiError(const QString& error) {
+    updateStatus("API Error: " + error, true);
+}
+
+void SecFilingDock::onStatusUpdate(const QString& message) {
+    updateStatus(message);
+}
+
+void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
     m_filingsModel->clear();
     m_filingsModel->setHorizontalHeaderLabels({"Date", "Form Type", "Description"});
     
-    QJsonObject obj = doc.object();
-    QJsonArray filings = obj["filings"].toArray();
-    
-    for (const QJsonValue& value : filings) {
-        QJsonObject filing = value.toObject();
+    for (const auto& filing : filings) {
         QList<QStandardItem*> row;
-        row << new QStandardItem(filing["filingDate"].toString());
-        row << new QStandardItem(filing["form"].toString());
-        row << new QStandardItem(filing["description"].toString());
+        row << new QStandardItem(filing.date);
+        row << new QStandardItem(filing.formType);
+        row << new QStandardItem(filing.description);
         m_filingsModel->appendRow(row);
     }
-    
-    updateStatus(QString("Loaded %1 filings").arg(filings.size()));
 }
 
-void SecFilingDock::parseTransactions(const QJsonDocument& doc) {
+void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
     m_transactionsModel->clear();
     m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
     
-    QJsonObject obj = doc.object();
-    QJsonArray transactions = obj["transactions"].toArray();
-    
-    for (const QJsonValue& value : transactions) {
-        QJsonObject tx = value.toObject();
+    for (const auto& tx : transactions) {
         QList<QStandardItem*> row;
-        row << new QStandardItem(tx["transactionDate"].toString());
-        row << new QStandardItem(tx["insiderName"].toString());
-        row << new QStandardItem(tx["transactionType"].toString());
-        row << new QStandardItem(QString::number(tx["shares"].toDouble()));
-        row << new QStandardItem(QString::number(tx["price"].toDouble()));
+        row << new QStandardItem(tx.date);
+        row << new QStandardItem(tx.insiderName);
+        row << new QStandardItem(tx.transactionType);
+        row << new QStandardItem(QString::number(tx.shares));
+        row << new QStandardItem(QString::number(tx.price));
         m_transactionsModel->appendRow(row);
     }
-    
-    updateStatus(QString("Loaded %1 transactions").arg(transactions.size()));
 }
 
-void SecFilingDock::parseFinancials(const QJsonDocument& doc) {
-    QJsonObject obj = doc.object();
-    QJsonObject summary = obj["summary"].toObject();
-    
+void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics) {
     QString text = "Financial Summary\n\n";
-    for (auto it = summary.begin(); it != summary.end(); ++it) {
-        text += QString("%1: %2\n").arg(it.key(), it.value().toString());
+    for (const auto& metric : metrics) {
+        QString value = metric.value;
+        if (!metric.unit.isEmpty()) {
+            value += " " + metric.unit;
+        }
+        text += QString("%1: %2\n").arg(metric.name, value);
     }
     
     m_financialsDisplay->setPlainText(text);
-    updateStatus("Financial summary loaded");
 }
 
 void SecFilingDock::updateStatus(const QString& message, bool isError) {
@@ -262,7 +209,4 @@ void SecFilingDock::onSymbolChanged(const QString& symbol) {
     // Optionally auto-fetch filings
 }
 
-void SecFilingDock::onServiceError(const QString& error) {
-    updateStatus("Service error: " + error, true);
-}
 

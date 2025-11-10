@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DockablePanel.hpp"
-#include "SecServiceBridge.hpp"
+#include "SecApiClient.hpp"
 #include <QLineEdit>
 #include <QComboBox>
 #include <QPushButton>
@@ -30,19 +30,19 @@ private slots:
     void fetchFilings();
     void fetchInsiderTransactions();
     void fetchFinancialSummary();
-    void onFilingsReply();
-    void onTransactionsReply();
-    void onFinancialsReply();
-    void onServiceError(const QString& error);
+    void onFilingsReady(const QList<SecApiClient::Filing>& filings);
+    void onTransactionsReady(const QList<SecApiClient::Transaction>& transactions);
+    void onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics);
+    void onApiError(const QString& error);
+    void onStatusUpdate(const QString& message);
 
 private:
     void updateStatus(const QString& message, bool isError = false);
-    void parseFilings(const QJsonDocument& doc);
-    void parseTransactions(const QJsonDocument& doc);
-    void parseFinancials(const QJsonDocument& doc);
+    void displayFilings(const QList<SecApiClient::Filing>& filings);
+    void displayTransactions(const QList<SecApiClient::Transaction>& transactions);
+    void displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics);
     
-    SecServiceBridge* m_serviceBridge;
-    QNetworkAccessManager* m_networkManager;
+    SecApiClient* m_apiClient;
     
     QLineEdit* m_tickerInput;
     QComboBox* m_formTypeCombo;
@@ -58,7 +58,5 @@ private:
     
     QTextEdit* m_financialsDisplay;
     QLabel* m_statusLabel;
-    
-    QHash<QString, QJsonDocument> m_cache;
 };
 
