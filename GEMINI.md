@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+You are an AI coding assistant.
+Write correct, efficient, and idiomatic code.
+Provide explanations only when requested.
+Follow the user’s language and libraries.
+Use best practices for readability and performance.
+
 ## Mission & Scope
 Sentinel is a C++20 trading terminal with a hard separation between pure core logic, Qt-based adapters, and thin app entry points. Every contribution should preserve low-latency data handling, GPU-driven visualization, and modular maintainability.
 
@@ -41,3 +47,63 @@ Sentinel is a C++20 trading terminal with a hard separation between pure core lo
 - Market data refactor guide: `docs/sockets-auth-cache-refactor.md`
 - Logging details: `docs/LOGGING_GUIDE.md`
 - Code analysis tooling: `scripts/README_CODE_ANALYSIS.md`
+
+---
+
+## Rendering invariant: Zoom must bump `viewportVersion`
+
+- **What**: Any zoom operation must update the viewport via `GridViewState::setViewport(...)` so `m_viewportVersion` increments and `viewportChanged` is emitted.
+- **Why**: `DataProcessor::updateVisibleCells()` gates full rebuilds on the viewport version. If zoom code writes bounds directly and skips `setViewport`, the version won’t change; the processor won’t rebuild, so zooming out won’t reveal history until a later pan triggers a version bump.
+- **How**: Route zoom math in `GridViewState::handleZoomWithViewport(...)` to `setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice)` rather than assigning members. Do not emit `viewportChanged` manually; the setter handles both versioning and signaling.
+
+Code reference — zoom path uses `setViewport(...)`:
+```167:185:libs/gui/render/GridViewState.cpp
+            // Apply validated bounds via central setter to bump version and signal change
+            setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
+            
+            if constexpr (kTraceZoomInteractions) {
+                qDebug() << " ZOOM RESULT:"
+                         << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
+                         << "NewTime[" << currentCenterTime << "]"
+                         << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
+            }
+        }
+        
+        m_zoomFactor = newZoom;
+        
+        // Disable auto-scroll when user manually zooms
+        if (m_autoScrollEnabled) {
+            m_autoScrollEnabled = false;
+            emit autoScrollEnabledChanged();
+        }
+```
+
+Code reference — processor rebuilds only when the viewport version changes:
+```413:421:libs/gui/render/DataProcessor.cpp
+    // Viewport version gating: full rebuild only when viewport changes
+    const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
+    const bool viewportChanged = (currentViewportVersion != m_lastViewportVersion);
+    if (viewportChanged) {
+        m_visibleCells.clear();
+        m_lastProcessedTime = 0;
+        m_lastViewportVersion = currentViewportVersion;
+    }
+```
+
+### Event pipeline (zoom → repaint)
+- `GridViewState::handleZoom*` computes new bounds → calls `setViewport(...)`.
+- `GridViewState::setViewport` increments `m_viewportVersion` and emits `viewportChanged`.
+- `UnifiedGridRenderer::onViewportChanged` enqueues `DataProcessor::updateVisibleCells()` (queued connection) and marks `m_transformDirty`.
+- `DataProcessor::updateVisibleCells` detects `viewportChanged` via version, rebuilds, publishes snapshot, emits `dataUpdated`.
+- `UnifiedGridRenderer` receives `dataUpdated`, sets `m_appendPending`, calls `update()`; `updatePaintNode` pulls the snapshot and updates geometry/content.
+
+### Testing checklist
+- Zoom out with mouse wheel: historical rows/columns should appear immediately (no pan required).
+- Logs should show processor “rebuild” when zooming, not just “append”.
+- Pan end should still trigger a resync (queued `updateVisibleCells`) to clear any transient visual offset.
+
+### Pitfalls
+- Avoid any direct writes to `GridViewState` viewport members in interaction code.
+- Do not manually emit `viewportChanged` from zoom handlers; always go through `setViewport`.
+
+Last updated: 2025-11-05
