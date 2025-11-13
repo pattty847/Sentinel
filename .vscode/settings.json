@@ -20,5 +20,6 @@
     ],
     "files.associations": {
         "*.qml": "qml"
-    }
+    },
+    "chatgpt.runCodexInWindowsSubsystemForLinux": true
 } 

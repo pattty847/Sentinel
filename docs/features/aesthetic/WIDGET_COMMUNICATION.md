@@ -263,3 +263,6 @@ Widgets (Spokes)
 3. **Consistent interface** via `DockablePanel` base class
 4. **Thread-safe** via `Qt::QueuedConnection` for cross-thread communication
 
+
+
+
