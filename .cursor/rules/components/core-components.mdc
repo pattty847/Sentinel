@@ -3,21 +3,115 @@ globs: libs/core/*
 alwaysApply: false
 ---
 
-# Core Components
+# Core Layer Rules (Sentinel)
 
-## Market Data Pipeline
-- `marketdata/ws`: `BeastWsTransport` and `SubscriptionManager` handle WebSocket connectivity, reconnect backoff, and declarative subscription frames.
-- `marketdata/dispatch`: `MessageDispatcher` and helpers normalize exchange payloads into typed events before they reach the cache.
-- `marketdata/cache`: `DataCache` stores rolling trades and live order books; `DataCacheSinkAdapter` is the only writer entry point.
-- `marketdata/auth`: `Authenticator` issues JWTs; keep it injectable for testing and never hardcode secret paths.
-- `marketdata/model`: DTOs such as `Trade`, `OrderBook`, and `LiveOrderBook`—keep them lightweight and serialization-free.
+These rules apply ONLY to files inside `libs/core/*`.  
+They define strict boundaries that keep core logic clean, deterministic, and Qt-independent.
 
-## Cross-Cutting Infrastructure
-- `SentinelLogging` powers categorized logging; stick to `sentinel.app|data|render|debug` channels.
-- `LockFreeQueue` provides the SPSC queues bridging worker ↔ GUI threads; usage must remain single-producer/single-consumer.
-- `StatisticsProcessor`, `RuleEngine`, and rule types remain Qt-free business logic—extend them without introducing GUI dependencies.
+------------------------------------------------------------------------------
 
-## Expectations
-- Maintain exchange-agnostic boundaries: new providers plug in through transport + dispatcher layers without touching higher tiers.
-- Keep files under the shared 500-LOC soft cap and prefer extraction over monolithic additions.
-- All new tests for these modules live in `tests/marketdata` until the wider suite returns.
+# 1. Core Philosophy (Non-Negotiable)
+- Core is **pure C++20**.
+- No Qt GUI types or QObjects.  
+- QtCore primitives (QString, QDateTime, QMutex) are allowed when practical.
+- No signals/slots.  
+- No rendering, no QML, no QSG.
+
+------------------------------------------------------------------------------
+
+# 2. Market Data Pipeline (Existing System Only)
+
+The pipeline inside core is:
+
+Transport  
+→ Dispatcher  
+→ DataCache (via DataCacheSinkAdapter ONLY)  
+→ Downstream consumers
+
+Where:
+
+### Transport (`marketdata/ws`)
+- BeastWsTransport handles WebSocket connection, backoff, and frames.
+- SubscriptionManager builds deterministic subscription messages.
+
+### Dispatcher (`marketdata/dispatch`)
+- Normalizes provider payloads into typed DTOs.
+
+### DataCache (`marketdata/cache`)
+- Thread-safe store of rolling trades + order books.
+- **DataCacheSinkAdapter = the ONLY writer**.
+- No direct writes to DataCache from anywhere else.
+
+### Model (`marketdata/model`)
+- DTOs: Trade, OrderBook, LiveOrderBook.  
+- Must be lightweight, copy-safe, and serialization-free.
+
+------------------------------------------------------------------------------
+
+# 3. Threading & Concurrency
+
+- Worker threads handle transport + dispatch + cache writes.
+- Core never touches GUI thread.
+- Use `LockFreeQueue` ONLY in strict SPSC mode:
+  - One producer  
+  - One consumer  
+- Do not modify LockFreeQueue to support multiple producers.
+
+Avoid blocking, mutex storms, and unnecessary allocations in hot paths.
+
+------------------------------------------------------------------------------
+
+# 4. Auth & Provider Rules
+
+- `Authenticator` must be fully injectable for testing.
+- No secrets, API keys, or file paths hardcoded anywhere.
+- Provider-specific logic stays isolated to transport + dispatcher only.
+
+------------------------------------------------------------------------------
+
+# 5. Logging & Diagnostics
+
+- Use `sentinel.data` category for core logs.
+- Keep logs lightweight — no GUI or render categories here.
+- No sensitive or credential-bearing logs.
+
+------------------------------------------------------------------------------
+
+# 6. Maintain Clear Boundaries
+
+Core MUST NOT depend on:
+
+- QML  
+- QSG  
+- Dockable widgets  
+- MainWindowGPU  
+- Render strategies  
+- Qt Quick  
+- SEC viewer UI  
+- GUI thread or its state  
+
+Keep core business logic deterministic and UI-agnostic.
+
+------------------------------------------------------------------------------
+
+# 7. Testing Guidance
+
+- Core tests live in `tests/marketdata`.
+- Use deterministic mock payloads for dispatcher + cache tests.
+- Avoid threading assumptions inside tests.
+
+------------------------------------------------------------------------------
+
+# 8. Assistant Behavior in Core
+
+When modifying anything under `libs/core/*`, assistants should:
+
+- Keep logic simple, explicit, and deterministic.
+- Avoid over-abstraction or enterprise patterns.
+- Preserve API clarity and thread safety.
+- Never introduce Qt GUI dependencies.
+- Maintain provider-agnostic structure.
+
+------------------------------------------------------------------------------
+
+# End of core.mdc

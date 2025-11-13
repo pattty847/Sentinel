@@ -1,109 +1,167 @@
-# Repository Guidelines
+## **AGENTS.md — Sentinel Unified Assistant Prompt (v5.1)**
 
-You are an AI coding assistant.
-Write correct, efficient, and idiomatic code.
-Provide explanations only when requested.
-Follow the user’s language and libraries.
-Use best practices for readability and performance.
-
-## Mission & Scope
-Sentinel is a C++20 trading terminal with a hard separation between pure core logic, Qt-based adapters, and thin app entry points. Every contribution should preserve low-latency data handling, GPU-driven visualization, and modular maintainability.
-
-## Architecture Boundaries & Constraints
-- Keep `libs/core` free of Qt (QtCore only), `libs/gui` as adapter/render layers, and `apps/` limited to bootstrapping.
-- Treat 500 LOC as the soft ceiling (warn above 450); crossing 500 requires a refactor plan or justification.
-- Functions should be kept concise and modular, minimizing complex or deeply nested branching logic.
-- Respect thread ownership: network/IO off the GUI thread, UI updates via queued signals, lock-free queues for cross-thread handoffs.
-- Use the categorized logging system (`SentinelLogging.hpp/.cpp`) with `sentinel.app|data|render|debug`; avoid temporary or secret-bearing logs.
-
-## Project Layout
-- `libs/core/marketdata`: Transport, dispatcher, auth, cache, and sink adapters for the data pipeline.
-- `libs/gui`: UnifiedGridRenderer façade, GridViewState, DataProcessor, render strategies, and QML controls.
-- `apps/`: `sentinel_gui` and `stream_cli` entry points only.
-- `tests/`: Legacy suites exist, but only `tests/marketdata` is currently wired into CMake. Stage new coverage here until the broader matrix is revived.
-- `docs/`: Architecture and refactor guidance (`docs/ARCHITECTURE.md`, `docs/sockets-auth-cache-refactor.md`, `docs/LOGGING_GUIDE.md`).
-- `scripts/`: Tooling and code-analysis helpers (`scripts/README_CODE_ANALYSIS.md`).
-
-## Build & Test Workflow
-- Configure/build via `cmake --preset <preset>` followed by `cmake --build --preset <preset>` (mac-clang, linux-gcc, windows-mingw).
-- Run active tests with `cmake --build --preset <preset> --target marketdata_tests` or `ctest --preset <preset> --output-on-failure`.
-- Launch the GUI using `./build-<preset>/apps/sentinel_gui/sentinel_gui`.
-- Need a snapshot of a large file before diving in? Use the analysis utilities (`quick_cpp_overview.sh`, `extract_functions.sh`) documented in `scripts/README_CODE_ANALYSIS.md` for a quick pass at function lists or structure.
-
-## Coding Style & Expectations
-- Favor modern C++20 idioms: RAII, smart pointers, standard library first; reach for Qt types only at integration seams.
-- Formatting: 4-space indent, Qt brace style for classes, headers as `.hpp`; classes/enums in `PascalCase`, methods/signals `camelCase`, private members `m_`, constants `kPascalCase`.
-- Keep cross-domain DTOs lightweight and avoid business logic in GUI layers.
-- Comment intent when the domain is subtle; otherwise rely on expressive naming.
-
-## Quality Gates
-- No pull request without a passing build and `ctest`.
-- Add or update tests with the code change; keep runs deterministic (mock transports, reuse fixtures).
-- Watch for performance regressions on hot paths and call them out in PR notes if unavoidable.
-- Document migrations, manual steps, and UI screenshots in commits/PRs, following the `Component: concise change` convention.
-
-## References
-- Architecture overview: `docs/ARCHITECTURE.md`
-- Market data refactor guide: `docs/sockets-auth-cache-refactor.md`
-- Logging details: `docs/LOGGING_GUIDE.md`
-- Code analysis tooling: `scripts/README_CODE_ANALYSIS.md`
+**Source of truth for all AI assistants working on Sentinel.**
+Claude, Gemini, Cursor, ChatGPT must follow this file.
 
 ---
 
-## Rendering invariant: Zoom must bump `viewportVersion`
+# **1. Mission**
 
-- **What**: Any zoom operation must update the viewport via `GridViewState::setViewport(...)` so `m_viewportVersion` increments and `viewportChanged` is emitted.
-- **Why**: `DataProcessor::updateVisibleCells()` gates full rebuilds on the viewport version. If zoom code writes bounds directly and skips `setViewport`, the version won’t change; the processor won’t rebuild, so zooming out won’t reveal history until a later pan triggers a version bump.
-- **How**: Route zoom math in `GridViewState::handleZoomWithViewport(...)` to `setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice)` rather than assigning members. Do not emit `viewportChanged` manually; the setter handles both versioning and signaling.
+Sentinel is a GPU-accelerated trading terminal.
+Its identity rests on three pillars:
 
-Code reference — zoom path uses `setViewport(...)`:
-```167:185:libs/gui/render/GridViewState.cpp
-            // Apply validated bounds via central setter to bump version and signal change
-            setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
-            
-            if constexpr (kTraceZoomInteractions) {
-                qDebug() << " ZOOM RESULT:"
-                         << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
-                         << "NewTime[" << currentCenterTime << "]"
-                         << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
-            }
-        }
-        
-        m_zoomFactor = newZoom;
-        
-        // Disable auto-scroll when user manually zooms
-        if (m_autoScrollEnabled) {
-            m_autoScrollEnabled = false;
-            emit autoScrollEnabledChanged();
-        }
+* **Core stays pure C++ (no Qt contamination).**
+* **GUI owns all Qt/QML/QSG behavior.**
+* **Rendering is GPU-first, zero-lag, and deterministic.**
+
+Everything the AI does must protect those three truths.
+
+---
+
+# **2. Architecture Overview (Simple & Honest)**
+
+### **Core Layer (`libs/core`)**
+
+* No Qt except QString/QDateTime if needed.
+* Handles: market data transport, cache, dispatchers, DTOs, transforms.
+
+### **GUI Layer (`libs/gui`)**
+
+* Owns Qt, QML, QSG, rendering strategies, widget layouts.
+* Contains the docking system & communication between widgets.
+
+### **Apps (`apps/`)**
+
+* Thin bootstraps. No business logic.
+
+### **Render Path**
+
+```
+Transport → Dispatch → Cache → DataProcessor → LiquidityEngine
+           → UnifiedGridRenderer → QSG Render Strategies → GPU
 ```
 
-Code reference — processor rebuilds only when the viewport version changes:
-```413:421:libs/gui/render/DataProcessor.cpp
-    // Viewport version gating: full rebuild only when viewport changes
-    const uint64_t currentViewportVersion = m_viewState->getViewportVersion();
-    const bool viewportChanged = (currentViewportVersion != m_lastViewportVersion);
-    if (viewportChanged) {
-        m_visibleCells.clear();
-        m_lastProcessedTime = 0;
-        m_lastViewportVersion = currentViewportVersion;
-    }
-```
+### **Invariant**
 
-### Event pipeline (zoom → repaint)
-- `GridViewState::handleZoom*` computes new bounds → calls `setViewport(...)`.
-- `GridViewState::setViewport` increments `m_viewportVersion` and emits `viewportChanged`.
-- `UnifiedGridRenderer::onViewportChanged` enqueues `DataProcessor::updateVisibleCells()` (queued connection) and marks `m_transformDirty`.
-- `DataProcessor::updateVisibleCells` detects `viewportChanged` via version, rebuilds, publishes snapshot, emits `dataUpdated`.
-- `UnifiedGridRenderer` receives `dataUpdated`, sets `m_appendPending`, calls `update()`; `updatePaintNode` pulls the snapshot and updates geometry/content.
+**Zoom/pan must always update via `setViewport()` so viewportVersion increments.**
+Never mutate viewport fields directly.
+If viewportVersion doesn’t change, the grid won’t rebuild.
 
-### Testing checklist
-- Zoom out with mouse wheel: historical rows/columns should appear immediately (no pan required).
-- Logs should show processor “rebuild” when zooming, not just “append”.
-- Pan end should still trigger a resync (queued `updateVisibleCells`) to clear any transient visual offset.
+---
 
-### Pitfalls
-- Avoid any direct writes to `GridViewState` viewport members in interaction code.
-- Do not manually emit `viewportChanged` from zoom handlers; always go through `setViewport`.
+# **3. Coding Standards (Realistic Solo-Dev Edition)**
 
-Last updated: 2025-11-05
+### **Musts**
+
+* Use modern C++20: RAII, smart pointers, no naked new/delete.
+* Prefer explicit types for public APIs.
+* Use expressive names; comment only where intent is subtle.
+* Separate concerns: logic in core, visuals in gui.
+
+### **Threading Rules**
+
+* Network & data processing off GUI thread.
+* Cross-thread communication only via Qt::QueuedConnection.
+* QSG strategies never touch QObject graph.
+
+### **File Size**
+
+* No arbitrary LOC limit.
+* If file feels unwieldy, split when *you* feel it’s time.
+
+---
+
+# **4. Branch Workflow (Non-Bureaucratic)**
+
+### **Branches**
+
+* `main` — stable, demo-ready.
+* `dev` — messy high-velocity work.
+* `feature/<name>` — only for large refactors.
+
+### **Rules**
+
+* Rebase feature onto dev frequently.
+* Don’t stack branches.
+* Commit as often as you want; clean history optional.
+
+If you can understand your commit messages tomorrow morning, they’re good.
+
+---
+
+# **5. Dockable Widgets (Short Version)**
+
+### **Rules**
+
+* All docks inherit `DockablePanel`.
+* Implement `buildUi()` + override `onSymbolChanged()` when needed.
+* Register each dock in `MainWindowGPU`.
+* State saved via `LayoutManager`.
+
+### **Cross-Dock Communication**
+
+* Use signals/slots (QueuedConnection).
+* No direct cross-widget mutation.
+
+---
+
+# **6. Rendering Strategies (You Only Need These Laws)**
+
+* Runs on render thread → never touch GUI QObjects.
+* Preallocate QSGGeometry; reuse nodes.
+* Validate inputs; skip NaNs/infinite.
+* Respect viewportVersion for rebuild logic.
+* Keep geometry minimal; avoid child-node explosions.
+
+---
+
+# **7. Testing & Performance (Realistic)**
+
+### **Real Expectations**
+
+* Run the app.
+* Look for hitches, stalls, dropped frames.
+* Log suspicious behavior (`sentinel.debug`).
+* Add tests only where needed (cache & dispatch).
+
+### **Hot Paths**
+
+* DataProcessor
+* LiquidityTimeSeriesEngine
+* QSG Geometry updates
+
+These matter. Everything else is negotiable.
+
+---
+
+# **8. AI Assistant Behavior**
+
+### **Assistants MUST:**
+
+* Follow these rules strictly.
+* Keep code clear, modern, and idiomatic.
+* Not introduce unnecessary abstractions or enterprise patterns.
+* Use your real architecture — never hallucinate systems.
+
+### **Assistants MUST NOT:**
+
+* Generate over-engineered patterns.
+* Escalate rules beyond what’s in THIS file.
+* Invent fake CI/CD steps or workflows you do not have.
+* Enforce pointless constraints (LOC ceilings, verbose PR formats).
+
+Your speed > their bureaucracy.
+
+---
+
+# **9. References**
+
+* `docs/ARCHITECTURE.md`
+* Dockable framework: `docs/features/aesthetic/DOCKABLE_FRAMEWORK.md`
+* Widget comms: `docs/features/aesthetic/WIDGET_COMMUNICATION.md`
+* Render strategies: `TradeBubbleStrategy.cpp`, `TradeFlowStrategy.cpp`
+* Backend SEC plan (optional): `.cursor/plans/sec-backend-integration-*.md`
+
+---
+
+# **End of AGENTS.md**

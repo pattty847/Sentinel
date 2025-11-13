@@ -1,22 +1,175 @@
 ---
-globs: libs/gui/*/*
+globs: libs/gui/render/*
 alwaysApply: false
 ---
 
-# GUI Components
+# GUI Core Rules (Sentinel)
+These rules apply to the GUI core layer ONLY — the subsystem that transforms
+data snapshots into GPU-ready geometry and maintains the viewport + render pipeline.
 
-## Rendering Stack
-- `UnifiedGridRenderer` is the QML-facing façade; it forwards interactions to state controllers and selects render strategies.
-- `GridViewState` owns viewport, pan/zoom, and interaction smoothing—keep it authoritative for UI state.
-- `render/DataProcessor` aggregates data from core, feeds the `LiquidityTimeSeriesEngine`, and signals the renderer when buffers need regeneration.
-- `render/strategies/*Strategy` classes build GPU geometry for specific visualizations; add new modes here without touching the façade.
-- `qml/` controls and scenes define layout; keep heavy logic in C++ counterparts.
+This includes:
+- DataProcessor
+- LiquidityTimeSeriesEngine
+- GridViewState
+- UnifiedGridRenderer
+- GridSceneNode
+- Coordinate systems
+- Snapshot preparation logic
+- Render orchestration (but NOT strategy implementations)
 
-## Supporting Infrastructure
-- `MainWindowGpu` wires the persistent `MarketDataCore` instance to QML; ensure queued connections guard against cross-thread issues.
-- `PerformanceMonitor` and diagnostics helpers surface stats to the UI—use them instead of ad-hoc logging for render metrics.
+------------------------------------------------------------------------------
 
-## Expectations
-- No business logic in GUI code: treat these files as adapters that consume DTOs from `libs/core`.
-- Coordinate changes with matching QML updates so signals, properties, and bindings stay aligned.
-- Monitor file size and keep refactors modular; render hot paths must avoid unnecessary allocations on the GUI thread.
+# 1. Layer Boundaries
+
+GUI core sits BETWEEN the data pipeline and QSG strategies.
+
+It MUST:
+- Receive immutable data snapshots (from DataCache → DataProcessor)
+- Transform them into cell batches and viewport-mapped coordinates
+- Drive UnifiedGridRenderer + GridSceneNode updates
+- Never contain QSG node manipulation
+
+It MUST NOT:
+- Read from live DataCache  
+- Touch QSG classes inside DataProcessor or LiquidityEngine  
+- Perform rendering — that belongs to strategies  
+- Block the GUI thread with heavy synchronous work
+
+All geometry manipulation must occur in render strategies, NOT here.
+
+------------------------------------------------------------------------------
+
+# 2. Viewport & GridViewState Invariants
+
+GridViewState is responsible for:
+- Visible time range  
+- Visible price range  
+- Coordinate transforms  
+- Auto-scroll state  
+- Zoom behavior  
+
+Critical rules:
+1. **All viewport changes MUST go through `setViewport(...)`.**
+2. Never mutate viewport fields directly.
+3. `setViewport(...)` MUST increment `m_viewportVersion`.
+4. No manual `emit viewportChanged`; the setter owns signaling.
+5. Coordinate transforms MUST use the system-provided mapping functions.
+
+Breaking these invariants causes:
+- History not appearing after zoom  
+- Panning desync  
+- Geometry drift  
+- Stale render frames  
+
+------------------------------------------------------------------------------
+
+# 3. DataProcessor Rules
+
+DataProcessor:
+- Runs on GUI thread via QueuedConnection.
+- Receives immutable core snapshots.
+- Determines whether to append or rebuild visible cells.
+- Publishes batch outputs to UnifiedGridRenderer.
+
+Rules:
+- MUST compare `viewportVersion` to detect rebuild needs.
+- MUST clear visible cells on rebuild.
+- MUST NOT access live DataCache directly.
+- MUST NOT perform QSG work.
+- MUST avoid blocking operations.
+
+Processor output must be a clean, ready-to-render data structure.
+
+------------------------------------------------------------------------------
+
+# 4. LiquidityTimeSeriesEngine Rules
+
+This engine takes raw trade/book state and produces multi-timeframe cell data.
+
+Rules:
+- Must be deterministic for identical inputs.
+- No QSG, no GUI widgets.
+- No thread-hopping.
+- Avoid dynamic allocation inside hot loops.
+- Input = immutable snapshot; Output = ephemeral batch for render.
+
+------------------------------------------------------------------------------
+
+# 5. UnifiedGridRenderer
+
+UGR coordinates:
+- Viewport changes  
+- New data batches  
+- Strategy selection  
+- Triggering `update()` on the QQuickItem  
+- Marking geometry/transform dirty  
+
+Rules:
+- Must receive all signals via QueuedConnection.
+- Must never mutate DataProcessor or DataCache.
+- Must not compute geometry; only hand data to render strategies.
+- Must call `update()` whenever data or viewport changes.
+
+------------------------------------------------------------------------------
+
+# 6. GridSceneNode Rules
+
+GridSceneNode:
+- Exists ONLY as a container for strategy-generated nodes.
+- Must NOT contain business logic.
+- Must NOT compute cell data or transforms.
+- Owns render-thread nodes **only by pointer**, not by logic.
+
+------------------------------------------------------------------------------
+
+# 7. Threading Rules for GUI Core
+
+- GUI core runs entirely on the **GUI thread**.
+- It MUST NOT:
+  - Run worker threads
+  - Touch render thread objects (QSG nodes)
+  - Access live DataCache
+  - Hold locks that block UI
+
+All cross-thread input MUST be via queued signals from core → GUI.
+
+------------------------------------------------------------------------------
+
+# 8. Coordinate System Rules
+
+- Use the central coordinate conversion utilities for:
+  - Time → X
+  - Price → Y
+  - Cell bounds  
+  - Pixel scaling
+
+Never recompute world → screen transforms inside DataProcessor or strategies.
+Only GridViewState + coordinate utilities own those formulas.
+
+------------------------------------------------------------------------------
+
+# 9. Logging
+
+- GUI core may log to:
+  - `sentinel.render` (viewport + pipeline events)
+  - `sentinel.app` (high-level notifications)
+
+- MUST NOT log inside hot-path loops.
+- MUST NOT log GPU-thread data inside GUI thread.
+
+------------------------------------------------------------------------------
+
+# 10. Assistant Behavior When Editing GUI Core
+
+When modifying these files, assistants must:
+- Maintain viewport invariants
+- Keep DataProcessor deterministic
+- Never leak QSG logic upstream
+- Keep UnifiedGridRenderer orchestration clean
+- Avoid complexity that slows redraw frequency
+- Treat GUI core → strategy as a strict “boundary”
+- Preserve performance above abstraction
+
+------------------------------------------------------------------------------
+
+# End of gui-core.mdc
