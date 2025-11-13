@@ -1,0 +1,207 @@
+
+Code Review
+
+This is a massive and impressive pull request that successfully implements a professional-grade dockable widget framework, transforming the application's UI. The architecture is well-thought-out, with clear separation of concerns using components like DockablePanel, LayoutManager, and ServiceLocator. The addition of a theming system and extensive documentation is also highly valuable. My review focuses on a few key areas to improve maintainability, correctness, and adherence to best practices, particularly in the CMake configuration, signal propagation, and the C++/Python interface for the SEC widget.
+libs/gui/widgets/SecApiClient.cpp
+Comment on lines +47 to +60
+    QString command = QString(
+        "import sys, json, asyncio; "
+        "sys.path.insert(0, r'%1'); "
+        "from sec.sec_api import SECDataFetcher; "
+        "async def fetch(): "
+        "    f = SECDataFetcher(); "
+        "    data = await f.get_filings_by_form('%2', %3); "
+        "    print('FILINGS_DATA:' + json.dumps(data)); "
+        "asyncio.run(fetch())"
+    ).arg(getSecModulePath(), ticker, formType.isEmpty() ? "None" : QString("'%1'").arg(formType));
+
+    m_currentOperation = "filings";
+    executePythonCommand(command, "filings");
+}
+@gemini-code-assist
+gemini-code-assist bot
+3 minutes ago
+
+critical
+
+Embedding multi-line Python code directly into C++ string literals is highly brittle and difficult to maintain. There is no syntax highlighting, linting, or static analysis for the Python code, making it very easy to introduce bugs that will only be found at runtime.
+
+This pull request already adds dedicated Python scripts (scripts/sec_fetch_*.py) for these tasks. The C++ code should be refactored to execute these scripts and pass arguments (like ticker and formType) via the command line. This separates the C++ and Python logic cleanly, making both sides much easier to develop and debug.
+@pattty847
+    QString command = QString(
+        "import sys, json, asyncio; "
+        "sys.path.insert(0, r'%1'); "
+        "from sec.sec_api import SECDataFetcher; "
+        "async def fetch(): "
+        "    f = SECDataFetcher(); "
+        "    data = await f.get_filings_by_form('%2', %3); "
+        "    print('FILINGS_DATA:' + json.dumps(data)); "
+        "asyncio.run(fetch())"
+    ).arg(getSecModulePath(), ticker, formType.isEmpty() ? "None" : QString("'%1'").arg(formType));
+
+    m_currentOperation = "filings";
+    executePythonCommand(command, "filings");
+}
+@gemini-code-assist
+gemini-code-assist bot
+3 minutes ago
+
+critical
+
+Embedding multi-line Python code directly into C++ string literals is highly brittle and difficult to maintain. There is no syntax highlighting, linting, or static analysis for the Python code, making it very easy to introduce bugs that will only be found at runtime.
+
+This pull request already adds dedicated Python scripts (scripts/sec_fetch_*.py) for these tasks. The C++ code should be refactored to execute these scripts and pass arguments (like ticker and formType) via the command line. This separates the C++ and Python logic cleanly, making both sides much easier to develop and debug.
+
+
+
+libs/gui/MainWindowGpu.cpp
+Comment on lines +255 to +261
+void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
+    emit symbolChanged(symbol);
+    // Propagate to all dock panels
+    for (auto* dock : findChildren<DockablePanel*>()) {
+        dock->onSymbolChanged(symbol);
+    }
+}
+@gemini-code-assist
+gemini-code-assist bot
+4 minutes ago
+
+high
+
+The current implementation for symbol propagation is redundant and may cause onSymbolChanged to be called multiple times on the same widget.
+
+Here, you both emit a symbolChanged signal and manually iterate through all DockablePanel children to call onSymbolChanged directly. The widgets are already connected to the signal elsewhere (e.g., lines 175-176). This means widgets like SecFilingDock will have their slot invoked by the signal and then immediately have their virtual method called by the loop, performing the same work twice.
+
+The idiomatic Qt approach is to rely solely on the signal/slot mechanism. This decouples the MainWindowGPU from its children's implementation details and ensures the logic is executed only once.
+
+void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
+    emit symbolChanged(symbol);
+}
+
+@pattty847
+
+
+
+libs/gui/widgets/OrderBookDock.cpp
+Comment on lines +144 to +150
+    // TODO: Connect to actual order book update signal when available
+    // For now this is a placeholder - MarketDataCore needs to emit order book signals
+    /*
+    connect(marketDataCore, &MarketDataCore::orderBookUpdated,
+            this, &OrderBookDock::onOrderBookUpdated,
+            Qt::QueuedConnection);
+    */
+@gemini-code-assist
+gemini-code-assist bot
+4 minutes ago
+
+high
+
+This widget appears to be incomplete as it never connects to the signal that provides order book updates. The connect call is commented out, and the onOrderBookUpdated slot will consequently never be called, leaving the widget without any data.
+
+To make this widget functional, you need to uncomment and complete the signal-slot connection to a signal from MarketDataCore that provides the necessary order book data.
+
+    connect(marketDataCore, &MarketDataCore::liveOrderBookUpdated, // Assuming a signal like this exists or will be added
+            this, &OrderBookDock::onOrderBookUpdated,
+            Qt::QueuedConnection);
+
+@pattty847
+    // TODO: Connect to actual order book update signal when available
+    // For now this is a placeholder - MarketDataCore needs to emit order book signals
+    /*
+    connect(marketDataCore, &MarketDataCore::orderBookUpdated,
+            this, &OrderBookDock::onOrderBookUpdated,
+            Qt::QueuedConnection);
+    */
+@gemini-code-assist
+gemini-code-assist bot
+4 minutes ago
+
+high
+
+This widget appears to be incomplete as it never connects to the signal that provides order book updates. The connect call is commented out, and the onOrderBookUpdated slot will consequently never be called, leaving the widget without any data.
+
+To make this widget functional, you need to uncomment and complete the signal-slot connection to a signal from MarketDataCore that provides the necessary order book data.
+
+    connect(marketDataCore, &MarketDataCore::liveOrderBookUpdated, // Assuming a signal like this exists or will be added
+            this, &OrderBookDock::onOrderBookUpdated,
+            Qt::QueuedConnection);
+
+
+libs/gui/CMakeLists.txt
+Comment on lines +48 to +55
+file(GLOB WIDGET_SOURCES
+    "widgets/*.cpp"
+)
+
+# Theme sources
+file(GLOB THEME_SOURCES
+    "themes/*.cpp"
+)
+@gemini-code-assist
+gemini-code-assist bot
+5 minutes ago
+
+medium
+
+Using file(GLOB ...) to collect source files is generally discouraged in modern CMake. If a developer adds a new widget or theme file, the build system will not automatically detect it, and they would need to manually re-run CMake. This can lead to confusing build errors where new files are seemingly ignored.
+
+For a more robust and maintainable build system, it's better to list the source files explicitly. This ensures that any changes to the file list are tracked by the build system correctly.
+
+set(WIDGET_SOURCES
+    "widgets/AICommentaryFeedDock.cpp"
+    "widgets/CommentaryFeedDock.cpp"
+    "widgets/CopenetFeedDock.cpp"
+    "widgets/DockablePanel.cpp"
+    "widgets/HeatmapDock.cpp"
+    "widgets/LayoutManager.cpp"
+    "widgets/MarketDataModel.cpp"
+    "widgets/MarketDataPanel.cpp"
+    "widgets/OrderBookDock.cpp"
+    "widgets/SecApiClient.cpp"
+    "widgets/SecFilingDock.cpp"
+    "widgets/ServiceLocator.cpp"
+    "widgets/StatusBar.cpp"
+    "widgets/StatusDock.cpp"
+)
+
+# Theme sources
+set(THEME_SOURCES
+    "themes/DarkTheme.cpp"
+    "themes/ThemeManager.cpp"
+)
+
+@pattty847
+
+
+
+libs/gui/MainWindowGpu.h
+Comment on lines +45 to +51
+    #include "widgets/HeatmapDock.hpp"
+    #include "widgets/StatusDock.hpp"
+    #include "widgets/StatusBar.hpp"
+    #include "widgets/MarketDataPanel.hpp"
+    #include "widgets/SecFilingDock.hpp"
+    #include "widgets/CopenetFeedDock.hpp"
+    #include "widgets/AICommentaryFeedDock.hpp"
+@gemini-code-assist
+gemini-code-assist bot
+5 minutes ago
+
+medium
+
+Including the full headers for widget pointers in the main window's header file increases coupling and can slow down compilation, as any change to these widget headers will trigger a re-compilation of MainWindowGpu.cpp and any other files that include it.
+
+Since these are just member pointers, you can use forward declarations in the header file and move the #include directives to the .cpp file. This is a standard C++ practice to reduce build dependencies.
+
+// Forward declarations for dock widgets
+class HeatmapDock;
+class StatusDock;
+class StatusBar;
+class MarketDataPanel;
+class SecFilingDock;
+class CopenetFeedDock;
+class AICommentaryFeedDock;
+
+@pattty847
