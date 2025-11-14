@@ -116,6 +116,7 @@ void MainWindowGPU::initializeDataComponents() {
 }
 
 void MainWindowGPU::setupUI() {
+    // TODO: Modularize this into separate methods for clarity
     LOG_SCOPE("Setting up UI");
     
     // Enable docking features
@@ -227,6 +228,7 @@ void MainWindowGPU::applyStyles() {  // Extracted for modularity
 
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
+    // TODO: Make full screen configurable to system
     resize(1400, 900);  // Could be from config
 }
 
