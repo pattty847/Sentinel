@@ -40,15 +40,13 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 // Forward declarations
 class ChartModeController;
 class UnifiedGridRenderer;
-
-    // Include widget headers (needed for MOC to see full type definitions)
-    #include "widgets/HeatmapDock.hpp"
-    #include "widgets/StatusDock.hpp"
-    #include "widgets/StatusBar.hpp"
-    #include "widgets/MarketDataPanel.hpp"
-    #include "widgets/SecFilingDock.hpp"
-    #include "widgets/CopenetFeedDock.hpp"
-    #include "widgets/AICommentaryFeedDock.hpp"
+class HeatmapDock;
+class StatusDock;
+class StatusBar;
+class MarketDataPanel;
+class SecFilingDock;
+class CopenetFeedDock;
+class AICommentaryFeedDock;
 
 /**
  *  GPU-Powered Trading Terminal MainWindow

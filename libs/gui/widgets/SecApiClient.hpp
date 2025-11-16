@@ -10,8 +10,8 @@
 #include <QTimer>
 
 /**
- * Direct Python SEC API client that runs embedded Python calls.
- * Replaces the microservice approach with direct subprocess calls.
+ * Direct Python SEC API client that runs helper scripts via subprocess.
+ * Replaces the microservice approach with direct subprocess calls to scripts/sec_fetch_*.py.
  */
 class SecApiClient : public QObject {
     Q_OBJECT
@@ -62,8 +62,10 @@ private slots:
 private:
     void initializePython();
     void executePythonCommand(const QString& command, const QString& operation);
+    void runSecScript(const QString& scriptName, const QStringList& args, const QString& operation);
     QString getPythonExecutable() const;
     QString getSecModulePath() const;
+    QString getScriptsPath() const;
     void parseFilingsData(const QString& jsonStr);
     void parseTransactionsData(const QString& jsonStr);
     void parseFinancialsData(const QString& jsonStr);

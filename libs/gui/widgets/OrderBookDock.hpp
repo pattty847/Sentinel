@@ -6,8 +6,10 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFrame>
+#include <vector>
 
 class MarketDataCore;
+struct BookDelta;
 
 /**
  * @brief Order book visualization dock starting with best bid/ask
@@ -36,15 +38,11 @@ private slots:
     /**
      * @brief Handle order book updates from MarketDataCore
      * @param symbol Trading symbol
-     * @param bidPrice Best bid price
-     * @param bidSize Best bid size
-     * @param askPrice Best ask price  
-     * @param askSize Best ask size
+     * @param deltas Dense order book deltas (used as a trigger for refresh)
      * 
      * Connected via Qt::QueuedConnection for thread safety
      */
-    void onOrderBookUpdated(const QString& symbol, double bidPrice, double bidSize, 
-                           double askPrice, double askSize);
+    void onOrderBookUpdated(const QString& symbol, const std::vector<BookDelta>& deltas);
 
 private:
     void connectToMarketData();

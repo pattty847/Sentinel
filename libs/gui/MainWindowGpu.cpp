@@ -26,7 +26,6 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
-#include "widgets/DockablePanel.hpp"
 #include "widgets/HeatmapDock.hpp"
 #include "widgets/StatusDock.hpp"
 #include "widgets/StatusBar.hpp"
@@ -256,10 +255,6 @@ void MainWindowGPU::onSubscribe() {
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     emit symbolChanged(symbol);
-    // Propagate to all dock panels
-    for (auto* dock : findChildren<DockablePanel*>()) {
-        dock->onSymbolChanged(symbol);
-    }
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {

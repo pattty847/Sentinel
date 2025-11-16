@@ -1,4 +1,5 @@
 #include "SecApiClient.hpp"
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -43,20 +44,14 @@ void SecApiClient::fetchFilings(const QString& ticker, const QString& formType) 
     }
     
     emit statusUpdate(QString("Fetching %1 filings for %2...").arg(formType.isEmpty() ? "all" : formType, ticker));
-    
-    QString command = QString(
-        "import sys, json, asyncio; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "async def fetch(): "
-        "    f = SECDataFetcher(); "
-        "    data = await f.get_filings_by_form('%2', %3); "
-        "    print('FILINGS_DATA:' + json.dumps(data)); "
-        "asyncio.run(fetch())"
-    ).arg(getSecModulePath(), ticker, formType.isEmpty() ? "None" : QString("'%1'").arg(formType));
-    
-    m_currentOperation = "filings";
-    executePythonCommand(command, "filings");
+
+    QStringList args;
+    args << ticker;
+    if (!formType.isEmpty()) {
+        args << formType;
+    }
+
+    runSecScript("sec_fetch_filings.py", args, "filings");
 }
 
 void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
@@ -66,20 +61,11 @@ void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
     }
     
     emit statusUpdate(QString("Fetching insider transactions for %1...").arg(ticker));
-    
-    QString command = QString(
-        "import sys, json, asyncio; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "async def fetch(): "
-        "    f = SECDataFetcher(); "
-        "    data = await f.fetch_insider_filings('%2'); "
-        "    print('TRANSACTIONS_DATA:' + json.dumps(data)); "
-        "asyncio.run(fetch())"
-    ).arg(getSecModulePath(), ticker);
-    
-    m_currentOperation = "transactions";
-    executePythonCommand(command, "transactions");
+
+    QStringList args;
+    args << ticker;
+
+    runSecScript("sec_fetch_transactions.py", args, "transactions");
 }
 
 void SecApiClient::fetchFinancialSummary(const QString& ticker) {
@@ -89,20 +75,11 @@ void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     }
     
     emit statusUpdate(QString("Fetching financial summary for %1...").arg(ticker));
-    
-    QString command = QString(
-        "import sys, json, asyncio; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "async def fetch(): "
-        "    f = SECDataFetcher(); "
-        "    data = await f.get_financial_summary('%2'); "
-        "    print('FINANCIALS_DATA:' + json.dumps(data)); "
-        "asyncio.run(fetch())"
-    ).arg(getSecModulePath(), ticker);
-    
-    m_currentOperation = "financials";
-    executePythonCommand(command, "financials");
+
+    QStringList args;
+    args << ticker;
+
+    runSecScript("sec_fetch_financials.py", args, "financials");
 }
 
 void SecApiClient::executePythonCommand(const QString& command, const QString& operation) {
@@ -124,9 +101,41 @@ void SecApiClient::executePythonCommand(const QString& command, const QString& o
     args << "-c" << command;
     
     QString pythonExe = getPythonExecutable();
-    qDebug() << "Executing Python command:" << pythonExe << args;
+    qDebug() << "Executing Python inline command:" << pythonExe << args;
     
     m_pythonProcess->start(pythonExe, args);
+}
+
+void SecApiClient::runSecScript(const QString& scriptName,
+                                const QStringList& args,
+                                const QString& operation) {
+    if (m_pythonProcess && m_pythonProcess->state() != QProcess::NotRunning) {
+        m_pythonProcess->kill();
+        m_pythonProcess->waitForFinished(1000);
+    }
+
+    if (m_pythonProcess) {
+        m_pythonProcess->deleteLater();
+    }
+
+    m_pythonProcess = new QProcess(this);
+    connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &SecApiClient::onPythonFinished);
+    connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
+
+    QString pythonExe = getPythonExecutable();
+    QString scriptsPath = getScriptsPath();
+    QString scriptPath = QDir(scriptsPath).absoluteFilePath(scriptName);
+
+    QStringList fullArgs;
+    fullArgs << scriptPath;
+    fullArgs << args;
+
+    m_currentOperation = operation;
+
+    qDebug() << "Executing SEC script:" << pythonExe << fullArgs;
+
+    m_pythonProcess->start(pythonExe, fullArgs);
 }
 
 void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus) {
@@ -194,7 +203,38 @@ QString SecApiClient::getPythonExecutable() const {
 }
 
 QString SecApiClient::getSecModulePath() const {
+    // Prefer project root inferred from the scripts directory so that
+    // sec/ can be imported reliably regardless of working directory.
+    QDir scriptsDir(getScriptsPath());
+    if (scriptsDir.cdUp()) {
+        return scriptsDir.absolutePath();
+    }
+
     return QDir::current().absolutePath();
+}
+
+QString SecApiClient::getScriptsPath() const {
+    // 1) Try alongside the application binary: <appDir>/scripts
+    QString appDir = QCoreApplication::applicationDirPath();
+    QDir dir(appDir);
+    if (dir.cd("scripts")) {
+        return dir.absolutePath();
+    }
+
+    // 2) Try current working directory: ./scripts
+    dir = QDir(QDir::current());
+    if (dir.cd("scripts")) {
+        return dir.absolutePath();
+    }
+
+    // 3) Try one level up from the application dir: <appDir>/../scripts
+    dir = QDir(appDir);
+    if (dir.cdUp() && dir.cd("scripts")) {
+        return dir.absolutePath();
+    }
+
+    // Fallback: relative to current directory
+    return QDir::current().absoluteFilePath("scripts");
 }
 
 void SecApiClient::parseFilingsData(const QString& jsonStr) {

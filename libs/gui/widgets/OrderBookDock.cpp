@@ -1,9 +1,11 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
-#include "../../../libs/core/marketdata/MarketDataCore.hpp"
+#include "../../core/marketdata/MarketDataCore.hpp"
+#include "../../core/marketdata/cache/DataCache.hpp"
 #include "../../../libs/core/SentinelLogging.hpp"
 #include <QGridLayout>
 #include <QFont>
+#include <vector>
 
 OrderBookDock::OrderBookDock(QWidget* parent)
     : DockablePanel("orderbook", "Order Book", parent)
@@ -140,26 +142,51 @@ void OrderBookDock::connectToMarketData()
         sLog_App("OrderBookDock: MarketDataCore not available in ServiceLocator");
         return;
     }
-    
-    // TODO: Connect to actual order book update signal when available
-    // For now this is a placeholder - MarketDataCore needs to emit order book signals
-    /*
-    connect(marketDataCore, &MarketDataCore::orderBookUpdated,
+    connect(marketDataCore, &MarketDataCore::liveOrderBookUpdated,
             this, &OrderBookDock::onOrderBookUpdated,
             Qt::QueuedConnection);
-    */
     
-    sLog_App("OrderBookDock: Connected to MarketDataCore (order book signals pending)");
+    sLog_App("OrderBookDock: Connected to MarketDataCore live order book updates");
 }
 
-void OrderBookDock::onOrderBookUpdated(const QString& symbol, double bidPrice, double bidSize,
-                                     double askPrice, double askSize)
+void OrderBookDock::onOrderBookUpdated(const QString& symbol,
+                                     const std::vector<BookDelta>& deltas)
 {
+    Q_UNUSED(deltas);
+
     if (symbol != m_currentSymbol) {
         return;  // Not our symbol
     }
     
-    sLog_Debug(QString("OrderBookDock: Order book update for %1 - Bid: %2@%3, Ask: %4@%5")
+    auto* cache = ServiceLocator::dataCache();
+    if (!cache) {
+        sLog_App("OrderBookDock: DataCache not available for order book updates");
+        return;
+    }
+
+    const LiveOrderBook& liveBook = cache->getDirectLiveOrderBook(symbol.toStdString());
+
+    std::vector<std::pair<uint32_t, double>> bidBuffer;
+    std::vector<std::pair<uint32_t, double>> askBuffer;
+
+    auto view = liveBook.captureDenseNonZero(bidBuffer, askBuffer, 1);
+
+    double bidPrice = 0.0;
+    double bidSize = 0.0;
+    double askPrice = 0.0;
+    double askSize = 0.0;
+
+    if (!view.bidLevels.empty()) {
+        bidPrice = view.minPrice + static_cast<double>(view.bidLevels.front().first) * view.tickSize;
+        bidSize = view.bidLevels.front().second;
+    }
+
+    if (!view.askLevels.empty()) {
+        askPrice = view.minPrice + static_cast<double>(view.askLevels.front().first) * view.tickSize;
+        askSize = view.askLevels.front().second;
+    }
+
+    sLog_Debug(QString("OrderBookDock: Top of book for %1 - Bid: %2@%3, Ask: %4@%5")
                .arg(symbol).arg(bidPrice).arg(bidSize).arg(askPrice).arg(askSize));
     
     updateSpreadDisplay(bidPrice, bidSize, askPrice, askSize);

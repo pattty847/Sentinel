@@ -44,14 +44,26 @@ set(GRID_CORE_SOURCES
     render/strategies/CandleStrategy.cpp
 )
 
-# Widget sources (auto-discovered for easier expansion)
-file(GLOB WIDGET_SOURCES
-    "widgets/*.cpp"
+set(WIDGET_SOURCES
+    "widgets/AICommentaryFeedDock.cpp"
+    "widgets/CommentaryFeedDock.cpp"
+    "widgets/CopenetFeedDock.cpp"
+    "widgets/DockablePanel.cpp"
+    "widgets/HeatmapDock.cpp"
+    "widgets/LayoutManager.cpp"
+    "widgets/MarketDataModel.cpp"
+    "widgets/MarketDataPanel.cpp"
+    "widgets/OrderBookDock.cpp"
+    "widgets/SecApiClient.cpp"
+    "widgets/SecFilingDock.cpp"
+    "widgets/ServiceLocator.cpp"
+    "widgets/StatusBar.cpp"
+    "widgets/StatusDock.cpp"
 )
 
-# Theme sources
-file(GLOB THEME_SOURCES
-    "themes/*.cpp"
+set(THEME_SOURCES
+    "themes/DarkTheme.cpp"
+    "themes/ThemeManager.cpp"
 )
 
 set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
