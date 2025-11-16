@@ -107,6 +107,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 .python-version
 
@@ -118,4 +119,9 @@ GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
 docs/archive/
-docs/refactor
+docs/refactor/
+docs/untracked/
+docs/backups/
+
+# Random files
+liquidity_timeseries_log.txt

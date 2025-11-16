@@ -248,6 +248,7 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
         }
     });
 }
+
 void MarketDataCore::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     

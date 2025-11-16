@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENTS_FILE="$ROOT_DIR/AGENTS.md"
 CLAUDE_FILE="$ROOT_DIR/CLAUDE.md"
+GEMINI_FILE="$ROOT_DIR/GEMINI.md"
 SENTINEL_ARCH_FILE="$ROOT_DIR/.cursor/rules/sentinel-architecture.mdc"
 DETAIL_MARKER="# Sentinel Architecture Details"
 HEADER='---

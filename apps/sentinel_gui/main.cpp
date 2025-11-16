@@ -15,6 +15,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp" // Sentinel categorized logging
+#include "themes/ThemeManager.hpp" // Theme system
 
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
@@ -67,6 +68,15 @@ int main(int argc, char *argv[])
     configureSurfaceFormat();
 
     QApplication app(argc, argv);
+
+    // Initialize and apply theme
+    ThemeManager& themeManager = ThemeManager::instance();
+    themeManager.initializeDefaults();
+    
+    // Apply default dark theme (can be made configurable later)
+    if (!themeManager.applyTheme("dark", &app)) {
+        sLog_Error("Failed to apply default theme");
+    }
 
     registerMetaTypesAndQml();
 

@@ -22,7 +22,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 */
 #pragma once
 
-#include <QWidget>
+#include <QMainWindow>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -31,6 +31,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QGroupBox>
 #include <QQuickView>
 #include <QSGRendererInterface>
+#include <QCloseEvent>
 #include <memory>
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
@@ -39,25 +40,45 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 // Forward declarations
 class ChartModeController;
 class UnifiedGridRenderer;
+class HeatmapDock;
+class StatusDock;
+class StatusBar;
+class MarketDataPanel;
+class SecFilingDock;
+class CopenetFeedDock;
+class AICommentaryFeedDock;
 
 /**
  *  GPU-Powered Trading Terminal MainWindow
- * Clean, focused implementation for GPU rendering
+ * Clean, focused implementation for GPU rendering with dockable widgets
  */
-class MainWindowGPU : public QWidget {
+class MainWindowGPU : public QMainWindow {
     Q_OBJECT
 
 public:
     explicit MainWindowGPU(QWidget* parent = nullptr);
     ~MainWindowGPU();
 
+signals:
+    /**
+     * Emitted when the active symbol changes.
+     * All dock widgets can connect to this for symbol-aware behavior.
+     */
+    void symbolChanged(const QString& symbol);
+
 private slots:
     void onSubscribe();
     void onConnectionStatusChanged(bool connected);
+    void resetLayoutToDefault();  // Slot for LayoutManager to call
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     void setupUI();
     void setupConnections();
+    void setupMenuBar();
+    void setupShortcuts();
     void initializeQMLComponents();
     void connectMarketDataSignals();
     void initializeDataComponents();
@@ -66,16 +87,31 @@ private:
     void applyStyles();
     void setWindowProperties();
     void updateSymbolInContext(const QString& symbol);
+    void propagateSymbolChange(const QString& symbol);
     bool validateComponents();
     UnifiedGridRenderer* getUnifiedGridRenderer() const;
     QString graphicsApiName(QSGRendererInterface::GraphicsApi api);
-
-    // GPU CHART - Core component (QQuickView within a QWidget container)
-    QQuickView* m_qquickView = nullptr;
-    QWidget* m_qmlContainer = nullptr;
     
-    // UI Controls
-    QLabel* m_statusLabel;
+    /**
+     * Arrange all docks to their default positions.
+     * Called during setupUI() and resetLayoutToDefault().
+     */
+    void arrangeDefaultLayout();
+
+    // Dock widgets
+    HeatmapDock* m_heatmapDock = nullptr;
+    StatusDock* m_statusDock = nullptr;  // Central widget (can be minimal/empty)
+    StatusBar* m_statusBar = nullptr;    // Bottom dock-like status bar
+    MarketDataPanel* m_marketDataDock = nullptr;
+    SecFilingDock* m_secDock = nullptr;
+    CopenetFeedDock* m_copenetDock = nullptr;
+    AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
+    
+    // GPU CHART - Core component (now owned by HeatmapDock)
+    QQuickView* m_qquickView = nullptr;  // Keep reference for compatibility
+    QWidget* m_qmlContainer = nullptr;   // Keep reference for compatibility
+    
+    // UI Controls (now accessed through HeatmapDock)
     QLineEdit* m_symbolInput;
     QPushButton* m_subscribeButton;
     

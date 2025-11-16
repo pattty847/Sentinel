@@ -8,11 +8,11 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Union, Tuple, Any, Callable, Awaitable
 from dotenv import load_dotenv
-from .sec.http_client import SecHttpClient
-from .sec.cache_manager import SecCacheManager
-from .sec.document_handler import FilingDocumentHandler
-from .sec.form4_processor import Form4Processor
-from .sec.financial_processor import FinancialDataProcessor
+from .http_client import SecHttpClient
+from .cache_manager import SecCacheManager
+from .document_handler import FilingDocumentHandler
+from .form4_processor import Form4Processor
+from .financial_processor import FinancialDataProcessor
 
 import pandas as pd
 
