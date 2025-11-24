@@ -1,55 +1,72 @@
 {
     "version": 3,
     "configurePresets": [
-        {
-            "name": "windows-msvc",
-            "displayName": "Windows - MSVC",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/windows-msvc",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "cl.exe",
-                "CMAKE_CXX_COMPILER": "cl.exe",
-                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_PREFIX_PATH": "$env{QT_MSVC}",
-                "QT_QMAKE_EXECUTABLE": "$env{QT_MSVC}/bin/qmake.exe"
-            },
-            "environment": {
-                "VCVARS64": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat"
-            }
-        },
-
-        {
-            "name": "mac-clang",
-            "displayName": "macOS - Clang",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/mac-clang",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "clang",
-                "CMAKE_CXX_COMPILER": "clang++",
-                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_PREFIX_PATH": "$env{QT_MAC}",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-            }
-        },
-
-        {
-            "name": "linux-gcc",
-            "displayName": "Linux - GCC",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/linux-gcc",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "gcc",
-                "CMAKE_CXX_COMPILER": "g++",
-                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_PREFIX_PATH": "$env{QT_LINUX}",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-            }
+      {
+        "name": "windows-msvc-vs",
+        "displayName": "Windows (MSVC + Visual Studio Generator)",
+        "generator": "Visual Studio 17 2022",
+        "architecture": "x64",
+        "binaryDir": "${sourceDir}/build/windows-msvc-vs",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_PREFIX_PATH": "$env{QT_MSVC}"
         }
-    ],
+      },
 
+      {
+        "name": "windows-msvc-ninja",
+        "displayName": "Windows (MSVC + Ninja, for clangd/IDE)",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/windows-msvc-ninja",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_PREFIX_PATH": "$env{QT_MSVC}",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
+      },
+  
+      {
+        "name": "mac-clang",
+        "displayName": "macOS - Clang",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/mac-clang",
+        "cacheVariables": {
+          "CMAKE_C_COMPILER": "clang",
+          "CMAKE_CXX_COMPILER": "clang++",
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_PREFIX_PATH": "$env{QT_MAC}",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
+      },
+  
+      {
+        "name": "linux-gcc",
+        "displayName": "Linux - GCC",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/linux-gcc",
+        "cacheVariables": {
+          "CMAKE_C_COMPILER": "gcc",
+          "CMAKE_CXX_COMPILER": "g++",
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_PREFIX_PATH": "$env{QT_LINUX}",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
+      }
+    ],
+  
     "buildPresets": [
-        { "name": "windows-msvc", "configurePreset": "windows-msvc" },
-        { "name": "mac-clang",    "configurePreset": "mac-clang" },
-        { "name": "linux-gcc",    "configurePreset": "linux-gcc" }
+      {
+        "name": "windows-msvc-vs",
+        "configurePreset": "windows-msvc-vs",
+        "verbose": false,
+        "nativeToolOptions": [
+          "/v:minimal",
+          "/nologo"
+        ]
+      },
+      { "name": "windows-msvc-ninja",  "configurePreset": "windows-msvc-ninja" },
+      { "name": "mac-clang",    "configurePreset": "mac-clang" },
+      { "name": "linux-gcc",    "configurePreset": "linux-gcc" }
     ]
-}
+  }
+  
