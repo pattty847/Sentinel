@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # Count lines of code and estimate LLM tokens in all .cpp, .h, and .hpp files under libs/
 
+# count_cpp_lines.sh - Count lines of code and estimate LLM tokens in all .cpp, .h, and .hpp files under libs/ on Unix-like systems
+# Usage: ./count_cpp_lines.sh [options]
+# Options:
+#   --by <lines|tokens|name>   Sort by column (default: lines)
+#   --asc                      Sort ascending (default: descending)
+#   --full-path                Show paths relative to libs/ instead of basenames
+#   --csv                      Output CSV (no header for easy piping)
+#   --md                       Output Markdown table
+#   --ext <csv>                Only include these extensions (comma-separated). Default: cpp,h,hpp,qml
+#   -h, --help                 Show this help and exit
+# Examples:
+#   ./count_cpp_lines.sh --by lines
+#   ./count_cpp_lines.sh --by tokens
+#   ./count_cpp_lines.sh --by name
+#   ./count_cpp_lines.sh --asc
+#   ./count_cpp_lines.sh --full-path
+#   ./count_cpp_lines.sh --csv
+#   ./count_cpp_lines.sh --md
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

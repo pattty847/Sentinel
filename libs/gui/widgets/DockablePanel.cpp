@@ -8,6 +8,9 @@ DockablePanel::DockablePanel(const QString& id, const QString& title, QWidget* p
     setObjectName(id);  // Persistent identifier for layout restoration
     setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable | QDockWidget::DockWidgetClosable);
     
+    // Explicitly allow all dock areas to enable side-by-side docking (not just tabbing)
+    setAllowedAreas(Qt::AllDockWidgetAreas);
+    
     // Create content widget container
     m_contentWidget = new QWidget(this);
     setWidget(m_contentWidget);

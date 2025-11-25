@@ -2,6 +2,8 @@
 #include <vector>
 #include <memory>
 #include "GridTypes.hpp"
+#include "../../core/marketdata/model/TradeData.h"
+#include "../CoordinateSystem.h"
 
 /*
     IDataAccessor — Interface for strategies to access data.

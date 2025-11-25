@@ -35,7 +35,7 @@ Independent of live updates, `captureOrderBookSnapshot` (`DataProcessor.cpp:149-
 1. `DataProcessor::updateVisibleCells` (`libs/gui/render/DataProcessor.cpp:402-548`) is invoked after every ingestion action and also from the GUI thread when dirty flags demand it.
 2. The method gates rebuilds by tracking `GridViewState::getViewportVersion` and clears caches when the viewport changes (`lines 410-418`).
 3. It picks an active timeframe (auto-suggest or manual), then calls `LiquidityTimeSeriesEngine::getVisibleSlices` with `timeStart/timeEnd` from `GridViewState` (`lines 442-449`).
-4. Visible slices are processed either as a full rebuild (clear `m_processedTimeRanges`, iterate every slice) or as append-only (skip any slice whose `(start,end)` tuple already exists in the set) per lines 486-517. This prevents duplication because the LTSE reuses slice objects.
+4. Visible slices are processed either as a full rebuild (clear `m_processedTimeRanges`, iterate every slice) or as append-only (track by `(startTime, endTime, dataVersion)` tuple) per lines 486-532. The version-aware tracking ensures slices are reprocessed when their data changes, preventing gaps while avoiding duplicate work.
 
 **Data copied:** Slices themselves are not copied—`createCellsFromLiquiditySlice` receives `const LiquidityTimeSlice&` references directly, so this stage only iterates data inside the engine.
 
@@ -52,16 +52,16 @@ Independent of live updates, `captureOrderBookSnapshot` (`DataProcessor.cpp:149-
 
 ## 5. Renderer Consumption (GUI/Render threads)
 
-1. On the GUI thread, `UnifiedGridRenderer::updateVisibleCells` (`libs/gui/UnifiedGridRenderer.cpp:146-158`) swaps in the latest published pointer by value-copying vector contents into `m_visibleCells`.
-2. `updatePaintNode` (`libs/gui/UnifiedGridRenderer.cpp:473-577`) runs on the Qt render thread. Dirty flags control whether it must fetch new cell data (`updateVisibleCells`) or simply re-run material/transform updates.
-3. When geometry is dirty or an append is pending, a new `GridSliceBatch` is created with the copied cells, the recent trade list, and the viewport snapshot (lines 502-528).
+1. On the GUI thread, `UnifiedGridRenderer::updateVisibleCells` (`libs/gui/UnifiedGridRenderer.cpp:156-168`) swaps in the latest published `shared_ptr` snapshot (zero-copy assignment).
+2. `updatePaintNode` (`libs/gui/UnifiedGridRenderer.cpp:548-680`) runs on the Qt render thread. Dirty flags control whether it must fetch new cell data (`updateVisibleCells`) or simply re-run material/transform updates.
+3. When geometry is dirty or an append is pending, a `UGRDataAccessor` is constructed (lines 579-588, 611-620, 635-644) which wraps the snapshot pointer and provides per-frame config (viewport, intensity scale, filters) to strategies.
 
-**Data copies at this boundary:** The `std::vector<CellInstance>` is copied twice—once into the shared snapshot, once from snapshot into `m_visibleCells` on the GUI side, then again when `GridSliceBatch` is constructed by value.
+**Data copies at this boundary:** The `std::vector<CellInstance>` is shared via `shared_ptr` from worker to renderer—**zero copies**. Only the `shared_ptr` itself is copied (8 bytes), not the cell data.
 
 ## 6. Geometry Generation (Qt render thread)
 
-1. `GridSceneNode::updateLayeredContent` (`libs/gui/render/GridSceneNode.cpp:48-100`) delegates to `HeatmapStrategy` when the heatmap layer is enabled. Each call destroys prior child `QSGNode`s and replaces them with freshly built geometry.
-2. `HeatmapStrategy::buildNode` (`libs/gui/render/strategies/HeatmapStrategy.cpp:25-150`) executes the hot path:
+1. `GridSceneNode::updateLayeredContent` (`libs/gui/render/GridSceneNode.cpp:24-76`) delegates to `HeatmapStrategy` when the heatmap layer is enabled. Each call destroys prior child `QSGNode`s and replaces them with freshly built geometry. **Note:** This per-frame node destruction/recreation is a known optimization target (Phase 7).
+2. `HeatmapStrategy::buildNode` (`libs/gui/render/strategies/HeatmapStrategy.cpp:25-157`) executes the hot path:
    * Calculates how many cells survive `minVolumeFilter` (lines 42-51).
    * Chunks work into ≤60 000 vertices per node (lines 55-70) by streaming pointers to `CellInstance` records.
    * For every chunk, allocates `QSGGeometry` with the default colored `Point2D` layout (lines 87-101).

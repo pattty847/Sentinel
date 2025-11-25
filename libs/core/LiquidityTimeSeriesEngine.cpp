@@ -423,6 +423,9 @@ void LiquidityTimeSeriesEngine::addSnapshotToSlice(LiquidityTimeSlice& slice, co
         }
     }
     
+    // Increment data version to signal that slice content has changed
+    ++slice.dataVersion;
+    
     // Handle disappearing levels (important for resting liquidity calculation)
     updateDisappearingLevels(slice, snapshot);
 }

@@ -56,7 +56,7 @@ Rectangle {
         renderMode: UnifiedGridRenderer.LiquidityHeatmap
         showVolumeProfile: true
         intensityScale: 1.0
-        maxCells: 50000
+        maxCells: 500000
         z: 1
         
         // Update our tracked timeframe when it changes

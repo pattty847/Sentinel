@@ -41,7 +41,6 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 class ChartModeController;
 class UnifiedGridRenderer;
 class HeatmapDock;
-class StatusDock;
 class StatusBar;
 class MarketDataPanel;
 class SecFilingDock;
@@ -100,7 +99,6 @@ private:
 
     // Dock widgets
     HeatmapDock* m_heatmapDock = nullptr;
-    StatusDock* m_statusDock = nullptr;  // Central widget (can be minimal/empty)
     StatusBar* m_statusBar = nullptr;    // Bottom dock-like status bar
     MarketDataPanel* m_marketDataDock = nullptr;
     SecFilingDock* m_secDock = nullptr;

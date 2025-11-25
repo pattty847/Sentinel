@@ -58,7 +58,6 @@ set(WIDGET_SOURCES
     "widgets/SecFilingDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
-    "widgets/StatusDock.cpp"
 )
 
 set(THEME_SOURCES

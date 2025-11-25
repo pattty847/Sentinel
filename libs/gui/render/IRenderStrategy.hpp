@@ -22,7 +22,15 @@ class IRenderStrategy {
 public:
     virtual ~IRenderStrategy() = default;
     
+    // Build a new node from scratch (fallback when updateNode returns false)
     virtual QSGNode* buildNode(const IDataAccessor* dataAccessor) = 0;
+    
+    // Update existing node in-place, returns true if successful, false if rebuild needed
+    virtual bool updateNode(QSGNode* existingNode, const IDataAccessor* dataAccessor) { 
+        (void)existingNode; (void)dataAccessor; 
+        return false; // Default: always rebuild
+    }
+    
     virtual QColor calculateColor(double liquidity, bool isBid, double intensity) const = 0;
     virtual const char* getStrategyName() const = 0;
     

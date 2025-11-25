@@ -61,6 +61,9 @@ struct LiquidityTimeSlice {
     int64_t endTime_ms;
     int64_t duration_ms;
     
+    // Version tracking for change detection (incremented when metrics change)
+    uint64_t dataVersion = 0;
+    
     // Tick-based price range for this slice
     Tick minTick = 0;      // Lowest price tick seen in this slice
     Tick maxTick = 0;      // Highest price tick seen in this slice

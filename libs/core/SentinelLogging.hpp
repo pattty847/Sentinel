@@ -2,7 +2,6 @@
 
 #include <QLoggingCategory>
 #include <QDebug>
-#include <cstdlib>
 
 // =============================================================================
 // SENTINEL LOGGING CATEGORIES - SIMPLIFIED 4-CATEGORY SYSTEM

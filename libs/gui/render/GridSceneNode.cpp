@@ -26,15 +26,23 @@ void GridSceneNode::updateLayeredContent(const IDataAccessor* dataAccessor,
                                         IRenderStrategy* bubbleStrategy, bool showBubbles,
                                         IRenderStrategy* flowStrategy, bool showFlow) {
     
-    // Update heatmap layer
+    // Update heatmap layer (DOD: try update-in-place first)
     if (showHeatmap && heatmapStrategy) {
+        bool updated = false;
         if (m_heatmapNode) {
-            removeChildNode(m_heatmapNode);
-            delete m_heatmapNode;
+            // DOD: Try to update existing node in-place (no allocation)
+            updated = heatmapStrategy->updateNode(m_heatmapNode, dataAccessor);
         }
-        m_heatmapNode = heatmapStrategy->buildNode(dataAccessor);
-        if (m_heatmapNode) {
-            appendChildNode(m_heatmapNode);
+        if (!updated) {
+            // Fallback: rebuild node (first frame or structure change)
+            if (m_heatmapNode) {
+                removeChildNode(m_heatmapNode);
+                delete m_heatmapNode;
+            }
+            m_heatmapNode = heatmapStrategy->buildNode(dataAccessor);
+            if (m_heatmapNode) {
+                appendChildNode(m_heatmapNode);
+            }
         }
     } else if (m_heatmapNode) {
         removeChildNode(m_heatmapNode);

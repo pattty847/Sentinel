@@ -8,7 +8,7 @@
 UGR paint: total=<totalUs>microseconds cache=<cacheUs>microseconds content=<contentUs>microseconds cells=<cellsCount>
 ```
 
-* **`cacheUs`:** Time spent inside `updateVisibleCells()` and `GridSliceBatch` construction (lines 499-505). This covers the main thread’s copy of the `std::vector<CellInstance>`, so it is the proxy for `DataProcessor::updateVisibleCells` latency plus the GUI copy overhead.
+* **`cacheUs`:** Time spent inside `updateVisibleCells()` (lines 574, 607, 633). This covers the `shared_ptr` snapshot fetch from `DataProcessor`, so it is the proxy for `DataProcessor::updateVisibleCells` latency. **Note:** No vector copying occurs—the snapshot is shared via `shared_ptr`.
 * **`contentUs`:** Duration of `GridSceneNode::updateLayeredContent(...)` (lines 506-534), which in turn runs `HeatmapStrategy::buildNode`. This number therefore measures vertex generation and Qt scene-graph churn.
 * **`cells`:** Snapshot of `m_visibleCells.size()` after cache refresh (lines 519/535). With typical 20–30 k cells, `contentUs` scales roughly linearly because each cell produces six vertices.
 * **Frame budget context:** 60 FPS implies a 16.67 ms (= 16 670 µs) total allowance. `totalUs` already sums `cacheUs + contentUs + transform/misc`, so keeping the logged total under this threshold is the gating requirement called out in the spec.

@@ -17,7 +17,6 @@ Sentinel uses a **hub-and-spoke** communication model where `MainWindowGPU` acts
 | Widget | Purpose | Inherits From |
 |--------|---------|---------------|
 | `HeatmapDock` | GPU-accelerated trading heatmap + embedded symbol controls | `DockablePanel` |
-| `StatusDock` | Central placeholder widget (minimal) | `QWidget` |
 | `StatusBar` | Bottom status bar (CPU/GPU/Latency metrics) | `QWidget` |
 | `MarketDataPanel` | Real-time trade data table | `DockablePanel` |
 | `SecFilingDock` | SEC filings viewer | `DockablePanel` |

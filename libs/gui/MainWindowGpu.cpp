@@ -12,7 +12,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QQuickView>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>  // Added for error dialogs
+#include <QMessageBox>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -20,14 +20,13 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QCloseEvent>
-#include <QStatusBar>  // For status bar integration
+#include <QStatusBar>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include "widgets/HeatmapDock.hpp"
-#include "widgets/StatusDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/MarketDataPanel.hpp"
 #include "widgets/SecFilingDock.hpp"
@@ -42,7 +41,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QFileInfo>
 #include <QTimer>
 #include <QSGRendererInterface>
-#include <QSettings>  // For config extraction
+#include <QSettings>
 #include <QPushButton>
 #include <QGroupBox>
 #include <QVBoxLayout>
@@ -90,9 +89,6 @@ MainWindowGPU::~MainWindowGPU() {
         m_marketDataCore.reset();
     }
     
-    // Stop processing - UnifiedGridRenderer destructor will handle thread-safe shutdown
-    // No need to call stopProcessing() here as it will be called from UnifiedGridRenderer destructor
-    
     if (m_qquickView) m_qquickView->setSource(QUrl());  // Clear QML
 }
 
@@ -111,38 +107,32 @@ void MainWindowGPU::initializeDataComponents() {
 }
 
 void MainWindowGPU::setupUI() {
-    // TODO: Modularize this into separate methods for clarity
     LOG_SCOPE("Setting up UI");
     
-    // Enable docking features
-    setDockOptions(QMainWindow::AllowTabbedDocks | QMainWindow::AnimatedDocks);
+    // Enable docking features - AllowNestedDocks enables side-by-side docking (Windows-style)
+    setDockOptions(QMainWindow::AllowTabbedDocks | QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks);
     setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
     
     // Prevent repaint storms during setup
     setUpdatesEnabled(false);
     
-    // Create StatusDock as central widget (minimal, just a placeholder)
-    m_statusDock = new StatusDock(this);
-    setCentralWidget(m_statusDock);
-    
-    // Create bottom status bar (dock-like, Windows taskbar style)
+    // Create bottom status bar
     m_statusBar = new StatusBar(this);
     // Add our custom status bar widget to Qt's status bar
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     
-    // Create HeatmapDock
+    // Create HeatmapDock and load QML source and configure GPU acceleration
     m_heatmapDock = new HeatmapDock(this);
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
-    
-    // Load QML source and configure
     loadQmlSource();
     verifyGpuAcceleration();
     
     QQmlContext* context = m_qquickView->rootContext();
     m_modeController = new ChartModeController(this);
     context->setContextProperty("chartModeController", m_modeController);
+    // TODO: Add configuration for this symbol
     updateSymbolInContext("BTC-USD");  // Centralized
     
     // Create all docks first
@@ -156,15 +146,12 @@ void MainWindowGPU::setupUI() {
     m_subscribeButton = m_heatmapDock->subscribeButton();
     
     // Set minimum sizes for better default layout
-    m_heatmapDock->setMinimumWidth(800);  // Heatmap needs space
-    m_heatmapDock->setMinimumHeight(600);  // Includes embedded symbol bar
-    m_secDock->setMinimumWidth(300);      // SEC panel can be narrower
-    m_marketDataDock->setMinimumWidth(350);  // Market data wider to fill gap
+    m_heatmapDock->setMinimumWidth(800);
+    m_heatmapDock->setMinimumHeight(600);
+    m_secDock->setMinimumWidth(300);
+    m_marketDataDock->setMinimumWidth(350);
     
-    // Arrange docks for optimal layout: Heatmap prominent and centered
-    // Strategy: Heatmap gets RightDockWidgetArea (large, takes most space)
-    //           Symbol control pinned directly below heatmap
-    //           Side panels on left, feeds at bottom
+    // Arrange docks for optimal layout
     arrangeDefaultLayout();
     
     // Connect symbol changes to docks
@@ -216,15 +203,15 @@ QString MainWindowGPU::graphicsApiName(QSGRendererInterface::GraphicsApi api) { 
     }
 }
 
-void MainWindowGPU::applyStyles() {  // Extracted for modularity
+void MainWindowGPU::applyStyles() {
     // Styles are now handled by individual dock widgets
     // Keep this method for any future global styling needs
 }
 
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
-    // TODO: Make full screen configurable to system
-    resize(1400, 900);  // Could be from config
+    // TODO: Make full screen 
+    resize(1400, 900);
 }
 
 void MainWindowGPU::setupConnections() {
@@ -235,7 +222,7 @@ void MainWindowGPU::setupConnections() {
 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
-    if (symbol.isEmpty() || !symbol.contains('-')) {  // Basic validation
+    if (symbol.isEmpty() || !symbol.contains('-')) {
         sLog_Warning("Invalid symbol: " << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
         return;
@@ -424,7 +411,7 @@ void MainWindowGPU::connectMarketDataSignals() {
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
     
     connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
-            this, &MainWindowGPU::onConnectionStatusChanged);  // Extracted slot
+            this, &MainWindowGPU::onConnectionStatusChanged);
 
     // Surface MarketDataCore errors (e.g., WS/TLS/DNS issues) into the app log
     connect(m_marketDataCore.get(), &MarketDataCore::errorOccurred,
@@ -457,20 +444,27 @@ void MainWindowGPU::arrangeDefaultLayout() {
     setUpdatesEnabled(false);
     
     // Remove all docks from their current positions first
+    // This ensures they're removed from any tab groups or nested layouts
     if (m_heatmapDock && m_heatmapDock->parent() == this) {
         removeDockWidget(m_heatmapDock);
+        // Ensure dock is fully removed and ready for re-docking
+        m_heatmapDock->setFloating(false);
     }
     if (m_secDock && m_secDock->parent() == this) {
         removeDockWidget(m_secDock);
+        m_secDock->setFloating(false);
     }
     if (m_marketDataDock && m_marketDataDock->parent() == this) {
         removeDockWidget(m_marketDataDock);
+        m_marketDataDock->setFloating(false);
     }
     if (m_copenetDock && m_copenetDock->parent() == this) {
         removeDockWidget(m_copenetDock);
+        m_copenetDock->setFloating(false);
     }
     if (m_aiCommentaryDock && m_aiCommentaryDock->parent() == this) {
         removeDockWidget(m_aiCommentaryDock);
+        m_aiCommentaryDock->setFloating(false);
     }
     
     // Right: Heatmap (includes embedded symbol control bar at bottom)

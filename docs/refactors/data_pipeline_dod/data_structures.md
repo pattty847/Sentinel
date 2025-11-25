@@ -5,17 +5,17 @@ All line references use 1-based numbering inside this workspace.
 ## CellInstance and Visible Cell Storage
 
 ```cpp
-// libs/gui/render/GridTypes.hpp:11-26
+// libs/gui/render/GridTypes.hpp:11-18
 struct CellInstance {
+    // World coordinates
     int64_t timeStart_ms = 0;
     int64_t timeEnd_ms = 0;
     double priceMin = 0.0;
     double priceMax = 0.0;
-    double liquidity = 0.0;
-    bool isBid = true;
-    double intensity = 0.0;
-    QColor color;
-    int snapshotCount = 0;
+
+    // Display/data attributes
+    float liquidity = 0.0f; // aggregated volume/liquidity
+    bool isBid = true;      // side
 };
 ```
 
@@ -85,6 +85,10 @@ struct OrderBookSnapshot {
 // libs/core/LiquidityTimeSeriesEngine.h:58-120
 struct LiquidityTimeSlice {
     int64_t startTime_ms, endTime_ms, duration_ms;
+    
+    // Version tracking for change detection (incremented when metrics change)
+    uint64_t dataVersion = 0;
+    
     Tick minTick, maxTick;
     double tickSize;
     struct PriceLevelMetrics {

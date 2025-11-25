@@ -5,36 +5,34 @@ All snippets are verbatim from the current codebase with comments describing how
 ## 1. Slice Scheduling (`DataProcessor::updateVisibleCells`)
 
 ```cpp
-// libs/gui/render/DataProcessor.cpp:486-517
+// libs/gui/render/DataProcessor.cpp:486-532
 if (viewportChanged || m_lastProcessedTime == 0) {
     m_processedTimeRanges.clear();
     for (const auto* slice : visibleSlices) {
         ++processedSlices;
         createCellsFromLiquiditySlice(*slice);
-        m_processedTimeRanges.insert({slice->startTime_ms, slice->endTime_ms});
-        if (slice && slice->endTime_ms > m_lastProcessedTime) {
-            m_lastProcessedTime = slice->endTime_ms;
-        }
+        m_processedTimeRanges.insert({slice->startTime_ms, slice->endTime_ms, slice->dataVersion});
+        // ... update m_lastProcessedTime
     }
 } else {
     for (const auto* slice : visibleSlices) {
         if (!slice) continue;
-        SliceTimeRange range{slice->startTime_ms, slice->endTime_ms};
+        SliceTimeRange range{slice->startTime_ms, slice->endTime_ms, slice->dataVersion};
         if (m_processedTimeRanges.find(range) == m_processedTimeRanges.end()) {
+            // Check for old version of this time range and remove stale cells
+            // ... removeCellsForTimeRange() if version changed ...
             ++processedSlices;
             createCellsFromLiquiditySlice(*slice);
             m_processedTimeRanges.insert(range);
         }
-        if (slice->endTime_ms > m_lastProcessedTime) {
-            m_lastProcessedTime = slice->endTime_ms;
-        }
+        // ... update m_lastProcessedTime
     }
 }
 ```
 
 * **Iteration count:** `visibleSlices` is whatever the LTE returns for the viewport window; at 100 ms buckets over a 30 s view this is ≈300 slices per frame. The loop is sequential, touching two cache-friendly containers: `std::vector<const LiquidityTimeSlice*> visibleSlices` and `std::unordered_set<SliceTimeRange>`.
-* **Memory accessed:** Only metadata (`startTime_ms`, `endTime_ms`) plus each slice passed into `createCellsFromLiquiditySlice`. The `unordered_set` operations read/write 16-byte keys.
-* **Read/write pattern:** Append-mode loops are read-mostly; writes only occur when a new slice appears. Processed ranges remain in the hash set until viewport changes, so repeated calls typically short-circuit.
+* **Memory accessed:** Only metadata (`startTime_ms`, `endTime_ms`, `dataVersion`) plus each slice passed into `createCellsFromLiquiditySlice`. The `unordered_set` operations read/write 24-byte keys (three int64_t-equivalent fields).
+* **Read/write pattern:** Append-mode loops are read-mostly; writes occur when a new slice appears OR when a slice's `dataVersion` changes (triggering stale cell removal and reprocessing). Processed ranges remain in the hash set until viewport changes, so repeated calls typically short-circuit unless slice data has changed.
 
 ## 2. Slice → Cells Expansion
 

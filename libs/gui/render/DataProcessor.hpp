@@ -111,6 +111,9 @@ private:
     bool isSignificantTrade(const Trade& trade, double midPrice) const;
     double calculateMidPrice() const;
     
+    // Append-mode helpers
+    void removeCellsForTimeRange(int64_t startTime, int64_t endTime);
+    
     // Components
     GridViewState* m_viewState = nullptr;
     LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
@@ -152,19 +155,24 @@ private:
     int64_t m_lastProcessedTime = 0;
     uint64_t m_lastViewportVersion = 0;
 
-    // Track processed slices by time range (slices are reused in memory, so can't use pointers)
+    // Track processed slices by time range + data version (slices are reused in memory, so can't use pointers)
     struct SliceTimeRange {
         int64_t startTime;
         int64_t endTime;
+        uint64_t dataVersion;  // Track data version to detect when slice content has changed
 
         bool operator==(const SliceTimeRange& other) const {
-            return startTime == other.startTime && endTime == other.endTime;
+            return startTime == other.startTime 
+                && endTime == other.endTime 
+                && dataVersion == other.dataVersion;
         }
     };
 
     struct SliceTimeRangeHash {
         size_t operator()(const SliceTimeRange& range) const {
-            return std::hash<int64_t>()(range.startTime) ^ (std::hash<int64_t>()(range.endTime) << 1);
+            return std::hash<int64_t>()(range.startTime) 
+                 ^ (std::hash<int64_t>()(range.endTime) << 1)
+                 ^ (std::hash<uint64_t>()(range.dataVersion) << 2);
         }
     };
 

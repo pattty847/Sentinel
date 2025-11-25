@@ -26,7 +26,6 @@ The Sentinel trading terminal uses a sophisticated dockable widget framework bui
 ```
 MainWindowGPU (QMainWindow)
 ├── Menu Bar (View, Layouts, Tools)
-├── Central Widget (StatusDock - minimal placeholder)
 ├── Dock Widgets (arranged in areas)
 │   ├── HeatmapDock (Right area, prominent)
 │   │   └── Embedded Symbol Control Bar
@@ -455,7 +454,6 @@ Qt's MOC requires full type definitions for classes with `Q_OBJECT` macro.
 ```cpp
 // Forward declarations won't work for MOC
 #include "widgets/HeatmapDock.hpp"
-#include "widgets/StatusDock.hpp"
 #include "widgets/StatusBar.hpp"
 // ... etc
 ```
@@ -608,7 +606,6 @@ void MainWindowGPU::resetLayoutToDefault() {
 - `libs/gui/widgets/SecFilingDock.hpp/.cpp` - SEC filing viewer
 - `libs/gui/widgets/CopenetFeedDock.hpp/.cpp` - COPENET commentary
 - `libs/gui/widgets/AICommentaryFeedDock.hpp/.cpp` - AI commentary
-- `libs/gui/widgets/StatusDock.hpp/.cpp` - Central widget placeholder
 - `libs/gui/widgets/StatusBar.hpp/.cpp` - Bottom status bar
 
 ### Build Configuration

@@ -54,7 +54,7 @@ DataProcessor::~DataProcessor() {
 
 void DataProcessor::startProcessing() {
     // Base 100ms sampler: ensure continuous time buckets
-    // This is the rate at whicch we sample the order book with 'captureOrderBookSnapshot'
+    // Rate at which we sample the order book with 'captureOrderBookSnapshot'
     sLog_App("DataProcessor: Starting 100ms base sampler");
     if (m_snapshotTimer && !m_snapshotTimer->isActive()) {
         m_snapshotTimer->start(100);
@@ -281,9 +281,24 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
         auto view = liveBook.captureDenseNonZero(bidBuf, askBuf, kMaxPerSide);
         if (!view.bidLevels.empty() || !view.askLevels.empty()) {
             m_liquidityEngine->addDenseSnapshot(view);
+            
+            // Also build sparse OrderBook for m_latestOrderBook (used by timer carry-forward)
+            // This ensures captureOrderBookSnapshot() has fresh data when no updates arrive
+            auto sparseForCarryForward = std::make_shared<OrderBook>();
+            sparseForCarryForward->product_id = productId.toStdString();
+            sparseForCarryForward->timestamp = view.timestamp;
+            for (const auto& [idx, qty] : view.bidLevels) {
+                double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+                sparseForCarryForward->bids.push_back({price, qty});
+            }
+            for (const auto& [idx, qty] : view.askLevels) {
+                double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+                sparseForCarryForward->asks.push_back({price, qty});
+            }
+            
             {
                 std::lock_guard<std::mutex> lock(m_dataMutex);
-                // Keep m_latestOrderBook for viewport init via existing path (optional)
+                m_latestOrderBook = sparseForCarryForward;
                 m_hasValidOrderBook = true;
             }
             updateVisibleCells();
@@ -489,21 +504,36 @@ void DataProcessor::updateVisibleCells() {
             for (const auto* slice : visibleSlices) {
                 ++processedSlices;
                 createCellsFromLiquiditySlice(*slice);
-                m_processedTimeRanges.insert({slice->startTime_ms, slice->endTime_ms});
+                m_processedTimeRanges.insert({slice->startTime_ms, slice->endTime_ms, slice->dataVersion});
                 if (slice && slice->endTime_ms > m_lastProcessedTime) {
                     m_lastProcessedTime = slice->endTime_ms;
                 }
             }
         } else {
-            // Append mode: process only slices with NEW time ranges
-            // CRITICAL: LTSE reuses slice objects in memory, so we MUST track by time range, not pointer
+            // Append mode: process only slices with NEW time ranges OR changed data versions
+            // CRITICAL: LTSE reuses slice objects in memory, so we track by (time range + dataVersion)
             for (const auto* slice : visibleSlices) {
                 if (!slice) continue;
 
-                SliceTimeRange range{slice->startTime_ms, slice->endTime_ms};
+                SliceTimeRange range{slice->startTime_ms, slice->endTime_ms, slice->dataVersion};
 
-                // Check if we've already processed a slice with this time range
+                // Check if we've already processed this exact (time + version) combination
                 if (m_processedTimeRanges.find(range) == m_processedTimeRanges.end()) {
+                    // Check if we have an OLD version of this time range that needs updating
+                    bool foundOldVersion = false;
+                    for (auto it = m_processedTimeRanges.begin(); it != m_processedTimeRanges.end(); ) {
+                        if (it->startTime == range.startTime && it->endTime == range.endTime) {
+                            // Found old version - remove stale cells and tracking entry
+                            sLog_Render("SLICE REPROCESS: time=[" << range.startTime << "-" << range.endTime 
+                                        << "] version " << it->dataVersion << " -> " << range.dataVersion);
+                            removeCellsForTimeRange(range.startTime, range.endTime);
+                            it = m_processedTimeRanges.erase(it);
+                            foundOldVersion = true;
+                        } else {
+                            ++it;
+                        }
+                    }
+                    
                     ++processedSlices;
                     createCellsFromLiquiditySlice(*slice);
                     m_processedTimeRanges.insert(range);
@@ -519,7 +549,8 @@ void DataProcessor::updateVisibleCells() {
         // Do NOT prune off-viewport cells here; retain history so zoom-out can
         // immediately reveal older columns without requiring a recompute.
 
-        const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize);
+        // Changed if: viewport changed, cell count changed, OR any slices were (re)processed
+        const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize) || (processedSlices > 0);
 
         sLog_Render("SLICE PROCESSING: Processed " << processedSlices << "/" << visibleSlices.size() << " slices ("
                     << (viewportChanged ? "rebuild" : "append") << ")");
@@ -609,6 +640,22 @@ void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double 
                         << cell.timeStart_ms << "," << cell.timeEnd_ms << "] $[" 
                         << cell.priceMin << "," << cell.priceMax << "] liquidity=" << cell.liquidity);
         }
+    }
+}
+
+void DataProcessor::removeCellsForTimeRange(int64_t startTime, int64_t endTime) {
+    // Remove all cells that belong to a specific time slice (for reprocessing)
+    const size_t beforeSize = m_visibleCells.size();
+    m_visibleCells.erase(
+        std::remove_if(m_visibleCells.begin(), m_visibleCells.end(),
+            [startTime, endTime](const CellInstance& cell) {
+                return cell.timeStart_ms == startTime && cell.timeEnd_ms == endTime;
+            }),
+        m_visibleCells.end()
+    );
+    const size_t removed = beforeSize - m_visibleCells.size();
+    if (removed > 0) {
+        sLog_Render("CELLS REMOVED: " << removed << " cells for time range [" << startTime << "-" << endTime << "]");
     }
 }
 
