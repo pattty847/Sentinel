@@ -19,8 +19,10 @@ Assumptions: The 'liquidity' field of a cell is used to determine the rendered l
 #include <cmath>
 
 
-QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
-    if (batch.recentTrades.empty()) return nullptr;
+QSGNode* TradeFlowStrategy::buildNode(const IDataAccessor* dataAccessor) {
+    if (!dataAccessor) return nullptr;
+    const auto& recentTrades = dataAccessor->getRecentTrades();
+    if (recentTrades.empty()) return nullptr;
     
     // Create geometry node for trade flow rendering
     auto* node = new QSGGeometryNode;
@@ -31,13 +33,14 @@ QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
     
     // Use raw trade data like TradeBubbleStrategy
     std::vector<const Trade*> validTrades;
-    for (const auto& trade : batch.recentTrades) {
-        if (trade.size >= batch.minVolumeFilter) {
+    double minVolumeFilter = dataAccessor->getMinVolumeFilter();
+    for (const auto& trade : recentTrades) {
+        if (trade.size >= minVolumeFilter) {
             validTrades.push_back(&trade);
         }
     }
     
-    int tradeCount = std::min(static_cast<int>(validTrades.size()), batch.maxCells);
+    int tradeCount = std::min(static_cast<int>(validTrades.size()), dataAccessor->getMaxCells());
     if (tradeCount == 0) return nullptr;
     
     int vertexCount = tradeCount * 6;
@@ -52,10 +55,10 @@ QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
-    // TEMPORARY: Just return empty geometry to test if vertex processing is the crash
-    // TODO: Remove this and restore the vertex processing once we confirm it's not the issue
-    
-    for (int i = 0; i < tradeCount && i < 10; ++i) {  // Limit to 10 trades for safety
+    double intensityScale = dataAccessor->getIntensityScale();
+    Viewport viewport = dataAccessor->getViewport();
+
+    for (int i = 0; i < tradeCount; ++i) {
         const auto& trade = *validTrades[i];
         
         // Add basic safety checks
@@ -63,7 +66,7 @@ QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
         if (trade.size <= 0.0) continue;  // Invalid trade size
         
         // Calculate color and size based on trade intensity
-        double scaledIntensity = calculateIntensity(trade.size, batch.intensityScale);
+        double scaledIntensity = calculateIntensity(trade.size, intensityScale);
         bool isBid = (trade.side == AggressorSide::Buy);
         QColor color = calculateColor(trade.size, isBid, scaledIntensity);
         
@@ -72,7 +75,7 @@ QSGNode* TradeFlowStrategy::buildNode(const GridSliceBatch& batch) {
         
         // Convert trade timestamp and price to screen coordinates  
         auto tradeTime = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
-        QPointF tradePos = CoordinateSystem::worldToScreen(tradeTime, trade.price, batch.viewport);
+        QPointF tradePos = CoordinateSystem::worldToScreen(tradeTime, trade.price, viewport);
         float centerX = static_cast<float>(tradePos.x());
         float centerY = static_cast<float>(tradePos.y());
         

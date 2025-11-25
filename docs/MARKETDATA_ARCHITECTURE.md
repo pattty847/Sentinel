@@ -136,12 +136,14 @@ The MarketDataCore is a high-performance, thread-safe market data pipeline desig
 - **Structure**:
   ```json
   {
-    "key_id": "string",
-    "private_key": "PEM-encoded ES256 key"
+    "key": "organizations/.../apiKeys/...",
+    "secret": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
   }
   ```
 - **Thread Safety**: `createJwt()` is stateless and thread-safe
 - **Usage**: Called once per subscription to generate fresh tokens
+- **Critical**: Nonce must be base64-encoded before adding to JWT claims (jwt-cpp requires UTF-8 safe strings)
+- **Error Handling**: JWT creation failures should be caught in handlers to prevent I/O thread crashes
 
 ---
 
@@ -369,6 +371,10 @@ Worker Thread                    GUI Thread
      │                            (main thread)
 ```
 
+**Posting from GUI Thread**: GUI thread can safely call `net::post(m_strand, handler)` to queue work on the I/O thread. The strand ensures serialized execution. This is thread-safe and the standard Boost.Asio pattern.
+
+**Critical**: The I/O thread must be running (`m_ioc.run()` active) for posted work to execute. If the I/O thread dies (e.g., from an uncaught exception), posted work will never execute.
+
 ---
 
 ## Message Processing Flow
@@ -511,6 +517,32 @@ MarketDataCore::stop()
 5. m_ioThread.join()
    └─→ Wait for worker thread completion
 ```
+
+### I/O Thread Resilience (Critical)
+
+**IMPORTANT**: The `run()` method must handle exceptions to prevent the I/O thread from dying:
+
+```cpp
+void MarketDataCore::run() {
+    while (m_running.load()) {
+        try {
+            m_ioc.run();
+            if (m_running.load()) {
+                m_ioc.restart(); // Restart if run() returns unexpectedly
+            }
+        } catch (const std::exception& e) {
+            // Log and restart - don't let handler exceptions kill the thread
+            if (m_running.load()) {
+                m_ioc.restart();
+            }
+        }
+    }
+}
+```
+
+**Why**: If an async handler throws an uncaught exception, it propagates to `io_context::run()` and causes it to exit. This kills the I/O thread, preventing all subsequent posted work from executing. The restart loop ensures the thread stays alive.
+
+**See**: `docs\refactors\marketdata\BUGFIX_SUBSCRIPTION_FLOW.md` for detailed explanation of this issue.
 
 ---
 
@@ -793,6 +825,24 @@ libs/core/marketdata/
 
 ---
 
+## Known Issues & Fixes
+
+### Subscription Flow Failure (2024) - RESOLVED
+
+**Issue**: Subscriptions failed silently after connection. I/O thread would die on JWT exceptions.
+
+**Root Causes**:
+1. I/O thread not resilient to handler exceptions
+2. JWT nonce not base64-encoded (UTF-8 safety issue)
+3. Missing error handling around JWT creation
+
+**Fixes Applied**:
+- Modified `run()` to restart io_context on exceptions
+- Base64-encode nonce before adding to JWT claims
+- Added try/catch around all JWT creation calls
+
+**See**: `docs\refactors\marketdata\BUGFIX_SUBSCRIPTION_FLOW.md` for complete details.
+
 ## Conclusion
 
 The MarketDataCore architecture achieves:
@@ -801,7 +851,7 @@ The MarketDataCore architecture achieves:
 - ✅ **Thread Safety**: No data races, clean cross-thread boundaries
 - ✅ **Extensibility**: Interface-based design for new exchanges
 - ✅ **Maintainability**: Clear separation, comprehensive documentation
-- ✅ **Reliability**: Automatic reconnection, robust error handling
+- ✅ **Reliability**: Automatic reconnection, robust error handling, resilient I/O thread
 
 This design forms the foundation for real-time market data visualization in the Sentinel trading terminal.
 

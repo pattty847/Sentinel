@@ -16,13 +16,13 @@ Assumptions: Assumes ownership of its child nodes and manages their memory.
 #include <memory>
 
 class IRenderStrategy;
-struct GridSliceBatch;
+class IDataAccessor;
 
 class GridSceneNode : public QSGTransformNode {
 public:
     GridSceneNode();
     
-    void updateLayeredContent(const GridSliceBatch& batch, 
+    void updateLayeredContent(const IDataAccessor* dataAccessor, 
                              IRenderStrategy* heatmapStrategy, bool showHeatmap,
                              IRenderStrategy* bubbleStrategy, bool showBubbles,
                              IRenderStrategy* flowStrategy, bool showFlow);

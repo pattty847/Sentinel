@@ -1,10 +1,10 @@
 #pragma once
-#include <QRectF>
-#include <QColor>
-#include <vector>
-#include <cstdint>
-#include "../CoordinateSystem.h"
 #include "../../core/marketdata/model/TradeData.h"
+#include "../CoordinateSystem.h"
+#include <QColor>
+#include <QRectF>
+#include <cstdint>
+#include <vector>
 
 // Shared grid rendering types to avoid circular dependencies
 // World-space cell; screen-space is derived in the renderer per-frame
@@ -16,20 +16,6 @@ struct CellInstance {
     double priceMax = 0.0;
 
     // Display/data attributes
-    double liquidity = 0.0;   // aggregated volume/liquidity
-    bool isBid = true;        // side
-    double intensity = 0.0;   // normalized [0,1]
-    QColor color;             // per-cell color
-
-    // Optional: for future text overlays/annotation
-    int snapshotCount = 0;
-};
-
-struct GridSliceBatch {
-    std::vector<CellInstance> cells;
-    std::vector<Trade> recentTrades;  // Raw trade data for bubble rendering
-    double intensityScale = 1.0;
-    double minVolumeFilter = 0.0;
-    int maxCells = 100000;
-    Viewport viewport;  // viewport snapshot for world→screen conversion
+  float liquidity = 0.0f; // aggregated volume/liquidity
+  bool isBid = true;      // side
 };

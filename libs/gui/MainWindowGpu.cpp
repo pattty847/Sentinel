@@ -90,12 +90,8 @@ MainWindowGPU::~MainWindowGPU() {
         m_marketDataCore.reset();
     }
     
-    // Stop processing
-    auto unifiedGridRenderer = getUnifiedGridRenderer();
-    if (unifiedGridRenderer) {
-        auto dataProcessor = unifiedGridRenderer->getDataProcessor();
-        if (dataProcessor) dataProcessor->stopProcessing();
-    }
+    // Stop processing - UnifiedGridRenderer destructor will handle thread-safe shutdown
+    // No need to call stopProcessing() here as it will be called from UnifiedGridRenderer destructor
     
     if (m_qquickView) m_qquickView->setSource(QUrl());  // Clear QML
 }
@@ -429,6 +425,12 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);  // Extracted slot
+
+    // Surface MarketDataCore errors (e.g., WS/TLS/DNS issues) into the app log
+    connect(m_marketDataCore.get(), &MarketDataCore::errorOccurred,
+            this, [](const QString& error) {
+                sLog_Error("MarketDataCore error: " << error);
+            });
 }
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted for clarity

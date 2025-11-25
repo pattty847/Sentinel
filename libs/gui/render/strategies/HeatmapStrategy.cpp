@@ -22,28 +22,32 @@ Assumptions: Liquidity intensity is represented by the alpha channel of the vert
 // #include <iostream>
 
 
-QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
+QSGNode* HeatmapStrategy::buildNode(const IDataAccessor* dataAccessor) {
 
     /*
         Build a GPU scene graph node for rendering the heatmap. 
         Take our CellInstance data and convert them to colored triangles in world space.
     */
 
-    if (batch.cells.empty()) {
+    if (!dataAccessor) return nullptr;
+    auto cellsPtr = dataAccessor->getVisibleCells();
+    if (!cellsPtr || cellsPtr->empty()) {
         sLog_Render(" HEATMAP EXIT: Returning nullptr - batch is empty");
         return nullptr;
     }
 
     // Calculate required vertex count window (6 vertices per cell for 2 triangles)
-    int total = static_cast<int>(batch.cells.size());
-    int cellCount = std::min(total, batch.maxCells);
+    const auto& cells = *cellsPtr;
+    int total = static_cast<int>(cells.size());
+    int cellCount = std::min(total, dataAccessor->getMaxCells());
     int startIndex = std::max(0, total - cellCount); // keep newest when clipping
 
     // First pass: count how many cells pass the min volume filter
     int keptCells = 0;
+    const double minVolume = dataAccessor->getMinVolumeFilter();
     for (int i = 0; i < cellCount; ++i) {
-        const auto& cell = batch.cells[startIndex + i];
-        if (cell.liquidity >= batch.minVolumeFilter) {
+        const auto& cell = cells[startIndex + i];
+        if (cell.liquidity >= minVolume) {
             ++keptCells;
         }
     }
@@ -65,6 +69,9 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
     int streamPos = 0; // relative to startIndex
     int totalVerticesDrawn = 0;
 
+    const Viewport viewport = dataAccessor->getViewport();
+    const double intensityScale = dataAccessor->getIntensityScale();
+
     while (producedKeptCells < keptCells) {
         const int remaining = keptCells - producedKeptCells;
         const int targetCells = std::min(cellsPerChunk, remaining);
@@ -74,8 +81,8 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
         chunkCells.reserve(targetCells);
 
         for (; streamPos < cellCount && static_cast<int>(chunkCells.size()) < targetCells; ++streamPos) {
-            const auto& c = batch.cells[startIndex + streamPos];
-            if (c.liquidity >= batch.minVolumeFilter) {
+            const auto& c = cells[startIndex + streamPos];
+            if (c.liquidity >= minVolume) {
                 chunkCells.push_back(&c);
             }
         }
@@ -104,7 +111,7 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
             const auto& cell = *cellPtr;
 
             // Color with intensity scaling
-            double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
+            double scaledIntensity = calculateIntensity(cell.liquidity, intensityScale);
             QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
             const int r = color.red();
             const int g = color.green();
@@ -112,8 +119,8 @@ QSGNode* HeatmapStrategy::buildNode(const GridSliceBatch& batch) {
             const int a = std::clamp(static_cast<int>(color.alpha()), 0, 255);
 
             // Convert world→screen using batch.viewport
-            QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
-            QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+            QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, viewport);
+            QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, viewport);
 
             const float left = static_cast<float>(topLeft.x());
             const float top = static_cast<float>(topLeft.y());

@@ -18,8 +18,10 @@ Assumptions: The 'liquidity' field represents trade size for bubble scaling.
 #include <algorithm>
 #include <cmath>
 
-QSGNode* TradeBubbleStrategy::buildNode(const GridSliceBatch& batch) {
-    if (batch.recentTrades.empty()) return nullptr;
+QSGNode* TradeBubbleStrategy::buildNode(const IDataAccessor* dataAccessor) {
+    if (!dataAccessor) return nullptr;
+    const auto& recentTrades = dataAccessor->getRecentTrades();
+    if (recentTrades.empty()) return nullptr;
     
     // Create geometry node for bubble rendering
     auto* node = new QSGGeometryNode;
@@ -32,8 +34,10 @@ QSGNode* TradeBubbleStrategy::buildNode(const GridSliceBatch& batch) {
     std::vector<const Trade*> validTrades;
     double maxTradeSize = 0.0;
     
-    for (const auto& trade : batch.recentTrades) {
-        if (trade.size >= batch.minVolumeFilter) {
+    double minVolumeFilter = dataAccessor->getMinVolumeFilter();
+
+    for (const auto& trade : recentTrades) {
+        if (trade.size >= minVolumeFilter) {
             validTrades.push_back(&trade);
             maxTradeSize = std::max(maxTradeSize, trade.size);
         }
@@ -48,7 +52,7 @@ QSGNode* TradeBubbleStrategy::buildNode(const GridSliceBatch& batch) {
               });
     
     // Limit trade count for performance
-    int tradeCount = std::min(static_cast<int>(validTrades.size()), batch.maxCells);
+    int tradeCount = std::min(static_cast<int>(validTrades.size()), dataAccessor->getMaxCells());
     
     // Each bubble uses 18 vertices (6 triangles for smooth circle)
     int vertexCount = tradeCount * 18;
@@ -63,18 +67,21 @@ QSGNode* TradeBubbleStrategy::buildNode(const GridSliceBatch& batch) {
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
+    double intensityScale = dataAccessor->getIntensityScale();
+    Viewport viewport = dataAccessor->getViewport();
+
     for (int i = 0; i < tradeCount; ++i) {
         const auto& trade = *validTrades[i];
         
         // Calculate bubble properties from trade data
-        double scaledIntensity = calculateIntensity(trade.size, batch.intensityScale);
+        double scaledIntensity = calculateIntensity(trade.size, intensityScale);
         float bubbleRadius = calculateBubbleRadius(trade.size, maxTradeSize);
         bool isBid = (trade.side == AggressorSide::Buy);
         QColor bubbleColor = calculateBubbleColor(trade.size, isBid, scaledIntensity);
         
         // Convert trade timestamp and price to screen coordinates
         auto tradeTime = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
-        QPointF tradePos = CoordinateSystem::worldToScreen(tradeTime, trade.price, batch.viewport);
+        QPointF tradePos = CoordinateSystem::worldToScreen(tradeTime, trade.price, viewport);
         float centerX = static_cast<float>(tradePos.x());
         float centerY = static_cast<float>(tradePos.y());
         

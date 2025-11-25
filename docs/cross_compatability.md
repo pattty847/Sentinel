@@ -1,112 +1,214 @@
-────────────────────────────────────────
-1. CMakePresets.json – one file, all platforms  
-```json
-{
-  "version": 3,
-  "configurePresets": [
-    {
-      "name": "windows-mingw",
-      "displayName": "Win - MinGW",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-windows-mingw",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe",
-        "CMAKE_PREFIX_PATH": "C:/Qt/6.9.1/mingw_64",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    },
-    {
-      "name": "mac-clang",
-      "displayName": "macOS - Clang",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-mac-clang",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/qt",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    }
-  ],
-  "buildPresets": [
-    { "name": "windows-mingw", "configurePreset": "windows-mingw" },
-    { "name": "mac-clang",     "configurePreset": "mac-clang"     }
-  ]
-}
+# **Sentinel Cross-Platform Build Guide (2025 Update)**
+
+Sentinel now uses a **unified, modern, zero-friction build system** across Windows, macOS, and Linux:
+
+* **CMakePresets.json** handles all configuration
+* Qt is provided via **platform-specific env vars**
+* Dependencies come from **vcpkg** only
+* Compiler toolchains are **not installed by scripts**
+* Bootstrap scripts simply validate your environment
+
+This doc explains exactly how to get Sentinel building on each platform with the new architecture.
+
+---
+
+# 🚀 Core Philosophy
+
+**1. You install Qt manually (installer or package manager).**
+**2. You install a compiler manually (MSVC/Xcode/GCC).**
+**3. You set 1–2 environment variables.**
+**4. You run the CMake preset.**
+
+Nothing else.
+The tooling is deterministic and identical across OSes.
+
+---
+
+# 📦 Required Environment Variables
+
+Sentinel uses three platform-specific Qt variables and one shared vcpkg variable:
+
+## **Shared**
+
 ```
-Users run:
+VCPKG_ROOT=/path/to/vcpkg
+```
+
+## **Windows**
+
+```
+QT_MSVC=C:/Qt/6.9.3/msvc2022_64
+```
+
+## **macOS**
+
+```
+QT_MAC=/opt/homebrew/opt/qt
+```
+
+## **Linux**
+
+```
+QT_LINUX=/usr/lib/qt6          # or your distro’s Qt6 path
+```
+
+You can export these inside your shell profile:
+
+**PowerShell**
+
+```powershell
+setx VCPKG_ROOT "C:\dev\vcpkg"
+setx QT_MSVC "C:\Qt\6.9.3\msvc2022_64"
+```
+
+**macOS/Linux**
+
 ```bash
-cmake --preset windows-mingw   # configures & writes compile_commands.json
-cmake --build --preset windows-mingw
-```
-Same for `mac-clang`.
-
-2. **IDE tips**  
-VS Code / CLion / Qt Creator all read CMake presets & auto-discover
-the compile database.  Document:
-
-```
-# .vscode/settings.json (recommended, not mandatory)
-{
-  "clangd.arguments": [
-    "--compile-commands-dir=${workspaceFolder}/build-${command:cmake.activeConfigurePreset}",
-    "--query-driver=C:/msys64/mingw64/bin/g++.exe"   // Windows only
-  ]
-}
+echo 'export VCPKG_ROOT="$HOME/vcpkg"' >> ~/.zshrc
+echo 'export QT_MAC="/opt/homebrew/opt/qt"' >> ~/.zshrc
 ```
 
-3. Package managers  
-• Windows & macOS: ship a `vcpkg.json` (or Conanfile) limited to
-  non-Qt, non-GCC libs (nlohmann_json, Boost, jwt-cpp).  
-• Let users `vcpkg integrate` once; CMake picks it up automatically.
+---
 
-4. GitHub CI matrix  
-```yaml
-jobs:
-  build:
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: lukka/run-vcpkg@v11   # optional
-      - name: Configure
-        run: cmake --preset ${{ matrix.os == 'windows-latest' && 'windows-mingw' || 'mac-clang' }}
-      - name: Build
-        run: cmake --build --preset ${{ matrix.os == 'windows-latest' && 'windows-mingw' || 'mac-clang' }}
+# 🧱 Platform Prerequisites
+
+## **Windows**
+
+* Visual Studio 2022 Build Tools (MSVC)
+* Qt 6.9+ (MSVC build)
+* Git
+* CMake (newest)
+* Ninja (optional but recommended)
+
+## **macOS**
+
+* Xcode (for Clang toolchain)
+* Qt 6.9+ via Homebrew (`brew install qt`)
+* Git
+* CMake
+* Ninja
+
+## **Linux**
+
+* GCC 11+ or Clang 14+
+* Qt 6.9+ (distro or Qt installer)
+* Git
+* CMake
+* Ninja
+* vcpkg bootstrapped from GitHub
+
+---
+
+# ✨ Building Sentinel (All Platforms)
+
+Once environment variables are set, building Sentinel is identical everywhere:
+
+### **Configure**
+
 ```
-A green matrix gives newcomers confidence the project really is portable.
+cmake --preset windows-msvc      # on Windows
+cmake --preset mac-clang        # on macOS
+cmake --preset linux-gcc        # on Linux
+```
 
-5. Document a **one-page “Getting Started”**  
-Explain:
-• prerequisites (Qt installer, MSYS2/MinGW or Xcode)  
-• `cmake --preset …` workflow  
-• optional IDE settings snippet.
+### **Build**
 
-6. Tooling isolation  
-If you want totally self-contained builds: ship a small `Dockerfile`
-(for Linux) and a `devcontainer.json` so VS Code Remote Containers sets
-everything up automatically.
+```
+cmake --build --preset windows-msvc
+```
 
-────────────────────────────────────────
-C.  Windows-specific quality-of-life
-────────────────────────────────────────
-• Add `%QtDir%\bin` and `%QtDir%\tools\qmllint` to `PATH` in a PowerShell
-  script you call `env.ps1`; VS Code lets you “Run active file” to get a
-  Qt-aware terminal.
+### **Run**
 
-• Turn off Defender real-time scanning on `build-*` directories – makes
-  Ninja builds and clangd indexing noticeably faster.
+Executables appear under:
 
-• GPU profiling: install Nsight Systems / Nsight Graphics – they work
-  fine with MinGW executables.
+```
+build-<preset>/apps/
+```
 
-────────────────────────────────────────
-Recap
-────────────────────────────────────────
-1. Single authoritative `compile_commands.json` in each build dir.  
-2. Point clangd to that dir & to **only** the compiler you actually use.  
-3. Capture all platform quirks in CMakePresets.json, not in IDE files.  
-4. Provide a one-liner configure + build for every OS.  
-5. CI matrix proves it works; docs show newcomers the exact steps.
+---
+
+# 📁 Directory Layout (Important)
+
+CMake builds go into platform-specific directories:
+
+```
+build/windows-msvc/
+build/mac-clang/
+build/linux-gcc/
+```
+
+Each is fully isolated — no pollution, no compiler mixing.
+
+---
+
+# 🔧 Bootstrap Scripts (Optional Helpers)
+
+Sentinel ships two ultra-simple bootstrap scripts:
+
+```
+scripts/bootstrap-windows.ps1
+scripts/bootstrap-unix.sh
+```
+
+They only:
+
+1. Check that required env vars exist
+2. Suggest fixes if missing
+3. Print the correct preset to run
+
+They do *not* install compilers, Qt, vcpkg, or system dependencies.
+
+This prevents:
+
+* accidental toolchain overrides
+* MinGW/MSYS2 contamination
+* weird PATH collisions
+* Qt mismatches across machines
+
+---
+
+# 🧪 Optional: Running Tests
+
+All tests run through **ctest** after the build:
+
+```
+cd build-<preset>
+ctest --output-on-failure
+```
+
+---
+
+# 🛠 IDE Notes
+
+All major C++ IDEs auto-detect presets:
+
+**VSCode (CMake Tools)**
+
+* Automatically detects `CMakePresets.json`
+* Uses compile commands generated per preset
+* No special settings required
+
+**CLion**
+
+* Import project → presets auto-populate
+
+**Qt Creator**
+
+* Supports presets since Qt 6.5
+
+---
+
+# 🏁 Summary
+
+Sentinel’s build system is now:
+
+**Cross-platform, reproducible, deterministic, preset-driven.**
+
+To build:
+
+1. Install Qt + compiler
+2. Set env vars
+3. `cmake --preset <platform>`
+4. `cmake --build --preset <platform>`
+
+That’s it.

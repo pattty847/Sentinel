@@ -18,8 +18,10 @@ Assumptions: Cells contain OHLC data; uses a single material for all rendered ge
 #include <algorithm>
 
 
-QSGNode* CandleStrategy::buildNode(const GridSliceBatch& batch) {
-    if (batch.cells.empty()) return nullptr;
+QSGNode* CandleStrategy::buildNode(const IDataAccessor* dataAccessor) {
+    if (!dataAccessor) return nullptr;
+    auto cellsPtr = dataAccessor->getVisibleCells();
+    if (!cellsPtr || cellsPtr->empty()) return nullptr;
     
     // Create geometry node for candle rendering
     auto* node = new QSGGeometryNode;
@@ -29,7 +31,8 @@ QSGNode* CandleStrategy::buildNode(const GridSliceBatch& batch) {
     node->setFlag(QSGNode::OwnsMaterial);
     
     // Calculate required vertex count (6 vertices per candle for 2 triangles)
-    int cellCount = std::min(static_cast<int>(batch.cells.size()), batch.maxCells);
+    const auto& cells = *cellsPtr;
+    int cellCount = std::min(static_cast<int>(cells.size()), dataAccessor->getMaxCells());
     int vertexCount = cellCount * 6;
     
     // Create geometry
@@ -42,19 +45,23 @@ QSGNode* CandleStrategy::buildNode(const GridSliceBatch& batch) {
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
+    double minVolumeFilter = dataAccessor->getMinVolumeFilter();
+    double intensityScale = dataAccessor->getIntensityScale();
+    Viewport viewport = dataAccessor->getViewport();
+
     for (int i = 0; i < cellCount; ++i) {
-        const auto& cell = batch.cells[i];
+        const auto& cell = cells[i];
         
         // Skip cells with insufficient volume
-        if (cell.liquidity < batch.minVolumeFilter) continue;
+        if (cell.liquidity < minVolumeFilter) continue;
         
         // Calculate color with intensity scaling
-        double scaledIntensity = calculateIntensity(cell.liquidity, batch.intensityScale);
+        double scaledIntensity = calculateIntensity(cell.liquidity, intensityScale);
         QColor color = calculateColor(cell.liquidity, cell.isBid, scaledIntensity);
         
         // Convert world→screen to derive base rectangle
-        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, batch.viewport);
-        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, batch.viewport);
+        QPointF topLeft = CoordinateSystem::worldToScreen(cell.timeStart_ms, cell.priceMax, viewport);
+        QPointF bottomRight = CoordinateSystem::worldToScreen(cell.timeEnd_ms, cell.priceMin, viewport);
         float baseWidth = static_cast<float>(bottomRight.x() - topLeft.x());
         float baseTop = static_cast<float>(topLeft.y());
         float baseBottom = static_cast<float>(bottomRight.y());

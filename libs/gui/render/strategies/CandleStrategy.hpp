@@ -1,7 +1,7 @@
 /*
 Sentinel — CandleStrategy
 Role: A concrete render strategy that visualizes market data as OHLC candlesticks.
-Inputs/Outputs: Implements IRenderStrategy to turn a GridSliceBatch into a QSGNode of lines.
+Inputs/Outputs: Implements IRenderStrategy to turn accessor-provided cell/price data into a QSGNode of lines.
 Threading: Methods are called exclusively on the Qt Quick render thread.
 Performance: Renders all geometry into a single QSGNode for efficiency.
 Integration: Instantiated and managed by UnifiedGridRenderer as a pluggable strategy.
@@ -41,7 +41,7 @@ public:
     CandleStrategy() = default;
     ~CandleStrategy() override = default;
     
-    QSGNode* buildNode(const GridSliceBatch& batch) override;
+    QSGNode* buildNode(const IDataAccessor* dataAccessor) override;
     QColor calculateColor(double liquidity, bool isBid, double intensity) const override;
     const char* getStrategyName() const override { return "VolumeCandles"; }
     

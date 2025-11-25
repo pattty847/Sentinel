@@ -1,6 +1,6 @@
 import QtQuick 2.15
-import QtQuick.Controls 2.15
-import Sentinel.Charts 1.0
+import QtQuick.Controls
+import Sentinel 1.0
 import "controls"
 
 Rectangle {

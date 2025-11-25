@@ -68,7 +68,7 @@ public:
     void stopProcessing();
     
     void createCellsFromLiquiditySlice(const struct LiquidityTimeSlice& slice);
-    void createLiquidityCell(const struct LiquidityTimeSlice& slice, double price, double liquidity, bool isBid);
+    void createLiquidityCell(const struct LiquidityTimeSlice& slice, double price, float liquidity, bool isBid);
     QRectF timeSliceToScreenRect(const struct LiquidityTimeSlice& slice, double price) const;
     
     void setPriceResolution(double resolution);

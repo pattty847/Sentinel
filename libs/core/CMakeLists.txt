@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.22)
-
 project(sentinel_core)
 
 add_library(sentinel_core
@@ -24,10 +22,11 @@ add_library(sentinel_core
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
-find_package(Boost REQUIRED)
-find_package(nlohmann_json REQUIRED)
-find_package(OpenSSL REQUIRED)
-# jwt-cpp is fetched via FetchContent in main CMakeLists.txt
+# Dependencies found in root CMakeLists.txt via vcpkg
+# - Boost (with system component)
+# - nlohmann_json
+# - OpenSSL
+# - jwt-cpp (via FetchContent)
 
 target_include_directories(sentinel_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -36,11 +35,12 @@ target_include_directories(sentinel_core PUBLIC
 target_link_libraries(sentinel_core
     PUBLIC
         Qt6::Core
-    PRIVATE
-        Boost::headers
-        nlohmann_json::nlohmann_json
+        Boost::headers         # header-only components
+        Boost::system          # required by beast
         OpenSSL::SSL
         OpenSSL::Crypto
+    PRIVATE
+        nlohmann_json::nlohmann_json
         jwt-cpp::jwt-cpp
 )
 
@@ -51,6 +51,11 @@ if(WIN32)
         wsock32
         mswsock
     )
+endif()
+
+# GPU acceleration support
+if(SENTINEL_USE_GPU)
+    target_compile_definitions(sentinel_core PRIVATE USE_SENTINEL_GPU)
 endif()
 
 # C++20 standard is set globally in root CMakeLists.txt

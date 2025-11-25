@@ -7,6 +7,8 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QApplication>
 #include <QMetaType>
 #include <QQmlEngine>
+#include <QtQml/qqml.h>
+#include <QByteArray> // for qputenv / qgetenv on all platforms
 #include "marketdata/model/TradeData.h"
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
@@ -49,10 +51,12 @@ void registerMetaTypesAndQml() {
     qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
 
     sLog_App("Registering pure grid-only QML components...");
-    qmlRegisterType<UnifiedGridRenderer>("Sentinel.Charts", 1, 0, "UnifiedGridRenderer");
-    qmlRegisterType<CoordinateSystem>("Sentinel.Charts", 1, 0, "CoordinateSystem");
-    qmlRegisterType<TimeAxisModel>("Sentinel.Charts", 1, 0, "TimeAxisModel");
-    qmlRegisterType<PriceAxisModel>("Sentinel.Charts", 1, 0, "PriceAxisModel");
+    // Register a lightweight QML module "Sentinel" and expose our core types there.
+    qmlRegisterModule("Sentinel", 1, 0);
+    qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
+    qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
+    qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
+    qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
     sLog_App("Pure grid-only mode: Legacy components permanently removed");
 }
 

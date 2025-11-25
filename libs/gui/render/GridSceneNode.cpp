@@ -12,6 +12,7 @@ Assumptions: The active render strategy returns a valid node to be added to the 
 #include "GridSceneNode.hpp"
 #include "GridTypes.hpp"
 #include "IRenderStrategy.hpp"
+#include "IDataAccessor.hpp"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QSGGeometry>
@@ -20,7 +21,7 @@ GridSceneNode::GridSceneNode() {
     setFlag(QSGNode::OwnedByParent);
 }
 
-void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch, 
+void GridSceneNode::updateLayeredContent(const IDataAccessor* dataAccessor, 
                                         IRenderStrategy* heatmapStrategy, bool showHeatmap,
                                         IRenderStrategy* bubbleStrategy, bool showBubbles,
                                         IRenderStrategy* flowStrategy, bool showFlow) {
@@ -31,7 +32,7 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             removeChildNode(m_heatmapNode);
             delete m_heatmapNode;
         }
-        m_heatmapNode = heatmapStrategy->buildNode(batch);
+        m_heatmapNode = heatmapStrategy->buildNode(dataAccessor);
         if (m_heatmapNode) {
             appendChildNode(m_heatmapNode);
         }
@@ -47,7 +48,7 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             removeChildNode(m_bubbleNode);
             delete m_bubbleNode;
         }
-        m_bubbleNode = bubbleStrategy->buildNode(batch);
+        m_bubbleNode = bubbleStrategy->buildNode(dataAccessor);
         if (m_bubbleNode) {
             appendChildNode(m_bubbleNode);
         }
@@ -63,7 +64,7 @@ void GridSceneNode::updateLayeredContent(const GridSliceBatch& batch,
             removeChildNode(m_flowNode);
             delete m_flowNode;
         }
-        m_flowNode = flowStrategy->buildNode(batch);
+        m_flowNode = flowStrategy->buildNode(dataAccessor);
         if (m_flowNode) {
             appendChildNode(m_flowNode);
         }
@@ -108,10 +109,11 @@ void GridSceneNode::updateVolumeProfile(const std::vector<std::pair<double, doub
         m_volumeProfileNode = nullptr;
     }
     
-    // Create new volume profile node
     m_volumeProfileNode = createVolumeProfileNode(profile);
+    
     if (m_volumeProfileNode) {
         appendChildNode(m_volumeProfileNode);
+        m_volumeProfileNode->setFlag(QSGNode::OwnedByParent, true);
     }
 }
 

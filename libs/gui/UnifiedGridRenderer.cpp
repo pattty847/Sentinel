@@ -29,6 +29,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/GridSceneNode.hpp" 
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
+#include "render/IDataAccessor.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
 #include "render/strategies/TradeFlowStrategy.hpp"
 #include "render/strategies/TradeBubbleStrategy.hpp"
@@ -53,7 +54,14 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
     sLog_App("UnifiedGridRenderer destructor - cleaning up...");
     
     if (m_dataProcessor) {
-        m_dataProcessor->stopProcessing();
+        if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
+            // CRITICAL: stopProcessing() must be called on the worker thread where the timer lives
+            // Use BlockingQueuedConnection to ensure it completes before we destroy the thread
+            QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::stopProcessing, Qt::BlockingQueuedConnection);
+        } else {
+            // Thread not running - safe to call directly (timer already stopped or object on main thread)
+            m_dataProcessor->stopProcessing();
+        }
         disconnect(m_dataProcessor.get(), nullptr, this, nullptr);
     }
     
@@ -75,7 +83,8 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
-    // Store recent trades for bubble rendering (keep last 1000 trades)
+    // REMOVED: Trade buffering in UGR. Strategies now pull from DataCache.
+    /*
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         m_recentTrades.push_back(trade);
@@ -83,6 +92,7 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
             m_recentTrades.erase(m_recentTrades.begin(), m_recentTrades.begin() + 100); // Remove oldest 100
         }
     }
+    */
     
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), "onTradeReceived", 
@@ -149,10 +159,10 @@ void UnifiedGridRenderer::updateVisibleCells() {
         // Try to grab the latest published cells without blocking the worker
         auto snapshot = m_dataProcessor->getPublishedCellsSnapshot();
         if (snapshot) {
-            m_visibleCells.assign(snapshot->begin(), snapshot->end());
+            m_visibleCells = snapshot; // Zero-copy share
         }
     } else {
-        m_visibleCells.clear();
+        m_visibleCells.reset();
     }
     // Avoid writing viewport state from the render thread; size is handled in geometryChanged
 }
@@ -160,9 +170,6 @@ void UnifiedGridRenderer::updateVisibleCells() {
 void UnifiedGridRenderer::updateVolumeProfile() {
     // TODO: Implement volume profile from liquidity time series
     m_volumeProfile.clear();
-    
-    // For now, create a simple placeholder
-    // In a full implementation, this would aggregate volume across time slices
 }
 
 // Property setters
@@ -282,7 +289,7 @@ void UnifiedGridRenderer::clearData() {
     }
     
     // Clear rendering data
-    m_visibleCells.clear();
+    m_visibleCells.reset();
     m_volumeProfile.clear();
     
     m_geometryDirty.store(true);
@@ -468,6 +475,74 @@ namespace {
         }
         return Viewport{0, 0, 0.0, 0.0, w, h};
     }
+
+    // UGR implementation of data accessor (Phase 3/4 - owns frame config)
+    class UGRDataAccessor : public IDataAccessor {
+    private:
+        UnifiedGridRenderer* m_ugr;
+        DataCache* m_dataCache;          // Access to live data
+        DataProcessor* m_dataProcessor;  // Access to processed cell data
+        double m_intensityScale;
+        double m_minVolumeFilter;
+        int m_maxCells;
+        Viewport m_viewport;
+        std::string m_symbol;            // Current symbol context
+        mutable std::vector<Trade> m_tradeCache;  // Cache trades for accessor lifetime
+    
+    public:
+        explicit UGRDataAccessor(UnifiedGridRenderer* ugr,
+                                 double intensityScale_,
+                                 double minVolumeFilter_,
+                                 int maxCells_,
+                                 const Viewport& viewport_,
+                                 DataCache* cache,
+                                 DataProcessor* processor,
+                                 const std::string& symbol = "BTC-USD") 
+            : m_ugr(ugr)
+            , m_dataCache(cache)
+            , m_dataProcessor(processor)
+            , m_intensityScale(intensityScale_)
+            , m_minVolumeFilter(minVolumeFilter_)
+            , m_maxCells(maxCells_)
+            , m_viewport(viewport_)
+            , m_symbol(symbol) {}
+        
+        std::shared_ptr<const std::vector<CellInstance>> getVisibleCells() const override {
+            if (m_dataProcessor) {
+                return m_dataProcessor->getPublishedCellsSnapshot();
+            }
+            return nullptr;
+        }
+        
+        const std::vector<Trade>& getRecentTrades() const override {
+            if (m_dataCache) {
+                // Cache the trades for the lifetime of this accessor instance.
+                // DataCache::recentTrades returns by value, so we store it in a member
+                // to safely return a reference as required by the IDataAccessor interface.
+                m_tradeCache = m_dataCache->recentTrades(m_symbol);
+                return m_tradeCache;
+            }
+            // Fallback to empty if no cache (shouldn't happen in prod)
+            static const std::vector<Trade> empty;
+            return empty;
+        }
+        
+        Viewport getViewport() const override {
+            return m_viewport;
+        }
+        
+        double getIntensityScale() const override {
+            return m_intensityScale;
+        }
+        
+        double getMinVolumeFilter() const override {
+            return m_minVolumeFilter;
+        }
+        
+        int getMaxCells() const override {
+            return m_maxCells;
+        }
+    };
 }
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
@@ -500,11 +575,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        // create a new GridSliceBatch with the visible cells, recent trades, intensity scale, min volume filter, max cells, and viewport
-        GridSliceBatch batch{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
+        // TODO: Get actual symbol from somewhere (View State or Prop). For now defaulting to BTC-USD as in scaffolding.
+        UGRDataAccessor accessor(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
 
         QElapsedTimer contentTimer; contentTimer.start();
-        sceneNode->updateLayeredContent(batch,
+        sceneNode->updateLayeredContent(&accessor,
                                        m_heatmapStrategy.get(), m_showHeatmapLayer,
                                        m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
                                        m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
@@ -516,7 +600,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
         sceneNode->setShowVolumeProfile(m_showVolumeProfile);
 
-        cellsCount = m_visibleCells.size();
+        cellsCount = m_visibleCells ? m_visibleCells->size() : 0;
     } else if (m_appendPending.exchange(false)) {
         sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");
         QElapsedTimer cacheTimer; cacheTimer.start();
@@ -524,23 +608,42 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp2 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch2{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
+        UGRDataAccessor accessor2(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp2,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
 
         QElapsedTimer contentTimer2; contentTimer2.start();
-        sceneNode->updateLayeredContent(batch2,
+        sceneNode->updateLayeredContent(&accessor2,
                                        m_heatmapStrategy.get(), m_showHeatmapLayer,
                                        m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
                                        m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
         contentUs = contentTimer2.nsecsElapsed() / 1000;
-        cellsCount = m_visibleCells.size();
+        cellsCount = m_visibleCells ? m_visibleCells->size() : 0;
     }
 
     if (m_materialDirty.exchange(false)) {
         sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
         updateVisibleCells();
         Viewport vp3 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch3{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
-        sceneNode->updateLayeredContent(batch3,
+        UGRDataAccessor accessor3(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp3,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
+
+        sceneNode->updateLayeredContent(&accessor3,
                                        m_heatmapStrategy.get(), m_showHeatmapLayer,
                                        m_tradeBubbleStrategy.get(), m_showTradeBubbleLayer,
                                        m_tradeFlowStrategy.get(), m_showTradeFlowLayer);
@@ -563,9 +666,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                        << "cells=" << cellsCount);
 
     // DIAGNOSTIC: Check if we have cells but they're not distributed properly
-    if (cellsCount > 0 && cellsCount % 100 == 0) {
+    if (cellsCount > 0 && cellsCount % 100 == 0 && m_visibleCells) {
         std::map<int64_t, size_t> cellsPerTimeSlice;
-        for (const auto& cell : m_visibleCells) {
+        for (const auto& cell : *m_visibleCells) {
             cellsPerTimeSlice[cell.timeStart_ms]++;
         }
         sLog_Debug("CELL DISTRIBUTION: " << cellsPerTimeSlice.size() << " time slices, "
@@ -600,7 +703,7 @@ QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m
 
 // ===== QML DEBUG API =====
 // Debug and monitoring methods for QML
-QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells.size()).arg(width()).arg(height()); }
+QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells ? m_visibleCells->size() : 0).arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getPerformanceStats() const { return "N/A (SentinelMonitor removed)"; }
 double UnifiedGridRenderer::getCurrentFPS() const { return 0.0; }

@@ -13,8 +13,11 @@ Assumptions: The linked JWT library supports ES256 signing.
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <stdexcept>
-#include <jwt-cpp/jwt.h>
+#include <jwt-cpp/traits/nlohmann-json/defaults.h>
 #include <openssl/rand.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/buffer.h>
 #include <iostream>
 #include <chrono>
 #include "SentinelLogging.hpp"
@@ -34,7 +37,19 @@ std::string Authenticator::createJwt() const {
         if (RAND_bytes(nonce_raw, sizeof(nonce_raw)) != 1) {
             throw std::runtime_error("🔑 Authenticator: Failed to generate random nonce");
         }
-        std::string nonce(reinterpret_cast<char*>(nonce_raw), sizeof(nonce_raw));
+        
+        // Base64 encode the nonce so it's JSON-safe (jwt-cpp requires UTF-8 safe strings)
+        BIO *bio, *b64;
+        BUF_MEM *bufferPtr;
+        b64 = BIO_new(BIO_f_base64());
+        bio = BIO_new(BIO_s_mem());
+        bio = BIO_push(b64, bio);
+        BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+        BIO_write(bio, nonce_raw, sizeof(nonce_raw));
+        BIO_flush(bio);
+        BIO_get_mem_ptr(bio, &bufferPtr);
+        std::string nonce(bufferPtr->data, bufferPtr->length);
+        BIO_free_all(bio);
 
         // Create JWT token following the Coinbase tutorial format
         auto token = jwt::create()
@@ -43,7 +58,7 @@ std::string Authenticator::createJwt() const {
             .set_not_before(std::chrono::system_clock::now())
             .set_expires_at(std::chrono::system_clock::now() + std::chrono::seconds{120})
             .set_header_claim("kid", jwt::claim(m_keyId))    // kid: key_name
-            .set_header_claim("nonce", jwt::claim(nonce))    // nonce: random bytes
+            .set_header_claim("nonce", jwt::claim(nonce))    // nonce: base64-encoded random bytes
             .sign(jwt::algorithm::es256("", m_privateKey));  // ES256 with private key
 
         return token;

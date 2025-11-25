@@ -584,8 +584,8 @@ void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slic
     }
 }
 
-void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double price, double liquidity, bool isBid) {
-    if (liquidity <= 0.0 || !m_viewState) return;
+void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double price, float liquidity, bool isBid) {
+    if (liquidity <= 0.0f || !m_viewState) return;
     
     // World-space culling
     if (price < m_viewState->getMinPrice() || price > m_viewState->getMaxPrice()) return;
@@ -599,9 +599,6 @@ void DataProcessor::createLiquidityCell(const LiquidityTimeSlice& slice, double 
     cell.priceMax = price + halfTick;
     cell.liquidity = liquidity;
     cell.isBid = isBid;
-    cell.intensity = std::min(1.0, liquidity / 1000.0);
-    cell.color = isBid ? QColor(0, 255, 0, 128) : QColor(255, 0, 0, 128);
-    cell.snapshotCount = slice.duration_ms > 0 ? static_cast<int>(slice.duration_ms / std::max<int64_t>(m_currentTimeframe_ms, 1)) : 1;
 
     m_visibleCells.push_back(cell);
     

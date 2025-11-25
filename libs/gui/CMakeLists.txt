@@ -84,22 +84,18 @@ target_include_directories(sentinel_gui_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-find_package(Boost REQUIRED)
-find_package(OpenSSL REQUIRED)
+# Dependencies found in root CMakeLists.txt via vcpkg
 
 target_link_libraries(sentinel_gui_lib
     PUBLIC
         sentinel_core
-        Qt::Core
-        Qt::Gui
-        Qt::Widgets
-        Qt::Charts
-        Qt::Network
-        Qt::Quick
-        Qt::Qml
-        Boost::headers
-        OpenSSL::SSL
-        OpenSSL::Crypto
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        Qt6::Charts
+        Qt6::Network
+        Qt6::Quick
+        Qt6::Qml
 )
 
 qt_add_resources(sentinel_gui_lib "resources"
