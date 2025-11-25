@@ -55,13 +55,10 @@ QSGNode* TradeFlowStrategy::buildNode(const IDataAccessor* dataAccessor) {
     auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
     int vertexIndex = 0;
     
-    // TEMPORARY: Just return empty geometry to test if vertex processing is the crash
-    // TODO: Remove this and restore the vertex processing once we confirm it's not the issue
-    
     double intensityScale = dataAccessor->getIntensityScale();
     Viewport viewport = dataAccessor->getViewport();
 
-    for (int i = 0; i < tradeCount && i < 10; ++i) {  // Limit to 10 trades for safety
+    for (int i = 0; i < tradeCount; ++i) {
         const auto& trade = *validTrades[i];
         
         // Add basic safety checks

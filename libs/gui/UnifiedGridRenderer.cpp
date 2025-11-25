@@ -487,6 +487,7 @@ namespace {
         int m_maxCells;
         Viewport m_viewport;
         std::string m_symbol;            // Current symbol context
+        mutable std::vector<Trade> m_tradeCache;  // Cache trades for accessor lifetime
     
     public:
         explicit UGRDataAccessor(UnifiedGridRenderer* ugr,
@@ -515,23 +516,11 @@ namespace {
         
         const std::vector<Trade>& getRecentTrades() const override {
             if (m_dataCache) {
-                // TODO: In a real implementation, we should probably return a reference to something more stable
-                // or change the interface to return by value if we're creating a new vector.
-                // For now, we'll trust that the vector returned by recentTrades() lives long enough 
-                // or that we are copying it (which recentTrades does).
-                // Wait, the interface returns const std::vector<Trade>&.
-                // DataCache::recentTrades returns std::vector<Trade> (by value).
-                // This is a dangling reference bug waiting to happen if we just return m_dataCache->recentTrades(m_symbol).
-                
-                // To fix this safely for Phase 2 without changing DataCache yet:
-                // We need a thread-local or member cache to hold the vector we return a reference to.
-                // BUT, IDataAccessor interface says `virtual const std::vector<Trade>& getRecentTrades() const = 0;`
-                
-                // Let's use a mutable member to store the result so we can return a reference.
-                // This is a "temporary" bridge solution.
-                static thread_local std::vector<Trade> s_tradeCache; 
-                s_tradeCache = m_dataCache->recentTrades(m_symbol);
-                return s_tradeCache;
+                // Cache the trades for the lifetime of this accessor instance.
+                // DataCache::recentTrades returns by value, so we store it in a member
+                // to safely return a reference as required by the IDataAccessor interface.
+                m_tradeCache = m_dataCache->recentTrades(m_symbol);
+                return m_tradeCache;
             }
             // Fallback to empty if no cache (shouldn't happen in prod)
             static const std::vector<Trade> empty;

@@ -59,10 +59,14 @@ find_package(Boost REQUIRED
     COMPONENTS system headers
 )
 
-# JWT-CPP (header-only, resolved via vcpkg; treat as simple include-only lib)
-find_path(JWT_CPP_INCLUDE_DIR "jwt-cpp/jwt.h" REQUIRED)
-add_library(jwt-cpp::jwt-cpp INTERFACE IMPORTED)
-target_include_directories(jwt-cpp::jwt-cpp INTERFACE "${JWT_CPP_INCLUDE_DIR}")
+# JWT-CPP (header-only, resolved via vcpkg)
+# Try find_package first (if vcpkg provides a config), fallback to find_path
+find_package(jwt-cpp CONFIG QUIET)
+if(NOT jwt-cpp_FOUND)
+    find_path(JWT_CPP_INCLUDE_DIR "jwt-cpp/jwt.h" REQUIRED)
+    add_library(jwt-cpp::jwt-cpp INTERFACE IMPORTED)
+    target_include_directories(jwt-cpp::jwt-cpp INTERFACE "${JWT_CPP_INCLUDE_DIR}")
+endif()
 
 # Googletest (tests only)
 FetchContent_Declare(

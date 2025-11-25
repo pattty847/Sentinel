@@ -204,12 +204,10 @@ void MarketDataCore::stop() {
 }
 
 void MarketDataCore::run() {
-    /* Holy fuck, what a bitch to debug this shit */
-    /* The issue is that the io_context is stopping unexpectedly, and the I/O thread is dying */
-
     // Transport handles resolve/connect/handshake; we just run the context
     // CRITICAL: Keep I/O thread running even if individual handlers throw exceptions
-    // Use a loop to restart io_context if it stops unexpectedly
+    // The io_context::run() call can exit if a handler throws an unhandled exception.
+    // This loop ensures the I/O thread remains active by restarting the context.
     while (m_running.load()) {
         try {
             m_ioc.run();

@@ -1,15 +1,15 @@
-Phase 1–4 GUI Dataflow Refactor: Summary & PR Notes
-===================================================
+Sentinel Refactor Branch: GUI Dataflow, Build System Overhaul, and Market Data Fixes
+===================================================================================
 
 Overview
 --------
 
-This PR completes Phases 1–4 of the `sentinel-dataflow-migration` plan for the GUI dataflow. It replaces the old GridSliceBatch “god DTO” with a clean accessor-based architecture, removes duplicated trade/cell buffers in the renderer, and prepares the render path for upcoming DOD optimizations.
+This PR represents a comprehensive refactor across multiple critical systems in Sentinel. It includes the completion of Phases 1–4 of the GUI dataflow migration, a complete Windows build system overhaul with MSVC migration, and critical market data subscription fixes. These changes modernize the build pipeline, stabilize the data architecture, and resolve critical subscription flow issues.
 
 Key Changes
 -----------
 
-1. Accessor-Based Strategy Interface
+### 1.1 Accessor-Based Strategy Interface
    - All render strategies (Heatmap, TradeBubble, TradeFlow, Candle) now consume data exclusively via `IDataAccessor`.
    - `IRenderStrategy` was updated to accept `const IDataAccessor*` and no longer references `GridSliceBatch` anywhere (including comments).
    - `IDataAccessor` provides:
@@ -17,7 +17,7 @@ Key Changes
      - `getRecentTrades()` for trade strategies (backed by `DataCache`).
      - Per-frame context/config: `getViewport()`, `getIntensityScale()`, `getMinVolumeFilter()`, `getMaxCells()`.
 
-2. UnifiedGridRenderer → UGRDataAccessor Bridge
+### 1.2 UnifiedGridRenderer → UGRDataAccessor Bridge
    - `UnifiedGridRenderer` constructs a `UGRDataAccessor` each frame with:
      - The current viewport snapshot (time/price/window size).
      - Current render configuration (intensity scale, min volume filter, max cells).
@@ -25,9 +25,9 @@ Key Changes
    - `UGRDataAccessor` is now the single bridge from GUI core to:
      - `DataProcessor::getPublishedCellsSnapshot()` for visible cells.
      - `DataCache::recentTrades(symbol)` via a safe, thread-local cache to honor the accessor’s reference API.
-   - UGR no longer owns or maintains a local “recent trades” buffer for strategies.
+   - UGR no longer owns or maintains a local "recent trades" buffer for strategies.
 
-3. GridSliceBatch Removal & Cleanup
+### 1.3 GridSliceBatch Removal & Cleanup
    - The `GridSliceBatch` struct was fully removed from `GridTypes.hpp`.
    - All remaining forward declarations and comments that referenced `GridSliceBatch` in:
      - `GridSceneNode.hpp`
@@ -38,7 +38,7 @@ Key Changes
      have been updated or deleted.
    - Strategies now describe themselves as consuming accessor-provided data (cells, trades, viewport), not batch structs.
 
-4. Renderer Orchestration Updates
+### 1.4 Renderer Orchestration Updates
    - `UnifiedGridRenderer::updatePaintNode` now:
      - Pulls the latest cell snapshot from `DataProcessor` using `updateVisibleCells()` and `getPublishedCellsSnapshot()`.
      - Builds a simple `Viewport` and config values.
@@ -46,12 +46,69 @@ Key Changes
      - Delegates actual geometry work to `GridSceneNode::updateLayeredContent` and the strategies.
    - Dirty flags (`m_geometryDirty`, `m_appendPending`, `m_materialDirty`, `m_transformDirty`) continue to gate work correctly, but no longer trigger any `GridSliceBatch` construction.
 
-5. Dataflow Documentation Alignment
+### 1.5 Dataflow Documentation Alignment
    - Legacy comments and doc references that implied strategies take `GridSliceBatch` have been corrected to the new accessor model.
    - The dataflow side-mission (Phases 1–4) is now reflected in the code, not just in the migration plan:
      - Single source of truth for trades: `DataCache`.
      - Single source of truth for cells: `DataProcessor`.
      - `UGRDataAccessor` owns per-frame config/viewport and exposes everything via `IDataAccessor`.
+
+## 2. Windows Build System Overhaul
+
+### 2.1 Toolchain Migration
+   - Removed all MinGW/GCC dependencies and cleaned PATH pollution from Cursor and MSYS2.
+   - Fully migrated Windows builds to **MSVC 2022 (BuildTools)**.
+   - Added `/bigobj` for Boost/Beast compatibility.
+   - Defined `_WIN32_WINNT=0x0A00` to target Windows 10 APIs.
+   - **Result**: Windows builds now work reliably using the correct compiler.
+
+### 2.2 Qt6 Fixes
+   - Removed stale hardcoded MSYS2 Qt paths.
+   - Installed Qt6.9.3 (msvc2022_64).
+   - Added correct CMake detection path via `CMAKE_PREFIX_PATH`.
+   - Ensured correct component loading (`Charts`, `Quick`, `Widgets`, etc.).
+   - Replaced all `Qt::` prefixes with **`Qt6::`** for compatibility and clarity.
+
+### 2.3 Dependency Management Cleanup
+   - Removed `pkg_check_modules()` and all PkgConfig usage on Windows.
+   - Standardized dependency resolution through **vcpkg**: `openssl`, `boost`, `nlohmann-json`, `jwt-cpp`.
+   - Deleted redundant `find_package()` calls in apps/ that duplicated library-level discovery.
+   - **Result**: No more mixed toolchain dependencies; everything is clean and consistent.
+
+### 2.4 CMake Modernization
+   - Upgraded root `cmake_minimum_required` to **3.22**.
+   - Removed conflicting `cmake_minimum_required()` calls inside subdirectories.
+   - Added MSVC-specific compile options (`/bigobj`, Win10 API).
+   - Removed obsolete MinGW prefixes.
+   - Centralized platform detection.
+   - Fixed incorrect or missing Qt6 policies.
+   - Ensured consistent FetchContent usage.
+
+### 2.5 Cross-Platform Presets
+   - Reworked Windows preset to use MSVC + vcpkg toolchain.
+   - Added support for environment-variable based paths: `QT_MSVC`, `VCPKG_ROOT`.
+   - Cleaned up presets to avoid absolute paths.
+   - **Result**: Presets are now portable and consistent across OSes.
+
+## 3. Market Data Subscription Fixes
+
+### 3.1 I/O Thread Exception Handling (CRITICAL)
+   - **Problem**: JWT generation threw exceptions causing `m_ioc.run()` to exit, killing the I/O thread.
+   - **Result**: All subsequent posted work (including subscription requests) never executed.
+   - **Fix**: Modified `run()` to catch exceptions and restart the io_context, keeping the I/O thread alive.
+
+### 3.2 JWT Nonce Encoding Issue (CRITICAL)
+   - **Problem**: JWT nonce was raw binary bytes causing `invalid UTF-8 byte` errors during JSON serialization.
+   - **Fix**: Base64-encode the nonce before adding it as a JWT claim to ensure JSON safety.
+
+### 3.3 Missing JWT Error Handling
+   - **Problem**: JWT creation failures in subscription handlers would crash the entire I/O thread.
+   - **Fix**: Added try/catch around JWT creation in subscription and heartbeat handlers.
+   - **Result**: JWT failures are now handled gracefully without crashing the I/O thread.
+
+### 3.4 Subscription Flow Verification
+   - **Before Fix**: Connection established but subscriptions failed, no market data flowing.
+   - **After Fix**: Connection establishes, subscription frames sent, market data flows, heatmap updates.
 
 Safety & Invariants
 -------------------
@@ -123,16 +180,15 @@ Now that the accessor-based architecture is stable and `GridSliceBatch` is gone,
 PR Review Notes
 ---------------
 
-- The changes in this PR are intentionally architectural and mostly mechanical:
+- This comprehensive refactor includes architectural changes across dataflow, build system, and market data components:
   - No changes to QML interfaces or public Qt properties on `UnifiedGridRenderer`.
   - No changes to how QML toggles layers or modes.
   - No new runtime configuration is required; existing behavior should be preserved.
 - Testing done:
-  - Built and ran the app under MSVC.
-  - Verified:
-    - Heatmap renders as expected.
-    - Trade bubbles and flow render and update.
-    - No anomalous logs from the UGR dataflow (viewport changes, data updates).
-  - Confirmed no direct strategy references to `GridSliceBatch` remain.
+  - **Build System**: Successfully built and ran the app under MSVC with vcpkg dependencies.
+  - **Dataflow**: Verified heatmap renders, trade bubbles and flow render and update, no anomalous UGR logs.
+  - **Market Data**: Confirmed subscription flow works end-to-end, market data flows, live heatmap updates.
+  - **Architecture**: Confirmed no direct strategy references to `GridSliceBatch` remain.
+  - **Stability**: I/O thread survives JWT errors and continues processing market data.
 
 

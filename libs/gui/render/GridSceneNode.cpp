@@ -118,7 +118,53 @@ void GridSceneNode::updateVolumeProfile(const std::vector<std::pair<double, doub
 }
 
 QSGNode* GridSceneNode::createVolumeProfileNode(const std::vector<std::pair<double, double>>& profile) {
-    // Placeholder for volume profile implementation
-    // In a real implementation, this would create geometry based on the profile data
-    return nullptr;
+    if (profile.empty()) return nullptr;
+    
+    auto* node = new QSGGeometryNode;
+    auto* material = new QSGVertexColorMaterial;
+    material->setFlag(QSGMaterial::Blending);
+    node->setMaterial(material);
+    node->setFlag(QSGNode::OwnsMaterial);
+    
+    // Create geometry for volume profile bars (6 vertices per bar)
+    int vertexCount = profile.size() * 6;
+    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), vertexCount);
+    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+    node->setGeometry(geometry);
+    node->setFlag(QSGNode::OwnsGeometry);
+    
+    // Fill vertex buffer with volume profile bars
+    auto* vertices = static_cast<QSGGeometry::ColoredPoint2D*>(geometry->vertexData());
+    int vertexIndex = 0;
+    
+    for (size_t i = 0; i < profile.size(); ++i) {
+        double price = profile[i].first;
+        double volume = profile[i].second;
+        
+        // Simple volume bar rendering (would need proper positioning)
+        float barHeight = 20.0f; // Fixed height for now
+        float barWidth = std::min(100.0f, static_cast<float>(volume * 0.01)); // Scale volume
+        
+        float left = 0.0f;
+        float right = barWidth;
+        float top = price - barHeight * 0.5f;
+        float bottom = price + barHeight * 0.5f;
+        
+        // Gray color for volume profile
+        int gray = 128;
+        int alpha = 180;
+        
+        // Triangle 1: top-left, top-right, bottom-left
+        vertices[vertexIndex++].set(left, top, gray, gray, gray, alpha);
+        vertices[vertexIndex++].set(right, top, gray, gray, gray, alpha);
+        vertices[vertexIndex++].set(left, bottom, gray, gray, gray, alpha);
+        
+        // Triangle 2: top-right, bottom-right, bottom-left
+        vertices[vertexIndex++].set(right, top, gray, gray, gray, alpha);
+        vertices[vertexIndex++].set(right, bottom, gray, gray, gray, alpha);
+        vertices[vertexIndex++].set(left, bottom, gray, gray, gray, alpha);
+    }
+    
+    node->markDirty(QSGNode::DirtyGeometry);
+    return node;
 }
