@@ -114,7 +114,7 @@ private:
         
     // Rendering data
     std::shared_ptr<const std::vector<CellInstance>> m_visibleCells;
-    std::vector<Trade> m_recentTrades;  // Recent trades for bubble rendering
+    // std::vector<Trade> m_recentTrades;  // REMOVED: Trades pulled from DataCache
     std::vector<std::pair<double, double>> m_volumeProfile;
     
     QSGTransformNode* m_rootTransformNode = nullptr;

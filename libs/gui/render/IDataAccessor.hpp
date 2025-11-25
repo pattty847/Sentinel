@@ -7,7 +7,7 @@
     IDataAccessor — Interface for strategies to access data.
     
     This interface decouples strategies from the specific storage of data
-    (currently GridSliceBatch/UGR). It allows strategies to "pull" only what they need.
+    (currently UnifiedGridRenderer/DataProcessor/DataCache). It allows strategies to "pull" only what they need.
 */
 class IDataAccessor {
 public:

@@ -1,0 +1,138 @@
+Phase 1–4 GUI Dataflow Refactor: Summary & PR Notes
+===================================================
+
+Overview
+--------
+
+This PR completes Phases 1–4 of the `sentinel-dataflow-migration` plan for the GUI dataflow. It replaces the old GridSliceBatch “god DTO” with a clean accessor-based architecture, removes duplicated trade/cell buffers in the renderer, and prepares the render path for upcoming DOD optimizations.
+
+Key Changes
+-----------
+
+1. Accessor-Based Strategy Interface
+   - All render strategies (Heatmap, TradeBubble, TradeFlow, Candle) now consume data exclusively via `IDataAccessor`.
+   - `IRenderStrategy` was updated to accept `const IDataAccessor*` and no longer references `GridSliceBatch` anywhere (including comments).
+   - `IDataAccessor` provides:
+     - `getVisibleCells()` for heatmap/cell data (backed by `DataProcessor`).
+     - `getRecentTrades()` for trade strategies (backed by `DataCache`).
+     - Per-frame context/config: `getViewport()`, `getIntensityScale()`, `getMinVolumeFilter()`, `getMaxCells()`.
+
+2. UnifiedGridRenderer → UGRDataAccessor Bridge
+   - `UnifiedGridRenderer` constructs a `UGRDataAccessor` each frame with:
+     - The current viewport snapshot (time/price/window size).
+     - Current render configuration (intensity scale, min volume filter, max cells).
+     - Pointers to `DataProcessor` (for cells) and `DataCache` (for trades).
+   - `UGRDataAccessor` is now the single bridge from GUI core to:
+     - `DataProcessor::getPublishedCellsSnapshot()` for visible cells.
+     - `DataCache::recentTrades(symbol)` via a safe, thread-local cache to honor the accessor’s reference API.
+   - UGR no longer owns or maintains a local “recent trades” buffer for strategies.
+
+3. GridSliceBatch Removal & Cleanup
+   - The `GridSliceBatch` struct was fully removed from `GridTypes.hpp`.
+   - All remaining forward declarations and comments that referenced `GridSliceBatch` in:
+     - `GridSceneNode.hpp`
+     - `IRenderStrategy.hpp`
+     - Strategy headers (`HeatmapStrategy.hpp`, `TradeBubbleStrategy.hpp`, `TradeFlowStrategy.hpp`, `CandleStrategy.hpp`)
+     - `RenderTypes.hpp`
+     - `IDataAccessor.hpp` comments
+     have been updated or deleted.
+   - Strategies now describe themselves as consuming accessor-provided data (cells, trades, viewport), not batch structs.
+
+4. Renderer Orchestration Updates
+   - `UnifiedGridRenderer::updatePaintNode` now:
+     - Pulls the latest cell snapshot from `DataProcessor` using `updateVisibleCells()` and `getPublishedCellsSnapshot()`.
+     - Builds a simple `Viewport` and config values.
+     - Constructs a `UGRDataAccessor` (no intermediate DTOs).
+     - Delegates actual geometry work to `GridSceneNode::updateLayeredContent` and the strategies.
+   - Dirty flags (`m_geometryDirty`, `m_appendPending`, `m_materialDirty`, `m_transformDirty`) continue to gate work correctly, but no longer trigger any `GridSliceBatch` construction.
+
+5. Dataflow Documentation Alignment
+   - Legacy comments and doc references that implied strategies take `GridSliceBatch` have been corrected to the new accessor model.
+   - The dataflow side-mission (Phases 1–4) is now reflected in the code, not just in the migration plan:
+     - Single source of truth for trades: `DataCache`.
+     - Single source of truth for cells: `DataProcessor`.
+     - `UGRDataAccessor` owns per-frame config/viewport and exposes everything via `IDataAccessor`.
+
+Safety & Invariants
+-------------------
+
+- **Layering preserved:**
+  - Core: `DataCache`, `LiquidityTimeSeriesEngine`, and market data DTOs remain in C++ only (no Qt in hot core paths).
+  - GUI core: `DataProcessor`, `UnifiedGridRenderer`, `GridSceneNode`, and `GridViewState` own viewport and render orchestration.
+  - Strategies: QSG-only, pulling data through `IDataAccessor` without touching DataProcessor or DataCache directly.
+- **Viewport invariants preserved:**
+  - All viewport changes still go through `GridViewState::setViewport()` / `setViewportSize()`.
+  - `UnifiedGridRenderer` only builds a value `Viewport` struct from `GridViewState` for coordinate math and passes it into `UGRDataAccessor`.
+- **Threading model preserved:**
+  - `DataProcessor` still lives on its worker `QThread`.
+  - Snapshots are published to the GUI thread via queued signals and `getPublishedCellsSnapshot()`.
+  - `updatePaintNode` and strategies only read immutable snapshots via `IDataAccessor`.
+
+What’s NOT in This PR
+----------------------
+
+This PR intentionally does NOT:
+
+- Change the internal structure or size of `CellInstance` (still AoS and relatively large).
+- Remove the remaining cell copy chain (worker → snapshot → GUI) yet.
+- Introduce SoA or compact cell buffers.
+- Reuse QSG nodes/geometry for the heatmap; the rebuild/append logic remains as-is.
+
+Those changes belong to the upcoming DOD-focused phases (see below).
+
+Next Steps (Future DOD Refactor Plan)
+-------------------------------------
+
+Now that the accessor-based architecture is stable and `GridSliceBatch` is gone, we can safely proceed with the DOD pipeline refactor described in `docs/refactors/data_pipeline_dod`:
+
+1. Phase 5: Snapshot + Compact Cell Layout Integration
+   - Redesign the snapshot model to remove the remaining cell copy chain:
+     - Double-buffer or ring-buffer `shared_ptr` snapshots in `DataProcessor`.
+     - Make snapshots read-only from GUI/render threads.
+   - Introduce a compact cell layout (slim AoS or SoA) that:
+     - Shrinks per-cell size (aiming for ~32 B to fit 2 cells per cache line).
+     - Holds only what strategies truly need (time range, price range, liquidity, side, maybe pre-normalized intensity).
+   - Keep `IDataAccessor::getVisibleCells()` as the stable API, but back it with the new compact snapshots.
+
+2. Phase 6: Renderer Consumption Rework
+   - Tighten `UnifiedGridRenderer` and `GridSceneNode` so they:
+     - Use compact snapshots directly via `UGRDataAccessor`.
+     - Do zero per-cell work on the GUI/render boundary.
+   - Ensure no GUI-side cell caching reappears; all data comes from accessor snapshots.
+   - Prepare for QSG node/geometry reuse with a stable, accessor-driven contract.
+
+3. Phase 7: Heatmap DOD Rewrite
+   - Rewrite `HeatmapStrategy::buildNode` to:
+     - Iterate compact cell buffers directly (no `chunkCells` vectors if possible).
+     - Perform only minimal per-cell math: filter → 2× `worldToScreen` → vertex writes.
+   - Introduce geometry reuse where Qt permits:
+     - Reuse `QSGGeometry` and `QSGGeometryNode` instances across frames.
+     - Update vertex buffers in place rather than recreating nodes.
+
+4. Phase 8: Backend Slice & LTSE Data-Oriented Improvements
+   - Apply DOD to `DataProcessor` + `LiquidityTimeSeriesEngine`:
+     - Optimize slice selection and `createCellsFromLiquiditySlice` loops.
+     - Improve dense/sparse ingestion (`onLiveOrderBookUpdated`) to limit unnecessary allocations and level expansions.
+     - Introduce SoA where beneficial for slice metrics and order book representations.
+
+5. Phase 9: Final Optimization, Benchmarks, & Validation
+   - Define repeatable benchmark scenarios (BTC-USD under typical and stress viewports).
+   - Use `UGR paint total/cache/content/cells` and `HEATMAP CHUNKS` logs as hard metrics.
+   - Remove legacy paths/flags and document the final DOD-optimized pipeline.
+
+PR Review Notes
+---------------
+
+- The changes in this PR are intentionally architectural and mostly mechanical:
+  - No changes to QML interfaces or public Qt properties on `UnifiedGridRenderer`.
+  - No changes to how QML toggles layers or modes.
+  - No new runtime configuration is required; existing behavior should be preserved.
+- Testing done:
+  - Built and ran the app under MSVC.
+  - Verified:
+    - Heatmap renders as expected.
+    - Trade bubbles and flow render and update.
+    - No anomalous logs from the UGR dataflow (viewport changes, data updates).
+  - Confirmed no direct strategy references to `GridSliceBatch` remain.
+
+

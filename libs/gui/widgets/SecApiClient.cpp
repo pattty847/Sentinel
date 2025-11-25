@@ -51,7 +51,7 @@ void SecApiClient::fetchFilings(const QString& ticker, const QString& formType) 
         args << formType;
     }
 
-    runSecScript("sec_fetch_filings.py", args, "filings");
+    runSecScript("sec/sec_fetch_filings.py", args, "filings");
 }
 
 void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
@@ -65,7 +65,7 @@ void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
     QStringList args;
     args << ticker;
 
-    runSecScript("sec_fetch_transactions.py", args, "transactions");
+    runSecScript("sec/sec_fetch_transactions.py", args, "transactions");
 }
 
 void SecApiClient::fetchFinancialSummary(const QString& ticker) {
@@ -79,7 +79,7 @@ void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     QStringList args;
     args << ticker;
 
-    runSecScript("sec_fetch_financials.py", args, "financials");
+    runSecScript("sec/sec_fetch_financials.py", args, "financials");
 }
 
 void SecApiClient::executePythonCommand(const QString& command, const QString& operation) {
@@ -203,14 +203,8 @@ QString SecApiClient::getPythonExecutable() const {
 }
 
 QString SecApiClient::getSecModulePath() const {
-    // Prefer project root inferred from the scripts directory so that
-    // sec/ can be imported reliably regardless of working directory.
-    QDir scriptsDir(getScriptsPath());
-    if (scriptsDir.cdUp()) {
-        return scriptsDir.absolutePath();
-    }
-
-    return QDir::current().absolutePath();
+    // Return scripts directory so that scripts/sec/ can be imported as sec
+    return getScriptsPath();
 }
 
 QString SecApiClient::getScriptsPath() const {

@@ -6,7 +6,7 @@ Creates 5 minutes of realistic BTC order book data at 100ms intervals.
 This is much smaller and faster to process for fractal zoom testing.
 
 Usage:
-    python3 scripts/generate_small_test_orderbook.py
+    python3 tests/marketdata/generate_small_test_orderbook.py
     
 Output:
     logs/small_test_orderbook_data.json - 5 minutes of order book snapshots

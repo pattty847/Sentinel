@@ -1,5 +1,5 @@
 import QtQuick 2.15
-import Sentinel.Charts 1.0
+import Sentinel 1.0
 
 // 🕯 CANDLE CHART VIEW: Professional trading terminal candles
 // Integrates with existing GPUChartWidget coordinate system

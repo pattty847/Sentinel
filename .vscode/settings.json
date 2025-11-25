@@ -6,7 +6,6 @@
         "cwd": "${workspaceFolder}"
     },
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-    "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.errorSquiggles": "enabled",
     "C_Cpp.autoAddFileAssociations": true,
     "C_Cpp.default.cppStandard": "c++20",
@@ -14,7 +13,8 @@
     "clangd.arguments": [
         "--background-index",
         "--clang-tidy",
-        "--header-insertion=iwyu"
+        "--header-insertion=iwyu",
+        "--compile-commands-dir=build/windows-msvc-ninja"
     ],
     "files.associations": {
         "*.qml": "qml"

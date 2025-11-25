@@ -9,7 +9,8 @@
 *~
 
 # Build artifacts and directories
-build-*/
+vcpkg_installed/
+build/
 .cache/
 compile_commands.json
 CMakeCache.txt

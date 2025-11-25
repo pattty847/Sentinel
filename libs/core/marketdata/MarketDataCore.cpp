@@ -18,12 +18,13 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <chrono>
 #include <span>
 #include <utility>
+#include <cstdlib>
 #include <QString>
 #include <QMetaObject>
 #include <QMetaType>
 #include <QPointer>
 #include <format>    // std::format for efficient string formatting
-
+ 
 namespace {
     inline int64_t steadyClockMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -42,7 +43,31 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
 
     // Configure SSL context
-    m_sslCtx.set_default_verify_paths();
+    // Prefer explicit CA bundle via env var for Windows/OpenSSL setups where
+    // default_verify_paths may not see the system trust store.
+    if (const char* caBundle = std::getenv("SENTINEL_SSL_CA_BUNDLE")) {
+        if (*caBundle) {
+            sLog_Data(QString("Using custom CA bundle from SENTINEL_SSL_CA_BUNDLE: %1").arg(caBundle));
+            try {
+                m_sslCtx.load_verify_file(caBundle);
+            } catch (const std::exception& e) {
+                sLog_Error(QString("Failed to load CA bundle from %1: %2").arg(caBundle, e.what()));
+                m_sslCtx.set_default_verify_paths();
+            }
+        } else {
+            m_sslCtx.set_default_verify_paths();
+        }
+    } else {
+        // Fallback: try repo-packaged bundle at resources/certs/ca-bundle.crt
+        const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
+        try {
+            sLog_Data(QString("Using default CA bundle: %1").arg(defaultCaBundle));
+            m_sslCtx.load_verify_file(defaultCaBundle);
+        } catch (const std::exception& e) {
+            sLog_Error(QString("Failed to load default CA bundle from %1: %2").arg(defaultCaBundle, e.what()));
+            m_sslCtx.set_default_verify_paths();
+        }
+    }
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     
     sLog_App("MarketDataCore initialized");
@@ -50,6 +75,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
+        sLog_DataN(1, QString("WebSocket transport status changed: %1").arg(up ? "UP" : "DOWN"));
         if (up) {
             // Reset sequencing and heartbeat tracking on fresh connect
             m_lastSeqByProduct.clear();
@@ -60,7 +86,10 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
             }
             QPointer<MarketDataCore> self(this);
             QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
-            replaySubscriptionsOnConnect();
+            // Post replay to MarketDataCore's strand to ensure thread-safe access to m_products
+            net::post(m_strand, [this]() {
+                replaySubscriptionsOnConnect();
+            });
             startHeartbeatWatchdog();
             sendHeartbeatSubscribe();
         } else {
@@ -105,6 +134,9 @@ void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols)
     if (!new_symbols.empty()) {
         // Keep subscription manager in sync
         m_subscriptions.setDesiredProducts(m_products);
+        sLog_DataN(1, QString("subscribeToSymbols: %1 new, %2 total products")
+                          .arg(static_cast<int>(new_symbols.size()))
+                          .arg(static_cast<int>(m_products.size())));
     }
     if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
@@ -172,13 +204,34 @@ void MarketDataCore::stop() {
 }
 
 void MarketDataCore::run() {
-    sLog_Data(QString("IO context running for transport (%1:%2)").arg(QString::fromStdString(m_host)).arg(QString::fromStdString(m_port)));
-    
+    /* Holy fuck, what a bitch to debug this shit */
+    /* The issue is that the io_context is stopping unexpectedly, and the I/O thread is dying */
+
     // Transport handles resolve/connect/handshake; we just run the context
-    m_ioc.run();
-    
-    sLog_Data("IO context stopped");
+    // CRITICAL: Keep I/O thread running even if individual handlers throw exceptions
+    // Use a loop to restart io_context if it stops unexpectedly
+    while (m_running.load()) {
+        try {
+            m_ioc.run();
+            // If run() returns, restart it (unless we're shutting down)
+            if (m_running.load()) {
+                m_ioc.restart();
+            }
+        } catch (const std::exception& e) {
+            sLog_Error(QString("IO context thread exception: %1 - restarting I/O loop").arg(e.what()));
+            // Restart io_context to keep processing work
+            if (m_running.load()) {
+                m_ioc.restart();
+            }
+        } catch (...) {
+            sLog_Error("IO context thread unknown exception - restarting I/O loop");
+            if (m_running.load()) {
+                m_ioc.restart();
+            }
+        }
+    }
 }
+
 void MarketDataCore::scheduleReconnect() {
     if (!m_running) return;
     
@@ -216,18 +269,20 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
     }
 
     // Post to the strand to ensure thread-safe access to the WebSocket stream
-    net::post(m_strand, [this, type, symbols]() {
+    // Capture symbols by value to avoid issues if called from different thread
+    auto symbolsCopy = symbols;
+    net::post(m_strand, [this, type, symbolsCopy]() {
         // Stage desired set if we are not connected; replay happens on status=true
         if (!m_connected.load()) {
             sLog_Warning("Transport not connected, staging subscription request for replay on connect.");
             if (type == "subscribe") {
-                for (const auto& s : symbols) {
+                for (const auto& s : symbolsCopy) {
                     if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
                         m_products.push_back(s);
                     }
                 }
             } else if (type == "unsubscribe") {
-                for (const auto& s : symbols) {
+                for (const auto& s : symbolsCopy) {
                     auto it = std::find(m_products.begin(), m_products.end(), s);
                     if (it != m_products.end()) m_products.erase(it);
                 }
@@ -237,14 +292,24 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
 
         // Use SubscriptionManager to build frames deterministically
         m_subscriptions.setDesiredProducts(m_products);
-        const std::string jwt = m_auth.createJwt();
+        
+        // CRITICAL: Wrap JWT creation in try/catch to prevent I/O thread from dying
+        std::string jwt;
+        try {
+            jwt = m_auth.createJwt();
+        } catch (const std::exception& e) {
+            sLog_Error(QString("JWT creation failed in subscription handler: %1").arg(e.what()));
+            emitError(QString("Failed to create JWT for subscription: %1").arg(e.what()));
+            return; // Exit gracefully without crashing I/O thread
+        }
+        
         const auto frames = (type == "subscribe") ? m_subscriptions.buildSubscribeMsgs(jwt)
                                                    : m_subscriptions.buildUnsubscribeMsgs(jwt);
+        
         if (m_transport && m_connected.load()) {
             for (const auto& frame : frames) {
                 m_transport->send(frame);
             }
-            sLog_Data("📤 Sent subscription frames via transport");
         }
     });
 }
@@ -273,8 +338,7 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
                     emitError(QString::fromStdString(ev.message));
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
-                    std::string logMessage = std::format("Subscription confirmed for {} symbols", ev.productIds.size());
-                    sLog_Data(QString::fromStdString(logMessage));
+                    sLog_DataN(1, QString("Subscription confirmed for %1 symbol(s)").arg(static_cast<int>(ev.productIds.size())));
                 }
             }, evt);
         }
@@ -554,12 +618,16 @@ int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_
 void MarketDataCore::sendHeartbeatSubscribe() {
     net::post(m_strand, [this]() {
         if (!m_connected.load() || !m_transport) return;
-        nlohmann::json msg;
-        msg["type"] = "subscribe";
-        msg["channel"] = ch::kHeartbeats;
-        // Heartbeats do not require product_ids
-        msg["jwt"] = m_auth.createJwt();
-        m_transport->send(msg.dump());
-        sLog_Data("📤 Subscribed to heartbeats");
+        try {
+            nlohmann::json msg;
+            msg["type"] = "subscribe";
+            msg["channel"] = ch::kHeartbeats;
+            // Heartbeats do not require product_ids
+            msg["jwt"] = m_auth.createJwt();
+            m_transport->send(msg.dump());
+        } catch (const std::exception& e) {
+            sLog_Error(QString("JWT creation failed in sendHeartbeatSubscribe: %1").arg(e.what()));
+            // Don't crash I/O thread - just log and continue
+        }
     });
 }

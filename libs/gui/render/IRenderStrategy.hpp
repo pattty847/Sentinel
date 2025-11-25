@@ -1,7 +1,7 @@
 /*
 Sentinel — IRenderStrategy
 Role: Defines the abstract interface for all rendering strategies.
-Inputs/Outputs: Defines the contract for turning a GridSliceBatch into a renderable QSGNode.
+Inputs/Outputs: Defines the contract for turning data from an IDataAccessor into a renderable QSGNode.
 Threading: Methods are designed to be called on the Qt Quick render thread.
 Performance: Interface is designed for batch operations to optimize rendering performance.
 Integration: Implemented by concrete strategies (e.g., HeatmapStrategy) and used by UnifiedGridRenderer.
@@ -17,7 +17,6 @@ class QSGGeometryNode;
 
 // Forward declarations
 struct CellInstance;
-struct GridSliceBatch;
 
 class IRenderStrategy {
 public:

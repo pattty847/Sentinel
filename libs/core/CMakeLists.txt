@@ -35,7 +35,7 @@ target_include_directories(sentinel_core PUBLIC
 target_link_libraries(sentinel_core
     PUBLIC
         Qt6::Core
-        Boost::boost           # header-only components
+        Boost::headers         # header-only components
         Boost::system          # required by beast
         OpenSSL::SSL
         OpenSSL::Crypto

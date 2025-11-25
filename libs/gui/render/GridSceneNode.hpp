@@ -16,7 +16,6 @@ Assumptions: Assumes ownership of its child nodes and manages their memory.
 #include <memory>
 
 class IRenderStrategy;
-struct GridSliceBatch;
 class IDataAccessor;
 
 class GridSceneNode : public QSGTransformNode {

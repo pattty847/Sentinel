@@ -1,4 +1,4 @@
 #pragma once
 #include "GridTypes.hpp"
 
-// GridSliceBatch uses CellInstance from GridTypes.hpp
+// Shared render-layer types built on top of CellInstance from GridTypes.hpp

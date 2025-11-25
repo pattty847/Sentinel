@@ -1,13 +1,13 @@
 /*
 Sentinel — TradeBubbleStrategy
 Role: A concrete render strategy that visualizes trades as size-relative bubbles on top of heatmap.
-Inputs/Outputs: Implements IRenderStrategy to turn a GridSliceBatch into beautiful bubble QSGNodes.
+Inputs/Outputs: Implements IRenderStrategy to turn accessor-provided trade data into beautiful bubble QSGNodes.
 Threading: Methods are called exclusively on the Qt Quick render thread.
 Performance: Creates smooth, anti-aliased bubbles with size proportional to trade volume.
 Integration: Instantiated and managed by UnifiedGridRenderer as a pluggable strategy.
 Observability: No internal logging.
 Related: TradeBubbleStrategy.cpp, IRenderStrategy.hpp, UnifiedGridRenderer.h, GridTypes.hpp.
-Assumptions: Each cell in the input batch represents a trade with size used for bubble scaling.
+Assumptions: The accessor provides recent trades with size used for bubble scaling.
 */
 #pragma once
 #include "../IRenderStrategy.hpp"

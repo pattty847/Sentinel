@@ -54,7 +54,14 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
     sLog_App("UnifiedGridRenderer destructor - cleaning up...");
     
     if (m_dataProcessor) {
-        m_dataProcessor->stopProcessing();
+        if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
+            // CRITICAL: stopProcessing() must be called on the worker thread where the timer lives
+            // Use BlockingQueuedConnection to ensure it completes before we destroy the thread
+            QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::stopProcessing, Qt::BlockingQueuedConnection);
+        } else {
+            // Thread not running - safe to call directly (timer already stopped or object on main thread)
+            m_dataProcessor->stopProcessing();
+        }
         disconnect(m_dataProcessor.get(), nullptr, this, nullptr);
     }
     
@@ -76,7 +83,8 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
-    // Store recent trades for bubble rendering (keep last 1000 trades)
+    // REMOVED: Trade buffering in UGR. Strategies now pull from DataCache.
+    /*
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         m_recentTrades.push_back(trade);
@@ -84,6 +92,7 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
             m_recentTrades.erase(m_recentTrades.begin(), m_recentTrades.begin() + 100); // Remove oldest 100
         }
     }
+    */
     
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), "onTradeReceived", 
@@ -161,9 +170,6 @@ void UnifiedGridRenderer::updateVisibleCells() {
 void UnifiedGridRenderer::updateVolumeProfile() {
     // TODO: Implement volume profile from liquidity time series
     m_volumeProfile.clear();
-    
-    // For now, create a simple placeholder
-    // In a full implementation, this would aggregate volume across time slices
 }
 
 // Property setters
@@ -470,36 +476,82 @@ namespace {
         return Viewport{0, 0, 0.0, 0.0, w, h};
     }
 
-    // UGR implementation of data accessor (Wraps GridSliceBatch for Phase 1)
+    // UGR implementation of data accessor (Phase 3/4 - owns frame config)
     class UGRDataAccessor : public IDataAccessor {
     private:
-        const GridSliceBatch& m_batch;
+        UnifiedGridRenderer* m_ugr;
+        DataCache* m_dataCache;          // Access to live data
+        DataProcessor* m_dataProcessor;  // Access to processed cell data
+        double m_intensityScale;
+        double m_minVolumeFilter;
+        int m_maxCells;
+        Viewport m_viewport;
+        std::string m_symbol;            // Current symbol context
     
     public:
-        explicit UGRDataAccessor(const GridSliceBatch& batch) : m_batch(batch) {}
+        explicit UGRDataAccessor(UnifiedGridRenderer* ugr,
+                                 double intensityScale_,
+                                 double minVolumeFilter_,
+                                 int maxCells_,
+                                 const Viewport& viewport_,
+                                 DataCache* cache,
+                                 DataProcessor* processor,
+                                 const std::string& symbol = "BTC-USD") 
+            : m_ugr(ugr)
+            , m_dataCache(cache)
+            , m_dataProcessor(processor)
+            , m_intensityScale(intensityScale_)
+            , m_minVolumeFilter(minVolumeFilter_)
+            , m_maxCells(maxCells_)
+            , m_viewport(viewport_)
+            , m_symbol(symbol) {}
         
         std::shared_ptr<const std::vector<CellInstance>> getVisibleCells() const override {
-            return m_batch.cells;
+            if (m_dataProcessor) {
+                return m_dataProcessor->getPublishedCellsSnapshot();
+            }
+            return nullptr;
         }
         
         const std::vector<Trade>& getRecentTrades() const override {
-            return m_batch.recentTrades;
+            if (m_dataCache) {
+                // TODO: In a real implementation, we should probably return a reference to something more stable
+                // or change the interface to return by value if we're creating a new vector.
+                // For now, we'll trust that the vector returned by recentTrades() lives long enough 
+                // or that we are copying it (which recentTrades does).
+                // Wait, the interface returns const std::vector<Trade>&.
+                // DataCache::recentTrades returns std::vector<Trade> (by value).
+                // This is a dangling reference bug waiting to happen if we just return m_dataCache->recentTrades(m_symbol).
+                
+                // To fix this safely for Phase 2 without changing DataCache yet:
+                // We need a thread-local or member cache to hold the vector we return a reference to.
+                // BUT, IDataAccessor interface says `virtual const std::vector<Trade>& getRecentTrades() const = 0;`
+                
+                // Let's use a mutable member to store the result so we can return a reference.
+                // This is a "temporary" bridge solution.
+                static thread_local std::vector<Trade> s_tradeCache; 
+                s_tradeCache = m_dataCache->recentTrades(m_symbol);
+                return s_tradeCache;
+            }
+            // Fallback to empty if no cache (shouldn't happen in prod)
+            static const std::vector<Trade> empty;
+            return empty;
         }
         
         Viewport getViewport() const override {
-            return m_batch.viewport;
+            return m_viewport;
         }
         
         double getIntensityScale() const override {
-            return m_batch.intensityScale;
+            return m_intensityScale;
         }
         
         double getMinVolumeFilter() const override {
-            return m_batch.minVolumeFilter;
+            return m_minVolumeFilter;
         }
         
         int getMaxCells() const override {
-            return m_batch.maxCells;
+            return m_maxCells;
         }
     };
 }
@@ -534,9 +586,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        // create a new GridSliceBatch with the visible cells, recent trades, intensity scale, min volume filter, max cells, and viewport
-        GridSliceBatch batch{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp};
-        UGRDataAccessor accessor(batch);
+        // TODO: Get actual symbol from somewhere (View State or Prop). For now defaulting to BTC-USD as in scaffolding.
+        UGRDataAccessor accessor(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
 
         QElapsedTimer contentTimer; contentTimer.start();
         sceneNode->updateLayeredContent(&accessor,
@@ -559,8 +619,16 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
 
         Viewport vp2 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch2{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp2};
-        UGRDataAccessor accessor2(batch2);
+        UGRDataAccessor accessor2(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp2,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
 
         QElapsedTimer contentTimer2; contentTimer2.start();
         sceneNode->updateLayeredContent(&accessor2,
@@ -575,8 +643,16 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         sLog_RenderN(10, "MATERIAL UPDATE (intensity/palette)");
         updateVisibleCells();
         Viewport vp3 = buildViewport(m_viewState.get(), static_cast<double>(width()), static_cast<double>(height()));
-        GridSliceBatch batch3{m_visibleCells, m_recentTrades, m_intensityScale, m_minVolumeFilter, m_maxCells, vp3};
-        UGRDataAccessor accessor3(batch3);
+        UGRDataAccessor accessor3(
+            this,
+            m_intensityScale,
+            m_minVolumeFilter,
+            m_maxCells,
+            vp3,
+            m_dataCache,
+            m_dataProcessor.get(),
+            "BTC-USD"
+        );
 
         sceneNode->updateLayeredContent(&accessor3,
                                        m_heatmapStrategy.get(), m_showHeatmapLayer,

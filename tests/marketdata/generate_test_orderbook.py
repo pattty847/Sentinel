@@ -7,7 +7,7 @@ This allows immediate testing of fractal zoom aggregation across all timeframes:
 100ms → 500ms → 1sec → 1min → 5min → 15min → 60min
 
 Usage:
-    python3 scripts/generate_test_orderbook.py
+    python3 tests/marketdata/generate_test_orderbook.py
     
 Output:
     logs/test_orderbook_data.json - 1 hour of order book snapshots
