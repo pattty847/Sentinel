@@ -68,9 +68,6 @@ public:
                                    std::chrono::system_clock::time_point exchange_timestamp,
                                    std::vector<BookDelta>& outDeltas);
     
-    // Remove in cleanup - kept for backwards compatibility during transition
-    [[nodiscard]] std::shared_ptr<const OrderBook> getLiveOrderBook(const std::string& symbol) const;
-    
     // Direct dense access (no conversion)
     [[nodiscard]] const LiveOrderBook& getDirectLiveOrderBook(const std::string& symbol) const;
     

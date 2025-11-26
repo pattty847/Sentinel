@@ -281,42 +281,6 @@ void DataCache::applyLiveOrderBookUpdates(const std::string& symbol,
     }
 }
 
-std::shared_ptr<const OrderBook> DataCache::getLiveOrderBook(const std::string& symbol) const {
-    std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);
-    
-    auto it = m_liveBooks.find(symbol);
-    if (it != m_liveBooks.end()) {
-        const auto& liveBook = it->second;
-        auto book = std::make_shared<OrderBook>();
-        book->product_id = liveBook.getProductId();
-        book->timestamp = liveBook.getLastUpdate();  // Use exchange timestamp, not system time!
-
-        // Convert dense LiveOrderBook to sparse OrderBook format
-        const auto& denseBids = liveBook.getBids();
-        const auto& denseAsks = liveBook.getAsks();
-        
-        // Convert bids (scan from highest to lowest price)
-        for (size_t i = denseBids.size(); i-- > 0; ) {
-            if (denseBids[i] > 0.0) {
-                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
-                book->bids.push_back(OrderBookLevel{price, denseBids[i]});
-            }
-        }
-        
-        // Convert asks (scan from lowest to highest price)
-        for (size_t i = 0; i < denseAsks.size(); ++i) {
-            if (denseAsks[i] > 0.0) {
-                double price = liveBook.getMinPrice() + (static_cast<double>(i) * liveBook.getTickSize());
-                book->asks.push_back(OrderBookLevel{price, denseAsks[i]});
-            }
-        }
-        
-        return book;
-    }
-    
-    return nullptr; // Return nullptr if not found
-}
-
 // Direct dense access (no conversion)
 const LiveOrderBook& DataCache::getDirectLiveOrderBook(const std::string& symbol) const {
     std::shared_lock<std::shared_mutex> lock(m_mxLiveBooks);

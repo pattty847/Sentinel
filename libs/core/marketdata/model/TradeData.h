@@ -80,11 +80,11 @@ struct OrderBookLevel {
     double size;
 };
 
+// Sparse representation for WebSocket message parsing
 struct OrderBook {
     std::string product_id;
     std::chrono::system_clock::time_point timestamp;
 
-    // Sparse representation for WebSocket message parsing
     std::vector<OrderBookLevel> bids;
     std::vector<OrderBookLevel> asks;
 };
