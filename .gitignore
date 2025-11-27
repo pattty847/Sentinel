@@ -123,6 +123,7 @@ docs/archive/
 docs/refactor/
 docs/untracked/
 docs/backups/
+data/
 
 # Random files
 liquidity_timeseries_log.txt
