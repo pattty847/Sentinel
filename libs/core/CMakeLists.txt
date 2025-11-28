@@ -4,7 +4,6 @@ add_library(sentinel_core
     Cpp20Utils.hpp
     LiquidityTimeSeriesEngine.cpp
     LiquidityTimeSeriesEngine.h
-    LockFreeQueue.h
     marketdata/MarketDataCore.cpp
     marketdata/MarketDataCore.hpp
     marketdata/auth/Authenticator.cpp

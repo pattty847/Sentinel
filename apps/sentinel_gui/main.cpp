@@ -21,16 +21,16 @@ This version modularizes startup logic for maintainability and clarity.
 
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
-#ifdef Q_OS_WIN
-    qputenv("QSG_RHI_BACKEND", "d3d11");
-#elif defined(Q_OS_MACOS)
-    qputenv("QSG_RHI_BACKEND", "metal");
-#else
-    qputenv("QSG_RHI_BACKEND", "opengl");
-#endif
-    qputenv("QSG_RENDER_LOOP", "threaded");
-    qputenv("QSG_INFO", "1"); // optional: verbose GPU info
-}
+    #ifdef Q_OS_WIN
+        qputenv("QSG_RHI_BACKEND", "d3d11");
+    #elif defined(Q_OS_MACOS)
+        qputenv("QSG_RHI_BACKEND", "metal");
+    #else
+        qputenv("QSG_RHI_BACKEND", "opengl");
+    #endif
+        qputenv("QSG_RENDER_LOOP", "threaded");
+        qputenv("QSG_INFO", "1"); // optional: verbose GPU info
+    }
 
 // --- Surface format configuration ---
 void configureSurfaceFormat() {
