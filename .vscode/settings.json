@@ -19,5 +19,15 @@
     "files.associations": {
         "*.qml": "qml"
     },
-    "chatgpt.runCodexInWindowsSubsystemForLinux": true
+    "terminal.integrated.profiles.windows": {
+        "Developer Command Prompt for VS": {
+            "path": "cmd.exe",
+            "args": [
+                "/k",
+                "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
+            ],
+            "icon": "terminal-powershell"
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "Developer Command Prompt for VS"
 } 

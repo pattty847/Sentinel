@@ -31,7 +31,9 @@ namespace sentinel::log_throttle {
     do {                                                                               \
         static std::atomic<uint32_t> _counter{0};                                      \
         static int _interval = []() {                                                  \
-            const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL");           \
+            char* env = nullptr;                                                        \
+            size_t envSize = 0;                                                         \
+            errno_t err = _dupenv_s(&env, &envSize, "SENTINEL_LOG_" #cat "_INTERVAL");  \
             if (env) {                                                                 \
                 int envVal = std::atoi(env);                                           \
                 if (envVal > 0 && envVal < (defaultInterval)) return envVal;           \

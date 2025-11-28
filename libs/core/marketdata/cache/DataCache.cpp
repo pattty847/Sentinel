@@ -229,7 +229,11 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
 //  NEW: DataCache LiveOrderBook Methods
 // =============================================================================
 
-void DataCache::initializeLiveOrderBook(const std::string& symbol, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, std::chrono::system_clock::time_point exchange_timestamp) {
+void DataCache::initializeLiveOrderBook(const std::string& symbol, 
+                                        const std::vector<OrderBookLevel>& bids, 
+                                        const std::vector<OrderBookLevel>& asks, 
+                                        std::chrono::system_clock::time_point exchange_timestamp) {
+                                            
     std::unique_lock<std::shared_mutex> lock(m_mxLiveBooks);
     
     // Create or get existing live order book
