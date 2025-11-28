@@ -78,6 +78,8 @@ void LiquidityTimeSeriesEngine::addDenseSnapshot(const LiveOrderBook::DenseBookS
 }
 
 void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, double minPrice, double maxPrice) {
+    // TODO: Optimize this function
+
     if (book.product_id.empty()) return;
     
     // Create a mutable copy to apply the depth limit
@@ -96,7 +98,7 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     
-    // Convert sparse OrderBook to snapshot format with price quantization  
+    // Convert sparse OrderBook to snapshot format with price quantization - PERFORMANCE OPTIMIZATION: O(n)
     for (const auto& bid : limitedBook.bids) {
         double quantizedPrice = quantizePrice(bid.price);
         snapshot.bids[quantizedPrice] += bid.size;  // Aggregate if multiple orders at same quantized price

@@ -147,6 +147,7 @@ const OrderBook& DataProcessor::getLatestOrderBook() const {
 }
 
 void DataProcessor::captureOrderBookSnapshot() {
+    // TODO: Optimize this function
     /*  
     This function captures the current state of an order book and aligns it to a 100ms time bucket.
     If there are skipped buckets since the last snapshot (e.g., no activity in the last 100ms),

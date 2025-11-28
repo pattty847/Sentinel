@@ -154,6 +154,8 @@ void UnifiedGridRenderer::componentComplete() {
 }
 
 void UnifiedGridRenderer::updateVisibleCells() {
+    // TODO: Optimize this function
+    
     // Non-blocking: consume latest snapshot, request async recompute if needed
     if (m_dataProcessor) {
         // Try to grab the latest published cells without blocking the worker
