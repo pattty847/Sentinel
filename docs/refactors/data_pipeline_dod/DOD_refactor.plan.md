@@ -87,6 +87,9 @@
  - Log snapshot version / pointer address occasionally to confirm double-buffer behavior.
  - Add optional debug assertions that no writes occur from GUI/render threads into snapshot memory.
 - Possibly wrap the new layout in a tiny debug-only “read-only view” that asserts against mutation in debug builds.
+- Extend timing breadcrumbs beyond `UGR paint` by sampling worker-side hotspots:
+  - Log the 100 ms snapshot timer with bucket drift + duration (`SNAPSHOT TIMER`), highlighting when the carry-forward loop grows long enough to threaten frame cadence.
+  - Time `updateVisibleCells` phases (`VISIBLE CELLS TIMING`) to surface slice fetch, AoS build, and snapshot publication costs independently of render-thread `cacheUs`.
 
 ### Expected Perf Benefits
 

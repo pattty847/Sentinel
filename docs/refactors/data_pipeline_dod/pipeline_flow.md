@@ -19,6 +19,8 @@ If dense ingestion produces no levels, the same handler:
 ### 1.3 Timer-driven snapshots
 Independent of live updates, `captureOrderBookSnapshot` (`DataProcessor.cpp:149-198`) runs every 100 ms to enforce uniform time buckets. It copies the latest sparse `OrderBook`, stamps `timestamp` to the bucket start, and pushes into the engine for each missed interval. This ensures there is always an entry every 100 ms even if real traffic stalls—see the recorded trace in `liquidity_timeseries_log.txt`, where `NEW SLICE 100ms` entries step monotonically in 100 ms increments.
 
+`SNAPSHOT TIMER` logs now report how many buckets were carried forward and how long the timer path took. When missing columns appear in 100 ms views, correlating `bucketsAdded` and `durationUs` with UI timestamps will confirm whether timer drift or mutex contention starved the LTSE of snapshots.
+
 **Threading:** All ingestion work above runs on the dedicated `DataProcessor` `QThread`. The Qt timer and live-order-book slot execute there, guarding shared state via `m_dataMutex`.
 
 ## 2. LiquidityTimeSeriesEngine Aggregation

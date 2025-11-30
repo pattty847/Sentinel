@@ -33,6 +33,7 @@ if (viewportChanged || m_lastProcessedTime == 0) {
 * **Iteration count:** `visibleSlices` is whatever the LTE returns for the viewport window; at 100 ms buckets over a 30 s view this is ≈300 slices per frame. The loop is sequential, touching two cache-friendly containers: `std::vector<const LiquidityTimeSlice*> visibleSlices` and `std::unordered_set<SliceTimeRange>`.
 * **Memory accessed:** Only metadata (`startTime_ms`, `endTime_ms`, `dataVersion`) plus each slice passed into `createCellsFromLiquiditySlice`. The `unordered_set` operations read/write 24-byte keys (three int64_t-equivalent fields).
 * **Read/write pattern:** Append-mode loops are read-mostly; writes occur when a new slice appears OR when a slice's `dataVersion` changes (triggering stale cell removal and reprocessing). Processed ranges remain in the hash set until viewport changes, so repeated calls typically short-circuit unless slice data has changed.
+* **Instrumentation:** `VISIBLE CELLS TIMING` logs report `sliceFetchUs`, `cellBuildUs`, and `snapshotUs` alongside the processed slice count. If `cellBuildUs` creeps toward the 16 ms budget while missing columns appear on 100 ms views, the AoS expansion here—not rendering—owns the loss.
 
 ## 2. Slice → Cells Expansion
 
@@ -115,6 +116,7 @@ while (producedKeptCells < keptCells) {
 * **Iteration count:** Each frame handles all visible cells after filtering. Logs show 20 k–30 k cells, so the vertex loop executes that many times, emitting 6 vertices per cell (120 k–180 k vertex struct writes). `cellsPerChunk` caps each chunk at 10 000 cells (60 000 vertices) to stay within ANGLE 16-bit index limits.
 * **Memory accessed:** `batch.cells` is contiguous; the loop touches each `CellInstance` field. Two calls to `CoordinateSystem::worldToScreen` per cell read `Viewport` and simple scalars. Writing into `QSGGeometry` hits a fresh heap buffer (per chunk) sequentially.
 * **Read/write pattern:** Strictly sequential and write-only for the vertex buffer; no random access.
+* **Instrumentation:** `HEATMAP CHUNKS` still captures per-chunk work; combine with `VISIBLE CELLS TIMING` to distinguish ingest pressure from geometry churn.
 
 ## 5. Vertex Chunk Logging
 

@@ -157,11 +157,14 @@ void DataProcessor::captureOrderBookSnapshot() {
     Early exits occur if the system is shutting down or if no valid liquidity engine exists.
     */
 
+    const auto snapshotStart = std::chrono::steady_clock::now();
+    int carriedForwardBuckets = 0;
+
     // Early return if shutting down
     if (m_shuttingDown.load()) {
         return;
     }
-    
+
     if (!m_liquidityEngine) return;
     
     std::shared_ptr<const OrderBook> book_copy;
@@ -184,6 +187,13 @@ void DataProcessor::captureOrderBookSnapshot() {
         m_liquidityEngine->addOrderBookSnapshot(ob);
         lastBucket = bucketStart;
         updateVisibleCells();
+        carriedForwardBuckets = 1;
+
+        const auto snapshotEnd = std::chrono::steady_clock::now();
+        const auto snapshotUs = std::chrono::duration_cast<std::chrono::microseconds>(snapshotEnd - snapshotStart).count();
+        sLog_RenderN(10, "SNAPSHOT TIMER: initialized 100ms bucket=" << bucketStart
+                                  << " bucketsAdded=" << carriedForwardBuckets
+                                  << " durationUs=" << snapshotUs);
         return;
     }
 
@@ -193,8 +203,19 @@ void DataProcessor::captureOrderBookSnapshot() {
             ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ts));
             m_liquidityEngine->addOrderBookSnapshot(ob);
             lastBucket = ts;
+            ++carriedForwardBuckets;
         }
         updateVisibleCells();
+    }
+
+    if (carriedForwardBuckets > 0) {
+        const auto snapshotEnd = std::chrono::steady_clock::now();
+        const auto snapshotUs = std::chrono::duration_cast<std::chrono::microseconds>(snapshotEnd - snapshotStart).count();
+
+        sLog_RenderN(10, "SNAPSHOT TIMER: bucketsAdded=" << carriedForwardBuckets
+                                  << " latestBucket=" << lastBucket
+                                  << " durationUs=" << snapshotUs
+                                  << " nowMs=" << nowMs);
     }
 }
 
@@ -416,6 +437,8 @@ void DataProcessor::clearData() {
 }
 
 void DataProcessor::updateVisibleCells() {
+    const auto totalStart = std::chrono::steady_clock::now();
+
     // Early return if shutting down
     if (m_shuttingDown.load()) {
         return;
@@ -457,11 +480,20 @@ void DataProcessor::updateVisibleCells() {
     
     // Get liquidity slices for active timeframe within viewport
     if (m_liquidityEngine) {
+        int64_t sliceFetchUs = 0;
+        int64_t cellBuildUs = 0;
+        int64_t snapshotPublishUs = 0;
+        size_t processedSlices = 0;
+
         qint64 timeStart = m_viewState->getVisibleTimeStart();
         qint64 timeEnd = m_viewState->getVisibleTimeEnd();
         sLog_Render("LTSE QUERY: timeframe=" << activeTimeframe << "ms, window=[" << timeStart << "-" << timeEnd << "]");
-        
+
+        const auto sliceFetchStart = std::chrono::steady_clock::now();
         auto visibleSlices = m_liquidityEngine->getVisibleSlices(activeTimeframe, timeStart, timeEnd);
+        sliceFetchUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - sliceFetchStart)
+                           .count();
         sLog_Render("LTSE RESULT: Found " << visibleSlices.size() << " slices for rendering");
         
         // Auto-fix viewport only when auto-scroll is enabled; never fight user pan/zoom
@@ -497,7 +529,8 @@ void DataProcessor::updateVisibleCells() {
 
         // Track processed slices and append only new data when viewport is stable
         const size_t beforeSize = m_visibleCells.size();
-        int processedSlices = 0;
+        const auto cellBuildStart = std::chrono::steady_clock::now();
+        processedSlices = 0;
 
         if (viewportChanged || m_lastProcessedTime == 0) {
             // Full rebuild: clear processed time range tracking and process everything
@@ -550,6 +583,10 @@ void DataProcessor::updateVisibleCells() {
         // Do NOT prune off-viewport cells here; retain history so zoom-out can
         // immediately reveal older columns without requiring a recompute.
 
+        cellBuildUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - cellBuildStart)
+                          .count();
+
         // Changed if: viewport changed, cell count changed, OR any slices were (re)processed
         const bool changed = viewportChanged || (m_visibleCells.size() != beforeSize) || (processedSlices > 0);
 
@@ -564,19 +601,43 @@ void DataProcessor::updateVisibleCells() {
         if (changed) {
             {
                 std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
+                const auto publishStart = std::chrono::steady_clock::now();
                 m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
+                snapshotPublishUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::steady_clock::now() - publishStart)
+                                         .count();
             }
             emit dataUpdated();
         }
+
+        const auto totalEnd = std::chrono::steady_clock::now();
+        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(totalEnd - totalStart).count();
+
+        sLog_RenderN(5, "VISIBLE CELLS TIMING: totalUs=" << totalUs
+                                << " sliceFetchUs=" << sliceFetchUs
+                                << " cellBuildUs=" << cellBuildUs
+                                << " snapshotUs=" << snapshotPublishUs
+                                << " slices=" << visibleSlices.size()
+                                << " processed=" << processedSlices
+                                << " cells=" << m_visibleCells.size()
+                                << " mode=" << (viewportChanged ? "rebuild" : "append"));
         return; // Avoid duplicate publish below
     }
-    
+
     // Fallback: if no liquidity engine, publish current state (likely empty)
     {
         std::lock_guard<std::mutex> snapLock(m_snapshotMutex);
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
     }
     emit dataUpdated();
+
+    const auto totalEnd = std::chrono::steady_clock::now();
+    const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(totalEnd - totalStart).count();
+
+    sLog_RenderN(5, "VISIBLE CELLS TIMING: totalUs=" << totalUs
+                            << " sliceFetchUs=0 cellBuildUs=0 snapshotUs=0"
+                            << " slices=0 processed=0 cells=" << m_visibleCells.size()
+                            << " mode=fallback");
 }
 
 void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {

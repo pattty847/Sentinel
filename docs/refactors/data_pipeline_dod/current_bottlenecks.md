@@ -59,3 +59,12 @@ While actual numbers depend on runtime measurements, the logging described above
 | Slice availability | `LTSE RESULT: Found <n> slices` (`libs/gui/render/DataProcessor.cpp:446-450`) | Shows how many slices feed `createCellsFromLiquiditySlice` |
 
 Mapping these logs per frame reveals where CPU budget is spent without speculating on optimizations: heavy `cacheUs` + large slice counts points at ingestion-side work, while elevated `contentUs` + `HEATMAP CHUNKS` vertices highlights GPU upload pressure.
+
+## New Timing Probes (worker thread)
+
+Two additional breadcrumbs measure the worker thread in the same microsecond units as `UGR paint`:
+
+* `SNAPSHOT TIMER: bucketsAdded=… durationUs=…` fires from `captureOrderBookSnapshot` whenever the 100 ms timer carries the latest book forward. A large `bucketsAdded` spike or a multi-millisecond `durationUs` hints at timer drift or mutex contention that could explain occasional missing slices on the 100 ms cadence.
+* `VISIBLE CELLS TIMING: totalUs=… sliceFetchUs=… cellBuildUs=… snapshotUs=…` surfaces how long `updateVisibleCells` spends fetching slices from the LTSE, expanding cells, and copying the AoS snapshot. Comparing `totalUs` against the 16 ms frame budget reveals whether CPU overrun happens before geometry even begins.
+
+These logs run behind throttling (`RenderN`) so they stay lightweight but still provide enough sampling resolution to correlate with the intermittent missing-column reports.
