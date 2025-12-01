@@ -483,9 +483,9 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
     // Initialize the live order book with the sparse snapshot data
     m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
     
-    std::string logMessage = Cpp20Utils::formatOrderBookLog(
-        product_id, sparse_bids.size(), sparse_asks.size());
-    sLog_Data(QString::fromStdString(logMessage));
+    // std::string logMessage = Cpp20Utils::formatOrderBookLog(
+    //     product_id, sparse_bids.size(), sparse_asks.size());
+    // sLog_Data(QString::fromStdString(logMessage));
 }
 
 void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
@@ -548,9 +548,9 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     size_t askCount = liveBook.getAskCount();
     
     
-    std::string logMessage = Cpp20Utils::formatOrderBookLog(
-        product_id, bidCount, askCount, updateCount);
-    sLog_Data(QString::fromStdString(logMessage));
+    // std::string logMessage = Cpp20Utils::formatOrderBookLog(
+    //     product_id, bidCount, askCount, updateCount);
+    // sLog_Data(QString::fromStdString(logMessage));
 }
 
 void MarketDataCore::replaySubscriptionsOnConnect() {

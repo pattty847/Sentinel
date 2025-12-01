@@ -22,6 +22,7 @@ public:
     void setGpuUsage(int percent);
     void setLatency(int milliseconds);
     void setReadyStatus(const QString& status = "Ready");
+    void showVersion();
 
 private slots:
     void updateMetrics();  // Periodic update slot
@@ -32,6 +33,7 @@ private:
     QLabel* m_cpuLabel;
     QLabel* m_gpuLabel;
     QLabel* m_latencyLabel;
+    QLabel* m_versionLabel;
     
     // Metrics storage
     int m_cpuPercent = 0;

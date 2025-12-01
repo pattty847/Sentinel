@@ -1,4 +1,5 @@
 #include "StatusBar.hpp"
+#include "Version.hpp"
 #include <QHBoxLayout>
 #include <QTimer>
 #include <QApplication>
@@ -46,6 +47,12 @@ StatusBar::StatusBar(QWidget* parent)
     m_latencyLabel = new QLabel("Latency: -- ms", this);
     m_latencyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
     layout->addWidget(m_latencyLabel);
+    
+    // Version (initially hidden, shown on demand)
+    m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
+    m_versionLabel->setStyleSheet("QLabel { color: #666; font-size: 9px; }");
+    m_versionLabel->hide();
+    layout->addWidget(m_versionLabel);
     
     setLayout(layout);
     
@@ -101,5 +108,9 @@ void StatusBar::updateMetrics() {
     // Placeholder: Update metrics display
     // TODO: Connect to actual system metrics when available
     // For now, just refresh the display
+}
+
+void StatusBar::showVersion() {
+    m_versionLabel->setVisible(!m_versionLabel->isVisible());
 }
 

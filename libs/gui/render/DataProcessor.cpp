@@ -104,12 +104,12 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
             initializeViewportFromTrade(trade);
         }
         
-        sLog_Data("DataProcessor TRADE UPDATE: Processing trade");
+        // sLog_Data("DataProcessor TRADE UPDATE: Processing trade");
     }
     
-    sLog_Data("DataProcessor TRADE: $" << trade.price 
-                 << " vol:" << trade.size 
-                 << " timestamp:" << timestamp);
+    // sLog_Data("DataProcessor TRADE: $" << trade.price 
+    //              << " vol:" << trade.size 
+    //              << " timestamp:" << timestamp);
 }
 
 void DataProcessor::onOrderBookUpdated(std::shared_ptr<const OrderBook> book) {
@@ -172,28 +172,27 @@ void DataProcessor::captureOrderBookSnapshot() {
     if (!book_copy) return;
 
     // Align to system 100ms buckets; carry-forward if we skipped buckets
-    // TODO: See if this is the best way to align the order book to the 100ms bucket.
     const qint64 nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     const qint64 bucketStart = (nowMs / 100) * 100;
 
-    static qint64 lastBucket = 0;
-    if (lastBucket == 0) {
+    // Use member variable instead of static - allows reset on clearData()
+    if (m_lastSnapshotBucket == 0) {
         OrderBook ob = *book_copy;
         ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
         m_liquidityEngine->addOrderBookSnapshot(ob);
-        lastBucket = bucketStart;
+        m_lastSnapshotBucket = bucketStart;
         updateVisibleCells();
         return;
     }
 
-    if (bucketStart > lastBucket) {
-        for (qint64 ts = lastBucket + 100; ts <= bucketStart; ts += 100) {
-            OrderBook ob = *book_copy;
-            ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ts));
-            m_liquidityEngine->addOrderBookSnapshot(ob);
-            lastBucket = ts;
-        }
+    // Only add current bucket - don't fill gaps with stale repeated data
+    // Gaps will appear as empty columns (honest representation of missing data)
+    if (bucketStart > m_lastSnapshotBucket) {
+        OrderBook ob = *book_copy;
+        ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
+        m_liquidityEngine->addOrderBookSnapshot(ob);
+        m_lastSnapshotBucket = bucketStart;
         updateVisibleCells();
     }
 }
@@ -311,7 +310,7 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
     // Build a mid-centered banded sparse snapshot from dense book
     OrderBook sparseBook;
     sparseBook.product_id = productId.toStdString();
-    sparseBook.timestamp = std::chrono::system_clock::now();
+    sparseBook.timestamp = liveBook.getLastUpdate();  // Use book's timestamp, not now()
 
     const auto& denseBids = liveBook.getBids();
     const auto& denseAsks = liveBook.getAsks();
@@ -403,6 +402,13 @@ void DataProcessor::clearData() {
     
     m_latestOrderBook = nullptr;
     m_hasValidOrderBook = false;
+    m_lastSnapshotBucket = 0;  // Reset bucket tracker for gap-filling
+    
+    // Clear all cell state to prevent stale data on symbol switch
+    m_visibleCells.clear();
+    m_processedTimeRanges.clear();
+    m_lastProcessedTime = 0;
+    m_lastViewportVersion = 0;
     
     if (m_viewState) {
         m_viewState->resetZoom();
@@ -500,7 +506,11 @@ void DataProcessor::updateVisibleCells() {
         int processedSlices = 0;
 
         if (viewportChanged || m_lastProcessedTime == 0) {
-            // Full rebuild: clear processed time range tracking and process everything
+            // Full rebuild: clear all cell state and process everything
+            // (viewportChanged already cleared at top, but m_lastProcessedTime==0 needs it too)
+            if (!viewportChanged) {
+                m_visibleCells.clear();
+            }
             m_processedTimeRanges.clear();
             for (const auto* slice : visibleSlices) {
                 ++processedSlices;

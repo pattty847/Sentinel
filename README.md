@@ -1,4 +1,4 @@
-# Sentinel
+# Sentinel v1.0.0-alpha
 
 GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
 <div align="center">

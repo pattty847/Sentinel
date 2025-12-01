@@ -154,6 +154,9 @@ private:
     // Append-only state with viewport version gating
     int64_t m_lastProcessedTime = 0;
     uint64_t m_lastViewportVersion = 0;
+    
+    // Last snapshot bucket timestamp for gap-filling (replaces static variable)
+    qint64 m_lastSnapshotBucket = 0;
 
     // Track processed slices by time range + data version (slices are reused in memory, so can't use pointers)
     struct SliceTimeRange {

@@ -13,6 +13,7 @@ Assumptions: Time bucketing logic correctly assigns updates to their respective 
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 #include <fstream>
 
@@ -95,8 +96,9 @@ void LiquidityTimeSeriesEngine::addOrderBookSnapshot(const OrderBook& book, doub
     }
     
     OrderBookSnapshot snapshot;
+    // USE THE BOOK'S TIMESTAMP - not now()! Gap-filling depends on this.
     snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+        book.timestamp.time_since_epoch()).count();
     
     // Convert sparse OrderBook to snapshot format with price quantization - PERFORMANCE OPTIMIZATION: O(n)
     for (const auto& bid : limitedBook.bids) {
@@ -141,13 +143,19 @@ const LiquidityTimeSlice* LiquidityTimeSeriesEngine::getTimeSlice(int64_t timefr
 std::vector<const LiquidityTimeSlice*> LiquidityTimeSeriesEngine::getVisibleSlices(
     int64_t timeframe_ms, int64_t viewStart_ms, int64_t viewEnd_ms) const {
     
-    std::vector<const LiquidityTimeSlice*> visible;
-    auto tf_it = m_timeSlices.find(timeframe_ms);
-    if (tf_it == m_timeSlices.end()) return visible;
+    // Use map to deduplicate by time range, keeping highest dataVersion
+    // (out-of-order timestamps can create multiple slices for same range)
+    std::map<int64_t, const LiquidityTimeSlice*> bestByStartTime;
     
-    for (const auto& slice : tf_it->second) {
-        if (slice.endTime_ms >= viewStart_ms && slice.startTime_ms <= viewEnd_ms) {
-            visible.push_back(&slice);
+    auto tf_it = m_timeSlices.find(timeframe_ms);
+    if (tf_it != m_timeSlices.end()) {
+        for (const auto& slice : tf_it->second) {
+            if (slice.endTime_ms >= viewStart_ms && slice.startTime_ms <= viewEnd_ms) {
+                auto existing = bestByStartTime.find(slice.startTime_ms);
+                if (existing == bestByStartTime.end() || slice.dataVersion > existing->second->dataVersion) {
+                    bestByStartTime[slice.startTime_ms] = &slice;
+                }
+            }
         }
     }
     
@@ -156,8 +164,18 @@ std::vector<const LiquidityTimeSlice*> LiquidityTimeSeriesEngine::getVisibleSlic
     if (current_it != m_currentSlices.end()) {
         const auto& currentSlice = current_it->second;
         if (currentSlice.endTime_ms >= viewStart_ms && currentSlice.startTime_ms <= viewEnd_ms) {
-            visible.push_back(&currentSlice);
+            auto existing = bestByStartTime.find(currentSlice.startTime_ms);
+            if (existing == bestByStartTime.end() || currentSlice.dataVersion > existing->second->dataVersion) {
+                bestByStartTime[currentSlice.startTime_ms] = &currentSlice;
+            }
         }
+    }
+    
+    // Convert map to vector
+    std::vector<const LiquidityTimeSlice*> visible;
+    visible.reserve(bestByStartTime.size());
+    for (const auto& [startTime, slicePtr] : bestByStartTime) {
+        visible.push_back(slicePtr);
     }
     
     return visible;

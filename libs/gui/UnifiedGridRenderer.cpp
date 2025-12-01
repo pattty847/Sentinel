@@ -604,7 +604,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
         cellsCount = m_visibleCells ? m_visibleCells->size() : 0;
     } else if (m_appendPending.exchange(false)) {
-        sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");
+        // sLog_RenderN(5, "APPEND PENDING (rebuild from snapshot)");   
         QElapsedTimer cacheTimer; cacheTimer.start();
         updateVisibleCells();
         cacheUs = cacheTimer.nsecsElapsed() / 1000;
