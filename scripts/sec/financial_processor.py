@@ -1,5 +1,9 @@
 import logging
-from typing import Dict, Optional, List, Callable, Awaitable
+import re
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List, Callable, Awaitable, Tuple
+
+from .tag_mapping import FINANCIAL_TAG_MAP
 
 class FinancialDataProcessor:
     """Handles the processing and summarization of financial data extracted from SEC Company Facts (XBRL API).
@@ -9,9 +13,9 @@ class FinancialDataProcessor:
     - Defining a mapping (`KEY_FINANCIAL_SUMMARY_METRICS`) between desired summary
       metric names (e.g., 'revenue', 'net_income') and their corresponding XBRL tags
       within specific taxonomies (usually 'us-gaap' or 'dei').
-    - Providing a method (`_get_latest_fact_value`) to navigate the raw company facts JSON
-      and extract the most recent reported value for a given XBRL concept, considering units
-      (prioritizing USD or shares) and reporting period end dates.
+    - Providing a method (`_get_fact_history`) to navigate the raw company facts JSON
+      and extract historical time-series data for a given XBRL concept, organized by quarterly
+      and annual periods, considering units (prioritizing USD or shares) and reporting period end dates.
     - Orchestrating the retrieval of raw company facts (via an injected function) and using
       the defined mapping and extraction logic to produce a flattened dictionary
       (`get_financial_summary`) containing key financial metrics suitable for display or further analysis.
@@ -23,23 +27,24 @@ class FinancialDataProcessor:
 
     # Define key metrics mapping for the financial summary required by the UI
     # Keys are snake_case matching the target flat dictionary output.
-    # Values are the corresponding us-gaap or dei XBRL tags.
-    KEY_FINANCIAL_SUMMARY_METRICS = {
-        # Income Statement
-        "revenue": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
-        "net_income": ("us-gaap", "NetIncomeLoss"),
-        "eps": ("us-gaap", "EarningsPerShareBasic"), # Using Basic EPS for UI
-        # Balance Sheet
-        "assets": ("us-gaap", "Assets"),
-        "liabilities": ("us-gaap", "Liabilities"),
-        "equity": ("us-gaap", "StockholdersEquity"),
-        # Cash Flow
-        "operating_cash_flow": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
-        "investing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInInvestingActivities"),
-        "financing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInFinancingActivities"),
-        # Other potentially useful
-        # "shares_outstanding": ("dei", "EntityCommonStockSharesOutstanding") # Example DEI tag
-    }
+    # Values are lists of (taxonomy, tag) tuples from FINANCIAL_TAG_MAP for fallback support.
+    KEY_FINANCIAL_SUMMARY_METRICS = [
+        "revenue",
+        "net_income",
+        "eps",
+        "assets",
+        "liabilities",
+        "equity",
+        "operating_cash_flow",
+        "investing_cash_flow",
+        "financing_cash_flow",
+        # Additional metrics for derived calculations
+        "operating_income",
+        "capex",
+        "interest_expense",
+        "income_tax_expense",
+        "depreciation_amortization"
+    ]
 
     def __init__(self, fetch_facts_func: Callable[[str, bool], Awaitable[Optional[Dict]]]):
         """
@@ -53,14 +58,239 @@ class FinancialDataProcessor:
         """
         self.fetch_company_facts = fetch_facts_func
 
-    def _get_latest_fact_value(self, facts_data: Dict, taxonomy: str, concept_tag: str) -> Optional[Dict]:
+    def _format_period(self, entry: Dict) -> str:
         """
-        Extracts the most recently reported data point for a specific XBRL concept from raw facts data.
+        Formats a period string from frame or fp+fy fields.
+        
+        Args:
+            entry (Dict): A fact entry containing 'frame', 'fp', and 'fy' fields.
+            
+        Returns:
+            str: Formatted period string like "Q3 2024" or "2024".
+        """
+        frame = entry.get('frame', '')
+        fp = entry.get('fp', '')
+        fy = entry.get('fy')
+        
+        # Prioritize frame field if available
+        if frame:
+            # Check for quarterly pattern: CY2023Q3 or CY2023Q3I
+            quarterly_match = re.match(r'CY(\d{4})Q(\d)', frame)
+            if quarterly_match:
+                year = quarterly_match.group(1)
+                quarter = quarterly_match.group(2)
+                return f"Q{quarter} {year}"
+            
+            # Check for annual pattern: CY2023
+            annual_match = re.match(r'CY(\d{4})$', frame)
+            if annual_match:
+                return annual_match.group(1)
+        
+        # Fall back to fp + fy
+        if fp and fy:
+            if fp.startswith('Q'):
+                return f"{fp} {fy}"
+            elif fp == 'FY':
+                return str(fy)
+        
+        # Last resort: just return the year
+        if fy:
+            return str(fy)
+        
+        return "Unknown"
+
+    def _is_quarterly(self, entry: Dict) -> bool:
+        """
+        Determines if an entry represents quarterly data based on frame or fp field.
+        
+        Args:
+            entry (Dict): A fact entry containing 'frame' or 'fp' fields.
+            
+        Returns:
+            bool: True if quarterly, False if annual or unknown.
+        """
+        frame = entry.get('frame', '')
+        fp = entry.get('fp', '')
+        
+        # Check frame first (standardized by SEC)
+        if frame:
+            # Quarterly: CY2023Q3, CY2023Q3I, etc.
+            if re.match(r'CY\d{4}Q\d', frame):
+                return True
+            # Annual: CY2023 (no Q)
+            if re.match(r'CY\d{4}$', frame):
+                return False
+        
+        # Fall back to fp field
+        if fp:
+            return fp.startswith('Q')
+        
+        return False
+
+    def _calculate_duration_days(self, entry: Dict) -> Optional[int]:
+        """
+        Calculates the duration in days for an entry.
+        
+        Args:
+            entry (Dict): A fact entry containing 'start' and 'end' date fields.
+            
+        Returns:
+            Optional[int]: Duration in days, or None if start date is not available.
+        """
+        start_date = entry.get('start')
+        end_date = entry.get('end')
+        
+        if not start_date or not end_date:
+            return None
+        
+        try:
+            start = datetime.strptime(start_date, '%Y-%m-%d')
+            end = datetime.strptime(end_date, '%Y-%m-%d')
+            duration = (end - start).days
+            return duration
+        except (ValueError, TypeError) as e:
+            logging.debug(f"Could not parse dates for duration calculation: {e}")
+            return None
+
+    def _filter_by_duration(self, entries: List[Dict], form_type: str, is_quarterly: bool) -> List[Dict]:
+        """
+        Filters entries by duration to exclude YTD/cumulative values.
+        
+        For 10-Q forms:
+        - Quarterly entries should be 85-95 days (3-month period)
+        - Rejects ~270-day YTD entries
+        
+        For 10-K forms:
+        - Annual entries should be 360-370 days (full year)
+        - Or 85-95 days if it's Q4 (sometimes Q4 is in 10-K)
+        
+        Args:
+            entries (List[Dict]): List of entries to filter
+            form_type (str): Form type ('10-Q', '10-K', etc.)
+            is_quarterly (bool): Whether these are quarterly entries
+            
+        Returns:
+            List[Dict]: Filtered entries that match duration criteria
+        """
+        filtered = []
+        
+        for entry in entries:
+            form = entry.get('form', '')
+            duration = self._calculate_duration_days(entry)
+            
+            # If no duration info available, we'll use deduplication logic later
+            if duration is None:
+                filtered.append(entry)
+                continue
+            
+            # Filter 10-Q quarterly entries: must be 85-95 days
+            if form_type == '10-Q' and is_quarterly:
+                if 85 <= duration <= 95:
+                    filtered.append(entry)
+                else:
+                    logging.debug(f"Rejected {form} entry with duration {duration} days (expected 85-95 for quarterly)")
+            
+            # Filter 10-K annual entries: 360-370 days OR 85-95 days (Q4)
+            elif form_type == '10-K' and not is_quarterly:
+                if 360 <= duration <= 370:
+                    filtered.append(entry)
+                elif 85 <= duration <= 95:
+                    # Q4 might be in 10-K, check if fp is Q4
+                    fp = entry.get('fp', '')
+                    if fp == 'Q4':
+                        filtered.append(entry)
+                    else:
+                        logging.debug(f"Rejected {form} entry with duration {duration} days (not Q4)")
+                else:
+                    logging.debug(f"Rejected {form} entry with duration {duration} days (expected 360-370 or 85-95 for Q4)")
+            
+            # For other forms or cases, include the entry
+            else:
+                filtered.append(entry)
+        
+        return filtered
+
+    def _deduplicate_entries(self, entries: List[Dict]) -> List[Dict]:
+        """
+        Deduplicates entries that have the same (period, end_date).
+        
+        Strategy:
+        1. Prefer entries with start date (can verify duration)
+        2. For entries without start date, prefer smaller values (quarterly vs YTD)
+        3. Prefer latest filed date as tiebreaker
+        
+        Args:
+            entries (List[Dict]): List of entries that may have duplicates
+            
+        Returns:
+            List[Dict]: Deduplicated entries
+        """
+        # Group by (period, end_date)
+        grouped = {}
+        for entry in entries:
+            key = (entry.get('period'), entry.get('date'))
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(entry)
+        
+        deduplicated = []
+        for key, group in grouped.items():
+            if len(group) == 1:
+                deduplicated.append(group[0])
+            else:
+                # Multiple entries with same period/date
+                # Strategy: prefer entries with start date, then smaller values (quarterly vs YTD)
+                entries_with_start = [e for e in group if e.get('start')]
+                entries_without_start = [e for e in group if not e.get('start')]
+                
+                def _get_filed_timestamp(entry: Dict) -> float:
+                    """Helper to safely parse filed date to timestamp."""
+                    filed = entry.get('filed')
+                    if not filed:
+                        return 0.0
+                    try:
+                        return datetime.strptime(filed, '%Y-%m-%d').timestamp()
+                    except (ValueError, TypeError):
+                        return 0.0
+                
+                if entries_with_start:
+                    # Prefer entries with start date (we can verify duration)
+                    # Among those, prefer smaller values (quarterly vs cumulative), then latest filed
+                    best_entry = min(entries_with_start, key=lambda e: (
+                        e.get('value', float('inf')),  # Smaller value (quarterly vs YTD)
+                        -_get_filed_timestamp(e)  # Latest filed date
+                    ))
+                elif entries_without_start:
+                    # No start dates available - prefer smaller values (likely quarterly)
+                    # Sort by value ascending, then by latest filed date
+                    best_entry = min(entries_without_start, key=lambda e: (
+                        e.get('value', float('inf')),  # Smaller value first
+                        -_get_filed_timestamp(e)  # Then latest filed date
+                    ))
+                else:
+                    # Fallback: just use latest filed date
+                    best_entry = max(group, key=lambda e: _get_filed_timestamp(e))
+                
+                deduplicated.append(best_entry)
+                if len(group) > 1:
+                    logging.debug(f"Deduplicated {len(group)} entries for {key}, kept entry with value {best_entry.get('value')} filed {best_entry.get('filed')}")
+        
+        return deduplicated
+
+    def _get_fact_history(self, facts_data: Dict, taxonomy: str, concept_tag: str) -> Optional[Dict]:
+        """
+        Extracts historical time-series data for a specific XBRL concept from raw facts data.
 
         Navigates the nested structure of the company facts JSON (`facts_data`) based on the
         provided `taxonomy` (e.g., 'us-gaap') and `concept_tag` (e.g., 'Assets').
-        It identifies the relevant units (preferring 'USD' or 'shares') and then finds the
-        data point within that unit list that has the latest 'end' date.
+        It identifies the relevant units (preferring 'USD' or 'shares') and then processes
+        all data points, categorizing them into quarterly and annual periods based on the
+        'frame' field (if available) or 'fp' (Fiscal Period) field.
+
+        **YTD Filtering:** This method filters out Year-To-Date (YTD) cumulative values that
+        can appear in 10-Q filings alongside quarterly values. It uses duration filtering
+        (85-95 days for quarterly, 360-370 days for annual) when 'start' dates are available,
+        and deduplication logic (preferring smaller values) when they are not.
 
         Args:
             facts_data (Dict): The raw JSON dictionary obtained from the SEC Company Facts API
@@ -70,10 +300,10 @@ class FinancialDataProcessor:
                 (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax').
 
         Returns:
-            Optional[Dict]: A dictionary containing details of the latest fact found, including its
-                'value', 'unit', 'end_date', fiscal year ('fy'), fiscal period ('fp'), source
-                'form', and 'filed' date. Returns None if the concept, unit, or valid data point
-                cannot be found within the provided `facts_data`.
+            Optional[Dict]: A dictionary with 'quarterly' and 'annual' keys, each containing
+                a list of entries sorted by 'end' date descending (newest first). Each entry
+                contains 'period', 'date', 'value', and 'form' fields. Returns None if the
+                concept, unit, or valid data points cannot be found.
         """
         try:
             concept_data = facts_data.get('facts', {}).get(taxonomy, {}).get(concept_tag)
@@ -86,49 +316,316 @@ class FinancialDataProcessor:
                 # logging.debug(f"No units for concept '{concept_tag}'.")
                 return None
 
-            target_unit = None
-            if 'USD' in units: target_unit = 'USD'
-            elif 'shares' in units: target_unit = 'shares'
-            else: target_unit = list(units.keys())[0]
+            # Collect data from all units (USD, shares, etc.)
+            all_entries = []
+            for unit_name, unit_data in units.items():
+                if not isinstance(unit_data, list):
+                    continue
+                
+                for entry in unit_data:
+                    if not entry or 'val' not in entry or 'end' not in entry:
+                        continue
+                    
+                    # Create formatted entry (include start for duration calculation)
+                    formatted_entry = {
+                        "period": self._format_period(entry),
+                        "date": entry.get('end'),
+                        "value": entry.get('val'),
+                        "form": entry.get('form', 'N/A'),
+                        "unit": unit_name,
+                        "fy": entry.get('fy'),
+                        "fp": entry.get('fp'),
+                        "frame": entry.get('frame'),
+                        "filed": entry.get('filed'),
+                        "start": entry.get('start')  # Include for duration filtering
+                    }
+                    all_entries.append(formatted_entry)
 
-            unit_data = units.get(target_unit)
-            if not unit_data or not isinstance(unit_data, list) or len(unit_data) == 0:
-                # logging.debug(f"No data for unit '{target_unit}' in concept '{concept_tag}'.")
+            if not all_entries:
+                # logging.debug(f"No valid data for concept '{concept_tag}'.")
                 return None
 
-            # Find the entry with the latest 'end' date
-            # TODO: Consider 'filed' date as tie-breaker if needed
-            latest_entry = max(unit_data, key=lambda x: x.get('end', '0000-00-00'))
+            # Prefer USD or shares units if available, otherwise use all
+            preferred_units = ['USD', 'shares']
+            preferred_entries = [e for e in all_entries if e.get('unit') in preferred_units]
+            if preferred_entries:
+                all_entries = preferred_entries
+            
+            # Further filter: if we have USD, prefer USD; if we have shares, prefer shares
+            if any(e.get('unit') == 'USD' for e in all_entries):
+                all_entries = [e for e in all_entries if e.get('unit') == 'USD']
+            elif any(e.get('unit') == 'shares' for e in all_entries):
+                all_entries = [e for e in all_entries if e.get('unit') == 'shares']
 
-            if not latest_entry or 'val' not in latest_entry:
-                 logging.warning(f"Latest entry for '{concept_tag}' seems invalid: {latest_entry}")
-                 return None
+            # Categorize into quarterly and annual
+            quarterly = []
+            annual = []
+            
+            for entry in all_entries:
+                if self._is_quarterly(entry):
+                    quarterly.append(entry)
+                else:
+                    annual.append(entry)
+
+            # Filter by duration to exclude YTD/cumulative values
+            # Group by form type for proper filtering
+            quarterly_by_form = {}
+            annual_by_form = {}
+            
+            for entry in quarterly:
+                form = entry.get('form', '')
+                if form not in quarterly_by_form:
+                    quarterly_by_form[form] = []
+                quarterly_by_form[form].append(entry)
+            
+            for entry in annual:
+                form = entry.get('form', '')
+                if form not in annual_by_form:
+                    annual_by_form[form] = []
+                annual_by_form[form].append(entry)
+            
+            # Apply duration filtering
+            quarterly_filtered = []
+            for form, entries in quarterly_by_form.items():
+                filtered = self._filter_by_duration(entries, form, is_quarterly=True)
+                quarterly_filtered.extend(filtered)
+            
+            annual_filtered = []
+            for form, entries in annual_by_form.items():
+                filtered = self._filter_by_duration(entries, form, is_quarterly=False)
+                annual_filtered.extend(filtered)
+            
+            # Deduplicate entries with same (period, end_date)
+            quarterly = self._deduplicate_entries(quarterly_filtered)
+            annual = self._deduplicate_entries(annual_filtered)
+
+            # Sort by date descending (newest first)
+            quarterly.sort(key=lambda x: x.get('date', '0000-00-00'), reverse=True)
+            annual.sort(key=lambda x: x.get('date', '0000-00-00'), reverse=True)
+
+            # Remove extra fields from final output (keep only period, date, value, form)
+            quarterly_clean = [
+                {
+                    "period": e["period"],
+                    "date": e["date"],
+                    "value": e["value"],
+                    "form": e["form"]
+                }
+                for e in quarterly
+            ]
+            
+            annual_clean = [
+                {
+                    "period": e["period"],
+                    "date": e["date"],
+                    "value": e["value"],
+                    "form": e["form"]
+                }
+                for e in annual
+            ]
 
             return {
-                "value": latest_entry.get('val'),
-                "unit": target_unit,
-                "end_date": latest_entry.get('end'),
-                "fy": latest_entry.get('fy'),
-                "fp": latest_entry.get('fp'),
-                "form": latest_entry.get('form'),
-                "filed": latest_entry.get('filed')
+                "quarterly": quarterly_clean,
+                "annual": annual_clean
             }
 
         except Exception as e:
             logging.error(f"Error processing concept '{concept_tag}' in {taxonomy}: {e}", exc_info=True)
             return None
 
+    def _get_fact_history_with_fallback(self, facts_data: Dict, metric_key: str) -> Optional[Dict]:
+        """
+        Attempts to fetch fact history for a metric using multiple tag fallbacks.
+        
+        Iterates through the list of tags for the given metric from FINANCIAL_TAG_MAP.
+        Returns the first non-empty history found, or None if all tags fail.
+        
+        Args:
+            facts_data (Dict): The raw JSON dictionary from SEC Company Facts API.
+            metric_key (str): The metric key (e.g., 'revenue', 'net_income').
+            
+        Returns:
+            Optional[Dict]: History dictionary with 'quarterly' and 'annual' keys, or None.
+        """
+        tag_list = FINANCIAL_TAG_MAP.get(metric_key)
+        if not tag_list:
+            logging.warning(f"No tag mapping found for metric '{metric_key}'")
+            return None
+        
+        for taxonomy, concept_tag in tag_list:
+            history = self._get_fact_history(facts_data, taxonomy, concept_tag)
+            if history and (history.get('quarterly') or history.get('annual')):
+                logging.debug(f"Found data for '{metric_key}' using tag '{concept_tag}' in '{taxonomy}'")
+                return history
+        
+        logging.debug(f"No data found for '{metric_key}' after trying {len(tag_list)} tag(s)")
+        return None
+
+    def _calculate_derived_metrics(self, summary_data: Dict) -> Dict:
+        """
+        Calculates derived financial metrics from the raw GAAP data.
+        
+        Computes:
+        - Free Cash Flow (FCF) = Operating Cash Flow - CapEx
+        - EBITDA = Net Income + Interest Expense + Income Tax + Depreciation/Amortization
+        - Net Margin = Net Income / Revenue
+        
+        Args:
+            summary_data (Dict): Dictionary containing raw financial metrics with history.
+            
+        Returns:
+            Dict: Dictionary with derived metrics added (ebitda, fcf, net_margin).
+        """
+        derived = {
+            "ebitda": None,
+            "fcf": None,
+            "net_margin": None
+        }
+        
+        # Get the base metrics
+        revenue = summary_data.get('revenue')
+        net_income = summary_data.get('net_income')
+        operating_cash_flow = summary_data.get('operating_cash_flow')
+        capex = summary_data.get('capex')
+        interest_expense = summary_data.get('interest_expense')
+        income_tax_expense = summary_data.get('income_tax_expense')
+        depreciation_amortization = summary_data.get('depreciation_amortization')
+        
+        # Calculate Free Cash Flow (quarterly)
+        if operating_cash_flow and isinstance(operating_cash_flow, dict):
+            ocf_q = operating_cash_flow.get('quarterly', [])
+            
+            if ocf_q:
+                capex_q = []
+                if capex and isinstance(capex, dict):
+                    capex_q = capex.get('quarterly', [])
+                
+                fcf_quarterly = []
+                # Create a lookup by date for capex
+                capex_by_date = {entry['date']: entry['value'] for entry in capex_q}
+                
+                for ocf_entry in ocf_q:
+                    date = ocf_entry['date']
+                    ocf_value = ocf_entry['value']
+                    capex_value = capex_by_date.get(date, 0)
+                    
+                    # CapEx is typically negative in cash flow statements, so we subtract it
+                    # If capex_value is already negative, we add it; if positive, we subtract
+                    if capex_value < 0:
+                        fcf_value = ocf_value + capex_value  # Adding negative = subtracting
+                    else:
+                        fcf_value = ocf_value - abs(capex_value)
+                    
+                    fcf_quarterly.append({
+                        "period": ocf_entry['period'],
+                        "date": date,
+                        "value": fcf_value,
+                        "form": ocf_entry['form']
+                    })
+                
+                if fcf_quarterly:
+                    derived["fcf"] = {
+                        "quarterly": fcf_quarterly,
+                        "annual": []  # Could calculate annual FCF similarly if needed
+                    }
+        
+        # Calculate EBITDA (quarterly)
+        if net_income and isinstance(net_income, dict):
+            ni_q = net_income.get('quarterly', [])
+            
+            if ni_q:
+                # Get supporting metrics
+                interest_q = []
+                if interest_expense and isinstance(interest_expense, dict):
+                    interest_q = interest_expense.get('quarterly', [])
+                
+                tax_q = []
+                if income_tax_expense and isinstance(income_tax_expense, dict):
+                    tax_q = income_tax_expense.get('quarterly', [])
+                
+                da_q = []
+                if depreciation_amortization and isinstance(depreciation_amortization, dict):
+                    da_q = depreciation_amortization.get('quarterly', [])
+                
+                # Create lookups by date
+                interest_by_date = {entry['date']: entry['value'] for entry in interest_q}
+                tax_by_date = {entry['date']: entry['value'] for entry in tax_q}
+                da_by_date = {entry['date']: entry['value'] for entry in da_q}
+                
+                ebitda_quarterly = []
+                for ni_entry in ni_q:
+                    date = ni_entry['date']
+                    ni_value = ni_entry['value']
+                    
+                    # Get supporting values (default to 0 if not found)
+                    interest_val = interest_by_date.get(date, 0)
+                    tax_val = tax_by_date.get(date, 0)
+                    da_val = da_by_date.get(date, 0)
+                    
+                    # EBITDA = Net Income + Interest Expense + Income Tax Expense + Depreciation/Amortization
+                    # All these are typically expenses (positive values), but we use absolute values to be safe
+                    # Interest and D&A are always expenses (positive), Tax can be negative (benefit)
+                    ebitda_value = ni_value + abs(interest_val) + abs(tax_val) + abs(da_val)
+                    
+                    ebitda_quarterly.append({
+                        "period": ni_entry['period'],
+                        "date": date,
+                        "value": ebitda_value,
+                        "form": ni_entry['form']
+                    })
+                
+                if ebitda_quarterly:
+                    derived["ebitda"] = {
+                        "quarterly": ebitda_quarterly,
+                        "annual": []
+                    }
+        
+        # Calculate Net Margin (quarterly)
+        if revenue and isinstance(revenue, dict) and net_income and isinstance(net_income, dict):
+            rev_q = revenue.get('quarterly', [])
+            ni_q = net_income.get('quarterly', [])
+            
+            if rev_q and ni_q:
+                # Create lookup by date
+                ni_by_date = {entry['date']: entry['value'] for entry in ni_q}
+                
+                margin_quarterly = []
+                for rev_entry in rev_q:
+                    date = rev_entry['date']
+                    rev_value = rev_entry['value']
+                    ni_value = ni_by_date.get(date)
+                    
+                    if rev_value and rev_value != 0 and ni_value is not None:
+                        margin_value = (ni_value / rev_value) * 100  # Convert to percentage
+                        
+                        margin_quarterly.append({
+                            "period": rev_entry['period'],
+                            "date": date,
+                            "value": margin_value,
+                            "form": rev_entry['form']
+                        })
+                
+                if margin_quarterly:
+                    derived["net_margin"] = {
+                        "quarterly": margin_quarterly,
+                        "annual": []
+                    }
+        
+        return derived
+
     async def get_financial_summary(self, ticker: str, use_cache: bool = True) -> Optional[Dict]:
         """
-        Generates a flattened summary dictionary of key financial metrics for a given ticker.
+        Generates a summary dictionary of key financial metrics with historical time-series data for a given ticker.
 
         This is the main public method of the processor. It orchestrates the process:
         1. Calls the injected `fetch_company_facts` function to get the raw XBRL data.
-        2. Iterates through the `KEY_FINANCIAL_SUMMARY_METRICS` mapping.
-        3. For each metric, calls `_get_latest_fact_value` to extract the latest data point.
-        4. Populates a flat dictionary with the extracted values, along with metadata like
+        2. Iterates through the `KEY_FINANCIAL_SUMMARY_METRICS` list.
+        3. For each metric, calls `_get_fact_history_with_fallback` to extract historical time-series data
+           using tag fallbacks from `FINANCIAL_TAG_MAP` for robustness.
+        4. Populates a dictionary with the extracted history (quarterly and annual), along with metadata like
            ticker, entity name, CIK, and the estimated source form and period end date
            (based on the latest end date found among key income statement metrics).
+        5. Calculates derived metrics (EBITDA, Free Cash Flow, Net Margin) using `_calculate_derived_metrics`.
 
         Args:
             ticker (str): The stock ticker symbol for which to generate the summary.
@@ -136,11 +633,12 @@ class FinancialDataProcessor:
                 whether cached data should be used if available and fresh. Defaults to True.
 
         Returns:
-            Optional[Dict]: A flat dictionary containing the requested financial summary.
+            Optional[Dict]: A dictionary containing the requested financial summary with historical data.
                 Keys include 'ticker', 'entityName', 'cik', 'source_form', 'period_end',
-                and the keys defined in `KEY_FINANCIAL_SUMMARY_METRICS` (e.g., 'revenue',
-                'net_income', 'assets'). Values will be the latest reported numerical value
-                or None if a metric couldn't be found. Returns None if the initial company
+                the keys defined in `KEY_FINANCIAL_SUMMARY_METRICS` (e.g., 'revenue',
+                'net_income', 'assets'), and derived metrics ('ebitda', 'fcf', 'net_margin').
+                Each metric value is a dictionary with 'quarterly' and 'annual' keys, each containing
+                a list of entries sorted by date descending. Returns None if the initial company
                 facts data cannot be retrieved or if none of the requested metrics are found.
         """
         company_facts = await self.fetch_company_facts(ticker, use_cache=use_cache)
@@ -157,28 +655,42 @@ class FinancialDataProcessor:
         }
 
         # Initialize all required metric keys to None
-        for key in self.KEY_FINANCIAL_SUMMARY_METRICS.keys():
+        for key in self.KEY_FINANCIAL_SUMMARY_METRICS:
             summary_data[key] = None
 
         latest_period_info = {"end_date": "0000-00-00", "form": None}
         has_data = False
 
-        # Iterate through the required metrics defined in the mapping
-        for metric_key, (taxonomy, concept_tag) in self.KEY_FINANCIAL_SUMMARY_METRICS.items():
-            latest_fact = self._get_latest_fact_value(company_facts, taxonomy, concept_tag)
+        # Iterate through the required metrics with fallback tag support
+        for metric_key in self.KEY_FINANCIAL_SUMMARY_METRICS:
+            fact_history = self._get_fact_history_with_fallback(company_facts, metric_key)
 
-            if latest_fact:
+            if fact_history:
                 has_data = True
-                summary_data[metric_key] = latest_fact.get('value') # Extract only the value
+                # Store the full history structure (quarterly and annual)
+                summary_data[metric_key] = {
+                    "quarterly": fact_history.get("quarterly", []),
+                    "annual": fact_history.get("annual", [])
+                }
 
                 # Try to determine the most recent period end date and form
-                current_end_date = latest_fact.get("end_date", "0000-00-00")
-                if metric_key in ["revenue", "net_income"] and current_end_date > latest_period_info["end_date"]:
-                    latest_period_info["end_date"] = current_end_date
-                    latest_period_info["form"] = latest_fact.get('form')
+                quarterly = fact_history.get("quarterly", [])
+                annual = fact_history.get("annual", [])
+                
+                # Check both quarterly and annual, keeping the most recent
+                for entry_list in [quarterly, annual]:
+                    if entry_list:
+                        current_end_date = entry_list[0].get("date", "0000-00-00")
+                        if current_end_date > latest_period_info["end_date"]:
+                            latest_period_info["end_date"] = current_end_date
+                            latest_period_info["form"] = entry_list[0].get("form")
             else:
-                 logging.debug(f"Metric '{metric_key}' (Tag: {concept_tag}, Tax: {taxonomy}) not found/no data for {ticker}.")
+                 logging.debug(f"Metric '{metric_key}' not found/no data for {ticker} after trying all tag fallbacks.")
                  summary_data[metric_key] = None
+
+        # Calculate derived metrics (EBITDA, FCF, Margins)
+        derived_metrics = self._calculate_derived_metrics(summary_data)
+        summary_data.update(derived_metrics)
 
         summary_data["period_end"] = latest_period_info["end_date"] if latest_period_info["end_date"] != "0000-00-00" else None
         summary_data["source_form"] = latest_period_info["form"]
