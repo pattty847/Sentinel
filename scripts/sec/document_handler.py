@@ -73,21 +73,6 @@ class FilingDocumentHandler:
 
         return cik_for_url
 
-    def _get_sec_archive_headers(self) -> Dict[str, str]:
-        """
-        Generates the necessary HTTP headers for requests to `www.sec.gov/Archives`.
-
-        It takes the default headers from the injected `SecHttpClient` (which includes the
-        essential User-Agent) and specifically overrides the `Host` header to `www.sec.gov`,
-        as required for accessing the archive endpoints.
-
-        Returns:
-            Dict[str, str]: A dictionary of HTTP headers.
-        """
-        # Create headers based on http_client's default, but override Host
-        headers = self.http_client.default_headers.copy()
-        headers['Host'] = 'www.sec.gov'
-        return headers
 
     async def get_filing_documents_list(self, accession_no: str, ticker: Optional[str] = None) -> Optional[List[Dict]]:
         """
@@ -118,8 +103,8 @@ class FilingDocumentHandler:
         logging.info(f"Fetching document list via index.json: {index_json_url}")
 
         try:
-            headers = self._get_sec_archive_headers()
-            index_data = await self.http_client.make_request(index_json_url, headers=headers, is_json=True)
+            # Use the specialized archive request method
+            index_data = await self.http_client.make_archive_request(index_json_url, is_json=True)
 
             if not isinstance(index_data, dict) or 'directory' not in index_data:
                 logging.warning(f"index.json for {accession_no} did not return expected structure. Type: {type(index_data)}. Attempting index.htm next.")
@@ -177,11 +162,9 @@ class FilingDocumentHandler:
         logging.info(f"Attempting to download document from: {url}")
 
         try:
-            headers = self._get_sec_archive_headers()
-            logging.debug(f"Using headers for document download: {headers}")
-
-            # Fetch as raw text (is_json=False)
-            response_content = await self.http_client.make_request(url, headers=headers, is_json=False)
+            # Use the specialized archive request method for document downloads
+            logging.debug(f"Downloading document using archive-safe request: {url}")
+            response_content = await self.http_client.make_archive_request(url, is_json=False)
 
             if response_content is None:
                 # Error logged within make_request
@@ -209,7 +192,7 @@ class FilingDocumentHandler:
            types ('XML', '10-K').
         2. Fallback to fetching and parsing `index.htm`: If `index.json` fails or yields no
            candidates, it scans the HTML index page for common link patterns (e.g.,
-           'form4.xml', 'd\d+k.htm', 'primary_doc.htm') or the first .htm/.xml link
+           'form4.xml', 'd\\d+k.htm', 'primary_doc.htm') or the first .htm/.xml link
            within the main filing table.
 
         Args:
@@ -221,14 +204,14 @@ class FilingDocumentHandler:
                 if no suitable candidate could be identified.
         """
         accession_no_clean = accession_no.replace('-', '')
-        headers = self._get_sec_archive_headers()
         primary_doc = None
 
         # 1. Try index.json
         index_json_url = f"{self.BASE_ARCHIVE_URL}/{cik_for_url}/{accession_no_clean}/index.json"
         logging.debug(f"Looking for primary document via index.json: {index_json_url}")
         try:
-            index_data = await self.http_client.make_request(index_json_url, headers=headers, is_json=True)
+            # Use archive-safe request for index.json
+            index_data = await self.http_client.make_archive_request(index_json_url, is_json=True)
             if isinstance(index_data, dict) and 'directory' in index_data:
                 potential_docs = []
                 for item in index_data.get('directory', {}).get('item', []):
@@ -257,14 +240,15 @@ class FilingDocumentHandler:
             index_html_url = f"{self.BASE_ARCHIVE_URL}/{cik_for_url}/{accession_no_clean}/index.htm"
             logging.debug(f"Falling back to HTML index page: {index_html_url}")
             try:
-                index_html = await self.http_client.make_request(index_html_url, headers=headers, is_json=False)
+                # Use archive-safe request for index.htm
+                index_html = await self.http_client.make_archive_request(index_html_url, is_json=False)
                 if index_html and isinstance(index_html, str):  # Check if we got valid HTML
                     # Simple regex patterns for common primary docs - capturing filename part
                     patterns = [
                         r'''href=["'][^"']*(form4\.xml)["']''',           # Form 4 XML
-                        r'''href=["'][^"']*(d\d+k\.htm)["']''',          # 8-K patterns like d123456k.htm
+                        r'''href=["'][^"']*(d\\d+k\.htm)["']''',          # 8-K patterns like d123456k.htm
                         r'''href=["'][^"']*(dq\.htm)["']''',             # 10-Q patterns like dq.htm
-                        r'''href=["'][^"']*(\w+-\d{8}\.htm)["']''',   # Common pattern like msft-20230630.htm
+                        r'''href=["'][^"']*(\w+-\\d{8}\.htm)["']''',   # Common pattern like msft-20230630.htm
                         r'''href=["'][^"']*(10-?[kq]\.htm)["']''',        # 10-K / 10-Q htm
                         r'''href=["'][^"']*(primary_doc\.xml)["']''',    # Explicit primary_doc.xml
                         r'''href=["'][^"']*(primary_doc\.htm)["']'''     # Explicit primary_doc.htm

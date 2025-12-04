@@ -251,6 +251,537 @@ if (validColumnCount > textureWidth * 0.9) {
 
 ---
 
+## 1.8 GPU Backend Selection (Qt 6 Critical)
+
+**⚠️ CRITICAL: Qt 6 does NOT guarantee OpenGL.**
+
+Qt 6 uses different backends depending on platform:
+- **Windows:** ANGLE (Direct3D 11/12 translation) by default
+- **macOS:** Metal (GL calls INVALID)
+- **Linux:** OpenGL or Vulkan
+- **QSG_RHI:** Vulkan/Metal/D3D (GL calls INVALID)
+
+**DESIGN DECISION — Dual-path implementation:**
+
+```cpp
+// In HeatmapTextureNode constructor or first render()
+void HeatmapTextureNode::detectBackend(QQuickWindow* window) {
+    QSGRendererInterface* ri = window->rendererInterface();
+    QSGRendererInterface::GraphicsApi api = ri->graphicsApi();
+    
+    switch (api) {
+        case QSGRendererInterface::OpenGL:
+        case QSGRendererInterface::OpenGLRhi:  // ANGLE on Windows
+            m_backend = Backend::OpenGL;
+            break;
+        case QSGRendererInterface::Vulkan:
+        case QSGRendererInterface::Metal:
+        case QSGRendererInterface::Direct3D11:
+        case QSGRendererInterface::Direct3D12:
+            m_backend = Backend::RHI;
+            break;
+        default:
+            m_backend = Backend::Unsupported;
+            break;
+    }
+}
+```
+
+**For OpenGL/ANGLE backend:**
+```cpp
+// Use raw GL calls via QOpenGLFunctions
+m_gl->glTexSubImage2D(...);
+```
+
+**For RHI backend (Vulkan/Metal/D3D):**
+```cpp
+// Use Qt RHI abstractions
+class HeatmapTextureNode : public QSGRenderNode {
+    QRhi* m_rhi = nullptr;
+    QRhiTexture* m_bidTexture = nullptr;
+    QRhiTexture* m_askTexture = nullptr;
+    QRhiSampler* m_sampler = nullptr;
+    QRhiShaderResourceBindings* m_bindings = nullptr;
+    QRhiGraphicsPipeline* m_pipeline = nullptr;
+    
+    void initRhi(QRhi* rhi) {
+        m_bidTexture = rhi->newTexture(QRhiTexture::R16F, 
+                                       QSize(textureWidth, textureHeight));
+        m_bidTexture->create();
+        // ... similar for ask texture
+    }
+    
+    void uploadColumnRhi(int col, const float* data) {
+        QRhiTextureSubresourceUploadDescription desc;
+        desc.setDestinationTopLeft(QPoint(col, 0));
+        desc.setSourceSize(QSize(1, textureHeight));
+        desc.setData(QByteArray::fromRawData(
+            reinterpret_cast<const char*>(data), 
+            textureHeight * sizeof(float)));
+        // Queue upload via QRhiResourceUpdateBatch
+    }
+};
+```
+
+**Implementation directive:**
+> "Opus: Detect QSG backend via `window->rendererInterface()->graphicsApi()`.
+> If OpenGL or ANGLE → use raw GL via QOpenGLFunctions.
+> If RHI (Vulkan/Metal/D3D) → use QRhiTexture/QRhiGraphicsPipeline.
+> DO NOT ship code that only works on OpenGL — it will break on half the machines."
+
+---
+
+## 1.9 Texture Lifecycle (QSG Thread Safety)
+
+**⚠️ CRITICAL: QSGRenderNode lifecycle is tricky.**
+
+**Rules:**
+1. **Texture creation** must occur in `render()` or a dedicated `prepare()` call, NOT in constructor
+2. **Destruction** must occur in `releaseResources()`, NOT in destructor
+3. **Context loss** (device reset, window resize) must be handled — recreate textures automatically
+4. **Never access GL/RHI objects from the UI thread**
+
+**DESIGN DECISION — Lazy initialization + context tracking:**
+
+```cpp
+class HeatmapTextureNode : public QSGRenderNode {
+public:
+    void render(const RenderState* state) override {
+        // Lazy init on first render (we're now on render thread)
+        if (!m_initialized) {
+            initializeGpuResources();
+            m_initialized = true;
+        }
+        
+        // Check for context loss
+        if (m_contextId != getCurrentContextId()) {
+            releaseResources();
+            initializeGpuResources();
+            m_contextId = getCurrentContextId();
+        }
+        
+        // ... render logic ...
+    }
+    
+    void releaseResources() override {
+        // MUST delete all GPU resources here
+        if (m_bidTexture) {
+            glDeleteTextures(1, &m_bidTexture);
+            m_bidTexture = 0;
+        }
+        if (m_askTexture) {
+            glDeleteTextures(1, &m_askTexture);
+            m_askTexture = 0;
+        }
+        if (m_shaderProgram) {
+            glDeleteProgram(m_shaderProgram);
+            m_shaderProgram = 0;
+        }
+        if (m_quadVAO) {
+            glDeleteVertexArrays(1, &m_quadVAO);
+            m_quadVAO = 0;
+        }
+        m_initialized = false;
+    }
+    
+private:
+    bool m_initialized = false;
+    quintptr m_contextId = 0;
+    
+    quintptr getCurrentContextId() {
+        // Track context identity to detect recreation
+        return reinterpret_cast<quintptr>(QOpenGLContext::currentContext());
+    }
+};
+```
+
+**Implementation directive:**
+> "Opus: All GL/RHI texture objects MUST be created on the Qt render thread (inside `render()` or `prepare()`).
+> Implement `releaseResources()` to properly clean up.
+> Track OpenGL context identity and recreate textures if context changes."
+
+---
+
+## 1.10 Ring Buffer Wraparound Strategy
+
+**⚠️ CRITICAL: Ring buffer UV wraparound breaks linear sampling.**
+
+When viewport spans columns 1800-200 (wrapping around 2048→0), naive UV math fails.
+
+**DESIGN DECISION — Split rendering into 1-2 quads:**
+
+✔ **Chosen approach:** Render up to 2 quads when wrap occurs (clean, no sampling artifacts)
+
+```cpp
+struct UVRenderRegion {
+    float uMin, uMax;  // Texture U range
+    float vMin, vMax;  // Texture V range (same for both)
+    float screenXMin, screenXMax;  // Where to draw on screen
+};
+
+std::vector<UVRenderRegion> HeatmapTextureNode::calculateRenderRegions(
+    const Viewport& vp, const HeatmapRingBuffer& ring) 
+{
+    std::vector<UVRenderRegion> regions;
+    
+    int colStart = ring.timeToColumn(vp.timeStart_ms);
+    int colEnd = ring.timeToColumn(vp.timeEnd_ms);
+    
+    float vMin = priceToV(vp.priceMin);
+    float vMax = priceToV(vp.priceMax);
+    
+    if (colEnd >= colStart) {
+        // No wrap — single quad
+        regions.push_back({
+            .uMin = float(colStart) / textureWidth,
+            .uMax = float(colEnd) / textureWidth,
+            .vMin = vMin, .vMax = vMax,
+            .screenXMin = -1.0f, .screenXMax = 1.0f
+        });
+    } else {
+        // Wrap detected — split into two quads
+        int wrapPoint = textureWidth;
+        float wrapScreenX = float(wrapPoint - colStart) / float(wrapPoint - colStart + colEnd) * 2.0f - 1.0f;
+        
+        // Left region: colStart → end of texture
+        regions.push_back({
+            .uMin = float(colStart) / textureWidth,
+            .uMax = 1.0f,  // Right edge of texture
+            .vMin = vMin, .vMax = vMax,
+            .screenXMin = -1.0f, .screenXMax = wrapScreenX
+        });
+        
+        // Right region: start of texture → colEnd
+        regions.push_back({
+            .uMin = 0.0f,  // Left edge of texture
+            .uMax = float(colEnd) / textureWidth,
+            .vMin = vMin, .vMax = vMax,
+            .screenXMin = wrapScreenX, .screenXMax = 1.0f
+        });
+    }
+    
+    return regions;
+}
+
+void HeatmapTextureNode::render(const RenderState* state) {
+    auto regions = calculateRenderRegions(m_viewport, m_ring);
+    
+    for (const auto& region : regions) {
+        // Update quad vertices for this region's screen position
+        updateQuadVertices(region.screenXMin, region.screenXMax);
+        
+        // Set UV rect uniform
+        glUniform4f(m_locUvRect, region.uMin, region.vMin, region.uMax, region.vMax);
+        
+        // Draw this region
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+}
+```
+
+**Implementation directive:**
+> "Opus: Implement wraparound by rendering 1–2 quads depending on column order.
+> NO modulo wrap in the shader — split the draw calls instead.
+> This avoids all sampling artifacts and is deterministic."
+
+---
+
+## 1.11 Adaptive DLOD Pipeline
+
+**⚠️ CRITICAL: DLOD must respect upload budget.**
+
+Current rule (`targetColumns = textureWidth * 0.75`) ignores:
+- Max columns uploadable per frame without GPU stall
+- Latency of viewport changes during fast panning
+- Frame time impact
+
+**DESIGN DECISION — Budget-aware adaptive timeframe:**
+
+```cpp
+struct DLODState {
+    int64_t currentTimeframe_ms = 100;
+    int recentUploadCounts[8] = {0};  // Rolling history
+    int historyIndex = 0;
+    std::chrono::steady_clock::time_point lastViewportChange;
+    float scrollSpeedPixelsPerSec = 0.0f;
+};
+
+static constexpr int MAX_COLUMNS_PER_FRAME = 5;
+static constexpr int STALL_THRESHOLD_COLUMNS = 3;
+
+int64_t HeatmapTextureNode::adaptiveTimeframe(
+    const Viewport& vp, 
+    int recentUploadCost,
+    float scrollSpeed) 
+{
+    // Record upload history
+    m_dlod.recentUploadCounts[m_dlod.historyIndex++ % 8] = recentUploadCost;
+    
+    // Calculate average recent uploads
+    int avgUploads = 0;
+    for (int i = 0; i < 8; ++i) avgUploads += m_dlod.recentUploadCounts[i];
+    avgUploads /= 8;
+    
+    // Base timeframe from viewport size
+    int64_t viewDuration = vp.timeEnd_ms - vp.timeStart_ms;
+    int64_t baseTimeframe = m_ltse->suggestTimeframe(
+        vp.timeStart_ms, vp.timeEnd_ms, textureWidth * 0.75);
+    
+    // Pressure factors
+    bool uploadPressure = avgUploads > STALL_THRESHOLD_COLUMNS;
+    bool scrollPressure = scrollSpeed > 500.0f;  // pixels/sec threshold
+    
+    // Increase timeframe if under pressure
+    if (uploadPressure || scrollPressure) {
+        // Find next higher timeframe
+        static const int64_t timeframes[] = {100, 250, 500, 1000, 2000, 5000, 10000};
+        for (int64_t tf : timeframes) {
+            if (tf > baseTimeframe) {
+                return tf;
+            }
+        }
+    }
+    
+    return baseTimeframe;
+}
+
+// In render loop
+void HeatmapTextureNode::updateColumns() {
+    int columnsUpdated = 0;
+    
+    for (const auto* slice : m_pendingSlices) {
+        if (columnsUpdated >= MAX_COLUMNS_PER_FRAME) {
+            // Defer remaining to next frame
+            break;
+        }
+        
+        uploadColumn(slice);
+        ++columnsUpdated;
+    }
+    
+    // Remove processed slices
+    m_pendingSlices.erase(
+        m_pendingSlices.begin(), 
+        m_pendingSlices.begin() + columnsUpdated);
+    
+    // Adapt timeframe for next frame
+    m_dlod.currentTimeframe_ms = adaptiveTimeframe(
+        m_viewport, columnsUpdated, m_dlod.scrollSpeedPixelsPerSec);
+}
+```
+
+**Implementation directive:**
+> "Opus: Timeframe selection MUST respect `MAX_COLUMNS_PER_FRAME` (3–5).
+> If uploads spike or user pans quickly → increase timeframe.
+> Defer excess column updates to subsequent frames."
+
+---
+
+## 1.12 Price Level of Detail (Aggregation)
+
+**⚠️ Issue: What if price range >> textureHeight?**
+
+Example: $10,000 price range, 1024 texture rows = 10 ticks per row needed.
+
+**DESIGN DECISION — CPU-side price aggregation:**
+
+```cpp
+int calculateTicksPerRow(double priceRange, int textureHeight, double baseTickSize) {
+    double rawTicksPerRow = priceRange / (textureHeight * baseTickSize);
+    
+    if (rawTicksPerRow <= 1.0) return 1;           // 1:1 mapping
+    if (rawTicksPerRow <= 2.0) return 2;           // 2 ticks per row
+    if (rawTicksPerRow <= 4.0) return 4;           // 4 ticks per row
+    return static_cast<int>(std::ceil(rawTicksPerRow));  // Dynamic
+}
+
+void extractSliceToColumnWithLOD(
+    const LiquidityTimeSlice& slice,
+    const HeatmapTextureConfig& cfg,
+    int ticksPerRow,
+    HeatmapColumnData& out) 
+{
+    out.bidIntensities.assign(cfg.textureHeight, 0.0f);
+    out.askIntensities.assign(cfg.textureHeight, 0.0f);
+    
+    // Aggregation accumulators
+    std::vector<float> bidSums(cfg.textureHeight, 0.0f);
+    std::vector<float> askSums(cfg.textureHeight, 0.0f);
+    std::vector<int> counts(cfg.textureHeight, 0);
+    
+    for (Tick tick = slice.minTick; tick <= slice.maxTick; ++tick) {
+        double price = slice.tickToPrice(tick);
+        
+        // Map to row with aggregation
+        int row = static_cast<int>((price - cfg.priceMin) / (cfg.priceResolution * ticksPerRow));
+        if (row < 0 || row >= cfg.textureHeight) continue;
+        
+        size_t idx = static_cast<size_t>(tick - slice.minTick);
+        
+        if (idx < slice.bidMetrics.size()) {
+            bidSums[row] += slice.bidMetrics[idx].avgLiquidity;
+        }
+        if (idx < slice.askMetrics.size()) {
+            askSums[row] += slice.askMetrics[idx].avgLiquidity;
+        }
+        counts[row]++;
+    }
+    
+    // Finalize: use max or average depending on preference
+    for (int row = 0; row < cfg.textureHeight; ++row) {
+        if (counts[row] > 0) {
+            // Use max for visual prominence, or average for smoothness
+            out.bidIntensities[row] = bidSums[row];  // Sum for total liquidity at LOD
+            out.askIntensities[row] = askSums[row];
+        }
+    }
+}
+```
+
+**Shader-side hint (optional):**
+```glsl
+uniform int u_ticksPerRow;  // For potential GPU-side effects
+```
+
+**Implementation directive:**
+> "Opus: Implement price aggregation when `priceRange / textureHeight > 1`.
+> Compute `ticksPerRow` CPU-side and aggregate before texture upload.
+> Pass `u_ticksPerRow` to shader for potential smoothing effects."
+
+---
+
+## 1.13 Fractional Viewport Mapping
+
+**⚠️ Issue: Timestamps may fall between slice boundaries.**
+
+Current code uses integer column indices, losing sub-column precision.
+
+**DESIGN DECISION — Float-based UV calculation:**
+
+```cpp
+void HeatmapTextureNode::calculateUVRectPrecise(
+    const Viewport& vp, 
+    const HeatmapRingBuffer& ring,
+    float& uMin, float& uMax, float& vMin, float& vMax) 
+{
+    const auto& cfg = m_config;
+    
+    // Fractional time → U (sub-column precision)
+    double fractionalColStart = double(vp.timeStart_ms - ring.baseTimestamp_ms) / ring.timeframe_ms;
+    double fractionalColEnd   = double(vp.timeEnd_ms - ring.baseTimestamp_ms) / ring.timeframe_ms;
+    
+    // Handle ring buffer modulo (with float precision)
+    fractionalColStart = std::fmod(fractionalColStart, double(cfg.textureWidth));
+    fractionalColEnd   = std::fmod(fractionalColEnd, double(cfg.textureWidth));
+    if (fractionalColStart < 0) fractionalColStart += cfg.textureWidth;
+    if (fractionalColEnd < 0)   fractionalColEnd   += cfg.textureWidth;
+    
+    uMin = static_cast<float>(fractionalColStart / cfg.textureWidth);
+    uMax = static_cast<float>(fractionalColEnd / cfg.textureWidth);
+    
+    // Fractional price → V
+    double priceRange = cfg.priceMax - cfg.priceMin;
+    if (priceRange < 1e-6) priceRange = 1.0;  // Safety
+    
+    vMin = static_cast<float>((vp.priceMin - cfg.priceMin) / priceRange);
+    vMax = static_cast<float>((vp.priceMax - cfg.priceMin) / priceRange);
+    
+    // Clamp to valid range
+    vMin = std::clamp(vMin, 0.0f, 1.0f);
+    vMax = std::clamp(vMax, 0.0f, 1.0f);
+    
+    // Flip Y (high price = top)
+    vMin = 1.0f - vMin;
+    vMax = 1.0f - vMax;
+    std::swap(vMin, vMax);
+}
+```
+
+**Clamping for out-of-range viewports:**
+```cpp
+// Handle viewport spanning outside recorded history
+if (vp.timeStart_ms < ring.oldestValidTimestamp()) {
+    // Clamp to oldest data, show blank for missing region
+    float validStartU = ring.timeToU(ring.oldestValidTimestamp());
+    // Shader can detect and render blank for uv.x < validStartU
+}
+```
+
+**Implementation directive:**
+> "Opus: Use float conversion for sub-column accuracy:
+> `fractionalCol = (timestamp - baseTimestamp) / timeframeMs`
+> Handle viewport clamping when it spans outside recorded history."
+
+---
+
+## 1.14 Shader Blending Model (Optional Enhancements)
+
+Current shader is minimal. Optional enhancements for professional feel:
+
+**Enhanced fragment shader:**
+```glsl
+#version 330 core
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_bidTexture;
+uniform sampler2D u_askTexture;
+uniform float u_intensityScale;
+
+// Optional enhancement uniforms
+uniform float u_timeFadeSeconds;     // Fade older columns (0 = disabled)
+uniform float u_priceBlurRadius;     // Vertical blur (0 = disabled)
+uniform float u_minVisibleIntensity; // Threshold below which to discard
+uniform float u_currentTimeU;        // Current time as U coordinate
+
+void main() {
+    vec2 uv = v_texCoord;
+    
+    // Sample textures
+    float bid = texture(u_bidTexture, uv).r;
+    float ask = texture(u_askTexture, uv).r;
+    
+    // Optional: vertical blur for price smoothing
+    if (u_priceBlurRadius > 0.0) {
+        float blurStep = u_priceBlurRadius / textureSize(u_bidTexture, 0).y;
+        bid = (bid + 
+               texture(u_bidTexture, uv + vec2(0, blurStep)).r +
+               texture(u_bidTexture, uv - vec2(0, blurStep)).r) / 3.0;
+        ask = (ask + 
+               texture(u_askTexture, uv + vec2(0, blurStep)).r +
+               texture(u_askTexture, uv - vec2(0, blurStep)).r) / 3.0;
+    }
+    
+    // Apply intensity scaling
+    float bidIntensity = clamp(bid * u_intensityScale, 0.0, 1.0);
+    float askIntensity = clamp(ask * u_intensityScale, 0.0, 1.0);
+    
+    // Optional: time-based fade (older = more transparent)
+    if (u_timeFadeSeconds > 0.0) {
+        float age = abs(u_currentTimeU - uv.x);  // Simplified; needs proper ring buffer math
+        float fadeMultiplier = clamp(1.0 - age / u_timeFadeSeconds, 0.3, 1.0);
+        bidIntensity *= fadeMultiplier;
+        askIntensity *= fadeMultiplier;
+    }
+    
+    // Color mapping (green=bid, red=ask)
+    vec3 color = vec3(askIntensity, bidIntensity, 0.0);
+    float alpha = max(bidIntensity, askIntensity);
+    
+    // Threshold check
+    if (alpha < u_minVisibleIntensity) discard;
+    
+    fragColor = vec4(color, alpha);
+}
+```
+
+**Implementation directive:**
+> "Opus: Implement optional smoothing toggles as uniforms.
+> Start with basic shader, add enhancements behind feature flags.
+> Uniform params: `u_timeFadeSeconds`, `u_priceBlurRadius`, `u_minVisibleIntensity`"
+
+---
+
 ## 2. Phase Plan (step-by-step)
 
 ### **Phase 0 – Recon & Map** ✅ COMPLETE
@@ -639,25 +1170,42 @@ sLog_RenderN(10, "HEATMAP TEXTURE: columns=" << columnsUpdated
 
 ## 3. Constraints for Implementation
 
-* **DO NOT** thread texture updates yet. Single-thread first.
-* Keep **types, class names, namespace style** consistent with existing code.
-* New files go in `libs/gui/render/` (textures) and `libs/gui/render/strategies/` (node).
-* Break into **smaller PRs**:
-  - PR1: `HeatmapTextureTypes.hpp` + config structs
-  - PR2: `HeatmapTextureManager` + texture creation/upload
-  - PR3: `HeatmapTextureNode` + shader + single quad
-  - PR4: LTSE integration + column extraction
-  - PR5: DLOD integration + feature flag
+### Hard Requirements (Non-Negotiable)
 
-**Refactoring allowed:**
+* **GPU Backend:** MUST support both OpenGL/ANGLE AND RHI (Vulkan/Metal/D3D) paths
+* **Texture Lifecycle:** Create in `render()`, destroy in `releaseResources()`, handle context loss
+* **Ring Buffer:** 1–2 quad rendering for wraparound (no shader modulo)
+* **Upload Budget:** Max 3–5 columns per frame, defer excess
+* **DO NOT** thread texture updates yet — single-thread first
+
+### Code Style
+
+* Keep **types, class names, namespace style** consistent with existing code
+* New files go in `libs/gui/render/` (textures) and `libs/gui/render/strategies/` (node)
+
+### PR Breakdown
+
+* **PR1:** `HeatmapTextureTypes.hpp` + config structs + ring buffer logic
+* **PR2:** `HeatmapTextureManager` + texture creation/upload (OpenGL path first)
+* **PR3:** `HeatmapTextureNode` + shader + single quad + wraparound handling
+* **PR4:** LTSE integration + column extraction + price LOD
+* **PR5:** Adaptive DLOD + upload budgeting
+* **PR6:** RHI backend support (Vulkan/Metal/D3D)
+* **PR7:** Feature flag + profiling + old path removal
+
+### Refactoring Allowed
+
 - Viewport logic in `GridViewState`
-- Slice indexing in `DataProcessor`
+- Slice indexing in `DataProcessor`  
 - Price binning utilities
+- Coordinate mapping in `CoordinateSystem`
 
-**DO NOT touch:**
-- Core layer (`libs/core/*`)
+### DO NOT Touch
+
+- Core layer (`libs/core/*`) — except reading from LTSE
 - Other render strategies (bubbles, flow, candles)
 - MainWindowGPU or dock widgets
+- Existing `HeatmapStrategy.cpp` until Texture2D is proven stable
 
 ---
 
@@ -680,6 +1228,81 @@ sLog_RenderN(10, "HEATMAP TEXTURE: columns=" << columnsUpdated
 | `libs/gui/render/strategies/HeatmapTextureNode.hpp/cpp` | QSGRenderNode + shader |
 | `libs/gui/render/shaders/heatmap_texture.vert` | Vertex shader |
 | `libs/gui/render/shaders/heatmap_texture.frag` | Fragment shader |
+
+---
+
+## 6. Implementation Directives Summary (Copy to Opus)
+
+These are the explicit directives Opus MUST follow:
+
+### Directive 1 — GPU Backend Detection
+> "Detect QSG backend via `window->rendererInterface()->graphicsApi()`.
+> If OpenGL or ANGLE → use raw GL via QOpenGLFunctions.
+> If RHI (Vulkan/Metal/D3D) → use QRhiTexture/QRhiGraphicsPipeline.
+> DO NOT ship code that only works on OpenGL."
+
+### Directive 2 — Texture Lifecycle
+> "All GL/RHI texture objects MUST be created on the Qt render thread (inside `render()`).
+> Implement `releaseResources()` to properly clean up.
+> Track OpenGL context identity and recreate textures if context changes."
+
+### Directive 3 — Ring Buffer Wraparound
+> "Implement wraparound by rendering 1–2 quads depending on column order.
+> NO modulo wrap in the shader — split the draw calls instead."
+
+### Directive 4 — Adaptive DLOD
+> "Timeframe selection MUST respect `MAX_COLUMNS_PER_FRAME` (3–5).
+> If uploads spike or user pans quickly → increase timeframe.
+> Defer excess column updates to subsequent frames."
+
+### Directive 5 — Price LOD
+> "Implement price aggregation when `priceRange / textureHeight > 1`.
+> Compute `ticksPerRow` CPU-side and aggregate before texture upload."
+
+### Directive 6 — Fractional UV Mapping
+> "Use float conversion for sub-column accuracy:
+> `fractionalCol = (timestamp - baseTimestamp) / timeframeMs`
+> Handle viewport clamping when it spans outside recorded history."
+
+---
+
+## 7. Recommended Reading
+
+### GPU Textures & Heatmaps
+
+| Resource | What You Learn |
+|----------|----------------|
+| **GPU Gems Ch.39 — "Real-Time Visualization of Large Scalar Fields"** | 2D data textures, shader-based heatmaps, sampling grids — exactly what Sentinel needs |
+| **Bookmap Patents** (public PDFs) | Column-based updates, ring buffers, GPU visualization, time-intensity decay, dynamic zooming — what competitors actually do |
+| **Real-Time Rendering (4th Ed)** — Textures & Shaders chapters | Data textures, UV transforms, mipmaps, GPU sampling behavior |
+| **OpenGL Red Book** — Texture Chapter | Core texture concepts (apply to ANGLE/RHI too) |
+
+### Qt-Specific
+
+| Resource | What You Learn |
+|----------|----------------|
+| **Qt "Custom QSGRenderNode" docs** | Lifecycle, context handling, GL calls during render phase, scene graph sync |
+| **Qt RHI documentation** | QRhiTexture, QRhiGraphicsPipeline for Vulkan/Metal/D3D backends |
+| **Qt 6 Migration Guide** — Graphics section | ANGLE defaults, RHI backends, compatibility notes |
+
+---
+
+## 8. Why This Plan is Production-Ready
+
+This plan covers:
+
+| Requirement | Solution |
+|-------------|----------|
+| Windows ANGLE | GPU backend detection + dual GL/RHI path |
+| macOS Metal | RHI abstraction path |
+| Linux Mesa | OpenGL path |
+| Infinite scrolling | Ring buffer with 2-quad wraparound |
+| Arbitrary zoom ranges | Price LOD aggregation |
+| Smooth panning | Fractional UV mapping |
+| Multiple TF LODs | Adaptive DLOD with upload budget |
+| Integration into existing codebase | Feature flag, IRenderStrategy interface |
+
+**This is Bookmap v2 architecture.**
 
 ---
 

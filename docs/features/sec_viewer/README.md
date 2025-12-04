@@ -65,7 +65,7 @@ The SEC system is built with a clean separation between Python backend processin
 5. Qt parses JSON and populates table models for display
 
 ### Configuration
-- **Environment**: `.env` file with `SEC_API_USER_AGENT=Your App your@email.com`
+- **Environment**: `.env` file with `SEC_API_USER_AGENT=Name (first/last) your@email.com`
 - **Virtual Environment**: `.venv/` with dependencies (aiohttp, pandas, etc.)
 - **Cache Directory**: `data/edgar/` for persistent storage
 

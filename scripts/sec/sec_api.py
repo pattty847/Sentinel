@@ -53,7 +53,7 @@ class SECDataFetcher:
 
         Args:
             user_agent (str, optional): User-Agent string for SEC API requests.
-                             Format: "Sample Company Name AdminContact@example.com".
+                             Format: "Name (first/last) your@email.com".
                              Defaults to None, attempts to read from 'SEC_API_USER_AGENT' env var.
             cache_dir (str, optional): Directory for storing cached data. Defaults to "data/edgar".
             rate_limit_sleep (float, optional): Seconds to wait between API requests for the HTTP client.
