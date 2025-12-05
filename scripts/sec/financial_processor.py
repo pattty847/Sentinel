@@ -1,9 +1,7 @@
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Callable, Awaitable, Tuple
-
-from .tag_mapping import FINANCIAL_TAG_MAP
+from typing import Dict, Optional, List, Callable, Awaitable
 
 class FinancialDataProcessor:
     """Handles the processing and summarization of financial data extracted from SEC Company Facts (XBRL API).
@@ -27,24 +25,23 @@ class FinancialDataProcessor:
 
     # Define key metrics mapping for the financial summary required by the UI
     # Keys are snake_case matching the target flat dictionary output.
-    # Values are lists of (taxonomy, tag) tuples from FINANCIAL_TAG_MAP for fallback support.
-    KEY_FINANCIAL_SUMMARY_METRICS = [
-        "revenue",
-        "net_income",
-        "eps",
-        "assets",
-        "liabilities",
-        "equity",
-        "operating_cash_flow",
-        "investing_cash_flow",
-        "financing_cash_flow",
-        # Additional metrics for derived calculations
-        "operating_income",
-        "capex",
-        "interest_expense",
-        "income_tax_expense",
-        "depreciation_amortization"
-    ]
+    # Values are the corresponding us-gaap or dei XBRL tags.
+    KEY_FINANCIAL_SUMMARY_METRICS = {
+        # Income Statement
+        "revenue": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        "net_income": ("us-gaap", "NetIncomeLoss"),
+        "eps": ("us-gaap", "EarningsPerShareBasic"), # Using Basic EPS for UI
+        # Balance Sheet
+        "assets": ("us-gaap", "Assets"),
+        "liabilities": ("us-gaap", "Liabilities"),
+        "equity": ("us-gaap", "StockholdersEquity"),
+        # Cash Flow
+        "operating_cash_flow": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
+        "investing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInInvestingActivities"),
+        "financing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInFinancingActivities"),
+        # Other potentially useful
+        # "shares_outstanding": ("dei", "EntityCommonStockSharesOutstanding") # Example DEI tag
+    }
 
     def __init__(self, fetch_facts_func: Callable[[str, bool], Awaitable[Optional[Dict]]]):
         """
@@ -433,199 +430,17 @@ class FinancialDataProcessor:
             logging.error(f"Error processing concept '{concept_tag}' in {taxonomy}: {e}", exc_info=True)
             return None
 
-    def _get_fact_history_with_fallback(self, facts_data: Dict, metric_key: str) -> Optional[Dict]:
-        """
-        Attempts to fetch fact history for a metric using multiple tag fallbacks.
-        
-        Iterates through the list of tags for the given metric from FINANCIAL_TAG_MAP.
-        Returns the first non-empty history found, or None if all tags fail.
-        
-        Args:
-            facts_data (Dict): The raw JSON dictionary from SEC Company Facts API.
-            metric_key (str): The metric key (e.g., 'revenue', 'net_income').
-            
-        Returns:
-            Optional[Dict]: History dictionary with 'quarterly' and 'annual' keys, or None.
-        """
-        tag_list = FINANCIAL_TAG_MAP.get(metric_key)
-        if not tag_list:
-            logging.warning(f"No tag mapping found for metric '{metric_key}'")
-            return None
-        
-        for taxonomy, concept_tag in tag_list:
-            history = self._get_fact_history(facts_data, taxonomy, concept_tag)
-            if history and (history.get('quarterly') or history.get('annual')):
-                logging.debug(f"Found data for '{metric_key}' using tag '{concept_tag}' in '{taxonomy}'")
-                return history
-        
-        logging.debug(f"No data found for '{metric_key}' after trying {len(tag_list)} tag(s)")
-        return None
-
-    def _calculate_derived_metrics(self, summary_data: Dict) -> Dict:
-        """
-        Calculates derived financial metrics from the raw GAAP data.
-        
-        Computes:
-        - Free Cash Flow (FCF) = Operating Cash Flow - CapEx
-        - EBITDA = Net Income + Interest Expense + Income Tax + Depreciation/Amortization
-        - Net Margin = Net Income / Revenue
-        
-        Args:
-            summary_data (Dict): Dictionary containing raw financial metrics with history.
-            
-        Returns:
-            Dict: Dictionary with derived metrics added (ebitda, fcf, net_margin).
-        """
-        derived = {
-            "ebitda": None,
-            "fcf": None,
-            "net_margin": None
-        }
-        
-        # Get the base metrics
-        revenue = summary_data.get('revenue')
-        net_income = summary_data.get('net_income')
-        operating_cash_flow = summary_data.get('operating_cash_flow')
-        capex = summary_data.get('capex')
-        interest_expense = summary_data.get('interest_expense')
-        income_tax_expense = summary_data.get('income_tax_expense')
-        depreciation_amortization = summary_data.get('depreciation_amortization')
-        
-        # Calculate Free Cash Flow (quarterly)
-        if operating_cash_flow and isinstance(operating_cash_flow, dict):
-            ocf_q = operating_cash_flow.get('quarterly', [])
-            
-            if ocf_q:
-                capex_q = []
-                if capex and isinstance(capex, dict):
-                    capex_q = capex.get('quarterly', [])
-                
-                fcf_quarterly = []
-                # Create a lookup by date for capex
-                capex_by_date = {entry['date']: entry['value'] for entry in capex_q}
-                
-                for ocf_entry in ocf_q:
-                    date = ocf_entry['date']
-                    ocf_value = ocf_entry['value']
-                    capex_value = capex_by_date.get(date, 0)
-                    
-                    # CapEx is typically negative in cash flow statements, so we subtract it
-                    # If capex_value is already negative, we add it; if positive, we subtract
-                    if capex_value < 0:
-                        fcf_value = ocf_value + capex_value  # Adding negative = subtracting
-                    else:
-                        fcf_value = ocf_value - abs(capex_value)
-                    
-                    fcf_quarterly.append({
-                        "period": ocf_entry['period'],
-                        "date": date,
-                        "value": fcf_value,
-                        "form": ocf_entry['form']
-                    })
-                
-                if fcf_quarterly:
-                    derived["fcf"] = {
-                        "quarterly": fcf_quarterly,
-                        "annual": []  # Could calculate annual FCF similarly if needed
-                    }
-        
-        # Calculate EBITDA (quarterly)
-        if net_income and isinstance(net_income, dict):
-            ni_q = net_income.get('quarterly', [])
-            
-            if ni_q:
-                # Get supporting metrics
-                interest_q = []
-                if interest_expense and isinstance(interest_expense, dict):
-                    interest_q = interest_expense.get('quarterly', [])
-                
-                tax_q = []
-                if income_tax_expense and isinstance(income_tax_expense, dict):
-                    tax_q = income_tax_expense.get('quarterly', [])
-                
-                da_q = []
-                if depreciation_amortization and isinstance(depreciation_amortization, dict):
-                    da_q = depreciation_amortization.get('quarterly', [])
-                
-                # Create lookups by date
-                interest_by_date = {entry['date']: entry['value'] for entry in interest_q}
-                tax_by_date = {entry['date']: entry['value'] for entry in tax_q}
-                da_by_date = {entry['date']: entry['value'] for entry in da_q}
-                
-                ebitda_quarterly = []
-                for ni_entry in ni_q:
-                    date = ni_entry['date']
-                    ni_value = ni_entry['value']
-                    
-                    # Get supporting values (default to 0 if not found)
-                    interest_val = interest_by_date.get(date, 0)
-                    tax_val = tax_by_date.get(date, 0)
-                    da_val = da_by_date.get(date, 0)
-                    
-                    # EBITDA = Net Income + Interest Expense + Income Tax Expense + Depreciation/Amortization
-                    # All these are typically expenses (positive values), but we use absolute values to be safe
-                    # Interest and D&A are always expenses (positive), Tax can be negative (benefit)
-                    ebitda_value = ni_value + abs(interest_val) + abs(tax_val) + abs(da_val)
-                    
-                    ebitda_quarterly.append({
-                        "period": ni_entry['period'],
-                        "date": date,
-                        "value": ebitda_value,
-                        "form": ni_entry['form']
-                    })
-                
-                if ebitda_quarterly:
-                    derived["ebitda"] = {
-                        "quarterly": ebitda_quarterly,
-                        "annual": []
-                    }
-        
-        # Calculate Net Margin (quarterly)
-        if revenue and isinstance(revenue, dict) and net_income and isinstance(net_income, dict):
-            rev_q = revenue.get('quarterly', [])
-            ni_q = net_income.get('quarterly', [])
-            
-            if rev_q and ni_q:
-                # Create lookup by date
-                ni_by_date = {entry['date']: entry['value'] for entry in ni_q}
-                
-                margin_quarterly = []
-                for rev_entry in rev_q:
-                    date = rev_entry['date']
-                    rev_value = rev_entry['value']
-                    ni_value = ni_by_date.get(date)
-                    
-                    if rev_value and rev_value != 0 and ni_value is not None:
-                        margin_value = (ni_value / rev_value) * 100  # Convert to percentage
-                        
-                        margin_quarterly.append({
-                            "period": rev_entry['period'],
-                            "date": date,
-                            "value": margin_value,
-                            "form": rev_entry['form']
-                        })
-                
-                if margin_quarterly:
-                    derived["net_margin"] = {
-                        "quarterly": margin_quarterly,
-                        "annual": []
-                    }
-        
-        return derived
-
     async def get_financial_summary(self, ticker: str, use_cache: bool = True) -> Optional[Dict]:
         """
         Generates a summary dictionary of key financial metrics with historical time-series data for a given ticker.
 
         This is the main public method of the processor. It orchestrates the process:
         1. Calls the injected `fetch_company_facts` function to get the raw XBRL data.
-        2. Iterates through the `KEY_FINANCIAL_SUMMARY_METRICS` list.
-        3. For each metric, calls `_get_fact_history_with_fallback` to extract historical time-series data
-           using tag fallbacks from `FINANCIAL_TAG_MAP` for robustness.
+        2. Iterates through the `KEY_FINANCIAL_SUMMARY_METRICS` mapping.
+        3. For each metric, calls `_get_fact_history` to extract historical time-series data.
         4. Populates a dictionary with the extracted history (quarterly and annual), along with metadata like
            ticker, entity name, CIK, and the estimated source form and period end date
            (based on the latest end date found among key income statement metrics).
-        5. Calculates derived metrics (EBITDA, Free Cash Flow, Net Margin) using `_calculate_derived_metrics`.
 
         Args:
             ticker (str): The stock ticker symbol for which to generate the summary.
@@ -635,11 +450,11 @@ class FinancialDataProcessor:
         Returns:
             Optional[Dict]: A dictionary containing the requested financial summary with historical data.
                 Keys include 'ticker', 'entityName', 'cik', 'source_form', 'period_end',
-                the keys defined in `KEY_FINANCIAL_SUMMARY_METRICS` (e.g., 'revenue',
-                'net_income', 'assets'), and derived metrics ('ebitda', 'fcf', 'net_margin').
-                Each metric value is a dictionary with 'quarterly' and 'annual' keys, each containing
-                a list of entries sorted by date descending. Returns None if the initial company
-                facts data cannot be retrieved or if none of the requested metrics are found.
+                and the keys defined in `KEY_FINANCIAL_SUMMARY_METRICS` (e.g., 'revenue',
+                'net_income', 'assets'). Each metric value is a dictionary with 'quarterly' and
+                'annual' keys, each containing a list of entries sorted by date descending.
+                Returns None if the initial company facts data cannot be retrieved or if none
+                of the requested metrics are found.
         """
         company_facts = await self.fetch_company_facts(ticker, use_cache=use_cache)
         if not company_facts:
@@ -655,15 +470,15 @@ class FinancialDataProcessor:
         }
 
         # Initialize all required metric keys to None
-        for key in self.KEY_FINANCIAL_SUMMARY_METRICS:
+        for key in self.KEY_FINANCIAL_SUMMARY_METRICS.keys():
             summary_data[key] = None
 
         latest_period_info = {"end_date": "0000-00-00", "form": None}
         has_data = False
 
-        # Iterate through the required metrics with fallback tag support
-        for metric_key in self.KEY_FINANCIAL_SUMMARY_METRICS:
-            fact_history = self._get_fact_history_with_fallback(company_facts, metric_key)
+        # Iterate through the required metrics defined in the mapping
+        for metric_key, (taxonomy, concept_tag) in self.KEY_FINANCIAL_SUMMARY_METRICS.items():
+            fact_history = self._get_fact_history(company_facts, taxonomy, concept_tag)
 
             if fact_history:
                 has_data = True
@@ -685,12 +500,8 @@ class FinancialDataProcessor:
                             latest_period_info["end_date"] = current_end_date
                             latest_period_info["form"] = entry_list[0].get("form")
             else:
-                 logging.debug(f"Metric '{metric_key}' not found/no data for {ticker} after trying all tag fallbacks.")
+                 logging.debug(f"Metric '{metric_key}' (Tag: {concept_tag}, Tax: {taxonomy}) not found/no data for {ticker}.")
                  summary_data[metric_key] = None
-
-        # Calculate derived metrics (EBITDA, FCF, Margins)
-        derived_metrics = self._calculate_derived_metrics(summary_data)
-        summary_data.update(derived_metrics)
 
         summary_data["period_end"] = latest_period_info["end_date"] if latest_period_info["end_date"] != "0000-00-00" else None
         summary_data["source_form"] = latest_period_info["form"]
