@@ -136,6 +136,7 @@ async def test_mocked_fact_response():
                             {
                                 "end": "2024-09-30",
                                 "val": 1000000000,
+                                "start": "2024-07-01",
                                 "fy": 2024,
                                 "fp": "Q3",
                                 "form": "10-Q",
@@ -144,14 +145,25 @@ async def test_mocked_fact_response():
                             {
                                 "end": "2024-06-30",
                                 "val": 950000000,
+                                "start": "2024-04-01",
                                 "fy": 2024,
                                 "fp": "Q2",
                                 "form": "10-Q",
                                 "frame": "CY2024Q2"
                             },
                             {
+                                "end": "2024-06-30",
+                                "val": 3000000000,
+                                "fy": 2024,
+                                "fp": "Q3",
+                                "form": "10-Q",
+                                "frame": "CY2024Q3",
+                                # Missing start date simulates a YTD/cumulative fact that should be rejected
+                            },
+                            {
                                 "end": "2024-03-31",
                                 "val": 900000000,
+                                "start": "2024-01-01",
                                 "fy": 2024,
                                 "fp": "Q1",
                                 "form": "10-Q",
@@ -160,6 +172,7 @@ async def test_mocked_fact_response():
                             {
                                 "end": "2023-12-31",
                                 "val": 850000000,
+                                "start": "2023-10-01",
                                 "fy": 2023,
                                 "fp": "Q4",
                                 "form": "10-Q",
@@ -168,6 +181,7 @@ async def test_mocked_fact_response():
                             {
                                 "end": "2023-12-31",
                                 "val": 3200000000,
+                                "start": "2023-01-01",
                                 "fy": 2023,
                                 "fp": "FY",
                                 "form": "10-K",
@@ -191,7 +205,8 @@ async def test_mocked_fact_response():
     history = processor._get_fact_history(
         mock_facts,
         "us-gaap",
-        "RevenueFromContractWithCustomerExcludingAssessedTax"
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        metric_key="revenue",
     )
     
     if not history:
@@ -210,6 +225,18 @@ async def test_mocked_fact_response():
     
     if len(annual) != 1:
         print(f"[FAIL] Expected 1 annual entry, got {len(annual)}")
+        return False
+
+    # Ensure YTD-like entry without duration was rejected
+    june_entries = [entry for entry in quarterly if entry.get('date') == '2024-06-30']
+    if len(june_entries) != 1:
+        print(f"[FAIL] Expected 1 quarterly entry for 2024-06-30 after filtering, got {len(june_entries)}")
+        return False
+
+    if june_entries[0].get('value') != 950000000:
+        print(
+            f"[FAIL] Expected quarterly value 950000000 for 2024-06-30, got {june_entries[0].get('value')}"
+        )
         return False
     
     # Verify first quarterly entry is newest

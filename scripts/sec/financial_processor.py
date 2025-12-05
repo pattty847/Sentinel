@@ -152,7 +152,27 @@ class FinancialDataProcessor:
             logging.debug(f"Could not parse dates for duration calculation: {e}")
             return None
 
-    def _filter_by_duration(self, entries: List[Dict], form_type: str, is_quarterly: bool) -> List[Dict]:
+    def _metric_requires_duration(self, metric_key: Optional[str]) -> bool:
+        """
+        Determines whether a metric concept represents a duration-based fact.
+
+        Duration-based facts (income statement, cash flow, EPS, etc.) should always
+        include a start/end date window. Instant metrics (balance sheet items) do not
+        require a duration and should not be rejected when the start date is absent.
+
+        Args:
+            metric_key (Optional[str]): Metric identifier such as 'revenue' or 'assets'.
+
+        Returns:
+            bool: True if the metric should have a duration, False otherwise.
+        """
+        instant_metrics = {"assets", "liabilities", "equity", "cash_equivalents"}
+        if metric_key is None:
+            return True
+
+        return metric_key not in instant_metrics
+
+    def _filter_by_duration(self, entries: List[Dict], form_type: str, is_quarterly: bool, requires_duration: bool) -> List[Dict]:
         """
         Filters entries by duration to exclude YTD/cumulative values.
         
@@ -168,7 +188,8 @@ class FinancialDataProcessor:
             entries (List[Dict]): List of entries to filter
             form_type (str): Form type ('10-Q', '10-K', etc.)
             is_quarterly (bool): Whether these are quarterly entries
-            
+            requires_duration (bool): Whether entries lacking duration should be rejected
+
         Returns:
             List[Dict]: Filtered entries that match duration criteria
         """
@@ -178,8 +199,14 @@ class FinancialDataProcessor:
             form = entry.get('form', '')
             duration = self._calculate_duration_days(entry)
             
-            # If no duration info available, we'll use deduplication logic later
+            # If no duration info available, enforce requirement for duration-based metrics
             if duration is None:
+                if requires_duration:
+                    logging.debug(
+                        f"Rejected {form} entry missing duration for metric requiring a period window"
+                    )
+                    continue
+
                 filtered.append(entry)
                 continue
             
@@ -277,7 +304,7 @@ class FinancialDataProcessor:
         
         return deduplicated
 
-    def _get_fact_history(self, facts_data: Dict, taxonomy: str, concept_tag: str) -> Optional[Dict]:
+    def _get_fact_history(self, facts_data: Dict, taxonomy: str, concept_tag: str, metric_key: Optional[str] = None) -> Optional[Dict]:
         """
         Extracts historical time-series data for a specific XBRL concept from raw facts data.
 
@@ -298,6 +325,8 @@ class FinancialDataProcessor:
             taxonomy (str): The XBRL taxonomy where the concept is defined (e.g., 'us-gaap', 'dei').
             concept_tag (str): The specific XBRL concept tag to extract data for
                 (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax').
+            metric_key (Optional[str]): Metric identifier used to decide if duration
+                should be enforced (e.g., 'revenue').
 
         Returns:
             Optional[Dict]: A dictionary with 'quarterly' and 'annual' keys, each containing
@@ -330,6 +359,7 @@ class FinancialDataProcessor:
                     formatted_entry = {
                         "period": self._format_period(entry),
                         "date": entry.get('end'),
+                        "end": entry.get('end'),
                         "value": entry.get('val'),
                         "form": entry.get('form', 'N/A'),
                         "unit": unit_name,
@@ -360,6 +390,8 @@ class FinancialDataProcessor:
             # Categorize into quarterly and annual
             quarterly = []
             annual = []
+
+            requires_duration = self._metric_requires_duration(metric_key)
             
             for entry in all_entries:
                 if self._is_quarterly(entry):
@@ -387,12 +419,12 @@ class FinancialDataProcessor:
             # Apply duration filtering
             quarterly_filtered = []
             for form, entries in quarterly_by_form.items():
-                filtered = self._filter_by_duration(entries, form, is_quarterly=True)
+                filtered = self._filter_by_duration(entries, form, is_quarterly=True, requires_duration=requires_duration)
                 quarterly_filtered.extend(filtered)
-            
+
             annual_filtered = []
             for form, entries in annual_by_form.items():
-                filtered = self._filter_by_duration(entries, form, is_quarterly=False)
+                filtered = self._filter_by_duration(entries, form, is_quarterly=False, requires_duration=requires_duration)
                 annual_filtered.extend(filtered)
             
             # Deduplicate entries with same (period, end_date)
@@ -453,7 +485,7 @@ class FinancialDataProcessor:
             return None
         
         for taxonomy, concept_tag in tag_list:
-            history = self._get_fact_history(facts_data, taxonomy, concept_tag)
+            history = self._get_fact_history(facts_data, taxonomy, concept_tag, metric_key=metric_key)
             if history and (history.get('quarterly') or history.get('annual')):
                 logging.debug(f"Found data for '{metric_key}' using tag '{concept_tag}' in '{taxonomy}'")
                 return history
