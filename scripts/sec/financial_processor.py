@@ -149,7 +149,27 @@ class FinancialDataProcessor:
             logging.debug(f"Could not parse dates for duration calculation: {e}")
             return None
 
-    def _filter_by_duration(self, entries: List[Dict], form_type: str, is_quarterly: bool) -> List[Dict]:
+    def _metric_requires_duration(self, metric_key: Optional[str]) -> bool:
+        """
+        Determines whether a metric concept represents a duration-based fact.
+
+        Duration-based facts (income statement, cash flow, EPS, etc.) should always
+        include a start/end date window. Instant metrics (balance sheet items) do not
+        require a duration and should not be rejected when the start date is absent.
+
+        Args:
+            metric_key (Optional[str]): Metric identifier such as 'revenue' or 'assets'.
+
+        Returns:
+            bool: True if the metric should have a duration, False otherwise.
+        """
+        instant_metrics = {"assets", "liabilities", "equity", "cash_equivalents"}
+        if metric_key is None:
+            return True
+
+        return metric_key not in instant_metrics
+
+    def _filter_by_duration(self, entries: List[Dict], form_type: str, is_quarterly: bool, requires_duration: bool) -> List[Dict]:
         """
         Filters entries by duration to exclude YTD/cumulative values.
         
@@ -165,7 +185,8 @@ class FinancialDataProcessor:
             entries (List[Dict]): List of entries to filter
             form_type (str): Form type ('10-Q', '10-K', etc.)
             is_quarterly (bool): Whether these are quarterly entries
-            
+            requires_duration (bool): Whether entries lacking duration should be rejected
+
         Returns:
             List[Dict]: Filtered entries that match duration criteria
         """
@@ -175,8 +196,14 @@ class FinancialDataProcessor:
             form = entry.get('form', '')
             duration = self._calculate_duration_days(entry)
             
-            # If no duration info available, we'll use deduplication logic later
+            # If no duration info available, enforce requirement for duration-based metrics
             if duration is None:
+                if requires_duration:
+                    logging.debug(
+                        f"Rejected {form} entry missing duration for metric requiring a period window"
+                    )
+                    continue
+
                 filtered.append(entry)
                 continue
             
@@ -274,7 +301,7 @@ class FinancialDataProcessor:
         
         return deduplicated
 
-    def _get_fact_history(self, facts_data: Dict, taxonomy: str, concept_tag: str) -> Optional[Dict]:
+    def _get_fact_history(self, facts_data: Dict, taxonomy: str, concept_tag: str, metric_key: Optional[str] = None) -> Optional[Dict]:
         """
         Extracts historical time-series data for a specific XBRL concept from raw facts data.
 
@@ -295,6 +322,8 @@ class FinancialDataProcessor:
             taxonomy (str): The XBRL taxonomy where the concept is defined (e.g., 'us-gaap', 'dei').
             concept_tag (str): The specific XBRL concept tag to extract data for
                 (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax').
+            metric_key (Optional[str]): Metric identifier used to decide if duration
+                should be enforced (e.g., 'revenue').
 
         Returns:
             Optional[Dict]: A dictionary with 'quarterly' and 'annual' keys, each containing
@@ -327,6 +356,7 @@ class FinancialDataProcessor:
                     formatted_entry = {
                         "period": self._format_period(entry),
                         "date": entry.get('end'),
+                        "end": entry.get('end'),
                         "value": entry.get('val'),
                         "form": entry.get('form', 'N/A'),
                         "unit": unit_name,
@@ -357,6 +387,8 @@ class FinancialDataProcessor:
             # Categorize into quarterly and annual
             quarterly = []
             annual = []
+
+            requires_duration = self._metric_requires_duration(metric_key)
             
             for entry in all_entries:
                 if self._is_quarterly(entry):
@@ -384,12 +416,12 @@ class FinancialDataProcessor:
             # Apply duration filtering
             quarterly_filtered = []
             for form, entries in quarterly_by_form.items():
-                filtered = self._filter_by_duration(entries, form, is_quarterly=True)
+                filtered = self._filter_by_duration(entries, form, is_quarterly=True, requires_duration=requires_duration)
                 quarterly_filtered.extend(filtered)
-            
+
             annual_filtered = []
             for form, entries in annual_by_form.items():
-                filtered = self._filter_by_duration(entries, form, is_quarterly=False)
+                filtered = self._filter_by_duration(entries, form, is_quarterly=False, requires_duration=requires_duration)
                 annual_filtered.extend(filtered)
             
             # Deduplicate entries with same (period, end_date)
@@ -429,6 +461,186 @@ class FinancialDataProcessor:
         except Exception as e:
             logging.error(f"Error processing concept '{concept_tag}' in {taxonomy}: {e}", exc_info=True)
             return None
+
+    def _get_fact_history_with_fallback(self, facts_data: Dict, metric_key: str) -> Optional[Dict]:
+        """
+        Attempts to fetch fact history for a metric using multiple tag fallbacks.
+        
+        Iterates through the list of tags for the given metric from FINANCIAL_TAG_MAP.
+        Returns the first non-empty history found, or None if all tags fail.
+        
+        Args:
+            facts_data (Dict): The raw JSON dictionary from SEC Company Facts API.
+            metric_key (str): The metric key (e.g., 'revenue', 'net_income').
+            
+        Returns:
+            Optional[Dict]: History dictionary with 'quarterly' and 'annual' keys, or None.
+        """
+        tag_list = FINANCIAL_TAG_MAP.get(metric_key)
+        if not tag_list:
+            logging.warning(f"No tag mapping found for metric '{metric_key}'")
+            return None
+        
+        for taxonomy, concept_tag in tag_list:
+            history = self._get_fact_history(facts_data, taxonomy, concept_tag, metric_key=metric_key)
+            if history and (history.get('quarterly') or history.get('annual')):
+                logging.debug(f"Found data for '{metric_key}' using tag '{concept_tag}' in '{taxonomy}'")
+                return history
+        
+        logging.debug(f"No data found for '{metric_key}' after trying {len(tag_list)} tag(s)")
+        return None
+
+    def _calculate_derived_metrics(self, summary_data: Dict) -> Dict:
+        """
+        Calculates derived financial metrics from the raw GAAP data.
+        
+        Computes:
+        - Free Cash Flow (FCF) = Operating Cash Flow - CapEx
+        - EBITDA = Net Income + Interest Expense + Income Tax + Depreciation/Amortization
+        - Net Margin = Net Income / Revenue
+        
+        Args:
+            summary_data (Dict): Dictionary containing raw financial metrics with history.
+            
+        Returns:
+            Dict: Dictionary with derived metrics added (ebitda, fcf, net_margin).
+        """
+        derived = {
+            "ebitda": None,
+            "fcf": None,
+            "net_margin": None
+        }
+        
+        # Get the base metrics
+        revenue = summary_data.get('revenue')
+        net_income = summary_data.get('net_income')
+        operating_cash_flow = summary_data.get('operating_cash_flow')
+        capex = summary_data.get('capex')
+        interest_expense = summary_data.get('interest_expense')
+        income_tax_expense = summary_data.get('income_tax_expense')
+        depreciation_amortization = summary_data.get('depreciation_amortization')
+        
+        # Calculate Free Cash Flow (quarterly)
+        if operating_cash_flow and isinstance(operating_cash_flow, dict):
+            ocf_q = operating_cash_flow.get('quarterly', [])
+            
+            if ocf_q:
+                capex_q = []
+                if capex and isinstance(capex, dict):
+                    capex_q = capex.get('quarterly', [])
+                
+                fcf_quarterly = []
+                # Create a lookup by date for capex
+                capex_by_date = {entry['date']: entry['value'] for entry in capex_q}
+                
+                for ocf_entry in ocf_q:
+                    date = ocf_entry['date']
+                    ocf_value = ocf_entry['value']
+                    capex_value = capex_by_date.get(date, 0)
+                    
+                    # CapEx is typically negative in cash flow statements, so we subtract it
+                    # If capex_value is already negative, we add it; if positive, we subtract
+                    if capex_value < 0:
+                        fcf_value = ocf_value + capex_value  # Adding negative = subtracting
+                    else:
+                        fcf_value = ocf_value - abs(capex_value)
+                    
+                    fcf_quarterly.append({
+                        "period": ocf_entry['period'],
+                        "date": date,
+                        "value": fcf_value,
+                        "form": ocf_entry['form']
+                    })
+                
+                if fcf_quarterly:
+                    derived["fcf"] = {
+                        "quarterly": fcf_quarterly,
+                        "annual": []  # Could calculate annual FCF similarly if needed
+                    }
+        
+        # Calculate EBITDA (quarterly)
+        if net_income and isinstance(net_income, dict):
+            ni_q = net_income.get('quarterly', [])
+            
+            if ni_q:
+                # Get supporting metrics
+                interest_q = []
+                if interest_expense and isinstance(interest_expense, dict):
+                    interest_q = interest_expense.get('quarterly', [])
+                
+                tax_q = []
+                if income_tax_expense and isinstance(income_tax_expense, dict):
+                    tax_q = income_tax_expense.get('quarterly', [])
+                
+                da_q = []
+                if depreciation_amortization and isinstance(depreciation_amortization, dict):
+                    da_q = depreciation_amortization.get('quarterly', [])
+                
+                # Create lookups by date
+                interest_by_date = {entry['date']: entry['value'] for entry in interest_q}
+                tax_by_date = {entry['date']: entry['value'] for entry in tax_q}
+                da_by_date = {entry['date']: entry['value'] for entry in da_q}
+                
+                ebitda_quarterly = []
+                for ni_entry in ni_q:
+                    date = ni_entry['date']
+                    ni_value = ni_entry['value']
+                    
+                    # Get supporting values (default to 0 if not found)
+                    interest_val = interest_by_date.get(date, 0)
+                    tax_val = tax_by_date.get(date, 0)
+                    da_val = da_by_date.get(date, 0)
+                    
+                    # EBITDA = Net Income + Interest Expense + Income Tax Expense + Depreciation/Amortization
+                    # All these are typically expenses (positive values), but we use absolute values to be safe
+                    # Interest and D&A are always expenses (positive), Tax can be negative (benefit)
+                    ebitda_value = ni_value + abs(interest_val) + abs(tax_val) + abs(da_val)
+                    
+                    ebitda_quarterly.append({
+                        "period": ni_entry['period'],
+                        "date": date,
+                        "value": ebitda_value,
+                        "form": ni_entry['form']
+                    })
+                
+                if ebitda_quarterly:
+                    derived["ebitda"] = {
+                        "quarterly": ebitda_quarterly,
+                        "annual": []
+                    }
+        
+        # Calculate Net Margin (quarterly)
+        if revenue and isinstance(revenue, dict) and net_income and isinstance(net_income, dict):
+            rev_q = revenue.get('quarterly', [])
+            ni_q = net_income.get('quarterly', [])
+            
+            if rev_q and ni_q:
+                # Create lookup by date
+                ni_by_date = {entry['date']: entry['value'] for entry in ni_q}
+                
+                margin_quarterly = []
+                for rev_entry in rev_q:
+                    date = rev_entry['date']
+                    rev_value = rev_entry['value']
+                    ni_value = ni_by_date.get(date)
+                    
+                    if rev_value and rev_value != 0 and ni_value is not None:
+                        margin_value = (ni_value / rev_value) * 100  # Convert to percentage
+                        
+                        margin_quarterly.append({
+                            "period": rev_entry['period'],
+                            "date": date,
+                            "value": margin_value,
+                            "form": rev_entry['form']
+                        })
+                
+                if margin_quarterly:
+                    derived["net_margin"] = {
+                        "quarterly": margin_quarterly,
+                        "annual": []
+                    }
+        
+        return derived
 
     async def get_financial_summary(self, ticker: str, use_cache: bool = True) -> Optional[Dict]:
         """
