@@ -86,18 +86,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_qmlController->setChartModeController(m_modeController);
     m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
     
-    // 4) Set up layout orchestrator and restore/arrange layout
+    // 4) Set up layout orchestrator
+    // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
+    // because resizeDocks() doesn't work correctly when window is at default 640x480 size.
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
-    LayoutOrchestrator::DockWidgets docks;
-    docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
-    docks.secDock = m_secDock;
-    docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
-    if (!m_layoutOrchestrator->restoreLayout(docks, LayoutManager::defaultLayoutName())) {
-        sLog_App("No saved layout found, using default arrangement");
-        m_layoutOrchestrator->arrangeDefaultLayout(docks);
-    }
     
     // 5) Set up menu bar and shortcuts
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -207,22 +199,39 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
-    // Save current layout as default
-    m_layoutOrchestrator->saveLayout(LayoutManager::defaultLayoutName());
+    // Auto-save current layout so it restores on next launch
+    sLog_App("Saving session layout on close");
+    m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
 
 void MainWindowGPU::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
     
-    // Ensure window is maximized on first show (fixes timing issues)
+    sLog_App("=== showEvent triggered ===");
+    sLog_App("  Window size: " << width() << "x" << height());
+    
+    // First show: maximize window, then restore/arrange layout AFTER maximization completes
     static bool firstShow = true;
     if (firstShow) {
         firstShow = false;
-        // Use a single-shot timer to maximize after the window is fully shown
-        QTimer::singleShot(0, this, [this]() {
-            if (windowState() != Qt::WindowMaximized) {
-                showMaximized();
+        
+        // Step 1: Maximize the window first
+        if (windowState() != Qt::WindowMaximized) {
+            showMaximized();
+        }
+        
+        // Step 2: Restore or arrange layout AFTER window has fully maximized
+        QTimer::singleShot(50, this, [this]() {
+            sLog_App("=== Restoring layout after maximize ===");
+            sLog_App("  Window size: " << width() << "x" << height());
+            
+            // Try to restore last session layout, fall back to default
+            if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
+                sLog_App("Restored last session layout");
+            } else {
+                sLog_App("No saved session, using default layout");
+                m_layoutOrchestrator->arrangeDefaultLayout(getDockWidgets());
             }
         });
     }
@@ -315,13 +324,7 @@ bool MainWindowGPU::validateComponents() {
 // Layout arrangement moved to LayoutOrchestrator
 
 void MainWindowGPU::resetLayoutToDefault() {
-    LayoutOrchestrator::DockWidgets docks;
-    docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
-    docks.secDock = m_secDock;
-    docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
-    m_layoutOrchestrator->resetLayoutToDefault(docks);
+    m_layoutOrchestrator->resetLayoutToDefault(getDockWidgets());
 }
 
 // UnifiedGridRenderer access moved to QmlSceneController
@@ -347,13 +350,7 @@ void MainWindowGPU::onRestoreLayout() {
     QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
                                             layouts, 0, false, &ok);
     if (ok && !selected.isEmpty()) {
-        LayoutOrchestrator::DockWidgets docks;
-        docks.heatmapDock = m_heatmapDock;
-        docks.marketDataDock = m_marketDataDock;
-        docks.secDock = m_secDock;
-        docks.copenetDock = m_copenetDock;
-        docks.aiCommentaryDock = m_aiCommentaryDock;
-        if (m_layoutOrchestrator->restoreLayout(docks, selected)) {
+        if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
             sLog_App("Layout restored: " << selected);
         } else {
             QMessageBox::warning(this, "Restore Failed", 
@@ -379,4 +376,14 @@ void MainWindowGPU::onOpenMarketDataPanel() {
         m_marketDataDock->show();
         m_marketDataDock->raise();
     }
+}
+
+LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
+    LayoutOrchestrator::DockWidgets docks;
+    docks.heatmapDock = m_heatmapDock;
+    docks.marketDataDock = m_marketDataDock;
+    docks.secDock = m_secDock;
+    docks.copenetDock = m_copenetDock;
+    docks.aiCommentaryDock = m_aiCommentaryDock;
+    return docks;
 }

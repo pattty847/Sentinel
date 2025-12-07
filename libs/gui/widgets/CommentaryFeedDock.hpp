@@ -16,6 +16,7 @@ class CommentaryFeedDock : public DockablePanel {
 public:
     explicit CommentaryFeedDock(const QString& id, const QString& title, QWidget* parent = nullptr);
     void buildUi() override;
+    QSize minimumSizeHint() const override;
     
     /**
      * Append a message to the feed.

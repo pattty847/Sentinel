@@ -30,14 +30,15 @@ void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
 void LayoutOrchestrator::resetLayoutToDefault(const DockWidgets& docks) {
     sLog_App("Resetting layout to default");
     arrangeDefaultLayout(docks);
-    // Clear saved layout so next time it uses this fresh default
-    LayoutManager::deleteLayout(LayoutManager::defaultLayoutName());
 }
 
 bool LayoutOrchestrator::restoreLayout(const DockWidgets& docks, const QString& layoutName) {
-    // Ensure constraints (min/max) are applied even when restoring saved state
-    applyDockConstraints(docks);
-    return LayoutManager::restoreLayout(m_mainWindow, layoutName);
+    bool success = LayoutManager::restoreLayout(m_mainWindow, layoutName);
+    if (success) {
+        // Apply constraints after restore to ensure minimum sizes are respected
+        applyDockConstraints(docks);
+    }
+    return success;
 }
 
 void LayoutOrchestrator::saveLayout(const QString& layoutName) {
@@ -92,63 +93,36 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
 }
 
 void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
-    // Get screen geometry for percentage-based sizing
-    QScreen* screen = QApplication::primaryScreen();
-    if (!screen) {
-        sLog_Warning("Could not get primary screen, using fallback sizes");
-        screen = m_mainWindow->screen();
-    }
+    auto applyMinimum = [](QDockWidget* dock, const QSize& fallback) {
+        if (!dock) return;
+        QSize minHint = dock->minimumSizeHint();
+        if (!minHint.isValid() || minHint.isEmpty()) {
+            minHint = fallback;
+        }
+        dock->setMinimumSize(minHint);
+        // Reset maximum to allow resizing
+        dock->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    };
     
-    QRect screenGeometry = screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
-    int screenWidth = screenGeometry.width();
-    int screenHeight = screenGeometry.height();
-    
-    // Calculate dock sizes as percentages of screen size
-    // Heatmap left: target ~70% width, right column ~30%
-    int heatmapMinWidth = static_cast<int>(screenWidth * 0.60);      // ensure it stays dominant
-    int rightDockMinWidth = static_cast<int>(screenWidth * 0.25);    // comfortable sidebar
-    // Bottom area: 10% of screen height (for commentary feeds) - keep this small
-    int bottomDockHeight = static_cast<int>(screenHeight * 0.10);
-    
-    // Update minimum sizes based on screen percentages for better proportional layout
-    if (docks.heatmapDock) {
-        docks.heatmapDock->setMinimumWidth(heatmapMinWidth);               // Dominant width
-        docks.heatmapDock->setMinimumHeight(static_cast<int>(screenHeight * 0.80)); // Prefer tall main area
-    }
-    if (docks.secDock) {
-        docks.secDock->setMinimumWidth(rightDockMinWidth);
-    }
-    if (docks.marketDataDock) {
-        docks.marketDataDock->setMinimumWidth(rightDockMinWidth);
-    }
-    // Bottom docks: Set small minimum height and maximum height to constrain them to 10%
-    if (docks.copenetDock) {
-        docks.copenetDock->setMinimumHeight(50);  // Small minimum (50px)
-        docks.copenetDock->setMaximumHeight(bottomDockHeight);  // Cap at 10% of screen
-    }
-    if (docks.aiCommentaryDock) {
-        docks.aiCommentaryDock->setMinimumHeight(50);  // Small minimum (50px)
-        docks.aiCommentaryDock->setMaximumHeight(bottomDockHeight);  // Cap at 10% of screen
-    }
+    const QSize fallback(260, 160);
+    applyMinimum(docks.heatmapDock, QSize(420, 300));
+    applyMinimum(docks.secDock, QSize(440, 380));
+    applyMinimum(docks.marketDataDock, QSize(360, 240));
+    applyMinimum(docks.copenetDock, fallback);
+    applyMinimum(docks.aiCommentaryDock, fallback);
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
     
-    // Set proportional sizes based on screen dimensions
-    // Use resizeDocks with relative proportions to control the split between areas
-    
-    // CRITICAL: Resize bottom vs main area FIRST to establish the vertical split (10% bottom, 90% main)
-    // Include both top-area docks so they share the taller region evenly
+    // Vertical split: 10% bottom, 90% main area
     m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
     
-    // Left (heatmap) vs Right (SEC/MarketData): ~70/30 split
+    // Horizontal split: 70% heatmap (left), 30% SEC (right)
     m_mainWindow->resizeDocks({docks.heatmapDock, docks.secDock}, {70, 30}, Qt::Horizontal);
     
-    // Left dock area: tabbed docks share space equally
+    // Tabbed docks share space equally
     m_mainWindow->resizeDocks({docks.secDock, docks.marketDataDock}, {1, 1}, Qt::Horizontal);
-    
-    // Bottom dock area: split equally (tabbed docks share space)
     m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
 }
 

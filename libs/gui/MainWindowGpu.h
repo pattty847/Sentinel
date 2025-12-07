@@ -36,6 +36,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include "../core/marketdata/MarketDataCore.hpp"
 #include "../core/marketdata/auth/Authenticator.hpp"
 #include "../core/marketdata/cache/DataCache.hpp"
+#include "mainwindow/LayoutOrchestrator.h"
 
 // Forward declarations
 class ChartModeController;
@@ -92,6 +93,7 @@ private:
     void setWindowProperties();
     void propagateSymbolChange(const QString& symbol);
     bool validateComponents();
+    LayoutOrchestrator::DockWidgets getDockWidgets() const;
     
     // Callbacks for modular components
     void onSaveLayout();

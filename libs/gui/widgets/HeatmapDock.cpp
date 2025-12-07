@@ -13,6 +13,11 @@ HeatmapDock::HeatmapDock(QWidget* parent)
     buildUi();
 }
 
+QSize HeatmapDock::minimumSizeHint() const {
+    // Enough space to keep the QML view visible and the control bar legible
+    return QSize(420, 300);
+}
+
 void HeatmapDock::buildUi() {
     // Create main vertical layout for heatmap + symbol control
     QVBoxLayout* mainLayout = new QVBoxLayout(m_contentWidget);

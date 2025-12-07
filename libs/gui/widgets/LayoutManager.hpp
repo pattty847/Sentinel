@@ -10,7 +10,7 @@
  */
 class LayoutManager {
 public:
-    static constexpr int APP_LAYOUT_VERSION = 2;  // Increment on breaking changes
+    static constexpr int APP_LAYOUT_VERSION = 3;  // Increment on breaking changes
     
     /**
      * Save the current window state as a named layout.

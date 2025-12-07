@@ -26,6 +26,11 @@ SecFilingDock::SecFilingDock(QWidget* parent)
     connect(m_apiClient, &SecApiClient::statusUpdate, this, &SecFilingDock::onStatusUpdate);
 }
 
+QSize SecFilingDock::minimumSizeHint() const {
+    // Enough room for controls plus at least a few table rows
+    return QSize(440, 380);
+}
+
 void SecFilingDock::buildUi() {
     QVBoxLayout* layout = new QVBoxLayout(m_contentWidget);
     

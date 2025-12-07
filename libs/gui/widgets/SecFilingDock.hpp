@@ -25,6 +25,7 @@ public:
     explicit SecFilingDock(QWidget* parent = nullptr);
     void buildUi() override;
     void onSymbolChanged(const QString& symbol) override;
+    QSize minimumSizeHint() const override;
 
 private slots:
     void fetchFilings();

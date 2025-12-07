@@ -20,6 +20,7 @@ class HeatmapDock : public DockablePanel {
 public:
     explicit HeatmapDock(QWidget* parent = nullptr);
     void buildUi() override;
+    QSize minimumSizeHint() const override;
     
     QWidget* qmlContainer() const { return m_qmlContainer; }
     QQuickView* qquickView() const { return m_qquickView; }

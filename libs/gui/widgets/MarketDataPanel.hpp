@@ -18,6 +18,7 @@ public:
     explicit MarketDataPanel(QWidget* parent = nullptr);
     void buildUi() override;
     void onSymbolChanged(const QString& symbol) override;
+    QSize minimumSizeHint() const override;
 
 private slots:
     void onTradeReceived(const Trade& trade);
