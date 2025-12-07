@@ -20,6 +20,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QCloseEvent>
+#include <QShowEvent>
 #include <QStatusBar>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
@@ -47,6 +48,8 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScopeGuard>
+#include <QScreen>
+#include <QApplication>
 
 // Helper macro for scoped logging
 #define LOG_SCOPE(msg) sLog_App(msg " started"); auto _scopeGuard = qScopeGuard([=]{ sLog_App(msg " complete"); });
@@ -145,7 +148,7 @@ void MainWindowGPU::setupUI() {
     m_symbolInput = m_heatmapDock->symbolInput();
     m_subscribeButton = m_heatmapDock->subscribeButton();
     
-    // Set minimum sizes for better default layout
+    // Set minimum sizes for better default layout (will be updated in arrangeDefaultLayout based on screen size)
     m_heatmapDock->setMinimumWidth(800);
     m_heatmapDock->setMinimumHeight(600);
     m_secDock->setMinimumWidth(300);
@@ -210,8 +213,8 @@ void MainWindowGPU::applyStyles() {
 
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
-    // TODO: Make full screen 
-    resize(1400, 900);
+    // Set window state to maximized (will be applied when window is shown)
+    setWindowState(Qt::WindowMaximized);
 }
 
 void MainWindowGPU::setupConnections() {
@@ -244,6 +247,22 @@ void MainWindowGPU::closeEvent(QCloseEvent* event) {
     // Save current layout as default
     LayoutManager::saveLayout(this, LayoutManager::defaultLayoutName());
     QMainWindow::closeEvent(event);
+}
+
+void MainWindowGPU::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    
+    // Ensure window is maximized on first show (fixes timing issues)
+    static bool firstShow = true;
+    if (firstShow) {
+        firstShow = false;
+        // Use a single-shot timer to maximize after the window is fully shown
+        QTimer::singleShot(0, this, [this]() {
+            if (windowState() != Qt::WindowMaximized) {
+                showMaximized();
+            }
+        });
+    }
 }
 
 void MainWindowGPU::setupMenuBar() {
@@ -383,6 +402,16 @@ void MainWindowGPU::setupShortcuts() {
     connect(f3Shortcut, &QShortcut::activated, this, [this]() {
         if (m_secDock) m_secDock->setVisible(!m_secDock->isVisible());
     });
+    
+    // F11 - Toggle fullscreen mode (preserves window controls when not fullscreen)
+    QShortcut* f11Shortcut = new QShortcut(QKeySequence("F11"), this);
+    connect(f11Shortcut, &QShortcut::activated, this, [this]() {
+        if (isFullScreen()) {
+            showMaximized();  // Exit fullscreen, return to maximized
+        } else {
+            showFullScreen();  // Enter fullscreen
+        }
+    });
 }
 
 void MainWindowGPU::updateSymbolInContext(const QString& symbol) {
@@ -443,6 +472,41 @@ void MainWindowGPU::arrangeDefaultLayout() {
     // Prevent repaint storms during layout changes
     setUpdatesEnabled(false);
     
+    // Get screen geometry for percentage-based sizing
+    QScreen* screen = QApplication::primaryScreen();
+    if (!screen) {
+        sLog_Warning("Could not get primary screen, using fallback sizes");
+        screen = this->screen();
+    }
+    
+    QRect screenGeometry = screen ? screen->availableGeometry() : QRect(0, 0, 1920, 1080);
+    int screenWidth = screenGeometry.width();
+    int screenHeight = screenGeometry.height();
+    
+    // Calculate dock sizes as percentages of screen size
+    // Left sidebar: 22% of screen width (for SEC + Market Data tabs)
+    int leftDockWidth = static_cast<int>(screenWidth * 0.22);
+    // Bottom area: 15% of screen height (for commentary feeds)
+    int bottomDockHeight = static_cast<int>(screenHeight * 0.10);
+    
+    // Update minimum sizes based on screen percentages for better proportional layout
+    if (m_heatmapDock) {
+        m_heatmapDock->setMinimumWidth(static_cast<int>(screenWidth * 0.5));  // At least 50% width
+        m_heatmapDock->setMinimumHeight(static_cast<int>(screenHeight * 0.5)); // At least 50% height
+    }
+    if (m_secDock) {
+        m_secDock->setMinimumWidth(leftDockWidth);
+    }
+    if (m_marketDataDock) {
+        m_marketDataDock->setMinimumWidth(leftDockWidth);
+    }
+    if (m_copenetDock) {
+        m_copenetDock->setMinimumHeight(bottomDockHeight);
+    }
+    if (m_aiCommentaryDock) {
+        m_aiCommentaryDock->setMinimumHeight(bottomDockHeight);
+    }
+    
     // Remove all docks from their current positions first
     // This ensures they're removed from any tab groups or nested layouts
     if (m_heatmapDock && m_heatmapDock->parent() == this) {
@@ -480,8 +544,19 @@ void MainWindowGPU::arrangeDefaultLayout() {
     addDockWidget(Qt::BottomDockWidgetArea, m_aiCommentaryDock);
     tabifyDockWidget(m_copenetDock, m_aiCommentaryDock);
     
-    // Set relative sizes for bottom feeds (they share the bottom area equally)
+    // Set proportional sizes based on screen dimensions
+    // Use resizeDocks with relative proportions to control the split between areas
+    // Left vs Right: 22% left (22), 78% right (78) - using relative sizes
+    resizeDocks({m_secDock, m_heatmapDock}, {22, 78}, Qt::Horizontal);
+    
+    // Left dock area: tabbed docks share space equally
+    resizeDocks({m_secDock, m_marketDataDock}, {1, 1}, Qt::Horizontal);
+    
+    // Bottom dock area: 10% of screen height, split equally (tabbed docks share space)
     resizeDocks({m_copenetDock, m_aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+    
+    // Bottom vs Main area: 10% bottom, 85% main - using relative sizes
+    resizeDocks({m_copenetDock, m_heatmapDock}, {10, 90}, Qt::Vertical);
     
     // Ensure all docks are visible
     if (m_heatmapDock) m_heatmapDock->show();

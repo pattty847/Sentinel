@@ -2,6 +2,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable, Awaitable
+from .tag_mapping import FINANCIAL_TAG_MAP
 
 class FinancialDataProcessor:
     """Handles the processing and summarization of financial data extracted from SEC Company Facts (XBRL API).
@@ -26,22 +27,22 @@ class FinancialDataProcessor:
     # Define key metrics mapping for the financial summary required by the UI
     # Keys are snake_case matching the target flat dictionary output.
     # Values are the corresponding us-gaap or dei XBRL tags.
-    KEY_FINANCIAL_SUMMARY_METRICS = {
-        # Income Statement
-        "revenue": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
-        "net_income": ("us-gaap", "NetIncomeLoss"),
-        "eps": ("us-gaap", "EarningsPerShareBasic"), # Using Basic EPS for UI
-        # Balance Sheet
-        "assets": ("us-gaap", "Assets"),
-        "liabilities": ("us-gaap", "Liabilities"),
-        "equity": ("us-gaap", "StockholdersEquity"),
-        # Cash Flow
-        "operating_cash_flow": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
-        "investing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInInvestingActivities"),
-        "financing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInFinancingActivities"),
-        # Other potentially useful
-        # "shares_outstanding": ("dei", "EntityCommonStockSharesOutstanding") # Example DEI tag
-    }
+    # KEY_FINANCIAL_SUMMARY_METRICS = {
+    #     # Income Statement
+    #     "revenue": ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+    #     "net_income": ("us-gaap", "NetIncomeLoss"),
+    #     "eps": ("us-gaap", "EarningsPerShareBasic"), # Using Basic EPS for UI
+    #     # Balance Sheet
+    #     "assets": ("us-gaap", "Assets"),
+    #     "liabilities": ("us-gaap", "Liabilities"),
+    #     "equity": ("us-gaap", "StockholdersEquity"),
+    #     # Cash Flow
+    #     "operating_cash_flow": ("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
+    #     "investing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInInvestingActivities"),
+    #     "financing_cash_flow": ("us-gaap", "NetCashProvidedByUsedInFinancingActivities"),
+    #     # Other potentially useful
+    #     # "shares_outstanding": ("dei", "EntityCommonStockSharesOutstanding") # Example DEI tag
+    # }
 
     def __init__(self, fetch_facts_func: Callable[[str, bool], Awaitable[Optional[Dict]]]):
         """
@@ -476,7 +477,7 @@ class FinancialDataProcessor:
         Returns:
             Optional[Dict]: History dictionary with 'quarterly' and 'annual' keys, or None.
         """
-        tag_list = FINANCIAL_TAG_MAP.get(metric_key)
+        tag_list = FINANCIAL_TAG_MAP.get(metric_key) 
         if not tag_list:
             logging.warning(f"No tag mapping found for metric '{metric_key}'")
             return None
@@ -648,11 +649,10 @@ class FinancialDataProcessor:
 
         This is the main public method of the processor. It orchestrates the process:
         1. Calls the injected `fetch_company_facts` function to get the raw XBRL data.
-        2. Iterates through the `KEY_FINANCIAL_SUMMARY_METRICS` mapping.
-        3. For each metric, calls `_get_fact_history` to extract historical time-series data.
+        2. Iterates through the `FINANCIAL_TAG_MAP` mapping keys.
+        3. For each metric, calls `_get_fact_history_with_fallback` to extract historical time-series data.
         4. Populates a dictionary with the extracted history (quarterly and annual), along with metadata like
-           ticker, entity name, CIK, and the estimated source form and period end date
-           (based on the latest end date found among key income statement metrics).
+           ticker, entity name, CIK, and the estimated source form and period end date.
 
         Args:
             ticker (str): The stock ticker symbol for which to generate the summary.
@@ -662,11 +662,7 @@ class FinancialDataProcessor:
         Returns:
             Optional[Dict]: A dictionary containing the requested financial summary with historical data.
                 Keys include 'ticker', 'entityName', 'cik', 'source_form', 'period_end',
-                and the keys defined in `KEY_FINANCIAL_SUMMARY_METRICS` (e.g., 'revenue',
-                'net_income', 'assets'). Each metric value is a dictionary with 'quarterly' and
-                'annual' keys, each containing a list of entries sorted by date descending.
-                Returns None if the initial company facts data cannot be retrieved or if none
-                of the requested metrics are found.
+                and the keys defined in `FINANCIAL_TAG_MAP`.
         """
         company_facts = await self.fetch_company_facts(ticker, use_cache=use_cache)
         if not company_facts:
@@ -682,15 +678,16 @@ class FinancialDataProcessor:
         }
 
         # Initialize all required metric keys to None
-        for key in self.KEY_FINANCIAL_SUMMARY_METRICS.keys():
+        for key in FINANCIAL_TAG_MAP.keys():
             summary_data[key] = None
 
         latest_period_info = {"end_date": "0000-00-00", "form": None}
         has_data = False
 
-        # Iterate through the required metrics defined in the mapping
-        for metric_key, (taxonomy, concept_tag) in self.KEY_FINANCIAL_SUMMARY_METRICS.items():
-            fact_history = self._get_fact_history(company_facts, taxonomy, concept_tag)
+        # Iterate through the metrics defined in the tag mapping
+        for metric_key in FINANCIAL_TAG_MAP.keys():
+            # Use the fallback method to try multiple tags
+            fact_history = self._get_fact_history_with_fallback(company_facts, metric_key)
 
             if fact_history:
                 has_data = True
@@ -712,7 +709,7 @@ class FinancialDataProcessor:
                             latest_period_info["end_date"] = current_end_date
                             latest_period_info["form"] = entry_list[0].get("form")
             else:
-                 logging.debug(f"Metric '{metric_key}' (Tag: {concept_tag}, Tax: {taxonomy}) not found/no data for {ticker}.")
+                 # logging.debug(f"Metric '{metric_key}' not found/no data for {ticker}.")
                  summary_data[metric_key] = None
 
         summary_data["period_end"] = latest_period_info["end_date"] if latest_period_info["end_date"] != "0000-00-00" else None

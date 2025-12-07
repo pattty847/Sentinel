@@ -13,6 +13,8 @@ from .cache_manager import SecCacheManager
 from .document_handler import FilingDocumentHandler
 from .form4_processor import Form4Processor
 from .financial_processor import FinancialDataProcessor
+from .supply_chain_parser import SupplyChainParser
+from .sql_cache_manager import SqlCacheManager
 
 import pandas as pd
 
@@ -63,6 +65,7 @@ class SECDataFetcher:
         resolved_user_agent = user_agent or os.environ.get('SEC_API_USER_AGENT')
         self.http_client = SecHttpClient(user_agent=resolved_user_agent, rate_limit_sleep=rate_limit_sleep)
         self.cache_manager = SecCacheManager(cache_dir=cache_dir)
+        self.sql_manager = SqlCacheManager() # Initialize SQL manager
         self.document_handler = FilingDocumentHandler(http_client=self.http_client, cik_lookup_func=self.get_cik_for_ticker)
         self.form4_processor = Form4Processor(
             document_handler=self.document_handler,
@@ -71,6 +74,7 @@ class SECDataFetcher:
         self.financial_processor = FinancialDataProcessor(
             fetch_facts_func=self.get_company_facts # Pass the method directly
         )
+        self.supply_chain_parser = SupplyChainParser() # Initialize Parser
 
 
     # === CORE ORCHESTRATION METHODS ===
@@ -320,7 +324,71 @@ class SECDataFetcher:
 
     async def get_financial_summary(self, ticker: str, use_cache: bool = True) -> Optional[Dict]:
         """Generates a flattened summary of key financial metrics for the UI (Delegated)."""
-        return await self.financial_processor.get_financial_summary(ticker=ticker, use_cache=use_cache)
+        summary = await self.financial_processor.get_financial_summary(ticker=ticker, use_cache=use_cache)
+        
+        if summary:
+            # Persist to SQL for faster future access and querying
+            await self.sql_manager.initialize_db() # Ensure DB is ready (idempotent)
+            await self.sql_manager.save_financial_history(ticker, summary)
+            
+        return summary
+
+    async def get_supply_chain(self, ticker: str) -> List[Dict]:
+        """
+        Extracts supply chain relationships for a company from its latest 10-K.
+        
+        Orchestrates:
+        1. Fetch 10-K filings list.
+        2. Get primary HTML of the latest 10-K.
+        3. Clean and Parse HTML.
+        4. Save extracted edges to SQL.
+        5. Return relationships.
+        
+        Args:
+            ticker (str): Ticker symbol.
+            
+        Returns:
+            List[Dict]: List of relationship dictionaries.
+        """
+        # 1. Get latest 10-K
+        filings = await self.fetch_annual_reports(ticker, days_back=365*2)
+        if not filings:
+            logging.warning(f"No recent 10-K found for {ticker} to extract supply chain.")
+            return []
+            
+        latest_10k = filings[0]
+        accession_no = latest_10k['accession_no']
+        doc_date = latest_10k['filing_date']
+        
+        logging.info(f"Extracting supply chain for {ticker} from 10-K ({doc_date})...")
+        
+        # 2. Fetch Raw HTML
+        raw_html = await self.document_handler.fetch_primary_html(accession_no, ticker)
+        if not raw_html:
+            logging.error(f"Failed to fetch HTML content for 10-K {accession_no}")
+            return []
+            
+        # 3. Parse
+        clean_text = self.supply_chain_parser.clean_html(raw_html)
+        sections = self.supply_chain_parser.extract_sections(clean_text)
+        relationships = self.supply_chain_parser.extract_relationships(sections)
+        
+        logging.info(f"Extracted {len(relationships)} relationships for {ticker}.")
+        
+        # 4. Save to SQL
+        await self.sql_manager.initialize_db()
+        for rel in relationships:
+            await self.sql_manager.save_relationship(
+                source_ticker=ticker,
+                target_entity=rel['target_entity'],
+                relationship_type=rel['relationship_type'],
+                weight=rel['weight'],
+                context=rel['context'],
+                confidence=rel['confidence_score'],
+                doc_date=doc_date
+            )
+            
+        return relationships
 
     # === OTHER PUBLIC METHODS ===
 

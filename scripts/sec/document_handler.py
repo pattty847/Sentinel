@@ -244,6 +244,7 @@ class FilingDocumentHandler:
                 index_html = await self.http_client.make_archive_request(index_html_url, is_json=False)
                 if index_html and isinstance(index_html, str):  # Check if we got valid HTML
                     # Simple regex patterns for common primary docs - capturing filename part
+                    # Filter out known bad patterns like index-headers or xsl styling
                     patterns = [
                         r'''href=["'][^"']*(form4\.xml)["']''',           # Form 4 XML
                         r'''href=["'][^"']*(d\\d+k\.htm)["']''',          # 8-K patterns like d123456k.htm
@@ -255,9 +256,15 @@ class FilingDocumentHandler:
                     ]
                     found_match = None
                     for pattern in patterns:
-                        match = re.search(pattern, index_html, re.IGNORECASE)
-                        if match:
-                            found_match = match.group(1)  # Capture the filename part
+                        matches = re.finditer(pattern, index_html, re.IGNORECASE)
+                        for match in matches:
+                            candidate = match.group(1)
+                            # Filter out bad matches even if regex hits
+                            if 'index-headers' in candidate or 'xsl' in candidate:
+                                continue
+                            found_match = candidate
+                            break
+                        if found_match:
                             break
 
                     if found_match:
@@ -268,11 +275,14 @@ class FilingDocumentHandler:
                         table_match = re.search(r'''<table.*?>(.*?)</table>''', index_html, re.DOTALL | re.IGNORECASE)
                         if table_match:
                             table_html = table_match.group(1)
-                            link_match = re.search(r'''href=["']([^"']+\.(?:htm|xml))["']''', table_html, re.IGNORECASE)
-                            if link_match:
-                                # Extract filename from potential path
-                                primary_doc = os.path.basename(link_match.group(1))
-                                logging.info(f"Found potential primary document via first link in index.htm table: {primary_doc}")
+                            # Find all links
+                            link_matches = re.finditer(r'''href=["']([^"']+\.(?:htm|xml))["']''', table_html, re.IGNORECASE)
+                            for link_match in link_matches:
+                                candidate = os.path.basename(link_match.group(1))
+                                if 'index-headers' not in candidate and 'xsl' not in candidate:
+                                    primary_doc = candidate
+                                    logging.info(f"Found potential primary document via first link in index.htm table: {primary_doc}")
+                                    break
             except Exception as e:
                 logging.error(f"Error processing HTML index for {accession_no}: {e}")
 
@@ -281,6 +291,96 @@ class FilingDocumentHandler:
             return None
 
         return primary_doc
+
+    async def fetch_primary_html(self, accession_no: str, ticker: Optional[str] = None) -> Optional[str]:
+        """
+        Fetches the primary HTML document for a filing, ensuring we get the .htm version.
+        
+        IMPROVED STRATEGY:
+        1. Prioritize files where 'type' is explicitly 10-K/10-Q in the index.
+        2. Prioritize files that start with the [ticker] (e.g., 'aapl-2024.htm').
+        3. STRICTLY IGNORE 'index-headers' and 'xsl' files unless absolutely nothing else exists.
+        """
+        cik_for_url = await self._get_cik_for_filing(accession_no, ticker)
+        if not cik_for_url: return None
+        
+        # 1. Get document list
+        documents = await self.get_filing_documents_list(accession_no, ticker)
+        if not documents: return None
+        
+        html_doc_name = None
+        
+        # Lists to sort candidates by quality
+        priority_high = []   # Type matches 10-K/10-Q
+        priority_med = []    # Filename starts with ticker
+        priority_low = []    # Generic HTML files
+        garbage_bin = []     # index-headers, exhibits
+        
+        ticker_lower = ticker.lower() if ticker else ""
+
+        for doc in documents:
+            name = doc.get('name', '').lower()
+            doc_type = doc.get('type', '').upper()
+            
+            # Must be HTML
+            if not name.endswith(('.htm', '.html')):
+                continue
+            
+            # Identify Garbage
+            if 'index-headers' in name or 'xsl' in name or 'primary_doc.xml' in name:
+                garbage_bin.append(name)
+                continue
+            
+            # Identify Exhibits (Low Value)
+            if 'exhibit' in name or 'ex-' in name:
+                garbage_bin.append(name) # Treat exhibits as garbage for "Primary Doc" purposes
+                continue
+
+            # --- SORTING HAT ---
+            
+            # Tier 1: Explicit SEC Type (The most reliable)
+            if doc_type in ['10-K', '10-Q', '10-K/A', '10-Q/A']:
+                priority_high.append(name)
+                
+            # Tier 2: Filename is "[ticker]-[date].htm" (Standard convention)
+            elif ticker_lower and name.startswith(ticker_lower + '-'):
+                priority_med.append(name)
+                
+            # Tier 3: Filename contains form type
+            elif '10-k' in name or '10k' in name or '10-q' in name or '10q' in name:
+                priority_med.append(name)
+                
+            # Tier 4: Anything else
+            else:
+                priority_low.append(name)
+
+        # Selection Logic: Pick the best available bucket
+        if priority_high:
+            html_doc_name = priority_high[0]
+        elif priority_med:
+            html_doc_name = priority_med[0]
+        elif priority_low:
+            html_doc_name = priority_low[0]
+        elif garbage_bin:
+            # Desperation move
+            logging.warning(f"Only garbage files found for {accession_no}. Trying: {garbage_bin[0]}")
+            html_doc_name = garbage_bin[0]
+
+        if not html_doc_name:
+            # Fallback to the heuristic method if the list logic failed
+            logging.info("List logic yielded no HTML. Trying fallback detection.")
+            fallback = await self._find_primary_document_name(accession_no, cik_for_url)
+            if fallback and fallback.lower().endswith(('.htm', '.html')):
+                html_doc_name = fallback
+                
+        if not html_doc_name:
+            logging.warning(f"Could not find explicit HTML document for {accession_no}")
+            return None
+            
+        logging.info(f"Identified primary HTML document: {html_doc_name}")
+        return await self.download_form_document(accession_no, html_doc_name, ticker)
+
+
 
     async def fetch_filing_document(self, accession_no: str, primary_doc: Optional[str] = None, ticker: Optional[str] = None) -> Optional[str]:
         """
