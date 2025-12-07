@@ -9,6 +9,11 @@ CommentaryFeedDock::CommentaryFeedDock(const QString& id, const QString& title, 
     buildUi();
 }
 
+QSize CommentaryFeedDock::minimumSizeHint() const {
+    // Compact chat-style view; enough for a few lines of text
+    return QSize(280, 160);
+}
+
 void CommentaryFeedDock::buildUi() {
     QVBoxLayout* layout = new QVBoxLayout(m_contentWidget);
     

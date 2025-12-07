@@ -5,6 +5,20 @@ set(GRID_CORE_SOURCES
     ChartModeController.cpp
     ChartModeController.h
     
+    # MainWindow modular components
+    mainwindow/DataBootstrapper.cpp
+    mainwindow/DataBootstrapper.h
+    mainwindow/DockFactory.cpp
+    mainwindow/DockFactory.h
+    mainwindow/QmlSceneController.cpp
+    mainwindow/QmlSceneController.h
+    mainwindow/LayoutOrchestrator.cpp
+    mainwindow/LayoutOrchestrator.h
+    mainwindow/MenuBuilder.cpp
+    mainwindow/MenuBuilder.h
+    mainwindow/ShortcutBinder.cpp
+    mainwindow/ShortcutBinder.h
+    
     # Grid system components
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.h

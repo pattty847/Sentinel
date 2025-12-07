@@ -34,6 +34,10 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     if (savedVersion != APP_LAYOUT_VERSION) {
         qWarning() << "Layout version mismatch:" << savedVersion << "vs" << APP_LAYOUT_VERSION
                    << "- falling back to default layout";
+        // Purge incompatible layout so we don't keep restoring stale geometry
+        settings.endGroup();
+        settings.beginGroup(layoutName);
+        settings.remove(QString());  // Clear current layout group
         settings.endGroup();
         settings.endGroup();
         return false;
@@ -45,11 +49,13 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     
     if (state.isEmpty()) {
         qWarning() << "Layout restore failed: empty state data";
+        deleteLayout(layoutName);
         return false;
     }
     
     if (!window->restoreState(state)) {
         qWarning() << "Layout restore failed: restoreState() returned false - falling back to default layout";
+        deleteLayout(layoutName);
         return false;
     }
     

@@ -20,6 +20,7 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QCloseEvent>
+#include <QShowEvent>
 #include <QStatusBar>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
@@ -30,10 +31,14 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "widgets/StatusBar.hpp"
 #include "widgets/MarketDataPanel.hpp"
 #include "widgets/SecFilingDock.hpp"
-#include "widgets/CopenetFeedDock.hpp"
-#include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
+#include "mainwindow/DataBootstrapper.h"
+#include "mainwindow/DockFactory.h"
+#include "mainwindow/QmlSceneController.h"
+#include "mainwindow/LayoutOrchestrator.h"
+#include "mainwindow/MenuBuilder.h"
+#include "mainwindow/ShortcutBinder.h"
 #include <QQmlContext>
 #include <QMetaObject>
 #include <QDir>
@@ -47,6 +52,8 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScopeGuard>
+#include <QScreen>
+#include <QApplication>
 
 // Helper macro for scoped logging
 #define LOG_SCOPE(msg) sLog_App(msg " started"); auto _scopeGuard = qScopeGuard([=]{ sLog_App(msg " complete"); });
@@ -54,22 +61,43 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     LOG_SCOPE("MainWindowGPU construction");
     
-    initializeDataComponents();
+    // 1) Initialize data components via DataBootstrapper
+    auto dataComponents = DataBootstrapper::initialize();
+    m_marketDataCore = std::move(dataComponents.marketDataCore);
+    m_authenticator = std::move(dataComponents.authenticator);
+    m_dataCache = std::move(dataComponents.dataCache);
     
     // Register services with ServiceLocator
     ServiceLocator::registerMarketDataCore(m_marketDataCore.get());
     ServiceLocator::registerDataCache(m_dataCache.get());
     
+    // 2) Create dock widgets via DockFactory
     setupUI();
+    
+    // 3) Initialize QML scene controller
+    m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
+    m_qmlController->loadQmlSource();
+    m_qmlController->verifyGpuAcceleration();
+    
+    // Set up QML context properties
+    m_modeController = new ChartModeController(this);
+    m_qmlController->setChartModeController(m_modeController);
+    m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
+    
+    // 4) Set up layout orchestrator
+    // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
+    // because resizeDocks() doesn't work correctly when window is at default 640x480 size.
+    m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
+    
+    // 5) Set up menu bar and shortcuts
+    m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
+    m_shortcutBinder = std::make_unique<ShortcutBinder>(this);
     setupMenuBar();
     setupShortcuts();
+    
+    // 6) Set up connections
     setupConnections();
     setWindowProperties();
-    
-    // Restore default layout if it exists
-    if (!LayoutManager::restoreLayout(this, LayoutManager::defaultLayoutName())) {
-        sLog_App("No saved layout found, using default arrangement");
-    }
     
     if (!validateComponents()) {
         sLog_Error("Component validation failed - app may not function correctly");
@@ -89,129 +117,57 @@ MainWindowGPU::~MainWindowGPU() {
         m_marketDataCore.reset();
     }
     
-    if (m_qquickView) m_qquickView->setSource(QUrl());  // Clear QML
+    if (m_qmlController) {
+        // QmlSceneController manages QML cleanup
+    }
 }
 
-void MainWindowGPU::initializeDataComponents() {
-    LOG_SCOPE("Initializing data components");
-    
-    // Load config (example: extract to separate class if complex)
-    QSettings config("config.ini", QSettings::IniFormat);
-    QString defaultKeyFile = config.value("auth/keyFile", "key.json").toString();
-    
-    m_authenticator = std::make_unique<Authenticator>(defaultKeyFile.toStdString());
-    m_dataCache = std::make_unique<DataCache>();
-
-    m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache);
-    m_marketDataCore->start();
-}
+// Data components initialization moved to DataBootstrapper
 
 void MainWindowGPU::setupUI() {
     LOG_SCOPE("Setting up UI");
     
-    // Enable docking features - AllowNestedDocks enables side-by-side docking (Windows-style)
-    setDockOptions(QMainWindow::AllowTabbedDocks | QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks);
-    setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
-    
     // Prevent repaint storms during setup
     setUpdatesEnabled(false);
     
-    // Create bottom status bar
-    m_statusBar = new StatusBar(this);
-    // Add our custom status bar widget to Qt's status bar
-    statusBar()->addPermanentWidget(m_statusBar);
-    statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
+    // Create docks via DockFactory
+    DockFactory dockFactory(this);
+    auto docks = dockFactory.createDocks();
+    m_heatmapDock = docks.heatmapDock;
+    m_statusBar = docks.statusBar;
+    m_marketDataDock = docks.marketDataDock;
+    m_secDock = docks.secDock;
+    m_copenetDock = docks.copenetDock;
+    m_aiCommentaryDock = docks.aiCommentaryDock;
     
-    // Create HeatmapDock and load QML source and configure GPU acceleration
-    m_heatmapDock = new HeatmapDock(this);
+    // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
-    loadQmlSource();
-    verifyGpuAcceleration();
     
-    QQmlContext* context = m_qquickView->rootContext();
-    m_modeController = new ChartModeController(this);
-    context->setContextProperty("chartModeController", m_modeController);
-    // TODO: Add configuration for this symbol
-    updateSymbolInContext("BTC-USD");  // Centralized
+    // Get symbol controls
+    auto symbolControls = dockFactory.getSymbolControls();
+    m_symbolInput = symbolControls.symbolInput;
+    m_subscribeButton = symbolControls.subscribeButton;
     
-    // Create all docks first
-    m_marketDataDock = new MarketDataPanel(this);
-    m_secDock = new SecFilingDock(this);
-    m_copenetDock = new CopenetFeedDock(this);
-    m_aiCommentaryDock = new AICommentaryFeedDock(this);
-    
-    // Get references to embedded symbol controls from HeatmapDock
-    m_symbolInput = m_heatmapDock->symbolInput();
-    m_subscribeButton = m_heatmapDock->subscribeButton();
-    
-    // Set minimum sizes for better default layout
-    m_heatmapDock->setMinimumWidth(800);
-    m_heatmapDock->setMinimumHeight(600);
-    m_secDock->setMinimumWidth(300);
-    m_marketDataDock->setMinimumWidth(350);
-    
-    // Arrange docks for optimal layout
-    arrangeDefaultLayout();
+    // Add status bar to main window
+    statusBar()->addPermanentWidget(m_statusBar);
+    statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     
     // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     connect(this, &MainWindowGPU::symbolChanged, m_marketDataDock, &MarketDataPanel::onSymbolChanged);
     
-    // Symbol controls are now embedded in HeatmapDock
     setUpdatesEnabled(true);
 }
 
-void MainWindowGPU::loadQmlSource() {
-    // Configurable path (extract from config)
-    QSettings config("config.ini", QSettings::IniFormat);
-    QString qmlPath = config.value("qml/path", QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath())).toString();
-    
-    const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
-    if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;  // Override
-    
-    if (QFile::exists(qmlPath)) {
-        m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));
-    } else {
-        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
-    }
-    
-    if (m_qquickView->status() == QQuickView::Error) {
-        sLog_Error("QML FAILED TO LOAD! Errors: " << m_qquickView->errors());
-        QMessageBox::critical(this, "QML Error", "Failed to load QML. Check logs for details.");
-    }
-}
+// QML loading and GPU verification moved to QmlSceneController
 
-void MainWindowGPU::verifyGpuAcceleration() {
-    if (m_qquickView->status() != QQuickView::Ready) return;
-    
-    auto* rhi = m_qquickView->rendererInterface();
-    if (rhi && rhi->graphicsApi() != QSGRendererInterface::Null) {
-        sLog_App("🎮 GPU ACCELERATION ACTIVE: " << graphicsApiName(rhi->graphicsApi()));  // Helper function for name
-    } else {
-        sLog_Error("❌ NO GPU ACCELERATION!");
-    }
-}
-
-QString MainWindowGPU::graphicsApiName(QSGRendererInterface::GraphicsApi api) {  // Helper
-    switch (api) {
-        case QSGRendererInterface::OpenGL: return "OpenGL";
-        case QSGRendererInterface::Direct3D11: return "Direct3D 11";
-        case QSGRendererInterface::Vulkan: return "Vulkan";
-        case QSGRendererInterface::Metal: return "Metal";
-        default: return "Unknown";
-    }
-}
-
-void MainWindowGPU::applyStyles() {
-    // Styles are now handled by individual dock widgets
-    // Keep this method for any future global styling needs
-}
+// Styles are now handled by individual dock widgets
 
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
-    // TODO: Make full screen 
-    resize(1400, 900);
+    // Set window state to maximized (will be applied when window is shown)
+    setWindowState(Qt::WindowMaximized);
 }
 
 void MainWindowGPU::setupConnections() {
@@ -229,7 +185,7 @@ void MainWindowGPU::onSubscribe() {
     }
     
     sLog_App("Subscribing to: " << symbol);
-    updateSymbolInContext(symbol);
+    m_qmlController->updateSymbolInContext(symbol);
     propagateSymbolChange(symbol);
     if (m_marketDataCore) {
         m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
@@ -241,158 +197,81 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
-    // Save current layout as default
-    LayoutManager::saveLayout(this, LayoutManager::defaultLayoutName());
+    // Auto-save current layout so it restores on next launch
+    sLog_App("Saving session layout on close");
+    m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
 
-void MainWindowGPU::setupMenuBar() {
-    QMenuBar* menuBar = this->menuBar();
+void MainWindowGPU::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
     
-    // View Menu
-    QMenu* viewMenu = menuBar->addMenu("&View");
-    // Add dock visibility toggles (symbol control is now embedded in heatmap)
-    if (m_heatmapDock) {
-        viewMenu->addAction(m_heatmapDock->toggleViewAction());
-    }
-    if (m_marketDataDock) {
-        viewMenu->addAction(m_marketDataDock->toggleViewAction());
-    }
-    if (m_secDock) {
-        viewMenu->addAction(m_secDock->toggleViewAction());
-    }
-    if (m_copenetDock) {
-        viewMenu->addAction(m_copenetDock->toggleViewAction());
-    }
-    if (m_aiCommentaryDock) {
-        viewMenu->addAction(m_aiCommentaryDock->toggleViewAction());
-    }
+    sLog_App("=== showEvent triggered ===");
+    sLog_App("  Window size: " << width() << "x" << height());
     
-    // Layouts Menu
-    QMenu* layoutsMenu = menuBar->addMenu("&Layouts");
-    
-    QAction* saveLayoutAction = layoutsMenu->addAction("&Save Current Layout...");
-    connect(saveLayoutAction, &QAction::triggered, this, [this]() {
-        bool ok;
-        QString name = QInputDialog::getText(this, "Save Layout", "Layout name:", 
-                                            QLineEdit::Normal, "", &ok);
-        if (ok && !name.isEmpty()) {
-            LayoutManager::saveLayout(this, name);
-            sLog_App("Layout saved: " << name);
-        }
-    });
-    
-    QAction* restoreLayoutAction = layoutsMenu->addAction("&Restore Layout...");
-    connect(restoreLayoutAction, &QAction::triggered, this, [this]() {
-        QStringList layouts = LayoutManager::availableLayouts();
-        if (layouts.isEmpty()) {
-            QMessageBox::information(this, "No Layouts", "No saved layouts found.");
-            return;
+    // First show: maximize window, then restore/arrange layout AFTER maximization completes
+    if (m_firstShow) {
+        m_firstShow = false;
+        
+        // Step 1: Maximize the window first
+        if (windowState() != Qt::WindowMaximized) {
+            showMaximized();
         }
         
-        bool ok;
-        QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
-                                                layouts, 0, false, &ok);
-        if (ok && !selected.isEmpty()) {
-            if (LayoutManager::restoreLayout(this, selected)) {
-                sLog_App("Layout restored: " << selected);
+        // Step 2: Restore or arrange layout AFTER window has fully maximized
+        QTimer::singleShot(50, this, [this]() {
+            sLog_App("=== Restoring layout after maximize ===");
+            sLog_App("  Window size: " << width() << "x" << height());
+            
+            // Try to restore last session layout, fall back to default
+            if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
+                sLog_App("Restored last session layout");
             } else {
-                QMessageBox::warning(this, "Restore Failed", 
-                                    "Failed to restore layout. Using default arrangement.");
+                sLog_App("No saved session, using default layout");
+                m_layoutOrchestrator->arrangeDefaultLayout(getDockWidgets());
             }
-        }
-    });
+        });
+    }
+}
+
+void MainWindowGPU::setupMenuBar() {
+    MenuBuilder::DockWidgets docks;
+    docks.heatmapDock = m_heatmapDock;
+    docks.marketDataDock = m_marketDataDock;
+    docks.secDock = m_secDock;
+    docks.copenetDock = m_copenetDock;
+    docks.aiCommentaryDock = m_aiCommentaryDock;
     
-    QAction* resetLayoutAction = layoutsMenu->addAction("&Reset to Default Layout");
-    connect(resetLayoutAction, &QAction::triggered, this, [this]() {
-        LayoutManager::resetToDefault(this);
-        sLog_App("Layout reset to default");
-    });
+    MenuBuilder::Callbacks callbacks;
+    callbacks.saveLayout = [this]() { onSaveLayout(); };
+    callbacks.restoreLayout = [this]() { onRestoreLayout(); };
+    callbacks.resetLayout = [this]() { onResetLayout(); };
+    callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
+    callbacks.openMarketDataPanel = [this]() { onOpenMarketDataPanel(); };
     
-    layoutsMenu->addSeparator();
-    
-    // Tools Menu
-    QMenu* toolsMenu = menuBar->addMenu("&Tools");
-    QAction* openSecAction = toolsMenu->addAction("Open &SEC Filing Viewer");
-    connect(openSecAction, &QAction::triggered, this, [this]() {
-        if (m_secDock && !m_secDock->isVisible()) {
-            m_secDock->show();
-            m_secDock->raise();
-        }
-    });
-    
-    QAction* openMarketDataAction = toolsMenu->addAction("Open &Market Data Panel");
-    connect(openMarketDataAction, &QAction::triggered, this, [this]() {
-        if (m_marketDataDock && !m_marketDataDock->isVisible()) {
-            m_marketDataDock->show();
-            m_marketDataDock->raise();
-        }
-    });
-    
-    toolsMenu->addSeparator();
-    QAction* settingsAction = toolsMenu->addAction("&Settings...");
-    settingsAction->setEnabled(false);  // Placeholder for future
+    m_menuBuilder->buildMenus(docks, callbacks);
 }
 
 void MainWindowGPU::setupShortcuts() {
-    // Ctrl+S - Save current layout
-    QShortcut* saveShortcut = new QShortcut(QKeySequence::Save, this);
-    connect(saveShortcut, &QShortcut::activated, this, [this]() {
-        bool ok;
-        QString name = QInputDialog::getText(this, "Save Layout", "Layout name:",
-                                             QLineEdit::Normal, "", &ok);
-        if (ok && !name.isEmpty()) {
-            LayoutManager::saveLayout(this, name);
-        }
-    });
+    ShortcutBinder::Callbacks callbacks;
+    callbacks.saveLayout = [this]() { onSaveLayout(); };
+    callbacks.restoreLayout = [this]() { onRestoreLayout(); };
+    callbacks.resetLayout = [this]() { onResetLayout(); };
     
-    // Ctrl+L - Restore layout dialog
-    QShortcut* loadShortcut = new QShortcut(QKeySequence("Ctrl+L"), this);
-    connect(loadShortcut, &QShortcut::activated, this, [this]() {
-        QStringList layouts = LayoutManager::availableLayouts();
-        if (layouts.isEmpty()) {
-            QMessageBox::information(this, "No Layouts", "No saved layouts found.");
-            return;
-        }
-        bool ok;
-        QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
-                                                 layouts, 0, false, &ok);
-        if (ok && !selected.isEmpty()) {
-            LayoutManager::restoreLayout(this, selected);
-        }
-    });
+    ShortcutBinder::DockWidgets docks;
+    docks.heatmapDock = m_heatmapDock;
+    docks.marketDataDock = m_marketDataDock;
+    docks.secDock = m_secDock;
     
-    // Ctrl+R - Reset to default layout
-    QShortcut* resetShortcut = new QShortcut(QKeySequence("Ctrl+R"), this);
-    connect(resetShortcut, &QShortcut::activated, this, [this]() {
-        LayoutManager::resetToDefault(this);
-    });
-    
-    // F1-F3 - Toggle docks
-    QShortcut* f1Shortcut = new QShortcut(QKeySequence("F1"), this);
-    connect(f1Shortcut, &QShortcut::activated, this, [this]() {
-        if (m_heatmapDock) m_heatmapDock->setVisible(!m_heatmapDock->isVisible());
-    });
-    
-    QShortcut* f2Shortcut = new QShortcut(QKeySequence("F2"), this);
-    connect(f2Shortcut, &QShortcut::activated, this, [this]() {
-        if (m_marketDataDock) m_marketDataDock->setVisible(!m_marketDataDock->isVisible());
-    });
-    
-    QShortcut* f3Shortcut = new QShortcut(QKeySequence("F3"), this);
-    connect(f3Shortcut, &QShortcut::activated, this, [this]() {
-        if (m_secDock) m_secDock->setVisible(!m_secDock->isVisible());
-    });
+    m_shortcutBinder->bindShortcuts(callbacks, docks);
 }
 
-void MainWindowGPU::updateSymbolInContext(const QString& symbol) {
-    if (m_qquickView) m_qquickView->rootContext()->setContextProperty("symbol", symbol);
-}
+// Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
     LOG_SCOPE("Connecting MarketData signals");
     
-    auto unifiedGridRenderer = getUnifiedGridRenderer();
+    auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
     if (!m_marketDataCore || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");
         return;
@@ -433,73 +312,75 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted fo
 }
 
 bool MainWindowGPU::validateComponents() {
-    if (m_qquickView->status() != QQuickView::Ready) return false;
-    if (!getUnifiedGridRenderer()) return false;
+    if (!m_qmlController || !m_qmlController->isValid()) return false;
+    if (!m_qmlController->getUnifiedGridRenderer()) return false;
     if (!m_marketDataCore) return false;
     return true;
 }
 
-void MainWindowGPU::arrangeDefaultLayout() {
-    // Prevent repaint storms during layout changes
-    setUpdatesEnabled(false);
-    
-    // Remove all docks from their current positions first
-    // This ensures they're removed from any tab groups or nested layouts
-    if (m_heatmapDock && m_heatmapDock->parent() == this) {
-        removeDockWidget(m_heatmapDock);
-        // Ensure dock is fully removed and ready for re-docking
-        m_heatmapDock->setFloating(false);
-    }
-    if (m_secDock && m_secDock->parent() == this) {
-        removeDockWidget(m_secDock);
-        m_secDock->setFloating(false);
-    }
-    if (m_marketDataDock && m_marketDataDock->parent() == this) {
-        removeDockWidget(m_marketDataDock);
-        m_marketDataDock->setFloating(false);
-    }
-    if (m_copenetDock && m_copenetDock->parent() == this) {
-        removeDockWidget(m_copenetDock);
-        m_copenetDock->setFloating(false);
-    }
-    if (m_aiCommentaryDock && m_aiCommentaryDock->parent() == this) {
-        removeDockWidget(m_aiCommentaryDock);
-        m_aiCommentaryDock->setFloating(false);
-    }
-    
-    // Right: Heatmap (includes embedded symbol control bar at bottom)
-    addDockWidget(Qt::RightDockWidgetArea, m_heatmapDock);
-    
-    // Left: SEC Filing Viewer and Market Data (tabbed together, narrow sidebar)
-    addDockWidget(Qt::LeftDockWidgetArea, m_secDock);
-    addDockWidget(Qt::LeftDockWidgetArea, m_marketDataDock);
-    tabifyDockWidget(m_secDock, m_marketDataDock);  // Tab them together
-    
-    // Bottom: Commentary feeds (small height, split horizontally)
-    addDockWidget(Qt::BottomDockWidgetArea, m_copenetDock);
-    addDockWidget(Qt::BottomDockWidgetArea, m_aiCommentaryDock);
-    tabifyDockWidget(m_copenetDock, m_aiCommentaryDock);
-    
-    // Set relative sizes for bottom feeds (they share the bottom area equally)
-    resizeDocks({m_copenetDock, m_aiCommentaryDock}, {1, 1}, Qt::Horizontal);
-    
-    // Ensure all docks are visible
-    if (m_heatmapDock) m_heatmapDock->show();
-    if (m_secDock) m_secDock->show();
-    if (m_marketDataDock) m_marketDataDock->show();
-    if (m_copenetDock) m_copenetDock->show();
-    if (m_aiCommentaryDock) m_aiCommentaryDock->show();
-    
-    setUpdatesEnabled(true);
-}
+// Layout arrangement moved to LayoutOrchestrator
 
 void MainWindowGPU::resetLayoutToDefault() {
-    sLog_App("Resetting layout to default");
-    arrangeDefaultLayout();
-    // Clear saved layout so next time it uses this fresh default
-    LayoutManager::deleteLayout(LayoutManager::defaultLayoutName());
+    m_layoutOrchestrator->resetLayoutToDefault(getDockWidgets());
 }
 
-UnifiedGridRenderer* MainWindowGPU::getUnifiedGridRenderer() const {
-    return m_qquickView->rootObject() ? m_qquickView->rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer") : nullptr;
+// UnifiedGridRenderer access moved to QmlSceneController
+
+void MainWindowGPU::onSaveLayout() {
+    bool ok;
+    QString name = QInputDialog::getText(this, "Save Layout", "Layout name:", 
+                                        QLineEdit::Normal, "", &ok);
+    if (ok && !name.isEmpty()) {
+        m_layoutOrchestrator->saveLayout(name);
+        sLog_App("Layout saved: " << name);
+    }
+}
+
+void MainWindowGPU::onRestoreLayout() {
+    QStringList layouts = LayoutManager::availableLayouts();
+    if (layouts.isEmpty()) {
+        QMessageBox::information(this, "No Layouts", "No saved layouts found.");
+        return;
+    }
+    
+    bool ok;
+    QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
+                                            layouts, 0, false, &ok);
+    if (ok && !selected.isEmpty()) {
+        if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
+            sLog_App("Layout restored: " << selected);
+        } else {
+            QMessageBox::warning(this, "Restore Failed", 
+                                "Failed to restore layout. Using default arrangement.");
+        }
+    }
+}
+
+void MainWindowGPU::onResetLayout() {
+    resetLayoutToDefault();
+    sLog_App("Layout reset to default");
+}
+
+void MainWindowGPU::onOpenSecFilingViewer() {
+    if (m_secDock && !m_secDock->isVisible()) {
+        m_secDock->show();
+        m_secDock->raise();
+    }
+}
+
+void MainWindowGPU::onOpenMarketDataPanel() {
+    if (m_marketDataDock && !m_marketDataDock->isVisible()) {
+        m_marketDataDock->show();
+        m_marketDataDock->raise();
+    }
+}
+
+LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
+    LayoutOrchestrator::DockWidgets docks;
+    docks.heatmapDock = m_heatmapDock;
+    docks.marketDataDock = m_marketDataDock;
+    docks.secDock = m_secDock;
+    docks.copenetDock = m_copenetDock;
+    docks.aiCommentaryDock = m_aiCommentaryDock;
+    return docks;
 }

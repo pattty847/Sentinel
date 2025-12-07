@@ -20,6 +20,11 @@ MarketDataPanel::MarketDataPanel(QWidget* parent)
     }
 }
 
+QSize MarketDataPanel::minimumSizeHint() const {
+    // Compact but keeps table headers and a few rows readable
+    return QSize(360, 240);
+}
+
 void MarketDataPanel::buildUi() {
     QVBoxLayout* layout = new QVBoxLayout(m_contentWidget);
     
