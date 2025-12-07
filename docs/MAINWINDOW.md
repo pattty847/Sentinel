@@ -85,15 +85,15 @@ m_qmlController->setChartModeController(modeController);
 **Purpose**: Handles dock arrangement, sizing, and layout persistence.
 
 **Key Features**:
-- Arranges docks in default layout (left sidebar, right heatmap, bottom feeds)
-- Screen-percentage-based sizing (22% left, 78% right, 90% main height, 10% bottom)
+- Arranges docks in default layout (left heatmap, right sidebar, bottom feeds)
+- Screen-percentage-based sizing (70% heatmap, 30% sidebar, 90% main height, 10% bottom)
 - Integrates with `LayoutManager` for save/restore
 - Handles dock tabbing and nested layouts
 
 **Layout Proportions**:
-- **Horizontal**: 22% left sidebar, 78% heatmap
-- **Vertical**: 90% heatmap, 10% bottom commentary feeds
-- **Left sidebar**: Tabbed SEC Filing Viewer and Market Data Panel
+- **Horizontal**: 70% heatmap (left), 30% sidebar (right)
+- **Vertical**: 90% main area height, 10% bottom commentary feeds
+- **Right sidebar**: Tabbed SEC Filing Viewer and Market Data Panel
 - **Bottom**: Tabbed COPENET and AI Commentary feeds
 
 **Usage**:

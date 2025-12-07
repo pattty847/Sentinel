@@ -712,6 +712,10 @@ class FinancialDataProcessor:
                  # logging.debug(f"Metric '{metric_key}' not found/no data for {ticker}.")
                  summary_data[metric_key] = None
 
+        # Calculate derived metrics (EBITDA, FCF, Margins)
+        derived_metrics = self._calculate_derived_metrics(summary_data)
+        summary_data.update(derived_metrics)
+
         summary_data["period_end"] = latest_period_info["end_date"] if latest_period_info["end_date"] != "0000-00-00" else None
         summary_data["source_form"] = latest_period_info["form"]
 

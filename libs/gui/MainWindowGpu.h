@@ -131,4 +131,6 @@ private:
     std::unique_ptr<LayoutOrchestrator> m_layoutOrchestrator;
     std::unique_ptr<MenuBuilder> m_menuBuilder;
     std::unique_ptr<ShortcutBinder> m_shortcutBinder;
+
+    bool m_firstShow = true;
 };

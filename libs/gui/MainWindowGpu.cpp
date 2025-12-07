@@ -31,8 +31,6 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "widgets/StatusBar.hpp"
 #include "widgets/MarketDataPanel.hpp"
 #include "widgets/SecFilingDock.hpp"
-#include "widgets/CopenetFeedDock.hpp"
-#include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/DataBootstrapper.h"
@@ -212,9 +210,8 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
     sLog_App("  Window size: " << width() << "x" << height());
     
     // First show: maximize window, then restore/arrange layout AFTER maximization completes
-    static bool firstShow = true;
-    if (firstShow) {
-        firstShow = false;
+    if (m_firstShow) {
+        m_firstShow = false;
         
         // Step 1: Maximize the window first
         if (windowState() != Qt::WindowMaximized) {
