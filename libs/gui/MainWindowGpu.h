@@ -47,6 +47,15 @@ class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 
+// Forward declarations for modular components
+class DataBootstrapper;
+class DockFactory;
+class QmlSceneController;
+class LayoutOrchestrator;
+class MenuBuilder;
+class ShortcutBinder;
+struct DataComponents;
+
 /**
  *  GPU-Powered Trading Terminal MainWindow
  * Clean, focused implementation for GPU rendering with dockable widgets
@@ -76,46 +85,48 @@ protected:
 
 private:
     void setupUI();
-    void setupConnections();
     void setupMenuBar();
     void setupShortcuts();
-    void initializeQMLComponents();
+    void setupConnections();
     void connectMarketDataSignals();
-    void initializeDataComponents();
-    void loadQmlSource();
-    void verifyGpuAcceleration();
-    void applyStyles();
     void setWindowProperties();
-    void updateSymbolInContext(const QString& symbol);
     void propagateSymbolChange(const QString& symbol);
     bool validateComponents();
-    UnifiedGridRenderer* getUnifiedGridRenderer() const;
-    QString graphicsApiName(QSGRendererInterface::GraphicsApi api);
     
-    /**
-     * Arrange all docks to their default positions.
-     * Called during setupUI() and resetLayoutToDefault().
-     */
-    void arrangeDefaultLayout();
+    // Callbacks for modular components
+    void onSaveLayout();
+    void onRestoreLayout();
+    void onResetLayout();
+    void onOpenSecFilingViewer();
+    void onOpenMarketDataPanel();
 
-    // Dock widgets
+    // Data components (owned via DataBootstrapper)
+    std::unique_ptr<MarketDataCore> m_marketDataCore;
+    std::unique_ptr<Authenticator> m_authenticator;
+    std::unique_ptr<DataCache> m_dataCache;
+    
+    // Dock widgets (created via DockFactory)
     HeatmapDock* m_heatmapDock = nullptr;
-    StatusBar* m_statusBar = nullptr;    // Bottom dock-like status bar
+    StatusBar* m_statusBar = nullptr;
     MarketDataPanel* m_marketDataDock = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
     
-    // GPU CHART - Core component (now owned by HeatmapDock)
-    QQuickView* m_qquickView = nullptr;  // Keep reference for compatibility
-    QWidget* m_qmlContainer = nullptr;   // Keep reference for compatibility
+    // UI Controls (accessed through HeatmapDock)
+    QLineEdit* m_symbolInput = nullptr;
+    QPushButton* m_subscribeButton = nullptr;
     
-    // UI Controls (now accessed through HeatmapDock)
-    QLineEdit* m_symbolInput;
-    QPushButton* m_subscribeButton;
+    // QML scene (managed via QmlSceneController)
+    QQuickView* m_qquickView = nullptr;
+    QWidget* m_qmlContainer = nullptr;
     
-    std::unique_ptr<MarketDataCore> m_marketDataCore;
-    std::unique_ptr<Authenticator> m_authenticator;
-    std::unique_ptr<DataCache> m_dataCache;
-    ChartModeController* m_modeController{nullptr};
+    // Controllers
+    ChartModeController* m_modeController = nullptr;
+    
+    // Modular components
+    std::unique_ptr<QmlSceneController> m_qmlController;
+    std::unique_ptr<LayoutOrchestrator> m_layoutOrchestrator;
+    std::unique_ptr<MenuBuilder> m_menuBuilder;
+    std::unique_ptr<ShortcutBinder> m_shortcutBinder;
 };
