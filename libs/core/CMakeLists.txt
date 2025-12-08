@@ -19,6 +19,17 @@ add_library(sentinel_core
     SentinelLogging.cpp
     SentinelLogging.hpp
     marketdata/model/TradeData.h
+    servermodel/ServerDataModel.hpp
+    servermodel/ServerDataModel.cpp
+    servermodel/SymbolHotData.hpp
+    servermodel/TickBinaryLogger.hpp
+    servermodel/TickBinaryLogger.cpp
+    servermodel/TimeframeAggregator.hpp
+    servermodel/TimeframeAggregator.cpp
+    protocol/SentinelStreamServer.hpp
+    protocol/SentinelStreamServer.cpp
+    protocol/SentinelStreamClient.hpp
+    protocol/SentinelStreamClient.cpp
 )
 
 # Find required packages

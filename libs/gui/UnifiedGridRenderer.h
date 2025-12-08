@@ -191,7 +191,7 @@ public:
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
-    void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
+    void setDataSource(class IGridDataSource* source); // Forward declaration - implemented in .cpp
     
     //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
@@ -263,7 +263,7 @@ private:
     void updateVisibleCells();
     void updateVolumeProfile();
     
-    class DataCache* m_dataCache = nullptr;
+    class IGridDataSource* m_dataSource = nullptr;
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;

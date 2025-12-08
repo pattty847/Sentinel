@@ -39,6 +39,8 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
+#include "datasources/LocalGridDataSource.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
 #include <QQmlContext>
 #include <QMetaObject>
 #include <QDir>
@@ -67,6 +69,19 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_authenticator = std::move(dataComponents.authenticator);
     m_dataCache = std::move(dataComponents.dataCache);
     
+    // Initialize Data Source (Abstraction Layer)
+    bool useRemote = qEnvironmentVariableIsSet("SENTINEL_REMOTE");
+    
+    if (useRemote) {
+        sLog_App("Starting in REMOTE mode (connecting to 127.0.0.1:8080)");
+        auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
+        remote->connectToServer();
+        m_dataSource = std::move(remote);
+    } else {
+        sLog_App("Starting in LOCAL mode");
+        m_dataSource = std::make_unique<LocalGridDataSource>(m_marketDataCore.get(), m_dataCache.get());
+    }
+
     // Register services with ServiceLocator
     ServiceLocator::registerMarketDataCore(m_marketDataCore.get());
     ServiceLocator::registerDataCache(m_dataCache.get());
@@ -187,8 +202,8 @@ void MainWindowGPU::onSubscribe() {
     sLog_App("Subscribing to: " << symbol);
     m_qmlController->updateSymbolInContext(symbol);
     propagateSymbolChange(symbol);
-    if (m_marketDataCore) {
-        m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
+    if (m_dataSource) {
+        m_dataSource->subscribe(symbol);
     }
 }
 
@@ -272,30 +287,30 @@ void MainWindowGPU::connectMarketDataSignals() {
     LOG_SCOPE("Connecting MarketData signals");
     
     auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
-    if (!m_marketDataCore || !unifiedGridRenderer) {
+    if (!m_dataSource || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");
         return;
     }
     
-    unifiedGridRenderer->setDataCache(m_dataCache.get());
+    unifiedGridRenderer->setDataSource(m_dataSource.get());
 
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
-        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
+        connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated,
                 dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
     }
     
     // Trade connection (simplified, assume UnifiedGridRenderer has a slot)
-    connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived,
+    connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
     
-    connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
+    connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
 
-    // Surface MarketDataCore errors (e.g., WS/TLS/DNS issues) into the app log
-    connect(m_marketDataCore.get(), &MarketDataCore::errorOccurred,
+    // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
+    connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
-                sLog_Error("MarketDataCore error: " << error);
+                sLog_Error("DataSource error: " << error);
             });
 }
 

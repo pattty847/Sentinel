@@ -23,9 +23,10 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
+#include "../datasources/IGridDataSource.hpp"
 
 class GridViewState;
-class DataCache;
+// class DataCache; // Removed
 
 class DataProcessor : public QObject {
     Q_OBJECT
@@ -47,7 +48,7 @@ public:
     
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
-    void setDataCache(DataCache* cache) { m_dataCache = cache; }
+    void setDataSource(IGridDataSource* source) { m_dataSource = source; }
     
     // Trade batching configuration
     void setTradeBatchInterval(std::chrono::milliseconds interval) { m_tradeBatchConfig.batchInterval = interval; }
@@ -117,7 +118,7 @@ private:
     // Components
     GridViewState* m_viewState = nullptr;
     LiquidityTimeSeriesEngine* m_liquidityEngine = nullptr;
-    DataCache* m_dataCache = nullptr;
+    IGridDataSource* m_dataSource = nullptr;
     
     // Data state
     std::shared_ptr<const OrderBook> m_latestOrderBook;

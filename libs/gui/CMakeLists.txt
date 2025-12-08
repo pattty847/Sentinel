@@ -20,6 +20,11 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     
     # Grid system components
+    datasources/IGridDataSource.hpp
+    datasources/LocalGridDataSource.hpp
+    datasources/LocalGridDataSource.cpp
+    datasources/RemoteGridDataSource.hpp
+    datasources/RemoteGridDataSource.cpp
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.h
     CoordinateSystem.cpp

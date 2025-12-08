@@ -37,6 +37,7 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include "../core/marketdata/auth/Authenticator.hpp"
 #include "../core/marketdata/cache/DataCache.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
+#include "datasources/LocalGridDataSource.hpp"
 
 // Forward declarations
 class ChartModeController;
@@ -106,6 +107,7 @@ private:
     std::unique_ptr<MarketDataCore> m_marketDataCore;
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<DataCache> m_dataCache;
+    std::unique_ptr<IGridDataSource> m_dataSource;
     
     // Dock widgets (created via DockFactory)
     HeatmapDock* m_heatmapDock = nullptr;

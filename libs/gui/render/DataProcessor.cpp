@@ -17,7 +17,7 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <QDateTime>
 #include <cmath>
 #include "SentinelLogging.hpp"
-#include "../../core/marketdata/cache/DataCache.hpp"
+// #include "../../core/marketdata/cache/DataCache.hpp" // Replaced by IGridDataSource
 #include "../CoordinateSystem.h"
 #include <QColor>
 #include <chrono>
@@ -265,12 +265,12 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
         return;
     }
     
-    if (!m_dataCache || !m_liquidityEngine) {
-        sLog_Render("DataProcessor: DataCache or LiquidityEngine not set");
+    if (!m_dataSource || !m_liquidityEngine) {
+        sLog_Render("DataProcessor: DataSource or LiquidityEngine not set");
         return;
     }
     
-    const auto& liveBook = m_dataCache->getDirectLiveOrderBook(productId.toStdString());
+    const auto& liveBook = m_dataSource->getDirectLiveOrderBook(productId.toStdString());
 
     // Phase 1: Dense ingestion path (behind feature flag)
     if (m_useDenseIngestion) {

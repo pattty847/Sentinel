@@ -11,7 +11,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 */
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "../core/marketdata/cache/DataCache.hpp"
+#include "../datasources/IGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
@@ -440,13 +440,13 @@ void UnifiedGridRenderer::init() {
 }
 
 // Dense data access - set cache on both UGR and DataProcessor
-void UnifiedGridRenderer::setDataCache(DataCache* cache) {
-    m_dataCache = cache;
+void UnifiedGridRenderer::setDataSource(IGridDataSource* source) {
+    m_dataSource = source;
     
     // Also set the cache on DataProcessor using thread-safe invocation
     if (m_dataProcessor) {
-        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, cache]() {
-            m_dataProcessor->setDataCache(cache);
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, source]() {
+            m_dataProcessor->setDataSource(source);
         }, Qt::QueuedConnection);
     }
 }
@@ -482,7 +482,7 @@ namespace {
     class UGRDataAccessor : public IDataAccessor {
     private:
         UnifiedGridRenderer* m_ugr;
-        DataCache* m_dataCache;          // Access to live data
+        IGridDataSource* m_dataSource;          // Access to live data
         DataProcessor* m_dataProcessor;  // Access to processed cell data
         double m_intensityScale;
         double m_minVolumeFilter;
@@ -497,11 +497,11 @@ namespace {
                                  double minVolumeFilter_,
                                  int maxCells_,
                                  const Viewport& viewport_,
-                                 DataCache* cache,
+                                 IGridDataSource* dataSource,
                                  DataProcessor* processor,
                                  const std::string& symbol = "BTC-USD") 
             : m_ugr(ugr)
-            , m_dataCache(cache)
+            , m_dataSource(dataSource)
             , m_dataProcessor(processor)
             , m_intensityScale(intensityScale_)
             , m_minVolumeFilter(minVolumeFilter_)
@@ -517,11 +517,11 @@ namespace {
         }
         
         const std::vector<Trade>& getRecentTrades() const override {
-            if (m_dataCache) {
+            if (m_dataSource) {
                 // Cache the trades for the lifetime of this accessor instance.
-                // DataCache::recentTrades returns by value, so we store it in a member
+                // IGridDataSource::getRecentTrades returns by value, so we store it in a member
                 // to safely return a reference as required by the IDataAccessor interface.
-                m_tradeCache = m_dataCache->recentTrades(m_symbol);
+                m_tradeCache = m_dataSource->getRecentTrades(m_symbol);
                 return m_tradeCache;
             }
             // Fallback to empty if no cache (shouldn't happen in prod)
@@ -584,7 +584,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_minVolumeFilter,
             m_maxCells,
             vp,
-            m_dataCache,
+            m_dataSource,
             m_dataProcessor.get(),
             "BTC-USD"
         );
@@ -616,7 +616,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_minVolumeFilter,
             m_maxCells,
             vp2,
-            m_dataCache,
+            m_dataSource,
             m_dataProcessor.get(),
             "BTC-USD"
         );
@@ -640,7 +640,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_minVolumeFilter,
             m_maxCells,
             vp3,
-            m_dataCache,
+            m_dataSource,
             m_dataProcessor.get(),
             "BTC-USD"
         );
