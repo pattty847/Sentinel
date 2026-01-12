@@ -1,0 +1,13 @@
+#pragma once
+#include <QObject>
+
+enum class ChartMode {
+    TRADE_SCATTER,
+    HIGH_FREQ_CANDLES,
+    TRADITIONAL_CANDLES,
+    ORDER_BOOK_HEATMAP,
+    HYBRID_CANDLES_TRADES,
+    HYBRID_DEPTH_PRICE,
+    MULTI_TIMEFRAME
+};
+
