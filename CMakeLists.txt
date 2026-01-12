@@ -54,7 +54,9 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # BOOST — IMPORTANT: beast + system + headers
-cmake_policy(SET CMP0167 NEW)
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif()
 find_package(Boost REQUIRED
     COMPONENTS system headers
 )
@@ -81,7 +83,7 @@ endif()
 FetchContent_MakeAvailable(googletest)
 
 # Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets QuickControls2 ShaderTools Test)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -89,9 +91,12 @@ set(CMAKE_AUTORCC ON)
 
 # ────────────────────────────────────────────────────────────────
 # QML POLICY CLEANUP (kills Qt spam)
+# Guard for older Qt (e.g., 6.4) where qt_policy is unavailable.
 # ────────────────────────────────────────────────────────────────
-qt_policy(SET QTP0001 NEW)
-qt_policy(SET QTP0004 NEW)
+if (COMMAND qt_policy)
+    qt_policy(SET QTP0001 NEW)
+    qt_policy(SET QTP0004 NEW)
+endif()
 
 # ────────────────────────────────────────────────────────────────
 # SUBDIRECTORIES

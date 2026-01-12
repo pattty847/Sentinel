@@ -369,6 +369,7 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         m_sink.onTrade(trade);
         
         // Record trade processed for throughput tracking
+        m_tradeLogCount++;
         
         // Emit real-time signal to GUI layer (Qt thread-safe)
         Trade tradeCopy = trade; // Make a copy for thread safety
@@ -482,6 +483,21 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
     
     // Initialize the live order book with the sparse snapshot data
     m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
+
+    // Broadcast snapshot initialization to listeners (like ServerDataModel)
+    // We need to pass by value/copy to cross threads safely
+    {
+        QPointer<MarketDataCore> self(this);
+        QString productIdQ = QString::fromStdString(product_id);
+        // Make deep copies for the signal payload
+        std::vector<OrderBookLevel> bidsCopy = sparse_bids;
+        std::vector<OrderBookLevel> asksCopy = sparse_asks;
+
+        QMetaObject::invokeMethod(this, [self, productIdQ, b = std::move(bidsCopy), a = std::move(asksCopy)]() mutable {
+            if (!self) return;
+            emit self->liveOrderBookInitialized(productIdQ, b, a);
+        }, Qt::QueuedConnection);
+    }
     
     // std::string logMessage = Cpp20Utils::formatOrderBookLog(
     //     product_id, sparse_bids.size(), sparse_asks.size());
@@ -548,9 +564,9 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     size_t askCount = liveBook.getAskCount();
     
     
-    // std::string logMessage = Cpp20Utils::formatOrderBookLog(
-    //     product_id, bidCount, askCount, updateCount);
-    // sLog_Data(QString::fromStdString(logMessage));
+    std::string logMessage = Cpp20Utils::formatOrderBookLog(
+        product_id, bidCount, askCount, updateCount);
+    sLog_Data(QString::fromStdString(logMessage));
 }
 
 void MarketDataCore::replaySubscriptionsOnConnect() {

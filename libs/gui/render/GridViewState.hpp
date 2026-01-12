@@ -35,6 +35,7 @@ public:
     QPointF getPanVisualOffset() const { return m_panVisualOffset; }
     bool isAutoScrollEnabled() const { return m_autoScrollEnabled; }
     bool isTimeWindowValid() const { return m_timeWindowValid; }
+    bool isDragging() const { return m_isDragging; }
     
     // Viewport management
     void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
@@ -89,12 +90,14 @@ private:
     // Zoom sensitivity control
     static constexpr double ZOOM_SENSITIVITY = 0.0005;
     static constexpr double MAX_ZOOM_DELTA = 0.4;
+    static constexpr double MAX_ZOOM_FACTOR = 500.0;
     
     // Mouse interaction state
     bool m_isDragging = false;
     QPointF m_lastMousePos;
     QPointF m_initialMousePos;
     QPointF m_panVisualOffset;
+    double m_panRemainderTimeMs = 0.0;
     QElapsedTimer m_interactionTimer;
     uint64_t m_viewportVersion = 1; // incremented on viewport/size changes
 };

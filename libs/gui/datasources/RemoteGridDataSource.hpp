@@ -15,6 +15,10 @@ public:
 
     void connectToServer();
 
+private slots:
+    void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
+    void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
+
 private:
     SentinelStreamClient m_client;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
@@ -22,6 +26,6 @@ private:
     // IGridDataSource::getDirectLiveOrderBook returns const ref.
     // So RemoteGridDataSource MUST maintain a local replica.
     
-    mutable std::unordered_map<std::string, LiveOrderBook> m_replicaBooks;
+    mutable std::unordered_map<std::string, std::unique_ptr<LiveOrderBook>> m_replicaBooks;
 };
 

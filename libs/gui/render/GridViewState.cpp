@@ -108,14 +108,16 @@ void GridViewState::handleZoom(double delta, const QPointF& center) {
 
 void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
+
+    static const bool kZoomDebug = qEnvironmentVariableIsSet("SENTINEL_ZOOM_DEBUG");
     
     // Apply clamped delta for controlled zoom
     double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
     double zoomMultiplier = 1.0 + clampedDelta;
     double newZoom = m_zoomFactor * zoomMultiplier;
     
-    // Clamp zoom levels (0.1x to 10x)
-    newZoom = std::max(0.1, std::min(10.0, newZoom));
+    // Clamp zoom levels (0.1x to MAX_ZOOM_FACTOR)
+    newZoom = std::max(0.1, std::min(MAX_ZOOM_FACTOR, newZoom));
     
     if (newZoom != m_zoomFactor) {
         //  ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
@@ -123,10 +125,21 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             // Get current viewport ranges
             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
             double currentPriceRange = m_maxPrice - m_minPrice;
+            if (currentTimeRange <= 0) {
+                currentTimeRange = 1;
+            }
+            if (currentPriceRange <= 0.0) {
+                currentPriceRange = 1.0;
+            }
             
             // Calculate new ranges based on zoom factor - ensure positive values
-            int64_t newTimeRange = static_cast<int64_t>(currentTimeRange * (m_zoomFactor / newZoom));
-            double newPriceRange = currentPriceRange * (m_zoomFactor / newZoom);
+            const double timeRangeD = static_cast<double>(currentTimeRange) * (m_zoomFactor / newZoom);
+            const bool zoomingOut = (newZoom < m_zoomFactor);
+            const int64_t newTimeRange = std::max<int64_t>(
+                1,
+                static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD) : std::floor(timeRangeD))
+            );
+            const double newPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
             
             // Validate ranges to prevent invalid coordinates
             if (newTimeRange <= 0 || newPriceRange <= 0.0) {
@@ -153,11 +166,30 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
             
             // Update viewport bounds around the center point
-            int64_t newTimeStart = currentCenterTime - static_cast<int64_t>(newTimeRange * centerTimeRatio);
-            int64_t newTimeEnd = currentCenterTime + static_cast<int64_t>(newTimeRange * (1.0 - centerTimeRatio));
+            const double newTimeRangeD = static_cast<double>(newTimeRange);
+            const double newTimeStartD = static_cast<double>(currentCenterTime) - (newTimeRangeD * centerTimeRatio);
+            const double newTimeEndD = newTimeStartD + newTimeRangeD;
+
+            int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
+            int64_t newTimeEnd = static_cast<int64_t>(std::ceil(newTimeEndD));
+            if (newTimeEnd <= newTimeStart) {
+                newTimeEnd = newTimeStart + 1;
+            }
+
             double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
             double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
             
+            if (kZoomDebug) {
+                qDebug() << "ZOOM DEBUG:"
+                         << "curTimeRange" << currentTimeRange
+                         << "curPriceRange" << currentPriceRange
+                         << "newTimeRange" << newTimeRange
+                         << "newPriceRange" << newPriceRange
+                         << "centerRatios" << centerTimeRatio << centerPriceRatio
+                         << "bounds" << m_visibleTimeStart_ms << m_visibleTimeEnd_ms
+                         << m_minPrice << m_maxPrice;
+            }
+
             // Final validation - ensure time range is positive and price range is valid
             if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
                 qDebug() << "🚨 ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
@@ -190,6 +222,7 @@ void GridViewState::handlePanStart(const QPointF& position) {
     m_lastMousePos = position;
     m_initialMousePos = position;
     m_panVisualOffset = QPointF(0, 0);
+    m_panRemainderTimeMs = 0.0;
     
     // Disable auto-scroll when user starts dragging
     if (m_autoScrollEnabled) {
@@ -224,7 +257,9 @@ void GridViewState::handlePanEnd() {
         double timePixelsToMs = static_cast<double>(timeRange) / m_viewportWidth;
         double pricePixelsToUnits = priceRange / m_viewportHeight;
         
-        int64_t timeDelta = static_cast<int64_t>(-m_panVisualOffset.x() * timePixelsToMs);
+        const double timeDeltaF = (-m_panVisualOffset.x() * timePixelsToMs) + m_panRemainderTimeMs;
+        const int64_t timeDelta = static_cast<int64_t>(std::floor(timeDeltaF));
+        m_panRemainderTimeMs = timeDeltaF - static_cast<double>(timeDelta);
         double priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
         
         // Apply to viewport through setViewport

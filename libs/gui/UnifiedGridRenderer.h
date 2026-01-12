@@ -14,11 +14,13 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <QQuickItem>
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
+#include <QImage>
 #include <QTimer>
 #include <QThread>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
+#include <QByteArray>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -120,6 +122,51 @@ private:
     QSGTransformNode* m_rootTransformNode = nullptr;
     bool m_needsDataRefresh = false;
     bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
+
+    // Dummy GPU heatmap path for testing single-quad rendering.
+    bool m_useDummyHeatmap = false;
+    int m_dummyGridSize = 2048;
+    bool m_dummyTextureDirty = true;
+    QImage m_dummyImage;
+    QImage m_dummyPaletteImage;
+    QTimer* m_dummyAppendTimer = nullptr;
+    QTimer* m_dummyRenderTimer = nullptr;
+    int m_dummyWriteColumn = 0;
+    int64_t m_dummyTimeIndex = 0;
+    int m_dummyAppendMs = 100;
+    qint64 m_dummyLastAppendMs = 0;
+    QElapsedTimer m_dummyClock;
+    std::atomic<float> m_dummyTimeOffset{0.0f};
+    bool m_dummyLabelDirty = true;
+    QRectF m_dummyLabelSourceRect;
+    QSize m_dummyLabelPixelSize;
+    int m_dummyLabelStartX = 0;
+    std::mutex m_dummyImageMutex;
+    std::mutex m_dummyLabelMutex;
+    QImage m_dummyLabelImage;
+    std::atomic<int> m_dummyLabelVersion{0};
+    int m_dummyLabelTextureVersion = -1;
+    struct DummyLabelRequest {
+        QRectF srcRect;
+        QSize labelSize;
+        int startX = 0;
+        float cellW = 0.0f;
+        float cellH = 0.0f;
+        bool valid = false;
+    };
+    std::mutex m_dummyLabelRequestMutex;
+    DummyLabelRequest m_dummyLabelRequest;
+    struct DummyPendingColumn {
+        int x = 0;
+        QByteArray data;
+    };
+    std::mutex m_dummyUploadMutex;
+    std::vector<DummyPendingColumn> m_dummyPendingColumns;
+
+    // FPS tracking (updated on render thread, read on GUI thread).
+    QElapsedTimer m_fpsTimer;
+    int m_fpsFrameCount = 0;
+    std::atomic<double> m_currentFps{0.0};
     
     // V1 state (removed - now delegated to DataProcessor)
 
@@ -147,16 +194,16 @@ public:
     bool showTradeFlowLayer() const { return m_showTradeFlowLayer; }
     
     //  VIEWPORT BOUNDS: Getters for QML properties
-    qint64 getVisibleTimeStart() const;
-    qint64 getVisibleTimeEnd() const; 
-    double getMinPrice() const;
-    double getMaxPrice() const;
+    Q_INVOKABLE qint64 getVisibleTimeStart() const;
+    Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
+    Q_INVOKABLE double getMinPrice() const;
+    Q_INVOKABLE double getMaxPrice() const;
     
     //  OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     //  VISUAL TRANSFORM: Getter for QML pan offset
-    QPointF getPanVisualOffset() const;
+    Q_INVOKABLE QPointF getPanVisualOffset() const;
     
     //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
@@ -208,6 +255,7 @@ public:
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
+    Q_INVOKABLE double getZoomFactor() const;
 
 public:
     // Real-time data integration
@@ -246,6 +294,14 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+
+private:
+    void initDummyHeatmap();
+    void ensureDummyImage();
+    void ensureDummyPaletteImage();
+    void appendDummyColumn();
+    void onDummyRenderTick();
+    void buildDummyLabelImage();
 
 private:
     // Property setters

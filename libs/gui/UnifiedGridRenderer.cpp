@@ -11,16 +11,24 @@ Assumptions: The render strategies are compatible and can be layered together.
 */
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "../datasources/IGridDataSource.hpp"
+#include "datasources/IGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
+#include <QSGSimpleTextureNode>
 #include <QThread>
 #include <QMetaObject>
 #include <QMetaType>
 #include <QDateTime>
+#include <QTimer>
+#include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
+#include <QSGClipNode>
+#include <cmath>
 // #include <algorithm>
+#include <algorithm>
 // #include <cmath>
 
 // New modular architecture includes
@@ -30,11 +38,72 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/DataProcessor.hpp"
 #include "render/IRenderStrategy.hpp"
 #include "render/IDataAccessor.hpp"
+#include "render/HeatmapIntensityNode.hpp"
 #include "render/strategies/HeatmapStrategy.hpp"
 #include "render/strategies/TradeFlowStrategy.hpp"
 #include "render/strategies/TradeBubbleStrategy.hpp"
 #include "render/strategies/CandleStrategy.hpp"
 
+namespace {
+uint32_t hash32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352d;
+    x ^= x >> 15;
+    x *= 0x846ca68b;
+    x ^= x >> 16;
+    return x;
+}
+
+float rand01(uint32_t seed) {
+    return static_cast<float>(hash32(seed) & 0xFFFFu) / 65535.0f;
+}
+
+float bandShape(float value, float spacing) {
+    const float phase = std::fmod(value, spacing) / spacing;
+    const float tri = 1.0f - std::abs(phase - 0.5f) * 2.0f;
+    return std::max(0.0f, tri);
+}
+
+float computeDummyIntensity(int x, int y, int grid, int mid) {
+    const int segment = 128;
+    const int slowSegment = 512;
+    const float majorSpacing = 64.0f;
+    const float minorSpacing = 12.0f;
+
+    const bool isAsk = y < mid;
+    const float dist = std::abs(static_cast<float>(y) - static_cast<float>(mid)) / static_cast<float>(mid);
+    const float falloff = std::exp(-dist * 1.6f);
+    const float majorBand = bandShape(static_cast<float>(y), majorSpacing);
+    const float minorBand = bandShape(static_cast<float>(y), minorSpacing);
+    const int bandIndex = static_cast<int>(static_cast<float>(y) / majorSpacing);
+    const float bandSeed = rand01(static_cast<uint32_t>(bandIndex) * 2654435761u);
+    const float bandBias = 0.15f + 0.85f * (0.65f * majorBand + 0.35f * minorBand);
+    const float density = (isAsk ? 0.70f : 0.78f) * (0.6f + 0.4f * (1.0f - dist));
+
+    const int seg = x / segment;
+    const int segSlow = x / slowSegment;
+    const uint32_t seed = static_cast<uint32_t>(bandIndex) * 73856093u
+        ^ static_cast<uint32_t>(seg) * 19349663u
+        ^ static_cast<uint32_t>(segSlow) * 83492791u
+        ^ static_cast<uint32_t>(isAsk ? 0xA5A5u : 0x5A5Au);
+
+    const float gate = rand01(seed);
+    const float strength = rand01(seed ^ 0x9E3779B9u);
+    const float active = (gate < density) ? 1.0f : 0.0f;
+
+    const float timeWave = 0.85f + 0.15f * std::sin((x * 0.0025f) + (y * 0.006f));
+    const float bandLine = (0.10f + 0.20f * bandSeed) * bandBias * falloff;
+    float intensity = bandLine + active * (0.35f + 0.65f * strength) * falloff * timeWave;
+
+    const float burstGate = rand01(seed ^ 0xC2B2AE35u);
+    if (burstGate > 0.992f) {
+        intensity = std::max(intensity, 0.75f * falloff);
+    }
+
+    const float hot = std::pow(std::min(1.0f, intensity), 0.85f);
+    return std::clamp(hot, 0.0f, 1.0f);
+}
+} // namespace
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
     , m_rootTransformNode(nullptr)
@@ -377,6 +446,12 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
 }
 
 void UnifiedGridRenderer::init() {
+    m_useDummyHeatmap = qEnvironmentVariableIsSet("SENTINEL_DUMMY_HEATMAP");
+    sLog_App("Dummy heatmap: " << (m_useDummyHeatmap ? "ENABLED" : "disabled"));
+    if (m_useDummyHeatmap) {
+        initDummyHeatmap();
+    }
+
     // Register metatypes for cross-thread signal/slot connections
     qRegisterMetaType<Trade>("Trade");
     
@@ -411,6 +486,14 @@ void UnifiedGridRenderer::init() {
         m_viewState->setViewportSize(width(), height());
     }
 
+    if (m_useDummyHeatmap) {
+        const qint64 startTime = 0;
+        const qint64 endTime = static_cast<qint64>(m_dummyGridSize);
+        const double minPrice = 0.0;
+        const double maxPrice = static_cast<double>(m_dummyGridSize);
+        m_viewState->setViewport(startTime, endTime, minPrice, maxPrice);
+    }
+
     // Dependencies will be set later when setDataCache() is called
     // Set ViewState immediately as it's available
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
@@ -433,10 +516,12 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     
-    QMetaObject::invokeMethod(
-        m_dataProcessor.get(),
-        &DataProcessor::startProcessing,
-        Qt::QueuedConnection);
+    if (!m_useDummyHeatmap) {
+        QMetaObject::invokeMethod(
+            m_dataProcessor.get(),
+            &DataProcessor::startProcessing,
+            Qt::QueuedConnection);
+    }
 }
 
 // Dense data access - set cache on both UGR and DataProcessor
@@ -551,6 +636,198 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     Q_UNUSED(data)
     if (width() <= 0 || height() <= 0) { 
         return oldNode;
+    }
+
+    if (m_useDummyHeatmap) {
+        auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
+        if (!texNode) {
+            texNode = new HeatmapIntensityNode();
+            m_dummyTextureDirty = true;
+        }
+
+        if (m_dummyTextureDirty) {
+            ensureDummyImage();
+            ensureDummyPaletteImage();
+            auto* intensityTexture = window()->createTextureFromImage(m_dummyImage);
+            if (!intensityTexture) {
+                QImage fallback = m_dummyImage.convertToFormat(QImage::Format_RGBA8888);
+                intensityTexture = window()->createTextureFromImage(fallback);
+            }
+            auto* paletteTexture = window()->createTextureFromImage(m_dummyPaletteImage);
+            if (intensityTexture && paletteTexture) {
+                intensityTexture->setFiltering(QSGTexture::Nearest);
+                paletteTexture->setFiltering(QSGTexture::Linear);
+                texNode->setTextures(intensityTexture, paletteTexture);
+                texNode->setGamma(1.05f);
+                texNode->setContrast(1.15f);
+                m_dummyTextureDirty = false;
+            }
+        }
+
+        const QRectF bounds = boundingRect();
+        texNode->setRect(bounds);
+
+        if (m_viewState && m_viewState->isTimeWindowValid()) {
+            qint64 timeStart = m_viewState->getVisibleTimeStart();
+            qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+            double minPrice = m_viewState->getMinPrice();
+            double maxPrice = m_viewState->getMaxPrice();
+
+            const QPointF pan = m_viewState->getPanVisualOffset();
+            const double timeRange = static_cast<double>(timeEnd - timeStart);
+            const double priceRange = maxPrice - minPrice;
+            if (!pan.isNull() && bounds.width() > 0.0 && bounds.height() > 0.0 &&
+                timeRange > 0.0 && priceRange > 0.0 && m_viewState->isDragging()) {
+                const double timePixelsToUnits = timeRange / bounds.width();
+                const double pricePixelsToUnits = priceRange / bounds.height();
+                const qint64 timeDelta = static_cast<qint64>(-pan.x() * timePixelsToUnits);
+                const double priceDelta = pan.y() * pricePixelsToUnits;
+                timeStart += timeDelta;
+                timeEnd += timeDelta;
+                minPrice += priceDelta;
+                maxPrice += priceDelta;
+            }
+
+            if (timeEnd > timeStart && maxPrice > minPrice) {
+                const double maxCoord = static_cast<double>(m_dummyGridSize);
+                const double windowW = static_cast<double>(timeEnd - timeStart);
+                const double windowH = maxPrice - minPrice;
+
+                const double srcW = std::clamp(windowW, 1.0, maxCoord);
+                const double srcH = std::clamp(windowH, 1.0, maxCoord);
+
+                const double clampedStart = (windowW >= maxCoord)
+                    ? 0.0
+                    : std::clamp(static_cast<double>(timeStart), 0.0, maxCoord - srcW);
+                const double clampedMinPrice = (windowH >= maxCoord)
+                    ? 0.0
+                    : std::clamp(minPrice, 0.0, maxCoord - srcH);
+
+                const double srcX = clampedStart;
+                const double srcY = std::clamp(maxCoord - (clampedMinPrice + srcH), 0.0, maxCoord - srcH);
+                texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+            } else {
+                texNode->setSourceRect(QRectF(0, 0, m_dummyGridSize, m_dummyGridSize));
+            }
+        } else {
+            texNode->setSourceRect(QRectF(0, 0, m_dummyGridSize, m_dummyGridSize));
+        }
+
+        texNode->setTimeOffset(m_dummyTimeOffset.load());
+
+        if (!bounds.isEmpty()) {
+            const QRectF srcRect = texNode->getSourceRect();
+            const QSize labelSize = bounds.size().toSize();
+            if (!labelSize.isEmpty()) {
+                const int gridSize = m_dummyGridSize;
+                const float baseX = static_cast<float>(srcRect.x()) + (m_dummyTimeOffset.load() * gridSize);
+                const int startX = static_cast<int>(std::floor(baseX));
+                const float frac = baseX - static_cast<float>(startX);
+
+                if (srcRect != m_dummyLabelSourceRect || labelSize != m_dummyLabelPixelSize || startX != m_dummyLabelStartX) {
+                    m_dummyLabelSourceRect = srcRect;
+                    m_dummyLabelPixelSize = labelSize;
+                    m_dummyLabelStartX = startX;
+                    m_dummyLabelDirty = true;
+                }
+
+                const float cellW = static_cast<float>(bounds.width()) / std::max(1.0, srcRect.width());
+                const float cellH = static_cast<float>(bounds.height()) / std::max(1.0, srcRect.height());
+                const float minCell = std::min(cellW, cellH);
+                const float labelThreshold = 18.0f;
+                const float shiftPx = frac * cellW;
+
+                if (minCell >= labelThreshold && !m_dummyImage.isNull() && window()) {
+                    auto* clipNode = dynamic_cast<QSGClipNode*>(texNode->firstChild());
+                    if (!clipNode) {
+                        if (auto* child = texNode->firstChild()) {
+                            texNode->removeChildNode(child);
+                            delete child;
+                        }
+                        clipNode = new QSGClipNode();
+                        texNode->appendChildNode(clipNode);
+                    }
+                    clipNode->setClipRect(bounds);
+
+                    auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(clipNode->firstChild());
+                    if (!labelNode) {
+                        if (auto* child = clipNode->firstChild()) {
+                            clipNode->removeChildNode(child);
+                            delete child;
+                        }
+                        labelNode = new QSGSimpleTextureNode();
+                        clipNode->appendChildNode(labelNode);
+                    }
+
+                    if (m_dummyLabelDirty) {
+                        DummyLabelRequest request;
+                        request.srcRect = srcRect;
+                        request.labelSize = labelSize;
+                        request.startX = startX;
+                        request.cellW = cellW;
+                        request.cellH = cellH;
+                        request.valid = true;
+                        {
+                            std::lock_guard<std::mutex> lock(m_dummyLabelRequestMutex);
+                            m_dummyLabelRequest = request;
+                        }
+                        QMetaObject::invokeMethod(this, [this]() { buildDummyLabelImage(); }, Qt::QueuedConnection);
+                        m_dummyLabelDirty = false;
+                    }
+
+                    int labelVersion = m_dummyLabelVersion.load();
+                    if (labelVersion != m_dummyLabelTextureVersion) {
+                        QImage labelImage;
+                        {
+                            std::lock_guard<std::mutex> lock(m_dummyLabelMutex);
+                            labelImage = m_dummyLabelImage;
+                        }
+                        if (!labelImage.isNull()) {
+                            auto* labelTex = window()->createTextureFromImage(labelImage);
+                            labelTex->setFiltering(QSGTexture::Nearest);
+                            labelNode->setTexture(labelTex);
+                            labelNode->setOwnsTexture(true);
+                            m_dummyLabelTextureVersion = labelVersion;
+                        }
+                    }
+
+                    if (labelNode->texture()) {
+                        const QSize texSize = labelNode->texture()->textureSize();
+                        labelNode->setRect(QRectF(bounds.x() - shiftPx, bounds.y(), texSize.width(), texSize.height()));
+                    }
+                } else if (auto* child = texNode->firstChild()) {
+                    texNode->removeChildNode(child);
+                    delete child;
+                    m_dummyLabelDirty = true;
+                }
+            }
+        }
+
+        std::vector<DummyPendingColumn> pendingUploads;
+        {
+            std::lock_guard<std::mutex> lock(m_dummyUploadMutex);
+            if (!m_dummyPendingColumns.empty()) {
+                pendingUploads.swap(m_dummyPendingColumns);
+            }
+        }
+        for (auto& upload : pendingUploads) {
+            texNode->enqueueColumn(upload.x, std::move(upload.data));
+        }
+
+        if (!m_fpsTimer.isValid()) {
+            m_fpsTimer.start();
+            m_fpsFrameCount = 0;
+        }
+
+        ++m_fpsFrameCount;
+        const qint64 elapsedMs = m_fpsTimer.elapsed();
+        if (elapsedMs >= 1000) {
+            m_currentFps.store((static_cast<double>(m_fpsFrameCount) * 1000.0) / elapsedMs);
+            m_fpsFrameCount = 0;
+            m_fpsTimer.restart();
+        }
+
+        return texNode;
     }
 
     QElapsedTimer timer;
@@ -678,7 +955,264 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                    << " count=" << (cellsPerTimeSlice.empty() ? 0 : cellsPerTimeSlice.begin()->second));
     }
 
+    if (!m_fpsTimer.isValid()) {
+        m_fpsTimer.start();
+        m_fpsFrameCount = 0;
+    }
+
+    ++m_fpsFrameCount;
+    const qint64 elapsedMs = m_fpsTimer.elapsed();
+    if (elapsedMs >= 1000) {
+        m_currentFps.store((static_cast<double>(m_fpsFrameCount) * 1000.0) / elapsedMs);
+        m_fpsFrameCount = 0;
+        m_fpsTimer.restart();
+    }
+
     return sceneNode;
+}
+
+void UnifiedGridRenderer::initDummyHeatmap() {
+    bool ok = false;
+    const int envSize = qgetenv("SENTINEL_DUMMY_GRID").toInt(&ok);
+    if (ok && envSize > 0) {
+        m_dummyGridSize = envSize;
+    }
+
+    if (m_viewState) {
+        const qint64 startTime = 0;
+        const qint64 endTime = static_cast<qint64>(m_dummyGridSize);
+        const double minPrice = 0.0;
+        const double maxPrice = static_cast<double>(m_dummyGridSize);
+        m_viewState->setViewport(startTime, endTime, minPrice, maxPrice);
+    }
+
+    if (!m_dummyAppendTimer) {
+        m_dummyAppendTimer = new QTimer(this);
+        connect(m_dummyAppendTimer, &QTimer::timeout, this, &UnifiedGridRenderer::appendDummyColumn);
+    }
+
+    int appendMs = 100;
+    const QByteArray appendEnv = qgetenv("SENTINEL_DUMMY_APPEND_MS");
+    if (!appendEnv.isEmpty()) {
+        bool appendOk = false;
+        const int parsed = appendEnv.toInt(&appendOk);
+        if (appendOk) {
+            appendMs = parsed;
+        }
+    }
+
+    m_dummyWriteColumn = 0;
+    m_dummyTimeIndex = 0;
+    m_dummyAppendMs = appendMs;
+    m_dummyClock.start();
+    m_dummyLastAppendMs = m_dummyClock.elapsed();
+    m_dummyTimeOffset.store(0.0f);
+    if (appendMs > 0) {
+        m_dummyAppendTimer->start(appendMs);
+    } else {
+        m_dummyAppendTimer->stop();
+    }
+
+    if (!m_dummyRenderTimer) {
+        m_dummyRenderTimer = new QTimer(this);
+        connect(m_dummyRenderTimer, &QTimer::timeout, this, &UnifiedGridRenderer::onDummyRenderTick);
+    }
+    int renderMs = 16;
+    const QByteArray renderEnv = qgetenv("SENTINEL_DUMMY_RENDER_MS");
+    if (!renderEnv.isEmpty()) {
+        bool renderOk = false;
+        const int parsed = renderEnv.toInt(&renderOk);
+        if (renderOk) {
+            renderMs = parsed;
+        }
+    }
+    if (renderMs > 0) {
+        m_dummyRenderTimer->start(renderMs);
+    } else {
+        m_dummyRenderTimer->stop();
+    }
+}
+
+void UnifiedGridRenderer::ensureDummyImage() {
+    if (!m_dummyImage.isNull() && m_dummyImage.width() == m_dummyGridSize &&
+        m_dummyImage.height() == m_dummyGridSize) {
+        return;
+    }
+
+    m_dummyImage = QImage(m_dummyGridSize, m_dummyGridSize, QImage::Format_ARGB32);
+    if (m_dummyImage.isNull()) {
+        return;
+    }
+
+    const int grid = m_dummyGridSize;
+    const int mid = grid / 2;
+
+    for (int y = 0; y < grid; ++y) {
+        auto* row = reinterpret_cast<QRgb*>(m_dummyImage.scanLine(y));
+        for (int x = 0; x < grid; ++x) {
+            const float intensityOut = computeDummyIntensity(x, y, grid, mid);
+            const int v = static_cast<int>(intensityOut * 255.0f);
+            row[x] = qRgba(v, v, v, 255);
+        }
+    }
+}
+
+void UnifiedGridRenderer::ensureDummyPaletteImage() {
+    if (!m_dummyPaletteImage.isNull()) {
+        return;
+    }
+
+    const int width = 512;
+    const int height = 1;
+    m_dummyPaletteImage = QImage(width, height, QImage::Format_RGBA8888);
+    if (m_dummyPaletteImage.isNull()) {
+        return;
+    }
+
+    auto* row = reinterpret_cast<QRgb*>(m_dummyPaletteImage.scanLine(0));
+    for (int i = 0; i < width; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(width - 1);
+        const bool isAsk = (i >= width / 2);
+        const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
+        const float boost = std::pow(std::clamp(localT, 0.0f, 1.0f), 0.8f);
+        const int base = static_cast<int>(boost * 255.0f);
+        const int r = isAsk ? base : static_cast<int>(base * 0.25f);
+        const int g = isAsk ? static_cast<int>(base * 0.25f) : base;
+        const int b = static_cast<int>(base * 0.35f);
+        row[i] = qRgba(r, g, b, 255);
+    }
+}
+
+void UnifiedGridRenderer::appendDummyColumn() {
+    if (!m_useDummyHeatmap || m_dummyGridSize <= 0) {
+        return;
+    }
+
+    if (m_dummyImage.isNull()) {
+        ensureDummyImage();
+    }
+
+    if (m_dummyImage.isNull()) {
+        return;
+    }
+
+    const int grid = m_dummyGridSize;
+    const int mid = grid / 2;
+    const int column = m_dummyWriteColumn;
+    const int xSample = static_cast<int>(m_dummyTimeIndex % (static_cast<int64_t>(grid) * 4));
+
+    QByteArray columnData;
+    columnData.resize(grid * 4);
+    auto* dst = reinterpret_cast<uchar*>(columnData.data());
+
+    {
+        std::lock_guard<std::mutex> lock(m_dummyImageMutex);
+        for (int y = 0; y < grid; ++y) {
+            const float intensityOut = computeDummyIntensity(xSample, y, grid, mid);
+            const int v = static_cast<int>(intensityOut * 255.0f);
+            const QRgb pixel = qRgba(v, v, v, 255);
+
+            auto* row = reinterpret_cast<QRgb*>(m_dummyImage.scanLine(y));
+            row[column] = pixel;
+
+            const int idx = y * 4;
+            dst[idx + 0] = static_cast<uchar>(pixel & 0xFF);
+            dst[idx + 1] = static_cast<uchar>((pixel >> 8) & 0xFF);
+            dst[idx + 2] = static_cast<uchar>((pixel >> 16) & 0xFF);
+            dst[idx + 3] = static_cast<uchar>((pixel >> 24) & 0xFF);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_dummyUploadMutex);
+        m_dummyPendingColumns.push_back({column, std::move(columnData)});
+    }
+
+    m_dummyWriteColumn = (m_dummyWriteColumn + 1) % grid;
+    ++m_dummyTimeIndex;
+    m_dummyLastAppendMs = m_dummyClock.elapsed();
+    m_dummyLabelDirty = true;
+
+    update();
+}
+
+void UnifiedGridRenderer::buildDummyLabelImage() {
+    DummyLabelRequest request;
+    {
+        std::lock_guard<std::mutex> lock(m_dummyLabelRequestMutex);
+        request = m_dummyLabelRequest;
+    }
+    if (!request.valid || request.labelSize.isEmpty()) {
+        return;
+    }
+
+    const float minCell = std::min(request.cellW, request.cellH);
+    const int extraWidth = static_cast<int>(std::ceil(request.cellW));
+    QImage labelImage(QSize(request.labelSize.width() + extraWidth, request.labelSize.height()), QImage::Format_ARGB32_Premultiplied);
+    labelImage.fill(Qt::transparent);
+
+    QPainter painter(&labelImage);
+    QFont font("Monospace");
+    font.setStyleHint(QFont::TypeWriter);
+    font.setPixelSize(static_cast<int>(std::floor(minCell * 0.45f)));
+    painter.setFont(font);
+    painter.setPen(QColor(15, 15, 15, 210));
+
+    const int cellsX = static_cast<int>(std::ceil(request.srcRect.width())) + 1;
+    const int cellsY = static_cast<int>(std::ceil(request.srcRect.height()));
+
+    {
+        std::lock_guard<std::mutex> lock(m_dummyImageMutex);
+        for (int j = 0; j < cellsY; ++j) {
+            const int texY = static_cast<int>(std::floor(request.srcRect.y() + j));
+            if (texY < 0 || texY >= m_dummyImage.height()) {
+                continue;
+            }
+            for (int i = 0; i < cellsX; ++i) {
+                int texX = request.startX + i;
+                if (texX < 0) {
+                    texX = m_dummyImage.width() + (texX % m_dummyImage.width());
+                }
+                texX = texX % m_dummyImage.width();
+                if (texX < 0 || texX >= m_dummyImage.width()) {
+                    continue;
+                }
+                const QRgb pixel = m_dummyImage.pixel(texX, texY);
+                const int value = static_cast<int>((qRed(pixel) / 255.0f) * 20.0f + 0.5f);
+                if (value <= 0) {
+                    continue;
+                }
+
+                const float px = static_cast<float>(i) * request.cellW;
+                const float py = static_cast<float>(j) * request.cellH;
+                const QRectF cellRect(px, py, request.cellW, request.cellH);
+                painter.drawText(cellRect, Qt::AlignCenter, QString::number(value));
+            }
+        }
+    }
+    painter.end();
+
+    {
+        std::lock_guard<std::mutex> lock(m_dummyLabelMutex);
+        m_dummyLabelImage = labelImage;
+    }
+    m_dummyLabelVersion.fetch_add(1);
+}
+
+void UnifiedGridRenderer::onDummyRenderTick() {
+    if (!m_useDummyHeatmap || m_dummyGridSize <= 0) {
+        return;
+    }
+
+    if (m_dummyAppendMs > 0) {
+        const qint64 nowMs = m_dummyClock.elapsed();
+        const qint64 deltaMs = nowMs - m_dummyLastAppendMs;
+        const float frac = std::clamp(static_cast<float>(deltaMs) / static_cast<float>(m_dummyAppendMs), 0.0f, 1.0f);
+        const float offset = (static_cast<float>(m_dummyWriteColumn) + frac) / static_cast<float>(m_dummyGridSize);
+        m_dummyTimeOffset.store(offset);
+    }
+
+    update();
 }
 
 // helper methods inlined above; no separate member helpers to avoid private access issues in free functions
@@ -697,6 +1231,7 @@ int UnifiedGridRenderer::getCurrentTimeResolution() const { return static_cast<i
 double UnifiedGridRenderer::getCurrentPriceResolution() const { return m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0; }
 double UnifiedGridRenderer::getScreenWidth() const { return width(); }
 double UnifiedGridRenderer::getScreenHeight() const { return height(); }
+double UnifiedGridRenderer::getZoomFactor() const { return m_viewState ? m_viewState->getZoomFactor() : 1.0; }
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const { return m_viewState ? m_viewState->getVisibleTimeStart() : 0; }
 qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_viewState->getVisibleTimeEnd() : 0; }
 double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
@@ -708,7 +1243,7 @@ QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Cells:%1 Size:%2x%3").arg(m_visibleCells ? m_visibleCells->size() : 0).arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getPerformanceStats() const { return "N/A (SentinelMonitor removed)"; }
-double UnifiedGridRenderer::getCurrentFPS() const { return 0.0; }
+double UnifiedGridRenderer::getCurrentFPS() const { return m_currentFps.load(); }
 double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 

@@ -33,13 +33,17 @@ signals:
     void errorOccurred(const QString& error);
     
     void tradeReceived(const Trade& trade);
+    // This signal is strictly for internal use by DataSource which converts prices -> indices
+    void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
+    
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
+    void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     // Other signals as needed for aggregated slices
 
 private:
     void run();
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
-    void onConnect(boost::beast::error_code ec, tcp::resolver::results_type::endpoint_type);
+    void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
     void onHandshake(boost::beast::error_code ec);
     void doRead();
     void onRead(boost::beast::error_code ec, std::size_t bytes_transferred);

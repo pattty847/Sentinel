@@ -53,6 +53,8 @@ set(GRID_CORE_SOURCES
     render/RenderTypes.hpp
     render/RenderConfig.hpp
     render/GridTypes.hpp
+    render/HeatmapIntensityNode.hpp
+    render/HeatmapIntensityNode.cpp
     render/strategies/HeatmapStrategy.hpp
     render/strategies/HeatmapStrategy.cpp
     render/strategies/TradeFlowStrategy.hpp
@@ -98,6 +100,19 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/CandleChartView.qml
 )
 
+qt_add_shaders(sentinel_gui_lib heatmap_shaders
+    BATCHABLE
+    GLSL
+        "330,440"
+    PREFIX
+        "/shaders"
+    BASE
+        "render/shaders"
+    FILES
+        render/shaders/heatmap_intensity.vert
+        render/shaders/heatmap_intensity.frag
+)
+
 target_include_directories(sentinel_gui_lib 
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -114,6 +129,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Network
         Qt6::Quick
         Qt6::Qml
+        Qt6::QuickControls2
 )
 
 qt_add_resources(sentinel_gui_lib "resources"

@@ -237,6 +237,60 @@ Rectangle {
         }
     }
 
+    // FPS overlay (polls QML invokable for now).
+    Rectangle {
+        id: fpsOverlay
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.leftMargin: 8
+        anchors.topMargin: 6
+        color: Qt.rgba(0, 0, 0, 0.45)
+        radius: 4
+        z: 10
+        width: Math.max(fpsText.implicitWidth, debugText.implicitWidth) + 12
+        height: fpsText.implicitHeight + debugText.implicitHeight + 10
+
+        Text {
+            id: fpsText
+            anchors.top: parent.top
+            anchors.topMargin: 4
+            anchors.horizontalCenter: parent.horizontalCenter
+            color: "#9ef6ff"
+            font.pixelSize: 12
+            text: "FPS: 0.0"
+        }
+
+        Text {
+            id: debugText
+            anchors.top: fpsText.bottom
+            anchors.topMargin: 2
+            anchors.horizontalCenter: parent.horizontalCenter
+            color: "#d5f7ff"
+            font.pixelSize: 10
+            text: ""
+        }
+
+        Timer {
+            interval: 250
+            repeat: true
+            running: true
+            onTriggered: {
+                fpsText.text = "FPS: " + unifiedGridRenderer.getCurrentFPS().toFixed(1);
+                var zoom = unifiedGridRenderer.getZoomFactor();
+                var t0 = unifiedGridRenderer.getVisibleTimeStart();
+                var t1 = unifiedGridRenderer.getVisibleTimeEnd();
+                var p0 = unifiedGridRenderer.getMinPrice();
+                var p1 = unifiedGridRenderer.getMaxPrice();
+                var pan = unifiedGridRenderer.getPanVisualOffset();
+                debugText.text =
+                    "Zoom: " + zoom.toFixed(2) +
+                    "  Time: " + t0 + "→" + t1 +
+                    "  Price: " + p0.toFixed(2) + "→" + p1.toFixed(2) +
+                    "  Pan: (" + pan.x.toFixed(1) + "," + pan.y.toFixed(1) + ")";
+            }
+        }
+    }
+
     // Control Panel (top right) - Refactored to use modular components
     Column {
         anchors.top: parent.top

@@ -19,3 +19,16 @@ set_target_properties(sentinel_server PROPERTIES
     OUTPUT_NAME "sentinel-server"
 )
 
+if (WIN32)
+    # Deploy Qt dependencies
+    add_custom_command(TARGET sentinel_server POST_BUILD
+        COMMAND "$ENV{QT_MSVC}/bin/windeployqt.exe"
+                --no-opengl
+                --no-system-d3d-compiler
+                --no-compiler-runtime
+                --no-translations
+                "$<TARGET_FILE:sentinel_server>"
+        COMMENT "Running windeployqt for sentinel-server"
+        VERBATIM
+    )
+endif()

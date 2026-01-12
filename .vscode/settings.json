@@ -5,29 +5,15 @@
     "cmake.debugConfig": {
         "cwd": "${workspaceFolder}"
     },
-    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-    "C_Cpp.errorSquiggles": "enabled",
-    "C_Cpp.autoAddFileAssociations": true,
-    "C_Cpp.default.cppStandard": "c++20",
-    "C_Cpp.default.cStandard": "c17",
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.autoAddFileAssociations": false,
     "clangd.arguments": [
         "--background-index",
-        "--clang-tidy",
-        "--header-insertion=iwyu",
-        "--compile-commands-dir=build/windows-msvc-ninja"
+        "--compile-commands-dir=build/linux-gcc"
     ],
+    "clangd.showDBChangedNotification": false,
     "files.associations": {
         "*.qml": "qml"
-    },
-    "terminal.integrated.profiles.windows": {
-        "Developer Command Prompt for VS": {
-            "path": "cmd.exe",
-            "args": [
-                "/k",
-                "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
-            ],
-            "icon": "terminal-powershell"
-        }
-    },
-    "terminal.integrated.defaultProfile.windows": "Developer Command Prompt for VS"
+    }
 } 

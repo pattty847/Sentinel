@@ -38,6 +38,8 @@ bool SentinelServerApp::initialize() {
                 m_serverModel.get(), &ServerDataModel::onTrade);
         connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated, 
                 m_serverModel.get(), &ServerDataModel::onLiveOrderBookUpdated);
+        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookInitialized,
+                m_serverModel.get(), &ServerDataModel::onLiveOrderBookInitialized);
         
         // Wire up signals for logging
         connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, [](bool connected){
@@ -51,8 +53,9 @@ bool SentinelServerApp::initialize() {
         // Start connection
         m_marketDataCore->start();
         
-        // TODO: Load config and subscribe to initial symbols
-        // m_marketDataCore->subscribeToSymbols({"BTC-USD"});
+        // Subscribe to BTC-USD by default for verification
+        sLog_App("Subscribing to default symbol: BTC-USD");
+        m_marketDataCore->subscribeToSymbols({"BTC-USD"});
 
         return true;
     } catch (const std::exception& e) {

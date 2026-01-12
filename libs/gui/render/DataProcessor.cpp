@@ -94,9 +94,6 @@ void DataProcessor::onTradeReceived(const Trade& trade) {
     
     if (trade.product_id.empty()) return;
     
-    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        trade.timestamp.time_since_epoch()).count();
-    
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         
@@ -531,7 +528,6 @@ void DataProcessor::updateVisibleCells() {
                 // Check if we've already processed this exact (time + version) combination
                 if (m_processedTimeRanges.find(range) == m_processedTimeRanges.end()) {
                     // Check if we have an OLD version of this time range that needs updating
-                    bool foundOldVersion = false;
                     for (auto it = m_processedTimeRanges.begin(); it != m_processedTimeRanges.end(); ) {
                         if (it->startTime == range.startTime && it->endTime == range.endTime) {
                             // Found old version - remove stale cells and tracking entry
@@ -539,7 +535,6 @@ void DataProcessor::updateVisibleCells() {
                                         << "] version " << it->dataVersion << " -> " << range.dataVersion);
                             removeCellsForTimeRange(range.startTime, range.endTime);
                             it = m_processedTimeRanges.erase(it);
-                            foundOldVersion = true;
                         } else {
                             ++it;
                         }

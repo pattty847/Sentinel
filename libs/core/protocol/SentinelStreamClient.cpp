@@ -7,6 +7,10 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     , m_port(port)
     , m_ws(m_ioc)
 {
+    qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
+    qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
+    qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
+    qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
@@ -24,10 +28,10 @@ void SentinelStreamClient::connectToServer() {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
             
-            net::async_connect(
-                m_ws.next_layer(),
+            auto& stream = m_ws.next_layer();
+            stream.async_connect(
                 results,
-                [this](auto ec, auto ep) { onConnect(ec, ep); }
+                [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
             
             m_ioc.run();
@@ -82,7 +86,7 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
     }
 }
 
-void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::resolver::results_type::endpoint_type) {
+void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
         sLog_Error("Connect failed: " << ec.message());
         emit errorOccurred(QString::fromStdString(ec.message()));
@@ -104,6 +108,14 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     emit connected();
     
     doRead();
+
+    // Flush pending writes
+    {
+        std::lock_guard<std::mutex> lock(m_writeMutex);
+        if (!m_writeQueue.empty()) {
+            doWrite();
+        }
+    }
 }
 
 void SentinelStreamClient::doRead() {
@@ -163,9 +175,58 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
         
         if (type == "snapshot") {
             // Process snapshot
-        } else if (type == "slice_batch") {
-            // Process batch
+            std::string symbol = msg.value("symbol", "");
+            if (symbol.empty()) return;
+            
+            std::vector<OrderBookLevel> bids;
+            std::vector<OrderBookLevel> asks;
+            
+            if (msg.contains("bids")) {
+                for (const auto& level : msg["bids"]) {
+                    if (level.contains("p") && level.contains("q")) {
+                        bids.push_back({level["p"], level["q"]});
+                    }
+                }
+            }
+            if (msg.contains("asks")) {
+                for (const auto& level : msg["asks"]) {
+                    if (level.contains("p") && level.contains("q")) {
+                        asks.push_back({level["p"], level["q"]});
+                    }
+                }
+            }
+            
+            emit snapshotReceived(QString::fromStdString(symbol), bids, asks);
+            
+        } else if (type == "l2update") {
+             std::string symbol = msg.value("product_id", "");
+             if (symbol.empty()) return;
+             
+             if (msg.contains("deltas")) {
+                 std::vector<BookLevelUpdate> updates;
+                 for (const auto& d : msg["deltas"]) {
+                     // JSON: { "side": "bid"/"ask", "price": float, "size": float }
+                     std::string side = d.value("side", "");
+                     bool isBid = (side == "bid");
+                     double price = d.value("price", 0.0);
+                     double size = d.value("size", 0.0);
+                     
+                     updates.push_back({isBid, price, size});
+                 }
+                 emit l2UpdateReceived(QString::fromStdString(symbol), updates);
+             }
+        } else if (type == "trade") {
+             Trade t;
+             t.product_id = msg.value("product_id", "");
+             t.price = msg.value("price", 0.0);
+             t.size = msg.value("size", 0.0);
+             std::string side = msg.value("side", "");
+             t.side = (side == "buy") ? AggressorSide::Buy : AggressorSide::Sell;
+             // t.timestamp? 
+             
+             emit tradeReceived(t);
         }
+
     } catch (const std::exception& e) {
         sLog_Error("Message parse error: " << e.what());
     }
