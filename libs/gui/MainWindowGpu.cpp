@@ -263,7 +263,10 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openMarketDataPanel = [this]() { onOpenMarketDataPanel(); };
-    
+
+    // Set heatmap dock for debug menu access
+    m_menuBuilder->setHeatmapDock(m_heatmapDock);
+
     m_menuBuilder->buildMenus(docks, callbacks);
 }
 

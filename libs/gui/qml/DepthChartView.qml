@@ -291,6 +291,90 @@ Rectangle {
         }
     }
 
+    // GPU Stats overlay (Tier 1 debug info)
+    Rectangle {
+        id: gpuStatsOverlay
+        anchors.left: parent.left
+        anchors.top: fpsOverlay.bottom
+        anchors.leftMargin: 8
+        anchors.topMargin: 4
+        color: Qt.rgba(0, 0, 0, 0.45)
+        radius: 4
+        z: 10
+        visible: unifiedGridRenderer.showGpuStatsOverlay
+        width: gpuStatsColumn.implicitWidth + 12
+        height: gpuStatsColumn.implicitHeight + 10
+
+        Column {
+            id: gpuStatsColumn
+            anchors.centerIn: parent
+            spacing: 2
+
+            Text {
+                color: "#FFD700"
+                font.pixelSize: 11
+                font.bold: true
+                text: "📊 GPU Stats"
+            }
+
+            Text {
+                id: textureSizeText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Texture: N/A"
+            }
+
+            Text {
+                id: textureMemText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Memory: N/A"
+            }
+
+            Text {
+                id: textureFormatText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Format: N/A"
+            }
+
+            Text {
+                id: uploadBandwidthText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Upload: 0.0 MB/s"
+            }
+
+            Text {
+                id: ringCursorText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Ring Cursor: N/A"
+            }
+
+            Text {
+                id: dirtyRegionsText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Dirty Regions: 0"
+            }
+        }
+
+        Timer {
+            interval: 250
+            repeat: true
+            running: gpuStatsOverlay.visible
+            onTriggered: {
+                textureSizeText.text = "Texture: " + unifiedGridRenderer.getTextureSize();
+                textureMemText.text = "Memory: " + unifiedGridRenderer.getTextureMemory();
+                textureFormatText.text = "Format: " + unifiedGridRenderer.getTextureFormat();
+                uploadBandwidthText.text = "Upload: " + unifiedGridRenderer.getUploadBandwidth().toFixed(2) + " MB/s";
+                ringCursorText.text = "Ring Cursor: " + unifiedGridRenderer.getRingCursorInfo();
+                dirtyRegionsText.text = "Dirty Regions: " + unifiedGridRenderer.getDirtyRegionCount();
+            }
+        }
+    }
+
     // Control Panel (top right) - Refactored to use modular components
     Column {
         anchors.top: parent.top

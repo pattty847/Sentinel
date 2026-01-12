@@ -42,17 +42,21 @@ public:
     };
 
     explicit MenuBuilder(QMenuBar* menuBar);
-    
+
     void buildMenus(const DockWidgets& docks, const Callbacks& callbacks);
-    
+    void setHeatmapDock(HeatmapDock* heatmapDock) { m_heatmapDock = heatmapDock; }
+
 private:
     void buildViewMenu(const DockWidgets& docks);
     void buildLayoutsMenu(const Callbacks& callbacks);
     void buildToolsMenu(const Callbacks& callbacks);
-    
+    void buildDebugMenu();
+
     QMenuBar* m_menuBar;
     QMenu* m_viewMenu = nullptr;
     QMenu* m_layoutsMenu = nullptr;
     QMenu* m_toolsMenu = nullptr;
+    QMenu* m_debugMenu = nullptr;
+    HeatmapDock* m_heatmapDock = nullptr;
 };
 

@@ -63,13 +63,21 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(bool showTradeBubbleLayer READ showTradeBubbleLayer WRITE setShowTradeBubbleLayer NOTIFY showTradeBubbleLayerChanged)
     Q_PROPERTY(bool showTradeFlowLayer READ showTradeFlowLayer WRITE setShowTradeFlowLayer NOTIFY showTradeFlowLayerChanged)
     
+    // Debug Overlay Toggles
+    Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
+    Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
+    Q_PROPERTY(bool showRenderStrategyOverlay READ showRenderStrategyOverlay WRITE setShowRenderStrategyOverlay NOTIFY showRenderStrategyOverlayChanged)
+    Q_PROPERTY(bool showViewportMathOverlay READ showViewportMathOverlay WRITE setShowViewportMathOverlay NOTIFY showViewportMathOverlayChanged)
+    Q_PROPERTY(bool showMemoryCacheOverlay READ showMemoryCacheOverlay WRITE setShowMemoryCacheOverlay NOTIFY showMemoryCacheOverlayChanged)
+    Q_PROPERTY(bool showModeFlagsOverlay READ showModeFlagsOverlay WRITE setShowModeFlagsOverlay NOTIFY showModeFlagsOverlayChanged)
+
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
-    
+
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
-    
+
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
 public:
@@ -100,7 +108,15 @@ private:
     bool m_showHeatmapLayer = true;      // Base heatmap layer
     bool m_showTradeBubbleLayer = true;  // Trade bubble overlay
     bool m_showTradeFlowLayer = false;   // Trade flow overlay
-    
+
+    // Debug overlay toggles
+    bool m_showGpuStatsOverlay = false;
+    bool m_showDataPipelineOverlay = false;
+    bool m_showRenderStrategyOverlay = false;
+    bool m_showViewportMathOverlay = false;
+    bool m_showMemoryCacheOverlay = false;
+    bool m_showModeFlagsOverlay = false;
+
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
@@ -150,6 +166,7 @@ private:
         QRectF srcRect;
         QSize labelSize;
         int startX = 0;
+        int startY = 0;
         float cellW = 0.0f;
         float cellH = 0.0f;
         bool valid = false;
@@ -160,14 +177,20 @@ private:
         int x = 0;
         QByteArray data;
     };
-    std::mutex m_dummyUploadMutex;
+    mutable std::mutex m_dummyUploadMutex;
     std::vector<DummyPendingColumn> m_dummyPendingColumns;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
     std::atomic<double> m_currentFps{0.0};
-    
+
+    // GPU upload bandwidth tracking
+    QElapsedTimer m_uploadTimer;
+    std::atomic<qint64> m_totalBytesUploaded{0};
+    std::atomic<double> m_uploadBandwidthMBps{0.0};
+    qint64 m_lastBandwidthUpdate = 0;
+
     // V1 state (removed - now delegated to DataProcessor)
 
 public:
@@ -192,7 +215,15 @@ public:
     bool showHeatmapLayer() const { return m_showHeatmapLayer; }
     bool showTradeBubbleLayer() const { return m_showTradeBubbleLayer; }
     bool showTradeFlowLayer() const { return m_showTradeFlowLayer; }
-    
+
+    // Debug overlay accessors
+    bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
+    bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
+    bool showRenderStrategyOverlay() const { return m_showRenderStrategyOverlay; }
+    bool showViewportMathOverlay() const { return m_showViewportMathOverlay; }
+    bool showMemoryCacheOverlay() const { return m_showMemoryCacheOverlay; }
+    bool showModeFlagsOverlay() const { return m_showModeFlagsOverlay; }
+
     //  VIEWPORT BOUNDS: Getters for QML properties
     Q_INVOKABLE qint64 getVisibleTimeStart() const;
     Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
@@ -233,7 +264,15 @@ public:
     Q_INVOKABLE double getCurrentFPS() const;
     Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
-    
+
+    //  GPU STATS DEBUG API
+    Q_INVOKABLE QString getTextureSize() const;          // e.g., "8192x8192"
+    Q_INVOKABLE QString getTextureMemory() const;        // e.g., "128 MB"
+    Q_INVOKABLE QString getTextureFormat() const;        // e.g., "RGBA8" or "R16"
+    Q_INVOKABLE double getUploadBandwidth() const;       // MB/s
+    Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
+    Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
+
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
@@ -280,6 +319,12 @@ signals:
     void showHeatmapLayerChanged();
     void showTradeBubbleLayerChanged();
     void showTradeFlowLayerChanged();
+    void showGpuStatsOverlayChanged();
+    void showDataPipelineOverlayChanged();
+    void showRenderStrategyOverlayChanged();
+    void showViewportMathOverlayChanged();
+    void showMemoryCacheOverlayChanged();
+    void showModeFlagsOverlayChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -316,6 +361,12 @@ private:
     void setShowHeatmapLayer(bool show);
     void setShowTradeBubbleLayer(bool show);
     void setShowTradeFlowLayer(bool show);
+    void setShowGpuStatsOverlay(bool show);
+    void setShowDataPipelineOverlay(bool show);
+    void setShowRenderStrategyOverlay(bool show);
+    void setShowViewportMathOverlay(bool show);
+    void setShowMemoryCacheOverlay(bool show);
+    void setShowModeFlagsOverlay(bool show);
     void updateVisibleCells();
     void updateVolumeProfile();
     
