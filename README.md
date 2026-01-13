@@ -9,8 +9,18 @@ GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
-![Dockable Layout (WIP)](https://github.com/user-attachments/assets/9d3ac4b5-eedb-44d3-855c-b03a7d6ac66b)
-![Liquidity Heatmap](https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779)
+## Server-Client Main Branch Recent Changes
+
+<img width="1913" height="921" alt="image" src="https://github.com/user-attachments/assets/7ff802be-510d-48e1-bcdb-13b9e75ff647" />
+
+- Full Server Client architecture
+- Entirely GPU based heatmap rasterization and rendering
+- One quad, texture sampling
+- 60 FPS, easily higher
+- 8192 x 8192 - 67M Cells, easily can push higher
+- TWAP Heatmap Cell Aggregation
+- Full Docking Framework
+- Qt RHI backend for any OS
 
 ---
 
