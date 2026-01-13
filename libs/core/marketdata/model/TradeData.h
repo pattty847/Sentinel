@@ -213,6 +213,15 @@ public:
                          double* bestBid,
                          double* bestAsk) const;
 
+    // Aggregate bids/asks separately into fixed-size rows (thread-safe).
+    void accumulateRangeSplit(double minPrice,
+                              double maxPrice,
+                              double rowTickSize,
+                              std::vector<double>& bidRows,
+                              std::vector<double>& askRows,
+                              double* bestBid,
+                              double* bestAsk) const;
+
 private:
     // Helper to convert a price to a vector index
     inline size_t price_to_index(double price) const {

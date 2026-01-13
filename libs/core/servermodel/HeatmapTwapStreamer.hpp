@@ -34,7 +34,8 @@ private:
         int64_t timeframeMs = 0;
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;
-        std::vector<double> accum;
+        std::vector<double> accumBid;
+        std::vector<double> accumAsk;
     };
 
     struct SymbolState {
@@ -46,7 +47,8 @@ private:
         int64_t lastSampleMs = 0;
         bool initialized = false;
         bool pendingReset = false;
-        std::vector<double> rowValues;
+        std::vector<double> rowValuesBid;
+        std::vector<double> rowValuesAsk;
         std::vector<TimeframeState> frames;
     };
 
@@ -61,7 +63,8 @@ private:
                         SymbolState& state,
                         TimeframeState& frame,
                         double lastTrade);
-    QByteArray toIntensityColumn(const std::vector<double>& values) const;
+    QByteArray toIntensityColumnSigned(const std::vector<double>& bidValues,
+                                       const std::vector<double>& askValues) const;
 
     static int64_t alignBucketStart(int64_t nowMs, int64_t timeframeMs);
 
@@ -74,6 +77,7 @@ private:
 
     int m_defaultHeight = 2048;
     double m_defaultTickSize = 1.0;
+    int64_t m_activeTimeframeMs = 100;
 
     std::vector<int64_t> m_timeframesMs;
     std::unordered_map<std::string, SymbolState> m_symbols;

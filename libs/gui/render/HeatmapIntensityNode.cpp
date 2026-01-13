@@ -62,7 +62,6 @@ public:
                     auto* gl = ctx ? ctx->functions() : nullptr;
                     if (gl) {
                         gl->glBindTexture(GL_TEXTURE_2D, glTex->nativeTexture());
-                        gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
                         const int height = (*texture)->textureSize().height();
                         const int width = (*texture)->textureSize().width();
                         for (const auto& upload : uploads) {
@@ -70,12 +69,18 @@ public:
                             if (x < 0 || x >= width) {
                                 continue;
                             }
-                            if (upload.second.size() < height * 4) {
-                                continue;
+                            const int byteCount = upload.second.size();
+                            if (byteCount == height) {
+                                gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                                gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
+                                                    GL_RED, GL_UNSIGNED_BYTE,
+                                                    upload.second.constData());
+                            } else if (byteCount == height * 4) {
+                                gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                                gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
+                                                    GL_BGRA, GL_UNSIGNED_BYTE,
+                                                    upload.second.constData());
                             }
-                            gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
-                                                GL_BGRA, GL_UNSIGNED_BYTE,
-                                                upload.second.constData());
                         }
                     }
                 }

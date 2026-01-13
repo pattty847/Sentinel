@@ -13,19 +13,26 @@ layout(std140, binding = 0) uniform buf {
 
 void main() {
     vec2 uv = vec2(fract(v_texcoord.x + params.w), v_texcoord.y);
-    float intensity = texture(intensityTex, uv).r;
-    if (intensity <= 0.0001) {
+    float encoded = texture(intensityTex, uv).r;
+    if (encoded <= 0.0001) {
         fragColor = vec4(0.0, 0.0, 0.0, params.x);
         return;
     }
-    float contrast = params.z;
     float gamma = params.y;
 
-    float adjusted = clamp((intensity - 0.5) * contrast + 0.5, 0.0, 1.0);
-    adjusted = pow(adjusted, gamma);
-
-    float isAsk = step(uv.y, 0.5);
-    float u = mix(adjusted * 0.5, 0.5 + adjusted * 0.5, isAsk);
+    // Detect bid vs ask: bytes 0-127 = bid, 128-255 = ask
+    float isAsk = step(0.5, encoded);
+    
+    // Extract magnitude within each half (0.0 to 1.0)
+    // Bids: 1-127 → 0.004-0.498 → magnitude 0.008-0.996
+    // Asks: 128-255 → 0.502-1.0 → magnitude 0.004-1.0
+    float magnitude = mix(encoded * 2.0, (encoded - 0.5) * 2.0, isAsk);
+    
+    // Apply gamma for brightness control, ensure minimum visibility
+    float adjusted = pow(max(magnitude, 0.1), gamma);
+    
+    // Map to palette: bids use 0.0-0.5, asks use 0.5-1.0
+    float u = mix(adjusted * 0.49, 0.51 + adjusted * 0.49, isAsk);
 
     vec4 color = texture(paletteTex, vec2(u, 0.5));
     fragColor = vec4(color.rgb, color.a * params.x);

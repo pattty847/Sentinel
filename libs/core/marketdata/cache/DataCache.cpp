@@ -400,3 +400,69 @@ void LiveOrderBook::accumulateRange(double minPrice,
         }
     }
 }
+
+void LiveOrderBook::accumulateRangeSplit(double minPrice,
+                                         double maxPrice,
+                                         double rowTickSize,
+                                         std::vector<double>& bidRows,
+                                         std::vector<double>& askRows,
+                                         double* bestBid,
+                                         double* bestAsk) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (rowTickSize <= 0.0 || maxPrice <= minPrice || bidRows.empty() || askRows.empty()) {
+        return;
+    }
+
+    std::fill(bidRows.begin(), bidRows.end(), 0.0);
+    std::fill(askRows.begin(), askRows.end(), 0.0);
+    if (bestBid) *bestBid = 0.0;
+    if (bestAsk) *bestAsk = 0.0;
+
+    const size_t startIdx = price_to_index(std::max(minPrice, m_min_price));
+    const size_t endIdx = price_to_index(std::min(maxPrice, m_max_price));
+
+    if (startIdx >= m_bids.size() || startIdx >= m_asks.size()) {
+        return;
+    }
+
+    const size_t clampedEnd = std::min(endIdx, m_bids.size() - 1);
+    const double spanMax = maxPrice;
+    const double spanMin = minPrice;
+
+    for (size_t i = clampedEnd + 1; i-- > startIdx; ) {
+        const double qty = m_bids[i];
+        if (qty <= 0.0) {
+            continue;
+        }
+        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
+        if (price < spanMin || price > spanMax) {
+            continue;
+        }
+        if (bestBid && *bestBid == 0.0) {
+            *bestBid = price;
+        }
+        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
+        if (row >= 0 && row < static_cast<int>(bidRows.size())) {
+            bidRows[static_cast<size_t>(row)] += qty;
+        }
+    }
+
+    for (size_t i = startIdx; i <= clampedEnd; ++i) {
+        const double qty = m_asks[i];
+        if (qty <= 0.0) {
+            continue;
+        }
+        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
+        if (price < spanMin || price > spanMax) {
+            continue;
+        }
+        if (bestAsk && *bestAsk == 0.0) {
+            *bestAsk = price;
+        }
+        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
+        if (row >= 0 && row < static_cast<int>(askRows.size())) {
+            askRows[static_cast<size_t>(row)] += qty;
+        }
+    }
+}

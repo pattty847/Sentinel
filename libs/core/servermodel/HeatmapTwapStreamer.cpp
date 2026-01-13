@@ -6,6 +6,7 @@
 #include <QProcessEnvironment>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace {
 constexpr int64_t kMsPerSecond = 1000;
@@ -31,6 +32,13 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
     const double envTick = tickEnv.toDouble(&ok);
     if (ok && envTick > 0.0) {
         m_defaultTickSize = envTick;
+    }
+
+    const QByteArray tfEnv = qgetenv("SENTINEL_HEATMAP_TF");
+    ok = false;
+    const int64_t envTf = tfEnv.toLongLong(&ok);
+    if (ok && envTf > 0) {
+        m_activeTimeframeMs = envTf;
     }
 }
 
@@ -69,7 +77,8 @@ void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolSta
 
     state.tickSize = state.tickSize > 0.0 ? state.tickSize : m_defaultTickSize;
     state.height = state.height > 0 ? state.height : m_defaultHeight;
-    state.rowValues.assign(static_cast<size_t>(state.height), 0.0);
+    state.rowValuesBid.assign(static_cast<size_t>(state.height), 0.0);
+    state.rowValuesAsk.assign(static_cast<size_t>(state.height), 0.0);
 
     const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
     const double center = (midPrice > 0.0) ? midPrice : state.lastMidPrice;
@@ -80,11 +89,15 @@ void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolSta
     state.frames.clear();
     state.frames.reserve(m_timeframesMs.size());
     for (const auto tf : m_timeframesMs) {
+        if (m_activeTimeframeMs > 0 && tf != m_activeTimeframeMs) {
+            continue;
+        }
         TimeframeState frame;
         frame.timeframeMs = tf;
         frame.bucketStartMs = 0;
         frame.bucketEndMs = 0;
-        frame.accum.assign(static_cast<size_t>(state.height), 0.0);
+        frame.accumBid.assign(static_cast<size_t>(state.height), 0.0);
+        frame.accumAsk.assign(static_cast<size_t>(state.height), 0.0);
         state.frames.push_back(std::move(frame));
     }
 
@@ -117,8 +130,9 @@ void HeatmapTwapStreamer::onSample() {
         }
         ensureSymbolState(symbol, state, midGuess);
 
-        hotData.liveBook.accumulateRange(state.minPrice, state.maxPrice, state.tickSize,
-                                         state.rowValues, &bestBid, &bestAsk);
+        hotData.liveBook.accumulateRangeSplit(state.minPrice, state.maxPrice, state.tickSize,
+                                              state.rowValuesBid, state.rowValuesAsk,
+                                              &bestBid, &bestAsk);
 
         double midPrice = midGuess;
         if (midPrice <= 0.0 && bestBid > 0.0 && bestAsk > 0.0) {
@@ -156,6 +170,9 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
         if (frame.timeframeMs <= 0) {
             continue;
         }
+        if (m_activeTimeframeMs > 0 && frame.timeframeMs != m_activeTimeframeMs) {
+            continue;
+        }
 
         if (frame.bucketStartMs == 0) {
             frame.bucketStartMs = alignBucketStart(intervalStart, frame.timeframeMs);
@@ -167,8 +184,9 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
             const int64_t segmentEnd = std::min(intervalEnd, frame.bucketEndMs);
             const double dtMs = static_cast<double>(segmentEnd - t0);
 
-            for (size_t i = 0; i < frame.accum.size(); ++i) {
-                frame.accum[i] += state.rowValues[i] * dtMs;
+            for (size_t i = 0; i < frame.accumBid.size(); ++i) {
+                frame.accumBid[i] += state.rowValuesBid[i] * dtMs;
+                frame.accumAsk[i] += state.rowValuesAsk[i] * dtMs;
             }
 
             t0 = segmentEnd;
@@ -176,7 +194,8 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
                 finalizeBucket(symbol, state, frame, lastTrade);
                 frame.bucketStartMs = frame.bucketEndMs;
                 frame.bucketEndMs = frame.bucketStartMs + frame.timeframeMs;
-                std::fill(frame.accum.begin(), frame.accum.end(), 0.0);
+                std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
+                std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
             }
         }
     }
@@ -195,12 +214,14 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     }
 
     const double denom = static_cast<double>(frame.timeframeMs);
-    std::vector<double> twap(frame.accum.size(), 0.0);
-    for (size_t i = 0; i < frame.accum.size(); ++i) {
-        twap[i] = (denom > 0.0) ? (frame.accum[i] / denom) : 0.0;
+    std::vector<double> twapBid(frame.accumBid.size(), 0.0);
+    std::vector<double> twapAsk(frame.accumAsk.size(), 0.0);
+    for (size_t i = 0; i < frame.accumBid.size(); ++i) {
+        twapBid[i] = (denom > 0.0) ? (frame.accumBid[i] / denom) : 0.0;
+        twapAsk[i] = (denom > 0.0) ? (frame.accumAsk[i] / denom) : 0.0;
     }
 
-    const QByteArray column = toIntensityColumn(twap);
+    const QByteArray column = toIntensityColumnSigned(twapBid, twapAsk);
     const bool reset = false;
     state.pendingReset = false;
 
@@ -225,24 +246,56 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                            reset);
 }
 
-QByteArray HeatmapTwapStreamer::toIntensityColumn(const std::vector<double>& values) const {
-    if (values.empty()) {
+QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double>& bidValues,
+                                                        const std::vector<double>& askValues) const {
+    if (bidValues.empty() || askValues.empty()) {
         return {};
     }
-    double maxValue = 0.0;
-    for (const double v : values) {
-        if (v > maxValue) {
-            maxValue = v;
+    double maxBid = 0.0;
+    double maxAsk = 0.0;
+    int nonZeroBid = 0;
+    int nonZeroAsk = 0;
+    for (const double v : bidValues) {
+        if (v > 0.0) {
+            ++nonZeroBid;
+            if (v > maxBid) {
+                maxBid = v;
+            }
         }
     }
-    const double denom = (maxValue > 0.0) ? maxValue : 1.0;
+    for (const double v : askValues) {
+        if (v > 0.0) {
+            ++nonZeroAsk;
+            if (v > maxAsk) {
+                maxAsk = v;
+            }
+        }
+    }
+    const double denomBid = (maxBid > 0.0) ? maxBid : 1.0;
+    const double denomAsk = (maxAsk > 0.0) ? maxAsk : 1.0;
+
+    static int logCount = 0;
+    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 20) == 0) {
+        sLog_App("Heatmap column stats: bids=" << nonZeroBid
+                 << " asks=" << nonZeroAsk
+                 << " maxBid=" << maxBid
+                 << " maxAsk=" << maxAsk);
+    }
 
     QByteArray out;
-    out.resize(static_cast<int>(values.size()));
+    const size_t height = bidValues.size();
+    out.resize(static_cast<int>(height));
     auto* dst = reinterpret_cast<unsigned char*>(out.data());
-    for (size_t i = 0; i < values.size(); ++i) {
-        const double normalized = std::clamp(values[i] / denom, 0.0, 1.0);
-        dst[i] = static_cast<unsigned char>(normalized * 255.0);
+    for (size_t i = 0; i < height; ++i) {
+        const double bidNorm = std::clamp(bidValues[i] / denomBid, 0.0, 1.0);
+        const double askNorm = std::clamp(askValues[i] / denomAsk, 0.0, 1.0);
+        if (askNorm > 0.0) {
+            dst[i] = static_cast<unsigned char>(128 + std::round(askNorm * 127.0));
+        } else if (bidNorm > 0.0) {
+            dst[i] = static_cast<unsigned char>(std::round(bidNorm * 127.0));
+        } else {
+            dst[i] = 0;
+        }
     }
     return out;
 }

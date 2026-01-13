@@ -554,13 +554,69 @@ void UnifiedGridRenderer::init() {
                    const QByteArray& column) {
                 Q_UNUSED(sliceEndMs);
                 const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
-                if (!m_useGpuHeatmap || m_heatmapGridSize <= 0 || column.isEmpty()) {
+                if (!m_useGpuHeatmap) {
+                    if (m_useDummyHeatmap) {
+                        if (debug) {
+                            sLog_Render("GPU HEATMAP DROP: enabled=" << m_useGpuHeatmap
+                                        << " grid=" << m_heatmapGridSize
+                                        << " bytes=" << column.size());
+                        }
+                        return;
+                    }
+                    m_useGpuHeatmap = true;
+                    m_heatmapTextureDirty = true;
+                    m_heatmapClock.start();
+                }
+                if (column.isEmpty()) {
                     if (debug) {
                         sLog_Render("GPU HEATMAP DROP: enabled=" << m_useGpuHeatmap
                                     << " grid=" << m_heatmapGridSize
                                     << " bytes=" << column.size());
                     }
                     return;
+                }
+                if (column.size() > 0 && column.size() != m_heatmapGridSize) {
+                    m_heatmapGridSize = column.size();
+                    m_heatmapTextureDirty = true;
+                    m_heatmapWriteColumn = 0;
+                    m_heatmapTimeOriginMs = 0;
+                    m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
+                    m_heatmapHaveLastColumn = false;
+                    m_heatmapLastColumnData.clear();
+                    m_heatmapViewportInitialized = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_heatmapUploadMutex);
+                        m_heatmapPendingColumns.clear();
+                    }
+                }
+
+                if (debug) {
+                    static int debugCount = 0;
+                    ++debugCount;
+                    if (debugCount <= 5 || debugCount % 50 == 0) {
+                        int bidCount = 0;
+                        int askCount = 0;
+                        unsigned char minByte = 255;
+                        unsigned char maxByte = 0;
+                        const auto* bytes = reinterpret_cast<const unsigned char*>(column.constData());
+                        for (int i = 0; i < column.size(); ++i) {
+                            const unsigned char v = bytes[i];
+                            if (v == 0) {
+                                continue;
+                            }
+                            minByte = std::min(minByte, v);
+                            maxByte = std::max(maxByte, v);
+                            if (v >= 128) {
+                                ++askCount;
+                            } else {
+                                ++bidCount;
+                            }
+                        }
+                        sLog_Render("GPU HEATMAP BYTES: bids=" << bidCount
+                                    << " asks=" << askCount
+                                    << " min=" << static_cast<int>(minByte)
+                                    << " max=" << static_cast<int>(maxByte));
+                    }
                 }
 
                 m_heatmapMinPrice = minPrice;
@@ -652,7 +708,12 @@ void UnifiedGridRenderer::init() {
             this,
             [this](double minPrice, double maxPrice, double tickSize, int gridHeight) {
                 if (!m_useGpuHeatmap) {
-                    return;
+                    if (m_useDummyHeatmap) {
+                        return;
+                    }
+                    m_useGpuHeatmap = true;
+                    m_heatmapTextureDirty = true;
+                    m_heatmapClock.start();
                 }
                 m_heatmapMinPrice = minPrice;
                 m_heatmapMaxPrice = maxPrice;
@@ -1060,7 +1121,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             ensureHeatmapPaletteImage();
             auto* intensityTexture = window()->createTextureFromImage(m_heatmapImage);
             if (!intensityTexture) {
-                QImage fallback = m_heatmapImage.convertToFormat(QImage::Format_RGBA8888);
+                QImage fallback = m_heatmapImage.convertToFormat(QImage::Format_Grayscale8);
                 intensityTexture = window()->createTextureFromImage(fallback);
             }
             auto* paletteTexture = window()->createTextureFromImage(m_heatmapPaletteImage);
@@ -1428,7 +1489,7 @@ void UnifiedGridRenderer::ensureHeatmapImage() {
         return;
     }
 
-    m_heatmapImage = QImage(m_heatmapGridSize, m_heatmapGridSize, QImage::Format_ARGB32);
+    m_heatmapImage = QImage(m_heatmapGridSize, m_heatmapGridSize, QImage::Format_Grayscale8);
     if (m_heatmapImage.isNull()) {
         return;
     }
@@ -1442,7 +1503,8 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
 
     const int width = 512;
     const int height = 1;
-    m_heatmapPaletteImage = QImage(width, height, QImage::Format_RGBA8888);
+    // Use ARGB32 format which matches QRgb (0xAARRGGBB) layout
+    m_heatmapPaletteImage = QImage(width, height, QImage::Format_ARGB32);
     if (m_heatmapPaletteImage.isNull()) {
         return;
     }
@@ -1454,9 +1516,10 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
         const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
         const float boost = std::pow(std::clamp(localT, 0.0f, 1.0f), 0.8f);
         const int base = static_cast<int>(boost * 255.0f);
-        const int r = isAsk ? base : static_cast<int>(base * 0.25f);
-        const int g = isAsk ? static_cast<int>(base * 0.25f) : base;
-        const int b = static_cast<int>(base * 0.35f);
+        // Bids (first half): GREEN, Asks (second half): RED
+        const int r = isAsk ? base : static_cast<int>(base * 0.2f);
+        const int g = isAsk ? static_cast<int>(base * 0.2f) : base;
+        const int b = static_cast<int>(base * 0.25f);
         row[i] = qRgba(r, g, b, 255);
     }
 }

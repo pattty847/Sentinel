@@ -42,7 +42,11 @@ DataProcessor::DataProcessor(QObject* parent)
     connect(m_liquidityEngine, &LiquidityTimeSeriesEngine::timeSliceReady,
             this, &DataProcessor::onTimeSliceReady);
     
-    sLog_App("DataProcessor: Initialized for V2 architecture");
+    // Remote-only mode: disable local heatmap paths by default to prevent column size
+    // conflicts between local (8192) and server (variable) grid heights.
+    m_remoteHeatmapActive = true;
+    
+    sLog_App("DataProcessor: Initialized for V2 architecture (remote-only heatmap)");
 }
 
 DataProcessor::~DataProcessor() {
@@ -469,6 +473,10 @@ void DataProcessor::updateVisibleCells() {
         return;
     }
 
+    if (m_remoteHeatmapActive) {
+        return;
+    }
+
     if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_ONLY")) {
         return;
     }
@@ -663,8 +671,17 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                     << " manual=" << m_manualTimeframeSet);
     }
 
-    if (timeframeMs > 0 && m_currentTimeframe_ms != timeframeMs) {
+    const QByteArray desiredTfEnv = qgetenv("SENTINEL_HEATMAP_TF");
+    bool tfOk = false;
+    const int64_t desiredTf = desiredTfEnv.toLongLong(&tfOk);
+    if (tfOk && desiredTf > 0 && timeframeMs > 0 && timeframeMs != desiredTf) {
         return;
+    }
+
+    if (timeframeMs > 0 && m_currentTimeframe_ms != timeframeMs) {
+        m_currentTimeframe_ms = timeframeMs;
+        m_manualTimeframeSet = true;
+        m_manualTimeframeTimer.restart();
     }
 
     if (column.isEmpty()) {
@@ -681,17 +698,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
         if (height <= 0) {
             return;
         }
-        expanded.resize(height * 4);
-        const auto* src = reinterpret_cast<const unsigned char*>(column.constData());
-        auto* dst = reinterpret_cast<unsigned char*>(expanded.data());
-        for (int i = 0; i < height; ++i) {
-            const unsigned char v = src[i];
-            const int idx = i * 4;
-            dst[idx + 0] = v;
-            dst[idx + 1] = v;
-            dst[idx + 2] = v;
-            dst[idx + 3] = 255;
-        }
+        expanded = column;
     } else {
         height = column.size() / 4;
         if (height <= 0) {
@@ -701,10 +708,11 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     }
 
     m_heatmapGridHeight = height;
+    const double effectiveTick = tickSize;
     const bool needsReset = reset || !m_heatmapRangeValid || (prevHeight != height);
 
     if (needsReset) {
-        emit heatmapRangeReset(minPrice, maxPrice, tickSize, height);
+        emit heatmapRangeReset(minPrice, maxPrice, effectiveTick, height);
     }
 
     m_heatmapRangeValid = true;
@@ -713,7 +721,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                             timeframeMs,
                             minPrice,
                             maxPrice,
-                            tickSize,
+                            effectiveTick,
                             expanded);
 }
 
