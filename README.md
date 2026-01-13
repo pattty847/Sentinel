@@ -9,6 +9,9 @@ GPU-accelerated trading terminal. C++20, Qt 6, GPU-resident rendering.
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
+
+## 📸 NEW PHOTOS COMING SOON!
+
 ![Dockable Layout (WIP)](https://github.com/user-attachments/assets/9d3ac4b5-eedb-44d3-855c-b03a7d6ac66b)
 ![Liquidity Heatmap](https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779)
 
