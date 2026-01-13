@@ -9,6 +9,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     // Connect to new specific signals
     connect(&m_client, &SentinelStreamClient::snapshotReceived, this, &RemoteGridDataSource::onSnapshotReceived);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived, this, &RemoteGridDataSource::onL2UpdateReceived);
+    connect(&m_client, &SentinelStreamClient::heatmapSliceReceived, this, &RemoteGridDataSource::onHeatmapSliceReceived);
     
     connect(&m_client, &SentinelStreamClient::connected, [this]{ emit connectionStatusChanged(true); });
     connect(&m_client, &SentinelStreamClient::disconnected, [this]{ emit connectionStatusChanged(false); });
@@ -112,4 +113,30 @@ void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const st
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }
+}
+
+void RemoteGridDataSource::onHeatmapSliceReceived(const QString& symbol,
+                                                  int64_t bucketStartMs,
+                                                  int64_t bucketEndMs,
+                                                  int64_t timeframeMs,
+                                                  double minPrice,
+                                                  double maxPrice,
+                                                  double tickSize,
+                                                  double midPrice,
+                                                  double lastTrade,
+                                                  const QString& format,
+                                                  const QByteArray& column,
+                                                  bool reset) {
+    emit heatmapSliceReceived(symbol,
+                              bucketStartMs,
+                              bucketEndMs,
+                              timeframeMs,
+                              minPrice,
+                              maxPrice,
+                              tickSize,
+                              midPrice,
+                              lastTrade,
+                              format,
+                              column,
+                              reset);
 }

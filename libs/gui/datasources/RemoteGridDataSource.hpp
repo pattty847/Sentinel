@@ -18,6 +18,18 @@ public:
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
+    void onHeatmapSliceReceived(const QString& symbol,
+                                int64_t bucketStartMs,
+                                int64_t bucketEndMs,
+                                int64_t timeframeMs,
+                                double minPrice,
+                                double maxPrice,
+                                double tickSize,
+                                double midPrice,
+                                double lastTrade,
+                                const QString& format,
+                                const QByteArray& column,
+                                bool reset);
 
 private:
     SentinelStreamClient m_client;
@@ -28,4 +40,3 @@ private:
     
     mutable std::unordered_map<std::string, std::unique_ptr<LiveOrderBook>> m_replicaBooks;
 };
-

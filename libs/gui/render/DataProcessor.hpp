@@ -41,6 +41,18 @@ public slots:
     void onTradeReceived(const Trade& trade);
     void onOrderBookUpdated(std::shared_ptr<const OrderBook> orderBook);
     void onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);  // Dense LiveOrderBook signal handler
+    void onHeatmapSliceReceived(const QString& symbol,
+                                int64_t bucketStartMs,
+                                int64_t bucketEndMs,
+                                int64_t timeframeMs,
+                                double minPrice,
+                                double maxPrice,
+                                double tickSize,
+                                double midPrice,
+                                double lastTrade,
+                                const QString& format,
+                                const QByteArray& column,
+                                bool reset);
     
     // Move updateVisibleCells to slots for cross-thread calls
     void updateVisibleCells();
@@ -184,6 +196,7 @@ private:
     int64_t m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
     QByteArray m_heatmapLastColumn;
     bool m_heatmapHasLastColumn = false;
+    bool m_remoteHeatmapActive = false;
 
     // Band-based ingestion settings (centered at mid price)
     BandMode m_bandMode = BandMode::PercentMid; // default to percentage of mid

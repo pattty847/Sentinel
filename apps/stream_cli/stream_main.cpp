@@ -7,6 +7,7 @@
 #include <thread>
 #include <unordered_map>
 #include <memory>
+#include <cstdlib>
 
 int main() {
     std::cout << "[Coinbase Stream Test Starting...]" << std::endl;
@@ -24,6 +25,8 @@ int main() {
     std::unordered_map<std::string, std::string> lastTradeIds;
 
     auto start = std::chrono::steady_clock::now();
+    const char* logEnv = std::getenv("SENTINEL_STREAM_LOG_TRADES");
+    const bool logTrades = logEnv && std::string(logEnv) == "1";
     
     // For full-speed streaming, use getNewTrades instead of sleep
     bool useFullHose = true;  // Set to false to use the slower 200ms version
@@ -44,8 +47,10 @@ int main() {
                         default: side_str = "unknown"; break;
                     }
                     
-                    std::cout << sym << ": " << trade.price << "@" << trade.size
-                              << " [" << side_str << "] ID:" << trade.trade_id << std::endl;
+                    if (logTrades) {
+                        std::cout << sym << ": " << trade.price << "@" << trade.size
+                                  << " [" << side_str << "] ID:" << trade.trade_id << std::endl;
+                    }
                 }
             }
             // Optional: tiny sleep to prevent excessive CPU usage
@@ -70,8 +75,10 @@ int main() {
                             default: side_str = "unknown"; break;
                         }
                         
-                        std::cout << sym << ": " << last.price << "@" << last.size
-                                  << " [" << side_str << "] ID:" << last.trade_id << std::endl;
+                        if (logTrades) {
+                            std::cout << sym << ": " << last.price << "@" << last.size
+                                      << " [" << side_str << "] ID:" << last.trade_id << std::endl;
+                        }
                     }
                 }
             }

@@ -1,0 +1,269 @@
+---
+globs:
+  - apps/sentinel-server/*
+  - libs/core/protocol/*
+  - libs/core/servermodel/*
+  - libs/gui/datasources/Remote*
+  - docs/features/server-client/*
+alwaysApply: false
+---
+
+# Server-Client Architecture Rules (Sentinel)
+
+These rules apply to the new server-client architecture being developed.
+This system enables distributed trading terminals with centralized data processing.
+
+------------------------------------------------------------------------------
+
+# 1. Architecture Overview
+
+## Server Components (apps/sentinel-server/)
+- **SentinelServerApp** - Main server application orchestrator
+- Manages multiple client connections
+- Handles data aggregation and distribution
+- Runs market data processing pipeline
+
+## Protocol Layer (libs/core/protocol/)
+- **SentinelStreamProtocol** - Binary protocol definitions
+- **SentinelStreamServer** - Server-side protocol handler
+- **SentinelStreamClient** - Client-side protocol handler
+- Message serialization/deserialization
+
+## Server Data Model (libs/core/servermodel/)
+- **ServerDataModel** - Centralized data storage and indexing
+- **SymbolHotData** - High-frequency symbol state management
+- **TickBinaryLogger** - Tick data persistence
+- **TimeframeAggregator** - Multi-timeframe data aggregation
+
+## Client Data Sources (libs/gui/datasources/)
+- **RemoteGridDataSource** - Client-side data source for remote server
+- **LocalGridDataSource** - Local data source (existing standalone mode)
+- **IGridDataSource** - Abstract interface for data source switching
+
+------------------------------------------------------------------------------
+
+# 2. Core Design Principles
+
+## Separation of Concerns
+- **Server**: Data ingestion, processing, aggregation, persistence
+- **Client**: Rendering, UI, user interaction
+- **Protocol**: Clean message boundaries, versioned schema
+
+## Performance Requirements
+- Server must handle 50+ concurrent client connections
+- Sub-millisecond data distribution latency
+- Binary protocol for minimal overhead
+- Zero-copy data sharing where possible
+
+## Backwards Compatibility
+- Clients can still run in standalone mode (LocalGridDataSource)
+- Server mode is additive, not replacement
+- Existing market data pipeline preserved
+
+------------------------------------------------------------------------------
+
+# 3. Protocol Design Rules
+
+## Message Format
+- Binary-first protocol for performance
+- Fixed-size headers with variable-length payloads
+- Message versioning for protocol evolution
+- Compression for large data transfers
+
+## Connection Management
+- TCP-based persistent connections
+- Heartbeat/keepalive mechanism
+- Graceful reconnection on failure
+- Client authentication and authorization
+
+## Data Streaming
+- Push-based model for real-time updates
+- Request/response for historical data
+- Subscription management per client
+- Flow control and backpressure handling
+
+------------------------------------------------------------------------------
+
+# 4. Server-Side Rules
+
+## Threading Model
+- Main I/O thread for client connections
+- Dedicated worker threads for data processing
+- Lock-free queues for inter-thread communication
+- Thread-safe data structures for shared state
+
+## Data Management
+- Centralized symbol database
+- Efficient data indexing and lookup
+- Configurable data retention policies
+- Hot/cold data tier separation
+
+## Resource Management
+- Per-client memory limits
+- Connection pooling and throttling
+- Graceful degradation under load
+- Monitoring and alerting
+
+------------------------------------------------------------------------------
+
+# 5. Client-Side Rules
+
+## Data Source Abstraction
+All rendering components must use IGridDataSource interface:
+```cpp
+class MyRenderer {
+    IGridDataSource* m_dataSource;  // Can be Local or Remote
+    void updateData() {
+        auto trades = m_dataSource->getRecentTrades(symbol, count);
+        // Render logic unchanged
+    }
+};
+```
+
+## Connection Handling
+- Automatic server discovery and connection
+- Transparent failover to local mode
+- Connection state propagation to UI
+- Reconnection with exponential backoff
+
+## Cache Management
+- Client-side caching for performance
+- Cache invalidation on server updates
+- Hybrid local/remote data strategies
+- Offline mode capabilities
+
+------------------------------------------------------------------------------
+
+# 6. Protocol Message Types
+
+## Market Data Messages
+- TradeUpdate: Real-time trade distribution
+- BookSnapshot: Order book state snapshots
+- BookUpdate: Incremental order book changes
+- SymbolStatus: Symbol availability and metadata
+
+## Control Messages
+- Subscribe/Unsubscribe: Symbol subscription management
+- HeartBeat: Connection liveness checks
+- ClientAuth: Authentication and session establishment
+- ServerStatus: Server health and capability announcements
+
+## Data Request Messages
+- HistoricalTrades: Request historical trade data
+- BookHistory: Request historical order book snapshots
+- AggregatedData: Request pre-computed aggregations
+- SymbolList: Request available symbol catalog
+
+------------------------------------------------------------------------------
+
+# 7. Error Handling and Resilience
+
+## Server Failure Scenarios
+- Individual client connection loss
+- Market data feed interruption
+- Server process crash/restart
+- Network partition events
+
+## Client Failure Scenarios
+- Server connection loss
+- Protocol version mismatch
+- Authentication failure
+- Data corruption or parsing errors
+
+## Recovery Strategies
+- Automatic reconnection with state recovery
+- Data gap detection and backfill
+- Graceful degradation to local mode
+- Client state synchronization
+
+------------------------------------------------------------------------------
+
+# 8. Performance Considerations
+
+## Hot Path Optimization
+- Zero-copy message passing
+- Pre-allocated message buffers
+- Batch processing for efficiency
+- Lock-free data structures
+
+## Scalability Design
+- Horizontal server scaling capability
+- Client load balancing
+- Data sharding strategies
+- Resource usage monitoring
+
+## Latency Requirements
+- Server processing: < 100μs
+- Network transmission: < 1ms
+- Client processing: < 50μs
+- End-to-end: < 2ms target
+
+------------------------------------------------------------------------------
+
+# 9. Testing and Validation
+
+## Integration Testing
+- Multi-client scenarios
+- Server failover testing
+- Protocol version compatibility
+- Load testing under high throughput
+
+## Performance Testing
+- Latency measurement and profiling
+- Memory usage validation
+- Connection scaling tests
+- Data consistency verification
+
+## Compatibility Testing
+- Local vs remote mode functionality
+- Cross-platform client support
+- Protocol backward compatibility
+- Migration path validation
+
+------------------------------------------------------------------------------
+
+# 10. Assistant Behavior for Server-Client
+
+When working on server-client architecture, assistants MUST:
+- Preserve the local/remote data source abstraction
+- Maintain protocol versioning compatibility
+- Keep server and client concerns strictly separated
+- Follow performance requirements for hot paths
+- Ensure graceful fallback to standalone mode
+- Maintain thread safety in all shared components
+
+Assistants MUST NOT:
+- Break the IGridDataSource interface abstraction
+- Introduce GUI dependencies in server code
+- Create tight coupling between client and server
+- Compromise standalone mode functionality
+- Add blocking operations on hot paths
+- Break protocol message format compatibility
+
+------------------------------------------------------------------------------
+
+# 11. Migration Strategy
+
+## Phase 1: Infrastructure
+- Implement basic protocol and connection handling
+- Create server skeleton and client data source
+- Establish build and deployment pipeline
+
+## Phase 2: Data Flow
+- Implement core market data streaming
+- Add subscription management
+- Create basic error handling and reconnection
+
+## Phase 3: Feature Parity
+- Ensure all local mode features work remotely
+- Add historical data request/response
+- Implement performance optimizations
+
+## Phase 4: Production Readiness
+- Add monitoring and alerting
+- Implement comprehensive error handling
+- Performance tuning and load testing
+
+------------------------------------------------------------------------------
+
+# End of server-client.mdc

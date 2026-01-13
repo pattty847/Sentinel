@@ -4,17 +4,6 @@ Role: Main QWidget-based window, hosting the QML GPU chart and native UI control
 Inputs/Outputs: Manages the lifecycle of the remote data source and UI controllers.
 Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
 Performance: UI setup is a one-time cost; not on the real-time data hot path.
-Integration: Instantiated in main.cpp; hosts DepthChartView.qml in a QQuickWidget.
-Observability: Logs lifecycle and connection status via qDebug.
-Related: MainWindowGpu.cpp, DepthChartView.qml, UnifiedGridRenderer.h.
-Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
-*/
-/*
-Sentinel — MainWindowGpu
-Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
-Inputs/Outputs: Manages the lifecycle of the remote data source and UI controllers.
-Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
-Performance: UI setup is a one-time cost; not on the real-time data hot path.
 Integration: Wires the remote data source to the QML renderer.
 Observability: Logs lifecycle and connection status via qDebug.
 Related: MainWindowGpu.cpp, DepthChartView.qml.

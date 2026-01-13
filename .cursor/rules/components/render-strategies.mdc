@@ -1,0 +1,153 @@
+---
+globs:
+  - libs/gui/render/strategies/*
+  - libs/gui/render/IRenderStrategy*
+  - libs/gui/render/GridSceneNode*
+alwaysApply: false
+---
+
+# Render Strategies (QSG / Render Thread Rules)
+
+These rules apply ONLY to files inside `libs/gui/render/strategies/*`.
+
+Render strategies run on the **Qt Quick render thread**, not the GUI thread.  
+They operate directly on QSG nodes and GPU geometry.  
+These rules enforce safety, performance, and correctness.
+
+------------------------------------------------------------------------------
+
+# 1. Threading Rules (Critical)
+
+- Strategy code executes on the **render thread** during `updatePaintNode`.
+- You MUST NOT:
+  - Touch QObject graphs
+  - Touch GUI widgets
+  - Emit Qt signals
+  - Read or mutate GUI-thread state
+- All inputs into strategies must be immutable snapshots prepared on GUI thread.
+
+If a value is not guaranteed thread-safe → do NOT read it here.
+
+------------------------------------------------------------------------------
+
+# 2. QSG Node Ownership & Geometry
+
+- Always set:
+```
+
+node->setFlag(QSGNode::OwnsGeometry, true);
+node->setFlag(QSGNode::OwnsMaterial, true);
+
+```
+- Use **preallocated QSGGeometry** whenever possible.
+- Reuse geometry buffers each frame instead of allocating new ones.
+- Avoid building large child-node trees; keep node fan-out minimal.
+
+Geometry shape and buffer counts should be predictable and stable.
+
+------------------------------------------------------------------------------
+
+# 3. Performance Rules
+
+- Avoid per-frame heap allocations.
+- Avoid unnecessary std::vector resizing; reserve or reuse buffers.
+- Avoid branching inside hot loops more than 1–2 levels.
+- GPU-bound logic should be straightforward: map inputs → vertices → colors.
+
+Strategies should produce **flat, efficient batches**.
+
+------------------------------------------------------------------------------
+
+# 4. Safety Rules
+
+- Validate all numeric inputs:
+```
+
+if (!std::isfinite(x) || !std::isfinite(y)) skip;
+
+```
+- Clamp absurd values early to avoid exploding the scenegraph.
+- Never trust upstream data — strategies must protect GPU stability.
+
+------------------------------------------------------------------------------
+
+# 5. Viewport & Coordinate System
+
+Strategies rely on DataProcessor + GridViewState to deliver final coordinates.
+
+- Coordinates MUST be produced via:
+```
+
+CoordinateSystem::worldToScreen(...)
+
+```
+- Never compute your own world → screen transforms.
+- Never mutate viewport fields from inside a strategy.
+- Never attempt to update DataProcessor or GridViewState from this thread.
+
+If viewport changes, strategies re-run on next `updatePaintNode`.
+
+------------------------------------------------------------------------------
+
+# 6. Rebuild vs Incremental Updates
+
+- Rebuild triggers when the DataProcessor publishes a new snapshot.
+- Strategies should detect:
+- New batch
+- New viewport version
+- New render mode
+- When rebuilding:
+- Clear or reuse geometry
+- Recompute vertices
+- Avoid destroying/recreating nodes unless required
+
+Use incremental updates when possible.
+
+------------------------------------------------------------------------------
+
+# 7. Material Usage
+
+- Use QSGVertexColorMaterial unless you have a justified reason.
+- Avoid custom shaders until absolutely necessary.
+- Transparency rules:
+- For bubbles: sort largest → smallest
+- For flows: consistent Z-ordering
+
+Alpha blending must remain predictable.
+
+------------------------------------------------------------------------------
+
+# 8. Strategy Interface Requirements (`IRenderStrategy`)
+
+Every strategy must:
+- Implement the interface contract
+- Accept immutable snapshot data
+- Produce geometry inside `populateNode(...)`
+- Avoid retaining references to snapshot buffers
+- Never block, sleep, or wait for other threads
+
+------------------------------------------------------------------------------
+
+# 9. Prohibited Behavior
+
+Strategies may NOT:
+- Allocate QObjects
+- Read GUI widget state
+- Modify QSGRenderer
+- Emit signals
+- Use QMutex locks
+- Access live market data directly
+- Use QtConcurrent or run worker threads
+
+If logic feels “stateful,” move it to the GUI thread upstream.
+
+------------------------------------------------------------------------------
+
+# 10. Assistant Behavior
+
+When editing or generating strategy files:
+- Prioritize performance above abstraction.
+- Prefer flat, local logic over indirection.
+- Keep buffer math explicit and clear.
+- Avoid unnecessary classes or inheritance layers.
+- Use logs ONLY under `sentinel.render` and sparingly.

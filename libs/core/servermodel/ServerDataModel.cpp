@@ -5,10 +5,16 @@ ServerDataModel::ServerDataModel(QObject* parent)
     : QObject(parent)
     , m_logger(std::make_unique<TickBinaryLogger>())
     , m_aggregator(std::make_unique<TimeframeAggregator>())
+    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this))
 {
     // Forward aggregation signals
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
+
+    connect(m_heatmapStreamer.get(), &HeatmapTwapStreamer::heatmapSliceReady,
+            this, &ServerDataModel::heatmapSliceReady);
+
+    m_heatmapStreamer->start();
 }
 
 ServerDataModel::~ServerDataModel() {
@@ -40,6 +46,16 @@ SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
     return *it->second;
 }
 
+std::vector<std::string> ServerDataModel::getSymbolsSnapshot() const {
+    std::shared_lock lock(m_mutex);
+    std::vector<std::string> symbols;
+    symbols.reserve(m_symbols.size());
+    for (const auto& [key, _] : m_symbols) {
+        symbols.push_back(key);
+    }
+    return symbols;
+}
+
 const LiveOrderBook& ServerDataModel::getLiveOrderBook(const std::string& symbol) {
     return ensureSymbol(symbol).liveBook;
 }
@@ -61,7 +77,8 @@ void ServerDataModel::onTrade(const Trade& trade) {
         m_aggregator->onTrade(trade);
     }
     
-    ensureSymbol(trade.product_id);
+    auto& data = ensureSymbol(trade.product_id);
+    data.lastTradePrice = trade.price;
     
     // Rebroadcast to streamers
     emit tradeBroadcast(trade);

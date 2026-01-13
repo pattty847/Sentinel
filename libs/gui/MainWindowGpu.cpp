@@ -1,13 +1,13 @@
 /*
 Sentinel — MainWindowGpu
 Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
-Inputs/Outputs: Connects MarketDataCore signals to UnifiedGridRenderer slots.
+Inputs/Outputs: Connects remote data source signals to UnifiedGridRenderer slots.
 Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
 Performance: Connection logic is part of the user-initiated subscription setup.
-Integration: Obtains MarketDataCore from CoinbaseStreamClient and wires it to the QML renderer.
+Integration: Wires the remote data source to the QML renderer.
 Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
-Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
-Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
+Related: MainWindowGpu.h, UnifiedGridRenderer.h.
+Assumptions: Remote data source connects before subscribe() is called.
 */
 #include <QQuickView>
 #include <QLabel>
@@ -267,6 +267,8 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated,
                 dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
+                dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
     }
     
     // Trade connection (simplified, assume UnifiedGridRenderer has a slot)

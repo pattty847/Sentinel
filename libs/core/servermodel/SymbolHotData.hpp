@@ -29,6 +29,7 @@ private:
 struct SymbolHotData {
     std::string symbol;
     LiveOrderBook liveBook;
+    double lastTradePrice = 0.0;
     
     // Recent history for immediate client snapshots
     // RingBuffer<TickSnapshot, N_TICKS> recentTicks; // TODO: Define TickSnapshot

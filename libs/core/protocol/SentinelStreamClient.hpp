@@ -39,6 +39,18 @@ signals:
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     // Other signals as needed for aggregated slices
+    void heatmapSliceReceived(const QString& symbol,
+                              int64_t bucketStartMs,
+                              int64_t bucketEndMs,
+                              int64_t timeframeMs,
+                              double minPrice,
+                              double maxPrice,
+                              double tickSize,
+                              double midPrice,
+                              double lastTrade,
+                              const QString& format,
+                              const QByteArray& column,
+                              bool reset);
 
 private:
     void run();
@@ -68,4 +80,3 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
 };
-

@@ -21,6 +21,8 @@ add_library(sentinel_core
     marketdata/model/TradeData.h
     servermodel/ServerDataModel.hpp
     servermodel/ServerDataModel.cpp
+    servermodel/HeatmapTwapStreamer.hpp
+    servermodel/HeatmapTwapStreamer.cpp
     servermodel/SymbolHotData.hpp
     servermodel/TickBinaryLogger.hpp
     servermodel/TickBinaryLogger.cpp

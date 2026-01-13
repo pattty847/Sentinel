@@ -51,6 +51,8 @@
 **Known gaps**
 - Resting snapshot mode still not stable visually; needs verification.
 - Panning/auto‑scroll needs cleanup (likely decouple viewport from live head when auto is off).
+- Server TWAP streamer emits 100ms columns; client renders without missing columns (stable, no flicker).
+- Recenter currently disabled for stability; re‑enable later with wider hysteresis.
 
 Goal: make the GUI a **pure client** and move all ingestion/aggregation to the headless server.  
 No monolith fallback. Fast, deterministic, and GPU‑first.
@@ -124,6 +126,8 @@ No monolith fallback. Fast, deterministic, and GPU‑first.
   - Snapshot `LiveOrderBook`
   - $1 bucket aggregation
   - Emit dense column bytes
+  - **TWAP resting liquidity implemented** (time‑weighted average per row)
+  - Emits `heatmap_slice` with base64 `u8` column payload
 - Add protocol message: `heatmap_slice`
   - `symbol`, `timeStart`, `timeEnd`, `tickSize`
   - `minPrice`, `maxPrice`
@@ -142,6 +146,8 @@ No monolith fallback. Fast, deterministic, and GPU‑first.
 - Extend `RemoteGridDataSource` to emit `heatmapColumnReady`.
 - `UnifiedGridRenderer` consumes columns and renders single‑quad GPU heatmap.
 - Remove/disable client‑side LTSE usage in GPU path.
+  - **Done:** client consumes `heatmap_slice` and uploads columns directly.
+  - **Done:** non‑100ms slices ignored to avoid flicker.
 
 **Files**
 - `libs/gui/datasources/RemoteGridDataSource.cpp/.h`
@@ -160,9 +166,11 @@ No monolith fallback. Fast, deterministic, and GPU‑first.
 - Client MarketDataCore creation (`DataBootstrapper` in GUI app)
 - `LocalGridDataSource` in GUI runtime
 - CPU heatmap path (`HeatmapStrategy`) once GPU is stable
+- `MarketDataPanel` removed from GUI build/layout (OrderBookDock kept inert)
 
 ## Notes / Non‑Goals
 
 - No Qt in core layer (unchanged).
 - GPU heatmap remains a **single quad** with streaming column uploads.
 - LTSE can remain server‑side for an “activity heatmap” later, but is not required for resting.
+- Server currently runs with **recenter disabled** to prevent texture rebuild flicker.

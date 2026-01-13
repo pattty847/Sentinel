@@ -1,0 +1,145 @@
+---
+globs:
+  - libs/gui/widgets/*
+  - libs/gui/MainWindowGpu*
+  - docs/features/aesthetic/DOCKABLE_FRAMEWORK.md
+  - docs/features/aesthetic/WIDGET_COMMUNICATION.md
+alwaysApply: false
+---
+
+# Dockable Widgets Rules (Sentinel)
+
+These rules apply ONLY to files inside `libs/gui/widgets/*`.
+
+Dockable widgets form the interactive UI surface of Sentinel.  
+They must follow a unified structure, threading discipline, and layout behavior.
+
+------------------------------------------------------------------------------
+
+# 1. Base Class & Structure
+
+- All dockable widgets must inherit from **DockablePanel**.
+- Every widget must implement:
+  - `buildUi()`     → construct layout, child controls, bindings
+  - `onSymbolChanged(QString)` → update widget state when symbol changes (optional override)
+
+Widgets should not perform heavy computation.  
+They display data → logic lives upstream.
+
+------------------------------------------------------------------------------
+
+# 2. Integration with MainWindowGPU
+
+MainWindowGPU controls:
+- Dock creation  
+- Symbol propagation  
+- Layout persistence  
+- Menu integration ("View → <DockName>")
+
+Widgets must connect to MainWindowGPU using Qt signals/slots — not direct mutations.
+
+When adding a new dock:
+- Instantiate inside MainWindowGPU constructor
+- Connect its `symbolChanged` propagation
+- Add to View menu
+- Register with LayoutManager
+
+------------------------------------------------------------------------------
+
+# 3. Layout Persistence
+
+- Layouts are managed by `LayoutManager` using `QSettings`.
+- Widgets must not manually save/restore layout state.
+- LayoutManager handles:
+  - Geometry  
+  - Dock area  
+  - Floating state  
+  - Versioned layout formats
+
+Widgets only define their internal content, not their external position.
+
+------------------------------------------------------------------------------
+
+# 4. Threading Rules
+
+Widgets run STRICTLY on the GUI thread.
+
+They must NOT:
+- Read data directly from worker threads
+- Perform I/O
+- Modify QSG nodes
+- Block the GUI thread with heavy work
+
+Cross-thread updates MUST use:
+```
+
+Qt::QueuedConnection
+
+```
+Only lightweight, already-processed data should arrive here.
+
+------------------------------------------------------------------------------
+
+# 5. Data Flow & Communication
+
+## ServiceLocator Pattern
+Access shared services without coupling:
+```cpp
+MarketDataCore* core = ServiceLocator::marketDataCore();
+DataCache* cache = ServiceLocator::dataCache();
+```
+
+## Symbol Change Flow
+1. User enters symbol → MainWindowGPU::onSubscribe()
+2. MainWindowGPU emits `symbolChanged(symbol)`  
+3. All docks receive via Qt::QueuedConnection
+4. Each dock calls virtual `onSymbolChanged(symbol)` method
+
+## Widget Communication Rules
+Widgets must NOT:
+- Call other docks directly  
+- Share mutable state across widgets
+- Modify global application state without signaling
+
+## Current Widget Types
+- **HeatmapDock**: QML GPU rendering + embedded symbol controls
+- **MarketDataPanel**: QAbstractTableModel + QTableView for trades
+- **SecFilingDock**: SEC data fetching and display UI  
+- **CommentaryFeedDock** (base): Message feed functionality
+- **CopenetFeedDock** / **AICommentaryFeedDock**: Commentary feeds
+- **StatusBar**: CPU/GPU/Latency metrics display
+
+------------------------------------------------------------------------------
+
+# 6. UI Rules
+
+- Keep UI construction inside `buildUi()` only.
+- Use Qt layouts, controls, and signals cleanly.
+- Avoid heavy logic in event handlers.
+- Do not embed core or render logic in widgets.
+- Keep widgets responsive — avoid long synchronous operations.
+
+------------------------------------------------------------------------------
+
+# 7. Logging
+
+- Widgets may log under `sentinel.app`.
+- No render- or data-layer logging here.
+- No sensitive data in logs.
+
+------------------------------------------------------------------------------
+
+# 8. Assistant Behavior in Widgets
+
+When modifying/creating widgets, assistants must:
+
+- Respect DockablePanel architecture.
+- Keep UI fast, simple, and thin.
+- Use signals/slots (QueuedConnection) for incoming updates.
+- Avoid introducing threading bugs.
+- Avoid business logic — that belongs in core or upstream processors.
+- Not invent new widget frameworks or sub-architectures.
+
+------------------------------------------------------------------------------
+
+# End of widgets-framework.mdc

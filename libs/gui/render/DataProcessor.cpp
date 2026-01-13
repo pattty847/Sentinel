@@ -302,6 +302,10 @@ void DataProcessor::onLiveOrderBookUpdated(const QString& productId, const std::
     if (m_shuttingDown.load()) {
         return;
     }
+
+    if (m_remoteHeatmapActive) {
+        return;
+    }
     
     if (!m_dataSource || !m_liquidityEngine) {
         sLog_Render("DataProcessor: DataSource or LiquidityEngine not set");
@@ -627,6 +631,90 @@ void DataProcessor::updateVisibleCells() {
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
     }
     emit dataUpdated();
+}
+
+void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
+                                           int64_t bucketStartMs,
+                                           int64_t bucketEndMs,
+                                           int64_t timeframeMs,
+                                           double minPrice,
+                                           double maxPrice,
+                                           double tickSize,
+                                           double midPrice,
+                                           double lastTrade,
+                                           const QString& format,
+                                           const QByteArray& column,
+                                           bool reset) {
+    Q_UNUSED(symbol);
+    Q_UNUSED(midPrice);
+    Q_UNUSED(lastTrade);
+
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
+    m_remoteHeatmapActive = true;
+    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
+        sLog_Render("HEATMAP SLICE RX: tf=" << timeframeMs
+                    << " rows=" << column.size()
+                    << " reset=" << reset
+                    << " format=" << format
+                    << " current=" << m_currentTimeframe_ms
+                    << " manual=" << m_manualTimeframeSet);
+    }
+
+    if (timeframeMs > 0 && m_currentTimeframe_ms != timeframeMs) {
+        return;
+    }
+
+    if (column.isEmpty()) {
+        return;
+    }
+
+    const bool isU8 = (format.compare(QStringLiteral("u8"), Qt::CaseInsensitive) == 0);
+    const int prevHeight = m_heatmapGridHeight;
+    int height = 0;
+    QByteArray expanded;
+
+    if (isU8) {
+        height = column.size();
+        if (height <= 0) {
+            return;
+        }
+        expanded.resize(height * 4);
+        const auto* src = reinterpret_cast<const unsigned char*>(column.constData());
+        auto* dst = reinterpret_cast<unsigned char*>(expanded.data());
+        for (int i = 0; i < height; ++i) {
+            const unsigned char v = src[i];
+            const int idx = i * 4;
+            dst[idx + 0] = v;
+            dst[idx + 1] = v;
+            dst[idx + 2] = v;
+            dst[idx + 3] = 255;
+        }
+    } else {
+        height = column.size() / 4;
+        if (height <= 0) {
+            return;
+        }
+        expanded = column;
+    }
+
+    m_heatmapGridHeight = height;
+    const bool needsReset = reset || !m_heatmapRangeValid || (prevHeight != height);
+
+    if (needsReset) {
+        emit heatmapRangeReset(minPrice, maxPrice, tickSize, height);
+    }
+
+    m_heatmapRangeValid = true;
+    emit heatmapColumnReady(bucketStartMs,
+                            bucketEndMs,
+                            timeframeMs,
+                            minPrice,
+                            maxPrice,
+                            tickSize,
+                            expanded);
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {

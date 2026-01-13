@@ -1,5 +1,6 @@
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
+#include <QByteArray>
 
 SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
     : QObject(parent)
@@ -225,10 +226,42 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              // t.timestamp? 
              
              emit tradeReceived(t);
+        } else if (type == "heatmap_slice") {
+             std::string symbol = msg.value("symbol", "");
+             if (symbol.empty()) return;
+
+             const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
+             const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
+             const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+             const double minPrice = msg.value("min_price", 0.0);
+             const double maxPrice = msg.value("max_price", 0.0);
+             const double tickSize = msg.value("tick_size", 0.0);
+             const double midPrice = msg.value("mid_price", 0.0);
+             const double lastTrade = msg.value("last_trade", 0.0);
+             const bool reset = msg.value("reset", false);
+             const std::string format = msg.value("format", "u8");
+             const std::string encoded = msg.value("column", "");
+
+             QByteArray column;
+             if (!encoded.empty()) {
+                 column = QByteArray::fromBase64(QByteArray::fromStdString(encoded));
+             }
+
+             emit heatmapSliceReceived(QString::fromStdString(symbol),
+                                       startMs,
+                                       endMs,
+                                       timeframeMs,
+                                       minPrice,
+                                       maxPrice,
+                                       tickSize,
+                                       midPrice,
+                                       lastTrade,
+                                       QString::fromStdString(format),
+                                       column,
+                                       reset);
         }
 
     } catch (const std::exception& e) {
         sLog_Error("Message parse error: " << e.what());
     }
 }
-

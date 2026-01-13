@@ -1,10 +1,13 @@
 #pragma once
 #include <unordered_map>
+#include <vector>
 #include <shared_mutex>
 #include <string>
 #include <memory>
 #include <QObject>
+#include <QByteArray>
 #include "SymbolHotData.hpp"
+#include "HeatmapTwapStreamer.hpp"
 #include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
 #include "../marketdata/model/TradeData.h"
@@ -16,6 +19,7 @@ public:
     ~ServerDataModel();
 
     SymbolHotData& ensureSymbol(const std::string& symbol);
+    std::vector<std::string> getSymbolsSnapshot() const;
     
     // Snapshot Accessor
     const LiveOrderBook& getLiveOrderBook(const std::string& symbol);
@@ -36,9 +40,22 @@ signals:
     void barClosed(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
 
+    void heatmapSliceReady(const QString& symbol,
+                           int64_t bucketStartMs,
+                           int64_t bucketEndMs,
+                           int64_t timeframeMs,
+                           double minPrice,
+                           double maxPrice,
+                           double tickSize,
+                           double midPrice,
+                           double lastTrade,
+                           const QByteArray& column,
+                           bool reset);
+
 private:
-    std::shared_mutex m_mutex;
+    mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
     std::unique_ptr<TickBinaryLogger> m_logger;
     std::unique_ptr<TimeframeAggregator> m_aggregator;
+    std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
 };

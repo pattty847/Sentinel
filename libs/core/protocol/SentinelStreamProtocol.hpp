@@ -11,6 +11,7 @@ enum class MessageType {
     Unsubscribe,
     Snapshot,
     SliceBatch,
+    HeatmapSlice,
     TickDelta, // Maybe for later
     Error,
     Unknown
@@ -22,6 +23,7 @@ inline std::string toString(MessageType t) {
         case MessageType::Unsubscribe: return "unsubscribe";
         case MessageType::Snapshot: return "snapshot";
         case MessageType::SliceBatch: return "slice_batch";
+        case MessageType::HeatmapSlice: return "heatmap_slice";
         case MessageType::Error: return "error";
         default: return "unknown";
     }
@@ -32,6 +34,7 @@ inline MessageType fromString(const std::string& s) {
     if (s == "unsubscribe") return MessageType::Unsubscribe;
     if (s == "snapshot") return MessageType::Snapshot;
     if (s == "slice_batch") return MessageType::SliceBatch;
+    if (s == "heatmap_slice") return MessageType::HeatmapSlice;
     if (s == "error") return MessageType::Error;
     return MessageType::Unknown;
 }

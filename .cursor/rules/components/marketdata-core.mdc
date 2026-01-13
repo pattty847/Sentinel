@@ -1,0 +1,195 @@
+---
+globs:
+  - libs/core/marketdata/*
+  - docs/MARKETDATA_ARCHITECTURE.md
+  - tests/marketdata/*
+alwaysApply: false
+---
+
+# MarketData Core Rules (Sentinel)
+
+These rules apply to the MarketDataCore pipeline and related components.
+This is the high-performance WebSocket data ingestion system that feeds the trading terminal.
+
+------------------------------------------------------------------------------
+
+# 1. Architecture Layers
+
+## Transport Layer (ws/)
+- `WsTransport` - Abstract interface for WebSocket operations
+- `BeastWsTransport` - Boost.Beast SSL WebSocket implementation
+- `SubscriptionManager` - Builds subscription messages with JWT auth
+
+## Authentication Layer (auth/)
+- `Authenticator` - ES256 JWT creation for Coinbase Advanced Trade API
+- Thread-safe, stateless JWT generation
+
+## Dispatch Layer (dispatch/)
+- `MessageDispatcher` - JSON → typed event parser (TradeEvent, BookEvent, etc)
+- `MessageParser` - Fast string parsing utilities
+- `Channels` - Channel name constants
+
+## Cache Layer (cache/)
+- `DataCache` - Thread-safe cache with shared_mutex for concurrent reads
+- Ring buffers for trades (1000 per symbol)
+- Dense `LiveOrderBook` for O(1) price level updates
+
+## Sink Layer (sinks/)
+- `IMarketDataSink` - Abstract consumer interface
+- `DataCacheSinkAdapter` - Connects dispatcher to cache
+
+------------------------------------------------------------------------------
+
+# 2. Threading Model
+
+## Worker Thread (Boost.Asio)
+- All WebSocket I/O on dedicated thread
+- `io_context.run()` with exception restart loop
+- Strand-based serialization for thread safety
+
+## GUI Thread (Qt)
+- Receives data via Qt::QueuedConnection signals
+- Updates UnifiedGridRenderer and other consumers
+- No blocking operations
+
+## Critical Rule
+ALL cross-thread communication MUST use Qt::QueuedConnection.
+Never pass raw pointers across thread boundaries.
+
+------------------------------------------------------------------------------
+
+# 3. Data Flow Pipeline
+
+```
+Exchange WebSocket → BeastWsTransport → MessageDispatcher
+    ↓
+TradeEvent/BookEvent → DataCacheSinkAdapter → DataCache
+    ↓
+Qt Signal (queued) → UnifiedGridRenderer → GPU
+```
+
+## Key Processing Steps
+1. Parse JSON on worker thread (MessageDispatcher)
+2. Update cache with exclusive locks (DataCache)
+3. Emit Qt signal with Trade/Book data
+4. GUI thread receives and processes for rendering
+
+------------------------------------------------------------------------------
+
+# 4. Performance Requirements
+
+## Latency Budget
+- WebSocket → Parse: < 100 μs
+- Parse → Cache: < 50 μs (mutex acquisition)
+- Cache → GUI signal: < 10 μs
+- **Total**: < 200 μs
+
+## Throughput Targets
+- 10,000+ trades/sec per symbol
+- 1,000+ order book updates/sec
+- 50+ concurrent symbols
+
+## Memory Constraints
+- Trade cache: ~800 KB for 8 symbols
+- Live order books: ~1.25 MB for 8 symbols
+- No unbounded growth
+
+------------------------------------------------------------------------------
+
+# 5. Error Handling & Resilience
+
+## I/O Thread Resilience
+The `run()` method MUST catch exceptions to prevent thread death:
+```cpp
+while (m_running.load()) {
+    try {
+        m_ioc.run();
+        if (m_running.load()) {
+            m_ioc.restart();
+        }
+    } catch (const std::exception& e) {
+        // Log and restart - don't let handler exceptions kill the thread
+        if (m_running.load()) {
+            m_ioc.restart();
+        }
+    }
+}
+```
+
+## Connection Management
+- Exponential backoff reconnection (1s → 60s max)
+- JWT refresh on reconnect
+- Subscription replay after reconnection
+- Graceful degradation on errors
+
+------------------------------------------------------------------------------
+
+# 6. Data Structures
+
+## Trade Storage
+- Ring buffer with atomic head pointer
+- FIFO eviction of oldest trades
+- Lock-free reads for recent data
+
+## LiveOrderBook (Dense Format)
+- Fixed price range with tick_size granularity
+- O(1) updates via index = (price - min_price) / tick_size
+- Continuous memory layout for GPU transfer
+
+## Threading Safety
+- `std::shared_mutex` for DataCache (concurrent reads, exclusive writes)
+- All async operations on strand for serialization
+- Qt signals for safe cross-thread communication
+
+------------------------------------------------------------------------------
+
+# 7. Testing Strategy
+
+## Unit Tests (tests/marketdata/)
+- `test_subscription_manager.cpp` - Message generation
+- `test_message_dispatcher.cpp` - JSON parsing
+- `test_datacache_sink_adapter.cpp` - Sink integration
+
+## Critical Test Areas
+- Message parsing accuracy
+- Thread safety under load
+- Reconnection behavior
+- Cache eviction policies
+
+------------------------------------------------------------------------------
+
+# 8. Assistant Behavior for MarketData
+
+When modifying MarketDataCore components, assistants MUST:
+- Preserve the layered architecture boundaries
+- Never introduce blocking operations on hot paths
+- Maintain thread safety invariants
+- Use existing error handling patterns
+- Keep latency budget under 200μs total
+- Follow the established data flow pipeline
+
+Assistants MUST NOT:
+- Add synchronous network calls
+- Introduce new threading models
+- Break the Transport→Dispatch→Cache→Sink pattern
+- Modify the JWT authentication without understanding ES256/nonce requirements
+- Add heavy logging on hot paths
+- Change the LiveOrderBook dense format without GPU rendering consideration
+
+------------------------------------------------------------------------------
+
+# 9. Integration Points
+
+## Upstream: Coinbase Advanced Trade WebSocket API
+- ES256 JWT authentication required
+- Channels: level2 (order book), market_trades
+- Message types: snapshot, update, trade, subscriptions, error
+
+## Downstream: GUI Rendering Pipeline
+- Signals: tradeReceived(), liveOrderBookUpdated()
+- Consumers: UnifiedGridRenderer, MarketDataPanel, etc
+- All connections MUST be Qt::QueuedConnection
+
+------------------------------------------------------------------------------
+
+# End of marketdata-core.mdc

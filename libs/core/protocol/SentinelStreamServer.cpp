@@ -14,6 +14,7 @@
 #include <vector>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
+#include <QByteArray>
 #include "../marketdata/model/TradeData.h"
 #include "Cpp20Utils.hpp"
 
@@ -35,6 +36,7 @@ class Session : public std::enable_shared_from_this<Session> {
     // Connection handles for signal disconnection (if needed)
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
+    QMetaObject::Connection heatmapConn_;
 
 public:
     // Take ownership of the socket
@@ -47,6 +49,7 @@ public:
     ~Session() {
         QObject::disconnect(tradeConn_);
         QObject::disconnect(bookConn_);
+        QObject::disconnect(heatmapConn_);
     }
 
     // Get on the correct executor
@@ -97,6 +100,23 @@ public:
         bookConn_ = QObject::connect(&model_, &ServerDataModel::bookUpdateBroadcast,
             [self](const QString& productId, const std::vector<BookDelta>& deltas) {
                 self->on_book_update(productId, deltas);
+            });
+
+        heatmapConn_ = QObject::connect(&model_, &ServerDataModel::heatmapSliceReady,
+            [self](const QString& symbol,
+                   int64_t bucketStartMs,
+                   int64_t bucketEndMs,
+                   int64_t timeframeMs,
+                   double minPrice,
+                   double maxPrice,
+                   double tickSize,
+                   double midPrice,
+                   double lastTrade,
+                   const QByteArray& column,
+                   bool reset) {
+                self->on_heatmap_slice(symbol, bucketStartMs, bucketEndMs, timeframeMs,
+                                       minPrice, maxPrice, tickSize, midPrice, lastTrade,
+                                       column, reset);
             });
             
         do_read();
@@ -242,6 +262,39 @@ public:
         }
         j["deltas"] = deltaJson;
         
+        do_write(j.dump());
+    }
+
+    void on_heatmap_slice(const QString& symbol,
+                          int64_t bucketStartMs,
+                          int64_t bucketEndMs,
+                          int64_t timeframeMs,
+                          double minPrice,
+                          double maxPrice,
+                          double tickSize,
+                          double midPrice,
+                          double lastTrade,
+                          const QByteArray& column,
+                          bool reset) {
+        const std::string sym = symbol.toStdString();
+        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+
+        nlohmann::json j;
+        j["type"] = "heatmap_slice";
+        j["symbol"] = sym;
+        j["time_start"] = bucketStartMs;
+        j["time_end"] = bucketEndMs;
+        j["timeframe_ms"] = timeframeMs;
+        j["min_price"] = minPrice;
+        j["max_price"] = maxPrice;
+        j["tick_size"] = tickSize;
+        j["mid_price"] = midPrice;
+        j["last_trade"] = lastTrade;
+        j["reset"] = reset;
+        j["format"] = "u8";
+        j["encoding"] = "base64";
+        j["column"] = column.toBase64().toStdString();
+
         do_write(j.dump());
     }
 

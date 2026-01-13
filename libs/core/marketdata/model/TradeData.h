@@ -205,6 +205,14 @@ public:
         std::vector<std::pair<uint32_t, double>>& askBuffer,
         size_t maxPerSide) const;
 
+    // Aggregate a price range into fixed-size rows (thread-safe).
+    void accumulateRange(double minPrice,
+                         double maxPrice,
+                         double rowTickSize,
+                         std::vector<double>& rowValues,
+                         double* bestBid,
+                         double* bestAsk) const;
+
 private:
     // Helper to convert a price to a vector index
     inline size_t price_to_index(double price) const {

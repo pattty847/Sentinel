@@ -1,6 +1,6 @@
 # Sentinel v1.0.0-alpha
 
-GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
+GPU-accelerated trading terminal. C++20, Qt 6, GPU-resident rendering.
 <div align="center">
   <img src="https://img.shields.io/badge/C++-20-blue" />
   <img src="https://img.shields.io/badge/Qt-6-green" />
@@ -14,75 +14,59 @@ GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
 
 ---
 
+## High-Performance Architecture
+
+Sentinel has been rebuilt from the ground up as a distributed **Client-Server** system. The legacy monolithic and CPU-bound rendering paths have been gutted in favor of a GPU-first pipeline.
+
+- **Distributed Core**: A headless server handles 24/7 ingestion, persistence, and TWAP aggregation.
+- **GPU Heatmap**: Zero CPU overhead per-cell. Renders 8192x8192 grids (67M+ cells) at 60+ FPS via single-quad GPU shading.
+- **Pure Streaming**: Real-time binary/JSON protocol connects the server to lightweight visualization clients.
+
+---
+
 ## Build
 
 **Windows:**
-
-```
-setx QT_MSVC C:\Qt\6.9.3\msvc2022_64
-setx VCPKG_ROOT C:\dev\vcpkg
-
-git clone https://github.com/pattty847/Sentinel.git
-cd Sentinel
+```powershell
 cmake --preset windows-msvc
 cmake --build --preset windows-msvc -j
 ```
 
-Run: `build/windows-msvc/apps/sentinel_gui/Release/sentinel_gui.exe`
-
-**macOS:**
-
-```
-brew install qt cmake ninja
-export QT_MAC=/opt/homebrew/opt/qt
-export VCPKG_ROOT=$HOME/vcpkg
-
-cmake --preset mac-clang
-cmake --build --preset mac-clang -j
-```
-
 **Linux:**
-
-```
-sudo apt install build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev
-export QT_LINUX=/usr/lib/qt6
-export VCPKG_ROOT=$HOME/vcpkg
-
+```bash
 cmake --preset linux-gcc
 cmake --build --preset linux-gcc -j
 ```
 
 ---
 
-## API Keys
+## Running Sentinel
 
-Drop a `key.json` in project root:
+1. **Start the Data Server**:
+   `./build/linux-gcc/apps/sentinel-server/sentinel-server`
 
-```json
-{
-  "key": "your-coinbase-api-key",
-  "secret": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
-}
-```
+2. **Start the GUI Client**:
+   `./build/linux-gcc/apps/sentinel_gui/sentinel_gui`
+
+*Note: Environment variables like `SENTINEL_GPU_HEATMAP=1` and `SENTINEL_REMOTE=1` are now the defaults for the optimized path.*
 
 ---
 
 ## Project Structure
 
 ```
-libs/core/    Pure C++ data layer (no Qt GUI)
-libs/gui/     Qt Quick, QSG rendering, widgets
-apps/         Executables (sentinel_gui, stream_cli)
+libs/core/    Headless data layer, persistence, and streaming protocols.
+libs/gui/     GPU-resident rendering strategies (no CPU loops), Qt Quick components.
+apps/         sentinel-server (Daemon) & sentinel_gui (Visualizer).
 ```
-
-Core handles market data, caching, and transforms. GUI handles all rendering and layout. They don't mix.
 
 ---
 
 ## Docs
 
-- `docs/ARCHITECTURE.md` — dataflow and rendering pipeline
-- `docs/CROSS_COMPATABILITY.md` — platform-specific notes
+- `docs/ARCHITECTURE.md` — The new distributed dataflow.
+- `docs/CLIENT-SERVER.md` — Protocol and aggregation details.
+- `docs/LOGGING_GUIDE.md` — Monitoring the sentinel.* channels.
 
 ---
 

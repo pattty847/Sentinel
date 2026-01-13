@@ -381,11 +381,6 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
             }, Qt::QueuedConnection);
         }
         
-        std::string logMessage = Cpp20Utils::formatTradeLog(
-            trade.product_id, trade.price, trade.size, 
-            trade.side == AggressorSide::Buy ? "buy" : "sell", 
-            m_tradeLogCount.load());
-        sLog_Data(QString::fromStdString(logMessage));
     }
 }
 
