@@ -12,8 +12,9 @@ GPU-accelerated trading terminal. C++20, Qt 6, GPU-resident rendering.
 
 ## 📸 NEW PHOTOS COMING SOON!
 
-![Dockable Layout (WIP)](https://github.com/user-attachments/assets/9d3ac4b5-eedb-44d3-855c-b03a7d6ac66b)
-![Liquidity Heatmap](https://github.com/user-attachments/assets/27a969f2-1a02-4e69-aee6-ff6b26411779)
+### New Entirely GPU Based Heatmap w/ Server Client Architecture
+*zero missing slices as before*
+<img width="1913" height="921" alt="image" src="https://github.com/user-attachments/assets/2d712c0a-9ead-41ea-9ee6-2443662d0aaf" />
 
 ---
 
@@ -74,5 +75,6 @@ apps/         sentinel-server (Daemon) & sentinel_gui (Visualizer).
 ---
 
 ## License
+
 
 AGPL-3.0
