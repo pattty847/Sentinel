@@ -11,6 +11,9 @@ This document captures the current implementation state and what to load first w
 - **Ring-buffer append** works (new columns stream in without full rebuilds).
 - **Smooth scrolling** decoupled from data cadence (render tick + wall-clock offset).
 - **Zoom-threshold labels** appear when cells are large enough (debug visuals).
+- DataProcessor can emit **dense column uploads** (slice → BGRA column) for the GPU heatmap path.
+- Added **price drift recenter** hooks for GPU heatmap ranges (rare full reset trigger).
+- Live data debugging is in progress; GPU heatmap can be driven by **resting book snapshots** (see below).
 
 ## How to Run (Dummy Heatmap)
 ```
@@ -26,6 +29,15 @@ SENTINEL_ZOOM_DEBUG=1  # Logs zoom math
 - `SENTINEL_DUMMY_HEATMAP=1` — enables single-quad dummy heatmap path.
 - `SENTINEL_DUMMY_GRID=<size>` — sets dummy texture size (e.g., 2048, 4096, 8192).
 - `SENTINEL_ZOOM_DEBUG=1` — zoom math logging.
+- `SENTINEL_GPU_HEATMAP=1` — enables real data GPU heatmap path (single quad + streamed columns).
+- `SENTINEL_HEATMAP_GRID=<size>` — sets GPU heatmap grid size (default 8192).
+- `SENTINEL_GPU_HEATMAP_ONLY=1` — disables CPU cell path; use GPU-only rendering.
+- `SENTINEL_GPU_HEATMAP_DEBUG=1` — enable GPU heatmap debug logs.
+- `SENTINEL_GPU_HEATMAP_DEBUG_MARK=1` — debug mark columns (forces visible marker).
+- `SENTINEL_GPU_HEATMAP_FORCE_FULL=1` — force full texture view (bypass viewport mapping).
+- `SENTINEL_HEATMAP_FILL_GAPS=1` — fill missing 100ms buckets by carry-forward.
+- `SENTINEL_HEATMAP_RESTING=1` — use resting book snapshots instead of LTSE slices for GPU heatmap.
+- `SENTINEL_HEATMAP_RECENTER=<fraction>` — recenter threshold for price drift (e.g., 0.15).
 
 ## Build/Runtime Dependencies (WSL)
 - Needed QML modules for Slider:
@@ -63,6 +75,25 @@ SENTINEL_ZOOM_DEBUG=1  # Logs zoom math
 ### 6) Zoom-threshold labels (dummy)
 - Cell labels render only when pixel size crosses a threshold.
 - Labels follow the heatmap scrolling (source-aligned).
+
+### 7) GPU heatmap (live data path)
+- **GPU-only path** (`SENTINEL_GPU_HEATMAP=1`) streams columns into the single-quad shader.
+- **Resting snapshot mode** (`SENTINEL_HEATMAP_RESTING=1`) samples the full LiveOrderBook each 100ms bucket.
+- Tick aggregation currently fixed at **$1 per row** for heatmap columns.
+- Column gap filling enabled when `SENTINEL_GPU_HEATMAP_ONLY=1` or `SENTINEL_HEATMAP_FILL_GAPS=1`.
+
+## Current Live Data Debug Notes (Active Work)
+- We are debugging **live GPU heatmap** behavior (resting book snapshots).
+- Observed issues: non-continuous 100ms slice logs, panning/auto-scroll conflicts, and missing columns.
+- Suspected root: bucket timer not firing on strict 100ms boundaries and/or snapshot gaps not filled.
+- Next step: verify 100ms bucket cadence, snapshot size, and viewport alignment.
+
+## Target Architecture (End State)
+- Maintain a **LiveOrderBook** that is updated by deltas.
+- **Tick aggregation** buckets levels into **$1 rows** for heatmap rendering.
+- **Multiple timeframes** (7 timers) run independently and deterministically.
+- Each timer **snapshots the current book** and emits a heatmap column for its timeframe.
+- No per-cell CPU loops during render; GPU shades a single quad with streamed columns.
 
 ## Files Modified (Key)
 

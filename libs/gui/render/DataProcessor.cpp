@@ -25,6 +25,7 @@ Assumptions: The processing interval is a good balance between latency and effic
 #include <climits>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 
 namespace {
 constexpr bool kTraceCellDebug = false;
@@ -38,6 +39,8 @@ DataProcessor::DataProcessor(QObject* parent)
     connect(m_snapshotTimer, &QTimer::timeout, this, &DataProcessor::captureOrderBookSnapshot);
     
     m_liquidityEngine = new LiquidityTimeSeriesEngine(this);
+    connect(m_liquidityEngine, &LiquidityTimeSeriesEngine::timeSliceReady,
+            this, &DataProcessor::onTimeSliceReady);
     
     sLog_App("DataProcessor: Initialized for V2 architecture");
 }
@@ -175,22 +178,60 @@ void DataProcessor::captureOrderBookSnapshot() {
 
     // Use member variable instead of static - allows reset on clearData()
     if (m_lastSnapshotBucket == 0) {
-        OrderBook ob = *book_copy;
-        ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
-        m_liquidityEngine->addOrderBookSnapshot(ob);
+        if (useRestingHeatmap()) {
+            const auto& liveBook = m_dataSource->getDirectLiveOrderBook(book_copy->product_id);
+            static thread_local std::vector<std::pair<uint32_t, double>> bidBuf;
+            static thread_local std::vector<std::pair<uint32_t, double>> askBuf;
+            const size_t maxPerSide = 20000;
+            auto view = liveBook.captureDenseNonZero(bidBuf, askBuf, maxPerSide);
+            emitRestingHeatmapColumn(view, bucketStart);
+        } else {
+            OrderBook ob = *book_copy;
+            ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
+            m_liquidityEngine->addOrderBookSnapshot(ob);
+        }
         m_lastSnapshotBucket = bucketStart;
-        updateVisibleCells();
+        if (!useRestingHeatmap()) {
+            updateVisibleCells();
+        }
         return;
     }
 
-    // Only add current bucket - don't fill gaps with stale repeated data
-    // Gaps will appear as empty columns (honest representation of missing data)
+    const bool fillGaps = qEnvironmentVariableIsSet("SENTINEL_HEATMAP_FILL_GAPS")
+        || qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_ONLY");
     if (bucketStart > m_lastSnapshotBucket) {
-        OrderBook ob = *book_copy;
-        ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
-        m_liquidityEngine->addOrderBookSnapshot(ob);
-        m_lastSnapshotBucket = bucketStart;
-        updateVisibleCells();
+        if (useRestingHeatmap()) {
+            const auto& liveBook = m_dataSource->getDirectLiveOrderBook(book_copy->product_id);
+            static thread_local std::vector<std::pair<uint32_t, double>> bidBuf;
+            static thread_local std::vector<std::pair<uint32_t, double>> askBuf;
+            const size_t maxPerSide = 20000;
+            auto view = liveBook.captureDenseNonZero(bidBuf, askBuf, maxPerSide);
+
+            if (fillGaps) {
+                for (qint64 bucket = m_lastSnapshotBucket + 100; bucket <= bucketStart; bucket += 100) {
+                    emitRestingHeatmapColumn(view, bucket);
+                    m_lastSnapshotBucket = bucket;
+                }
+            } else {
+                emitRestingHeatmapColumn(view, bucketStart);
+                m_lastSnapshotBucket = bucketStart;
+            }
+        } else {
+            if (fillGaps) {
+                for (qint64 bucket = m_lastSnapshotBucket + 100; bucket <= bucketStart; bucket += 100) {
+                    OrderBook ob = *book_copy;
+                    ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucket));
+                    m_liquidityEngine->addOrderBookSnapshot(ob);
+                    m_lastSnapshotBucket = bucket;
+                }
+            } else {
+                OrderBook ob = *book_copy;
+                ob.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(bucketStart));
+                m_liquidityEngine->addOrderBookSnapshot(ob);
+                m_lastSnapshotBucket = bucketStart;
+            }
+            updateVisibleCells();
+        }
     }
 }
 
@@ -424,6 +465,10 @@ void DataProcessor::updateVisibleCells() {
         return;
     }
 
+    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_ONLY")) {
+        return;
+    }
+
     if (!m_viewState || !m_viewState->isTimeWindowValid()) return;
     
     // Viewport version gating: full rebuild only when viewport changes
@@ -582,6 +627,369 @@ void DataProcessor::updateVisibleCells() {
         m_publishedCells = std::make_shared<std::vector<CellInstance>>(m_visibleCells);
     }
     emit dataUpdated();
+}
+
+void DataProcessor::setHeatmapGridHeight(int height) {
+    if (height > 0) {
+        m_heatmapGridHeight = height;
+    }
+}
+
+void DataProcessor::setHeatmapIntensityScale(double scale) {
+    if (scale > 0.0) {
+        m_heatmapIntensityScale = scale;
+    }
+}
+
+void DataProcessor::setHeatmapRecenterFraction(double fraction) {
+    m_heatmapRecenterFraction = std::clamp(fraction, 0.01, 0.45);
+}
+
+void DataProcessor::onTimeSliceReady(int64_t timeframe_ms, const LiquidityTimeSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
+    if (useRestingHeatmap()) {
+        return;
+    }
+
+    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+    if (timeframe_ms != m_currentTimeframe_ms || m_heatmapGridHeight <= 0) {
+        if (debug) {
+            sLog_Render("GPU HEATMAP SKIP: tf=" << timeframe_ms
+                        << " expected=" << m_currentTimeframe_ms
+                        << " grid=" << m_heatmapGridHeight);
+        }
+        return;
+    }
+
+    updateHeatmapRangeForSlice(slice);
+    if (!m_heatmapRangeValid || m_heatmapTickSize <= 0.0) {
+        if (debug) {
+            sLog_Render("GPU HEATMAP RANGE INVALID: min=" << m_heatmapMinPrice
+                        << " max=" << m_heatmapMaxPrice
+                        << " tick=" << m_heatmapTickSize);
+        }
+        return;
+    }
+
+    QByteArray columnData;
+    int nonZeroRows = 0;
+    rasterizeSliceToColumn(slice, columnData, m_heatmapMinPrice, m_heatmapMaxPrice, m_heatmapTickSize, &nonZeroRows);
+    if (columnData.isEmpty()) {
+        if (debug) {
+            sLog_Render("GPU HEATMAP COLUMN EMPTY: slice=" << slice.startTime_ms);
+        }
+        return;
+    }
+
+    if (nonZeroRows == 0 && m_heatmapHasLastColumn) {
+        columnData = m_heatmapLastColumn;
+        if (debug) {
+            sLog_Render("GPU HEATMAP COLUMN FILL: slice=" << slice.startTime_ms);
+        }
+    }
+
+    if (debug) {
+        sLog_Render("GPU HEATMAP COLUMN READY: tf=" << timeframe_ms
+                    << " slice=" << slice.startTime_ms
+                    << " bytes=" << columnData.size());
+    }
+    emit heatmapColumnReady(slice.startTime_ms,
+                            slice.endTime_ms,
+                            timeframe_ms,
+                            m_heatmapMinPrice,
+                            m_heatmapMaxPrice,
+                            m_heatmapTickSize,
+                            columnData);
+
+    m_heatmapLastColumn = columnData;
+    m_heatmapHasLastColumn = true;
+}
+
+bool DataProcessor::useRestingHeatmap() const {
+    return qEnvironmentVariableIsSet("SENTINEL_HEATMAP_RESTING")
+        || qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_ONLY");
+}
+
+void DataProcessor::updateHeatmapRangeForMid(double mid, double tickSize) {
+    if (m_heatmapGridHeight <= 0 || tickSize <= 0.0) {
+        return;
+    }
+    const double range = static_cast<double>(m_heatmapGridHeight) * tickSize;
+    m_heatmapTickSize = tickSize;
+    m_heatmapMinPrice = mid - range * 0.5;
+    m_heatmapMaxPrice = m_heatmapMinPrice + range;
+    m_heatmapRangeValid = true;
+    emit heatmapRangeReset(m_heatmapMinPrice, m_heatmapMaxPrice, m_heatmapTickSize, m_heatmapGridHeight);
+}
+
+void DataProcessor::emitRestingHeatmapColumn(const LiveOrderBook::DenseBookSnapshotView& view,
+                                             qint64 bucketStart) {
+    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+    if (view.bidLevels.empty() && view.askLevels.empty()) {
+        if (debug) {
+            sLog_Render("GPU HEATMAP RESTING: empty book snapshot");
+        }
+        return;
+    }
+
+    double bestBid = std::numeric_limits<double>::quiet_NaN();
+    double bestAsk = std::numeric_limits<double>::quiet_NaN();
+    if (!view.bidLevels.empty()) {
+        const auto& [idx, qty] = view.bidLevels.front();
+        if (qty > 0.0) {
+            bestBid = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        }
+    }
+    if (!view.askLevels.empty()) {
+        const auto& [idx, qty] = view.askLevels.front();
+        if (qty > 0.0) {
+            bestAsk = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        }
+    }
+
+    double mid = 0.0;
+    if (!std::isnan(bestBid) && !std::isnan(bestAsk)) {
+        mid = (bestBid + bestAsk) * 0.5;
+    } else if (!std::isnan(bestBid)) {
+        mid = bestBid;
+    } else if (!std::isnan(bestAsk)) {
+        mid = bestAsk;
+    } else {
+        return;
+    }
+
+    const double tickSize = 1.0;
+    updateHeatmapRangeForMid(mid, tickSize);
+
+    QByteArray columnData;
+    int nonZeroRows = 0;
+    rasterizeBookToColumn(view, columnData, m_heatmapMinPrice, m_heatmapMaxPrice, tickSize, &nonZeroRows);
+    if (columnData.isEmpty()) {
+        if (debug) {
+            sLog_Render("GPU HEATMAP RESTING: empty column");
+        }
+        return;
+    }
+
+    if (nonZeroRows == 0 && m_heatmapHasLastColumn) {
+        columnData = m_heatmapLastColumn;
+    }
+
+    emit heatmapColumnReady(bucketStart,
+                            bucketStart + 100,
+                            100,
+                            m_heatmapMinPrice,
+                            m_heatmapMaxPrice,
+                            tickSize,
+                            columnData);
+
+    m_heatmapLastColumn = columnData;
+    m_heatmapHasLastColumn = true;
+}
+
+void DataProcessor::updateHeatmapRangeForSlice(const LiquidityTimeSlice& slice) {
+    if (m_heatmapGridHeight <= 0) {
+        return;
+    }
+
+    const double tickSize = 1.0;
+    if (tickSize <= 0.0) {
+        return;
+    }
+
+    const double sliceMinPrice = slice.tickToPrice(slice.minTick);
+    const double sliceMaxPrice = slice.tickToPrice(slice.maxTick);
+    const double mid = (sliceMinPrice + sliceMaxPrice) * 0.5;
+
+    const double range = static_cast<double>(m_heatmapGridHeight) * tickSize;
+    if (range <= 0.0) {
+        return;
+    }
+
+    if (!m_heatmapRangeValid || m_heatmapTickSize != tickSize) {
+        updateHeatmapRangeForMid(mid, tickSize);
+        return;
+    }
+
+    const double margin = range * m_heatmapRecenterFraction;
+    if (mid < m_heatmapMinPrice + margin || mid > m_heatmapMaxPrice - margin) {
+        updateHeatmapRangeForMid(mid, tickSize);
+    }
+}
+
+void DataProcessor::rasterizeSliceToColumn(const LiquidityTimeSlice& slice,
+                                           QByteArray& out,
+                                           double minPrice,
+                                           double maxPrice,
+                                           double tickSize,
+                                           int* nonZeroRows) const {
+    if (m_heatmapGridHeight <= 0 || tickSize <= 0.0 || maxPrice <= minPrice) {
+        return;
+    }
+
+    const int height = m_heatmapGridHeight;
+    out.resize(height * 4);
+    std::memset(out.data(), 0, out.size());
+    auto* dst = reinterpret_cast<uchar*>(out.data());
+
+    const int displayMode = static_cast<int>(LiquidityTimeSeriesEngine::LiquidityDisplayMode::Total);
+    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+    double maxValue = 0.0;
+    for (size_t i = 0; i < slice.bidMetrics.size(); ++i) {
+        const auto& metrics = slice.bidMetrics[i];
+        if (metrics.snapshotCount <= 0) {
+            continue;
+        }
+        const double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+        maxValue = std::max(maxValue, slice.getDisplayValue(price, true, displayMode));
+    }
+    for (size_t i = 0; i < slice.askMetrics.size(); ++i) {
+        const auto& metrics = slice.askMetrics[i];
+        if (metrics.snapshotCount <= 0) {
+            continue;
+        }
+        const double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+        maxValue = std::max(maxValue, slice.getDisplayValue(price, false, displayMode));
+    }
+
+    const double denom = (maxValue > 0.0) ? maxValue : 1.0;
+    const double invScale = (m_heatmapIntensityScale > 0.0)
+        ? (1.0 / (denom * m_heatmapIntensityScale))
+        : (1.0 / denom);
+    if (debug) {
+        sLog_Render("GPU HEATMAP COLUMN STATS: max=" << maxValue
+                    << " invScale=" << invScale
+                    << " range=$" << minPrice << "-$" << maxPrice);
+    }
+
+    int rowsWritten = 0;
+    const auto writeRow = [&](double price, float value) {
+        const double normalized = std::clamp(static_cast<double>(value) * invScale, 0.0, 1.0);
+        if (normalized <= 0.0) {
+            return;
+        }
+        const int row = static_cast<int>(std::floor((maxPrice - price) / tickSize));
+        if (row < 0 || row >= height) {
+            return;
+        }
+        const int intensity = static_cast<int>(normalized * 255.0);
+        const int idx = row * 4;
+        const int prev = dst[idx];
+        if (intensity > prev) {
+            dst[idx + 0] = static_cast<uchar>(intensity);
+            dst[idx + 1] = static_cast<uchar>(intensity);
+            dst[idx + 2] = static_cast<uchar>(intensity);
+            dst[idx + 3] = static_cast<uchar>(255);
+            if (prev == 0) {
+                ++rowsWritten;
+            }
+        }
+    };
+
+    for (size_t i = 0; i < slice.bidMetrics.size(); ++i) {
+        const auto& metrics = slice.bidMetrics[i];
+        if (metrics.snapshotCount <= 0) {
+            continue;
+        }
+        const double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+        const float value = static_cast<float>(slice.getDisplayValue(price, true, displayMode));
+        writeRow(price, value);
+    }
+
+    for (size_t i = 0; i < slice.askMetrics.size(); ++i) {
+        const auto& metrics = slice.askMetrics[i];
+        if (metrics.snapshotCount <= 0) {
+            continue;
+        }
+        const double price = slice.minTick * slice.tickSize + (static_cast<double>(i) * slice.tickSize);
+        const float value = static_cast<float>(slice.getDisplayValue(price, false, displayMode));
+        writeRow(price, value);
+    }
+
+    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG_MARK")) {
+        for (int row = 0; row < height; ++row) {
+            const int idx = row * 4;
+            dst[idx + 0] = 255;
+            dst[idx + 1] = 255;
+            dst[idx + 2] = 255;
+            dst[idx + 3] = 255;
+        }
+    }
+
+    if (nonZeroRows) {
+        *nonZeroRows = rowsWritten;
+    }
+}
+
+void DataProcessor::rasterizeBookToColumn(const LiveOrderBook::DenseBookSnapshotView& view,
+                                          QByteArray& out,
+                                          double minPrice,
+                                          double maxPrice,
+                                          double tickSize,
+                                          int* nonZeroRows) const {
+    if (m_heatmapGridHeight <= 0 || tickSize <= 0.0 || maxPrice <= minPrice) {
+        return;
+    }
+
+    const int height = m_heatmapGridHeight;
+    std::vector<double> rowValues(height, 0.0);
+
+    auto accumulate = [&](double price, double qty) {
+        if (qty <= 0.0) {
+            return;
+        }
+        const int row = static_cast<int>(std::floor((maxPrice - price) / tickSize));
+        if (row < 0 || row >= height) {
+            return;
+        }
+        rowValues[static_cast<size_t>(row)] += qty;
+    };
+
+    for (const auto& [idx, qty] : view.bidLevels) {
+        const double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        accumulate(price, qty);
+    }
+    for (const auto& [idx, qty] : view.askLevels) {
+        const double price = view.minPrice + (static_cast<double>(idx) * view.tickSize);
+        accumulate(price, qty);
+    }
+
+    double maxValue = 0.0;
+    int rowsWritten = 0;
+    for (const double value : rowValues) {
+        if (value > maxValue) {
+            maxValue = value;
+        }
+    }
+    const double denom = (maxValue > 0.0) ? maxValue : 1.0;
+    const double invScale = (m_heatmapIntensityScale > 0.0)
+        ? (1.0 / (denom * m_heatmapIntensityScale))
+        : (1.0 / denom);
+
+    out.resize(height * 4);
+    std::memset(out.data(), 0, out.size());
+    auto* dst = reinterpret_cast<uchar*>(out.data());
+
+    for (int row = 0; row < height; ++row) {
+        const double normalized = std::clamp(rowValues[static_cast<size_t>(row)] * invScale, 0.0, 1.0);
+        if (normalized <= 0.0) {
+            continue;
+        }
+        const int intensity = static_cast<int>(normalized * 255.0);
+        const int idx = row * 4;
+        dst[idx + 0] = static_cast<uchar>(intensity);
+        dst[idx + 1] = static_cast<uchar>(intensity);
+        dst[idx + 2] = static_cast<uchar>(intensity);
+        dst[idx + 3] = static_cast<uchar>(255);
+        ++rowsWritten;
+    }
+
+    if (nonZeroRows) {
+        *nonZeroRows = rowsWritten;
+    }
 }
 
 void DataProcessor::createCellsFromLiquiditySlice(const LiquidityTimeSlice& slice) {

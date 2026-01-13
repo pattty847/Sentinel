@@ -25,6 +25,7 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <limits>
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
@@ -179,6 +180,33 @@ private:
     };
     mutable std::mutex m_dummyUploadMutex;
     std::vector<DummyPendingColumn> m_dummyPendingColumns;
+
+    // Real GPU heatmap path (single quad with streamed columns).
+    bool m_useGpuHeatmap = false;
+    int m_heatmapGridSize = 8192;
+    bool m_heatmapTextureDirty = true;
+    QImage m_heatmapImage;
+    QImage m_heatmapPaletteImage;
+    QTimer* m_heatmapRenderTimer = nullptr;
+    int m_heatmapWriteColumn = 0;
+    int m_heatmapAppendMs = 100;
+    qint64 m_heatmapLastAppendMs = 0;
+    int64_t m_heatmapTimeOriginMs = 0;
+    int64_t m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
+    bool m_heatmapViewportInitialized = false;
+    double m_heatmapMinPrice = 0.0;
+    double m_heatmapMaxPrice = 0.0;
+    double m_heatmapTickSize = 0.0;
+    QElapsedTimer m_heatmapClock;
+    std::atomic<float> m_heatmapTimeOffset{0.0f};
+    QByteArray m_heatmapLastColumnData;
+    bool m_heatmapHaveLastColumn = false;
+    struct HeatmapPendingColumn {
+        int x = 0;
+        QByteArray data;
+    };
+    mutable std::mutex m_heatmapUploadMutex;
+    std::vector<HeatmapPendingColumn> m_heatmapPendingColumns;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
@@ -344,6 +372,8 @@ private:
     void initDummyHeatmap();
     void ensureDummyImage();
     void ensureDummyPaletteImage();
+    void ensureHeatmapImage();
+    void ensureHeatmapPaletteImage();
     void appendDummyColumn();
     void onDummyRenderTick();
     void buildDummyLabelImage();

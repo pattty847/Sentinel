@@ -264,6 +264,11 @@ void UnifiedGridRenderer::setShowVolumeProfile(bool show) {
 void UnifiedGridRenderer::setIntensityScale(double scale) {
     if (m_intensityScale != scale) {
         m_intensityScale = scale;
+        if (m_useGpuHeatmap && m_dataProcessor) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, scale]() {
+                m_dataProcessor->setHeatmapIntensityScale(scale);
+            }, Qt::QueuedConnection);
+        }
         m_materialDirty.store(true);
         update();
         emit intensityScaleChanged();
@@ -428,6 +433,9 @@ void UnifiedGridRenderer::setGridMode(int mode) {
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     if (m_currentTimeframe_ms != timeframe_ms) {
         m_currentTimeframe_ms = timeframe_ms;
+        if (m_useGpuHeatmap && timeframe_ms > 0) {
+            m_heatmapAppendMs = timeframe_ms;
+        }
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.start();
         if (m_dataProcessor) m_dataProcessor->addTimeframe(timeframe_ms);
@@ -493,6 +501,23 @@ void UnifiedGridRenderer::init() {
         initDummyHeatmap();
     }
 
+    m_useGpuHeatmap = !m_useDummyHeatmap && qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP");
+    if (m_useGpuHeatmap) {
+        bool ok = false;
+        const int envSize = qgetenv("SENTINEL_HEATMAP_GRID").toInt(&ok);
+        if (ok && envSize > 0) {
+            m_heatmapGridSize = envSize;
+        }
+        ok = false;
+        const double recenter = qgetenv("SENTINEL_HEATMAP_RECENTER").toDouble(&ok);
+        if (ok && recenter > 0.0) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
+                m_dataProcessor->setHeatmapRecenterFraction(recenter);
+            }, Qt::QueuedConnection);
+        }
+        m_heatmapClock.start();
+    }
+
     // Register metatypes for cross-thread signal/slot connections
     qRegisterMetaType<Trade>("Trade");
     
@@ -518,6 +543,139 @@ void UnifiedGridRenderer::init() {
             }, Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::viewportInitialized,
             this, &UnifiedGridRenderer::viewportChanged, Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
+            this,
+            [this](int64_t sliceStartMs,
+                   int64_t sliceEndMs,
+                   int64_t timeframeMs,
+                   double minPrice,
+                   double maxPrice,
+                   double tickSize,
+                   const QByteArray& column) {
+                Q_UNUSED(sliceEndMs);
+                const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+                if (!m_useGpuHeatmap || m_heatmapGridSize <= 0 || column.isEmpty()) {
+                    if (debug) {
+                        sLog_Render("GPU HEATMAP DROP: enabled=" << m_useGpuHeatmap
+                                    << " grid=" << m_heatmapGridSize
+                                    << " bytes=" << column.size());
+                    }
+                    return;
+                }
+
+                m_heatmapMinPrice = minPrice;
+                m_heatmapMaxPrice = maxPrice;
+                m_heatmapTickSize = tickSize;
+                if (timeframeMs > 0) {
+                    m_heatmapAppendMs = static_cast<int>(timeframeMs);
+                }
+
+                if (m_heatmapTimeOriginMs == 0) {
+                    m_heatmapTimeOriginMs = sliceStartMs;
+                }
+
+                int step = 1;
+                if (m_heatmapLastSliceStartMs != std::numeric_limits<int64_t>::min() &&
+                    m_heatmapAppendMs > 0) {
+                    const int64_t dt = sliceStartMs - m_heatmapLastSliceStartMs;
+                    if (dt > 0) {
+                        const int64_t rawStep = dt / m_heatmapAppendMs;
+                        step = static_cast<int>(std::max<int64_t>(1, rawStep));
+                    }
+                }
+
+                QByteArray fillColumn;
+                if (!m_heatmapHaveLastColumn) {
+                    fillColumn = QByteArray(column.size(), 0);
+                } else {
+                    fillColumn = m_heatmapLastColumnData;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(m_heatmapUploadMutex);
+                    for (int i = 0; i < step - 1; ++i) {
+                        m_heatmapWriteColumn = (m_heatmapWriteColumn + 1) % m_heatmapGridSize;
+                        m_heatmapPendingColumns.push_back({m_heatmapWriteColumn, fillColumn});
+                    }
+
+                    m_heatmapWriteColumn = (m_heatmapWriteColumn + 1) % m_heatmapGridSize;
+                    m_heatmapPendingColumns.push_back({m_heatmapWriteColumn, column});
+                }
+                m_heatmapLastSliceStartMs = sliceStartMs;
+                m_heatmapLastColumnData = column;
+                m_heatmapHaveLastColumn = true;
+
+                m_heatmapLastAppendMs = m_heatmapClock.elapsed();
+                if (debug) {
+                    sLog_Render("GPU HEATMAP ENQUEUE: col=" << m_heatmapWriteColumn
+                                << " step=" << step
+                                << " tf=" << timeframeMs
+                                << " range=$" << m_heatmapMinPrice << "-$" << m_heatmapMaxPrice);
+                }
+                if (!m_heatmapViewportInitialized && m_viewState && timeframeMs > 0 && m_heatmapGridSize > 0) {
+                    const int64_t spanMs = static_cast<int64_t>(m_heatmapGridSize - 1) * timeframeMs;
+                    const int64_t viewStart = sliceStartMs - spanMs;
+                    const int64_t viewEnd = sliceStartMs + timeframeMs;
+                    if (viewEnd > viewStart) {
+                        m_viewState->setViewport(viewStart, viewEnd, m_heatmapMinPrice, m_heatmapMaxPrice);
+                        m_heatmapViewportInitialized = true;
+                        m_transformDirty.store(true);
+                        if (debug) {
+                            sLog_Render("GPU HEATMAP VIEWPORT INIT: [" << viewStart << "-" << viewEnd
+                                        << "] $" << m_heatmapMinPrice << "-$" << m_heatmapMaxPrice);
+                        }
+                    }
+                }
+
+                if (m_viewState && m_viewState->isAutoScrollEnabled() && timeframeMs > 0) {
+                    const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
+                    const int64_t maxSpanMs = static_cast<int64_t>(m_heatmapGridSize) * timeframeMs;
+                    const int64_t clampedSpanMs = std::min(spanMs, maxSpanMs);
+                    const int64_t viewEnd = sliceStartMs + timeframeMs;
+                    const int64_t viewStart = viewEnd - clampedSpanMs;
+
+                    const double priceSpan = std::max(1e-6, m_viewState->getMaxPrice() - m_viewState->getMinPrice());
+                    const double heatmapMid = (m_heatmapMinPrice + m_heatmapMaxPrice) * 0.5;
+                    double minPrice = m_viewState->getMinPrice();
+                    double maxPrice = m_viewState->getMaxPrice();
+                    if (maxPrice < m_heatmapMinPrice || minPrice > m_heatmapMaxPrice) {
+                        minPrice = heatmapMid - priceSpan * 0.5;
+                        maxPrice = heatmapMid + priceSpan * 0.5;
+                    }
+
+                    m_viewState->setViewport(viewStart, viewEnd, minPrice, maxPrice);
+                }
+                update();
+            },
+            Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapRangeReset,
+            this,
+            [this](double minPrice, double maxPrice, double tickSize, int gridHeight) {
+                if (!m_useGpuHeatmap) {
+                    return;
+                }
+                m_heatmapMinPrice = minPrice;
+                m_heatmapMaxPrice = maxPrice;
+                m_heatmapTickSize = tickSize;
+                if (gridHeight > 0) {
+                    m_heatmapGridSize = gridHeight;
+                }
+                m_heatmapTextureDirty = true;
+                m_heatmapWriteColumn = 0;
+                m_heatmapTimeOriginMs = 0;
+                m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
+                m_heatmapHaveLastColumn = false;
+                m_heatmapLastColumnData.clear();
+                if (m_viewState && m_viewState->isAutoScrollEnabled()) {
+                    m_heatmapViewportInitialized = false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_heatmapUploadMutex);
+                    m_heatmapPendingColumns.clear();
+                }
+                update();
+            },
+            Qt::QueuedConnection);
     
     // Start the worker thread
     m_dataProcessorThread->start();
@@ -562,6 +720,29 @@ void UnifiedGridRenderer::init() {
             m_dataProcessor.get(),
             &DataProcessor::startProcessing,
             Qt::QueuedConnection);
+    }
+
+    if (m_useGpuHeatmap && m_dataProcessor) {
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
+            m_dataProcessor->setHeatmapGridHeight(m_heatmapGridSize);
+            m_dataProcessor->setHeatmapIntensityScale(m_intensityScale);
+        }, Qt::QueuedConnection);
+
+        m_heatmapRenderTimer = new QTimer(this);
+        connect(m_heatmapRenderTimer, &QTimer::timeout, this, [this]() {
+            if (!m_useGpuHeatmap || m_heatmapGridSize <= 0 || m_heatmapAppendMs <= 0) {
+                return;
+            }
+            const qint64 nowMs = m_heatmapClock.elapsed();
+            const qint64 delta = nowMs - m_heatmapLastAppendMs;
+            const float frac = std::clamp(static_cast<float>(delta) / static_cast<float>(m_heatmapAppendMs),
+                                          0.0f, 1.0f);
+            const float offset = (static_cast<float>(m_heatmapWriteColumn) + frac) /
+                                 static_cast<float>(m_heatmapGridSize);
+            m_heatmapTimeOffset.store(offset);
+            update();
+        });
+        m_heatmapRenderTimer->start(16);
     }
 }
 
@@ -867,6 +1048,120 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         return texNode;
     }
 
+    if (m_useGpuHeatmap) {
+        auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
+        if (!texNode) {
+            texNode = new HeatmapIntensityNode();
+            m_heatmapTextureDirty = true;
+        }
+
+        if (m_heatmapTextureDirty) {
+            ensureHeatmapImage();
+            ensureHeatmapPaletteImage();
+            auto* intensityTexture = window()->createTextureFromImage(m_heatmapImage);
+            if (!intensityTexture) {
+                QImage fallback = m_heatmapImage.convertToFormat(QImage::Format_RGBA8888);
+                intensityTexture = window()->createTextureFromImage(fallback);
+            }
+            auto* paletteTexture = window()->createTextureFromImage(m_heatmapPaletteImage);
+            if (intensityTexture && paletteTexture) {
+                intensityTexture->setFiltering(QSGTexture::Nearest);
+                paletteTexture->setFiltering(QSGTexture::Linear);
+                texNode->setTextures(intensityTexture, paletteTexture);
+                texNode->setGamma(1.05f);
+                texNode->setContrast(1.15f);
+                m_heatmapTextureDirty = false;
+            }
+        }
+
+        const QRectF bounds = boundingRect();
+        texNode->setRect(bounds);
+
+        if (m_viewState && m_viewState->isTimeWindowValid() &&
+            m_heatmapAppendMs > 0 && m_heatmapTickSize > 0.0 && m_heatmapTimeOriginMs != 0) {
+            const qint64 timeStart = m_viewState->getVisibleTimeStart();
+            const qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+            const double minPrice = m_viewState->getMinPrice();
+            const double maxPrice = m_viewState->getMaxPrice();
+
+            double timeStartF = static_cast<double>(timeStart);
+            double timeEndF = static_cast<double>(timeEnd);
+            double minPriceF = minPrice;
+            double maxPriceF = maxPrice;
+
+            const QPointF pan = m_viewState->getPanVisualOffset();
+            const double timeRange = static_cast<double>(timeEnd - timeStart);
+            const double priceRange = maxPrice - minPrice;
+            if (!pan.isNull() && bounds.width() > 0.0 && bounds.height() > 0.0 &&
+                timeRange > 0.0 && priceRange > 0.0 && m_viewState->isDragging()) {
+                const double timePixelsToUnits = timeRange / bounds.width();
+                const double pricePixelsToUnits = priceRange / bounds.height();
+                const double timeDelta = -pan.x() * timePixelsToUnits;
+                const double priceDelta = pan.y() * pricePixelsToUnits;
+                timeStartF += timeDelta;
+                timeEndF += timeDelta;
+                minPriceF += priceDelta;
+                maxPriceF += priceDelta;
+            }
+
+            if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
+                texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
+                texNode->setTimeOffset(0.0f);
+            } else if (timeEndF > timeStartF && maxPriceF > minPriceF) {
+                const double maxCoord = static_cast<double>(m_heatmapGridSize);
+                const double windowW = timeEndF - timeStartF;
+                const double windowH = maxPriceF - minPriceF;
+
+                const double srcW = std::clamp(windowW / m_heatmapAppendMs, 1.0, maxCoord);
+                const double srcH = std::clamp(windowH / m_heatmapTickSize, 1.0, maxCoord);
+
+                const double timeMax = m_heatmapTimeOriginMs + (maxCoord - srcW) * m_heatmapAppendMs;
+                const double priceMax = m_heatmapMaxPrice - (srcH * m_heatmapTickSize);
+                const double clampedStart = std::clamp(timeStartF, static_cast<double>(m_heatmapTimeOriginMs), timeMax);
+                const double clampedMinPrice = std::clamp(minPriceF, m_heatmapMinPrice, priceMax);
+
+                const double srcX = (clampedStart - m_heatmapTimeOriginMs) / m_heatmapAppendMs;
+                const double srcY = (m_heatmapMaxPrice - (clampedMinPrice + srcH * m_heatmapTickSize)) /
+                                    m_heatmapTickSize;
+                texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+            } else {
+                texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
+            }
+        } else {
+            texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
+        }
+
+        if (!qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
+            texNode->setTimeOffset(m_heatmapTimeOffset.load());
+        }
+
+        std::vector<HeatmapPendingColumn> pendingUploads;
+        {
+            std::lock_guard<std::mutex> lock(m_heatmapUploadMutex);
+            if (!m_heatmapPendingColumns.empty()) {
+                pendingUploads.swap(m_heatmapPendingColumns);
+            }
+        }
+        for (auto& upload : pendingUploads) {
+            texNode->enqueueColumn(upload.x, std::move(upload.data));
+        }
+
+        if (!m_fpsTimer.isValid()) {
+            m_fpsTimer.start();
+            m_fpsFrameCount = 0;
+        }
+
+        ++m_fpsFrameCount;
+        const qint64 elapsedMs = m_fpsTimer.elapsed();
+        if (elapsedMs >= 1000) {
+            m_currentFps.store((static_cast<double>(m_fpsFrameCount) * 1000.0) / elapsedMs);
+            m_fpsFrameCount = 0;
+            m_fpsTimer.restart();
+        }
+
+        return texNode;
+    }
+
     QElapsedTimer timer;
     timer.start();
 
@@ -1114,6 +1409,45 @@ void UnifiedGridRenderer::ensureDummyPaletteImage() {
     }
 
     auto* row = reinterpret_cast<QRgb*>(m_dummyPaletteImage.scanLine(0));
+    for (int i = 0; i < width; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(width - 1);
+        const bool isAsk = (i >= width / 2);
+        const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
+        const float boost = std::pow(std::clamp(localT, 0.0f, 1.0f), 0.8f);
+        const int base = static_cast<int>(boost * 255.0f);
+        const int r = isAsk ? base : static_cast<int>(base * 0.25f);
+        const int g = isAsk ? static_cast<int>(base * 0.25f) : base;
+        const int b = static_cast<int>(base * 0.35f);
+        row[i] = qRgba(r, g, b, 255);
+    }
+}
+
+void UnifiedGridRenderer::ensureHeatmapImage() {
+    if (!m_heatmapImage.isNull() && m_heatmapImage.width() == m_heatmapGridSize &&
+        m_heatmapImage.height() == m_heatmapGridSize) {
+        return;
+    }
+
+    m_heatmapImage = QImage(m_heatmapGridSize, m_heatmapGridSize, QImage::Format_ARGB32);
+    if (m_heatmapImage.isNull()) {
+        return;
+    }
+    m_heatmapImage.fill(Qt::black);
+}
+
+void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
+    if (!m_heatmapPaletteImage.isNull()) {
+        return;
+    }
+
+    const int width = 512;
+    const int height = 1;
+    m_heatmapPaletteImage = QImage(width, height, QImage::Format_RGBA8888);
+    if (m_heatmapPaletteImage.isNull()) {
+        return;
+    }
+
+    auto* row = reinterpret_cast<QRgb*>(m_heatmapPaletteImage.scanLine(0));
     for (int i = 0; i < width; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(width - 1);
         const bool isAsk = (i >= width / 2);

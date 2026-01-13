@@ -20,6 +20,7 @@ Assumptions: Dependencies (GridViewState, LiquidityTimeSeriesEngine) are set bef
 #include <vector>
 #include <chrono>
 #include <unordered_set>
+#include <limits>
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/LiquidityTimeSeriesEngine.h"
 #include "GridTypes.hpp"
@@ -43,6 +44,7 @@ public slots:
     
     // Move updateVisibleCells to slots for cross-thread calls
     void updateVisibleCells();
+    void onTimeSliceReady(int64_t timeframe_ms, const LiquidityTimeSlice& slice);
 
 public:
     
@@ -88,6 +90,10 @@ public:
     
     void setTimeframe(int timeframe_ms);
     bool isManualTimeframeSet() const;
+
+    void setHeatmapGridHeight(int height);
+    void setHeatmapIntensityScale(double scale);
+    void setHeatmapRecenterFraction(double fraction);
     
     const std::vector<struct CellInstance>& getVisibleCells() const { return m_visibleCells; }
     // Thread-safe snapshot access for renderer (swap-only on render thread)
@@ -99,6 +105,14 @@ public:
 signals:
     void dataUpdated();
     void viewportInitialized();
+    void heatmapColumnReady(int64_t sliceStartMs,
+                            int64_t sliceEndMs,
+                            int64_t timeframeMs,
+                            double minPrice,
+                            double maxPrice,
+                            double tickSize,
+                            const QByteArray& column);
+    void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridHeight);
 
 private slots:
     void captureOrderBookSnapshot();
@@ -114,6 +128,23 @@ private:
     
     // Append-mode helpers
     void removeCellsForTimeRange(int64_t startTime, int64_t endTime);
+    void updateHeatmapRangeForSlice(const LiquidityTimeSlice& slice);
+    void updateHeatmapRangeForMid(double mid, double tickSize);
+    void rasterizeSliceToColumn(const LiquidityTimeSlice& slice,
+                                QByteArray& out,
+                                double minPrice,
+                                double maxPrice,
+                                double tickSize,
+                                int* nonZeroRows = nullptr) const;
+    void rasterizeBookToColumn(const LiveOrderBook::DenseBookSnapshotView& view,
+                               QByteArray& out,
+                               double minPrice,
+                               double maxPrice,
+                               double tickSize,
+                               int* nonZeroRows = nullptr) const;
+    void emitRestingHeatmapColumn(const LiveOrderBook::DenseBookSnapshotView& view,
+                                  qint64 bucketStart);
+    bool useRestingHeatmap() const;
     
     // Components
     GridViewState* m_viewState = nullptr;
@@ -141,6 +172,18 @@ private:
     
     // Dynamic price resolution
     double m_priceResolution = 1.0;
+
+    // GPU heatmap rasterization config
+    int m_heatmapGridHeight = 8192;
+    double m_heatmapIntensityScale = 1.0;
+    double m_heatmapMinPrice = 0.0;
+    double m_heatmapMaxPrice = 0.0;
+    double m_heatmapTickSize = 0.0;
+    bool m_heatmapRangeValid = false;
+    double m_heatmapRecenterFraction = 0.15;
+    int64_t m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
+    QByteArray m_heatmapLastColumn;
+    bool m_heatmapHasLastColumn = false;
 
     // Band-based ingestion settings (centered at mid price)
     BandMode m_bandMode = BandMode::PercentMid; // default to percentage of mid

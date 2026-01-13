@@ -14,6 +14,10 @@ layout(std140, binding = 0) uniform buf {
 void main() {
     vec2 uv = vec2(fract(v_texcoord.x + params.w), v_texcoord.y);
     float intensity = texture(intensityTex, uv).r;
+    if (intensity <= 0.0001) {
+        fragColor = vec4(0.0, 0.0, 0.0, params.x);
+        return;
+    }
     float contrast = params.z;
     float gamma = params.y;
 
