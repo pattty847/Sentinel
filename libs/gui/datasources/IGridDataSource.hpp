@@ -8,9 +8,7 @@
 /**
  * @brief Abstract interface for supplying market data to the grid.
  * 
- * Supports switching between:
- * - LocalGridDataSource: Direct access to DataCache (Monolith)
- * - RemoteGridDataSource: Network access via WebSocket (Client/Server)
+ * Supports remote client-server access via WebSocket.
  */
 class IGridDataSource : public QObject {
     Q_OBJECT

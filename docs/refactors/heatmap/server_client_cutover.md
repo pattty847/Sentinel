@@ -101,18 +101,18 @@ No monolith fallback. Fast, deterministic, and GPU‑first.
 
 **Intent**: The GUI should never construct `MarketDataCore` or `LocalGridDataSource`.
 
-- Force `SENTINEL_REMOTE=1` for GUI builds/runs.
+- GUI is remote‑only by default (no `SENTINEL_REMOTE` toggle).
 - Remove `LocalGridDataSource` usage in `MainWindowGPU`.
-- Remove `ServiceLocator::registerMarketDataCore` from GUI.
+- Do not register `MarketDataCore`/`DataCache` in `ServiceLocator`.
 - Disable or rewire widgets that depend on MarketDataCore:
-  - `OrderBookDock` (uses MarketDataCore)
-  - `MarketDataPanel` (uses MarketDataCore)
+  - `OrderBookDock` (kept, currently inert)
+  - `MarketDataPanel` (removed from GUI build)
 
 **Files**
 - `libs/gui/MainWindowGpu.cpp`
 - `libs/gui/widgets/ServiceLocator.cpp`
 - `libs/gui/widgets/OrderBookDock.cpp`
-- `libs/gui/widgets/MarketDataPanel.cpp`
+- `libs/gui/widgets/MarketDataPanel.cpp` (removed)
 - `libs/gui/datasources/LocalGridDataSource.cpp` (remove from GUI build path)
 
 ## Phase 2 — Server emits heatmap slices

@@ -29,17 +29,13 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "SentinelLogging.hpp"
 #include "widgets/HeatmapDock.hpp"
 #include "widgets/StatusBar.hpp"
-#include "widgets/MarketDataPanel.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/LayoutManager.hpp"
-#include "widgets/ServiceLocator.hpp"
-#include "mainwindow/DataBootstrapper.h"
 #include "mainwindow/DockFactory.h"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
-#include "datasources/LocalGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QQmlContext>
 #include <QMetaObject>
@@ -63,28 +59,11 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     LOG_SCOPE("MainWindowGPU construction");
     
-    // 1) Initialize data components via DataBootstrapper
-    auto dataComponents = DataBootstrapper::initialize();
-    m_marketDataCore = std::move(dataComponents.marketDataCore);
-    m_authenticator = std::move(dataComponents.authenticator);
-    m_dataCache = std::move(dataComponents.dataCache);
-    
-    // Initialize Data Source (Abstraction Layer)
-    bool useRemote = qEnvironmentVariableIsSet("SENTINEL_REMOTE");
-    
-    if (useRemote) {
-        sLog_App("Starting in REMOTE mode (connecting to 127.0.0.1:8080)");
-        auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
-        remote->connectToServer();
-        m_dataSource = std::move(remote);
-    } else {
-        sLog_App("Starting in LOCAL mode");
-        m_dataSource = std::make_unique<LocalGridDataSource>(m_marketDataCore.get(), m_dataCache.get());
-    }
-
-    // Register services with ServiceLocator
-    ServiceLocator::registerMarketDataCore(m_marketDataCore.get());
-    ServiceLocator::registerDataCache(m_dataCache.get());
+    // 1) Initialize data source (remote-only)
+    sLog_App("Starting in REMOTE mode (connecting to 127.0.0.1:8080)");
+    auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
+    remote->connectToServer();
+    m_dataSource = std::move(remote);
     
     // 2) Create dock widgets via DockFactory
     setupUI();
@@ -126,18 +105,10 @@ MainWindowGPU::~MainWindowGPU() {
     LOG_SCOPE("MainWindowGPU destruction");
     
     // Disconnect signals first
-    if (m_marketDataCore) {
-        disconnect(m_marketDataCore.get(), nullptr, nullptr, nullptr);
-        m_marketDataCore->stop();
-        m_marketDataCore.reset();
-    }
-    
     if (m_qmlController) {
         // QmlSceneController manages QML cleanup
     }
 }
-
-// Data components initialization moved to DataBootstrapper
 
 void MainWindowGPU::setupUI() {
     LOG_SCOPE("Setting up UI");
@@ -150,7 +121,6 @@ void MainWindowGPU::setupUI() {
     auto docks = dockFactory.createDocks();
     m_heatmapDock = docks.heatmapDock;
     m_statusBar = docks.statusBar;
-    m_marketDataDock = docks.marketDataDock;
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
     m_aiCommentaryDock = docks.aiCommentaryDock;
@@ -170,7 +140,6 @@ void MainWindowGPU::setupUI() {
     
     // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
-    connect(this, &MainWindowGPU::symbolChanged, m_marketDataDock, &MarketDataPanel::onSymbolChanged);
     
     setUpdatesEnabled(true);
 }
@@ -252,7 +221,6 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 void MainWindowGPU::setupMenuBar() {
     MenuBuilder::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
@@ -262,7 +230,6 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
-    callbacks.openMarketDataPanel = [this]() { onOpenMarketDataPanel(); };
 
     // Set heatmap dock for debug menu access
     m_menuBuilder->setHeatmapDock(m_heatmapDock);
@@ -278,7 +245,6 @@ void MainWindowGPU::setupShortcuts() {
     
     ShortcutBinder::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     
     m_shortcutBinder->bindShortcuts(callbacks, docks);
@@ -332,7 +298,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted fo
 bool MainWindowGPU::validateComponents() {
     if (!m_qmlController || !m_qmlController->isValid()) return false;
     if (!m_qmlController->getUnifiedGridRenderer()) return false;
-    if (!m_marketDataCore) return false;
+    if (!m_dataSource) return false;
     return true;
 }
 
@@ -386,17 +352,9 @@ void MainWindowGPU::onOpenSecFilingViewer() {
     }
 }
 
-void MainWindowGPU::onOpenMarketDataPanel() {
-    if (m_marketDataDock && !m_marketDataDock->isVisible()) {
-        m_marketDataDock->show();
-        m_marketDataDock->raise();
-    }
-}
-
 LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     LayoutOrchestrator::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;

@@ -1,6 +1,5 @@
 #include "ShortcutBinder.h"
 #include "../widgets/HeatmapDock.hpp"
-#include "../widgets/MarketDataPanel.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include <QShortcut>
 #include <QKeySequence>
@@ -45,9 +44,6 @@ void ShortcutBinder::bindShortcuts(const Callbacks& callbacks, const DockWidgets
     
     QShortcut* f2Shortcut = new QShortcut(QKeySequence("F2"), m_parent);
     QObject::connect(f2Shortcut, &QShortcut::activated, [docks]() {
-        if (docks.marketDataDock) {
-            docks.marketDataDock->setVisible(!docks.marketDataDock->isVisible());
-        }
     });
     
     QShortcut* f3Shortcut = new QShortcut(QKeySequence("F3"), m_parent);

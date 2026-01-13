@@ -6,8 +6,6 @@ set(GRID_CORE_SOURCES
     ChartModeController.h
     
     # MainWindow modular components
-    mainwindow/DataBootstrapper.cpp
-    mainwindow/DataBootstrapper.h
     mainwindow/DockFactory.cpp
     mainwindow/DockFactory.h
     mainwindow/QmlSceneController.cpp
@@ -21,8 +19,6 @@ set(GRID_CORE_SOURCES
     
     # Grid system components
     datasources/IGridDataSource.hpp
-    datasources/LocalGridDataSource.hpp
-    datasources/LocalGridDataSource.cpp
     datasources/RemoteGridDataSource.hpp
     datasources/RemoteGridDataSource.cpp
     UnifiedGridRenderer.cpp
@@ -72,8 +68,6 @@ set(WIDGET_SOURCES
     "widgets/DockablePanel.cpp"
     "widgets/HeatmapDock.cpp"
     "widgets/LayoutManager.cpp"
-    "widgets/MarketDataModel.cpp"
-    "widgets/MarketDataPanel.cpp"
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"

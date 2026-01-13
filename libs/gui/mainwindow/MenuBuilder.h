@@ -18,7 +18,6 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 
 // Forward declarations
 class HeatmapDock;
-class MarketDataPanel;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
@@ -27,7 +26,6 @@ class MenuBuilder {
 public:
     struct DockWidgets {
         HeatmapDock* heatmapDock = nullptr;
-        MarketDataPanel* marketDataDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
@@ -38,7 +36,6 @@ public:
         std::function<void()> restoreLayout;
         std::function<void()> resetLayout;
         std::function<void()> openSecFilingViewer;
-        std::function<void()> openMarketDataPanel;
     };
 
     explicit MenuBuilder(QMenuBar* menuBar);

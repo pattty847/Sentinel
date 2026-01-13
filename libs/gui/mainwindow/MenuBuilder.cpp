@@ -1,6 +1,5 @@
 #include "MenuBuilder.h"
 #include "../widgets/HeatmapDock.hpp"
-#include "../widgets/MarketDataPanel.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
@@ -27,9 +26,6 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     
     if (docks.heatmapDock) {
         m_viewMenu->addAction(docks.heatmapDock->toggleViewAction());
-    }
-    if (docks.marketDataDock) {
-        m_viewMenu->addAction(docks.marketDataDock->toggleViewAction());
     }
     if (docks.secDock) {
         m_viewMenu->addAction(docks.secDock->toggleViewAction());
@@ -81,9 +77,6 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
     
     QAction* openMarketDataAction = m_toolsMenu->addAction("Open &Market Data Panel");
     QObject::connect(openMarketDataAction, &QAction::triggered, [callbacks]() {
-        if (callbacks.openMarketDataPanel) {
-            callbacks.openMarketDataPanel();
-        }
     });
     
     m_toolsMenu->addSeparator();
