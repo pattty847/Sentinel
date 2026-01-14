@@ -234,6 +234,9 @@ public:
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     
+    // GridViewState accessor (for axis models)
+    GridViewState* getViewState() const { return m_viewState.get(); }
+    
     // Trade Bubble accessors
     double minBubbleRadius() const { return m_minBubbleRadius; }
     double maxBubbleRadius() const { return m_maxBubbleRadius; }

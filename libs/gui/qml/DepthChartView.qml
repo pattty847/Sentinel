@@ -50,7 +50,7 @@ Rectangle {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
         anchors.fill: parent
-        anchors.leftMargin: 60   // Space for price axis
+        anchors.rightMargin: 70  // Space for price axis (RIGHT side)
         anchors.bottomMargin: 30 // Space for time axis
         visible: true
         renderMode: UnifiedGridRenderer.LiquidityHeatmap
@@ -134,55 +134,51 @@ Rectangle {
         }
     }
     
-    //  PRICE AXIS (Y-AXIS) - LEFT SIDE with PriceAxisModel
+    //  PRICE AXIS (Y-AXIS) - RIGHT SIDE with PriceAxisModel
     Rectangle {
         id: priceAxis
-        anchors.left: parent.left
+        anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 30
-        width: 60
-        color: Qt.rgba(0, 0, 0, 0.3)
-        border.color: "white"
+        anchors.topMargin: 10  // Prevent label clipping at top
+        width: 70
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
+        border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 2
         
         enabled: false  // Transparent to mouse events
         
+        // Clip labels to axis bounds
+        clip: true
+        
         PriceAxisModel {
             id: priceAxisModel
+            target: unifiedGridRenderer
         }
         
         Repeater {
             model: priceAxisModel
-            Rectangle {
-                width: priceAxis.width - 10
-                height: 20
-                color: "transparent"
-                border.color: Qt.rgba(1, 1, 1, 0.3)
-                border.width: model.isMajorTick ? 1 : 0
+            
+            Item {
+                width: priceAxis.width
+                height: 16
+                y: model.position - 8  // Center label on tick position
                 
-                y: model.position
+                // Only show if within clipped bounds (with margin)
+                visible: y >= -4 && y <= priceAxis.height - 12
                 
                 Text {
-                    anchors.centerIn: parent
-                    color: "#00FF00"
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "#E0E0E0"
                     font.pixelSize: 10
-                    font.bold: true
+                    font.family: "monospace"
                     text: model.label
                 }
             }
-        }
-        
-        Text {
-            anchors.top: parent.top
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.topMargin: 5
-            color: "white"
-            font.pixelSize: 11
-            font.bold: true
-            text: "PRICE"
-            rotation: -90
         }
     }
     
@@ -192,49 +188,56 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom  
-        anchors.leftMargin: 60
+        anchors.rightMargin: 70  // Match price axis width
         height: 30
-        color: Qt.rgba(0, 0, 0, 0.3)
-        border.color: "white"
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
+        border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 2
         
         enabled: false  // Transparent to mouse events
         
+        // Clip labels to axis bounds
+        clip: true
+        
         TimeAxisModel {
             id: timeAxisModel
+            target: unifiedGridRenderer
         }
         
         Repeater {
             model: timeAxisModel
-            Rectangle {
+            
+            Item {
                 width: 80
-                height: timeAxis.height - 10
-                color: "transparent"
-                border.color: Qt.rgba(1, 1, 1, 0.3)
-                border.width: model.isMajorTick ? 1 : 0
+                height: timeAxis.height
+                x: model.position - 40  // Center label on tick position
                 
-                x: model.position
+                // Only show if within clipped bounds
+                visible: x >= -40 && x <= timeAxis.width - 40
                 
                 Text {
                     anchors.centerIn: parent
-                    color: "#00FFFF"
-                    font.pixelSize: 9
-                    font.bold: true
+                    color: "#E0E0E0"
+                    font.pixelSize: 10
+                    font.family: "monospace"
                     text: model.label
                 }
             }
         }
-        
-        Text {
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.rightMargin: 5
-            color: "white"
-            font.pixelSize: 11
-            font.bold: true
-            text: "TIME →"
-        }
+    }
+    
+    // Corner piece where axes meet (bottom-right)
+    Rectangle {
+        id: axisCorner
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        width: 70
+        height: 30
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
+        border.color: Qt.rgba(1, 1, 1, 0.3)
+        border.width: 1
+        z: 3
     }
 
     // FPS overlay (polls QML invokable for now).
@@ -375,13 +378,18 @@ Rectangle {
         }
     }
 
-    // Control Panel (top right) - Refactored to use modular components
+    // Control Panel (top left, below all debug overlays)
     Column {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 10
+        id: controlPanel
+        anchors.top: gpuStatsOverlay.visible ? gpuStatsOverlay.bottom : fpsOverlay.bottom
+        anchors.left: parent.left
+        anchors.leftMargin: 8
+        anchors.topMargin: 6
         spacing: 5
         z: 10
+        
+        // Future: Toggle visibility from menu bar
+        // visible: root.showControlPanel
         
         //  MOUSE EVENT ISOLATION: Ensure controls don't interfere with chart
         // The controls have their own MouseArea components that handle their events

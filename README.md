@@ -46,13 +46,29 @@ cmake --build --preset linux-gcc -j
 
 ## Running Sentinel
 
-1. **Start the Data Server**:
-   `./build/linux-gcc/apps/sentinel-server/sentinel-server`
+### Quick Start
 
-2. **Start the GUI Client**:
-   `./build/linux-gcc/apps/sentinel_gui/sentinel_gui`
+#### **Start the Server**
+```bash
+SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/bin/sentinel-server
+```
 
-*Note: Environment variables like `SENTINEL_GPU_HEATMAP=1` and `SENTINEL_REMOTE=1` are now the defaults for the optimized path.*
+#### **Start the Client**
+```bash
+SENTINEL_GPU_HEATMAP=1 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+```
+
+That's it! Just those two commands.
+
+---
+
+<details>
+  <summary>🔎 Optional: Enable Client Debug Logging</summary>
+
+```bash
+SENTINEL_GPU_HEATMAP=1 SENTINEL_GPU_HEATMAP_DEBUG=1 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+```
+</details>
 
 ---
 

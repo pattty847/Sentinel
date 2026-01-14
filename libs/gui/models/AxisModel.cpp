@@ -1,11 +1,38 @@
 #include "AxisModel.hpp"
 #include "../render/GridViewState.hpp"
+#include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
 
 AxisModel::AxisModel(QObject* parent)
     : QAbstractListModel(parent) {
+}
+
+void AxisModel::setTarget(QQuickItem* target) {
+    if (m_target == target) return;
+    
+    m_target = target;
+    emit targetChanged();
+    
+    // Try to extract GridViewState from UnifiedGridRenderer
+    if (auto* renderer = qobject_cast<UnifiedGridRenderer*>(target)) {
+        GridViewState* viewState = renderer->getViewState();
+        if (viewState) {
+            setGridViewState(viewState);
+            
+            // Also connect to size changes
+            connect(renderer, &QQuickItem::widthChanged, this, [this, renderer]() {
+                setViewportSize(renderer->width(), renderer->height());
+            });
+            connect(renderer, &QQuickItem::heightChanged, this, [this, renderer]() {
+                setViewportSize(renderer->width(), renderer->height());
+            });
+            
+            // Initialize viewport size
+            setViewportSize(renderer->width(), renderer->height());
+        }
+    }
 }
 
 void AxisModel::setGridViewState(GridViewState* viewState) {
