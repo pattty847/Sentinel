@@ -4,22 +4,19 @@
 
 **Where we are**
 - Dummy GPU heatmap is solid: single quad, 8192x8192, smooth pan/zoom, append via ring buffer.
-- Live GPU heatmap is **partially working** but unstable: missing columns, viewport pinned, auto‑scroll conflicts.
-- Root mismatch: we were rasterizing **LTSE activity slices** (flickery) instead of **resting book snapshots**.
+- Live GPU heatmap is **working** in server/client mode: stable 60 FPS, no missing columns.
+- Root mismatches resolved: server is the only column producer; client only renders incoming slices.
 
-**Current live GPU path (in progress)**
-- `SENTINEL_GPU_HEATMAP=1` enables GPU heatmap path in `UnifiedGridRenderer`.
-- Columns are enqueued via `heatmapColumnReady`.
-- We added a **resting mode**: snapshot full LiveOrderBook on the 100ms timer and rasterize the full book depth into $1 rows.  
-  - This bypasses LTSE slices when `SENTINEL_HEATMAP_RESTING=1` or `SENTINEL_GPU_HEATMAP_ONLY=1`.
-- Tick aggregation for heatmap rows is currently fixed at **$1 per row**.
-- We added **gap fill** in `captureOrderBookSnapshot()` to fill missed 100ms buckets when GPU mode is on.
+**Current live GPU path**
+- Server emits **TWAP resting liquidity** columns (`u8` intensity).
+- Client consumes `heatmap_slice` and renders a single-quad heatmap.
+- Timeframe is locked by `SENTINEL_HEATMAP_TF` (default 100ms).
+- Tick size and grid height are authoritative from server.
 
-**Key pain points observed**
-- 100ms bucket logs skip time → missing columns.
-- Auto‑scroll fights manual pan; horizontal drag often feels pinned.
-- Debug marker + force‑full view toggles were used to verify texture writes.
-- Logs show LTSE timeframes (100/250/500/1000/2000/5000/10000ms) even though GPU heatmap only uses 100ms.
+**Resolved pain points**
+- FPS drops caused by dual column producers (server 2048 vs local 8192) are fixed by disabling local producers.
+- Timeframe flapping fixed by locking to `SENTINEL_HEATMAP_TF`.
+- Asks/bids now render with distinct colors (u8 side encoding).
 
 **Live data flow today (monolith)**
 1) MarketDataCore updates DataCache LiveOrderBook.
@@ -31,28 +28,23 @@
 - Client only receives **pre‑built columns** and renders GPU heatmap.
 - No local MarketDataCore or LTSE in client.
 
-**Debug env vars**
-- `SENTINEL_GPU_HEATMAP=1`
-- `SENTINEL_GPU_HEATMAP_ONLY=1`
-- `SENTINEL_HEATMAP_RESTING=1`
-- `SENTINEL_HEATMAP_GRID=<size>`
-- `SENTINEL_HEATMAP_FILL_GAPS=1`
-- `SENTINEL_HEATMAP_RECENTER=<fraction>`
-- `SENTINEL_GPU_HEATMAP_DEBUG=1`
-- `SENTINEL_GPU_HEATMAP_DEBUG_MARK=1`
-- `SENTINEL_GPU_HEATMAP_FORCE_FULL=1`
+**Minimal env vars**
+- `SENTINEL_GPU_HEATMAP=1` (client)
+- `SENTINEL_HEATMAP_TF=100` (server + client)
+- `SENTINEL_HEATMAP_TICK_SIZE=<value>` (server)
+- `SENTINEL_HEATMAP_GRID=<size>` (server)
+- `SENTINEL_GPU_HEATMAP_DEBUG=1` (optional client)
 
 **Recent code changes**
-- DataProcessor: resting snapshot mode + full book rasterization (`rasterizeBookToColumn`).
-- DataProcessor: $1 tick size for heatmap.
-- UnifiedGridRenderer: GPU heatmap path, column enqueue, timeOffset, viewport init.
-- heatmap shader: zero intensity renders black.
+- Server: `HeatmapTwapStreamer` emits TWAP columns (`u8` encoded, asks/bids split by range).
+- Client: `DataProcessor` ignores local LTSE columns in remote mode.
+- Renderer: resizes texture to server grid height; ring-buffer upload only.
+- Shader: low-intensity visibility floor for asks (avoids invisible reds).
 
 **Known gaps**
-- Resting snapshot mode still not stable visually; needs verification.
-- Panning/auto‑scroll needs cleanup (likely decouple viewport from live head when auto is off).
-- Server TWAP streamer emits 100ms columns; client renders without missing columns (stable, no flicker).
-- Recenter currently disabled for stability; re‑enable later with wider hysteresis.
+- Consolidate debug logging into a single file-based stream.
+- Re-enable recenter with wide hysteresis once stable.
+- Tick size presets per symbol (server).
 
 Goal: make the GUI a **pure client** and move all ingestion/aggregation to the headless server.  
 No monolith fallback. Fast, deterministic, and GPU‑first.
