@@ -36,29 +36,12 @@ set(GRID_CORE_SOURCES
     models/PriceAxisModel.cpp
     
     # New modular render architecture (V2)
-    render/IRenderStrategy.hpp
-    render/IRenderStrategy.cpp
     render/GridViewState.hpp
     render/GridViewState.cpp
-    render/GridSceneNode.hpp
-    render/GridSceneNode.cpp
-    render/RenderDiagnostics.hpp
-    render/RenderDiagnostics.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
-    render/RenderTypes.hpp
-    render/RenderConfig.hpp
-    render/GridTypes.hpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
-    render/strategies/HeatmapStrategy.hpp
-    render/strategies/HeatmapStrategy.cpp
-    render/strategies/TradeFlowStrategy.hpp
-    render/strategies/TradeFlowStrategy.cpp
-    render/strategies/TradeBubbleStrategy.hpp
-    render/strategies/TradeBubbleStrategy.cpp
-    render/strategies/CandleStrategy.hpp
-    render/strategies/CandleStrategy.cpp
 )
 
 set(WIDGET_SOURCES

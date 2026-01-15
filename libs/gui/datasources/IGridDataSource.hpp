@@ -25,9 +25,6 @@ public:
     // Returns the dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
 
-    // Returns recent trades for the symbol
-    virtual std::vector<Trade> getRecentTrades(const std::string& productId) const = 0;
-
 signals:
     // Core Signals
     void tradeReceived(const Trade& trade);

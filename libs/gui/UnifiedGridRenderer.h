@@ -1,13 +1,13 @@
 // ======= libs/gui/UnifiedGridRenderer.h =======
 /*
 Sentinel — UnifiedGridRenderer
-Role: A QML scene item that orchestrates multiple rendering strategies to draw market data.
-Inputs/Outputs: Takes Trade/OrderBook data via slots; outputs a QSGNode tree for GPU rendering.
+Role: A QML scene item that renders the GPU-only heatmap path.
+Inputs/Outputs: Takes heatmap columns via DataProcessor; outputs a QSGNode for GPU rendering.
 Threading: Runs on the GUI thread; data is received via queued connections; rendering on render thread.
 Performance: Batches incoming data with a QTimer to throttle scene graph updates.
-Integration: Used in QML; receives data from MarketDataCore; delegates rendering to strategy objects.
+Integration: Used in QML; receives data from MarketDataCore and server heatmap stream.
 Observability: Logs key events like data reception and paint node updates via qDebug.
-Related: UnifiedGridRenderer.cpp, IRenderStrategy.h, CoordinateSystem.h, MarketDataCore.hpp.
+Related: UnifiedGridRenderer.cpp, CoordinateSystem.h, MarketDataCore.hpp.
 Assumptions: CoordinateSystem and ChartModeController properties are set from QML.
 */
 #pragma once
@@ -27,13 +27,9 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <mutex>
 #include <limits>
 #include "../core/marketdata/model/TradeData.h"
-#include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
 
-// Forward declarations for new modular architecture
-class GridSceneNode;
 class DataProcessor;
-class IRenderStrategy;
 
 /**
  *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
@@ -45,24 +41,12 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
     
-    Q_PROPERTY(RenderMode renderMode READ renderMode WRITE setRenderMode NOTIFY renderModeChanged)
-    Q_PROPERTY(bool showVolumeProfile READ showVolumeProfile WRITE setShowVolumeProfile NOTIFY showVolumeProfileChanged)
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
     Q_PROPERTY(int maxCells READ maxCells WRITE setMaxCells NOTIFY maxCellsChanged)
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
-    
-    // Trade Bubble Properties
-    Q_PROPERTY(double minBubbleRadius READ minBubbleRadius WRITE setMinBubbleRadius NOTIFY minBubbleRadiusChanged)
-    Q_PROPERTY(double maxBubbleRadius READ maxBubbleRadius WRITE setMaxBubbleRadius NOTIFY maxBubbleRadiusChanged)
-    Q_PROPERTY(double bubbleOpacity READ bubbleOpacity WRITE setBubbleOpacity NOTIFY bubbleOpacityChanged)
-    
-    // Overlay Properties for Layered Rendering
-    Q_PROPERTY(bool showHeatmapLayer READ showHeatmapLayer WRITE setShowHeatmapLayer NOTIFY showHeatmapLayerChanged)
-    Q_PROPERTY(bool showTradeBubbleLayer READ showTradeBubbleLayer WRITE setShowTradeBubbleLayer NOTIFY showTradeBubbleLayerChanged)
-    Q_PROPERTY(bool showTradeFlowLayer READ showTradeFlowLayer WRITE setShowTradeFlowLayer NOTIFY showTradeFlowLayerChanged)
     
     // Debug Overlay Toggles
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
@@ -81,35 +65,13 @@ class UnifiedGridRenderer : public QQuickItem {
 
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
-public:
-    enum class RenderMode {
-        LiquidityHeatmap,    // Bookmap-style dense grid
-        TradeFlow,           // Trade dots with density
-        TradeBubbles,        // Size-relative bubbles on heatmap
-        VolumeCandles,       // Volume-weighted candles
-        OrderBookDepth       // Depth chart style
-    };
-    Q_ENUM(RenderMode)
-
 private:
     // Rendering configuration
-    RenderMode m_renderMode = RenderMode::LiquidityHeatmap;
-    bool m_showVolumeProfile = true;
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
     double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
     
-    // Trade Bubble configuration
-    double m_minBubbleRadius = 4.0;      // Minimum bubble size (pixels)
-    double m_maxBubbleRadius = 20.0;     // Maximum bubble size (pixels) 
-    double m_bubbleOpacity = 0.85;       // Base opacity for bubbles
-    
-    // Overlay layer toggles
-    bool m_showHeatmapLayer = true;      // Base heatmap layer
-    bool m_showTradeBubbleLayer = true;  // Trade bubble overlay
-    bool m_showTradeFlowLayer = false;   // Trade flow overlay
-
     // Debug overlay toggles
     bool m_showGpuStatsOverlay = false;
     bool m_showDataPipelineOverlay = false;
@@ -121,23 +83,6 @@ private:
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
-    // Thread safety
-    mutable std::mutex m_dataMutex;
-    
-    //  FOUR DIRTY FLAGS SYSTEM
-    // Each flag triggers a different update path in updatePaintNode
-    std::atomic<bool> m_geometryDirty{true};     // Topology/LOD/mode changed (RARE - full rebuild)
-    std::atomic<bool> m_appendPending{false};    // New data arrived (COMMON - append cells)
-    std::atomic<bool> m_transformDirty{false};   // Pan/zoom/follow (VERY COMMON - transform only)
-    std::atomic<bool> m_materialDirty{false};    // Visual params changed (OCCASIONAL - uniforms/material)
-        
-    // Rendering data
-    std::shared_ptr<const std::vector<CellInstance>> m_visibleCells;
-    // std::vector<Trade> m_recentTrades;  // REMOVED: Trades pulled from DataCache
-    std::vector<std::pair<double, double>> m_volumeProfile;
-    
-    QSGTransformNode* m_rootTransformNode = nullptr;
-    bool m_needsDataRefresh = false;
     bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
 
     // Dummy GPU heatmap path for testing single-quad rendering.
@@ -228,8 +173,6 @@ public:
     ~UnifiedGridRenderer(); // Custom destructor needed for unique_ptr with incomplete types
     
     // Property accessors
-    RenderMode renderMode() const { return m_renderMode; }
-    bool showVolumeProfile() const { return m_showVolumeProfile; }
     double intensityScale() const { return m_intensityScale; }
     int maxCells() const { return m_maxCells; }
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
@@ -239,16 +182,6 @@ public:
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
     
-    // Trade Bubble accessors
-    double minBubbleRadius() const { return m_minBubbleRadius; }
-    double maxBubbleRadius() const { return m_maxBubbleRadius; }
-    double bubbleOpacity() const { return m_bubbleOpacity; }
-    
-    // Overlay layer accessors
-    bool showHeatmapLayer() const { return m_showHeatmapLayer; }
-    bool showTradeBubbleLayer() const { return m_showTradeBubbleLayer; }
-    bool showTradeFlowLayer() const { return m_showTradeFlowLayer; }
-
     // Debug overlay accessors
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -338,20 +271,12 @@ public:
     void onViewportChanged();
 
 signals:
-    void renderModeChanged();
-    void showVolumeProfileChanged();
     void intensityScaleChanged();
     void maxCellsChanged();
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
     void minVolumeFilterChanged();
     void priceResolutionChanged();
-    void minBubbleRadiusChanged();
-    void maxBubbleRadiusChanged(); 
-    void bubbleOpacityChanged();
-    void showHeatmapLayerChanged();
-    void showTradeBubbleLayerChanged();
-    void showTradeFlowLayerChanged();
     void showGpuStatsOverlayChanged();
     void showDataPipelineOverlayChanged();
     void showRenderStrategyOverlayChanged();
@@ -385,38 +310,20 @@ private:
 
 private:
     // Property setters
-    void setRenderMode(RenderMode mode);
-    void setShowVolumeProfile(bool show);
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
-    void setMinBubbleRadius(double radius);
-    void setMaxBubbleRadius(double radius);
-    void setBubbleOpacity(double opacity);
-    void setShowHeatmapLayer(bool show);
-    void setShowTradeBubbleLayer(bool show);
-    void setShowTradeFlowLayer(bool show);
     void setShowGpuStatsOverlay(bool show);
     void setShowDataPipelineOverlay(bool show);
     void setShowRenderStrategyOverlay(bool show);
     void setShowViewportMathOverlay(bool show);
     void setShowMemoryCacheOverlay(bool show);
     void setShowModeFlagsOverlay(bool show);
-    void updateVisibleCells();
-    void updateVolumeProfile();
-    
     class IGridDataSource* m_dataSource = nullptr;
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;
     std::unique_ptr<QThread> m_dataProcessorThread;
-    std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
-    std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
-    std::unique_ptr<IRenderStrategy> m_tradeBubbleStrategy;
-    std::unique_ptr<IRenderStrategy> m_candleStrategy;
-
-    IRenderStrategy* getCurrentStrategy() const;
-    
     void init();
 
 public:

@@ -51,11 +51,6 @@ const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::str
     return empty;
 }
 
-std::vector<Trade> RemoteGridDataSource::getRecentTrades(const std::string& productId) const {
-    // TODO: Implement replica trade cache
-    return {};
-}
-
 void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
     std::string symbol = productId.toStdString();
     

@@ -11,8 +11,6 @@ public:
     void unsubscribe(const QString& symbol) override;
     
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
-    std::vector<Trade> getRecentTrades(const std::string& productId) const override;
-
     void connectToServer();
 
 private slots:

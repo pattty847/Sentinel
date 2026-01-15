@@ -265,8 +265,6 @@ void MainWindowGPU::connectMarketDataSignals() {
 
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
-        connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated,
-                dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
     }
