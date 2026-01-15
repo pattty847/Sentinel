@@ -147,6 +147,7 @@ private:
     QByteArray m_heatmapLastColumnData;
     bool m_heatmapHaveLastColumn = false;
     int64_t m_autoScrollLagMs = 0;
+    int64_t m_autoScrollSpanMs = 0;
     double m_autoScrollPaddingFrac = 0.05;
     struct HeatmapPendingColumn {
         int x = 0;

@@ -2,8 +2,6 @@ project(sentinel_core)
 
 add_library(sentinel_core
     Cpp20Utils.hpp
-    LiquidityTimeSeriesEngine.cpp
-    LiquidityTimeSeriesEngine.h
     Version.cpp
     Version.hpp
     marketdata/MarketDataCore.cpp

@@ -61,7 +61,7 @@ Client:
 
 ---
 
-### Notes / Legacy Pipeline
+### Notes
 
-- The old LTSE → CellInstance → GridSceneNode path still exists for non-heatmap layers.
-- Remote heatmap rendering must not allow a second local column producer.
+- Legacy CPU/QSG strategy rendering has been removed.
+- Remote heatmap rendering is GPU-only; the server is the sole column producer.

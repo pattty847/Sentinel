@@ -106,8 +106,8 @@ void TimeAxisModel::calculateTicks() {
         }
     }
     
-    qDebug() << "TimeAxisModel: Generated" << m_ticks.size() 
-             << "time ticks for range" << timeRange << "ms, step=" << step << "ms";
+    //qDebug() << "TimeAxisModel: Generated" << m_ticks.size() 
+    //         << "time ticks for range" << timeRange << "ms, step=" << step << "ms";
 }
 
 QString TimeAxisModel::formatLabel(double value) const {

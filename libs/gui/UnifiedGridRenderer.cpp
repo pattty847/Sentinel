@@ -319,6 +319,8 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
             const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
             const int64_t padMs = static_cast<int64_t>(spanMs * m_autoScrollPaddingFrac);
             m_autoScrollLagMs = (m_viewState->getVisibleTimeEnd() - (m_heatmapLastSliceStartMs + m_heatmapAppendMs)) - padMs;
+            const int64_t maxSpanMs = static_cast<int64_t>(m_heatmapGridSize) * m_heatmapAppendMs;
+            m_autoScrollSpanMs = std::min(spanMs, maxSpanMs);
         }
     }
 }
@@ -515,9 +517,17 @@ void UnifiedGridRenderer::init() {
                                 << " range=$" << m_heatmapMinPrice << "-$" << m_heatmapMaxPrice);
                 }
                 if (!m_heatmapViewportInitialized && m_viewState && timeframeMs > 0 && m_heatmapGridSize > 0) {
-                    const int64_t spanMs = static_cast<int64_t>(m_heatmapGridSize - 1) * timeframeMs;
-                    const int64_t viewStart = sliceStartMs - spanMs;
-                    const int64_t viewEnd = sliceStartMs + timeframeMs;
+                    const int64_t maxSpanMs = std::max<int64_t>(1, static_cast<int64_t>(m_heatmapGridSize - 1) * timeframeMs);
+                    if (m_autoScrollSpanMs <= 0 || m_autoScrollSpanMs > maxSpanMs) {
+                        m_autoScrollSpanMs = static_cast<int64_t>(maxSpanMs * (1.0 - m_autoScrollPaddingFrac));
+                        if (m_autoScrollSpanMs <= 0) {
+                            m_autoScrollSpanMs = maxSpanMs;
+                        }
+                    }
+                    const int64_t spanMs = m_autoScrollSpanMs;
+                    const int64_t padMs = static_cast<int64_t>(spanMs * m_autoScrollPaddingFrac);
+                    const int64_t viewEnd = sliceStartMs + timeframeMs - padMs;
+                    const int64_t viewStart = viewEnd - spanMs;
                     if (viewEnd > viewStart) {
                         m_viewState->setViewport(viewStart, viewEnd, m_heatmapMinPrice, m_heatmapMaxPrice);
                         m_heatmapViewportInitialized = true;
@@ -529,9 +539,14 @@ void UnifiedGridRenderer::init() {
                 }
 
                 if (m_viewState && m_viewState->isAutoScrollEnabled() && timeframeMs > 0 && !m_viewState->isDragging()) {
-                    const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
                     const int64_t maxSpanMs = static_cast<int64_t>(m_heatmapGridSize) * timeframeMs;
-                    const int64_t clampedSpanMs = std::min(spanMs, maxSpanMs);
+                    if (m_autoScrollSpanMs <= 0 || m_autoScrollSpanMs > maxSpanMs) {
+                        m_autoScrollSpanMs = static_cast<int64_t>(maxSpanMs * (1.0 - m_autoScrollPaddingFrac));
+                        if (m_autoScrollSpanMs <= 0) {
+                            m_autoScrollSpanMs = maxSpanMs;
+                        }
+                    }
+                    const int64_t clampedSpanMs = std::min(m_autoScrollSpanMs, maxSpanMs);
                     const int64_t padMs = static_cast<int64_t>(clampedSpanMs * m_autoScrollPaddingFrac);
                     const int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs - padMs;
                     const int64_t viewStart = viewEnd - clampedSpanMs;
@@ -573,6 +588,7 @@ void UnifiedGridRenderer::init() {
                 m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
                 m_heatmapHaveLastColumn = false;
                 m_heatmapLastColumnData.clear();
+                m_autoScrollSpanMs = 0;
                 if (m_viewState && m_viewState->isAutoScrollEnabled()) {
                     m_heatmapViewportInitialized = false;
                 }
