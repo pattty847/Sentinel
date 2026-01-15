@@ -48,7 +48,7 @@ public:
     void handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize);
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
-    void handlePanEnd();
+    void handlePanEnd(bool applyViewport = true);
     // Clear the transient visual pan offset after geometry resync
     void clearPanVisualOffset();
     

@@ -223,12 +223,6 @@ void GridViewState::handlePanStart(const QPointF& position) {
     m_initialMousePos = position;
     m_panVisualOffset = QPointF(0, 0);
     m_panRemainderTimeMs = 0.0;
-    
-    // Disable auto-scroll when user starts dragging
-    if (m_autoScrollEnabled) {
-        m_autoScrollEnabled = false;
-        emit autoScrollEnabledChanged();
-    }
 }
 
 void GridViewState::handlePanMove(const QPointF& position) {
@@ -241,11 +235,14 @@ void GridViewState::handlePanMove(const QPointF& position) {
     emit panVisualOffsetChanged();
 }
 
-void GridViewState::handlePanEnd() {
+void GridViewState::handlePanEnd(bool applyViewport) {
     if (!m_isDragging) return;
 
     m_isDragging = false;
-    
+    if (!applyViewport) {
+        return;
+    }
+
     const double threshold = 1.0; // pixels
     if (m_panVisualOffset.manhattanLength() > threshold && m_viewportWidth > 0 && m_viewportHeight > 0) {
         // Create viewport for coordinate conversion

@@ -460,6 +460,12 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
         update();
         emit autoScrollEnabledChanged();
         sLog_Render("Auto-scroll: "<< (enabled ? "ENABLED" : "DISABLED"));
+        if (enabled && m_viewState->isTimeWindowValid() && m_heatmapAppendMs > 0 &&
+            m_heatmapLastSliceStartMs != std::numeric_limits<int64_t>::min()) {
+            const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
+            const int64_t padMs = static_cast<int64_t>(spanMs * m_autoScrollPaddingFrac);
+            m_autoScrollLagMs = (m_viewState->getVisibleTimeEnd() - (m_heatmapLastSliceStartMs + m_heatmapAppendMs)) - padMs;
+        }
     }
 }
 
@@ -683,11 +689,12 @@ void UnifiedGridRenderer::init() {
                     }
                 }
 
-                if (m_viewState && m_viewState->isAutoScrollEnabled() && timeframeMs > 0) {
+                if (m_viewState && m_viewState->isAutoScrollEnabled() && timeframeMs > 0 && !m_viewState->isDragging()) {
                     const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
                     const int64_t maxSpanMs = static_cast<int64_t>(m_heatmapGridSize) * timeframeMs;
                     const int64_t clampedSpanMs = std::min(spanMs, maxSpanMs);
-                    const int64_t viewEnd = sliceStartMs + timeframeMs;
+                    const int64_t padMs = static_cast<int64_t>(clampedSpanMs * m_autoScrollPaddingFrac);
+                    const int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs - padMs;
                     const int64_t viewStart = viewEnd - clampedSpanMs;
 
                     const double priceSpan = std::max(1e-6, m_viewState->getMaxPrice() - m_viewState->getMinPrice());
@@ -1769,8 +1776,45 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
 
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
     if (m_viewState) {
-        m_viewState->handlePanEnd();
+        const QPointF pan = m_viewState->getPanVisualOffset();
+        const bool autoScroll = m_viewState->isAutoScrollEnabled();
+        bool panAppliedToAuto = false;
+        if (autoScroll && !pan.isNull() && width() > 0.0 && height() > 0.0 &&
+            m_viewState->isTimeWindowValid()) {
+            const int64_t timeRange = m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart();
+            const double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+            if (timeRange != 0 && priceRange != 0.0) {
+                const double timePixelsToMs = static_cast<double>(timeRange) / static_cast<double>(width());
+                const double pricePixelsToUnits = priceRange / static_cast<double>(height());
+                const double timeDeltaF = (-pan.x() * timePixelsToMs);
+                const int64_t timeDelta = static_cast<int64_t>(std::floor(timeDeltaF));
+                const double priceDelta = pan.y() * pricePixelsToUnits;
+                m_autoScrollLagMs += timeDelta;
+                if (priceDelta != 0.0) {
+                    m_viewState->setViewport(
+                        m_viewState->getVisibleTimeStart(),
+                        m_viewState->getVisibleTimeEnd(),
+                        m_viewState->getMinPrice() + priceDelta,
+                        m_viewState->getMaxPrice() + priceDelta);
+                }
+            }
+            m_viewState->handlePanEnd(false);
+            m_viewState->clearPanVisualOffset();
+            m_transformDirty.store(true);
+            update();
+            panAppliedToAuto = true;
+        } else {
+            m_viewState->handlePanEnd(true);
+        }
         event->accept();
+        if (m_viewState->isAutoScrollEnabled() &&
+            m_heatmapAppendMs > 0 &&
+            m_heatmapLastSliceStartMs != std::numeric_limits<int64_t>::min() &&
+            !panAppliedToAuto) {
+            const int64_t spanMs = std::max<int64_t>(1, m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
+            const int64_t padMs = static_cast<int64_t>(spanMs * m_autoScrollPaddingFrac);
+            m_autoScrollLagMs = (m_viewState->getVisibleTimeEnd() - (m_heatmapLastSliceStartMs + m_heatmapAppendMs)) - padMs;
+        }
         // Request immediate resync of geometry based on new viewport
         if (m_dataProcessor) {
             QMetaObject::invokeMethod(m_dataProcessor.get(), "updateVisibleCells", Qt::QueuedConnection);
