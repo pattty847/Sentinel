@@ -11,7 +11,7 @@ GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
 
 ## Server-Client Main Branch Recent Changes
 
-<img width="1913" height="921" alt="image" src="https://github.com/user-attachments/assets/7ff802be-510d-48e1-bcdb-13b9e75ff647" />
+<img width="1918" height="1030" alt="image" src="https://github.com/user-attachments/assets/945eca03-91f2-4af7-899a-70a594847cf3" />
 
 - Full Server Client architecture
 - Entirely GPU based heatmap rasterization and rendering
