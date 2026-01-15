@@ -37,8 +37,5 @@ struct SymbolHotData {
     // We will store aggregated slices here
     // For now, let's keep it simple: just the LiveOrderBook
     
-    explicit SymbolHotData(const std::string& s) : symbol(s), liveBook(s) {
-        liveBook.initialize(0.0, 1000000.0, 0.01); // Default large range
-    }
+    explicit SymbolHotData(const std::string& s) : symbol(s), liveBook(s) {}
 };
-

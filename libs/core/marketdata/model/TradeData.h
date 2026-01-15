@@ -257,5 +257,7 @@ private:
 Q_DECLARE_METATYPE(Trade)
 Q_DECLARE_METATYPE(BookDelta)
 Q_DECLARE_METATYPE(std::vector<BookDelta>)
+Q_DECLARE_METATYPE(BookLevelUpdate)
+Q_DECLARE_METATYPE(std::vector<BookLevelUpdate>)
 
 #endif // TRADEDATA_H 

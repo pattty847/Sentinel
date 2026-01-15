@@ -29,6 +29,9 @@ public:
 public slots:
     void onTrade(const Trade& trade);
     void onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
+    void onLiveOrderBookLevelUpdates(const QString& productId,
+                                     const std::vector<BookLevelUpdate>& updates,
+                                     qint64 exchangeMs);
     void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
 
 signals:

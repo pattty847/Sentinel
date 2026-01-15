@@ -1,5 +1,18 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
+#include <QProcessEnvironment>
+
+namespace {
+double getOrderBookTickSize() {
+    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
+    bool ok = false;
+    const double envTick = tickEnv.toDouble(&ok);
+    if (ok && envTick > 0.0) {
+        return envTick;
+    }
+    return 0.10;
+}
+}
 
 ServerDataModel::ServerDataModel(QObject* parent) 
     : QObject(parent)
@@ -35,13 +48,6 @@ SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
     auto [it, inserted] = m_symbols.try_emplace(symbol, std::make_unique<SymbolHotData>(symbol));
     if (inserted) {
         sLog_Data("ServerDataModel: New symbol tracked: " << symbol);
-        // Default initialization if not yet initialized by Snapshot
-        // This ensures we don't crash, but ideally onLiveOrderBookInitialized is called first or soon.
-        if (symbol == "BTC-USD") {
-             it->second->liveBook.initialize(75000.0, 125000.0, 0.01);
-        } else {
-             it->second->liveBook.initialize(75000.0, 125000.0, 0.01);
-        }
     }
     return *it->second;
 }
@@ -87,7 +93,11 @@ void ServerDataModel::onTrade(const Trade& trade) {
 void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas) {
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
-    
+
+    if (data.liveBook.getTickSize() <= 0.0) {
+        return;
+    }
+
     // Apply deltas to our local LiveOrderBook replica
     // We need to convert indices back to prices to use the public applyUpdates API
     // This is slightly inefficient (idx -> price -> idx) but keeps LiveOrderBook encapsulation intact.
@@ -113,16 +123,35 @@ void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std
     emit bookUpdateBroadcast(productId, deltas);
 }
 
+void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
+                                                  const std::vector<BookLevelUpdate>& updates,
+                                                  qint64 exchangeMs) {
+    std::string symbol = productId.toStdString();
+    SymbolHotData& data = ensureSymbol(symbol);
+
+    if (data.liveBook.getTickSize() <= 0.0) {
+        return;
+    }
+
+    if (updates.empty()) {
+        return;
+    }
+
+    const auto timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(exchangeMs));
+    data.liveBook.applyUpdates(updates, timestamp, nullptr);
+}
+
 void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
     // Re-initialize the book to clear old state
     // TODO: Unify this logic with DataCache to avoid drift
+    const double tickSize = getOrderBookTickSize();
     if (symbol == "BTC-USD") {
-        data.liveBook.initialize(75000.0, 125000.0, 0.01);
+        data.liveBook.initialize(75000.0, 125000.0, tickSize);
     } else {
-        data.liveBook.initialize(75000.0, 125000.0, 0.01);
+        data.liveBook.initialize(75000.0, 125000.0, tickSize);
     }
     
     std::vector<BookLevelUpdate> updates;

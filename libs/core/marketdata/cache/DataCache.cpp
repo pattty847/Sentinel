@@ -240,14 +240,24 @@ void DataCache::initializeLiveOrderBook(const std::string& symbol,
     auto& liveBook = m_liveBooks[symbol];
     liveBook.setProductId(symbol);
 
+    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
+    bool ok = false;
+    const double tickSize = [&]() -> double {
+        const double envTick = tickEnv.toDouble(&ok);
+        if (ok && envTick > 0.0) {
+            return envTick;
+        }
+        return 0.10;
+    }();
+
     // TODO: dynamically set the price range based on the current price
     // Use reasonable price ranges to avoid massive memory waste
     if (symbol == "BTC-USD") {
-        // BTC: ±$25k around $100k = [75k, 125k] = 5M entries instead of 20M
-        liveBook.initialize(75000.0, 125000.0, 0.01);
+        // BTC: ±$25k around $100k = [75k, 125k]
+        liveBook.initialize(75000.0, 125000.0, tickSize);
     } else {
         // Default reasonable range for other crypto pairs
-        liveBook.initialize(75000.0, 125000.0, 0.01);
+        liveBook.initialize(75000.0, 125000.0, tickSize);
     }
 
     // Apply the snapshot levels to the new book structure - Use exchange timestamp

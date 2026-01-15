@@ -59,6 +59,9 @@ public:
 signals:
     void tradeReceived(const Trade& trade);
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
+    void liveOrderBookLevelUpdates(const QString& productId,
+                                   const std::vector<BookLevelUpdate>& updates,
+                                   qint64 exchangeMs);
     void liveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);

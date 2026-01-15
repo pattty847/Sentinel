@@ -36,8 +36,8 @@ bool SentinelServerApp::initialize() {
         // Connect MarketDataCore -> ServerDataModel
         connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived, 
                 m_serverModel.get(), &ServerDataModel::onTrade);
-        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated, 
-                m_serverModel.get(), &ServerDataModel::onLiveOrderBookUpdated);
+        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookLevelUpdates,
+                m_serverModel.get(), &ServerDataModel::onLiveOrderBookLevelUpdates);
         connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookInitialized,
                 m_serverModel.get(), &ServerDataModel::onLiveOrderBookInitialized);
         
@@ -63,4 +63,3 @@ bool SentinelServerApp::initialize() {
         return false;
     }
 }
-

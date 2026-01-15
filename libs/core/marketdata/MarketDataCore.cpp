@@ -41,6 +41,8 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
 {
     qRegisterMetaType<BookDelta>("BookDelta");
     qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
+    qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
+    qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
 
     // Configure SSL context
     // Prefer explicit CA bundle via env var for Windows/OpenSSL setups where
@@ -451,6 +453,8 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
                                            const std::string& product_id,
                                            const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
+
+    const bool useCacheBook = !qEnvironmentVariableIsSet("SENTINEL_SERVER_MODE");
     
     // SNAPSHOT: Initialize complete order book state
     std::vector<OrderBookLevel> sparse_bids;
@@ -476,8 +480,10 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
         }
     }
     
-    // Initialize the live order book with the sparse snapshot data
-    m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
+    // Initialize the live order book with the sparse snapshot data (client/monolith only)
+    if (useCacheBook) {
+        m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
+    }
 
     // Broadcast snapshot initialization to listeners (like ServerDataModel)
     // We need to pass by value/copy to cross threads safely
@@ -503,6 +509,8 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
                                          const std::string& product_id,
                                          const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
+
+    const bool useCacheBook = !qEnvironmentVariableIsSet("SENTINEL_SERVER_MODE");
     
     // UPDATE: Apply incremental changes to stateful order book
     thread_local std::vector<BookLevelUpdate> levelUpdates;
@@ -531,7 +539,7 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     }
 
     thread_local std::vector<BookDelta> deltas;
-    if (!levelUpdates.empty()) {
+    if (useCacheBook && !levelUpdates.empty()) {
         m_cache.applyLiveOrderBookUpdates(product_id,
                                           std::span<const BookLevelUpdate>(levelUpdates.data(), levelUpdates.size()),
                                           exchange_timestamp,
@@ -542,26 +550,41 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     const int updateCount = static_cast<int>(deltas.size());
     
     // Direct dense-only signal - NO CONVERSION!
-    std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
-    deltas.clear();
-    {
-        QPointer<MarketDataCore> self(this);
-        QString productIdQ = QString::fromStdString(product_id);
-        QMetaObject::invokeMethod(this, [self, productIdQ, deltasMove = std::move(deltasPayload)]() mutable {
-            if (!self) return;
-            emit self->liveOrderBookUpdated(productIdQ, deltasMove);
-        }, Qt::QueuedConnection);
+    if (useCacheBook) {
+        std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
+        deltas.clear();
+        {
+            QPointer<MarketDataCore> self(this);
+            QString productIdQ = QString::fromStdString(product_id);
+            QMetaObject::invokeMethod(this, [self, productIdQ, deltasMove = std::move(deltasPayload)]() mutable {
+                if (!self) return;
+                emit self->liveOrderBookUpdated(productIdQ, deltasMove);
+            }, Qt::QueuedConnection);
+        }
+    } else if (!levelUpdates.empty()) {
+        const qint64 exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            exchange_timestamp.time_since_epoch()).count();
+        std::vector<BookLevelUpdate> updatesPayload(levelUpdates.begin(), levelUpdates.end());
+        {
+            QPointer<MarketDataCore> self(this);
+            QString productIdQ = QString::fromStdString(product_id);
+            QMetaObject::invokeMethod(this, [self, productIdQ, updatesMove = std::move(updatesPayload), exchangeMs]() mutable {
+                if (!self) return;
+                emit self->liveOrderBookLevelUpdates(productIdQ, updatesMove, exchangeMs);
+            }, Qt::QueuedConnection);
+        }
     }
     
     // Record order book update metrics
-    const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
-    size_t bidCount = liveBook.getBidCount();
-    size_t askCount = liveBook.getAskCount();
-    
-    
-    std::string logMessage = Cpp20Utils::formatOrderBookLog(
-        product_id, bidCount, askCount, updateCount);
-    sLog_Data(QString::fromStdString(logMessage));
+    if (useCacheBook) {
+        const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
+        size_t bidCount = liveBook.getBidCount();
+        size_t askCount = liveBook.getAskCount();
+
+        std::string logMessage = Cpp20Utils::formatOrderBookLog(
+            product_id, bidCount, askCount, updateCount);
+        sLog_Data(QString::fromStdString(logMessage));
+    }
 }
 
 void MarketDataCore::replaySubscriptionsOnConnect() {

@@ -6,6 +6,7 @@
 int main(int argc, char *argv[]) {
     // Set up logging
     qSetMessagePattern("[%{time yyyy-MM-dd h:mm:ss.zzz}] %{type}: %{message}");
+    qputenv("SENTINEL_SERVER_MODE", "1");
     sLog_App("Starting Sentinel Server...");
 
     QCoreApplication app(argc, argv);
