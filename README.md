@@ -1,6 +1,7 @@
-# Sentinel v1.0.0-alpha
+# Sentinel v2.0.0-alpha
 
-GPU-accelerated trading terminal. C++20, Qt 6, sub-millisecond rendering.
+Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20, Qt 6, and with sub-millisecond rendering.
+
 <div align="center">
   <img src="https://img.shields.io/badge/C++-20-blue" />
   <img src="https://img.shields.io/badge/Qt-6-green" />
