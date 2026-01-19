@@ -27,7 +27,6 @@ GridViewState::GridViewState(QObject* parent)
 
 void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) {
     bool changed = false;
-    
     if (m_visibleTimeStart_ms != timeStart) {
         m_visibleTimeStart_ms = timeStart;
         changed = true;
@@ -243,7 +242,6 @@ void GridViewState::handlePanEnd(bool applyViewport) {
     }
 
     const double threshold = 1.0; // pixels
-    bool applied = false;
     double timeDeltaF = 0.0;
     double priceDelta = 0.0;
     if (m_panVisualOffset.manhattanLength() > threshold && m_viewportWidth > 0 && m_viewportHeight > 0) {
@@ -266,7 +264,6 @@ void GridViewState::handlePanEnd(bool applyViewport) {
                    m_visibleTimeEnd_ms + timeDelta,
                    m_minPrice + priceDelta,
                    m_maxPrice + priceDelta);
-        applied = true;
     }
     // Do not clear visual offset here; let the renderer clear it
     // after geometry is resynchronized to avoid visual snap-back.

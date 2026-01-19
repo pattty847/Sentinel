@@ -48,6 +48,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
     Q_PROPERTY(double autoScrollPaddingFrac READ autoScrollPaddingFrac WRITE setAutoScrollPaddingFrac NOTIFY autoScrollPaddingFracChanged)
+    Q_PROPERTY(bool autoScrollSmoothEnabled READ autoScrollSmoothEnabled WRITE setAutoScrollSmoothEnabled NOTIFY autoScrollSmoothEnabledChanged)
     
     // Debug Overlay Toggles
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
@@ -138,6 +139,7 @@ private:
     int m_heatmapAppendMs = 100;
     qint64 m_heatmapLastAppendMs = 0;
     int64_t m_heatmapTimeOriginMs = 0;
+    int64_t m_heatmapStreamBaseMs = std::numeric_limits<int64_t>::min();
     int64_t m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
     bool m_heatmapViewportInitialized = false;
     double m_heatmapMinPrice = 0.0;
@@ -150,6 +152,7 @@ private:
     int64_t m_autoScrollLagMs = 0;
     int64_t m_autoScrollSpanMs = 0;
     double m_autoScrollPaddingFrac = 0.05;
+    bool m_smoothAutoScrollEnabled = true;
     bool m_heatmapDragFrozen = false;
     double m_heatmapDragDataStart = 0.0;
     double m_heatmapDragDataEnd = 0.0;
@@ -186,6 +189,7 @@ public:
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
+    bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
@@ -287,6 +291,7 @@ signals:
     void minVolumeFilterChanged();
     void priceResolutionChanged();
     void autoScrollPaddingFracChanged();
+    void autoScrollSmoothEnabledChanged();
     void showGpuStatsOverlayChanged();
     void showDataPipelineOverlayChanged();
     void showRenderStrategyOverlayChanged();
@@ -330,6 +335,7 @@ private:
     void setShowMemoryCacheOverlay(bool show);
     void setShowModeFlagsOverlay(bool show);
     void setAutoScrollPaddingFrac(double fraction);
+    void setAutoScrollSmoothEnabled(bool enabled);
     class IGridDataSource* m_dataSource = nullptr;
 
     std::unique_ptr<GridViewState> m_viewState;
