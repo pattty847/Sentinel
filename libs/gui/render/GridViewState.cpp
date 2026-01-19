@@ -49,7 +49,6 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
     }
     
     m_timeWindowValid = true;
-    
     if (changed) {
         ++m_viewportVersion;
         emit viewportChanged();
@@ -244,6 +243,9 @@ void GridViewState::handlePanEnd(bool applyViewport) {
     }
 
     const double threshold = 1.0; // pixels
+    bool applied = false;
+    double timeDeltaF = 0.0;
+    double priceDelta = 0.0;
     if (m_panVisualOffset.manhattanLength() > threshold && m_viewportWidth > 0 && m_viewportHeight > 0) {
         // Create viewport for coordinate conversion
         // TODO: figure out why we aren't using 'viewport'
@@ -254,18 +256,18 @@ void GridViewState::handlePanEnd(bool applyViewport) {
         double timePixelsToMs = static_cast<double>(timeRange) / m_viewportWidth;
         double pricePixelsToUnits = priceRange / m_viewportHeight;
         
-        const double timeDeltaF = (-m_panVisualOffset.x() * timePixelsToMs) + m_panRemainderTimeMs;
+        timeDeltaF = (-m_panVisualOffset.x() * timePixelsToMs) + m_panRemainderTimeMs;
         const int64_t timeDelta = static_cast<int64_t>(std::floor(timeDeltaF));
         m_panRemainderTimeMs = timeDeltaF - static_cast<double>(timeDelta);
-        double priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
+        priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
         
         // Apply to viewport through setViewport
         setViewport(m_visibleTimeStart_ms + timeDelta,
                    m_visibleTimeEnd_ms + timeDelta,
                    m_minPrice + priceDelta,
                    m_maxPrice + priceDelta);
+        applied = true;
     }
-    
     // Do not clear visual offset here; let the renderer clear it
     // after geometry is resynchronized to avoid visual snap-back.
 }

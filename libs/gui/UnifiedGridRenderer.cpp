@@ -20,7 +20,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QThread>
 #include <QMetaObject>
 #include <QMetaType>
-#include <QDateTime>
 #include <QTimer>
 #include <QPainter>
 #include <QFont>
@@ -94,6 +93,7 @@ float computeDummyIntensity(int x, int y, int grid, int mid) {
     const float hot = std::pow(std::min(1.0f, intensity), 0.85f);
     return std::clamp(hot, 0.0f, 1.0f);
 }
+
 } // namespace
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
@@ -217,6 +217,15 @@ void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
         m_minVolumeFilter = minVolume;
         update();
         emit minVolumeFilterChanged();
+    }
+}
+
+void UnifiedGridRenderer::setAutoScrollPaddingFrac(double fraction) {
+    const double clamped = std::clamp(fraction, 0.0, 0.45);
+    if (m_autoScrollPaddingFrac != clamped) {
+        m_autoScrollPaddingFrac = clamped;
+        m_autoScrollSpanMs = 0;
+        emit autoScrollPaddingFracChanged();
     }
 }
 
@@ -561,6 +570,10 @@ void UnifiedGridRenderer::init() {
                     }
 
                     m_viewState->setViewport(viewStart, viewEnd, minPrice, maxPrice);
+                    if (m_panSyncPending) {
+                        m_viewState->clearPanVisualOffset();
+                        m_panSyncPending = false;
+                    }
                 }
                 update();
             },
@@ -645,11 +658,24 @@ void UnifiedGridRenderer::init() {
             if (!m_useGpuHeatmap || m_heatmapGridSize <= 0 || m_heatmapAppendMs <= 0) {
                 return;
             }
+            const bool dragging = (m_viewState && m_viewState->isDragging());
+            if (dragging) {
+                if (!m_heatmapTimeOffsetFrozen) {
+                    m_heatmapTimeOffsetFrozen = true;
+                    m_heatmapFrozenTimeOffset = m_heatmapTimeOffset.load();
+                }
+                update();
+                return;
+            }
+            if (m_heatmapTimeOffsetFrozen) {
+                m_heatmapTimeOffsetFrozen = false;
+            }
             const qint64 nowMs = m_heatmapClock.elapsed();
             const qint64 delta = nowMs - m_heatmapLastAppendMs;
             const float frac = std::clamp(static_cast<float>(delta) / static_cast<float>(m_heatmapAppendMs),
                                           0.0f, 1.0f);
-            const float offset = (static_cast<float>(m_heatmapWriteColumn) + frac) /
+            const int oldestColumn = (m_heatmapWriteColumn + 1) % m_heatmapGridSize;
+            const float offset = (static_cast<float>(oldestColumn) + frac) /
                                  static_cast<float>(m_heatmapGridSize);
             m_heatmapTimeOffset.store(offset);
             update();
@@ -703,7 +729,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
 
         const QRectF bounds = boundingRect();
-        texNode->setRect(bounds);
 
         if (m_viewState && m_viewState->isTimeWindowValid()) {
             const qint64 timeStart = m_viewState->getVisibleTimeStart();
@@ -719,8 +744,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             const QPointF pan = m_viewState->getPanVisualOffset();
             const double timeRange = static_cast<double>(timeEnd - timeStart);
             const double priceRange = maxPrice - minPrice;
+            const bool dragging = m_viewState->isDragging();
             if (!pan.isNull() && bounds.width() > 0.0 && bounds.height() > 0.0 &&
-                timeRange > 0.0 && priceRange > 0.0 && m_viewState->isDragging()) {
+                timeRange > 0.0 && priceRange > 0.0 && dragging) {
                 const double timePixelsToUnits = timeRange / bounds.width();
                 const double pricePixelsToUnits = priceRange / bounds.height();
                 const double timeDelta = -pan.x() * timePixelsToUnits;
@@ -921,29 +947,78 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
 
             if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
+                texNode->setRect(bounds);
                 texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
                 texNode->setTimeOffset(0.0f);
             } else if (timeEndF > timeStartF && maxPriceF > minPriceF) {
                 const double maxCoord = static_cast<double>(m_heatmapGridSize);
-                const double windowW = timeEndF - timeStartF;
-                const double windowH = maxPriceF - minPriceF;
+                const double viewTimeSpan = timeEndF - timeStartF;
+                const double viewPriceSpan = maxPriceF - minPriceF;
+                if (viewTimeSpan <= 0.0 || viewPriceSpan <= 0.0) {
+                    texNode->setRect(QRectF());
+                    texNode->setSourceRect(QRectF());
+                } else {
+                    const int64_t lastSlice = m_heatmapLastSliceStartMs;
+                    const int64_t bufferSpanMs = static_cast<int64_t>(m_heatmapGridSize) * m_heatmapAppendMs;
+                    double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
+                        ? static_cast<double>(lastSlice + m_heatmapAppendMs)
+                        : static_cast<double>(m_heatmapTimeOriginMs + bufferSpanMs);
+                    double dataStart = dataEnd - static_cast<double>(bufferSpanMs);
+                    const bool dragging = m_viewState && m_viewState->isDragging();
+                    if (dragging) {
+                        if (!m_heatmapDragFrozen) {
+                            m_heatmapDragFrozen = true;
+                            m_heatmapDragDataStart = dataStart;
+                            m_heatmapDragDataEnd = dataEnd;
+                        }
+                        dataStart = m_heatmapDragDataStart;
+                        dataEnd = m_heatmapDragDataEnd;
+                    } else if (m_heatmapDragFrozen) {
+                        m_heatmapDragFrozen = false;
+                    }
 
-                const double srcW = std::clamp(windowW / m_heatmapAppendMs, 1.0, maxCoord);
-                const double srcH = std::clamp(windowH / m_heatmapTickSize, 1.0, maxCoord);
+                    const double dataMin = m_heatmapMinPrice;
+                    const double dataMax = m_heatmapMaxPrice;
 
-                const double timeMax = m_heatmapTimeOriginMs + (maxCoord - srcW) * m_heatmapAppendMs;
-                const double priceMax = m_heatmapMaxPrice - (srcH * m_heatmapTickSize);
-                const double clampedStart = std::clamp(timeStartF, static_cast<double>(m_heatmapTimeOriginMs), timeMax);
-                const double clampedMinPrice = std::clamp(minPriceF, m_heatmapMinPrice, priceMax);
+                    const double overlapStart = std::max(timeStartF, dataStart);
+                    const double overlapEnd = std::min(timeEndF, dataEnd);
+                    const double overlapMin = std::max(minPriceF, dataMin);
+                    const double overlapMax = std::min(maxPriceF, dataMax);
 
-                const double srcX = (clampedStart - m_heatmapTimeOriginMs) / m_heatmapAppendMs;
-                const double srcY = (m_heatmapMaxPrice - (clampedMinPrice + srcH * m_heatmapTickSize)) /
-                                    m_heatmapTickSize;
-                texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+                    if (overlapEnd <= overlapStart || overlapMax <= overlapMin) {
+                        texNode->setRect(QRectF());
+                        texNode->setSourceRect(QRectF());
+                    } else {
+                        const double overlapTimeSpan = overlapEnd - overlapStart;
+                        const double overlapPriceSpan = overlapMax - overlapMin;
+
+                        const double timeRatioStart = (overlapStart - timeStartF) / viewTimeSpan;
+                        const double timeRatioEnd = (overlapEnd - timeStartF) / viewTimeSpan;
+                        const double priceRatioTop = (maxPriceF - overlapMax) / viewPriceSpan;
+                        const double priceRatioBottom = (maxPriceF - overlapMin) / viewPriceSpan;
+
+                        const QRectF drawRect(
+                            bounds.x() + bounds.width() * timeRatioStart,
+                            bounds.y() + bounds.height() * priceRatioTop,
+                            bounds.width() * (timeRatioEnd - timeRatioStart),
+                            bounds.height() * (priceRatioBottom - priceRatioTop));
+                        texNode->setRect(drawRect);
+
+                        const double srcW = std::clamp(overlapTimeSpan / m_heatmapAppendMs, 1.0, maxCoord);
+                        const double srcH = std::clamp(overlapPriceSpan / m_heatmapTickSize, 1.0, maxCoord);
+                        double srcX = (overlapStart - dataStart) / m_heatmapAppendMs;
+                        double srcY = (m_heatmapMaxPrice - overlapMax) / m_heatmapTickSize;
+                        srcX = std::clamp(srcX, 0.0, maxCoord - srcW);
+                        srcY = std::clamp(srcY, 0.0, maxCoord - srcH);
+                        texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+                    }
+                }
             } else {
+                texNode->setRect(bounds);
                 texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
             }
         } else {
+            texNode->setRect(bounds);
             texNode->setSourceRect(QRectF(0, 0, m_heatmapGridSize, m_heatmapGridSize));
         }
 
@@ -1299,6 +1374,26 @@ void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade);
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
 void UnifiedGridRenderer::togglePerformanceOverlay() { /* No-op: SentinelMonitor removed */ }
+void UnifiedGridRenderer::fitHeatmapToDataRange() {
+    if (!m_viewState || m_heatmapAppendMs <= 0 || m_heatmapGridSize <= 0) {
+        return;
+    }
+    if (m_heatmapLastSliceStartMs == std::numeric_limits<int64_t>::min()) {
+        return;
+    }
+    const int64_t bufferSpanMs = std::max<int64_t>(
+        1, static_cast<int64_t>(m_heatmapGridSize) * m_heatmapAppendMs);
+    const int64_t dataEnd = m_heatmapLastSliceStartMs + m_heatmapAppendMs;
+    const int64_t dataStart = dataEnd - bufferSpanMs;
+    if (dataEnd <= dataStart) {
+        return;
+    }
+    if (m_viewState->isAutoScrollEnabled()) {
+        m_viewState->enableAutoScroll(false);
+    }
+    m_viewState->setViewport(dataStart, dataEnd, m_heatmapMinPrice, m_heatmapMaxPrice);
+    update();
+}
 
 // ===== QML PROPERTY GETTERS =====
 // Read-only property access for QML bindings
@@ -1399,16 +1494,16 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
                 const int64_t timeDelta = static_cast<int64_t>(std::floor(timeDeltaF));
                 const double priceDelta = pan.y() * pricePixelsToUnits;
                 m_autoScrollLagMs += timeDelta;
-                if (priceDelta != 0.0) {
-                    m_viewState->setViewport(
-                        m_viewState->getVisibleTimeStart(),
-                        m_viewState->getVisibleTimeEnd(),
-                        m_viewState->getMinPrice() + priceDelta,
-                        m_viewState->getMaxPrice() + priceDelta);
+                if (timeDelta != 0 || priceDelta != 0.0) {
+                    const qint64 newStart = m_viewState->getVisibleTimeStart() + timeDelta;
+                    const qint64 newEnd = m_viewState->getVisibleTimeEnd() + timeDelta;
+                    const double newMin = m_viewState->getMinPrice() + priceDelta;
+                    const double newMax = m_viewState->getMaxPrice() + priceDelta;
+                    m_viewState->setViewport(newStart, newEnd, newMin, newMax);
                 }
             }
             m_viewState->handlePanEnd(false);
-            m_viewState->clearPanVisualOffset();
+            m_panSyncPending = true;
             update();
             panAppliedToAuto = true;
         } else {
@@ -1424,7 +1519,9 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
             m_autoScrollLagMs = (m_viewState->getVisibleTimeEnd() - (m_heatmapLastSliceStartMs + m_heatmapAppendMs)) - padMs;
         }
         // Keep visual pan until resync arrives to avoid snap-back
-        m_panSyncPending = true;
+        if (autoScroll) {
+            m_panSyncPending = true;
+        }
         update();
     }
 }
