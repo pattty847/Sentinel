@@ -121,6 +121,8 @@ void RemoteGridDataSource::onHeatmapSliceReceived(const QString& symbol,
                                                   double lastTrade,
                                                   const QString& format,
                                                   const QByteArray& column,
+                                                  const QByteArray& liquidityColumn,
+                                                  double liquidityScale,
                                                   bool reset) {
     emit heatmapSliceReceived(symbol,
                               bucketStartMs,
@@ -133,5 +135,7 @@ void RemoteGridDataSource::onHeatmapSliceReceived(const QString& symbol,
                               lastTrade,
                               format,
                               column,
+                              liquidityColumn,
+                              liquidityScale,
                               reset);
 }

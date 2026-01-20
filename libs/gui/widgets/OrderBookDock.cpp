@@ -1,6 +1,6 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
-#include "../../core/marketdata/MarketDataCore.hpp"
+#include "../marketdata/MarketDataCoreQt.hpp"
 #include "../../core/marketdata/cache/DataCache.hpp"
 #include "../../../libs/core/SentinelLogging.hpp"
 #include <QGridLayout>
@@ -139,14 +139,14 @@ void OrderBookDock::connectToMarketData()
 {
     auto* marketDataCore = ServiceLocator::marketDataCore();
     if (!marketDataCore) {
-        sLog_App("OrderBookDock: MarketDataCore not available in ServiceLocator");
+        sLog_App("OrderBookDock: MarketDataCoreQt not available in ServiceLocator");
         return;
     }
-    connect(marketDataCore, &MarketDataCore::liveOrderBookUpdated,
+    connect(marketDataCore, &MarketDataCoreQt::liveOrderBookUpdated,
             this, &OrderBookDock::onOrderBookUpdated,
             Qt::QueuedConnection);
     
-    sLog_App("OrderBookDock: Connected to MarketDataCore live order book updates");
+    sLog_App("OrderBookDock: Connected to MarketDataCoreQt live order book updates");
 }
 
 void OrderBookDock::onOrderBookUpdated(const QString& symbol,

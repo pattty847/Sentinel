@@ -113,10 +113,12 @@ public:
                    double midPrice,
                    double lastTrade,
                    const QByteArray& column,
+                   const QByteArray& liquidityColumn,
+                   double liquidityScale,
                    bool reset) {
                 self->on_heatmap_slice(symbol, bucketStartMs, bucketEndMs, timeframeMs,
                                        minPrice, maxPrice, tickSize, midPrice, lastTrade,
-                                       column, reset);
+                                       column, liquidityColumn, liquidityScale, reset);
             });
             
         do_read();
@@ -275,6 +277,8 @@ public:
                           double midPrice,
                           double lastTrade,
                           const QByteArray& column,
+                          const QByteArray& liquidityColumn,
+                          double liquidityScale,
                           bool reset) {
         const std::string sym = symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
@@ -294,6 +298,12 @@ public:
         j["format"] = "u8";
         j["encoding"] = "base64";
         j["column"] = column.toBase64().toStdString();
+        if (!liquidityColumn.isEmpty()) {
+            j["liquidity_format"] = "u16";
+            j["liquidity_encoding"] = "base64";
+            j["liquidity_scale"] = liquidityScale;
+            j["liquidity_column"] = liquidityColumn.toBase64().toStdString();
+        }
 
         do_write(j.dump());
     }

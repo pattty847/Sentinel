@@ -1,15 +1,15 @@
 /*
-Sentinel — MarketDataCore
+Sentinel — MarketDataCoreEngine
 Role: Manages the primary WebSocket connection for real-time market data streams.
 Inputs/Outputs: Ingests JSON from WebSocket; produces Trade/OrderBook data for DataCache.
-Threading: Runs network I/O on a dedicated worker thread; safely dispatches to main thread via Qt signals.
+Threading: Runs network I/O on a dedicated worker thread; emits callbacks from I/O thread.
 Performance: Hot path is message parsing; uses fast string conversion and throttled logging.
-Integration: Instantiated by main app; feeds DataCache and GUI via tradeReceived/orderBookUpdated signals.
+Integration: Instantiated by Qt adapters or server/CLI apps.
 Observability: Logs connection lifecycle and errors via SentinelLogging; data path logging is throttled.
-Related: MarketDataCore.hpp, DataCache.hpp, Authenticator.hpp, TradeData.h.
+Related: MarketDataCoreEngine.hpp, DataCache.hpp, Authenticator.hpp, TradeData.h.
 Assumptions: Authenticator and DataCache instances outlive this object; API is Coinbase-like.
 */
-#include "MarketDataCore.hpp"
+#include "MarketDataCoreEngine.hpp"
 #include "SentinelLogging.hpp"
 #include "dispatch/MessageDispatcher.hpp"
 #include "dispatch/Channels.hpp"
@@ -17,14 +17,12 @@ Assumptions: Authenticator and DataCache instances outlive this object; API is C
 #include <thread>
 #include <chrono>
 #include <span>
+#include <algorithm>
+#include <random>
 #include <utility>
 #include <cstdlib>
-#include <QString>
-#include <QMetaObject>
-#include <QMetaType>
-#include <QPointer>
-#include <format>    // std::format for efficient string formatting
- 
+#include <string>
+
 namespace {
     inline int64_t steadyClockMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -33,27 +31,21 @@ namespace {
     static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
 }
 
-MarketDataCore::MarketDataCore(Authenticator& auth,
-                               DataCache& cache)
-    : QObject(nullptr)
-    , m_auth(auth)
+MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth,
+                                           DataCache& cache)
+    : m_auth(auth)
     , m_cache(cache)
 {
-    qRegisterMetaType<BookDelta>("BookDelta");
-    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
-    qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
-    qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
-
     // Configure SSL context
     // Prefer explicit CA bundle via env var for Windows/OpenSSL setups where
     // default_verify_paths may not see the system trust store.
     if (const char* caBundle = std::getenv("SENTINEL_SSL_CA_BUNDLE")) {
         if (*caBundle) {
-            sLog_Data(QString("Using custom CA bundle from SENTINEL_SSL_CA_BUNDLE: %1").arg(caBundle));
+            sLog_Data(std::string("Using custom CA bundle from SENTINEL_SSL_CA_BUNDLE: ") + caBundle);
             try {
                 m_sslCtx.load_verify_file(caBundle);
             } catch (const std::exception& e) {
-                sLog_Error(QString("Failed to load CA bundle from %1: %2").arg(caBundle, e.what()));
+                sLog_Error(std::string("Failed to load CA bundle from ") + caBundle + ": " + e.what());
                 m_sslCtx.set_default_verify_paths();
             }
         } else {
@@ -63,10 +55,10 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
         // Fallback: try repo-packaged bundle at resources/certs/ca-bundle.crt
         const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
         try {
-            sLog_Data(QString("Using default CA bundle: %1").arg(defaultCaBundle));
+            sLog_Data(std::string("Using default CA bundle: ") + defaultCaBundle);
             m_sslCtx.load_verify_file(defaultCaBundle);
         } catch (const std::exception& e) {
-            sLog_Error(QString("Failed to load default CA bundle from %1: %2").arg(defaultCaBundle, e.what()));
+            sLog_Error(std::string("Failed to load default CA bundle from ") + defaultCaBundle + ": " + e.what());
             m_sslCtx.set_default_verify_paths();
         }
     }
@@ -77,7 +69,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
-        sLog_DataN(1, QString("WebSocket transport status changed: %1").arg(up ? "UP" : "DOWN"));
+        sLog_DataN(1, std::string("WebSocket transport status changed: ") + (up ? "UP" : "DOWN"));
         if (up) {
             // Reset sequencing and heartbeat tracking on fresh connect
             m_lastSeqByProduct.clear();
@@ -86,8 +78,7 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
                 std::lock_guard<std::mutex> lock(m_seqMutex);
                 m_lastSeqByProduct.clear();
             }
-            QPointer<MarketDataCore> self(this);
-            QMetaObject::invokeMethod(this, [self]{ if (!self) return; emit self->connectionStatusChanged(true); }, Qt::QueuedConnection);
+            emitConnectionStatus(true);
             // Post replay to MarketDataCore's strand to ensure thread-safe access to m_products
             net::post(m_strand, [this]() {
                 replaySubscriptionsOnConnect();
@@ -98,34 +89,51 @@ MarketDataCore::MarketDataCore(Authenticator& auth,
             emitError("Transport down");
         }
     });
-    m_transport->onError([this](std::string err){ emitError(QString::fromStdString(err)); });
+    m_transport->onError([this](std::string err){ emitError(std::move(err)); });
     m_transport->onMessage([this](std::string payload){
         try {
             auto j = nlohmann::json::parse(payload);
             dispatch(j);
         } catch (const nlohmann::json::parse_error& e) {
-            sLog_Error(QString("JSON parse error in transport message: %1").arg(e.what()));
+            sLog_Error(std::string("JSON parse error in transport message: ") + e.what());
         } catch (const std::exception& e) {
-            sLog_Error(QString("Error processing transport message: %1").arg(e.what()));
+            sLog_Error(std::string("Error processing transport message: ") + e.what());
         }
     });
 }
 
-MarketDataCore::~MarketDataCore() {
+MarketDataCoreEngine::~MarketDataCoreEngine() {
     stop();
     sLog_App("MarketDataCore destroyed");
 }
 
-inline void MarketDataCore::emitError(QString msg) {
-    QPointer<MarketDataCore> self(this);
-    QMetaObject::invokeMethod(this, [self, m = std::move(msg)]{
-        if (!self) return;
-        emit self->errorOccurred(m);
-        emit self->connectionStatusChanged(false);
-    }, Qt::QueuedConnection);
+inline void MarketDataCoreEngine::emitError(std::string msg) {
+    if (m_onError) {
+        try {
+            m_onError(msg);
+        } catch (const std::exception& e) {
+            sLog_Error(std::string("Error callback exception: ") + e.what());
+        }
+    }
+    emitConnectionStatus(false);
 }
 
-void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols) {    
+inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
+    if (m_onConnectionStatus) {
+        try {
+            m_onConnectionStatus(connected);
+        } catch (const std::exception& e) {
+            sLog_Error(std::string("Connection status callback exception: ") + e.what());
+        }
+    }
+}
+
+bool MarketDataCoreEngine::isServerModeEnabled() {
+    const char* env = std::getenv("SENTINEL_SERVER_MODE");
+    return env && *env;
+}
+
+void MarketDataCoreEngine::subscribeToSymbols(const std::vector<std::string>& symbols) {
     std::vector<std::string> new_symbols;
     for (const auto& s : symbols) {
         if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
@@ -136,16 +144,18 @@ void MarketDataCore::subscribeToSymbols(const std::vector<std::string>& symbols)
     if (!new_symbols.empty()) {
         // Keep subscription manager in sync
         m_subscriptions.setDesiredProducts(m_products);
-        sLog_DataN(1, QString("subscribeToSymbols: %1 new, %2 total products")
-                          .arg(static_cast<int>(new_symbols.size()))
-                          .arg(static_cast<int>(m_products.size())));
+        sLog_DataN(1, std::string("subscribeToSymbols: ") +
+                          std::to_string(new_symbols.size()) +
+                          " new, " +
+                          std::to_string(m_products.size()) +
+                          " total products");
     }
     if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
     }
 }
 
-void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
+void MarketDataCoreEngine::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
     std::vector<std::string> removed_symbols;
     for (const auto& s : symbols) {
         auto it = std::find(m_products.begin(), m_products.end(), s);
@@ -160,7 +170,7 @@ void MarketDataCore::unsubscribeFromSymbols(const std::vector<std::string>& symb
     }
 }
 
-void MarketDataCore::start() {
+void MarketDataCoreEngine::start() {
     if (!m_running.exchange(true)) {
         sLog_App("Starting MarketDataCore...");
         
@@ -174,14 +184,14 @@ void MarketDataCore::start() {
         m_ioc.restart();
         
         // Start I/O thread
-        m_ioThread = std::thread(&MarketDataCore::run, this);
+        m_ioThread = std::thread(&MarketDataCoreEngine::run, this);
         if (m_transport) {
             m_transport->connect(m_host, m_port, m_target);
         }
     }
 }
 
-void MarketDataCore::stop() {
+void MarketDataCoreEngine::stop() {
     if (m_running.exchange(false)) {
         sLog_App("Stopping MarketDataCore...");
 
@@ -205,7 +215,7 @@ void MarketDataCore::stop() {
     }
 }
 
-void MarketDataCore::run() {
+void MarketDataCoreEngine::run() {
     // Transport handles resolve/connect/handshake; we just run the context
     // CRITICAL: Keep I/O thread running even if individual handlers throw exceptions
     // The io_context::run() call can exit if a handler throws an unhandled exception.
@@ -218,7 +228,7 @@ void MarketDataCore::run() {
                 m_ioc.restart();
             }
         } catch (const std::exception& e) {
-            sLog_Error(QString("IO context thread exception: %1 - restarting I/O loop").arg(e.what()));
+            sLog_Error(std::string("IO context thread exception: ") + e.what() + " - restarting I/O loop");
             // Restart io_context to keep processing work
             if (m_running.load()) {
                 m_ioc.restart();
@@ -232,7 +242,7 @@ void MarketDataCore::run() {
     }
 }
 
-void MarketDataCore::scheduleReconnect() {
+void MarketDataCoreEngine::scheduleReconnect() {
     if (!m_running) return;
     
     // Exponential backoff with jitter (max 60s)
@@ -244,9 +254,11 @@ void MarketDataCore::scheduleReconnect() {
     std::uniform_int_distribution<> jitter(0, 250);
     auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
     
-    sLog_Data(QString("Scheduling reconnect in %1ms (backoff: %2s)...")
-        .arg(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count())
-        .arg(m_backoffDuration.count()));
+    sLog_Data(std::string("Scheduling reconnect in ") +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()) +
+              "ms (backoff: " +
+              std::to_string(m_backoffDuration.count()) +
+              "s)...");
     
     // NON-BLOCKING timer-based reconnect
     m_reconnectTimer.expires_after(delay);
@@ -263,7 +275,7 @@ void MarketDataCore::scheduleReconnect() {
     });
 }
 
-void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
+void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
     if (symbols.empty()) {
         return;
     }
@@ -298,8 +310,8 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
         try {
             jwt = m_auth.createJwt();
         } catch (const std::exception& e) {
-            sLog_Error(QString("JWT creation failed in subscription handler: %1").arg(e.what()));
-            emitError(QString("Failed to create JWT for subscription: %1").arg(e.what()));
+            sLog_Error(std::string("JWT creation failed in subscription handler: ") + e.what());
+            emitError(std::string("Failed to create JWT for subscription: ") + e.what());
             return; // Exit gracefully without crashing I/O thread
         }
         
@@ -314,7 +326,7 @@ void MarketDataCore::sendSubscriptionMessage(const std::string& type, const std:
     });
 }
 
-void MarketDataCore::dispatch(const nlohmann::json& message) {
+void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     
     // Record message arrival time for latency analysis
@@ -336,9 +348,11 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
             std::visit([this](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
-                    emitError(QString::fromStdString(ev.message));
+                    emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
-                    sLog_DataN(1, QString("Subscription confirmed for %1 symbol(s)").arg(static_cast<int>(ev.productIds.size())));
+                    sLog_DataN(1, std::string("Subscription confirmed for ") +
+                                      std::to_string(ev.productIds.size()) +
+                                      " symbol(s)");
                 }
             }, evt);
         }
@@ -351,8 +365,8 @@ void MarketDataCore::dispatch(const nlohmann::json& message) {
     }
 }
 
-void MarketDataCore::handleMarketTrades(const nlohmann::json& message, 
-                                      const std::chrono::system_clock::time_point& arrival_time) {
+void MarketDataCoreEngine::handleMarketTrades(const nlohmann::json& message,
+                                              const std::chrono::system_clock::time_point& arrival_time) {
     if (!message.contains("events")) return;
     
     for (const auto& event : message["events"]) {
@@ -362,8 +376,8 @@ void MarketDataCore::handleMarketTrades(const nlohmann::json& message,
     }
 }
 
-void MarketDataCore::processTrades(const nlohmann::json& trades,
-                                 const std::chrono::system_clock::time_point& arrival_time) {
+void MarketDataCoreEngine::processTrades(const nlohmann::json& trades,
+                                         const std::chrono::system_clock::time_point& arrival_time) {
     for (const auto& trade_data : trades) {
         Trade trade = createTradeFromJson(trade_data, arrival_time);
         
@@ -373,21 +387,19 @@ void MarketDataCore::processTrades(const nlohmann::json& trades,
         // Record trade processed for throughput tracking
         m_tradeLogCount++;
         
-        // Emit real-time signal to GUI layer (Qt thread-safe)
-        Trade tradeCopy = trade; // Make a copy for thread safety
-        {
-            QPointer<MarketDataCore> self(this);
-            QMetaObject::invokeMethod(this, [self, tradeCopy]() {
-                if (!self) return;
-                emit self->tradeReceived(tradeCopy);
-            }, Qt::QueuedConnection);
+        if (m_onTrade) {
+            try {
+                m_onTrade(trade);
+            } catch (const std::exception& e) {
+                sLog_Error(std::string("Trade callback exception: ") + e.what());
+            }
         }
         
     }
 }
 
-Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
-                                        const std::chrono::system_clock::time_point& arrival_time) {
+Trade MarketDataCoreEngine::createTradeFromJson(const nlohmann::json& trade_data,
+                                                const std::chrono::system_clock::time_point& arrival_time) {
     Trade trade;
     trade.product_id = trade_data.value("product_id", "");
     trade.trade_id = trade_data.value("trade_id", "");
@@ -411,15 +423,15 @@ Trade MarketDataCore::createTradeFromJson(const nlohmann::json& trade_data,
     return trade;
 }
 
-void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
-                                       const std::chrono::system_clock::time_point& arrival_time) {
+void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
+                                               const std::chrono::system_clock::time_point& arrival_time) {
     // Sequence number at message root
     uint64_t seq = 0;
     if (message.contains("sequence_num")) {
         try {
             seq = message["sequence_num"].get<uint64_t>();
         } catch (const nlohmann::json::exception& e) {
-            sLog_Warning(QString("sequence_num parse issue: %1").arg(e.what()));
+            sLog_Warning(std::string("sequence_num parse issue: ") + e.what());
             seq = 0;
         }
     }
@@ -449,12 +461,12 @@ void MarketDataCore::handleOrderBookData(const nlohmann::json& message,
     }
 }
 
-void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
-                                           const std::string& product_id,
-                                           const std::chrono::system_clock::time_point& exchange_timestamp) {
+void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
+                                                   const std::string& product_id,
+                                                   const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
 
-    const bool useCacheBook = !qEnvironmentVariableIsSet("SENTINEL_SERVER_MODE");
+    const bool useCacheBook = !isServerModeEnabled();
     
     // SNAPSHOT: Initialize complete order book state
     std::vector<OrderBookLevel> sparse_bids;
@@ -487,30 +499,25 @@ void MarketDataCore::handleOrderBookSnapshot(const nlohmann::json& event,
 
     // Broadcast snapshot initialization to listeners (like ServerDataModel)
     // We need to pass by value/copy to cross threads safely
-    {
-        QPointer<MarketDataCore> self(this);
-        QString productIdQ = QString::fromStdString(product_id);
-        // Make deep copies for the signal payload
-        std::vector<OrderBookLevel> bidsCopy = sparse_bids;
-        std::vector<OrderBookLevel> asksCopy = sparse_asks;
-
-        QMetaObject::invokeMethod(this, [self, productIdQ, b = std::move(bidsCopy), a = std::move(asksCopy)]() mutable {
-            if (!self) return;
-            emit self->liveOrderBookInitialized(productIdQ, b, a);
-        }, Qt::QueuedConnection);
+    if (m_onLiveOrderBookInitialized) {
+        try {
+            m_onLiveOrderBookInitialized(product_id, sparse_bids, sparse_asks);
+        } catch (const std::exception& e) {
+            sLog_Error(std::string("Order book init callback exception: ") + e.what());
+        }
     }
     
     // std::string logMessage = Cpp20Utils::formatOrderBookLog(
     //     product_id, sparse_bids.size(), sparse_asks.size());
-    // sLog_Data(QString::fromStdString(logMessage));
+    // sLog_Data(logMessage);
 }
 
-void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
-                                         const std::string& product_id,
-                                         const std::chrono::system_clock::time_point& exchange_timestamp) {
+void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
+                                                 const std::string& product_id,
+                                                 const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
 
-    const bool useCacheBook = !qEnvironmentVariableIsSet("SENTINEL_SERVER_MODE");
+    const bool useCacheBook = !isServerModeEnabled();
     
     // UPDATE: Apply incremental changes to stateful order book
     thread_local std::vector<BookLevelUpdate> levelUpdates;
@@ -553,25 +560,23 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
     if (useCacheBook) {
         std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
         deltas.clear();
-        {
-            QPointer<MarketDataCore> self(this);
-            QString productIdQ = QString::fromStdString(product_id);
-            QMetaObject::invokeMethod(this, [self, productIdQ, deltasMove = std::move(deltasPayload)]() mutable {
-                if (!self) return;
-                emit self->liveOrderBookUpdated(productIdQ, deltasMove);
-            }, Qt::QueuedConnection);
+        if (m_onLiveOrderBookUpdated) {
+            try {
+                m_onLiveOrderBookUpdated(product_id, deltasPayload);
+            } catch (const std::exception& e) {
+                sLog_Error(std::string("Order book updated callback exception: ") + e.what());
+            }
         }
     } else if (!levelUpdates.empty()) {
-        const qint64 exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             exchange_timestamp.time_since_epoch()).count();
         std::vector<BookLevelUpdate> updatesPayload(levelUpdates.begin(), levelUpdates.end());
-        {
-            QPointer<MarketDataCore> self(this);
-            QString productIdQ = QString::fromStdString(product_id);
-            QMetaObject::invokeMethod(this, [self, productIdQ, updatesMove = std::move(updatesPayload), exchangeMs]() mutable {
-                if (!self) return;
-                emit self->liveOrderBookLevelUpdates(productIdQ, updatesMove, exchangeMs);
-            }, Qt::QueuedConnection);
+        if (m_onLiveOrderBookLevelUpdates) {
+            try {
+                m_onLiveOrderBookLevelUpdates(product_id, updatesPayload, exchangeMs);
+            } catch (const std::exception& e) {
+                sLog_Error(std::string("Order book level updates callback exception: ") + e.what());
+            }
         }
     }
     
@@ -583,23 +588,23 @@ void MarketDataCore::handleOrderBookUpdate(const nlohmann::json& event,
 
         std::string logMessage = Cpp20Utils::formatOrderBookLog(
             product_id, bidCount, askCount, updateCount);
-        sLog_Data(QString::fromStdString(logMessage));
+        sLog_Data(logMessage);
     }
 }
 
-void MarketDataCore::replaySubscriptionsOnConnect() {
+void MarketDataCoreEngine::replaySubscriptionsOnConnect() {
     if (m_products.empty()) return;
     auto symbols = m_products;
     sendSubscriptionMessage("subscribe", symbols);
 }
 
-void MarketDataCore::handleHeartbeats(const nlohmann::json& message) {
+void MarketDataCoreEngine::handleHeartbeats(const nlohmann::json& message) {
     // Update last heartbeat timestamp; optionally validate counter
     m_lastHeartbeatMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-void MarketDataCore::startHeartbeatWatchdog() {
+void MarketDataCoreEngine::startHeartbeatWatchdog() {
     // Run periodic checks on the strand
     net::post(m_strand, [this](){
         m_heartbeatTimer.expires_after(std::chrono::seconds(2));
@@ -618,9 +623,9 @@ void MarketDataCore::startHeartbeatWatchdog() {
     });
 }
 
-void MarketDataCore::triggerImmediateReconnect(const char* reason) {
+void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     net::post(m_strand, [this, r = std::string(reason)](){
-        sLog_Data(QString("Immediate reconnect: %1").arg(QString::fromStdString(r)));
+        sLog_Data(std::string("Immediate reconnect: ") + r);
         // Reset backoff and cancel any pending reconnect
         m_backoffDuration = std::chrono::seconds(1);
         m_reconnectTimer.cancel();
@@ -632,7 +637,7 @@ void MarketDataCore::triggerImmediateReconnect(const char* reason) {
     });
 }
 
-int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
+int MarketDataCoreEngine::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
     // For Advanced Trade l2_data, delivery is guaranteed; treat sequence as informational only.
     // Keep latest observed sequence per product for diagnostics, but never gate processing.
     std::lock_guard<std::mutex> lock(m_seqMutex);
@@ -647,7 +652,7 @@ int MarketDataCore::checkAndTrackSequence(const std::string& product_id, uint64_
     return 0;
 }
 
-void MarketDataCore::sendHeartbeatSubscribe() {
+void MarketDataCoreEngine::sendHeartbeatSubscribe() {
     net::post(m_strand, [this]() {
         if (!m_connected.load() || !m_transport) return;
         try {
@@ -658,7 +663,7 @@ void MarketDataCore::sendHeartbeatSubscribe() {
             msg["jwt"] = m_auth.createJwt();
             m_transport->send(msg.dump());
         } catch (const std::exception& e) {
-            sLog_Error(QString("JWT creation failed in sendHeartbeatSubscribe: %1").arg(e.what()));
+            sLog_Error(std::string("JWT creation failed in sendHeartbeatSubscribe: ") + e.what());
             // Don't crash I/O thread - just log and continue
         }
     });

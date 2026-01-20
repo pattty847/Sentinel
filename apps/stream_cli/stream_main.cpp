@@ -1,4 +1,4 @@
-#include "marketdata/MarketDataCore.hpp"
+#include "marketdata/MarketDataCoreEngine.hpp"
 #include "marketdata/auth/Authenticator.hpp"
 #include "marketdata/cache/DataCache.hpp"
 #include "marketdata/model/TradeData.h"
@@ -12,12 +12,12 @@
 int main() {
     std::cout << "[Coinbase Stream Test Starting...]" << std::endl;
     
-    // Direct MarketDataCore usage (facade OBLITERATED)
+    // Direct MarketDataCoreEngine usage (facade OBLITERATED)
     Authenticator auth;  // uses default "key.json"
     DataCache cache;
     std::vector<std::string> symbols = {"BTC-USD"};
 
-    MarketDataCore client(auth, cache);
+    MarketDataCoreEngine client(auth, cache);
     client.subscribeToSymbols(symbols);
     client.start();
 

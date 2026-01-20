@@ -51,6 +51,7 @@ set(WIDGET_SOURCES
     "widgets/DockablePanel.cpp"
     "widgets/HeatmapDock.cpp"
     "widgets/LayoutManager.cpp"
+    "marketdata/MarketDataCoreQt.cpp"
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"

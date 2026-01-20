@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include <QByteArray>
 #include <QProcessEnvironment>
+#include <QtEndian>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -222,6 +223,8 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     }
 
     const QByteArray column = toIntensityColumnSigned(twapBid, twapAsk);
+    double liquidityScale = 1.0;
+    const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
     const bool reset = false;
     state.pendingReset = false;
 
@@ -243,6 +246,8 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                            state.lastMidPrice,
                            lastTrade,
                            column,
+                           liquidityColumn,
+                           liquidityScale,
                            reset);
 }
 
@@ -296,6 +301,46 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
         } else {
             dst[i] = 0;
         }
+    }
+    return out;
+}
+
+QByteArray HeatmapTwapStreamer::toLiquidityColumn(const std::vector<double>& bidValues,
+                                                  const std::vector<double>& askValues,
+                                                  double& outScale) const {
+    if (bidValues.empty() || askValues.empty()) {
+        outScale = 1.0;
+        return {};
+    }
+
+    const size_t height = bidValues.size();
+    double maxValue = 0.0;
+    for (size_t i = 0; i < height; ++i) {
+        const double ask = askValues[i];
+        const double bid = bidValues[i];
+        const double value = (ask > 0.0) ? ask : bid;
+        if (value > maxValue) {
+            maxValue = value;
+        }
+    }
+
+    const double scale = (maxValue > 0.0) ? (maxValue / 65535.0) : 1.0;
+    outScale = (scale > 0.0) ? scale : 1.0;
+
+    QByteArray out;
+    out.resize(static_cast<int>(height * sizeof(uint16_t)));
+    auto* dst = reinterpret_cast<uint16_t*>(out.data());
+    for (size_t i = 0; i < height; ++i) {
+        const double ask = askValues[i];
+        const double bid = bidValues[i];
+        const double value = (ask > 0.0) ? ask : bid;
+        uint16_t scaled = 0;
+        if (value > 0.0) {
+            const double raw = std::floor(value / outScale);
+            const double clamped = std::clamp(raw, 0.0, 65535.0);
+            scaled = static_cast<uint16_t>(clamped);
+        }
+        dst[i] = qToLittleEndian(scaled);
     }
     return out;
 }

@@ -53,6 +53,8 @@ signals:
                            double midPrice,
                            double lastTrade,
                            const QByteArray& column,
+                           const QByteArray& liquidityColumn,
+                           double liquidityScale,
                            bool reset);
 
 private:

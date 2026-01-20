@@ -1,13 +1,13 @@
 #pragma once
 /*
-Sentinel — MarketDataCore
+Sentinel — MarketDataCoreEngine
 Role: Owns the WebSocket connection and I/O thread, handling all network operations.
-Inputs/Outputs: Takes product IDs, an Authenticator, and a DataCache; emits parsed data via Qt signals.
+Inputs/Outputs: Takes product IDs, an Authenticator, and a DataCache; emits parsed data via callbacks.
 Threading: Runs a Boost.Asio io_context on a dedicated worker thread, using a strand for safety.
 Performance: High-throughput design using asynchronous I/O for non-blocking operations.
-Integration: Created and owned by CoinbaseStreamClient; its signals are wired to the GUI layer.
-Observability: Emits connectionStatusChanged and errorOccurred signals.
-Related: MarketDataCore.cpp, CoinbaseStreamClient.hpp, DataCache.hpp, Authenticator.hpp.
+Integration: Core engine used by GUI adapters and server/CLI apps.
+Observability: Emits connection status and errors via callbacks.
+Related: MarketDataCoreEngine.cpp, DataCache.hpp, Authenticator.hpp.
 Assumptions: The provided Authenticator and DataCache instances will outlive this object.
 */
 #include <memory>
@@ -17,13 +17,16 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <nlohmann/json.hpp>
+#include <cstdint>
 #include <atomic>
 #include <thread>
 #include <chrono>
 #include <optional>
 #include <unordered_map>
 #include <mutex>
-#include <QObject>
+#include <functional>
+#include <string>
+#include <vector>
 #include "auth/Authenticator.hpp"
 #include "cache/DataCache.hpp"
 #include "sinks/DataCacheSinkAdapter.hpp"
@@ -35,14 +38,23 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-class MarketDataCore : public QObject {
-    Q_OBJECT
-
+class MarketDataCoreEngine {
 public:
-    MarketDataCore(Authenticator& auth,
-                   DataCache& cache);
+    using TradeCb = std::function<void(const Trade&)>;
+    using OrderBookUpdatedCb = std::function<void(const std::string&, const std::vector<BookDelta>&)>;
+    using OrderBookLevelUpdatesCb = std::function<void(const std::string&,
+                                                       const std::vector<BookLevelUpdate>&,
+                                                       int64_t exchangeMs)>;
+    using OrderBookInitializedCb = std::function<void(const std::string&,
+                                                      const std::vector<OrderBookLevel>&,
+                                                      const std::vector<OrderBookLevel>&)>;
+    using ConnectionStatusCb = std::function<void(bool)>;
+    using ErrorCb = std::function<void(const std::string&)>;
 
-    ~MarketDataCore();
+    MarketDataCoreEngine(Authenticator& auth,
+                         DataCache& cache);
+
+    ~MarketDataCoreEngine();
     void start();
     void stop();
 
@@ -51,20 +63,18 @@ public:
     void unsubscribeFromSymbols(const std::vector<std::string>& symbols);
 
     // Non-copyable, non-movable (manages thread)
-    MarketDataCore(const MarketDataCore&) = delete;
-    MarketDataCore& operator=(const MarketDataCore&) = delete;
-    MarketDataCore(MarketDataCore&&) = delete;
-    MarketDataCore& operator=(MarketDataCore&&) = delete;
+    MarketDataCoreEngine(const MarketDataCoreEngine&) = delete;
+    MarketDataCoreEngine& operator=(const MarketDataCoreEngine&) = delete;
+    MarketDataCoreEngine(MarketDataCoreEngine&&) = delete;
+    MarketDataCoreEngine& operator=(MarketDataCoreEngine&&) = delete;
 
-signals:
-    void tradeReceived(const Trade& trade);
-    void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
-    void liveOrderBookLevelUpdates(const QString& productId,
-                                   const std::vector<BookLevelUpdate>& updates,
-                                   qint64 exchangeMs);
-    void liveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
-    void connectionStatusChanged(bool connected);
-    void errorOccurred(const QString& error);
+    // Callback registration (set before start; not thread-safe to mutate while running)
+    void onTrade(TradeCb cb) { m_onTrade = std::move(cb); }
+    void onLiveOrderBookUpdated(OrderBookUpdatedCb cb) { m_onLiveOrderBookUpdated = std::move(cb); }
+    void onLiveOrderBookLevelUpdates(OrderBookLevelUpdatesCb cb) { m_onLiveOrderBookLevelUpdates = std::move(cb); }
+    void onLiveOrderBookInitialized(OrderBookInitializedCb cb) { m_onLiveOrderBookInitialized = std::move(cb); }
+    void onConnectionStatus(ConnectionStatusCb cb) { m_onConnectionStatus = std::move(cb); }
+    void onError(ErrorCb cb) { m_onError = std::move(cb); }
 
 private:
     // Connection lifecycle
@@ -100,8 +110,10 @@ private:
     void sendHeartbeatSubscribe();
 
     // Members
-    // Unified error emission to GUI and status surface
-    void emitError(QString msg);
+    // Unified error emission
+    void emitError(std::string msg);
+    void emitConnectionStatus(bool connected);
+    static bool isServerModeEnabled();
 
     // Subscription helpers
     void replaySubscriptionsOnConnect();
@@ -135,6 +147,13 @@ private:
     std::unordered_map<std::string, uint64_t> m_lastSeqByProduct; // l2 sequence tracking (guarded by m_seqMutex)
     std::mutex                      m_seqMutex;
     std::atomic<int64_t>            m_lastHeartbeatMs{0};
-    
+
     // Transport-level serialization keeps cross-thread access safe
+
+    TradeCb                          m_onTrade;
+    OrderBookUpdatedCb               m_onLiveOrderBookUpdated;
+    OrderBookLevelUpdatesCb          m_onLiveOrderBookLevelUpdates;
+    OrderBookInitializedCb           m_onLiveOrderBookInitialized;
+    ConnectionStatusCb               m_onConnectionStatus;
+    ErrorCb                          m_onError;
 };

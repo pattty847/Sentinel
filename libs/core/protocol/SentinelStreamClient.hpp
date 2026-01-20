@@ -50,6 +50,8 @@ signals:
                               double lastTrade,
                               const QString& format,
                               const QByteArray& column,
+                              const QByteArray& liquidityColumn,
+                              double liquidityScale,
                               bool reset);
 
 private:

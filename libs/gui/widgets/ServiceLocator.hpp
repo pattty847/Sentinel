@@ -3,7 +3,7 @@
 #include <QPointer>
 
 // Forward declarations
-class MarketDataCore;
+class MarketDataCoreQt;
 class DataCache;
 
 /**
@@ -11,14 +11,14 @@ class DataCache;
  * Uses raw pointers since DataCache is not a QObject.
  * 
  * Future evolution: Can be extended with signals for service registration/unregistration
- * for MarketDataCore (which is a QObject) to support hot-reload scenarios.
+ * for MarketDataCoreQt (which is a QObject) to support hot-reload scenarios.
  */
 class ServiceLocator {
 public:
     /**
-     * Register the MarketDataCore service.
+     * Register the MarketDataCoreQt service.
      */
-    static void registerMarketDataCore(MarketDataCore* core);
+    static void registerMarketDataCore(MarketDataCoreQt* core);
     
     /**
      * Register the DataCache service.
@@ -26,10 +26,10 @@ public:
     static void registerDataCache(DataCache* cache);
     
     /**
-     * Get the registered MarketDataCore instance.
+     * Get the registered MarketDataCoreQt instance.
      * Returns nullptr if not registered or destroyed.
      */
-    static MarketDataCore* marketDataCore();
+    static MarketDataCoreQt* marketDataCore();
     
     /**
      * Get the registered DataCache instance.
@@ -38,7 +38,7 @@ public:
     static DataCache* dataCache();
 
 private:
-    static QPointer<MarketDataCore> s_marketDataCore;  // QPointer for QObject
+    static QPointer<MarketDataCoreQt> s_marketDataCore;  // QPointer for QObject
     static DataCache* s_dataCache;  // Raw pointer for non-QObject
 };
 

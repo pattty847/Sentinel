@@ -1,5 +1,8 @@
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
+#include <QMetaObject>
+#include <QPointer>
+#include <QString>
 #include <QTimer>
 
 SentinelServerApp::SentinelServerApp(QObject* parent) 
@@ -24,7 +27,7 @@ bool SentinelServerApp::initialize() {
         m_dataCache = std::make_unique<DataCache>();
 
         // 3. Market Data Core
-        m_marketDataCore = std::make_unique<MarketDataCore>(*m_authenticator, *m_dataCache);
+        m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, *m_dataCache);
         
         // 4. Server Data Model
         m_serverModel = std::make_unique<ServerDataModel>();
@@ -33,20 +36,46 @@ bool SentinelServerApp::initialize() {
         m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, 8080);
         m_server->start();
         
-        // Connect MarketDataCore -> ServerDataModel
-        connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived, 
-                m_serverModel.get(), &ServerDataModel::onTrade);
-        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookLevelUpdates,
-                m_serverModel.get(), &ServerDataModel::onLiveOrderBookLevelUpdates);
-        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookInitialized,
-                m_serverModel.get(), &ServerDataModel::onLiveOrderBookInitialized);
+        // Connect MarketDataCoreEngine -> ServerDataModel via queued invocations
+        QPointer<ServerDataModel> modelPtr(m_serverModel.get());
+        m_marketDataCore->onTrade([modelPtr](const Trade& trade) {
+            if (!modelPtr) return;
+            Trade tradeCopy = trade;
+            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, tradeCopy]() mutable {
+                if (!modelPtr) return;
+                modelPtr->onTrade(tradeCopy);
+            }, Qt::QueuedConnection);
+        });
+        m_marketDataCore->onLiveOrderBookLevelUpdates([modelPtr](const std::string& productId,
+                                                                 const std::vector<BookLevelUpdate>& updates,
+                                                                 int64_t exchangeMs) {
+            if (!modelPtr) return;
+            QString productIdQ = QString::fromStdString(productId);
+            std::vector<BookLevelUpdate> updatesCopy = updates;
+            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, productIdQ, updatesCopy = std::move(updatesCopy), exchangeMs]() mutable {
+                if (!modelPtr) return;
+                modelPtr->onLiveOrderBookLevelUpdates(productIdQ, updatesCopy, static_cast<qint64>(exchangeMs));
+            }, Qt::QueuedConnection);
+        });
+        m_marketDataCore->onLiveOrderBookInitialized([modelPtr](const std::string& productId,
+                                                                const std::vector<OrderBookLevel>& bids,
+                                                                const std::vector<OrderBookLevel>& asks) {
+            if (!modelPtr) return;
+            QString productIdQ = QString::fromStdString(productId);
+            std::vector<OrderBookLevel> bidsCopy = bids;
+            std::vector<OrderBookLevel> asksCopy = asks;
+            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, productIdQ, bidsCopy = std::move(bidsCopy), asksCopy = std::move(asksCopy)]() mutable {
+                if (!modelPtr) return;
+                modelPtr->onLiveOrderBookInitialized(productIdQ, bidsCopy, asksCopy);
+            }, Qt::QueuedConnection);
+        });
         
-        // Wire up signals for logging
-        connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged, [](bool connected){
+        // Wire up callbacks for logging
+        m_marketDataCore->onConnectionStatus([](bool connected){
             sLog_App("MarketDataCore Connection: " << (connected ? "CONNECTED" : "DISCONNECTED"));
         });
         
-        connect(m_marketDataCore.get(), &MarketDataCore::errorOccurred, [](const QString& error){
+        m_marketDataCore->onError([](const std::string& error){
             sLog_Error("MarketDataCore Error: " << error);
         });
 

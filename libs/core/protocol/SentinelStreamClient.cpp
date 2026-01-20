@@ -241,10 +241,16 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              const bool reset = msg.value("reset", false);
              const std::string format = msg.value("format", "u8");
              const std::string encoded = msg.value("column", "");
+             const std::string liquidityEncoded = msg.value("liquidity_column", "");
+             const double liquidityScale = msg.value("liquidity_scale", 1.0);
 
              QByteArray column;
              if (!encoded.empty()) {
                  column = QByteArray::fromBase64(QByteArray::fromStdString(encoded));
+             }
+             QByteArray liquidityColumn;
+             if (!liquidityEncoded.empty()) {
+                 liquidityColumn = QByteArray::fromBase64(QByteArray::fromStdString(liquidityEncoded));
              }
 
              emit heatmapSliceReceived(QString::fromStdString(symbol),
@@ -258,6 +264,8 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                        lastTrade,
                                        QString::fromStdString(format),
                                        column,
+                                       liquidityColumn,
+                                       liquidityScale,
                                        reset);
         }
 

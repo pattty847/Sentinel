@@ -4,8 +4,8 @@ add_library(sentinel_core
     Cpp20Utils.hpp
     Version.cpp
     Version.hpp
-    marketdata/MarketDataCore.cpp
-    marketdata/MarketDataCore.hpp
+    marketdata/MarketDataCoreEngine.cpp
+    marketdata/MarketDataCoreEngine.hpp
     marketdata/auth/Authenticator.cpp
     marketdata/auth/Authenticator.hpp
     marketdata/cache/DataCache.cpp

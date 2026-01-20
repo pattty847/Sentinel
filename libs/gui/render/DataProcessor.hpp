@@ -39,6 +39,8 @@ public slots:
                                 double lastTrade,
                                 const QString& format,
                                 const QByteArray& column,
+                                const QByteArray& liquidityColumn,
+                                double liquidityScale,
                                 bool reset);
     
 public:
@@ -72,7 +74,9 @@ signals:
                             double minPrice,
                             double maxPrice,
                             double tickSize,
-                            const QByteArray& column);
+                            const QByteArray& column,
+                            const QByteArray& liquidityColumn,
+                            double liquidityScale);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridHeight);
 
 private:

@@ -8,7 +8,7 @@
 #include <QFrame>
 #include <vector>
 
-class MarketDataCore;
+class MarketDataCoreQt;
 struct BookDelta;
 
 /**
@@ -18,7 +18,7 @@ struct BookDelta;
  * Future: Expandable to full order book with configurable tick aggregation
  * 
  * Design considerations:
- * - Uses ServiceLocator pattern for MarketDataCore access
+ * - Uses ServiceLocator pattern for MarketDataCoreQt access
  * - Thread-safe updates via queued connections
  * - Prepared for order book depth data expansion
  * - Visual design matches trading terminal aesthetics
@@ -36,7 +36,7 @@ public:
 
 private slots:
     /**
-     * @brief Handle order book updates from MarketDataCore
+     * @brief Handle order book updates from MarketDataCoreQt
      * @param symbol Trading symbol
      * @param deltas Dense order book deltas (used as a trigger for refresh)
      * 

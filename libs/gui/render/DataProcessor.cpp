@@ -71,6 +71,8 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                                            double lastTrade,
                                            const QString& format,
                                            const QByteArray& column,
+                                           const QByteArray& liquidityColumn,
+                                           double liquidityScale,
                                            bool reset) {
     Q_UNUSED(symbol);
     Q_UNUSED(midPrice);
@@ -140,7 +142,9 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                             minPrice,
                             maxPrice,
                             effectiveTick,
-                            expanded);
+                            expanded,
+                            liquidityColumn,
+                            liquidityScale);
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {

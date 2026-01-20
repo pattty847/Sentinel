@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QByteArray>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -27,6 +28,8 @@ signals:
                            double midPrice,
                            double lastTrade,
                            const QByteArray& column,
+                           const QByteArray& liquidityColumn,
+                           double liquidityScale,
                            bool reset);
 
 private:
@@ -65,6 +68,9 @@ private:
                         double lastTrade);
     QByteArray toIntensityColumnSigned(const std::vector<double>& bidValues,
                                        const std::vector<double>& askValues) const;
+    QByteArray toLiquidityColumn(const std::vector<double>& bidValues,
+                                 const std::vector<double>& askValues,
+                                 double& outScale) const;
 
     static int64_t alignBucketStart(int64_t nowMs, int64_t timeframeMs);
 

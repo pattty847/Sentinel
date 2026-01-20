@@ -5,9 +5,9 @@ Role: A QML scene item that renders the GPU-only heatmap path.
 Inputs/Outputs: Takes heatmap columns via DataProcessor; outputs a QSGNode for GPU rendering.
 Threading: Runs on the GUI thread; data is received via queued connections; rendering on render thread.
 Performance: Batches incoming data with a QTimer to throttle scene graph updates.
-Integration: Used in QML; receives data from MarketDataCore and server heatmap stream.
+Integration: Used in QML; receives data from MarketDataCoreQt and server heatmap stream.
 Observability: Logs key events like data reception and paint node updates via qDebug.
-Related: UnifiedGridRenderer.cpp, CoordinateSystem.h, MarketDataCore.hpp.
+Related: UnifiedGridRenderer.cpp, CoordinateSystem.h, MarketDataCoreQt.hpp.
 Assumptions: CoordinateSystem and ChartModeController properties are set from QML.
 */
 #pragma once
@@ -66,6 +66,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
 
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
+    Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
 
 private:
     // Rendering configuration
@@ -81,54 +82,14 @@ private:
     bool m_showViewportMathOverlay = false;
     bool m_showMemoryCacheOverlay = false;
     bool m_showModeFlagsOverlay = false;
+    int m_liquidityLabelMode = 0;
 
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
     bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
 
-    // Dummy GPU heatmap path for testing single-quad rendering.
-    bool m_useDummyHeatmap = false;
-    int m_dummyGridSize = 2048;
-    bool m_dummyTextureDirty = true;
-    QImage m_dummyImage;
-    QImage m_dummyPaletteImage;
-    QTimer* m_dummyAppendTimer = nullptr;
-    QTimer* m_dummyRenderTimer = nullptr;
-    int m_dummyWriteColumn = 0;
-    int64_t m_dummyTimeIndex = 0;
-    int m_dummyAppendMs = 100;
-    qint64 m_dummyLastAppendMs = 0;
-    QElapsedTimer m_dummyClock;
-    std::atomic<float> m_dummyTimeOffset{0.0f};
-    bool m_dummyLabelDirty = true;
-    QRectF m_dummyLabelSourceRect;
-    QSize m_dummyLabelPixelSize;
-    int m_dummyLabelStartX = 0;
-    std::mutex m_dummyImageMutex;
-    std::mutex m_dummyLabelMutex;
-    QImage m_dummyLabelImage;
-    std::atomic<int> m_dummyLabelVersion{0};
-    int m_dummyLabelTextureVersion = -1;
-    struct DummyLabelRequest {
-        QRectF srcRect;
-        QSize labelSize;
-        int startX = 0;
-        int startY = 0;
-        float cellW = 0.0f;
-        float cellH = 0.0f;
-        bool valid = false;
-    };
-    std::mutex m_dummyLabelRequestMutex;
-    DummyLabelRequest m_dummyLabelRequest;
-    struct DummyPendingColumn {
-        int x = 0;
-        QByteArray data;
-    };
-    mutable std::mutex m_dummyUploadMutex;
-    std::vector<DummyPendingColumn> m_dummyPendingColumns;
-
-    // Real GPU heatmap path (single quad with streamed columns).
+    // GPU heatmap path (single quad with streamed columns).
     bool m_useGpuHeatmap = false;
     int m_heatmapGridSize = 8192;
     bool m_heatmapTextureDirty = true;
@@ -164,6 +125,43 @@ private:
     };
     mutable std::mutex m_heatmapUploadMutex;
     std::vector<HeatmapPendingColumn> m_heatmapPendingColumns;
+    std::vector<uint16_t> m_heatmapLiquidityRing;
+    std::vector<double> m_heatmapLiquidityScales;
+    QByteArray m_heatmapLastLiquidityColumn;
+    double m_heatmapLastLiquidityScale = 1.0;
+    bool m_heatmapHaveLastLiquidity = false;
+    bool m_heatmapLiquidityAvailable = false;
+    mutable std::mutex m_heatmapLiquidityMutex;
+
+    bool m_heatmapLabelDirty = true;
+    QRectF m_heatmapLabelSourceRect;
+    QSize m_heatmapLabelPixelSize;
+    int m_heatmapLabelStartX = 0;
+    int m_heatmapLabelStartY = 0;
+    int m_heatmapLabelFontBucket = 0;
+    uint64_t m_heatmapLabelViewportVersion = 0;
+    std::mutex m_heatmapLabelMutex;
+    QImage m_heatmapLabelImage;
+    std::atomic<int> m_heatmapLabelVersion{0};
+    int m_heatmapLabelTextureVersion = -1;
+    int m_heatmapLabelActiveStartX = 0;
+    int m_heatmapLabelActiveStartY = 0;
+    int m_heatmapLabelBuiltStartX = 0;
+    int m_heatmapLabelBuiltStartY = 0;
+    struct HeatmapLabelRequest {
+        QRectF srcRect;
+        QSize labelSize;
+        int startX = 0;
+        int startY = 0;
+        float cellW = 0.0f;
+        float cellH = 0.0f;
+        int fontPx = 0;
+        int fontBucket = 0;
+        uint64_t viewportVersion = 0;
+        bool valid = false;
+    };
+    std::mutex m_heatmapLabelRequestMutex;
+    HeatmapLabelRequest m_heatmapLabelRequest;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
@@ -190,6 +188,7 @@ public:
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
+    int liquidityLabelMode() const { return m_liquidityLabelMode; }
     
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
@@ -255,6 +254,7 @@ public:
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
+    Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
     void setDataSource(class IGridDataSource* source); // Forward declaration - implemented in .cpp
     
@@ -298,6 +298,7 @@ signals:
     void showViewportMathOverlayChanged();
     void showMemoryCacheOverlayChanged();
     void showModeFlagsOverlayChanged();
+    void liquidityLabelModeChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -314,14 +315,11 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
-    void initDummyHeatmap();
-    void ensureDummyImage();
-    void ensureDummyPaletteImage();
     void ensureHeatmapImage();
     void ensureHeatmapPaletteImage();
-    void appendDummyColumn();
-    void onDummyRenderTick();
-    void buildDummyLabelImage();
+    void buildHeatmapLabelImage();
+    QString formatLiquidityLabel(double value, bool dollars) const;
+    int quantizeFontPx(float fontPx) const;
 
 private:
     // Property setters
