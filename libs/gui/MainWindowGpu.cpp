@@ -31,6 +31,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/LayoutManager.hpp"
+#include "widgets/ServiceLocator.hpp"
 #include "mainwindow/DockFactory.h"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
@@ -64,6 +65,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
     remote->connectToServer();
     m_dataSource = std::move(remote);
+    ServiceLocator::registerDataSource(m_dataSource.get());
     
     // 2) Create dock widgets via DockFactory
     setupUI();

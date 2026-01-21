@@ -1,5 +1,80 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
+#include <algorithm>
+#include <QProcessEnvironment>
+
+namespace {
+double getOrderBookTickSize() {
+    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
+    bool ok = false;
+    const double envTick = tickEnv.toDouble(&ok);
+    if (ok && envTick > 0.0) {
+        return envTick;
+    }
+    return 0.10;
+}
+
+double getOrderBookBandPct() {
+    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
+    bool ok = false;
+    const double envBand = bandEnv.toDouble(&ok);
+    if (ok && envBand > 0.0) {
+        return envBand;
+    }
+    return 0.30;
+}
+
+std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
+                                           const std::vector<OrderBookLevel>& asks,
+                                           double bandPct) {
+    double bestBid = 0.0;
+    double bestAsk = 0.0;
+    double minPrice = 0.0;
+    double maxPrice = 0.0;
+    bool hasPrice = false;
+
+    for (const auto& level : bids) {
+        if (level.price > bestBid) {
+            bestBid = level.price;
+        }
+        if (!hasPrice) {
+            minPrice = level.price;
+            maxPrice = level.price;
+            hasPrice = true;
+        } else {
+            minPrice = std::min(minPrice, level.price);
+            maxPrice = std::max(maxPrice, level.price);
+        }
+    }
+
+    for (const auto& level : asks) {
+        if (bestAsk <= 0.0 || level.price < bestAsk) {
+            bestAsk = level.price;
+        }
+        if (!hasPrice) {
+            minPrice = level.price;
+            maxPrice = level.price;
+            hasPrice = true;
+        } else {
+            minPrice = std::min(minPrice, level.price);
+            maxPrice = std::max(maxPrice, level.price);
+        }
+    }
+
+    if (bestBid > 0.0 && bestAsk > 0.0) {
+        const double mid = (bestBid + bestAsk) * 0.5;
+        const double halfRange = mid * bandPct;
+        return {mid - halfRange, mid + halfRange};
+    }
+
+    if (hasPrice && maxPrice > minPrice) {
+        const double pad = std::max(1e-6, (maxPrice - minPrice) * 0.10);
+        return {std::max(0.0, minPrice - pad), maxPrice + pad};
+    }
+
+    return {0.0, 1.0};
+}
+}
 
 RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& port, QObject* parent)
     : IGridDataSource(parent)
@@ -23,17 +98,10 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
     
-    // Ensure we have a replica ready - but we should wait for snapshot to initialize properly
-    // However, create it so we don't return null ref
+    // Ensure we have a replica ready - initialize on snapshot for authoritative range.
     std::string s = symbol.toStdString();
     if (m_replicaBooks.find(s) == m_replicaBooks.end()) {
         m_replicaBooks.emplace(s, std::make_unique<LiveOrderBook>(s));
-        // Default init to avoid crashes if accessed before snapshot
-        if (s == "BTC-USD") {
-            m_replicaBooks[s]->initialize(75000.0, 125000.0, 0.01);
-        } else {
-            m_replicaBooks[s]->initialize(75000.0, 125000.0, 0.01);
-        }
     }
 }
 
@@ -61,13 +129,11 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     
     auto& book = *m_replicaBooks[symbol];
     
-    // Re-initialize (clears data)
-    // TODO: Protocol should transmit these params!
-    if (symbol == "BTC-USD") {
-        book.initialize(75000.0, 125000.0, 0.01);
-    } else {
-        book.initialize(75000.0, 125000.0, 0.01);
-    }
+    // Re-initialize (clears data) using banded range around best bid/ask.
+    const double tickSize = getOrderBookTickSize();
+    const double bandPct = getOrderBookBandPct();
+    const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
+    book.initialize(minPrice, maxPrice, tickSize);
     
     std::vector<BookLevelUpdate> updates;
     updates.reserve(bids.size() + asks.size());

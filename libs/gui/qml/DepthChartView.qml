@@ -417,6 +417,11 @@ Rectangle {
             target: unifiedGridRenderer
             maxVolumeRange: root.maxVolumeRange
         }
+
+        LiquidityThresholdFilter {
+            target: unifiedGridRenderer
+            maxLiquidityRange: root.maxVolumeRange
+        }
         
         GridResolutionSelector {
             target: unifiedGridRenderer

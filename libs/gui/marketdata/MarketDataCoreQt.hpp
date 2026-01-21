@@ -10,7 +10,7 @@ class MarketDataCoreQt : public QObject {
     Q_OBJECT
 
 public:
-    MarketDataCoreQt(Authenticator& auth, DataCache& cache, QObject* parent = nullptr);
+    explicit MarketDataCoreQt(Authenticator& auth, QObject* parent = nullptr);
     ~MarketDataCoreQt() override;
 
     void start();
@@ -21,7 +21,6 @@ public:
 
 signals:
     void tradeReceived(const Trade& trade);
-    void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void liveOrderBookLevelUpdates(const QString& productId,
                                    const std::vector<BookLevelUpdate>& updates,
                                    qint64 exchangeMs);

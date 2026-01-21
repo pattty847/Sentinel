@@ -23,16 +23,13 @@ bool SentinelServerApp::initialize() {
         // 1. Authenticator
         m_authenticator = std::make_unique<Authenticator>();
         
-        // 2. Data Cache
-        m_dataCache = std::make_unique<DataCache>();
-
-        // 3. Market Data Core
-        m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, *m_dataCache);
+        // 2. Market Data Core
+        m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator);
         
-        // 4. Server Data Model
+        // 3. Server Data Model
         m_serverModel = std::make_unique<ServerDataModel>();
 
-        // 5. Stream Server
+        // 4. Stream Server
         m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, 8080);
         m_server->start();
         

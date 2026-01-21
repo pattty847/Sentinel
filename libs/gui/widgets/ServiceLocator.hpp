@@ -4,11 +4,11 @@
 
 // Forward declarations
 class MarketDataCoreQt;
-class DataCache;
+class IGridDataSource;
 
 /**
  * Lightweight service locator for shared services.
- * Uses raw pointers since DataCache is not a QObject.
+ * Uses raw pointers; ownership is managed elsewhere (MainWindowGPU).
  * 
  * Future evolution: Can be extended with signals for service registration/unregistration
  * for MarketDataCoreQt (which is a QObject) to support hot-reload scenarios.
@@ -21,9 +21,9 @@ public:
     static void registerMarketDataCore(MarketDataCoreQt* core);
     
     /**
-     * Register the DataCache service.
+     * Register the DataSource service.
      */
-    static void registerDataCache(DataCache* cache);
+    static void registerDataSource(IGridDataSource* source);
     
     /**
      * Get the registered MarketDataCoreQt instance.
@@ -32,13 +32,13 @@ public:
     static MarketDataCoreQt* marketDataCore();
     
     /**
-     * Get the registered DataCache instance.
+     * Get the registered DataSource instance.
      * Returns nullptr if not registered.
      */
-    static DataCache* dataCache();
+    static IGridDataSource* dataSource();
 
 private:
     static QPointer<MarketDataCoreQt> s_marketDataCore;  // QPointer for QObject
-    static DataCache* s_dataCache;  // Raw pointer for non-QObject
+    static IGridDataSource* s_dataSource;  // Raw pointer for non-QObject
 };
 

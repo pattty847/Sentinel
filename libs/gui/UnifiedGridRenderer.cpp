@@ -28,6 +28,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <cmath>
 // #include <algorithm>
 #include <algorithm>
+#include <cmath>
 // #include <cmath>
 
 // New modular architecture includes
@@ -277,6 +278,17 @@ void UnifiedGridRenderer::setLiquidityLabelMode(int mode) {
     emit liquidityLabelModeChanged();
 }
 
+void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
+    const double clamped = std::max(0.0, threshold);
+    if (std::abs(m_heatmapLiquidityThreshold - clamped) < 1e-9) {
+        return;
+    }
+    m_heatmapLiquidityThreshold = clamped;
+    m_heatmapLabelDirty = true;
+    update();
+    emit heatmapLiquidityThresholdChanged();
+}
+
 void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); update(); } }
@@ -404,6 +416,7 @@ void UnifiedGridRenderer::init() {
                     m_heatmapLiquidityAvailable = false;
                     {
                         std::lock_guard<std::mutex> lock(m_heatmapLiquidityMutex);
+                        m_heatmapIntensityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
                         m_heatmapLiquidityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
                         m_heatmapLiquidityScales.assign(m_heatmapGridSize, 1.0);
                     }
@@ -473,9 +486,30 @@ void UnifiedGridRenderer::init() {
 
                 const int expectedLiquidityBytes = m_heatmapGridSize * static_cast<int>(sizeof(uint16_t));
                 const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
+                QByteArray intensityColumn = column;
+                if (m_heatmapLiquidityThreshold > 0.0 && haveLiquidityColumn && liquidityScale > 0.0 &&
+                    intensityColumn.size() == m_heatmapGridSize) {
+                    const auto* raw = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
+                    const double threshold = m_heatmapLiquidityThreshold;
+                    for (int y = 0; y < m_heatmapGridSize; ++y) {
+                        const uint16_t packed = qFromLittleEndian(raw[y]);
+                        if (packed == 0) {
+                            intensityColumn[y] = 0;
+                            continue;
+                        }
+                        double value = static_cast<double>(packed) * liquidityScale;
+                        if (m_liquidityLabelMode != 0) {
+                            const double price = maxPrice - (static_cast<double>(y) * tickSize);
+                            value *= price;
+                        }
+                        if (value < threshold) {
+                            intensityColumn[y] = 0;
+                        }
+                    }
+                }
                 QByteArray fillColumn;
                 if (!m_heatmapHaveLastColumn) {
-                    fillColumn = QByteArray(column.size(), 0);
+                    fillColumn = QByteArray(intensityColumn.size(), 0);
                 } else {
                     fillColumn = m_heatmapLastColumnData;
                 }
@@ -497,17 +531,26 @@ void UnifiedGridRenderer::init() {
                     }
 
                     m_heatmapWriteColumn = (m_heatmapWriteColumn + 1) % m_heatmapGridSize;
-                    m_heatmapPendingColumns.push_back({m_heatmapWriteColumn, column});
+                    m_heatmapPendingColumns.push_back({m_heatmapWriteColumn, intensityColumn});
                 }
 
                 if (expectedLiquidityBytes > 0) {
                     std::lock_guard<std::mutex> lock(m_heatmapLiquidityMutex);
+                    if (m_heatmapIntensityRing.size() != static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize) {
+                        m_heatmapIntensityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
+                    }
                     if (m_heatmapLiquidityRing.size() != static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize) {
                         m_heatmapLiquidityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
                         m_heatmapLiquidityScales.assign(m_heatmapGridSize, 1.0);
                     }
                     for (int i = 0; i < step - 1; ++i) {
                         const int columnIndex = (m_heatmapWriteColumn - (step - 1 - i) + m_heatmapGridSize) % m_heatmapGridSize;
+                        if (fillColumn.size() == m_heatmapGridSize) {
+                            const auto* src = reinterpret_cast<const uint8_t*>(fillColumn.constData());
+                            for (int y = 0; y < m_heatmapGridSize; ++y) {
+                                m_heatmapIntensityRing[static_cast<size_t>(y) * m_heatmapGridSize + columnIndex] = src[y];
+                            }
+                        }
                         if (fillLiquidityColumn.size() == expectedLiquidityBytes) {
                             const auto* src = reinterpret_cast<const uint16_t*>(fillLiquidityColumn.constData());
                             for (int y = 0; y < m_heatmapGridSize; ++y) {
@@ -515,6 +558,12 @@ void UnifiedGridRenderer::init() {
                                 m_heatmapLiquidityRing[static_cast<size_t>(y) * m_heatmapGridSize + columnIndex] = raw;
                             }
                             m_heatmapLiquidityScales[columnIndex] = fillLiquidityScale;
+                        }
+                    }
+                    if (intensityColumn.size() == m_heatmapGridSize) {
+                        const auto* src = reinterpret_cast<const uint8_t*>(intensityColumn.constData());
+                        for (int y = 0; y < m_heatmapGridSize; ++y) {
+                            m_heatmapIntensityRing[static_cast<size_t>(y) * m_heatmapGridSize + m_heatmapWriteColumn] = src[y];
                         }
                     }
                     if (haveLiquidityColumn) {
@@ -541,7 +590,7 @@ void UnifiedGridRenderer::init() {
                     }
                 }
                 m_heatmapLastSliceStartMs = sliceStartMs;
-                m_heatmapLastColumnData = column;
+                m_heatmapLastColumnData = intensityColumn;
                 m_heatmapHaveLastColumn = true;
                 m_heatmapLabelDirty = true;
 
@@ -639,6 +688,7 @@ void UnifiedGridRenderer::init() {
                 m_heatmapLiquidityAvailable = false;
                 {
                     std::lock_guard<std::mutex> lock(m_heatmapLiquidityMutex);
+                    m_heatmapIntensityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
                     m_heatmapLiquidityRing.assign(static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize, 0);
                     m_heatmapLiquidityScales.assign(m_heatmapGridSize, 1.0);
                 }
@@ -663,7 +713,6 @@ void UnifiedGridRenderer::init() {
         m_viewState->setViewportSize(width(), height());
     }
 
-    // Dependencies will be set later when setDataCache() is called
     // Set ViewState immediately as it's available
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
         m_dataProcessor->setGridViewState(m_viewState.get());
@@ -913,11 +962,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                     const float timeOffset = forceFull ? 0.0f : m_heatmapTimeOffset.load();
                     const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridSize);
                     const int startX = static_cast<int>(std::floor(baseX));
-                    const float fracX = baseX - static_cast<float>(startX);
-
                     const float baseY = static_cast<float>(srcRect.y());
                     const int startY = static_cast<int>(std::floor(baseY));
-                    const float fracY = baseY - static_cast<float>(startY);
 
                     const float rawFontPx = std::clamp(minCell * 0.45f, 8.0f, 28.0f);
                     const int fontBucket = quantizeFontPx(rawFontPx);
@@ -940,11 +986,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
                     auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(texNode->firstChild());
                     if (window()) {
-                        if (!labelNode) {
-                            labelNode = new QSGSimpleTextureNode();
-                            texNode->appendChildNode(labelNode);
-                        }
-
                         if (m_heatmapLabelDirty) {
                             HeatmapLabelRequest request;
                             request.srcRect = srcRect;
@@ -973,8 +1014,15 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                                 labelImage = m_heatmapLabelImage;
                                 m_heatmapLabelActiveStartX = m_heatmapLabelBuiltStartX;
                                 m_heatmapLabelActiveStartY = m_heatmapLabelBuiltStartY;
+                                m_heatmapLabelActivePixelSize = m_heatmapLabelBuiltPixelSize;
+                                m_heatmapLabelActiveSourceSize = m_heatmapLabelBuiltSourceSize;
+                                m_heatmapLabelActiveFontBucket = m_heatmapLabelBuiltFontBucket;
                             }
                             if (!labelImage.isNull()) {
+                                if (!labelNode) {
+                                    labelNode = new QSGSimpleTextureNode();
+                                    texNode->appendChildNode(labelNode);
+                                }
                                 auto* labelTex = window()->createTextureFromImage(labelImage);
                                 labelTex->setFiltering(QSGTexture::Nearest);
                                 labelNode->setTexture(labelTex);
@@ -984,15 +1032,22 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                         }
 
                         if (labelNode && labelNode->texture()) {
+                            const bool labelMatches = (m_heatmapLabelActivePixelSize == labelSize) &&
+                                (m_heatmapLabelActiveSourceSize == srcRect.size()) &&
+                                (m_heatmapLabelActiveFontBucket == fontBucket);
                             const QSize texSize = labelNode->texture()->textureSize();
                             const float deltaX = baseX - static_cast<float>(m_heatmapLabelActiveStartX);
                             const float deltaY = baseY - static_cast<float>(m_heatmapLabelActiveStartY);
                             const float shiftPx = deltaX * cellW;
                             const float shiftPy = deltaY * cellH;
-                            labelNode->setRect(QRectF(drawRect.x() - shiftPx,
-                                                      drawRect.y() - shiftPy,
-                                                      texSize.width(),
-                                                      texSize.height()));
+                            if (labelMatches) {
+                                labelNode->setRect(QRectF(drawRect.x() - shiftPx,
+                                                          drawRect.y() - shiftPy,
+                                                          texSize.width(),
+                                                          texSize.height()));
+                            } else {
+                                labelNode->setRect(QRectF());
+                            }
                         }
                     }
                 } else {
@@ -1069,17 +1124,30 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
     }
 
     auto* row = reinterpret_cast<QRgb*>(m_heatmapPaletteImage.scanLine(0));
+    const float gamma = 0.65f;
     for (int i = 0; i < width; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(width - 1);
         const bool isAsk = (i >= width / 2);
         const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
-        const float boost = std::pow(std::clamp(localT, 0.0f, 1.0f), 0.8f);
-        const int base = static_cast<int>(boost * 255.0f);
-        // Bids (first half): GREEN, Asks (second half): RED
-        const int r = isAsk ? base : static_cast<int>(base * 0.2f);
-        const int g = isAsk ? static_cast<int>(base * 0.2f) : base;
-        const int b = static_cast<int>(base * 0.25f);
-        row[i] = qRgba(r, g, b, 255);
+        const float x = std::clamp(localT, 0.0f, 1.0f);
+        const float curve = std::pow(x, gamma);
+
+        // Base hues: bids = teal/green, asks = red/orange.
+        const int r0 = isAsk ? 255 : 18;
+        const int g0 = isAsk ? 64 : 255;
+        const int b0 = isAsk ? 32 : 160;
+
+        const int r1 = isAsk ? 255 : 180;
+        const int g1 = isAsk ? 200 : 255;
+        const int b1 = isAsk ? 120 : 220;
+
+        const int r = static_cast<int>(r0 + (r1 - r0) * curve);
+        const int g = static_cast<int>(g0 + (g1 - g0) * curve);
+        const int b = static_cast<int>(b0 + (b1 - b0) * curve);
+        row[i] = qRgba(std::clamp(r, 0, 255),
+                       std::clamp(g, 0, 255),
+                       std::clamp(b, 0, 255),
+                       255);
     }
 }
 
@@ -1179,7 +1247,8 @@ void UnifiedGridRenderer::buildHeatmapLabelImage() {
     font.setStyleHint(QFont::TypeWriter);
     font.setPixelSize(request.fontPx);
     painter.setFont(font);
-    painter.setPen(QColor(255, 255, 255, 230));
+    const QColor askColor(255, 255, 255, 230);
+    const QColor bidColor(0, 0, 0, 210);
 
     const int cellsX = static_cast<int>(std::ceil(request.srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(request.srcRect.height()));
@@ -1190,6 +1259,7 @@ void UnifiedGridRenderer::buildHeatmapLabelImage() {
         if (m_heatmapLiquidityRing.size() != static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize) {
             return;
         }
+        const bool haveIntensity = (m_heatmapIntensityRing.size() == static_cast<size_t>(m_heatmapGridSize) * m_heatmapGridSize);
         for (int j = 0; j < cellsY; ++j) {
             int texY = request.startY + j;
             if (texY < 0) {
@@ -1209,9 +1279,26 @@ void UnifiedGridRenderer::buildHeatmapLabelImage() {
                 if (texX < 0 || texX >= m_heatmapGridSize) {
                     continue;
                 }
-                const uint16_t raw = m_heatmapLiquidityRing[static_cast<size_t>(texY) * m_heatmapGridSize + texX];
+                if (haveIntensity) {
+                    const uint8_t encoded = m_heatmapIntensityRing[static_cast<size_t>(texY) * m_heatmapGridSize + texX];
+                    if (encoded == 0) {
+                        continue;
+                    }
+                }
+                const size_t ringIndex = static_cast<size_t>(texY) * m_heatmapGridSize + texX;
+                const uint16_t raw = m_heatmapLiquidityRing[ringIndex];
                 if (raw == 0) {
                     continue;
+                }
+                if (haveIntensity) {
+                    const uint8_t encoded = m_heatmapIntensityRing[ringIndex];
+                    if (encoded >= 128) {
+                        painter.setPen(askColor);
+                    } else {
+                        painter.setPen(bidColor);
+                    }
+                } else {
+                    painter.setPen(askColor);
                 }
                 const double scale = (m_heatmapLiquidityScales.size() == static_cast<size_t>(m_heatmapGridSize))
                     ? std::max(1e-12, m_heatmapLiquidityScales[texX])
@@ -1239,6 +1326,9 @@ void UnifiedGridRenderer::buildHeatmapLabelImage() {
         m_heatmapLabelImage = labelImage;
         m_heatmapLabelBuiltStartX = request.startX;
         m_heatmapLabelBuiltStartY = request.startY;
+        m_heatmapLabelBuiltPixelSize = request.labelSize;
+        m_heatmapLabelBuiltSourceSize = request.srcRect.size();
+        m_heatmapLabelBuiltFontBucket = request.fontBucket;
     }
     m_heatmapLabelVersion.fetch_add(1);
     update();

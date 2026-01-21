@@ -2,13 +2,13 @@
 /*
 Sentinel — MarketDataCoreEngine
 Role: Owns the WebSocket connection and I/O thread, handling all network operations.
-Inputs/Outputs: Takes product IDs, an Authenticator, and a DataCache; emits parsed data via callbacks.
+Inputs/Outputs: Takes product IDs and an Authenticator; emits parsed data via callbacks.
 Threading: Runs a Boost.Asio io_context on a dedicated worker thread, using a strand for safety.
 Performance: High-throughput design using asynchronous I/O for non-blocking operations.
 Integration: Core engine used by GUI adapters and server/CLI apps.
 Observability: Emits connection status and errors via callbacks.
-Related: MarketDataCoreEngine.cpp, DataCache.hpp, Authenticator.hpp.
-Assumptions: The provided Authenticator and DataCache instances will outlive this object.
+Related: MarketDataCoreEngine.cpp, Authenticator.hpp.
+Assumptions: The provided Authenticator instance will outlive this object.
 */
 #include <memory>
 #include <boost/beast/core.hpp>
@@ -28,8 +28,6 @@ Assumptions: The provided Authenticator and DataCache instances will outlive thi
 #include <string>
 #include <vector>
 #include "auth/Authenticator.hpp"
-#include "cache/DataCache.hpp"
-#include "sinks/DataCacheSinkAdapter.hpp"
 #include "ws/SubscriptionManager.hpp"
 #include "ws/BeastWsTransport.hpp"
 #include "model/TradeData.h"
@@ -41,7 +39,6 @@ using tcp = net::ip::tcp;
 class MarketDataCoreEngine {
 public:
     using TradeCb = std::function<void(const Trade&)>;
-    using OrderBookUpdatedCb = std::function<void(const std::string&, const std::vector<BookDelta>&)>;
     using OrderBookLevelUpdatesCb = std::function<void(const std::string&,
                                                        const std::vector<BookLevelUpdate>&,
                                                        int64_t exchangeMs)>;
@@ -51,8 +48,7 @@ public:
     using ConnectionStatusCb = std::function<void(bool)>;
     using ErrorCb = std::function<void(const std::string&)>;
 
-    MarketDataCoreEngine(Authenticator& auth,
-                         DataCache& cache);
+    explicit MarketDataCoreEngine(Authenticator& auth);
 
     ~MarketDataCoreEngine();
     void start();
@@ -70,7 +66,6 @@ public:
 
     // Callback registration (set before start; not thread-safe to mutate while running)
     void onTrade(TradeCb cb) { m_onTrade = std::move(cb); }
-    void onLiveOrderBookUpdated(OrderBookUpdatedCb cb) { m_onLiveOrderBookUpdated = std::move(cb); }
     void onLiveOrderBookLevelUpdates(OrderBookLevelUpdatesCb cb) { m_onLiveOrderBookLevelUpdates = std::move(cb); }
     void onLiveOrderBookInitialized(OrderBookInitializedCb cb) { m_onLiveOrderBookInitialized = std::move(cb); }
     void onConnectionStatus(ConnectionStatusCb cb) { m_onConnectionStatus = std::move(cb); }
@@ -123,8 +118,6 @@ private:
     std::vector<std::string>        m_products;
 
     Authenticator&                  m_auth;
-    DataCache&                      m_cache;
-    DataCacheSinkAdapter            m_sink{m_cache};
     SubscriptionManager             m_subscriptions;
 
     net::io_context                 m_ioc;
@@ -151,7 +144,6 @@ private:
     // Transport-level serialization keeps cross-thread access safe
 
     TradeCb                          m_onTrade;
-    OrderBookUpdatedCb               m_onLiveOrderBookUpdated;
     OrderBookLevelUpdatesCb          m_onLiveOrderBookLevelUpdates;
     OrderBookInitializedCb           m_onLiveOrderBookInitialized;
     ConnectionStatusCb               m_onConnectionStatus;

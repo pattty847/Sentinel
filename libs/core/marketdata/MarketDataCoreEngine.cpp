@@ -1,13 +1,13 @@
 /*
 Sentinel — MarketDataCoreEngine
 Role: Manages the primary WebSocket connection for real-time market data streams.
-Inputs/Outputs: Ingests JSON from WebSocket; produces Trade/OrderBook data for DataCache.
+Inputs/Outputs: Ingests JSON from WebSocket; produces Trade/OrderBook data for callbacks.
 Threading: Runs network I/O on a dedicated worker thread; emits callbacks from I/O thread.
 Performance: Hot path is message parsing; uses fast string conversion and throttled logging.
 Integration: Instantiated by Qt adapters or server/CLI apps.
 Observability: Logs connection lifecycle and errors via SentinelLogging; data path logging is throttled.
-Related: MarketDataCoreEngine.hpp, DataCache.hpp, Authenticator.hpp, TradeData.h.
-Assumptions: Authenticator and DataCache instances outlive this object; API is Coinbase-like.
+Related: MarketDataCoreEngine.hpp, Authenticator.hpp, TradeData.h.
+Assumptions: Authenticator instance outlives this object; API is Coinbase-like.
 */
 #include "MarketDataCoreEngine.hpp"
 #include "SentinelLogging.hpp"
@@ -31,10 +31,8 @@ namespace {
     static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
 }
 
-MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth,
-                                           DataCache& cache)
+MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth)
     : m_auth(auth)
-    , m_cache(cache)
 {
     // Configure SSL context
     // Prefer explicit CA bundle via env var for Windows/OpenSSL setups where
@@ -381,9 +379,6 @@ void MarketDataCoreEngine::processTrades(const nlohmann::json& trades,
     for (const auto& trade_data : trades) {
         Trade trade = createTradeFromJson(trade_data, arrival_time);
         
-        // Store through sink adapter
-        m_sink.onTrade(trade);
-        
         // Record trade processed for throughput tracking
         m_tradeLogCount++;
         
@@ -466,8 +461,6 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
                                                    const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
 
-    const bool useCacheBook = !isServerModeEnabled();
-    
     // SNAPSHOT: Initialize complete order book state
     std::vector<OrderBookLevel> sparse_bids;
     std::vector<OrderBookLevel> sparse_asks;
@@ -492,11 +485,6 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         }
     }
     
-    // Initialize the live order book with the sparse snapshot data (client/monolith only)
-    if (useCacheBook) {
-        m_cache.initializeLiveOrderBook(product_id, sparse_bids, sparse_asks, exchange_timestamp);
-    }
-
     // Broadcast snapshot initialization to listeners (like ServerDataModel)
     // We need to pass by value/copy to cross threads safely
     if (m_onLiveOrderBookInitialized) {
@@ -517,8 +505,6 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
                                                  const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
 
-    const bool useCacheBook = !isServerModeEnabled();
-    
     // UPDATE: Apply incremental changes to stateful order book
     thread_local std::vector<BookLevelUpdate> levelUpdates;
     levelUpdates.clear();
@@ -545,29 +531,7 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
         levelUpdates.push_back(BookLevelUpdate{isBid, price, quantity});
     }
 
-    thread_local std::vector<BookDelta> deltas;
-    if (useCacheBook && !levelUpdates.empty()) {
-        m_cache.applyLiveOrderBookUpdates(product_id,
-                                          std::span<const BookLevelUpdate>(levelUpdates.data(), levelUpdates.size()),
-                                          exchange_timestamp,
-                                          deltas);
-    } else {
-        deltas.clear();
-    }
-    const int updateCount = static_cast<int>(deltas.size());
-    
-    // Direct dense-only signal - NO CONVERSION!
-    if (useCacheBook) {
-        std::vector<BookDelta> deltasPayload(deltas.begin(), deltas.end());
-        deltas.clear();
-        if (m_onLiveOrderBookUpdated) {
-            try {
-                m_onLiveOrderBookUpdated(product_id, deltasPayload);
-            } catch (const std::exception& e) {
-                sLog_Error(std::string("Order book updated callback exception: ") + e.what());
-            }
-        }
-    } else if (!levelUpdates.empty()) {
+    if (!levelUpdates.empty()) {
         const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             exchange_timestamp.time_since_epoch()).count();
         std::vector<BookLevelUpdate> updatesPayload(levelUpdates.begin(), levelUpdates.end());
@@ -578,17 +542,6 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
                 sLog_Error(std::string("Order book level updates callback exception: ") + e.what());
             }
         }
-    }
-    
-    // Record order book update metrics
-    if (useCacheBook) {
-        const auto& liveBook = m_cache.getDirectLiveOrderBook(product_id);
-        size_t bidCount = liveBook.getBidCount();
-        size_t askCount = liveBook.getAskCount();
-
-        std::string logMessage = Cpp20Utils::formatOrderBookLog(
-            product_id, bidCount, askCount, updateCount);
-        sLog_Data(logMessage);
     }
 }
 

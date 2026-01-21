@@ -2,12 +2,10 @@
 #include <QMetaObject>
 #include <QMetaType>
 
-MarketDataCoreQt::MarketDataCoreQt(Authenticator& auth, DataCache& cache, QObject* parent)
+MarketDataCoreQt::MarketDataCoreQt(Authenticator& auth, QObject* parent)
     : QObject(parent)
-    , m_core(auth, cache)
+    , m_core(auth)
 {
-    qRegisterMetaType<BookDelta>("BookDelta");
-    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
 
@@ -43,17 +41,6 @@ void MarketDataCoreQt::wireCallbacks() {
         QMetaObject::invokeMethod(self.data(), [self, tradeCopy]() mutable {
             if (!self) return;
             emit self->tradeReceived(tradeCopy);
-        }, Qt::QueuedConnection);
-    });
-
-    m_core.onLiveOrderBookUpdated([self](const std::string& productId,
-                                         const std::vector<BookDelta>& deltas) {
-        if (!self) return;
-        QString productIdQ = QString::fromStdString(productId);
-        std::vector<BookDelta> deltasCopy = deltas;
-        QMetaObject::invokeMethod(self.data(), [self, productIdQ, deltasCopy = std::move(deltasCopy)]() mutable {
-            if (!self) return;
-            emit self->liveOrderBookUpdated(productIdQ, deltasCopy);
         }, Qt::QueuedConnection);
     });
 

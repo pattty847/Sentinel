@@ -17,7 +17,6 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "../datasources/IGridDataSource.hpp"
 
 class GridViewState;
-// class DataCache; // Removed
 
 class DataProcessor : public QObject {
     Q_OBJECT

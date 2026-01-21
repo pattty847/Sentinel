@@ -1,6 +1,5 @@
 #include "HeatmapTwapStreamer.hpp"
 #include "ServerDataModel.hpp"
-#include "../marketdata/cache/DataCache.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
 #include <QProcessEnvironment>
@@ -41,6 +40,34 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
     if (ok && envTf > 0) {
         m_activeTimeframeMs = envTf;
     }
+
+    const QByteArray deltaEnv = qgetenv("SENTINEL_HEATMAP_RECENTER_DELTA");
+    ok = false;
+    const double envDelta = deltaEnv.toDouble(&ok);
+    if (ok && envDelta > 0.0) {
+        m_recenterDelta = envDelta;
+    }
+
+    const QByteArray bandFastEnv = qgetenv("SENTINEL_HEATMAP_BAND_FAST");
+    ok = false;
+    const double bandFast = bandFastEnv.toDouble(&ok);
+    if (ok && bandFast > 0.0) {
+        m_bandFast = bandFast;
+    }
+
+    const QByteArray bandMedEnv = qgetenv("SENTINEL_HEATMAP_BAND_MED");
+    ok = false;
+    const double bandMed = bandMedEnv.toDouble(&ok);
+    if (ok && bandMed > 0.0) {
+        m_bandMedium = bandMed;
+    }
+
+    const QByteArray bandSlowEnv = qgetenv("SENTINEL_HEATMAP_BAND_SLOW");
+    ok = false;
+    const double bandSlow = bandSlowEnv.toDouble(&ok);
+    if (ok && bandSlow > 0.0) {
+        m_bandSlow = bandSlow;
+    }
 }
 
 void HeatmapTwapStreamer::start() {
@@ -60,18 +87,6 @@ int64_t HeatmapTwapStreamer::alignBucketStart(int64_t nowMs, int64_t timeframeMs
 }
 
 void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolState& state, double midPrice) {
-    if (state.initialized && state.lastMidPrice > 0.0) {
-        const double range = state.maxPrice - state.minPrice;
-        if (range > 0.0) {
-            const double edge = range * m_recenterEdgeFraction;
-            if (midPrice > 0.0 &&
-                (midPrice < (state.minPrice + edge) || midPrice > (state.maxPrice - edge))) {
-                state.pendingReset = true;
-                state.initialized = false;
-            }
-        }
-    }
-
     if (state.initialized) {
         return;
     }
@@ -81,11 +96,22 @@ void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolSta
     state.rowValuesBid.assign(static_cast<size_t>(state.height), 0.0);
     state.rowValuesAsk.assign(static_cast<size_t>(state.height), 0.0);
 
-    const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
-    const double center = (midPrice > 0.0) ? midPrice : state.lastMidPrice;
-    state.minPrice = center - (rangeSpan * 0.5);
-    state.maxPrice = state.minPrice + rangeSpan;
-    state.lastMidPrice = center;
+    const int64_t bandTf = (m_activeTimeframeMs > 0)
+        ? m_activeTimeframeMs
+        : (m_timeframesMs.empty() ? 1000 : m_timeframesMs.front());
+    const double center = (midPrice > 0.0) ? midPrice : state.lastRecenterMid;
+    if (center > 0.0) {
+        const double bandPct = bandForTimeframe(bandTf);
+        const double rangeSpan = center * bandPct * 2.0;
+        state.tickSize = (rangeSpan > 0.0) ? (rangeSpan / static_cast<double>(state.height)) : state.tickSize;
+        state.minPrice = center - (rangeSpan * 0.5);
+        state.maxPrice = center + (rangeSpan * 0.5);
+        state.lastRecenterMid = center;
+    } else {
+        const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
+        state.minPrice = 0.0;
+        state.maxPrice = state.minPrice + rangeSpan;
+    }
 
     state.frames.clear();
     state.frames.reserve(m_timeframesMs.size());
@@ -103,6 +129,34 @@ void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolSta
     }
 
     state.initialized = true;
+}
+
+double HeatmapTwapStreamer::bandForTimeframe(int64_t timeframeMs) const {
+    if (timeframeMs <= 1000) {
+        return m_bandFast;
+    }
+    if (timeframeMs <= 60000) {
+        return m_bandMedium;
+    }
+    return m_bandSlow;
+}
+
+void HeatmapTwapStreamer::applyBandRange(SymbolState& state, double midPrice, int64_t timeframeMs) {
+    if (midPrice <= 0.0 || state.height <= 0) {
+        return;
+    }
+    const double bandPct = bandForTimeframe(timeframeMs);
+    const double rangeSpan = midPrice * bandPct * 2.0;
+    if (rangeSpan <= 0.0) {
+        return;
+    }
+    state.tickSize = rangeSpan / static_cast<double>(state.height);
+    if (state.tickSize <= 0.0) {
+        return;
+    }
+    state.minPrice = midPrice - (rangeSpan * 0.5);
+    state.maxPrice = midPrice + (rangeSpan * 0.5);
+    state.lastRecenterMid = midPrice;
 }
 
 void HeatmapTwapStreamer::onSample() {
@@ -141,6 +195,13 @@ void HeatmapTwapStreamer::onSample() {
         }
         if (midPrice > 0.0) {
             state.lastMidPrice = midPrice;
+        }
+
+        if (state.initialized && midPrice > 0.0 && state.lastRecenterMid > 0.0) {
+            const double deltaPct = std::abs(midPrice - state.lastRecenterMid) / state.lastRecenterMid;
+            if (deltaPct >= m_recenterDelta) {
+                state.pendingReset = true;
+            }
         }
 
         accumulateForSymbol(symbol, state, nowMs, midPrice, lastTrade);
@@ -192,7 +253,7 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
 
             t0 = segmentEnd;
             if (segmentEnd >= frame.bucketEndMs) {
-                finalizeBucket(symbol, state, frame, lastTrade);
+                finalizeBucket(symbol, state, frame, lastTrade, midPrice);
                 frame.bucketStartMs = frame.bucketEndMs;
                 frame.bucketEndMs = frame.bucketStartMs + frame.timeframeMs;
                 std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
@@ -209,7 +270,8 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
 void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                                          SymbolState& state,
                                          TimeframeState& frame,
-                                         double lastTrade) {
+                                         double lastTrade,
+                                         double midPrice) {
     if (frame.timeframeMs <= 0) {
         return;
     }
@@ -225,8 +287,12 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     const QByteArray column = toIntensityColumnSigned(twapBid, twapAsk);
     double liquidityScale = 1.0;
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
-    const bool reset = false;
-    state.pendingReset = false;
+    bool reset = false;
+    if (state.pendingReset && midPrice > 0.0) {
+        applyBandRange(state, midPrice, frame.timeframeMs);
+        reset = true;
+        state.pendingReset = false;
+    }
 
     static int logCount = 0;
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 10) == 0) {
@@ -255,6 +321,13 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
                                                         const std::vector<double>& askValues) const {
     if (bidValues.empty() || askValues.empty()) {
         return {};
+    }
+    double intensityFloor = 0.02;
+    const QByteArray floorEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_FLOOR");
+    bool ok = false;
+    const double floorOverride = floorEnv.toDouble(&ok);
+    if (ok && floorOverride >= 0.0 && floorOverride <= 1.0) {
+        intensityFloor = floorOverride;
     }
     double maxBid = 0.0;
     double maxAsk = 0.0;
@@ -292,8 +365,14 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
     out.resize(static_cast<int>(height));
     auto* dst = reinterpret_cast<unsigned char*>(out.data());
     for (size_t i = 0; i < height; ++i) {
-        const double bidNorm = std::clamp(bidValues[i] / denomBid, 0.0, 1.0);
-        const double askNorm = std::clamp(askValues[i] / denomAsk, 0.0, 1.0);
+        double bidNorm = std::clamp(bidValues[i] / denomBid, 0.0, 1.0);
+        double askNorm = std::clamp(askValues[i] / denomAsk, 0.0, 1.0);
+        if (bidNorm < intensityFloor) {
+            bidNorm = 0.0;
+        }
+        if (askNorm < intensityFloor) {
+            askNorm = 0.0;
+        }
         if (askNorm > 0.0) {
             dst[i] = static_cast<unsigned char>(128 + std::round(askNorm * 127.0));
         } else if (bidNorm > 0.0) {

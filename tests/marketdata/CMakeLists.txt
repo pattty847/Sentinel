@@ -32,28 +32,13 @@ target_link_libraries(test_subscription_manager PRIVATE
 add_test(NAME SubscriptionManagerTests COMMAND test_subscription_manager)
 set_tests_properties(SubscriptionManagerTests PROPERTIES LABELS "marketdata")
 
-# Test Target: test_datacache_sink_adapter
-add_executable(test_datacache_sink_adapter test_datacache_sink_adapter.cpp)
-target_include_directories(test_datacache_sink_adapter PRIVATE
-    ${CMAKE_SOURCE_DIR}/libs/core
-    ${CMAKE_SOURCE_DIR}/tests
-)
-target_link_libraries(test_datacache_sink_adapter PRIVATE
-    sentinel_core
-    GTest::gtest_main
-    Qt6::Core
-)
-add_test(NAME DataCacheSinkAdapterTests COMMAND test_datacache_sink_adapter)
-set_tests_properties(DataCacheSinkAdapterTests PROPERTIES LABELS "marketdata")
-
 # Custom target to run all marketdata tests
 add_custom_target(marketdata_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L marketdata
     DEPENDS
         test_message_dispatcher
         test_subscription_manager
-        test_datacache_sink_adapter
     COMMENT "Running market data refactor tests"
 )
 
-message(STATUS "Marketdata tests configured (3 test suites)")
+message(STATUS "Marketdata tests configured (2 test suites)")

@@ -46,6 +46,7 @@ private:
         double maxPrice = 0.0;
         double tickSize = 1.0;
         double lastMidPrice = 0.0;
+        double lastRecenterMid = 0.0;
         int height = 0;
         int64_t lastSampleMs = 0;
         bool initialized = false;
@@ -65,7 +66,8 @@ private:
     void finalizeBucket(const std::string& symbol,
                         SymbolState& state,
                         TimeframeState& frame,
-                        double lastTrade);
+                        double lastTrade,
+                        double midPrice);
     QByteArray toIntensityColumnSigned(const std::vector<double>& bidValues,
                                        const std::vector<double>& askValues) const;
     QByteArray toLiquidityColumn(const std::vector<double>& bidValues,
@@ -73,13 +75,17 @@ private:
                                  double& outScale) const;
 
     static int64_t alignBucketStart(int64_t nowMs, int64_t timeframeMs);
+    double bandForTimeframe(int64_t timeframeMs) const;
+    void applyBandRange(SymbolState& state, double midPrice, int64_t timeframeMs);
 
     ServerDataModel& m_model;
     QTimer m_timer;
     int m_sampleMs = 50;
 
-    double m_recenterFraction = 0.20;
-    double m_recenterEdgeFraction = 0.05;
+    double m_recenterDelta = 0.01;
+    double m_bandFast = 0.15;
+    double m_bandMedium = 0.25;
+    double m_bandSlow = 0.35;
 
     int m_defaultHeight = 2048;
     double m_defaultTickSize = 1.0;

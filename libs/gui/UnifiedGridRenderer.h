@@ -21,6 +21,8 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <QWheelEvent>
 #include <QElapsedTimer>
 #include <QByteArray>
+#include <QSizeF>
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -67,6 +69,7 @@ class UnifiedGridRenderer : public QQuickItem {
 
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
+    Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
 
 private:
     // Rendering configuration
@@ -83,6 +86,7 @@ private:
     bool m_showMemoryCacheOverlay = false;
     bool m_showModeFlagsOverlay = false;
     int m_liquidityLabelMode = 0;
+    double m_heatmapLiquidityThreshold = 0.0;
 
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
@@ -125,6 +129,7 @@ private:
     };
     mutable std::mutex m_heatmapUploadMutex;
     std::vector<HeatmapPendingColumn> m_heatmapPendingColumns;
+    std::vector<uint8_t> m_heatmapIntensityRing;
     std::vector<uint16_t> m_heatmapLiquidityRing;
     std::vector<double> m_heatmapLiquidityScales;
     QByteArray m_heatmapLastLiquidityColumn;
@@ -144,10 +149,16 @@ private:
     QImage m_heatmapLabelImage;
     std::atomic<int> m_heatmapLabelVersion{0};
     int m_heatmapLabelTextureVersion = -1;
+    QSize m_heatmapLabelActivePixelSize;
+    QSizeF m_heatmapLabelActiveSourceSize;
+    int m_heatmapLabelActiveFontBucket = 0;
     int m_heatmapLabelActiveStartX = 0;
     int m_heatmapLabelActiveStartY = 0;
     int m_heatmapLabelBuiltStartX = 0;
     int m_heatmapLabelBuiltStartY = 0;
+    QSize m_heatmapLabelBuiltPixelSize;
+    QSizeF m_heatmapLabelBuiltSourceSize;
+    int m_heatmapLabelBuiltFontBucket = 0;
     struct HeatmapLabelRequest {
         QRectF srcRect;
         QSize labelSize;
@@ -189,6 +200,7 @@ public:
     double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
+    double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
@@ -298,6 +310,7 @@ signals:
     void showMemoryCacheOverlayChanged();
     void showModeFlagsOverlayChanged();
     void liquidityLabelModeChanged();
+    void heatmapLiquidityThresholdChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -333,6 +346,7 @@ private:
     void setShowModeFlagsOverlay(bool show);
     void setAutoScrollPaddingFrac(double fraction);
     void setAutoScrollSmoothEnabled(bool enabled);
+    void setHeatmapLiquidityThreshold(double threshold);
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;

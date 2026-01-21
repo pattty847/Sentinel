@@ -8,12 +8,11 @@ add_library(sentinel_core
     marketdata/MarketDataCoreEngine.hpp
     marketdata/auth/Authenticator.cpp
     marketdata/auth/Authenticator.hpp
-    marketdata/cache/DataCache.cpp
-    marketdata/cache/DataCache.hpp
     marketdata/dispatch/MessageParser.hpp
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
+    marketdata/model/LiveOrderBook.cpp
     SentinelLogging.cpp
     SentinelLogging.hpp
     marketdata/model/TradeData.h

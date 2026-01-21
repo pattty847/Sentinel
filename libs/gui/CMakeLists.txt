@@ -76,6 +76,12 @@ qt6_add_qml_module(sentinel_gui_lib
     QML_FILES
         qml/DepthChartView.qml
         qml/CandleChartView.qml
+        qml/controls/VolumeFilter.qml
+        qml/controls/PriceResolutionSelector.qml
+        qml/controls/TimeframeSelector.qml
+        qml/controls/GridResolutionSelector.qml
+        qml/controls/NavigationControls.qml
+        qml/controls/LiquidityThresholdFilter.qml
 )
 
 qt_add_shaders(sentinel_gui_lib heatmap_shaders

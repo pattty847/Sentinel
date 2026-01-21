@@ -1,7 +1,6 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
-#include "../marketdata/MarketDataCoreQt.hpp"
-#include "../../core/marketdata/cache/DataCache.hpp"
+#include "../datasources/IGridDataSource.hpp"
 #include "../../../libs/core/SentinelLogging.hpp"
 #include <QGridLayout>
 #include <QFont>
@@ -137,16 +136,16 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
 
 void OrderBookDock::connectToMarketData()
 {
-    auto* marketDataCore = ServiceLocator::marketDataCore();
-    if (!marketDataCore) {
-        sLog_App("OrderBookDock: MarketDataCoreQt not available in ServiceLocator");
+    auto* dataSource = ServiceLocator::dataSource();
+    if (!dataSource) {
+        sLog_App("OrderBookDock: DataSource not available in ServiceLocator");
         return;
     }
-    connect(marketDataCore, &MarketDataCoreQt::liveOrderBookUpdated,
+    connect(dataSource, &IGridDataSource::liveOrderBookUpdated,
             this, &OrderBookDock::onOrderBookUpdated,
             Qt::QueuedConnection);
     
-    sLog_App("OrderBookDock: Connected to MarketDataCoreQt live order book updates");
+    sLog_App("OrderBookDock: Connected to DataSource live order book updates");
 }
 
 void OrderBookDock::onOrderBookUpdated(const QString& symbol,
@@ -158,13 +157,13 @@ void OrderBookDock::onOrderBookUpdated(const QString& symbol,
         return;  // Not our symbol
     }
     
-    auto* cache = ServiceLocator::dataCache();
-    if (!cache) {
-        sLog_App("OrderBookDock: DataCache not available for order book updates");
+    auto* dataSource = ServiceLocator::dataSource();
+    if (!dataSource) {
+        sLog_App("OrderBookDock: DataSource not available for order book updates");
         return;
     }
 
-    const LiveOrderBook& liveBook = cache->getDirectLiveOrderBook(symbol.toStdString());
+    const LiveOrderBook& liveBook = dataSource->getDirectLiveOrderBook(symbol.toStdString());
 
     std::vector<std::pair<uint32_t, double>> bidBuffer;
     std::vector<std::pair<uint32_t, double>> askBuffer;

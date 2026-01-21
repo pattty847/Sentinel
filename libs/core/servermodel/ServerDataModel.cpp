@@ -1,6 +1,7 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
 #include <QProcessEnvironment>
+#include <algorithm>
 
 namespace {
 double getOrderBookTickSize() {
@@ -11,6 +12,67 @@ double getOrderBookTickSize() {
         return envTick;
     }
     return 0.10;
+}
+
+double getOrderBookBandPct() {
+    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
+    bool ok = false;
+    const double envBand = bandEnv.toDouble(&ok);
+    if (ok && envBand > 0.0) {
+        return envBand;
+    }
+    return 0.30;
+}
+
+std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
+                                           const std::vector<OrderBookLevel>& asks,
+                                           double bandPct) {
+    double bestBid = 0.0;
+    double bestAsk = 0.0;
+    double minPrice = 0.0;
+    double maxPrice = 0.0;
+    bool hasPrice = false;
+
+    for (const auto& level : bids) {
+        if (level.price > bestBid) {
+            bestBid = level.price;
+        }
+        if (!hasPrice) {
+            minPrice = level.price;
+            maxPrice = level.price;
+            hasPrice = true;
+        } else {
+            minPrice = std::min(minPrice, level.price);
+            maxPrice = std::max(maxPrice, level.price);
+        }
+    }
+
+    for (const auto& level : asks) {
+        if (bestAsk <= 0.0 || level.price < bestAsk) {
+            bestAsk = level.price;
+        }
+        if (!hasPrice) {
+            minPrice = level.price;
+            maxPrice = level.price;
+            hasPrice = true;
+        } else {
+            minPrice = std::min(minPrice, level.price);
+            maxPrice = std::max(maxPrice, level.price);
+        }
+    }
+
+    if (bestBid > 0.0 && bestAsk > 0.0) {
+        const double mid = (bestBid + bestAsk) * 0.5;
+        const double halfRange = mid * bandPct;
+        return {mid - halfRange, mid + halfRange};
+    }
+
+    if (hasPrice && maxPrice > minPrice) {
+        const double pad = std::max(1e-6, (maxPrice - minPrice) * 0.10);
+        return {std::max(0.0, minPrice - pad), maxPrice + pad};
+    }
+
+    return {0.0, 1.0};
 }
 }
 
@@ -138,7 +200,11 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     }
 
     const auto timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(exchangeMs));
-    data.liveBook.applyUpdates(updates, timestamp, nullptr);
+    std::vector<BookDelta> deltas;
+    data.liveBook.applyUpdates(updates, timestamp, &deltas);
+    if (!deltas.empty()) {
+        emit bookUpdateBroadcast(productId, deltas);
+    }
 }
 
 void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
@@ -146,13 +212,11 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     SymbolHotData& data = ensureSymbol(symbol);
     
     // Re-initialize the book to clear old state
-    // TODO: Unify this logic with DataCache to avoid drift
+    // TODO: Unify this logic with client-side book initialization to avoid drift
     const double tickSize = getOrderBookTickSize();
-    if (symbol == "BTC-USD") {
-        data.liveBook.initialize(75000.0, 125000.0, tickSize);
-    } else {
-        data.liveBook.initialize(75000.0, 125000.0, tickSize);
-    }
+    const double bandPct = getOrderBookBandPct();
+    const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
+    data.liveBook.initialize(minPrice, maxPrice, tickSize);
     
     std::vector<BookLevelUpdate> updates;
     updates.reserve(bids.size() + asks.size());
