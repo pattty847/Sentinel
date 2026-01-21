@@ -256,7 +256,6 @@ public:
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
-    void setDataSource(class IGridDataSource* source); // Forward declaration - implemented in .cpp
     
     //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
@@ -334,7 +333,6 @@ private:
     void setShowModeFlagsOverlay(bool show);
     void setAutoScrollPaddingFrac(double fraction);
     void setAutoScrollSmoothEnabled(bool enabled);
-    class IGridDataSource* m_dataSource = nullptr;
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;

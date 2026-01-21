@@ -64,12 +64,12 @@ void SentinelStreamClient::subscribe(const std::string& symbol) {
     };
     
     std::string str = msg.dump();
-    std::lock_guard<std::mutex> lock(m_writeMutex);
-    m_writeQueue.push_back(std::move(str));
-    
-    if (m_writeQueue.size() == 1) {
-        doWrite();
-    }
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
 }
 
 void SentinelStreamClient::unsubscribe(const std::string& symbol) {
@@ -79,12 +79,12 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
     };
     
     std::string str = msg.dump();
-    std::lock_guard<std::mutex> lock(m_writeMutex);
-    m_writeQueue.push_back(std::move(str));
-    
-    if (m_writeQueue.size() == 1) {
-        doWrite();
-    }
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
 }
 
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
@@ -111,12 +111,11 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     doRead();
 
     // Flush pending writes
-    {
-        std::lock_guard<std::mutex> lock(m_writeMutex);
+    net::post(m_strand, [this]() {
         if (!m_writeQueue.empty()) {
             doWrite();
         }
-    }
+    });
 }
 
 void SentinelStreamClient::doRead() {
@@ -140,19 +139,11 @@ void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes
 }
 
 void SentinelStreamClient::doWrite() {
-    // Requires write mutex locked by caller if calling directly? 
-    // No, doWrite should be called from strand or safe context.
-    // For simplicity here, we assume single threaded write loop or careful locking.
-    // Beast requires only one async_write at a time.
-    
-    // We'll dispatch to strand if we were doing this properly.
-    // For Phase 2 Prototype, let's keep it simple.
-    
-    // Actually, doWrite needs to be safe.
-    m_ws.async_write(
-        net::buffer(m_writeQueue.front()),
-        [this](auto ec, auto bytes) { onWrite(ec, bytes); }
-    );
+    if (m_writeQueue.empty()) {
+        return;
+    }
+    m_ws.async_write(net::buffer(m_writeQueue.front()),
+                     [this](auto ec, auto bytes) { onWrite(ec, bytes); });
 }
 
 void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t bytes_transferred) {
@@ -161,7 +152,6 @@ void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t byte
         return;
     }
     
-    std::lock_guard<std::mutex> lock(m_writeMutex);
     m_writeQueue.pop_front();
     
     if (!m_writeQueue.empty()) {

@@ -80,13 +80,11 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     }
     
     auto now = std::chrono::system_clock::now();
-    // Snapshot doesn't produce deltas that we need to broadcast usually, 
-    // unless we want to trigger a full repaint. 
-    // But DataProcessor usually repaints on timer or updates.
-    // However, we should emit `orderBookUpdated` (shared_ptr) if using legacy path?
-    // IGridDataSource interface has `liveOrderBookUpdated` (deltas) and `orderBookUpdated` (full book).
-    
-    book.applyUpdates(updates, now, nullptr);
+    std::vector<BookDelta> deltas;
+    book.applyUpdates(updates, now, &deltas);
+    if (!deltas.empty()) {
+        emit liveOrderBookUpdated(productId, deltas);
+    }
     
     sLog_Data(QString("RemoteGridDataSource: Snapshot applied for %1 (%2 bids, %3 asks)")
               .arg(productId).arg(bids.size()).arg(asks.size()));

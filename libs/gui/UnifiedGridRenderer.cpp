@@ -82,6 +82,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     Q_UNUSED(trade);
+    // TODO: Wire trades into candle/overlay pipeline.
 }
 
 // onLiveOrderBookUpdated(QString) removed: legacy pass-through; MainWindow connects Core→DataProcessor directly
@@ -219,16 +220,22 @@ void UnifiedGridRenderer::setShowModeFlagsOverlay(bool show) {
 }
 
 void UnifiedGridRenderer::clearData() {
+    if (m_viewState) {
+        m_viewState->resetZoom();
+    }
+
     // Delegate to DataProcessor
     if (m_dataProcessor) {
-        m_dataProcessor->clearData();
+        QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData, Qt::QueuedConnection);
     }
     update();
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
     if (m_dataProcessor && resolution > 0) {
-        m_dataProcessor->setPriceResolution(resolution);
+        QMetaObject::invokeMethod(m_dataProcessor.get(),
+                                  [this, resolution]() { m_dataProcessor->setPriceResolution(resolution); },
+                                  Qt::QueuedConnection);
         update();
     }
 }
@@ -250,7 +257,11 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
         }
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.start();
-        if (m_dataProcessor) m_dataProcessor->addTimeframe(timeframe_ms);
+        if (m_dataProcessor) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(),
+                                      [this, timeframe_ms]() { m_dataProcessor->addTimeframe(timeframe_ms); },
+                                      Qt::QueuedConnection);
+        }
         update();
         emit timeframeChanged();
     }
@@ -330,13 +341,6 @@ void UnifiedGridRenderer::init() {
         if (ok && envSize > 0) {
             m_heatmapGridSize = envSize;
         }
-        ok = false;
-        const double recenter = qgetenv("SENTINEL_HEATMAP_RECENTER").toDouble(&ok);
-        if (ok && recenter > 0.0) {
-            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
-                m_dataProcessor->setHeatmapRecenterFraction(recenter);
-            }, Qt::QueuedConnection);
-        }
         m_heatmapClock.start();
     }
 
@@ -349,6 +353,15 @@ void UnifiedGridRenderer::init() {
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
+    if (m_useGpuHeatmap) {
+        bool ok = false;
+        const double recenter = qgetenv("SENTINEL_HEATMAP_RECENTER").toDouble(&ok);
+        if (ok && recenter > 0.0) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
+                m_dataProcessor->setHeatmapRecenterFraction(recenter);
+            }, Qt::QueuedConnection);
+        }
+    }
     
     // Connect signals with QueuedConnection for thread safety
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
@@ -735,18 +748,6 @@ void UnifiedGridRenderer::init() {
             update();
         });
         m_heatmapRenderTimer->start(16);
-    }
-}
-
-// Dense data access - set cache on both UGR and DataProcessor
-void UnifiedGridRenderer::setDataSource(IGridDataSource* source) {
-    m_dataSource = source;
-    
-    // Also set the cache on DataProcessor using thread-safe invocation
-    if (m_dataProcessor) {
-        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, source]() {
-            m_dataProcessor->setDataSource(source);
-        }, Qt::QueuedConnection);
     }
 }
 

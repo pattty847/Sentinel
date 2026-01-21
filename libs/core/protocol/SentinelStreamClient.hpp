@@ -7,7 +7,6 @@
 #include <thread>
 #include <atomic>
 #include <deque>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include "SentinelStreamProtocol.hpp"
 #include "../marketdata/model/TradeData.h"
@@ -70,6 +69,7 @@ private:
     std::string m_port;
     
     net::io_context m_ioc;
+    net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
     
@@ -77,7 +77,6 @@ private:
     boost::beast::flat_buffer m_buffer;
     
     std::deque<std::string> m_writeQueue;
-    std::mutex m_writeMutex;
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};

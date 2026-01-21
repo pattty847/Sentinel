@@ -261,8 +261,6 @@ void MainWindowGPU::connectMarketDataSignals() {
         return;
     }
     
-    unifiedGridRenderer->setDataSource(m_dataSource.get());
-
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,

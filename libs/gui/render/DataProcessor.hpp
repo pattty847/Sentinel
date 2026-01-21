@@ -47,7 +47,6 @@ public:
     
     // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
-    void setDataSource(IGridDataSource* source) { m_dataSource = source; }
     
     // Control
     void clearData();
@@ -83,7 +82,6 @@ private:
     
     // Components
     GridViewState* m_viewState = nullptr;
-    IGridDataSource* m_dataSource = nullptr;
     
     // Manual timeframe management
     bool m_manualTimeframeSet = false;

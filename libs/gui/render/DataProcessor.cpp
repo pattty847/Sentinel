@@ -51,9 +51,6 @@ void DataProcessor::stopProcessing() {
 }
 
 void DataProcessor::clearData() {
-    if (m_viewState) {
-        m_viewState->resetZoom();
-    }
     m_heatmapRangeValid = false;
     m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
     m_heatmapHasLastColumn = false;
