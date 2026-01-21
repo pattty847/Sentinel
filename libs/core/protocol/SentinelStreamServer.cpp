@@ -88,8 +88,6 @@ public:
         if(ec)
             return fail(ec, "accept");
 
-        sLog_App("Session: Client connected");
-        
         auto self = shared_from_this();
         
         tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
@@ -162,7 +160,6 @@ public:
             if (type == "subscribe") {
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
-                    sLog_App("Client subscribed to: " << QString::fromStdString(symbol));
                     subscriptions_.insert(symbol);
                     
                     // Send ACK
@@ -384,9 +381,7 @@ void SentinelStreamServer::start() {
         m_acceptor->set_option(net::socket_base::reuse_address(true));
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
-        
-        sLog_App("SentinelStreamServer: Listening on port " << m_port);
-        
+
         doAccept();
         
         m_thread = std::thread([this] {

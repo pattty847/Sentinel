@@ -21,10 +21,6 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_nonZeroAskCount = 0;
     m_totalBidVolume = 0.0;
     m_totalAskVolume = 0.0;
-
-    sLog_App(QString("O(1) LiveOrderBook initialized for %1 with size %2 (%3 -> %4 @ %5)")
-              .arg(QString::fromStdString(m_productId)).arg(size)
-              .arg(m_min_price).arg(m_max_price).arg(m_tick_size));
 }
 
 void LiveOrderBook::applyUpdates(std::span<const BookLevelUpdate> updates,

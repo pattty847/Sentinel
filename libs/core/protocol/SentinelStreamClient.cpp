@@ -105,7 +105,6 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     }
     
     m_isConnected = true;
-    sLog_App("Client Connected to Server");
     emit connected();
     
     doRead();

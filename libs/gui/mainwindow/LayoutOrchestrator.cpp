@@ -27,7 +27,6 @@ void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
 }
 
 void LayoutOrchestrator::resetLayoutToDefault(const DockWidgets& docks) {
-    sLog_App("Resetting layout to default");
     arrangeDefaultLayout(docks);
 }
 

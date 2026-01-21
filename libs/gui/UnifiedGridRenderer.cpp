@@ -44,32 +44,23 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     setFlag(ItemAcceptsInputMethod, true);
     
     setAcceptHoverEvents(false);  // Reduce event capture
-    
+
     init();
-    sLog_App("UnifiedGridRenderer V2: Initialized successfully");
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-    sLog_App("UnifiedGridRenderer destructor - cleaning up...");
-    
     if (m_dataProcessor) {
         if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
-            // CRITICAL: stopProcessing() must be called on the worker thread where the timer lives
-            // Use BlockingQueuedConnection to ensure it completes before we destroy the thread
             QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::stopProcessing, Qt::BlockingQueuedConnection);
         } else {
-            // Thread not running - safe to call directly (timer already stopped or object on main thread)
             m_dataProcessor->stopProcessing();
         }
         disconnect(m_dataProcessor.get(), nullptr, this, nullptr);
     }
-    
+
     if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
         m_dataProcessorThread->quit();
-        
-        // Wait for thread to finish and process all pending events
         if (!m_dataProcessorThread->wait(5000)) {
-            sLog_App("Thread did not finish in time, terminating...");
             m_dataProcessorThread->terminate();
             m_dataProcessorThread->wait(1000);
         }
@@ -77,8 +68,6 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 
     m_dataProcessor.reset();
     m_dataProcessorThread.reset();
-    
-    sLog_App("UnifiedGridRenderer cleanup complete");
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
@@ -124,13 +113,10 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF
 }
 
 void UnifiedGridRenderer::componentComplete() {
-    // Called by Qt upon component initialization
     QQuickItem::componentComplete();
-    
-    // Set viewport size immediately when component is ready
+
     if (m_viewState && width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
-        sLog_App("Component complete: Set initial viewport size to " << width() << "x" << height() << " pixels");
     }
 }
 

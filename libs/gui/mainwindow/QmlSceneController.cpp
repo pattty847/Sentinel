@@ -35,12 +35,10 @@ void QmlSceneController::loadQmlSource() {
 
 void QmlSceneController::verifyGpuAcceleration() {
     if (m_qquickView->status() != QQuickView::Ready) return;
-    
+
     auto* rhi = m_qquickView->rendererInterface();
-    if (rhi && rhi->graphicsApi() != QSGRendererInterface::Null) {
-        sLog_App("🎮 GPU ACCELERATION ACTIVE: " << graphicsApiName(rhi->graphicsApi()));
-    } else {
-        sLog_Error("❌ NO GPU ACCELERATION!");
+    if (!rhi || rhi->graphicsApi() == QSGRendererInterface::Null) {
+        sLog_Error("No GPU acceleration available");
     }
 }
 

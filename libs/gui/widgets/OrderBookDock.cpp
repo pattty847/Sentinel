@@ -9,13 +9,10 @@
 OrderBookDock::OrderBookDock(QWidget* parent)
     : DockablePanel("orderbook", "Order Book", parent)
 {
-    sLog_App("OrderBookDock: Constructing order book dock");
 }
 
 void OrderBookDock::buildUi()
 {
-    sLog_App("OrderBookDock: Building UI components");
-    
     // Main vertical layout
     auto* mainLayout = new QVBoxLayout(m_contentWidget);
     mainLayout->setContentsMargins(8, 8, 8, 8);
@@ -120,32 +117,22 @@ void OrderBookDock::setupSpreadLayout()
 
 void OrderBookDock::onSymbolChanged(const QString& symbol)
 {
-    sLog_App(QString("OrderBookDock: Symbol changed to %1").arg(symbol));
-    
     m_currentSymbol = symbol;
     if (m_symbolLabel) {
         m_symbolLabel->setText(symbol.isEmpty() ? "No Symbol" : symbol);
     }
-    
-    // Reset display
+
     updateSpreadDisplay(0.0, 0.0, 0.0, 0.0);
-    
-    // TODO: Subscribe to order book updates for new symbol
-    // For now, we'll wait for market data core to provide order book signals
 }
 
 void OrderBookDock::connectToMarketData()
 {
     auto* dataSource = ServiceLocator::dataSource();
-    if (!dataSource) {
-        sLog_App("OrderBookDock: DataSource not available in ServiceLocator");
-        return;
-    }
+    if (!dataSource) return;
+
     connect(dataSource, &IGridDataSource::liveOrderBookUpdated,
             this, &OrderBookDock::onOrderBookUpdated,
             Qt::QueuedConnection);
-    
-    sLog_App("OrderBookDock: Connected to DataSource live order book updates");
 }
 
 void OrderBookDock::onOrderBookUpdated(const QString& symbol,
@@ -153,15 +140,10 @@ void OrderBookDock::onOrderBookUpdated(const QString& symbol,
 {
     Q_UNUSED(deltas);
 
-    if (symbol != m_currentSymbol) {
-        return;  // Not our symbol
-    }
-    
+    if (symbol != m_currentSymbol) return;
+
     auto* dataSource = ServiceLocator::dataSource();
-    if (!dataSource) {
-        sLog_App("OrderBookDock: DataSource not available for order book updates");
-        return;
-    }
+    if (!dataSource) return;
 
     const LiveOrderBook& liveBook = dataSource->getDirectLiveOrderBook(symbol.toStdString());
 

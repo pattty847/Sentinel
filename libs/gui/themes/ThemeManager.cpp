@@ -8,37 +8,20 @@ ThemeManager& ThemeManager::instance() {
 }
 
 void ThemeManager::registerTheme(std::unique_ptr<ITheme> theme) {
-    if (!theme) {
-        qWarning() << "ThemeManager: Attempted to register null theme";
-        return;
-    }
-    
+    if (!theme) return;
+
     QString id = theme->id();
-    if (m_themes.find(id) != m_themes.end()) {
-        qWarning() << "ThemeManager: Theme" << id << "already registered, replacing";
-    }
-    
     m_themes[id] = std::move(theme);
-    qDebug() << "ThemeManager: Registered theme" << id << "-" << m_themes[id]->name();
 }
 
 bool ThemeManager::applyTheme(const QString& themeId, QApplication* app) {
-    if (!app) {
-        qWarning() << "ThemeManager: Cannot apply theme to null QApplication";
-        return false;
-    }
-    
+    if (!app) return false;
+
     auto it = m_themes.find(themeId);
-    if (it == m_themes.end()) {
-        qWarning() << "ThemeManager: Theme" << themeId << "not found";
-        return false;
-    }
-    
-    QString stylesheet = it->second->stylesheet();
-    app->setStyleSheet(stylesheet);
+    if (it == m_themes.end()) return false;
+
+    app->setStyleSheet(it->second->stylesheet());
     m_currentTheme = themeId;
-    
-    qDebug() << "ThemeManager: Applied theme" << themeId << "-" << it->second->name();
     return true;
 }
 

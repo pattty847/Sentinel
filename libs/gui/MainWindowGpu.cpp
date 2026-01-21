@@ -50,18 +50,11 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QGroupBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QScopeGuard>
 #include <QScreen>
 #include <QApplication>
 
-// Helper macro for scoped logging
-#define LOG_SCOPE(msg) sLog_App(msg " started"); auto _scopeGuard = qScopeGuard([=]{ sLog_App(msg " complete"); });
-
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
-    LOG_SCOPE("MainWindowGPU construction");
-    
     // 1) Initialize data source (remote-only)
-    sLog_App("Starting in REMOTE mode (connecting to 127.0.0.1:8080)");
     auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
     remote->connectToServer();
     m_dataSource = std::move(remote);
@@ -99,21 +92,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         sLog_Error("Component validation failed - app may not function correctly");
         QMessageBox::critical(this, "Initialization Error", "Failed to initialize core components. Check logs.");
     }
-    
-    sLog_App("GPU MainWindow ready for 144Hz trading!");
 }
 
 MainWindowGPU::~MainWindowGPU() {
-    LOG_SCOPE("MainWindowGPU destruction");
-    
-    // Disconnect signals first
-    if (m_qmlController) {
-        // QmlSceneController manages QML cleanup
-    }
 }
 
 void MainWindowGPU::setupUI() {
-    LOG_SCOPE("Setting up UI");
     
     // Prevent repaint storms during setup
     setUpdatesEnabled(false);
@@ -157,7 +141,6 @@ void MainWindowGPU::setWindowProperties() {
 }
 
 void MainWindowGPU::setupConnections() {
-    LOG_SCOPE("Setting up connections");
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
     connectMarketDataSignals();
 }
@@ -165,12 +148,10 @@ void MainWindowGPU::setupConnections() {
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty() || !symbol.contains('-')) {
-        sLog_Warning("Invalid symbol: " << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
         return;
     }
-    
-    sLog_App("Subscribing to: " << symbol);
+
     m_qmlController->updateSymbolInContext(symbol);
     propagateSymbolChange(symbol);
     if (m_dataSource) {
@@ -183,37 +164,22 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
-    // Auto-save current layout so it restores on next launch
-    sLog_App("Saving session layout on close");
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
 
 void MainWindowGPU::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
-    
-    sLog_App("=== showEvent triggered ===");
-    sLog_App("  Window size: " << width() << "x" << height());
-    
-    // First show: maximize window, then restore/arrange layout AFTER maximization completes
+
     if (m_firstShow) {
         m_firstShow = false;
-        
-        // Step 1: Maximize the window first
+
         if (windowState() != Qt::WindowMaximized) {
             showMaximized();
         }
-        
-        // Step 2: Restore or arrange layout AFTER window has fully maximized
+
         QTimer::singleShot(50, this, [this]() {
-            sLog_App("=== Restoring layout after maximize ===");
-            sLog_App("  Window size: " << width() << "x" << height());
-            
-            // Try to restore last session layout, fall back to default
-            if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
-                sLog_App("Restored last session layout");
-            } else {
-                sLog_App("No saved session, using default layout");
+            if (!m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
                 m_layoutOrchestrator->arrangeDefaultLayout(getDockWidgets());
             }
         });
@@ -255,8 +221,6 @@ void MainWindowGPU::setupShortcuts() {
 // Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
-    LOG_SCOPE("Connecting MarketData signals");
-    
     auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
     if (!m_dataSource || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");
@@ -312,11 +276,10 @@ void MainWindowGPU::resetLayoutToDefault() {
 
 void MainWindowGPU::onSaveLayout() {
     bool ok;
-    QString name = QInputDialog::getText(this, "Save Layout", "Layout name:", 
+    QString name = QInputDialog::getText(this, "Save Layout", "Layout name:",
                                         QLineEdit::Normal, "", &ok);
     if (ok && !name.isEmpty()) {
         m_layoutOrchestrator->saveLayout(name);
-        sLog_App("Layout saved: " << name);
     }
 }
 
@@ -326,15 +289,13 @@ void MainWindowGPU::onRestoreLayout() {
         QMessageBox::information(this, "No Layouts", "No saved layouts found.");
         return;
     }
-    
+
     bool ok;
     QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
                                             layouts, 0, false, &ok);
     if (ok && !selected.isEmpty()) {
-        if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
-            sLog_App("Layout restored: " << selected);
-        } else {
-            QMessageBox::warning(this, "Restore Failed", 
+        if (!m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
+            QMessageBox::warning(this, "Restore Failed",
                                 "Failed to restore layout. Using default arrangement.");
         }
     }
@@ -342,7 +303,6 @@ void MainWindowGPU::onRestoreLayout() {
 
 void MainWindowGPU::onResetLayout() {
     resetLayoutToDefault();
-    sLog_App("Layout reset to default");
 }
 
 void MainWindowGPU::onOpenSecFilingViewer() {

@@ -18,36 +18,23 @@ Assumptions: Server is authoritative for heatmap columns.
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
-    sLog_App("DataProcessor: Initialized for GPU-only heatmap ingest");
 }
 
 DataProcessor::~DataProcessor() {
-    // Log even if stopProcessing() returns early (idempotent)
-    if (!m_shuttingDown.load()) {
-        sLog_App("DataProcessor destructor - stopProcessing() not called yet");
-    }
     stopProcessing();
-    // This log will always appear, even if stopProcessing() returned early
-    sLog_App("DataProcessor destructor complete");
 }
 
 void DataProcessor::startProcessing() {
-    sLog_App("DataProcessor: startProcessing (no local ingestion)");
 }
 
 void DataProcessor::stopProcessing() {
-    // Idempotent: if already shutting down, return immediately
     bool expected = false;
     if (!m_shuttingDown.compare_exchange_strong(expected, true)) {
-        // Already shutting down, skip redundant work
         return;
     }
-    
-    sLog_App("DataProcessor::stopProcessing() - shutting down...");
 
     disconnect(this, nullptr, nullptr, nullptr);
     clearData();
-    sLog_App("DataProcessor stopped");
 }
 
 void DataProcessor::clearData() {
