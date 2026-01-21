@@ -40,6 +40,12 @@ set(GRID_CORE_SOURCES
     render/GridViewState.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
+    render/HeatmapStreamState.hpp
+    render/HeatmapStreamState.cpp
+    render/ViewportAutoScrollController.hpp
+    render/ViewportAutoScrollController.cpp
+    render/HeatmapLabelRenderer.hpp
+    render/HeatmapLabelRenderer.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
 )

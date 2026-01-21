@@ -1,89 +1,113 @@
 # Sentinel Architecture
 
-**Version**: 3.0  
-**Status**: Active Development (Distributed Phase)
+## Overview
 
-Sentinel is a high-performance, GPU-resident trading terminal. It has been re-engineered from a monolithic application into a mandatory **Client-Server** architecture to ensure 24/7 data ingestion, persistence, and scalable visualization.
+Sentinel is a GPU-accelerated trading terminal built on a mandatory client-server architecture. The server runs as a headless daemon for 24/7 data ingestion; the client is a lightweight Qt6/QML visualizer.
 
----
+## Core Principles
 
-## 1. Architectural Principles
+- **Client-Server Split**: Ingestion and visualization are decoupled. Server handles data, client handles rendering.
+- **GPU-Resident Rendering**: All high-density visualizations (heatmaps) are rendered directly on GPU via streamed intensity textures.
+- **Zero-Copy Hot Paths**: Binary streams and pre-aggregated buffers minimize overhead between server and GPU.
+- **Deterministic Threading**: Network I/O (Boost.Beast), aggregation, and rendering run on dedicated threads.
 
-- **Pure Client-Server**: Ingestion and visualization are decoupled. The server runs as a headless daemon; the client is a lightweight visualizer.
-- **GPU-Resident Rendering**: Legacy CPU-per-cell rendering loops have been gutted. All high-density visualizations (Heatmaps, TradeFlow) are shaded directly on the GPU using streamed intensity textures.
-- **Zero-Copy Data Plane**: Hot paths utilize binary streams and pre-aggregated buffers to minimize overhead between the server and the GPU.
-- **Deterministic Threads**: Network IO (Boost.Beast), aggregation, and rendering occur on dedicated threads.
-
----
-
-## 2. Layered Layout
+## Directory Layout
 
 ```
 apps/
-  ├─ sentinel_gui/      # Visualization client (Remote-only)
-  └─ sentinel-server/   # Headless data & persistence daemon
+  sentinel_gui/       # Visualization client (remote-only)
+  sentinel-server/    # Headless data daemon
 
 libs/
-  ├─ core/
-  │   ├─ marketdata/    # Exchange transports
-  │   ├─ protocol/      # Client-Server WebSocket protocol
-  │   ├─ servermodel/   # Server state, aggregation, and persistence
-  │   └─ model/         # Shared DTOs
-  └─ gui/
-       ├─ UnifiedGridRenderer (GPU pipeline orchestration)
-       ├─ datasources/   # RemoteGridDataSource
-       ├─ render/        # GPU-resident strategies (Heatmap, etc.)
-       └─ qml/           # UI components
+  core/
+    marketdata/       # Exchange transports (see MARKETDATA_ARCHITECTURE.md)
+    protocol/         # Client-server WebSocket protocol
+    servermodel/      # Server state, aggregation, persistence
+    model/            # Shared DTOs
+  gui/
+    UnifiedGridRenderer   # GPU pipeline orchestration
+    datasources/          # RemoteGridDataSource
+    render/               # GPU strategies (HeatmapIntensityNode)
+    qml/                  # UI components
 ```
 
-Only `QtCore` is permitted in `libs/core`. All rendering logic resides in `libs/gui` as GPU shaders and strategies.
+Only `QtCore` is permitted in `libs/core`. All rendering logic lives in `libs/gui`.
 
----
+## Data Pipeline
 
-## 3. Data Pipeline (Distributed)
+### Server
 
-```mermaid
-graph TD
-    subgraph "Sentinel Server (Headless)"
-        A[Exchange] --> B[MarketDataCore]
-        B --> C[ServerDataModel]
-        C --> D[TickBinaryLogger]
-        C --> E[TimeframeAggregator]
-        E --> F[SentinelStreamServer]
-    end
-
-    subgraph "Sentinel Client (GUI)"
-        F -->|WebSocket| G[SentinelStreamClient]
-        G --> H[RemoteGridDataSource]
-        H --> I[UnifiedGridRenderer]
-        I --> J[GPU / Shader]
-    end
+```
+Exchange -> MarketDataCore -> ServerDataModel -> Persistence + SentinelStreamServer -> WebSocket
 ```
 
-1. **Ingestion**: `sentinel-server` maintains the primary connection to exchanges.
-2. **Persistence**: `TickBinaryLogger` rotates raw data hourly; `TimeframeAggregator` maintains the history segments.
-3. **Streaming**: `SentinelStreamServer` broadcasts pre-aggregated slices (e.g., 100ms TWAP columns) to clients.
-4. **Rendering**: `UnifiedGridRenderer` uploads these columns directly to GPU textures, allowing for smooth 60 FPS performance even with 67M+ active cells.
+- **MarketDataCore**: Maintains exchange connections, parses feeds, populates cache. See `docs/MARKETDATA_ARCHITECTURE.md` for full details.
+- **ServerDataModel**: Central data hub for all symbols. Coordinates persistence and streaming.
+- **TickBinaryLogger**: Append-only binary logging with hourly rotation.
+- **TimeframeAggregator**: Timer-driven aggregation (100ms, 1s, etc.) into GPU-ready slices.
+- **SentinelStreamServer**: Broadcasts pre-aggregated heatmap columns to clients via WebSocket.
 
----
+### Client
 
-## 4. Rendering Architecture (GPU-Only)
+```
+WebSocket -> SentinelStreamClient -> RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> GPU
+```
 
-- **Heatmap Strategy**: Renders as a single GPU quad. The server streams intensity data into 16-bit textures. Viewport logic is handled via shader uniforms (Time/Price offsets).
-- **Performance**: Capable of 8192x8192 (67M) cells today, with 10k x 10k planned.
+- **SentinelStreamClient**: Boost.Beast WebSocket client with reconnection handling.
+- **RemoteGridDataSource**: Manages local buffers for received slices. Emits `heatmapColumnReady`.
+- **DataProcessor**: Validates incoming slices, emits to renderer. No local aggregation in remote mode.
+- **UnifiedGridRenderer**: Manages viewport state, ring-buffer uploads, drives `updatePaintNode()`.
+- **HeatmapIntensityNode**: Single-quad QSG material. Samples intensity + palette on GPU.
 
----
+## Rendering Pipeline
 
-## 5. Testing & Quality Gates
+### Server Side
 
-- **Protocol Verification**: Ensures snapshot and incremental updates maintain consistency.
-- **Render Stress**: GUI must maintain frame rate at extreme zoom levels and high texture density.
+```
+LiveOrderBook -> HeatmapTwapStreamer (TWAP, dense u8 column) -> SentinelStreamServer (heatmap_slice)
+```
 
----
+The server produces dense `u8` columns: bids 0-127, asks 128-255.
 
-## 6. Related Documentation
+### Client Side
 
-- `docs/CLIENT-SERVER.md`: Protocol implementation details.
-- `docs/refactors/heatmap/heatmap_plan.md`: Evolution of the GPU heatmap.
-- `docs/LOGGING_GUIDE.md`: Observability best practices.
+```
+RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode -> GPU
+```
 
+The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering.
+
+### Key Data Structures
+
+```
+heatmap_slice message:
+  - time_start / time_end
+  - tick_size / min_price / max_price
+  - column (base64-encoded u8 array)
+```
+
+## Protocol
+
+**JSON (v0)**: Used for subscription handshake and snapshots.
+
+**Binary (v1)**: Compact framing for live streaming. Active protocol for heatmap data.
+
+## Threading Model
+
+- **Server I/O Thread**: Boost.Asio io_context handles all network operations.
+- **Server Aggregation**: Timer-driven on dedicated thread.
+- **Client I/O Thread**: SentinelStreamClient runs on Boost.Asio strand.
+- **Client GUI Thread**: Qt event loop, receives data via queued signals.
+- **Client Render Thread**: QSG rendering, never touches QObject graph.
+
+Cross-thread communication uses `Qt::QueuedConnection` exclusively.
+
+## Performance
+
+- Server streams 8192x8192 (67M cells) depth grids.
+- Client maintains 60 FPS regardless of visible cell count.
+- CPU cost in client is constant (GPU does the work).
+
+## Related Documentation
+
+- `docs/MARKETDATA_ARCHITECTURE.md`: Complete MarketDataCore pipeline, threading, error handling.

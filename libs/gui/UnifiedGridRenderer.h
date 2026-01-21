@@ -100,79 +100,25 @@ private:
     QImage m_heatmapImage;
     QImage m_heatmapPaletteImage;
     QTimer* m_heatmapRenderTimer = nullptr;
-    int m_heatmapWriteColumn = 0;
-    int m_heatmapAppendMs = 100;
-    qint64 m_heatmapLastAppendMs = 0;
-    int64_t m_heatmapTimeOriginMs = 0;
-    int64_t m_heatmapStreamBaseMs = std::numeric_limits<int64_t>::min();
-    int64_t m_heatmapLastSliceStartMs = std::numeric_limits<int64_t>::min();
     bool m_heatmapViewportInitialized = false;
-    double m_heatmapMinPrice = 0.0;
-    double m_heatmapMaxPrice = 0.0;
-    double m_heatmapTickSize = 0.0;
     QElapsedTimer m_heatmapClock;
-    std::atomic<float> m_heatmapTimeOffset{0.0f};
-    QByteArray m_heatmapLastColumnData;
-    bool m_heatmapHaveLastColumn = false;
-    int64_t m_autoScrollLagMs = 0;
-    int64_t m_autoScrollSpanMs = 0;
+    std::unique_ptr<class HeatmapStreamState> m_heatmapStream;
+    std::unique_ptr<class ViewportAutoScrollController> m_autoScrollController;
     double m_autoScrollPaddingFrac = 0.05;
     bool m_smoothAutoScrollEnabled = true;
-    bool m_heatmapDragFrozen = false;
-    double m_heatmapDragDataStart = 0.0;
-    double m_heatmapDragDataEnd = 0.0;
-    bool m_heatmapTimeOffsetFrozen = false;
-    float m_heatmapFrozenTimeOffset = 0.0f;
-    struct HeatmapPendingColumn {
-        int x = 0;
-        QByteArray data;
-    };
-    mutable std::mutex m_heatmapUploadMutex;
-    std::vector<HeatmapPendingColumn> m_heatmapPendingColumns;
-    std::vector<uint8_t> m_heatmapIntensityRing;
-    std::vector<uint16_t> m_heatmapLiquidityRing;
-    std::vector<double> m_heatmapLiquidityScales;
-    QByteArray m_heatmapLastLiquidityColumn;
-    double m_heatmapLastLiquidityScale = 1.0;
-    bool m_heatmapHaveLastLiquidity = false;
-    bool m_heatmapLiquidityAvailable = false;
-    mutable std::mutex m_heatmapLiquidityMutex;
 
     bool m_heatmapLabelDirty = true;
     QRectF m_heatmapLabelSourceRect;
     QSize m_heatmapLabelPixelSize;
-    int m_heatmapLabelStartX = 0;
-    int m_heatmapLabelStartY = 0;
     int m_heatmapLabelFontBucket = 0;
     uint64_t m_heatmapLabelViewportVersion = 0;
-    std::mutex m_heatmapLabelMutex;
-    QImage m_heatmapLabelImage;
-    std::atomic<int> m_heatmapLabelVersion{0};
     int m_heatmapLabelTextureVersion = -1;
     QSize m_heatmapLabelActivePixelSize;
     QSizeF m_heatmapLabelActiveSourceSize;
     int m_heatmapLabelActiveFontBucket = 0;
     int m_heatmapLabelActiveStartX = 0;
     int m_heatmapLabelActiveStartY = 0;
-    int m_heatmapLabelBuiltStartX = 0;
-    int m_heatmapLabelBuiltStartY = 0;
-    QSize m_heatmapLabelBuiltPixelSize;
-    QSizeF m_heatmapLabelBuiltSourceSize;
-    int m_heatmapLabelBuiltFontBucket = 0;
-    struct HeatmapLabelRequest {
-        QRectF srcRect;
-        QSize labelSize;
-        int startX = 0;
-        int startY = 0;
-        float cellW = 0.0f;
-        float cellH = 0.0f;
-        int fontPx = 0;
-        int fontBucket = 0;
-        uint64_t viewportVersion = 0;
-        bool valid = false;
-    };
-    std::mutex m_heatmapLabelRequestMutex;
-    HeatmapLabelRequest m_heatmapLabelRequest;
+    std::unique_ptr<class HeatmapLabelRenderer> m_labelRenderer;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
@@ -329,8 +275,6 @@ protected:
 private:
     void ensureHeatmapImage();
     void ensureHeatmapPaletteImage();
-    void buildHeatmapLabelImage();
-    QString formatLiquidityLabel(double value, bool dollars) const;
     int quantizeFontPx(float fontPx) const;
 
 private:
