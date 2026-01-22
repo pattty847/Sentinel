@@ -42,6 +42,8 @@ Column {
         border.color: "orange"
         border.width: 1
         radius: 3
+        layer.enabled: true
+        layer.smooth: false
         
         Rectangle {
             id: priceSliderHandle
@@ -53,6 +55,8 @@ Column {
             radius: 2
             x: Math.max(0, Math.min(parent.width - width, 
                 root.target ? (Math.log(root.target.getCurrentPriceResolution() / 0.01) / Math.log(100)) * (parent.width - width) : 0))
+            layer.enabled: true
+            layer.smooth: false
             
             MouseArea {
                 anchors.fill: parent

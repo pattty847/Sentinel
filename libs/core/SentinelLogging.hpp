@@ -2,6 +2,14 @@
 
 #include <QLoggingCategory>
 #include <QDebug>
+#include <string>
+#include <cstdlib>
+
+// Fix for ambiguous QDebug << std::string in Qt6
+inline QDebug operator<<(QDebug debug, const std::string& str) {
+    debug << QString::fromStdString(str);
+    return debug;
+}
 
 // =============================================================================
 // SENTINEL LOGGING CATEGORIES - SIMPLIFIED 4-CATEGORY SYSTEM
@@ -31,10 +39,7 @@ namespace sentinel::log_throttle {
     do {                                                                               \
         static std::atomic<uint32_t> _counter{0};                                      \
         static int _interval = []() {                                                  \
-            char* env = nullptr;                                                        \
-            size_t envSize = 0;                                                         \
-            errno_t err = _dupenv_s(&env, &envSize, "SENTINEL_LOG_" #cat "_INTERVAL");  \
-            if (env) {                                                                 \
+            if (const char* env = std::getenv("SENTINEL_LOG_" #cat "_INTERVAL")) {     \
                 int envVal = std::atoi(env);                                           \
                 if (envVal > 0 && envVal < (defaultInterval)) return envVal;           \
             }                                                                          \

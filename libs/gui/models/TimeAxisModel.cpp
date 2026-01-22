@@ -30,7 +30,36 @@ const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
 };
 
 TimeAxisModel::TimeAxisModel(QObject* parent)
-    : AxisModel(parent) {
+    : AxisModel(parent)
+    , m_timezone(QTimeZone::utc()) {
+}
+
+QString TimeAxisModel::timezone() const {
+    return QString::fromLatin1(m_timezone.id());
+}
+
+void TimeAxisModel::setTimezone(const QString& tzId) {
+    QTimeZone newTz;
+    
+    // Handle common shorthand names
+    if (tzId == "UTC" || tzId == "utc") {
+        newTz = QTimeZone::utc();
+    } else if (tzId == "EST" || tzId == "New York" || tzId == "America/New_York") {
+        newTz = QTimeZone("America/New_York");
+    } else if (tzId == "London" || tzId == "Europe/London") {
+        newTz = QTimeZone("Europe/London");
+    } else if (tzId == "Tokyo" || tzId == "Asia/Tokyo") {
+        newTz = QTimeZone("Asia/Tokyo");
+    } else {
+        // Try direct IANA name
+        newTz = QTimeZone(tzId.toLatin1());
+    }
+    
+    if (newTz.isValid() && newTz != m_timezone) {
+        m_timezone = newTz;
+        emit timezoneChanged();
+        recalculateTicks();
+    }
 }
 
 void TimeAxisModel::recalculateTicks() {
@@ -77,8 +106,8 @@ void TimeAxisModel::calculateTicks() {
         }
     }
     
-    qDebug() << "TimeAxisModel: Generated" << m_ticks.size() 
-             << "time ticks for range" << timeRange << "ms, step=" << step << "ms";
+    //qDebug() << "TimeAxisModel: Generated" << m_ticks.size() 
+    //         << "time ticks for range" << timeRange << "ms, step=" << step << "ms";
 }
 
 QString TimeAxisModel::formatLabel(double value) const {
@@ -140,19 +169,54 @@ qint64 TimeAxisModel::calculateNiceTimeStep(qint64 rangeMs, int targetTicks) con
 }
 
 QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const {
-    QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(timestampMs);
+    QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(timestampMs, m_timezone);
     
-    if (stepMs < 1000) {
-        // Sub-second precision - show milliseconds
-        return dateTime.toString("hh:mm:ss.zzz");
-    } else if (stepMs < 60000) {
-        // Second precision
-        return dateTime.toString("hh:mm:ss");
-    } else if (stepMs < 3600000) {
-        // Minute precision
-        return dateTime.toString("hh:mm");
+    // TradingView-style adaptive formatting:
+    // Show minimal info, add context only at boundaries
+    
+    if (stepMs >= 86400000) {
+        // Day scale or larger - show day of month, month at boundaries
+        int day = dateTime.date().day();
+        if (day == 1) {
+            // Month boundary - show month name
+            return dateTime.toString("MMM");
+        }
+        return QString::number(day);
+        
+    } else if (stepMs >= 3600000) {
+        // Hour scale - show hour, date at day boundaries
+        int hour = dateTime.time().hour();
+        if (hour == 0) {
+            // Day boundary - show date
+            return dateTime.toString("d MMM");
+        }
+        return dateTime.toString("HH:mm");
+        
+    } else if (stepMs >= 60000) {
+        // Minute scale - show HH:MM, hour context at hour boundaries
+        int minute = dateTime.time().minute();
+        if (minute == 0) {
+            // Hour boundary - show full time
+            return dateTime.toString("HH:mm");
+        }
+        return dateTime.toString(":mm");
+        
+    } else if (stepMs >= 1000) {
+        // Second scale - show :SS, minute context at minute boundaries
+        int second = dateTime.time().second();
+        if (second == 0) {
+            // Minute boundary
+            return dateTime.toString("HH:mm");
+        }
+        return dateTime.toString(":ss");
+        
     } else {
-        // Hour precision or larger
-        return dateTime.toString("hh:mm");
+        // Sub-second - show .ms, second context at second boundaries
+        int ms = dateTime.time().msec();
+        if (ms == 0) {
+            // Second boundary
+            return dateTime.toString(":ss");
+        }
+        return QString(".%1").arg(ms, 3, 10, QChar('0'));
     }
 }

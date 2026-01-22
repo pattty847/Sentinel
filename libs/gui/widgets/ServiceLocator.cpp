@@ -1,24 +1,24 @@
 #include "ServiceLocator.hpp"
-#include "../../core/marketdata/MarketDataCore.hpp"
-#include "../../core/marketdata/cache/DataCache.hpp"
+#include "../marketdata/MarketDataCoreQt.hpp"
+#include "../datasources/IGridDataSource.hpp"
 #include <QPointer>
 
-QPointer<MarketDataCore> ServiceLocator::s_marketDataCore;
-DataCache* ServiceLocator::s_dataCache = nullptr;
+QPointer<MarketDataCoreQt> ServiceLocator::s_marketDataCore;
+IGridDataSource* ServiceLocator::s_dataSource = nullptr;
 
-void ServiceLocator::registerMarketDataCore(MarketDataCore* core) {
+void ServiceLocator::registerMarketDataCore(MarketDataCoreQt* core) {
     s_marketDataCore = core;
 }
 
-void ServiceLocator::registerDataCache(DataCache* cache) {
-    s_dataCache = cache;
+void ServiceLocator::registerDataSource(IGridDataSource* source) {
+    s_dataSource = source;
 }
 
-MarketDataCore* ServiceLocator::marketDataCore() {
+MarketDataCoreQt* ServiceLocator::marketDataCore() {
     return s_marketDataCore.data();
 }
 
-DataCache* ServiceLocator::dataCache() {
-    return s_dataCache;
+IGridDataSource* ServiceLocator::dataSource() {
+    return s_dataSource;
 }
 

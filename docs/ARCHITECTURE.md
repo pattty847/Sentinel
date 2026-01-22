@@ -1,117 +1,113 @@
 # Sentinel Architecture
 
-**Version**: 2.1  
-**Status**: Active Development
+## Overview
 
-Sentinel delivers a GPU-accelerated trading terminal built on modern C++20 with Qt 6. The architecture is designed to stream exchange data with low latency, aggregate it into a dense time/price grid, and render it interactively while remaining modular enough for headless or CLI workflows.
+Sentinel is a GPU-accelerated trading terminal built on a mandatory client-server architecture. The server runs as a headless daemon for 24/7 data ingestion; the client is a lightweight Qt6/QML visualizer.
 
----
+## Core Principles
 
-## 1. Architectural Principles
+- **Client-Server Split**: Ingestion and visualization are decoupled. Server handles data, client handles rendering.
+- **GPU-Resident Rendering**: All high-density visualizations (heatmaps) are rendered directly on GPU via streamed intensity textures.
+- **Zero-Copy Hot Paths**: Binary streams and pre-aggregated buffers minimize overhead between server and GPU.
+- **Deterministic Threading**: Network I/O (Boost.Beast), aggregation, and rendering run on dedicated threads.
 
-- **Layered Ownership**: `libs/core` owns networking, domain logic, and data stores; `libs/gui` adapts that data to Qt/QML; `apps/` bootstrap executables only.
-- **Performance First**: Hot paths avoid allocations, copies, or blocking calls. A 500-line soft cap keeps modules approachable for refactors.
-- **Deterministic Threads**: Network IO runs on dedicated workers, GUI mutations occur via queued signals on the main thread, and lock-free queues bridge the two.
-- **Modularity**: Transport, dispatcher, cache, aggregation, and render layers sit behind clear seams so new providers or visualizations slot in without upheaval.
-- **Observability**: `SentinelLogging` channels (`sentinel.app|data|render|debug`) and performance monitors provide visibility across the stack.
-
----
-
-## 2. Layered Layout
+## Directory Layout
 
 ```
 apps/
-  ├─ sentinel_gui/      # Desktop entry point
-  └─ stream_cli/        # Headless data harness
+  sentinel_gui/       # Visualization client (remote-only)
+  sentinel-server/    # Headless data daemon
 
 libs/
-  ├─ core/
-  │   └─ marketdata/
-  │        ├─ ws/ (BeastWsTransport, SubscriptionManager)
-  │        ├─ dispatch/ (MessageDispatcher, event types)
-  │        ├─ cache/ (DataCache, DataCacheSinkAdapter)
-  │        ├─ auth/ (Authenticator)
-  │        └─ model/ (Trade, OrderBook, LiveOrderBook DTOs)
-  └─ gui/
-       ├─ UnifiedGridRenderer (QML façade)
-       ├─ GridViewState (viewport state)
-       ├─ render/ (DataProcessor, LiquidityTimeSeriesEngine, strategies)
-       └─ qml/ (scene components)
-
-scripts/              # Tooling and analysis helpers
-tests/marketdata/     # Active GoogleTest suites
+  core/
+    marketdata/       # Exchange transports (see MARKETDATA_ARCHITECTURE.md)
+    protocol/         # Client-server WebSocket protocol
+    servermodel/      # Server state, aggregation, persistence
+    model/            # Shared DTOs
+  gui/
+    UnifiedGridRenderer   # GPU pipeline orchestration
+    datasources/          # RemoteGridDataSource
+    render/               # GPU strategies (HeatmapIntensityNode)
+    qml/                  # UI components
 ```
 
-Only `QtCore` is permitted in `libs/core`. All UI code remains in `libs/gui`, and executables never house business logic.
+Only `QtCore` is permitted in `libs/core`. All rendering logic lives in `libs/gui`.
 
----
+## Data Pipeline
 
-## 3. Data Pipeline (Exchange → GPU)
+### Server
 
-```mermaid
-graph TD
-    subgraph "Worker Thread"
-        A[Exchange WebSocket] --> B[BeastWsTransport]
-        B --> C[MessageDispatcher]
-        C --> D[DataCache]
-    end
-
-    subgraph "GUI Thread"
-        D -->|Queued signals| E[DataProcessor]
-        E --> F[LiquidityTimeSeriesEngine]
-        F --> G[UnifiedGridRenderer]
-    end
-
-    subgraph "Qt Scene Graph"
-        G --> H[Render Strategy]
-        H --> I[GridSceneNode]
-        I --> J[GPU]
-    end
+```
+Exchange -> MarketDataCore -> ServerDataModel -> Persistence + SentinelStreamServer -> WebSocket
 ```
 
-1. **Transport (`marketdata/ws`)** establishes TLS connections, heartbeats, and reconnection backoff via `BeastWsTransport`. `SubscriptionManager` generates deterministic subscribe/unsubscribe frames.
-2. **Dispatch (`marketdata/dispatch`)** parses raw frames into typed events using `MessageDispatcher`, surfacing provider acks or errors alongside trade/book payloads.
-3. **Cache (`marketdata/cache`)** stores rolling trades and live order book snapshots. `DataCacheSinkAdapter` exposes the only write API so other layers stay decoupled.
-4. **Aggregation (`libs/gui/render`)**: `DataProcessor` pulls from the cache when new data arrives, funnels it into `LiquidityTimeSeriesEngine`, and prepares multi-timeframe grid slices.
-5. **Rendering (`libs/gui`)**: `UnifiedGridRenderer` bridges QML, `GridViewState`, and the active render strategy (heatmap, trade flow, etc.). Strategies build GPU buffers that `GridSceneNode` submits through the Qt Scene Graph.
+- **MarketDataCore**: Maintains exchange connections, parses feeds, populates cache. See `docs/MARKETDATA_ARCHITECTURE.md` for full details.
+- **ServerDataModel**: Central data hub for all symbols. Coordinates persistence and streaming.
+- **TickBinaryLogger**: Append-only binary logging with hourly rotation.
+- **TimeframeAggregator**: Timer-driven aggregation (100ms, 1s, etc.) into GPU-ready slices.
+- **SentinelStreamServer**: Broadcasts pre-aggregated heatmap columns to clients via WebSocket.
 
-Thread boundaries are explicit: the transport/dispatcher work never blocks the GUI, and GUI updates defer to queued lambdas guarded by `QPointer` to avoid dangling captures.
+### Client
 
----
+```
+WebSocket -> SentinelStreamClient -> RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> GPU
+```
 
-## 4. Rendering Architecture
+- **SentinelStreamClient**: Boost.Beast WebSocket client with reconnection handling.
+- **RemoteGridDataSource**: Manages local buffers for received slices. Emits `heatmapColumnReady`.
+- **DataProcessor**: Validates incoming slices, emits to renderer. No local aggregation in remote mode.
+- **UnifiedGridRenderer**: Manages viewport state, ring-buffer uploads, drives `updatePaintNode()`.
+- **HeatmapIntensityNode**: Single-quad QSG material. Samples intensity + palette on GPU.
 
-Sentinel’s renderer is intentionally modular so adding a visualization does not disturb the façade.
+## Rendering Pipeline
 
-- **UnifiedGridRenderer**: Exposes properties and signals to QML, forwards input events, and schedules scene graph updates. Contains no business logic.
-- **GridViewState**: Tracks pan, zoom, selection, and axis ranges. All interaction logic routes through it for consistent behavior.
-- **Render Strategies (`render/strategies`)**: Each strategy implements geometry generation for a visualization mode. Strategies receive pre-aggregated cells and return `QSGNode` updates.
-- **GridSceneNode**: Owns GPU buffers, applies viewport transforms, and orchestrates child nodes for overlays and indicators.
-- **QML & Controls**: Declaratively compose the window, axis components, tool panels, and wire user actions back into C++ controllers.
+### Server Side
 
----
+```
+LiveOrderBook -> HeatmapTwapStreamer (TWAP, dense u8 column) -> SentinelStreamServer (heatmap_slice)
+```
 
-## 5. Testing & Quality Gates
+The server produces dense `u8` columns: bids 0-127, asks 128-255.
 
-- GoogleTest suites under `tests/marketdata` cover transports, dispatch, and subscription logic. As new subsystems come online, add suites beside the relevant domain.
-- Smoke-test the GUI manually after changes that touch rendering or threading boundaries.
-- No pull request ships without a clean `cmake --build --preset <preset>` and `ctest --preset <preset> --output-on-failure` run.
-- Hot-path modifications should include notes on performance impact and, where possible, benchmark evidence.
+### Client Side
 
----
+```
+RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode -> GPU
+```
 
-## 6. Tooling & Observability
+The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering.
 
-- **Logging**: Configure `QT_LOGGING_RULES` to enable or suppress `sentinel.*` categories. See `docs/LOGGING_GUIDE.md` for examples.
-- **Analysis Scripts**: `scripts/quick_cpp_overview.sh` and `scripts/extract_functions.sh` provide structure and function lists for large files prior to refactors.
-- **Monitoring**: `SentinelMonitor` exposes unified render/data metrics and replaces prior ad-hoc profilers. Activate it for profiling sessions instead of console prints.
+### Key Data Structures
 
----
+```
+heatmap_slice message:
+  - time_start / time_end
+  - tick_size / min_price / max_price
+  - column (base64-encoded u8 array)
+```
 
-## 7. Related Documentation
+## Protocol
 
-- `docs/sockets-auth-cache-refactor.md`: phased plan for the MarketDataCore decomposition and future modularization steps.
-- `docs/LOGGING_GUIDE.md`: logging categories, verbosity controls, and best practices.
-- `README.md`: platform-specific setup instructions, build presets, and prerequisite tooling.
+**JSON (v0)**: Used for subscription handshake and snapshots.
 
-Stay within these architectural boundaries, keep hot paths lean, and favor modular seams when adding new capability.
+**Binary (v1)**: Compact framing for live streaming. Active protocol for heatmap data.
+
+## Threading Model
+
+- **Server I/O Thread**: Boost.Asio io_context handles all network operations.
+- **Server Aggregation**: Timer-driven on dedicated thread.
+- **Client I/O Thread**: SentinelStreamClient runs on Boost.Asio strand.
+- **Client GUI Thread**: Qt event loop, receives data via queued signals.
+- **Client Render Thread**: QSG rendering, never touches QObject graph.
+
+Cross-thread communication uses `Qt::QueuedConnection` exclusively.
+
+## Performance
+
+- Server streams 8192x8192 (67M cells) depth grids.
+- Client maintains 60 FPS regardless of visible cell count.
+- CPU cost in client is constant (GPU does the work).
+
+## Related Documentation
+
+- `docs/MARKETDATA.md`: Complete MarketDataCore pipeline, threading, error handling.

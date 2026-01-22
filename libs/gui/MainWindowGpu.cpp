@@ -1,13 +1,13 @@
 /*
 Sentinel — MainWindowGpu
 Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
-Inputs/Outputs: Connects MarketDataCore signals to UnifiedGridRenderer slots.
+Inputs/Outputs: Connects remote data source signals to UnifiedGridRenderer slots.
 Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
 Performance: Connection logic is part of the user-initiated subscription setup.
-Integration: Obtains MarketDataCore from CoinbaseStreamClient and wires it to the QML renderer.
+Integration: Wires the remote data source to the QML renderer.
 Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
-Related: MainWindowGpu.h, UnifiedGridRenderer.h, CoinbaseStreamClient.hpp.
-Assumptions: MarketDataCore becomes available from the client after subscribe() is called.
+Related: MainWindowGpu.h, UnifiedGridRenderer.h.
+Assumptions: Remote data source connects before subscribe() is called.
 */
 #include <QQuickView>
 #include <QLabel>
@@ -29,16 +29,15 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include "SentinelLogging.hpp"
 #include "widgets/HeatmapDock.hpp"
 #include "widgets/StatusBar.hpp"
-#include "widgets/MarketDataPanel.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
-#include "mainwindow/DataBootstrapper.h"
 #include "mainwindow/DockFactory.h"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
+#include "datasources/RemoteGridDataSource.hpp"
 #include <QQmlContext>
 #include <QMetaObject>
 #include <QDir>
@@ -51,25 +50,15 @@ Assumptions: MarketDataCore becomes available from the client after subscribe() 
 #include <QGroupBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QScopeGuard>
 #include <QScreen>
 #include <QApplication>
 
-// Helper macro for scoped logging
-#define LOG_SCOPE(msg) sLog_App(msg " started"); auto _scopeGuard = qScopeGuard([=]{ sLog_App(msg " complete"); });
-
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
-    LOG_SCOPE("MainWindowGPU construction");
-    
-    // 1) Initialize data components via DataBootstrapper
-    auto dataComponents = DataBootstrapper::initialize();
-    m_marketDataCore = std::move(dataComponents.marketDataCore);
-    m_authenticator = std::move(dataComponents.authenticator);
-    m_dataCache = std::move(dataComponents.dataCache);
-    
-    // Register services with ServiceLocator
-    ServiceLocator::registerMarketDataCore(m_marketDataCore.get());
-    ServiceLocator::registerDataCache(m_dataCache.get());
+    // 1) Initialize data source (remote-only)
+    auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
+    remote->connectToServer();
+    m_dataSource = std::move(remote);
+    ServiceLocator::registerDataSource(m_dataSource.get());
     
     // 2) Create dock widgets via DockFactory
     setupUI();
@@ -103,29 +92,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         sLog_Error("Component validation failed - app may not function correctly");
         QMessageBox::critical(this, "Initialization Error", "Failed to initialize core components. Check logs.");
     }
-    
-    sLog_App("GPU MainWindow ready for 144Hz trading!");
 }
 
 MainWindowGPU::~MainWindowGPU() {
-    LOG_SCOPE("MainWindowGPU destruction");
-    
-    // Disconnect signals first
-    if (m_marketDataCore) {
-        disconnect(m_marketDataCore.get(), nullptr, nullptr, nullptr);
-        m_marketDataCore->stop();
-        m_marketDataCore.reset();
-    }
-    
-    if (m_qmlController) {
-        // QmlSceneController manages QML cleanup
-    }
 }
 
-// Data components initialization moved to DataBootstrapper
-
 void MainWindowGPU::setupUI() {
-    LOG_SCOPE("Setting up UI");
     
     // Prevent repaint storms during setup
     setUpdatesEnabled(false);
@@ -135,7 +107,6 @@ void MainWindowGPU::setupUI() {
     auto docks = dockFactory.createDocks();
     m_heatmapDock = docks.heatmapDock;
     m_statusBar = docks.statusBar;
-    m_marketDataDock = docks.marketDataDock;
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
     m_aiCommentaryDock = docks.aiCommentaryDock;
@@ -155,7 +126,6 @@ void MainWindowGPU::setupUI() {
     
     // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
-    connect(this, &MainWindowGPU::symbolChanged, m_marketDataDock, &MarketDataPanel::onSymbolChanged);
     
     setUpdatesEnabled(true);
 }
@@ -171,7 +141,6 @@ void MainWindowGPU::setWindowProperties() {
 }
 
 void MainWindowGPU::setupConnections() {
-    LOG_SCOPE("Setting up connections");
     connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
     connectMarketDataSignals();
 }
@@ -179,16 +148,14 @@ void MainWindowGPU::setupConnections() {
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty() || !symbol.contains('-')) {
-        sLog_Warning("Invalid symbol: " << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
         return;
     }
-    
-    sLog_App("Subscribing to: " << symbol);
+
     m_qmlController->updateSymbolInContext(symbol);
     propagateSymbolChange(symbol);
-    if (m_marketDataCore) {
-        m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
+    if (m_dataSource) {
+        m_dataSource->subscribe(symbol);
     }
 }
 
@@ -197,37 +164,22 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
-    // Auto-save current layout so it restores on next launch
-    sLog_App("Saving session layout on close");
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
 
 void MainWindowGPU::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
-    
-    sLog_App("=== showEvent triggered ===");
-    sLog_App("  Window size: " << width() << "x" << height());
-    
-    // First show: maximize window, then restore/arrange layout AFTER maximization completes
+
     if (m_firstShow) {
         m_firstShow = false;
-        
-        // Step 1: Maximize the window first
+
         if (windowState() != Qt::WindowMaximized) {
             showMaximized();
         }
-        
-        // Step 2: Restore or arrange layout AFTER window has fully maximized
+
         QTimer::singleShot(50, this, [this]() {
-            sLog_App("=== Restoring layout after maximize ===");
-            sLog_App("  Window size: " << width() << "x" << height());
-            
-            // Try to restore last session layout, fall back to default
-            if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
-                sLog_App("Restored last session layout");
-            } else {
-                sLog_App("No saved session, using default layout");
+            if (!m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
                 m_layoutOrchestrator->arrangeDefaultLayout(getDockWidgets());
             }
         });
@@ -237,7 +189,6 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 void MainWindowGPU::setupMenuBar() {
     MenuBuilder::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
@@ -247,8 +198,10 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
-    callbacks.openMarketDataPanel = [this]() { onOpenMarketDataPanel(); };
-    
+
+    // Set heatmap dock for debug menu access
+    m_menuBuilder->setHeatmapDock(m_heatmapDock);
+
     m_menuBuilder->buildMenus(docks, callbacks);
 }
 
@@ -260,7 +213,6 @@ void MainWindowGPU::setupShortcuts() {
     
     ShortcutBinder::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     
     m_shortcutBinder->bindShortcuts(callbacks, docks);
@@ -269,33 +221,29 @@ void MainWindowGPU::setupShortcuts() {
 // Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
-    LOG_SCOPE("Connecting MarketData signals");
-    
     auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
-    if (!m_marketDataCore || !unifiedGridRenderer) {
+    if (!m_dataSource || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");
         return;
     }
     
-    unifiedGridRenderer->setDataCache(m_dataCache.get());
-
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
-        connect(m_marketDataCore.get(), &MarketDataCore::liveOrderBookUpdated,
-                dataProcessor, &DataProcessor::onLiveOrderBookUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
+                dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
     }
     
     // Trade connection (simplified, assume UnifiedGridRenderer has a slot)
-    connect(m_marketDataCore.get(), &MarketDataCore::tradeReceived,
+    connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
     
-    connect(m_marketDataCore.get(), &MarketDataCore::connectionStatusChanged,
+    connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
 
-    // Surface MarketDataCore errors (e.g., WS/TLS/DNS issues) into the app log
-    connect(m_marketDataCore.get(), &MarketDataCore::errorOccurred,
+    // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
+    connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
-                sLog_Error("MarketDataCore error: " << error);
+                sLog_Error("DataSource error: " << error);
             });
 }
 
@@ -314,7 +262,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted fo
 bool MainWindowGPU::validateComponents() {
     if (!m_qmlController || !m_qmlController->isValid()) return false;
     if (!m_qmlController->getUnifiedGridRenderer()) return false;
-    if (!m_marketDataCore) return false;
+    if (!m_dataSource) return false;
     return true;
 }
 
@@ -328,11 +276,10 @@ void MainWindowGPU::resetLayoutToDefault() {
 
 void MainWindowGPU::onSaveLayout() {
     bool ok;
-    QString name = QInputDialog::getText(this, "Save Layout", "Layout name:", 
+    QString name = QInputDialog::getText(this, "Save Layout", "Layout name:",
                                         QLineEdit::Normal, "", &ok);
     if (ok && !name.isEmpty()) {
         m_layoutOrchestrator->saveLayout(name);
-        sLog_App("Layout saved: " << name);
     }
 }
 
@@ -342,15 +289,13 @@ void MainWindowGPU::onRestoreLayout() {
         QMessageBox::information(this, "No Layouts", "No saved layouts found.");
         return;
     }
-    
+
     bool ok;
     QString selected = QInputDialog::getItem(this, "Restore Layout", "Select layout:",
                                             layouts, 0, false, &ok);
     if (ok && !selected.isEmpty()) {
-        if (m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
-            sLog_App("Layout restored: " << selected);
-        } else {
-            QMessageBox::warning(this, "Restore Failed", 
+        if (!m_layoutOrchestrator->restoreLayout(getDockWidgets(), selected)) {
+            QMessageBox::warning(this, "Restore Failed",
                                 "Failed to restore layout. Using default arrangement.");
         }
     }
@@ -358,7 +303,6 @@ void MainWindowGPU::onRestoreLayout() {
 
 void MainWindowGPU::onResetLayout() {
     resetLayoutToDefault();
-    sLog_App("Layout reset to default");
 }
 
 void MainWindowGPU::onOpenSecFilingViewer() {
@@ -368,17 +312,9 @@ void MainWindowGPU::onOpenSecFilingViewer() {
     }
 }
 
-void MainWindowGPU::onOpenMarketDataPanel() {
-    if (m_marketDataDock && !m_marketDataDock->isVisible()) {
-        m_marketDataDock->show();
-        m_marketDataDock->raise();
-    }
-}
-
 LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     LayoutOrchestrator::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
-    docks.marketDataDock = m_marketDataDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;

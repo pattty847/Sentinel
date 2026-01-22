@@ -1,23 +1,12 @@
 /*
 Sentinel — MainWindowGpu
 Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
-Inputs/Outputs: Manages the lifecycle of the CoinbaseStreamClient and UI controllers.
+Inputs/Outputs: Manages the lifecycle of the remote data source and UI controllers.
 Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
 Performance: UI setup is a one-time cost; not on the real-time data hot path.
-Integration: Instantiated in main.cpp; hosts DepthChartView.qml in a QQuickWidget.
+Integration: Wires the remote data source to the QML renderer.
 Observability: Logs lifecycle and connection status via qDebug.
-Related: MainWindowGpu.cpp, CoinbaseStreamClient.hpp, DepthChartView.qml, UnifiedGridRenderer.h.
-Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
-*/
-/*
-Sentinel — MainWindowGpu
-Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
-Inputs/Outputs: Manages the lifecycle of the CoinbaseStreamClient and UI controllers.
-Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
-Performance: UI setup is a one-time cost; not on the real-time data hot path.
-Integration: Uses CoinbaseStreamClient to create/manage MarketDataCore; wires it to the QML renderer.
-Observability: Logs lifecycle and connection status via qDebug.
-Related: MainWindowGpu.cpp, CoinbaseStreamClient.hpp, MarketDataCore.hpp, DepthChartView.qml.
+Related: MainWindowGpu.cpp, DepthChartView.qml.
 Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 */
 #pragma once
@@ -33,29 +22,23 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QSGRendererInterface>
 #include <QCloseEvent>
 #include <memory>
-#include "../core/marketdata/MarketDataCore.hpp"
-#include "../core/marketdata/auth/Authenticator.hpp"
-#include "../core/marketdata/cache/DataCache.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
+#include "datasources/IGridDataSource.hpp"
 
 // Forward declarations
 class ChartModeController;
 class UnifiedGridRenderer;
 class HeatmapDock;
 class StatusBar;
-class MarketDataPanel;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 
-// Forward declarations for modular components
-class DataBootstrapper;
 class DockFactory;
 class QmlSceneController;
 class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
-struct DataComponents;
 
 /**
  *  GPU-Powered Trading Terminal MainWindow
@@ -100,17 +83,12 @@ private:
     void onRestoreLayout();
     void onResetLayout();
     void onOpenSecFilingViewer();
-    void onOpenMarketDataPanel();
 
-    // Data components (owned via DataBootstrapper)
-    std::unique_ptr<MarketDataCore> m_marketDataCore;
-    std::unique_ptr<Authenticator> m_authenticator;
-    std::unique_ptr<DataCache> m_dataCache;
+    std::unique_ptr<IGridDataSource> m_dataSource;
     
     // Dock widgets (created via DockFactory)
     HeatmapDock* m_heatmapDock = nullptr;
     StatusBar* m_statusBar = nullptr;
-    MarketDataPanel* m_marketDataDock = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;

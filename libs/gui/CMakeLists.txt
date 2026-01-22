@@ -6,8 +6,6 @@ set(GRID_CORE_SOURCES
     ChartModeController.h
     
     # MainWindow modular components
-    mainwindow/DataBootstrapper.cpp
-    mainwindow/DataBootstrapper.h
     mainwindow/DockFactory.cpp
     mainwindow/DockFactory.h
     mainwindow/QmlSceneController.cpp
@@ -20,6 +18,9 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     
     # Grid system components
+    datasources/IGridDataSource.hpp
+    datasources/RemoteGridDataSource.hpp
+    datasources/RemoteGridDataSource.cpp
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.h
     CoordinateSystem.cpp
@@ -35,27 +36,22 @@ set(GRID_CORE_SOURCES
     models/PriceAxisModel.cpp
     
     # New modular render architecture (V2)
-    render/IRenderStrategy.hpp
-    render/IRenderStrategy.cpp
     render/GridViewState.hpp
     render/GridViewState.cpp
-    render/GridSceneNode.hpp
-    render/GridSceneNode.cpp
-    render/RenderDiagnostics.hpp
-    render/RenderDiagnostics.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
-    render/RenderTypes.hpp
-    render/RenderConfig.hpp
-    render/GridTypes.hpp
-    render/strategies/HeatmapStrategy.hpp
-    render/strategies/HeatmapStrategy.cpp
-    render/strategies/TradeFlowStrategy.hpp
-    render/strategies/TradeFlowStrategy.cpp
-    render/strategies/TradeBubbleStrategy.hpp
-    render/strategies/TradeBubbleStrategy.cpp
-    render/strategies/CandleStrategy.hpp
-    render/strategies/CandleStrategy.cpp
+    render/HeatmapStreamState.hpp
+    render/HeatmapStreamState.cpp
+    render/ViewportAutoScrollController.hpp
+    render/ViewportAutoScrollController.cpp
+    render/HeatmapLabelRenderer.hpp
+    render/HeatmapLabelRenderer.cpp
+    render/GlyphAtlas.hpp
+    render/GlyphAtlas.cpp
+    render/HeatmapGlyphNode.hpp
+    render/HeatmapGlyphNode.cpp
+    render/HeatmapIntensityNode.hpp
+    render/HeatmapIntensityNode.cpp
 )
 
 set(WIDGET_SOURCES
@@ -65,8 +61,7 @@ set(WIDGET_SOURCES
     "widgets/DockablePanel.cpp"
     "widgets/HeatmapDock.cpp"
     "widgets/LayoutManager.cpp"
-    "widgets/MarketDataModel.cpp"
-    "widgets/MarketDataPanel.cpp"
+    "marketdata/MarketDataCoreQt.cpp"
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"
@@ -91,6 +86,27 @@ qt6_add_qml_module(sentinel_gui_lib
     QML_FILES
         qml/DepthChartView.qml
         qml/CandleChartView.qml
+        qml/controls/VolumeFilter.qml
+        qml/controls/PriceResolutionSelector.qml
+        qml/controls/TimeframeSelector.qml
+        qml/controls/GridResolutionSelector.qml
+        qml/controls/NavigationControls.qml
+        qml/controls/LiquidityThresholdFilter.qml
+)
+
+qt_add_shaders(sentinel_gui_lib heatmap_shaders
+    BATCHABLE
+    GLSL
+        "330,440"
+    PREFIX
+        "/shaders"
+    BASE
+        "render/shaders"
+    FILES
+        render/shaders/heatmap_intensity.vert
+        render/shaders/heatmap_intensity.frag
+        render/shaders/heatmap_glyph.vert
+        render/shaders/heatmap_glyph.frag
 )
 
 target_include_directories(sentinel_gui_lib 
@@ -109,6 +125,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Network
         Qt6::Quick
         Qt6::Qml
+        Qt6::QuickControls2
 )
 
 qt_add_resources(sentinel_gui_lib "resources"

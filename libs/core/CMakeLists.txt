@@ -2,23 +2,33 @@ project(sentinel_core)
 
 add_library(sentinel_core
     Cpp20Utils.hpp
-    LiquidityTimeSeriesEngine.cpp
-    LiquidityTimeSeriesEngine.h
     Version.cpp
     Version.hpp
-    marketdata/MarketDataCore.cpp
-    marketdata/MarketDataCore.hpp
+    marketdata/MarketDataCoreEngine.cpp
+    marketdata/MarketDataCoreEngine.hpp
     marketdata/auth/Authenticator.cpp
     marketdata/auth/Authenticator.hpp
-    marketdata/cache/DataCache.cpp
-    marketdata/cache/DataCache.hpp
     marketdata/dispatch/MessageParser.hpp
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
+    marketdata/model/LiveOrderBook.cpp
     SentinelLogging.cpp
     SentinelLogging.hpp
     marketdata/model/TradeData.h
+    servermodel/ServerDataModel.hpp
+    servermodel/ServerDataModel.cpp
+    servermodel/HeatmapTwapStreamer.hpp
+    servermodel/HeatmapTwapStreamer.cpp
+    servermodel/SymbolHotData.hpp
+    servermodel/TickBinaryLogger.hpp
+    servermodel/TickBinaryLogger.cpp
+    servermodel/TimeframeAggregator.hpp
+    servermodel/TimeframeAggregator.cpp
+    protocol/SentinelStreamServer.hpp
+    protocol/SentinelStreamServer.cpp
+    protocol/SentinelStreamClient.hpp
+    protocol/SentinelStreamClient.cpp
 )
 
 # Find required packages

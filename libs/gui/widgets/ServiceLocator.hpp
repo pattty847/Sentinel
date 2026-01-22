@@ -3,42 +3,42 @@
 #include <QPointer>
 
 // Forward declarations
-class MarketDataCore;
-class DataCache;
+class MarketDataCoreQt;
+class IGridDataSource;
 
 /**
  * Lightweight service locator for shared services.
- * Uses raw pointers since DataCache is not a QObject.
+ * Uses raw pointers; ownership is managed elsewhere (MainWindowGPU).
  * 
  * Future evolution: Can be extended with signals for service registration/unregistration
- * for MarketDataCore (which is a QObject) to support hot-reload scenarios.
+ * for MarketDataCoreQt (which is a QObject) to support hot-reload scenarios.
  */
 class ServiceLocator {
 public:
     /**
-     * Register the MarketDataCore service.
+     * Register the MarketDataCoreQt service.
      */
-    static void registerMarketDataCore(MarketDataCore* core);
+    static void registerMarketDataCore(MarketDataCoreQt* core);
     
     /**
-     * Register the DataCache service.
+     * Register the DataSource service.
      */
-    static void registerDataCache(DataCache* cache);
+    static void registerDataSource(IGridDataSource* source);
     
     /**
-     * Get the registered MarketDataCore instance.
+     * Get the registered MarketDataCoreQt instance.
      * Returns nullptr if not registered or destroyed.
      */
-    static MarketDataCore* marketDataCore();
+    static MarketDataCoreQt* marketDataCore();
     
     /**
-     * Get the registered DataCache instance.
+     * Get the registered DataSource instance.
      * Returns nullptr if not registered.
      */
-    static DataCache* dataCache();
+    static IGridDataSource* dataSource();
 
 private:
-    static QPointer<MarketDataCore> s_marketDataCore;  // QPointer for QObject
-    static DataCache* s_dataCache;  // Raw pointer for non-QObject
+    static QPointer<MarketDataCoreQt> s_marketDataCore;  // QPointer for QObject
+    static IGridDataSource* s_dataSource;  // Raw pointer for non-QObject
 };
 

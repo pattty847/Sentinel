@@ -12,7 +12,6 @@ Core data pipeline validation for the V2 architecture:
 |------------|------|----------|
 | **MessageDispatcher** | `test_message_dispatcher.cpp` | Channel-based message routing, subscription callbacks, trade/orderbook dispatch |
 | **SubscriptionManager** | `test_subscription_manager.cpp` | Symbol subscription lifecycle, multiple products, JSON generation |
-| **DataCache Sink** | `test_datacache_sink_adapter.cpp` | DataCache integration with dispatcher sinks, trade/orderbook updates |
 
 **Status**: ✅ All 3 test suites passing
 
@@ -51,7 +50,7 @@ ctest --output-on-failure
 ### Market Data Tests Only
 ```bash
 cd build-<platform>
-ctest -R "MessageDispatcher|SubscriptionManager|DataCacheSinkAdapter" --output-on-failure
+ctest -R "MessageDispatcher|SubscriptionManager" --output-on-failure
 ```
 
 ### Individual Test
@@ -155,7 +154,6 @@ TEST(<ComponentName>Test, <Behavior>_<Condition>_<ExpectedResult>)
 Examples:
 - MessageDispatcherTest, RegisterChannel_NewChannel_ReturnsSuccess
 - SubscriptionManagerTest, Subscribe_DuplicateSymbol_IgnoresDuplicate
-- DataCacheTest, UpdateTrade_ValidTrade_StoresCorrectly
 ```
 
 ## Clean Build & Test Workflow
@@ -203,5 +201,5 @@ The new V2 architecture (GPU-accelerated, async snapshots, lock-free pipelines) 
 ---
 
 **Last Updated**: 2025-11-03
-**Test Count**: 3 suites (MessageDispatcher, SubscriptionManager, DataCacheSinkAdapter)
+**Test Count**: 2 suites (MessageDispatcher, SubscriptionManager)
 **Status**: ✅ All passing

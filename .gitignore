@@ -1,6 +1,6 @@
 # IDE and Editor files
-.cursor/
-.cursorindexingignore
+# .cursor/
+# .cursorindexingignore
 .clangd
 
 # .vscode/ - Keep tracked for shared project settings

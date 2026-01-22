@@ -1,36 +1,41 @@
 // ======= libs/gui/UnifiedGridRenderer.h =======
 /*
 Sentinel — UnifiedGridRenderer
-Role: A QML scene item that orchestrates multiple rendering strategies to draw market data.
-Inputs/Outputs: Takes Trade/OrderBook data via slots; outputs a QSGNode tree for GPU rendering.
+Role: A QML scene item that renders the GPU-only heatmap path.
+Inputs/Outputs: Takes heatmap columns via DataProcessor; outputs a QSGNode for GPU rendering.
 Threading: Runs on the GUI thread; data is received via queued connections; rendering on render thread.
 Performance: Batches incoming data with a QTimer to throttle scene graph updates.
-Integration: Used in QML; receives data from MarketDataCore; delegates rendering to strategy objects.
+Integration: Used in QML; receives data from MarketDataCoreQt and server heatmap stream.
 Observability: Logs key events like data reception and paint node updates via qDebug.
-Related: UnifiedGridRenderer.cpp, IRenderStrategy.h, CoordinateSystem.h, MarketDataCore.hpp.
+Related: UnifiedGridRenderer.cpp, CoordinateSystem.h, MarketDataCoreQt.hpp.
 Assumptions: CoordinateSystem and ChartModeController properties are set from QML.
 */
 #pragma once
 #include <QQuickItem>
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
+#include <QImage>
 #include <QTimer>
 #include <QThread>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
+#include <QByteArray>
+#include <QSizeF>
+#include <cstdint>
 #include <vector>
+#include <array>
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <limits>
 #include "../core/marketdata/model/TradeData.h"
-#include "render/GridTypes.hpp"
 #include "render/GridViewState.hpp"
+#include "render/GlyphAtlas.hpp"
+#include "render/HeatmapLabelRenderer.hpp"
+#include "render/HeatmapStreamState.hpp"
 
-// Forward declarations for new modular architecture
-class GridSceneNode;
 class DataProcessor;
-class IRenderStrategy;
 
 /**
  *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
@@ -42,85 +47,92 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
     
-    Q_PROPERTY(RenderMode renderMode READ renderMode WRITE setRenderMode NOTIFY renderModeChanged)
-    Q_PROPERTY(bool showVolumeProfile READ showVolumeProfile WRITE setShowVolumeProfile NOTIFY showVolumeProfileChanged)
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
     Q_PROPERTY(int maxCells READ maxCells WRITE setMaxCells NOTIFY maxCellsChanged)
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
+    Q_PROPERTY(double autoScrollPaddingFrac READ autoScrollPaddingFrac WRITE setAutoScrollPaddingFrac NOTIFY autoScrollPaddingFracChanged)
+    Q_PROPERTY(bool autoScrollSmoothEnabled READ autoScrollSmoothEnabled WRITE setAutoScrollSmoothEnabled NOTIFY autoScrollSmoothEnabledChanged)
     
-    // Trade Bubble Properties
-    Q_PROPERTY(double minBubbleRadius READ minBubbleRadius WRITE setMinBubbleRadius NOTIFY minBubbleRadiusChanged)
-    Q_PROPERTY(double maxBubbleRadius READ maxBubbleRadius WRITE setMaxBubbleRadius NOTIFY maxBubbleRadiusChanged)
-    Q_PROPERTY(double bubbleOpacity READ bubbleOpacity WRITE setBubbleOpacity NOTIFY bubbleOpacityChanged)
-    
-    // Overlay Properties for Layered Rendering
-    Q_PROPERTY(bool showHeatmapLayer READ showHeatmapLayer WRITE setShowHeatmapLayer NOTIFY showHeatmapLayerChanged)
-    Q_PROPERTY(bool showTradeBubbleLayer READ showTradeBubbleLayer WRITE setShowTradeBubbleLayer NOTIFY showTradeBubbleLayerChanged)
-    Q_PROPERTY(bool showTradeFlowLayer READ showTradeFlowLayer WRITE setShowTradeFlowLayer NOTIFY showTradeFlowLayerChanged)
-    
+    // Debug Overlay Toggles
+    Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
+    Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
+    Q_PROPERTY(bool showRenderStrategyOverlay READ showRenderStrategyOverlay WRITE setShowRenderStrategyOverlay NOTIFY showRenderStrategyOverlayChanged)
+    Q_PROPERTY(bool showViewportMathOverlay READ showViewportMathOverlay WRITE setShowViewportMathOverlay NOTIFY showViewportMathOverlayChanged)
+    Q_PROPERTY(bool showMemoryCacheOverlay READ showMemoryCacheOverlay WRITE setShowMemoryCacheOverlay NOTIFY showMemoryCacheOverlayChanged)
+    Q_PROPERTY(bool showModeFlagsOverlay READ showModeFlagsOverlay WRITE setShowModeFlagsOverlay NOTIFY showModeFlagsOverlayChanged)
+
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
-    
-    Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
-    
-    Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
 
-public:
-    enum class RenderMode {
-        LiquidityHeatmap,    // Bookmap-style dense grid
-        TradeFlow,           // Trade dots with density
-        TradeBubbles,        // Size-relative bubbles on heatmap
-        VolumeCandles,       // Volume-weighted candles
-        OrderBookDepth       // Depth chart style
-    };
-    Q_ENUM(RenderMode)
+    Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
+
+    Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
+    Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
+    Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
 
 private:
     // Rendering configuration
-    RenderMode m_renderMode = RenderMode::LiquidityHeatmap;
-    bool m_showVolumeProfile = true;
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
     double m_minVolumeFilter = 0.0;      // Volume filter
     int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
     
-    // Trade Bubble configuration
-    double m_minBubbleRadius = 4.0;      // Minimum bubble size (pixels)
-    double m_maxBubbleRadius = 20.0;     // Maximum bubble size (pixels) 
-    double m_bubbleOpacity = 0.85;       // Base opacity for bubbles
-    
-    // Overlay layer toggles
-    bool m_showHeatmapLayer = true;      // Base heatmap layer
-    bool m_showTradeBubbleLayer = true;  // Trade bubble overlay
-    bool m_showTradeFlowLayer = false;   // Trade flow overlay
-    
+    // Debug overlay toggles
+    bool m_showGpuStatsOverlay = false;
+    bool m_showDataPipelineOverlay = false;
+    bool m_showRenderStrategyOverlay = false;
+    bool m_showViewportMathOverlay = false;
+    bool m_showMemoryCacheOverlay = false;
+    bool m_showModeFlagsOverlay = false;
+    int m_liquidityLabelMode = 0;
+    double m_heatmapLiquidityThreshold = 0.0;
+
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
     
-    // Thread safety
-    mutable std::mutex m_dataMutex;
-    
-    //  FOUR DIRTY FLAGS SYSTEM
-    // Each flag triggers a different update path in updatePaintNode
-    std::atomic<bool> m_geometryDirty{true};     // Topology/LOD/mode changed (RARE - full rebuild)
-    std::atomic<bool> m_appendPending{false};    // New data arrived (COMMON - append cells)
-    std::atomic<bool> m_transformDirty{false};   // Pan/zoom/follow (VERY COMMON - transform only)
-    std::atomic<bool> m_materialDirty{false};    // Visual params changed (OCCASIONAL - uniforms/material)
-        
-    // Rendering data
-    std::shared_ptr<const std::vector<CellInstance>> m_visibleCells;
-    // std::vector<Trade> m_recentTrades;  // REMOVED: Trades pulled from DataCache
-    std::vector<std::pair<double, double>> m_volumeProfile;
-    
-    QSGTransformNode* m_rootTransformNode = nullptr;
-    bool m_needsDataRefresh = false;
     bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
-    
+
+    // GPU heatmap path (single quad with streamed columns).
+    bool m_useGpuHeatmap = false;
+    int m_heatmapGridSize = 8192;
+    bool m_heatmapTextureDirty = true;
+    QImage m_heatmapImage;
+    QImage m_heatmapPaletteImage;
+    QTimer* m_heatmapRenderTimer = nullptr;
+    bool m_heatmapViewportInitialized = false;
+    QElapsedTimer m_heatmapClock;
+    std::unique_ptr<class HeatmapStreamState> m_heatmapStream;
+    std::unique_ptr<class ViewportAutoScrollController> m_autoScrollController;
+    double m_autoScrollPaddingFrac = 0.05;
+    bool m_smoothAutoScrollEnabled = true;
+
+    std::array<class GlyphAtlas, 5> m_glyphAtlases;
+    bool m_glyphAtlasesBuilt = false;
+    int m_labelRingGridSize = 0;
+    std::vector<uint16_t> m_labelLiquidityRing;
+    std::vector<uint8_t> m_labelIntensityRing;
+    std::vector<double> m_labelLiquidityScales;
+    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
+    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
+    class HeatmapGlyphNode* m_whiteGlyphNode = nullptr;
+    class HeatmapGlyphNode* m_blackGlyphNode = nullptr;
+
+    // FPS tracking (updated on render thread, read on GUI thread).
+    QElapsedTimer m_fpsTimer;
+    int m_fpsFrameCount = 0;
+    std::atomic<double> m_currentFps{0.0};
+
+    // GPU upload bandwidth tracking
+    QElapsedTimer m_uploadTimer;
+    std::atomic<qint64> m_totalBytesUploaded{0};
+    std::atomic<double> m_uploadBandwidthMBps{0.0};
+    qint64 m_lastBandwidthUpdate = 0;
+
     // V1 state (removed - now delegated to DataProcessor)
 
 public:
@@ -128,35 +140,38 @@ public:
     ~UnifiedGridRenderer(); // Custom destructor needed for unique_ptr with incomplete types
     
     // Property accessors
-    RenderMode renderMode() const { return m_renderMode; }
-    bool showVolumeProfile() const { return m_showVolumeProfile; }
     double intensityScale() const { return m_intensityScale; }
     int maxCells() const { return m_maxCells; }
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
+    double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
+    bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
+    int liquidityLabelMode() const { return m_liquidityLabelMode; }
+    double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     
-    // Trade Bubble accessors
-    double minBubbleRadius() const { return m_minBubbleRadius; }
-    double maxBubbleRadius() const { return m_maxBubbleRadius; }
-    double bubbleOpacity() const { return m_bubbleOpacity; }
+    // GridViewState accessor (for axis models)
+    GridViewState* getViewState() const { return m_viewState.get(); }
     
-    // Overlay layer accessors
-    bool showHeatmapLayer() const { return m_showHeatmapLayer; }
-    bool showTradeBubbleLayer() const { return m_showTradeBubbleLayer; }
-    bool showTradeFlowLayer() const { return m_showTradeFlowLayer; }
-    
+    // Debug overlay accessors
+    bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
+    bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
+    bool showRenderStrategyOverlay() const { return m_showRenderStrategyOverlay; }
+    bool showViewportMathOverlay() const { return m_showViewportMathOverlay; }
+    bool showMemoryCacheOverlay() const { return m_showMemoryCacheOverlay; }
+    bool showModeFlagsOverlay() const { return m_showModeFlagsOverlay; }
+
     //  VIEWPORT BOUNDS: Getters for QML properties
-    qint64 getVisibleTimeStart() const;
-    qint64 getVisibleTimeEnd() const; 
-    double getMinPrice() const;
-    double getMaxPrice() const;
+    Q_INVOKABLE qint64 getVisibleTimeStart() const;
+    Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
+    Q_INVOKABLE double getMinPrice() const;
+    Q_INVOKABLE double getMaxPrice() const;
     
     //  OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     //  VISUAL TRANSFORM: Getter for QML pan offset
-    QPointF getPanVisualOffset() const;
+    Q_INVOKABLE QPointF getPanVisualOffset() const;
     
     //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
@@ -168,6 +183,7 @@ public:
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
     Q_INVOKABLE void setGridResolution(int timeResMs, double priceRes);
+    Q_INVOKABLE void fitHeatmapToDataRange();
     struct GridResolution {
         int timeMs;
         double price;
@@ -186,12 +202,20 @@ public:
     Q_INVOKABLE double getCurrentFPS() const;
     Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
-    
+
+    //  GPU STATS DEBUG API
+    Q_INVOKABLE QString getTextureSize() const;          // e.g., "8192x8192"
+    Q_INVOKABLE QString getTextureMemory() const;        // e.g., "128 MB"
+    Q_INVOKABLE QString getTextureFormat() const;        // e.g., "RGBA8" or "R16"
+    Q_INVOKABLE double getUploadBandwidth() const;       // MB/s
+    Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
+    Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
+
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
+    Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
-    void setDataCache(class DataCache* cache); // Forward declaration - implemented in .cpp
     
     //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
@@ -208,6 +232,7 @@ public:
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
+    Q_INVOKABLE double getZoomFactor() const;
 
 public:
     // Real-time data integration
@@ -218,20 +243,22 @@ public:
     void onViewportChanged();
 
 signals:
-    void renderModeChanged();
-    void showVolumeProfileChanged();
     void intensityScaleChanged();
     void maxCellsChanged();
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
     void minVolumeFilterChanged();
     void priceResolutionChanged();
-    void minBubbleRadiusChanged();
-    void maxBubbleRadiusChanged(); 
-    void bubbleOpacityChanged();
-    void showHeatmapLayerChanged();
-    void showTradeBubbleLayerChanged();
-    void showTradeFlowLayerChanged();
+    void autoScrollPaddingFracChanged();
+    void autoScrollSmoothEnabledChanged();
+    void showGpuStatsOverlayChanged();
+    void showDataPipelineOverlayChanged();
+    void showRenderStrategyOverlayChanged();
+    void showViewportMathOverlayChanged();
+    void showMemoryCacheOverlayChanged();
+    void showModeFlagsOverlayChanged();
+    void liquidityLabelModeChanged();
+    void heatmapLiquidityThresholdChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -248,33 +275,32 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
+    void ensureHeatmapImage();
+    void ensureHeatmapPaletteImage();
+    void buildGlyphAtlases();
+    int pickFontBucket(float cellHeight) const;
+    float fontBucketPx(int bucket) const;
+    void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+                           int gridSize);
+
+private:
     // Property setters
-    void setRenderMode(RenderMode mode);
-    void setShowVolumeProfile(bool show);
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);
-    void setMinBubbleRadius(double radius);
-    void setMaxBubbleRadius(double radius);
-    void setBubbleOpacity(double opacity);
-    void setShowHeatmapLayer(bool show);
-    void setShowTradeBubbleLayer(bool show);
-    void setShowTradeFlowLayer(bool show);
-    void updateVisibleCells();
-    void updateVolumeProfile();
-    
-    class DataCache* m_dataCache = nullptr;
+    void setShowGpuStatsOverlay(bool show);
+    void setShowDataPipelineOverlay(bool show);
+    void setShowRenderStrategyOverlay(bool show);
+    void setShowViewportMathOverlay(bool show);
+    void setShowMemoryCacheOverlay(bool show);
+    void setShowModeFlagsOverlay(bool show);
+    void setAutoScrollPaddingFrac(double fraction);
+    void setAutoScrollSmoothEnabled(bool enabled);
+    void setHeatmapLiquidityThreshold(double threshold);
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;
     std::unique_ptr<QThread> m_dataProcessorThread;
-    std::unique_ptr<IRenderStrategy> m_heatmapStrategy;
-    std::unique_ptr<IRenderStrategy> m_tradeFlowStrategy;  
-    std::unique_ptr<IRenderStrategy> m_tradeBubbleStrategy;
-    std::unique_ptr<IRenderStrategy> m_candleStrategy;
-
-    IRenderStrategy* getCurrentStrategy() const;
-    
     void init();
 
 public:

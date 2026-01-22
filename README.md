@@ -1,4 +1,4 @@
-# Sentinel v2.0.0-alpha
+# Sentinel v2.1.0-alpha
 
 Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20, Qt 6, and with sub-millisecond rendering.
 

@@ -59,9 +59,9 @@ void PriceAxisModel::calculateTicks() {
         }
     }
     
-    qDebug() << "PriceAxisModel: Generated" << m_ticks.size() 
-             << "price ticks for range $" << priceMin << "-$" << priceMax 
-             << "step=$" << step;
+    //qDebug() << "PriceAxisModel: Generated" << m_ticks.size() 
+    //         << "price ticks for range $" << priceMin << "-$" << priceMax 
+    //         << "step=$" << step;
 }
 
 QString PriceAxisModel::formatLabel(double value) const {

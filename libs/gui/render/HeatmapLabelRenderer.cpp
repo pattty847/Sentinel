@@ -1,0 +1,233 @@
+/*
+Sentinel — HeatmapLabelRenderer
+*/
+#include "HeatmapLabelRenderer.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace {
+bool useBlackLabel(uint8_t encoded) {
+    if (encoded == 0) {
+        return false;
+    }
+    const float magnitude = (encoded >= 128)
+        ? (static_cast<float>(encoded - 128) / 127.0f)
+        : (static_cast<float>(encoded) / 127.0f);
+    return magnitude > 0.5f;
+}
+} // namespace
+
+void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
+                                           const GlyphAtlas& atlas,
+                                           const std::vector<uint16_t>& liquidityRing,
+                                           const std::vector<uint8_t>& intensityRing,
+                                           const std::vector<double>& liquidityScales,
+                                           const QRectF& srcRect,
+                                           const QRectF& drawRect,
+                                           int startX,
+                                           int startY,
+                                           float fracX,
+                                           float fracY,
+                                           float cellW,
+                                           float cellH,
+                                           float scale,
+                                           bool dollars,
+                                           std::vector<GlyphQuad>& whiteQuads,
+                                           std::vector<GlyphQuad>& blackQuads) {
+    whiteQuads.clear();
+    blackQuads.clear();
+
+    if (!atlas.isBuilt() || snapshot.gridSize <= 0 || snapshot.tickSize <= 0.0) {
+        return;
+    }
+
+    const int gridSize = snapshot.gridSize;
+    const size_t expectedSize = static_cast<size_t>(gridSize) * gridSize;
+    if (liquidityRing.size() != expectedSize) {
+        return;
+    }
+    const bool haveIntensity = (intensityRing.size() == expectedSize);
+    const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridSize));
+
+    const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
+    const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
+
+    for (int j = 0; j < cellsY; ++j) {
+        int texY = startY + j;
+        if (texY < 0) {
+            texY = gridSize + (texY % gridSize);
+        }
+        texY = texY % gridSize;
+        if (texY < 0 || texY >= gridSize) {
+            continue;
+        }
+        const double price = snapshot.maxPrice - (static_cast<double>(texY) * snapshot.tickSize);
+        for (int i = 0; i < cellsX; ++i) {
+            int texX = startX + i;
+            if (texX < 0) {
+                texX = gridSize + (texX % gridSize);
+            }
+            texX = texX % gridSize;
+            if (texX < 0 || texX >= gridSize) {
+                continue;
+            }
+            const size_t ringIndex = static_cast<size_t>(texY) * gridSize + texX;
+            const uint16_t raw = liquidityRing[ringIndex];
+            if (raw == 0) {
+                continue;
+            }
+
+            const double scaleValue = haveScales
+                ? std::max(1e-12, liquidityScales[texX])
+                : 1.0;
+            double value = static_cast<double>(raw) * scaleValue;
+            if (dollars) {
+                value *= price;
+            }
+            const QString label = formatLiquidityLabel(value, dollars);
+            if (label.isEmpty()) {
+                continue;
+            }
+
+            uint8_t encoded = 255;
+            if (haveIntensity) {
+                encoded = intensityRing[ringIndex];
+                if (encoded == 0) {
+                    continue;
+                }
+            }
+
+            float penX = 0.0f;
+            float minX = std::numeric_limits<float>::max();
+            float maxX = std::numeric_limits<float>::lowest();
+            float minY = std::numeric_limits<float>::max();
+            float maxY = std::numeric_limits<float>::lowest();
+            for (const QChar c : label) {
+                const auto& glyph = atlas.glyph(c);
+                if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+                    continue;
+                }
+                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()));
+                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()));
+                minY = std::min(minY, static_cast<float>(glyph.bounds.top()));
+                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()));
+                penX += glyph.advance;
+            }
+            if (!std::isfinite(minX) || !std::isfinite(maxX)) {
+                continue;
+            }
+
+            const float centerX = drawRect.x() + (static_cast<float>(i) + 0.5f - fracX) * cellW;
+            const float centerY = drawRect.y() + (static_cast<float>(j) + 0.5f - fracY) * cellH;
+            const float originX = centerX - (minX + maxX) * 0.5f * scale;
+            const float originY = centerY - (minY + maxY) * 0.5f * scale;
+
+            penX = 0.0f;
+            for (const QChar c : label) {
+                const auto& glyph = atlas.glyph(c);
+                if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+                    penX += glyph.advance;
+                    continue;
+                }
+
+                const float x0 = originX + (penX + glyph.bounds.left()) * scale;
+                const float y0 = originY + (glyph.bounds.top()) * scale;
+                const float x1 = originX + (penX + glyph.bounds.right()) * scale;
+                const float y1 = originY + (glyph.bounds.bottom()) * scale;
+
+                const float u0 = static_cast<float>(glyph.uv.left());
+                const float v0 = static_cast<float>(glyph.uv.top());
+                const float u1 = static_cast<float>(glyph.uv.right());
+                const float v1 = static_cast<float>(glyph.uv.bottom());
+
+                GlyphQuad quad;
+                quad.pos[0] = QVector2D(x0, y0);
+                quad.pos[1] = QVector2D(x0, y1);
+                quad.pos[2] = QVector2D(x1, y0);
+                quad.pos[3] = QVector2D(x1, y0);
+                quad.pos[4] = QVector2D(x0, y1);
+                quad.pos[5] = QVector2D(x1, y1);
+
+                quad.uv[0] = QVector2D(u0, v0);
+                quad.uv[1] = QVector2D(u0, v1);
+                quad.uv[2] = QVector2D(u1, v0);
+                quad.uv[3] = QVector2D(u1, v0);
+                quad.uv[4] = QVector2D(u0, v1);
+                quad.uv[5] = QVector2D(u1, v1);
+
+                if (haveIntensity && useBlackLabel(encoded)) {
+                    blackQuads.push_back(quad);
+                } else {
+                    whiteQuads.push_back(quad);
+                }
+                penX += glyph.advance;
+            }
+        }
+    }
+}
+
+QString HeatmapLabelRenderer::formatLiquidityLabel(double value, bool dollars) {
+    if (value <= 0.0) {
+        return QString();
+    }
+
+    const double absValue = value;
+    double divisor = 1.0;
+    QString suffix;
+    if (absValue >= 1.0e9) {
+        divisor = 1.0e9;
+        suffix = "B";
+    } else if (absValue >= 1.0e6) {
+        divisor = 1.0e6;
+        suffix = "M";
+    } else if (absValue >= 1.0e3) {
+        divisor = 1.0e3;
+        suffix = "k";
+    }
+
+    double scaled = absValue / divisor;
+    QString number;
+    if (divisor > 1.0) {
+        if (scaled >= 10.0) {
+            scaled = std::floor(scaled);
+            number = QString::number(scaled, 'f', 0);
+        } else {
+            scaled = std::floor(scaled * 10.0) / 10.0;
+            if (scaled < 0.1) {
+                return QString();
+            }
+            number = QString::number(scaled, 'f', 1);
+            if (number.endsWith(".0")) {
+                number.chop(2);
+            }
+        }
+    } else if (absValue < 1.0) {
+        scaled = std::floor(absValue * 100.0) / 100.0;
+        if (scaled < 0.01) {
+            return QString();
+        }
+        number = QString::number(scaled, 'f', 2);
+        while (number.endsWith('0')) {
+            number.chop(1);
+        }
+        if (number.endsWith('.')) {
+            number.chop(1);
+        }
+    } else if (absValue < 10.0) {
+        scaled = std::floor(absValue * 10.0) / 10.0;
+        number = QString::number(scaled, 'f', 1);
+        if (number.endsWith(".0")) {
+            number.chop(2);
+        }
+    } else {
+        scaled = std::floor(absValue);
+        number = QString::number(scaled, 'f', 0);
+    }
+
+    if (dollars) {
+        return QString("$%1%2").arg(number, suffix);
+    }
+    return QString("%1%2").arg(number, suffix);
+}

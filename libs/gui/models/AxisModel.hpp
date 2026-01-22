@@ -2,9 +2,11 @@
 #include <QAbstractListModel>
 #include <QObject>
 #include <QPointF>
+#include <QQuickItem>
 #include <vector>
 
 class GridViewState;
+class UnifiedGridRenderer;
 
 /**
  * AxisModel - Base class for axis tick calculation and presentation
@@ -15,9 +17,13 @@ class GridViewState;
  * 
  * The model automatically updates when the viewport changes by connecting to
  * GridViewState::viewportChanged() signal.
+ * 
+ * QML Usage:
+ *   TimeAxisModel { target: unifiedGridRenderer }
  */
 class AxisModel : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(QQuickItem* target READ target WRITE setTarget NOTIFY targetChanged)
     
 public:
     enum Role {
@@ -29,6 +35,14 @@ public:
     explicit AxisModel(QObject* parent = nullptr);
     virtual ~AxisModel() = default;
     
+    // QML target connection
+    QQuickItem* target() const { return m_target; }
+    void setTarget(QQuickItem* target);
+    
+signals:
+    void targetChanged();
+    
+public:
     // QAbstractListModel interface
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
@@ -79,6 +93,9 @@ protected:
     // Viewport dimensions
     double m_viewportWidth = 800.0;
     double m_viewportHeight = 600.0;
+    
+private:
+    QQuickItem* m_target = nullptr;
 };
 
 Q_DECLARE_METATYPE(AxisModel*)

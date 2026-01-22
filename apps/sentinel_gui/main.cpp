@@ -28,9 +28,8 @@ void configureGraphicsBackend() {
     #else
         qputenv("QSG_RHI_BACKEND", "opengl");
     #endif
-        qputenv("QSG_RENDER_LOOP", "threaded");
-        qputenv("QSG_INFO", "1"); // optional: verbose GPU info
-    }
+    qputenv("QSG_RENDER_LOOP", "threaded");
+}
 
 // --- Surface format configuration ---
 void configureSurfaceFormat() {
@@ -50,21 +49,16 @@ void registerMetaTypesAndQml() {
     qRegisterMetaType<OrderBook>();
     qRegisterMetaType<std::shared_ptr<const OrderBook>>("std::shared_ptr<const OrderBook>");
 
-    sLog_App("Registering pure grid-only QML components...");
-    // Register a lightweight QML module "Sentinel" and expose our core types there.
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
-    sLog_App("Pure grid-only mode: Legacy components permanently removed");
 }
 
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
-    sLog_App("[Sentinel Starting...]");
-
     configureGraphicsBackend();
     configureSurfaceFormat();
 
@@ -73,23 +67,15 @@ int main(int argc, char *argv[])
     // Initialize and apply theme
     ThemeManager& themeManager = ThemeManager::instance();
     themeManager.initializeDefaults();
-    
-    // Apply default dark theme (can be made configurable later)
+
     if (!themeManager.applyTheme("dark", &app)) {
         sLog_Error("Failed to apply default theme");
     }
 
     registerMetaTypesAndQml();
 
-    sLog_App("Creating MainWindowGPU...");
     MainWindowGPU window;
-    sLog_App("MainWindowGPU created successfully");
-    sLog_App("Calling window.show()...");
     window.show();
-    sLog_App("window.show() completed");
-
-    sLog_App("Starting Qt event loop with app.exec()...");
-    sLog_App("GPU Trading Terminal ready for 144Hz action!");
 
     return app.exec();
 }

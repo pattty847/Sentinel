@@ -17,7 +17,6 @@ Related: MainWindowGpu.cpp, DockablePanel.hpp.
 // Forward declarations
 class HeatmapDock;
 class StatusBar;
-class MarketDataPanel;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
@@ -27,7 +26,6 @@ public:
     struct DockWidgets {
         HeatmapDock* heatmapDock = nullptr;
         StatusBar* statusBar = nullptr;
-        MarketDataPanel* marketDataDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;

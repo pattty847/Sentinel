@@ -45,6 +45,8 @@ Column {
         border.color: "lime"
         border.width: 1
         radius: 3
+        layer.enabled: true
+        layer.smooth: false
         
         Rectangle {
             id: volumeSliderHandle
@@ -56,6 +58,8 @@ Column {
             radius: 2
             x: Math.max(0, Math.min(parent.width - width, 
                 root.target ? (root.target.minVolumeFilter / root.maxVolumeRange) * (parent.width - width) : 0))
+            layer.enabled: true
+            layer.smooth: false
             
             MouseArea {
                 anchors.fill: parent

@@ -4,25 +4,29 @@
 
 
 void BeastWsTransport::connect(std::string host, std::string port, std::string target) {
-    host_ = std::move(host);
-    port_ = std::move(port);
-    target_ = std::move(target);
+    net::post(strand_, [this, h = std::move(host), p = std::move(port), t = std::move(target)]() mutable {
+        host_ = std::move(h);
+        port_ = std::move(p);
+        target_ = std::move(t);
 
-    resolver_.async_resolve(host_, port_,
-        [this](beast::error_code ec, tcp::resolver::results_type results){
-            onResolve(ec, results);
-        });
+        resolver_.async_resolve(host_, port_,
+            [this](beast::error_code ec, tcp::resolver::results_type results){
+                onResolve(ec, results);
+            });
+    });
 }
 
 void BeastWsTransport::close() {
-    if (ws_.is_open()) {
-        ws_.async_close(websocket::close_code::normal, [this](beast::error_code ec){
-            if (ec) { if (onError_) onError_(ec.message()); }
+    net::post(strand_, [this]() {
+        if (ws_.is_open()) {
+            ws_.async_close(websocket::close_code::normal, [this](beast::error_code ec){
+                if (ec) { if (onError_) onError_(ec.message()); }
+                if (onStatus_) onStatus_(false);
+            });
+        } else {
             if (onStatus_) onStatus_(false);
-        });
-    } else {
-        if (onStatus_) onStatus_(false);
-    }
+        }
+    });
 }
 
 void BeastWsTransport::send(std::string msg) {

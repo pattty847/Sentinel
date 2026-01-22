@@ -99,10 +99,8 @@ void SecApiClient::executePythonCommand(const QString& command, const QString& o
     
     QStringList args;
     args << "-c" << command;
-    
+
     QString pythonExe = getPythonExecutable();
-    qDebug() << "Executing Python inline command:" << pythonExe << args;
-    
     m_pythonProcess->start(pythonExe, args);
 }
 
@@ -132,9 +130,6 @@ void SecApiClient::runSecScript(const QString& scriptName,
     fullArgs << args;
 
     m_currentOperation = operation;
-
-    qDebug() << "Executing SEC script:" << pythonExe << fullArgs;
-
     m_pythonProcess->start(pythonExe, fullArgs);
 }
 
@@ -146,9 +141,8 @@ void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatu
         emit apiError(error);
         return;
     }
-    
+
     QString output = m_pythonProcess->readAllStandardOutput();
-    qDebug() << "Python output:" << output;
     
     if (m_currentOperation == "init") {
         if (output.contains("SEC_API_READY")) {

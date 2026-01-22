@@ -1,7 +1,6 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
-#include "../../core/marketdata/MarketDataCore.hpp"
-#include "../../core/marketdata/cache/DataCache.hpp"
+#include "../datasources/IGridDataSource.hpp"
 #include "../../../libs/core/SentinelLogging.hpp"
 #include <QGridLayout>
 #include <QFont>
@@ -10,13 +9,10 @@
 OrderBookDock::OrderBookDock(QWidget* parent)
     : DockablePanel("orderbook", "Order Book", parent)
 {
-    sLog_App("OrderBookDock: Constructing order book dock");
 }
 
 void OrderBookDock::buildUi()
 {
-    sLog_App("OrderBookDock: Building UI components");
-    
     // Main vertical layout
     auto* mainLayout = new QVBoxLayout(m_contentWidget);
     mainLayout->setContentsMargins(8, 8, 8, 8);
@@ -121,32 +117,22 @@ void OrderBookDock::setupSpreadLayout()
 
 void OrderBookDock::onSymbolChanged(const QString& symbol)
 {
-    sLog_App(QString("OrderBookDock: Symbol changed to %1").arg(symbol));
-    
     m_currentSymbol = symbol;
     if (m_symbolLabel) {
         m_symbolLabel->setText(symbol.isEmpty() ? "No Symbol" : symbol);
     }
-    
-    // Reset display
+
     updateSpreadDisplay(0.0, 0.0, 0.0, 0.0);
-    
-    // TODO: Subscribe to order book updates for new symbol
-    // For now, we'll wait for market data core to provide order book signals
 }
 
 void OrderBookDock::connectToMarketData()
 {
-    auto* marketDataCore = ServiceLocator::marketDataCore();
-    if (!marketDataCore) {
-        sLog_App("OrderBookDock: MarketDataCore not available in ServiceLocator");
-        return;
-    }
-    connect(marketDataCore, &MarketDataCore::liveOrderBookUpdated,
+    auto* dataSource = ServiceLocator::dataSource();
+    if (!dataSource) return;
+
+    connect(dataSource, &IGridDataSource::liveOrderBookUpdated,
             this, &OrderBookDock::onOrderBookUpdated,
             Qt::QueuedConnection);
-    
-    sLog_App("OrderBookDock: Connected to MarketDataCore live order book updates");
 }
 
 void OrderBookDock::onOrderBookUpdated(const QString& symbol,
@@ -154,17 +140,12 @@ void OrderBookDock::onOrderBookUpdated(const QString& symbol,
 {
     Q_UNUSED(deltas);
 
-    if (symbol != m_currentSymbol) {
-        return;  // Not our symbol
-    }
-    
-    auto* cache = ServiceLocator::dataCache();
-    if (!cache) {
-        sLog_App("OrderBookDock: DataCache not available for order book updates");
-        return;
-    }
+    if (symbol != m_currentSymbol) return;
 
-    const LiveOrderBook& liveBook = cache->getDirectLiveOrderBook(symbol.toStdString());
+    auto* dataSource = ServiceLocator::dataSource();
+    if (!dataSource) return;
+
+    const LiveOrderBook& liveBook = dataSource->getDirectLiveOrderBook(symbol.toStdString());
 
     std::vector<std::pair<uint32_t, double>> bidBuffer;
     std::vector<std::pair<uint32_t, double>> askBuffer;

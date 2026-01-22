@@ -205,6 +205,23 @@ public:
         std::vector<std::pair<uint32_t, double>>& askBuffer,
         size_t maxPerSide) const;
 
+    // Aggregate a price range into fixed-size rows (thread-safe).
+    void accumulateRange(double minPrice,
+                         double maxPrice,
+                         double rowTickSize,
+                         std::vector<double>& rowValues,
+                         double* bestBid,
+                         double* bestAsk) const;
+
+    // Aggregate bids/asks separately into fixed-size rows (thread-safe).
+    void accumulateRangeSplit(double minPrice,
+                              double maxPrice,
+                              double rowTickSize,
+                              std::vector<double>& bidRows,
+                              std::vector<double>& askRows,
+                              double* bestBid,
+                              double* bestAsk) const;
+
 private:
     // Helper to convert a price to a vector index
     inline size_t price_to_index(double price) const {
@@ -240,5 +257,7 @@ private:
 Q_DECLARE_METATYPE(Trade)
 Q_DECLARE_METATYPE(BookDelta)
 Q_DECLARE_METATYPE(std::vector<BookDelta>)
+Q_DECLARE_METATYPE(BookLevelUpdate)
+Q_DECLARE_METATYPE(std::vector<BookLevelUpdate>)
 
 #endif // TRADEDATA_H 

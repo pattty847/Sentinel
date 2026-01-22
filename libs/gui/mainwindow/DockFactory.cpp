@@ -1,7 +1,6 @@
 #include "DockFactory.h"
 #include "../widgets/HeatmapDock.hpp"
 #include "../widgets/StatusBar.hpp"
-#include "../widgets/MarketDataPanel.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
@@ -17,7 +16,6 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.heatmapDock = new HeatmapDock(m_parent);
     
     // Create all other docks
-    m_docks.marketDataDock = new MarketDataPanel(m_parent);
     m_docks.secDock = new SecFilingDock(m_parent);
     m_docks.copenetDock = new CopenetFeedDock(m_parent);
     m_docks.aiCommentaryDock = new AICommentaryFeedDock(m_parent);
@@ -27,8 +25,6 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.heatmapDock->setMinimumWidth(800);
     m_docks.heatmapDock->setMinimumHeight(600);
     m_docks.secDock->setMinimumWidth(300);
-    m_docks.marketDataDock->setMinimumWidth(350);
-    
     return m_docks;
 }
 
