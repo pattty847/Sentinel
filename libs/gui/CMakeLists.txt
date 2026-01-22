@@ -46,6 +46,10 @@ set(GRID_CORE_SOURCES
     render/ViewportAutoScrollController.cpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
+    render/GlyphAtlas.hpp
+    render/GlyphAtlas.cpp
+    render/HeatmapGlyphNode.hpp
+    render/HeatmapGlyphNode.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
 )
@@ -101,6 +105,8 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
     FILES
         render/shaders/heatmap_intensity.vert
         render/shaders/heatmap_intensity.frag
+        render/shaders/heatmap_glyph.vert
+        render/shaders/heatmap_glyph.frag
 )
 
 target_include_directories(sentinel_gui_lib 

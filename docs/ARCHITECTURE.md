@@ -110,4 +110,4 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 
 ## Related Documentation
 
-- `docs/MARKETDATA_ARCHITECTURE.md`: Complete MarketDataCore pipeline, threading, error handling.
+- `docs/MARKETDATA.md`: Complete MarketDataCore pipeline, threading, error handling.

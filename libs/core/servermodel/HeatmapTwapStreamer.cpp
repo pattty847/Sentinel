@@ -322,7 +322,7 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
     if (bidValues.empty() || askValues.empty()) {
         return {};
     }
-    double intensityFloor = 0.02;
+    double intensityFloor = 0.01;
     const QByteArray floorEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_FLOOR");
     bool ok = false;
     const double floorOverride = floorEnv.toDouble(&ok);

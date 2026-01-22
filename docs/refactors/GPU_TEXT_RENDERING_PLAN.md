@@ -26,6 +26,51 @@
 - Glyph atlas built once (QImage → QSGTexture).
 - Label geometry uses data‑relative coordinates and ring/timeOffset.
 - Reuse geometry buffers; no per‑frame heap churn.
+- Grid dimensions: **8129 × 8129** (price levels × time columns).
+- Two text colors only: **white** and **black** (contrast against cell intensity).
+
+---
+
+## 0.1) Label Appearance
+
+**Format:** Compact SI notation — `1.3k`, `2M`, `4B`, `$420.69`  
+**Position:** Centered within each cell (both horizontal and vertical).  
+**Visibility threshold:** Only render labels when `cellHeight >= 12px`.  
+**Baseline:** Vertically center the glyph bounding box, not the font baseline.
+
+---
+
+## 0.2) Font Bucket Strategy
+
+| Bucket | Cell Height Range | Atlas Font Size | Scale Factor      |
+|--------|-------------------|-----------------|-------------------|
+| 0      | 12–17 px          | 12 px           | cellHeight / 12   |
+| 1      | 18–27 px          | 20 px           | cellHeight / 20   |
+| 2      | 28–47 px          | 32 px           | cellHeight / 32   |
+| 3      | 48+ px            | 48 px           | cellHeight / 48   |
+
+**Selection logic:**
+```cpp
+int pickFontBucket(float cellHeight) {
+    if (cellHeight < 18) return 0;
+    if (cellHeight < 28) return 1;
+    if (cellHeight < 48) return 2;
+    return 3;
+}
+```
+
+Scale factor is applied to quad size for smooth scaling within each bucket.
+
+---
+
+## 0.3) Capacity Planning
+
+**Worst‑case viewport at min zoom (labels visible):**
+- Assume viewport shows ~100 columns × ~80 rows = **8,000 cells** max.
+- Average label length: 4 chars (e.g. "1.3k").
+- Max quads needed: **8,000 × 4 = 32,000 quads**.
+- Pre‑allocate geometry buffer for **32,000 quads** at init.
+- 6 verts/quad × 4 floats/vert (pos+uv) × 32k = ~3 MB. Trivial.
 
 ---
 
@@ -53,8 +98,29 @@ public:
 ```
 
 **Notes:**
-- Build **one atlas per font bucket** (e.g. 10/14/18/22 px).
+- Build **one atlas per font bucket** (12/20/32/48 px).
 - Store glyphs in a map.
+- Atlas format: **alpha‑only** (or RGBA with white glyphs). Colorize via vertex color.
+
+---
+
+## 1.1) Text Color Handling
+
+Two colors: **white** (`#FFFFFF`) and **black** (`#000000`).
+
+**Selection:** Based on cell intensity.
+```cpp
+QColor pickLabelColor(float intensity) {
+    return (intensity > 0.5f) ? Qt::black : Qt::white;
+}
+```
+
+**Implementation:** Add vertex color to `HeatmapGlyphNode` vertex format:
+- position (2 floats) + texcoord (2 floats) + color (4 bytes packed as 1 uint)
+- Or use `QSGOpaqueTextureMaterial` subclass with color uniform per‑label.
+
+Simpler approach: **two geometry batches** — one for white labels, one for black.
+Draw white batch first, black batch second. Two draw calls, still fast.
 
 ---
 
@@ -70,17 +136,21 @@ public:
 
 **Vertex format:**
 - 6 vertices per quad (2 triangles).
-- Each vertex: position + texcoord.
+- Each vertex: position (2f) + texcoord (2f) = 16 bytes/vert.
 
 **API Sketch:**
 ```cpp
 class HeatmapGlyphNode : public QSGGeometryNode {
 public:
   void setAtlas(QSGTexture* texture);
+  void setColor(const QColor& color);  // white or black
   void ensureCapacity(int maxQuads);
   void updateGeometry(const std::vector<GlyphQuad>& quads);
 };
 ```
+
+**Color approach:** Use two `HeatmapGlyphNode` instances — one white, one black.
+Partition labels by intensity threshold, fill each node's geometry separately.
 
 ---
 
@@ -120,10 +190,27 @@ struct GlyphQuad { QVector2D pos[6]; QVector2D uv[6]; };
 
 **Pseudo:**
 ```cpp
-if (!glyphNode) create once;
-glyphNode->setAtlas(atlasTex);
-glyphNode->ensureCapacity(maxChars);
-glyphNode->updateGeometry(quads);
+// Init (once)
+if (!m_whiteGlyphNode) {
+    m_whiteGlyphNode = new HeatmapGlyphNode();
+    m_whiteGlyphNode->setColor(Qt::white);
+    m_whiteGlyphNode->ensureCapacity(32000);
+}
+if (!m_blackGlyphNode) {
+    m_blackGlyphNode = new HeatmapGlyphNode();
+    m_blackGlyphNode->setColor(Qt::black);
+    m_blackGlyphNode->ensureCapacity(32000);
+}
+
+// Per frame
+int bucket = pickFontBucket(cellHeight);
+auto [whiteQuads, blackQuads] = buildLabelQuads(snapshot, viewport, atlas[bucket]);
+
+m_whiteGlyphNode->setAtlas(atlas[bucket].texture());
+m_whiteGlyphNode->updateGeometry(whiteQuads);
+
+m_blackGlyphNode->setAtlas(atlas[bucket].texture());
+m_blackGlyphNode->updateGeometry(blackQuads);
 ```
 
 ---
@@ -139,13 +226,23 @@ Everything is drawn **in the same frame**.
 ---
 
 ## 6) Performance Notes
-- Pre‑allocate enough quads for worst‑case viewport.
-- Use one geometry node; avoid thousands of children.
+- Pre‑allocate **32,000 quads** per glyph node at init (~3 MB each).
+- Two geometry nodes total (white + black). Two draw calls.
 - Update only vertex data; no texture rebuilds after init.
+- Skip label generation entirely when `cellHeight < 12px`.
 
 ---
 
 ## ✅ Done Criteria
 - Text moves *perfectly* with heatmap under pan/zoom/auto.
 - No flicker, no swap lag.
+- Labels appear/disappear cleanly at zoom threshold (12px).
+- Labels scale smoothly within each font bucket.
+- White/black contrast is correct against cell intensity.
 - `updatePaintNode()` becomes simpler: render only.
+
+---
+
+## Implementation Notes (Codex)
+- Avoided full `LabelSnapshot` copies per frame by streaming per-column label updates into a render-thread ring buffer.
+- Label geometry is built from that render-thread ring each frame only when `cellHeight >= 12px`.

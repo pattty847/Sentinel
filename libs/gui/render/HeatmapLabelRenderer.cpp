@@ -3,51 +3,59 @@ Sentinel — HeatmapLabelRenderer
 */
 #include "HeatmapLabelRenderer.hpp"
 
-#include <QPainter>
-#include <QFont>
-
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
-void HeatmapLabelRenderer::buildFromSnapshot(const Request& request,
-                                             const HeatmapStreamState::LabelSnapshot& labelSnapshot,
-                                             bool dollars) {
-    if (!request.valid || request.labelSize.isEmpty()) {
+namespace {
+bool useBlackLabel(uint8_t encoded) {
+    if (encoded == 0) {
+        return false;
+    }
+    const float magnitude = (encoded >= 128)
+        ? (static_cast<float>(encoded - 128) / 127.0f)
+        : (static_cast<float>(encoded) / 127.0f);
+    return magnitude > 0.5f;
+}
+} // namespace
+
+void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
+                                           const GlyphAtlas& atlas,
+                                           const std::vector<uint16_t>& liquidityRing,
+                                           const std::vector<uint8_t>& intensityRing,
+                                           const std::vector<double>& liquidityScales,
+                                           const QRectF& srcRect,
+                                           const QRectF& drawRect,
+                                           int startX,
+                                           int startY,
+                                           float fracX,
+                                           float fracY,
+                                           float cellW,
+                                           float cellH,
+                                           float scale,
+                                           bool dollars,
+                                           std::vector<GlyphQuad>& whiteQuads,
+                                           std::vector<GlyphQuad>& blackQuads) {
+    whiteQuads.clear();
+    blackQuads.clear();
+
+    if (!atlas.isBuilt() || snapshot.gridSize <= 0 || snapshot.tickSize <= 0.0) {
         return;
     }
 
-    const auto& snapshot = labelSnapshot.snapshot;
-    if (!snapshot.liquidityAvailable || snapshot.tickSize <= 0.0 || snapshot.gridSize <= 0) {
-        return;
-    }
-
-    const auto& liquidityRing = labelSnapshot.liquidityRing;
-    const auto& intensityRing = labelSnapshot.intensityRing;
-    const auto& liquidityScales = labelSnapshot.liquidityScales;
-    const size_t expectedSize = static_cast<size_t>(snapshot.gridSize) * snapshot.gridSize;
+    const int gridSize = snapshot.gridSize;
+    const size_t expectedSize = static_cast<size_t>(gridSize) * gridSize;
     if (liquidityRing.size() != expectedSize) {
         return;
     }
-
-    const int extraWidth = static_cast<int>(std::ceil(request.cellW));
-    QImage labelImage(QSize(request.labelSize.width() + extraWidth, request.labelSize.height()),
-                      QImage::Format_ARGB32_Premultiplied);
-    labelImage.fill(Qt::transparent);
-
-    QPainter painter(&labelImage);
-    QFont font("Monospace");
-    font.setStyleHint(QFont::TypeWriter);
-    font.setPixelSize(request.fontPx);
-    painter.setFont(font);
-    const QColor askColor(255, 255, 255, 230);
-    const QColor bidColor(0, 0, 0, 210);
-
-    const int gridSize = snapshot.gridSize;
-    const int cellsX = static_cast<int>(std::ceil(request.srcRect.width())) + 1;
-    const int cellsY = static_cast<int>(std::ceil(request.srcRect.height()));
     const bool haveIntensity = (intensityRing.size() == expectedSize);
+    const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridSize));
+
+    const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
+    const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
 
     for (int j = 0; j < cellsY; ++j) {
-        int texY = request.startY + j;
+        int texY = startY + j;
         if (texY < 0) {
             texY = gridSize + (texY % gridSize);
         }
@@ -57,7 +65,7 @@ void HeatmapLabelRenderer::buildFromSnapshot(const Request& request,
         }
         const double price = snapshot.maxPrice - (static_cast<double>(texY) * snapshot.tickSize);
         for (int i = 0; i < cellsX; ++i) {
-            int texX = request.startX + i;
+            int texX = startX + i;
             if (texX < 0) {
                 texX = gridSize + (texX % gridSize);
             }
@@ -66,23 +74,15 @@ void HeatmapLabelRenderer::buildFromSnapshot(const Request& request,
                 continue;
             }
             const size_t ringIndex = static_cast<size_t>(texY) * gridSize + texX;
-            if (haveIntensity) {
-                const uint8_t encoded = intensityRing[ringIndex];
-                if (encoded == 0) {
-                    continue;
-                }
-                painter.setPen(encoded >= 128 ? askColor : bidColor);
-            } else {
-                painter.setPen(askColor);
-            }
             const uint16_t raw = liquidityRing[ringIndex];
             if (raw == 0) {
                 continue;
             }
-            const double scale = (liquidityScales.size() == static_cast<size_t>(gridSize))
+
+            const double scaleValue = haveScales
                 ? std::max(1e-12, liquidityScales[texX])
                 : 1.0;
-            double value = static_cast<double>(raw) * scale;
+            double value = static_cast<double>(raw) * scaleValue;
             if (dollars) {
                 value *= price;
             }
@@ -91,34 +91,81 @@ void HeatmapLabelRenderer::buildFromSnapshot(const Request& request,
                 continue;
             }
 
-            const float px = static_cast<float>(i) * request.cellW;
-            const float py = static_cast<float>(j) * request.cellH;
-            const QRectF cellRect(px, py, request.cellW, request.cellH);
-            painter.drawText(cellRect, Qt::AlignCenter, label);
+            uint8_t encoded = 255;
+            if (haveIntensity) {
+                encoded = intensityRing[ringIndex];
+                if (encoded == 0) {
+                    continue;
+                }
+            }
+
+            float penX = 0.0f;
+            float minX = std::numeric_limits<float>::max();
+            float maxX = std::numeric_limits<float>::lowest();
+            float minY = std::numeric_limits<float>::max();
+            float maxY = std::numeric_limits<float>::lowest();
+            for (const QChar c : label) {
+                const auto& glyph = atlas.glyph(c);
+                if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+                    continue;
+                }
+                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()));
+                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()));
+                minY = std::min(minY, static_cast<float>(glyph.bounds.top()));
+                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()));
+                penX += glyph.advance;
+            }
+            if (!std::isfinite(minX) || !std::isfinite(maxX)) {
+                continue;
+            }
+
+            const float centerX = drawRect.x() + (static_cast<float>(i) + 0.5f - fracX) * cellW;
+            const float centerY = drawRect.y() + (static_cast<float>(j) + 0.5f - fracY) * cellH;
+            const float originX = centerX - (minX + maxX) * 0.5f * scale;
+            const float originY = centerY - (minY + maxY) * 0.5f * scale;
+
+            penX = 0.0f;
+            for (const QChar c : label) {
+                const auto& glyph = atlas.glyph(c);
+                if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+                    penX += glyph.advance;
+                    continue;
+                }
+
+                const float x0 = originX + (penX + glyph.bounds.left()) * scale;
+                const float y0 = originY + (glyph.bounds.top()) * scale;
+                const float x1 = originX + (penX + glyph.bounds.right()) * scale;
+                const float y1 = originY + (glyph.bounds.bottom()) * scale;
+
+                const float u0 = static_cast<float>(glyph.uv.left());
+                const float v0 = static_cast<float>(glyph.uv.top());
+                const float u1 = static_cast<float>(glyph.uv.right());
+                const float v1 = static_cast<float>(glyph.uv.bottom());
+
+                GlyphQuad quad;
+                quad.pos[0] = QVector2D(x0, y0);
+                quad.pos[1] = QVector2D(x0, y1);
+                quad.pos[2] = QVector2D(x1, y0);
+                quad.pos[3] = QVector2D(x1, y0);
+                quad.pos[4] = QVector2D(x0, y1);
+                quad.pos[5] = QVector2D(x1, y1);
+
+                quad.uv[0] = QVector2D(u0, v0);
+                quad.uv[1] = QVector2D(u0, v1);
+                quad.uv[2] = QVector2D(u1, v0);
+                quad.uv[3] = QVector2D(u1, v0);
+                quad.uv[4] = QVector2D(u0, v1);
+                quad.uv[5] = QVector2D(u1, v1);
+
+                if (haveIntensity && useBlackLabel(encoded)) {
+                    blackQuads.push_back(quad);
+                } else {
+                    whiteQuads.push_back(quad);
+                }
+                penX += glyph.advance;
+            }
         }
     }
-    painter.end();
-
-    Result result;
-    result.image = labelImage;
-    result.startX = request.startX;
-    result.startY = request.startY;
-    result.pixelSize = request.labelSize;
-    result.sourceSize = request.srcRect.size();
-    result.fontBucket = request.fontBucket;
-    result.viewportVersion = request.viewportVersion;
-    result.valid = !labelImage.isNull();
-
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_result = result;
-    }
-    m_version.fetch_add(1);
-}
-
-HeatmapLabelRenderer::Result HeatmapLabelRenderer::result() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_result;
 }
 
 QString HeatmapLabelRenderer::formatLiquidityLabel(double value, bool dollars) {

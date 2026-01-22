@@ -16,21 +16,21 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
 #include <QSGVertexColorMaterial>
-#include <QSGSimpleTextureNode>
 #include <QThread>
 #include <QMetaObject>
 #include <QMetaType>
 #include <QTimer>
 #include <QtEndian>
-#include <cmath>
-// #include <algorithm>
+#include <QFont>
+#include <QFontDatabase>
 #include <algorithm>
 #include <cmath>
-// #include <cmath>
 
 // New modular architecture includes
 #include "render/GridViewState.hpp"
 #include "render/DataProcessor.hpp"
+#include "render/GlyphAtlas.hpp"
+#include "render/HeatmapGlyphNode.hpp"
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
@@ -267,7 +267,6 @@ void UnifiedGridRenderer::setLiquidityLabelMode(int mode) {
         return;
     }
     m_liquidityLabelMode = mode;
-    m_heatmapLabelDirty = true;
     update();
     emit liquidityLabelModeChanged();
 }
@@ -278,7 +277,6 @@ void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
         return;
     }
     m_heatmapLiquidityThreshold = clamped;
-    m_heatmapLabelDirty = true;
     update();
     emit heatmapLiquidityThresholdChanged();
 }
@@ -347,7 +345,7 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
-    m_labelRenderer = std::make_unique<HeatmapLabelRenderer>();
+    buildGlyphAtlases();
     
     // Create DataProcessor on worker thread for background processing
     m_dataProcessorThread = std::make_unique<QThread>();
@@ -396,7 +394,6 @@ void UnifiedGridRenderer::init() {
                     if (m_heatmapStream) {
                         m_heatmapStream->reset(m_heatmapGridSize, minPrice, maxPrice, tickSize);
                     }
-                    m_heatmapLabelDirty = true;
                     m_heatmapViewportInitialized = false;
                 }
 
@@ -520,7 +517,6 @@ void UnifiedGridRenderer::init() {
                 if (m_heatmapStream) {
                     m_heatmapStream->reset(m_heatmapGridSize, minPrice, maxPrice, tickSize);
                 }
-                m_heatmapLabelDirty = true;
                 if (m_autoScrollController) {
                     m_autoScrollController->resetSpan();
                 }
@@ -611,6 +607,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (!texNode) {
             texNode = new HeatmapIntensityNode();
             m_heatmapTextureDirty = true;
+            m_whiteGlyphNode = nullptr;
+            m_blackGlyphNode = nullptr;
         }
 
         if (m_heatmapTextureDirty) {
@@ -736,155 +734,108 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             texNode->setTimeOffset(snapshot.timeOffset);
         }
 
-        if (!drawRect.isEmpty() && !bounds.isEmpty()) {
-            const QRectF srcRect = texNode->getSourceRect();
-            const QSize labelSize(qRound(drawRect.width()), qRound(drawRect.height()));
-            if (!labelSize.isEmpty() && srcRect.width() > 0.0 && srcRect.height() > 0.0 && snapshot.liquidityAvailable) {
-                const auto sizeClose = [](const QSizeF& a, const QSizeF& b) {
-                    const double eps = 1.0e-3;
-                    return std::abs(a.width() - b.width()) < eps &&
-                           std::abs(a.height() - b.height()) < eps;
-                };
-                const auto pixelSizeClose = [](const QSize& a, const QSize& b) {
-                    const int tol = 1;
-                    return std::abs(a.width() - b.width()) <= tol &&
-                           std::abs(a.height() - b.height()) <= tol;
-                };
-                const float cellW = static_cast<float>(drawRect.width()) / std::max(1.0, srcRect.width());
-                const float cellH = static_cast<float>(drawRect.height()) / std::max(1.0, srcRect.height());
-                const float minCell = std::min(cellW, cellH);
-                const float labelThreshold = 18.0f;
-                if (minCell >= labelThreshold) {
-                    const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-                    const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridSize);
-                    const int startX = static_cast<int>(std::floor(baseX));
-                    const float baseY = static_cast<float>(srcRect.y());
-                    const int startY = static_cast<int>(std::floor(baseY));
+        if (m_labelRingGridSize != gridSize && gridSize > 0) {
+            m_labelRingGridSize = gridSize;
+            m_labelLiquidityRing.assign(static_cast<size_t>(gridSize) * gridSize, 0);
+            m_labelIntensityRing.assign(static_cast<size_t>(gridSize) * gridSize, 0);
+            m_labelLiquidityScales.assign(gridSize, 1.0);
+        }
 
-                    const float rawFontPx = std::clamp(minCell * 0.45f, 8.0f, 28.0f);
-                    const int fontBucket = quantizeFontPx(rawFontPx);
-                    const uint64_t viewportVersion = m_viewState ? m_viewState->getViewportVersion() : 0;
-                    const bool srcSizeMatches = sizeClose(srcRect.size(), m_heatmapLabelSourceRect.size());
+        if (m_heatmapStream) {
+            std::vector<HeatmapStreamState::PendingLabelColumn> pendingLabelUploads;
+            m_heatmapStream->takePendingLabelUploads(pendingLabelUploads);
+            if (!pendingLabelUploads.empty()) {
+                applyLabelUploads(pendingLabelUploads, gridSize);
+            }
+        }
 
-                    const bool dragging = (m_viewState && m_viewState->isDragging());
-                    const int panCellDx = std::abs(startX - m_heatmapLabelActiveStartX);
-                    const int panCellDy = std::abs(startY - m_heatmapLabelActiveStartY);
-                    const bool panNeedsRebuild = dragging && (panCellDx >= 1 || panCellDy >= 1);
-                    if (!pixelSizeClose(labelSize, m_heatmapLabelPixelSize) ||
-                        !srcSizeMatches ||
-                        fontBucket != m_heatmapLabelFontBucket ||
-                        viewportVersion != m_heatmapLabelViewportVersion ||
-                        panNeedsRebuild) {
-                        m_heatmapLabelPixelSize = labelSize;
-                        m_heatmapLabelSourceRect = srcRect;
-                        m_heatmapLabelFontBucket = fontBucket;
-                        m_heatmapLabelViewportVersion = viewportVersion;
-                        m_heatmapLabelDirty = true;
-                    }
+        const QRectF srcRect = texNode->getSourceRect();
+        const bool labelVisible = (!drawRect.isEmpty() && !bounds.isEmpty() &&
+                                   srcRect.width() > 0.0 && srcRect.height() > 0.0 &&
+                                   snapshot.liquidityAvailable && m_labelRingGridSize == gridSize);
+        const float cellW = (srcRect.width() > 0.0f)
+            ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRect.width())
+            : 0.0f;
+        const float cellH = (srcRect.height() > 0.0f)
+            ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRect.height())
+            : 0.0f;
+        const float labelThreshold = 12.0f;
 
-                    auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(texNode->firstChild());
-                    if (window()) {
-                        if (m_heatmapLabelDirty) {
-                            HeatmapLabelRenderer::Request request;
-                            request.srcRect = srcRect;
-                            request.labelSize = labelSize;
-                            request.startX = startX;
-                            request.startY = startY;
-                            request.cellW = cellW;
-                            request.cellH = cellH;
-                            request.fontPx = fontBucket;
-                            request.fontBucket = fontBucket;
-                            request.viewportVersion = viewportVersion;
-                            request.valid = true;
-                            if (m_labelRenderer && m_heatmapStream) {
-                                auto labelSnapshot = std::make_shared<HeatmapStreamState::LabelSnapshot>();
-                                if (m_heatmapStream->copyLabelSnapshot(*labelSnapshot)) {
-                                    const bool dollars = (m_liquidityLabelMode != 0);
-                                    QMetaObject::invokeMethod(this, [this, request, dollars, labelSnapshot]() {
-                                        if (m_labelRenderer && labelSnapshot) {
-                                            m_labelRenderer->buildFromSnapshot(request, *labelSnapshot, dollars);
-                                        }
-                                    }, Qt::QueuedConnection);
-                                }
-                            }
-                            m_heatmapLabelDirty = false;
-                        }
-
-                        const int labelVersion = m_labelRenderer ? m_labelRenderer->version() : 0;
-                        if (labelVersion != m_heatmapLabelTextureVersion) {
-                            const auto result = m_labelRenderer ? m_labelRenderer->result() : HeatmapLabelRenderer::Result{};
-                            if (result.valid && !result.image.isNull() &&
-                                result.viewportVersion == m_heatmapLabelViewportVersion &&
-                                result.fontBucket == m_heatmapLabelFontBucket) {
-                                m_heatmapLabelActiveStartX = result.startX;
-                                m_heatmapLabelActiveStartY = result.startY;
-                                m_heatmapLabelActivePixelSize = result.pixelSize;
-                                m_heatmapLabelActiveSourceSize = result.sourceSize;
-                                m_heatmapLabelActiveFontBucket = result.fontBucket;
-                                if (!labelNode) {
-                                    labelNode = new QSGSimpleTextureNode();
-                                    texNode->appendChildNode(labelNode);
-                                }
-                                auto* labelTex = window()->createTextureFromImage(result.image);
-                                labelTex->setFiltering(QSGTexture::Nearest);
-                                labelNode->setTexture(labelTex);
-                                labelNode->setOwnsTexture(true);
-                                m_heatmapLabelTextureVersion = labelVersion;
-                            }
-                        }
-
-                        if (labelNode && labelNode->texture()) {
-                            const bool labelMatches = pixelSizeClose(m_heatmapLabelActivePixelSize, labelSize) &&
-                                sizeClose(m_heatmapLabelActiveSourceSize, srcRect.size()) &&
-                                (m_heatmapLabelActiveFontBucket == fontBucket);
-                            const QSize texSize = labelNode->texture()->textureSize();
-                            const float deltaX = baseX - static_cast<float>(m_heatmapLabelActiveStartX);
-                            const float deltaY = baseY - static_cast<float>(m_heatmapLabelActiveStartY);
-                            const float activeCellW = (m_heatmapLabelActiveSourceSize.width() > 0.0)
-                                ? static_cast<float>(m_heatmapLabelActivePixelSize.width() / m_heatmapLabelActiveSourceSize.width())
-                                : cellW;
-                            const float activeCellH = (m_heatmapLabelActiveSourceSize.height() > 0.0)
-                                ? static_cast<float>(m_heatmapLabelActivePixelSize.height() / m_heatmapLabelActiveSourceSize.height())
-                                : cellH;
-                            const float activeWidth = static_cast<float>(m_heatmapLabelActivePixelSize.width());
-                            const float activeHeight = static_cast<float>(m_heatmapLabelActivePixelSize.height());
-                            const float scaleX = (activeWidth > 0.0f)
-                                ? static_cast<float>(labelSize.width()) / activeWidth
-                                : 1.0f;
-                            const float scaleY = (activeHeight > 0.0f)
-                                ? static_cast<float>(labelSize.height()) / activeHeight
-                                : 1.0f;
-                            const float shiftPx = deltaX * activeCellW * scaleX;
-                            const float shiftPy = deltaY * activeCellH * scaleY;
-                            const float scaledW = texSize.width() * scaleX;
-                            const float scaledH = texSize.height() * scaleY;
-                            if (labelMatches) {
-                                labelNode->setRect(QRectF(drawRect.x() - shiftPx,
-                                                          drawRect.y() - shiftPy,
-                                                          scaledW,
-                                                          scaledH));
-                            } else {
-                                labelNode->setRect(QRectF(drawRect.x() - shiftPx,
-                                                          drawRect.y() - shiftPy,
-                                                          scaledW,
-                                                          scaledH));
-                            }
-                        }
-                    }
-                } else {
-                    if (auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(texNode->firstChild())) {
-                        labelNode->setRect(QRectF());
-                        m_heatmapLabelDirty = true;
-                    }
+        if (labelVisible && cellH >= labelThreshold && m_glyphAtlasesBuilt && window()) {
+            const int bucket = pickFontBucket(cellH);
+            const float fontPx = fontBucketPx(bucket);
+            const float scale = (fontPx > 0.0f) ? (cellH / fontPx) : 1.0f;
+            const GlyphAtlas& atlas = m_glyphAtlases[static_cast<size_t>(bucket)];
+            if (!atlas.isBuilt()) {
+                if (m_whiteGlyphNode) {
+                    m_labelWhiteQuads.clear();
+                    m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
+                }
+                if (m_blackGlyphNode) {
+                    m_labelBlackQuads.clear();
+                    m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
                 }
             } else {
-                if (auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(texNode->firstChild())) {
-                    labelNode->setRect(QRectF());
+                const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+                const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridSize);
+                const int startX = static_cast<int>(std::floor(baseX));
+                const float fracX = baseX - static_cast<float>(startX);
+                const float baseY = static_cast<float>(srcRect.y());
+                const int startY = static_cast<int>(std::floor(baseY));
+                const float fracY = baseY - static_cast<float>(startY);
+
+                if (m_labelWhiteQuads.capacity() < 32000) {
+                    m_labelWhiteQuads.reserve(32000);
                 }
+                if (m_labelBlackQuads.capacity() < 32000) {
+                    m_labelBlackQuads.reserve(32000);
+                }
+
+                const bool dollars = (m_liquidityLabelMode != 0);
+                HeatmapLabelRenderer::buildLabelQuads(snapshot,
+                                                      atlas,
+                                                      m_labelLiquidityRing,
+                                                      m_labelIntensityRing,
+                                                      m_labelLiquidityScales,
+                                                      srcRect,
+                                                      drawRect,
+                                                      startX,
+                                                      startY,
+                                                      fracX,
+                                                      fracY,
+                                                      cellW,
+                                                      cellH,
+                                                      scale,
+                                                      dollars,
+                                                      m_labelWhiteQuads,
+                                                      m_labelBlackQuads);
+
+                if (!m_whiteGlyphNode) {
+                    m_whiteGlyphNode = new HeatmapGlyphNode();
+                    m_whiteGlyphNode->setColor(Qt::white);
+                    m_whiteGlyphNode->ensureCapacity(32000);
+                    texNode->appendChildNode(m_whiteGlyphNode);
+                }
+                if (!m_blackGlyphNode) {
+                    m_blackGlyphNode = new HeatmapGlyphNode();
+                    m_blackGlyphNode->setColor(Qt::black);
+                    m_blackGlyphNode->ensureCapacity(32000);
+                    texNode->appendChildNode(m_blackGlyphNode);
+                }
+
+                m_whiteGlyphNode->setAtlas(atlas.image(), window());
+                m_blackGlyphNode->setAtlas(atlas.image(), window());
+                m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
+                m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
             }
         } else {
-            if (auto* labelNode = dynamic_cast<QSGSimpleTextureNode*>(texNode->firstChild())) {
-                labelNode->setRect(QRectF());
+            if (m_whiteGlyphNode) {
+                m_labelWhiteQuads.clear();
+                m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
+            }
+            if (m_blackGlyphNode) {
+                m_labelBlackQuads.clear();
+                m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
             }
         }
 
@@ -969,12 +920,94 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
     }
 }
 
-int UnifiedGridRenderer::quantizeFontPx(float fontPx) const {
-    const int bucketSize = 2;
-    const int minPx = 8;
-    const int maxPx = 28;
-    const int bucket = static_cast<int>(std::floor(fontPx / bucketSize)) * bucketSize;
-    return std::clamp(bucket, minPx, maxPx);
+void UnifiedGridRenderer::buildGlyphAtlases() {
+    if (m_glyphAtlasesBuilt) {
+        return;
+    }
+    static const QString charset = QStringLiteral("0123456789.kMB$+-");
+    const std::array<int, 5> sizes = {12, 20, 32, 48, 96};
+    const QFont baseFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    for (size_t i = 0; i < m_glyphAtlases.size(); ++i) {
+        QFont font = baseFont;
+        font.setPixelSize(sizes[i]);
+        m_glyphAtlases[i].build(font, charset);
+        if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
+            const QString path = QString("/tmp/sentinel_glyph_atlas_%1.png").arg(sizes[i]);
+            m_glyphAtlases[i].image().save(path);
+        }
+    }
+    m_glyphAtlasesBuilt = true;
+}
+
+int UnifiedGridRenderer::pickFontBucket(float cellHeight) const {
+    if (cellHeight < 18.0f) {
+        return 0;
+    }
+    if (cellHeight < 28.0f) {
+        return 1;
+    }
+    if (cellHeight < 48.0f) {
+        return 2;
+    }
+    if (cellHeight < 80.0f) {
+        return 3;
+    }
+    return 4;
+}
+
+float UnifiedGridRenderer::fontBucketPx(int bucket) const {
+    switch (bucket) {
+    case 0:
+        return 12.0f;
+    case 1:
+        return 20.0f;
+    case 2:
+        return 32.0f;
+    case 3:
+        return 48.0f;
+    default:
+        return 96.0f;
+    }
+}
+
+void UnifiedGridRenderer::applyLabelUploads(
+    const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+    int gridSize) {
+    if (gridSize <= 0 || uploads.empty()) {
+        return;
+    }
+    const size_t expectedSize = static_cast<size_t>(gridSize) * gridSize;
+    if (m_labelLiquidityRing.size() != expectedSize) {
+        m_labelLiquidityRing.assign(expectedSize, 0);
+    }
+    if (m_labelIntensityRing.size() != expectedSize) {
+        m_labelIntensityRing.assign(expectedSize, 0);
+    }
+    if (m_labelLiquidityScales.size() != static_cast<size_t>(gridSize)) {
+        m_labelLiquidityScales.assign(gridSize, 1.0);
+    }
+
+    const int expectedLiquidityBytes = gridSize * static_cast<int>(sizeof(uint16_t));
+    for (const auto& upload : uploads) {
+        const int column = upload.x;
+        if (column < 0 || column >= gridSize) {
+            continue;
+        }
+        if (upload.intensity.size() == gridSize) {
+            const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
+            for (int y = 0; y < gridSize; ++y) {
+                m_labelIntensityRing[static_cast<size_t>(y) * gridSize + column] = src[y];
+            }
+        }
+        if (upload.liquidity.size() == expectedLiquidityBytes) {
+            const auto* src = reinterpret_cast<const uint16_t*>(upload.liquidity.constData());
+            for (int y = 0; y < gridSize; ++y) {
+                const uint16_t raw = qFromLittleEndian(src[y]);
+                m_labelLiquidityRing[static_cast<size_t>(y) * gridSize + column] = raw;
+            }
+            m_labelLiquidityScales[column] = upload.liquidityScale;
+        }
+    }
 }
 
 void UnifiedGridRenderer::fitHeatmapToDataRange() {

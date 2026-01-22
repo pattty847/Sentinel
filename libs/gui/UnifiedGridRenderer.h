@@ -24,12 +24,16 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <QSizeF>
 #include <cstdint>
 #include <vector>
+#include <array>
 #include <memory>
 #include <atomic>
 #include <mutex>
 #include <limits>
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
+#include "render/GlyphAtlas.hpp"
+#include "render/HeatmapLabelRenderer.hpp"
+#include "render/HeatmapStreamState.hpp"
 
 class DataProcessor;
 
@@ -107,18 +111,16 @@ private:
     double m_autoScrollPaddingFrac = 0.05;
     bool m_smoothAutoScrollEnabled = true;
 
-    bool m_heatmapLabelDirty = true;
-    QRectF m_heatmapLabelSourceRect;
-    QSize m_heatmapLabelPixelSize;
-    int m_heatmapLabelFontBucket = 0;
-    uint64_t m_heatmapLabelViewportVersion = 0;
-    int m_heatmapLabelTextureVersion = -1;
-    QSize m_heatmapLabelActivePixelSize;
-    QSizeF m_heatmapLabelActiveSourceSize;
-    int m_heatmapLabelActiveFontBucket = 0;
-    int m_heatmapLabelActiveStartX = 0;
-    int m_heatmapLabelActiveStartY = 0;
-    std::unique_ptr<class HeatmapLabelRenderer> m_labelRenderer;
+    std::array<class GlyphAtlas, 5> m_glyphAtlases;
+    bool m_glyphAtlasesBuilt = false;
+    int m_labelRingGridSize = 0;
+    std::vector<uint16_t> m_labelLiquidityRing;
+    std::vector<uint8_t> m_labelIntensityRing;
+    std::vector<double> m_labelLiquidityScales;
+    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
+    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
+    class HeatmapGlyphNode* m_whiteGlyphNode = nullptr;
+    class HeatmapGlyphNode* m_blackGlyphNode = nullptr;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
@@ -275,7 +277,11 @@ protected:
 private:
     void ensureHeatmapImage();
     void ensureHeatmapPaletteImage();
-    int quantizeFontPx(float fontPx) const;
+    void buildGlyphAtlases();
+    int pickFontBucket(float cellHeight) const;
+    float fontBucketPx(int bucket) const;
+    void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+                           int gridSize);
 
 private:
     // Property setters

@@ -19,6 +19,14 @@ public:
         QByteArray data;
     };
 
+    struct PendingLabelColumn {
+        int x = 0;
+        QByteArray intensity;
+        QByteArray liquidity;
+        double liquidityScale = 1.0;
+        bool haveLiquidity = false;
+    };
+
     struct Snapshot {
         int gridSize = 0;
         int appendMs = 0;
@@ -62,6 +70,7 @@ public:
     bool copyLabelSnapshot(LabelSnapshot& out) const;
 
     void takePendingUploads(std::vector<PendingColumn>& out);
+    void takePendingLabelUploads(std::vector<PendingLabelColumn>& out);
     void copyLiquiditySnapshot(std::vector<uint16_t>& liquidityRing,
                                std::vector<uint8_t>& intensityRing,
                                std::vector<double>& liquidityScales,
@@ -89,6 +98,9 @@ private:
 
     mutable std::mutex m_uploadMutex;
     std::vector<PendingColumn> m_pendingUploads;
+
+    mutable std::mutex m_labelUploadMutex;
+    std::vector<PendingLabelColumn> m_pendingLabelUploads;
 
     mutable std::mutex m_ringMutex;
     std::vector<uint8_t> m_intensityRing;
