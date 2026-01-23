@@ -99,7 +99,7 @@ private:
 
     // GPU heatmap path (single quad with streamed columns).
     bool m_useGpuHeatmap = false;
-    int m_heatmapGridSize = 8192;
+    int m_heatmapGridSize = 2048;
     bool m_heatmapTextureDirty = true;
     QImage m_heatmapImage;
     QImage m_heatmapPaletteImage;

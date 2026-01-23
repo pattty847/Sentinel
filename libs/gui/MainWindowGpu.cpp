@@ -107,9 +107,14 @@ void MainWindowGPU::setupUI() {
     auto docks = dockFactory.createDocks();
     m_heatmapDock = docks.heatmapDock;
     m_statusBar = docks.statusBar;
+    if (m_heatmapDock) {
+        m_symbolInput = m_heatmapDock->symbolInput();
+        m_subscribeButton = m_heatmapDock->subscribeButton();
+    }
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
     m_aiCommentaryDock = docks.aiCommentaryDock;
+    m_labDock = docks.labDock;
     
     // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
@@ -192,6 +197,7 @@ void MainWindowGPU::setupMenuBar() {
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
+    docks.labDock = m_labDock;
     
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
@@ -252,7 +258,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted fo
     if (m_statusBar) {
         m_statusBar->setConnectionStatus(connected);
     }
-    
+
     if (m_subscribeButton) {
         m_subscribeButton->setText(connected ? "Subscribe" : "Connect");
         m_subscribeButton->setEnabled(true);
@@ -318,5 +324,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
+    docks.labDock = m_labDock;
     return docks;
 }

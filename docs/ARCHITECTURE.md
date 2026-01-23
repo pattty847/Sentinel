@@ -7,8 +7,8 @@ Sentinel is a GPU-accelerated trading terminal built on a mandatory client-serve
 ## Core Principles
 
 - **Client-Server Split**: Ingestion and visualization are decoupled. Server handles data, client handles rendering.
-- **GPU-Resident Rendering**: All high-density visualizations (heatmaps) are rendered directly on GPU via streamed intensity textures.
-- **Zero-Copy Hot Paths**: Binary streams and pre-aggregated buffers minimize overhead between server and GPU.
+- **GPU-Resident Rendering**: Heatmaps and labels are rendered directly on GPU via streamed intensity textures and a glyph atlas.
+- **Hot Path Efficiency**: Pre-aggregated buffers minimize overhead between server and GPU; transport is JSON + base64 today.
 - **Deterministic Threading**: Network I/O (Boost.Beast), aggregation, and rendering run on dedicated threads.
 
 ## Directory Layout
@@ -20,14 +20,14 @@ apps/
 
 libs/
   core/
-    marketdata/       # Exchange transports (see MARKETDATA_ARCHITECTURE.md)
+    marketdata/       # Exchange transports + MarketDataCoreEngine (see MARKETDATA.md)
     protocol/         # Client-server WebSocket protocol
     servermodel/      # Server state, aggregation, persistence
     model/            # Shared DTOs
   gui/
     UnifiedGridRenderer   # GPU pipeline orchestration
     datasources/          # RemoteGridDataSource
-    render/               # GPU strategies (HeatmapIntensityNode)
+    render/               # GPU nodes + glyph atlas (HeatmapIntensityNode, HeatmapGlyphNode)
     qml/                  # UI components
 ```
 
@@ -38,10 +38,10 @@ Only `QtCore` is permitted in `libs/core`. All rendering logic lives in `libs/gu
 ### Server
 
 ```
-Exchange -> MarketDataCore -> ServerDataModel -> Persistence + SentinelStreamServer -> WebSocket
+Exchange -> MarketDataCoreEngine -> ServerDataModel -> Persistence + SentinelStreamServer -> WebSocket
 ```
 
-- **MarketDataCore**: Maintains exchange connections, parses feeds, populates cache. See `docs/MARKETDATA_ARCHITECTURE.md` for full details.
+- **MarketDataCoreEngine**: Maintains exchange connections, parses feeds, updates order books. See `docs/MARKETDATA.md` for full details.
 - **ServerDataModel**: Central data hub for all symbols. Coordinates persistence and streaming.
 - **TickBinaryLogger**: Append-only binary logging with hourly rotation.
 - **TimeframeAggregator**: Timer-driven aggregation (100ms, 1s, etc.) into GPU-ready slices.
@@ -54,10 +54,11 @@ WebSocket -> SentinelStreamClient -> RemoteGridDataSource -> DataProcessor -> Un
 ```
 
 - **SentinelStreamClient**: Boost.Beast WebSocket client with reconnection handling.
-- **RemoteGridDataSource**: Manages local buffers for received slices. Emits `heatmapColumnReady`.
+- **RemoteGridDataSource**: Manages local buffers for received slices. Emits `heatmapSliceReceived`.
 - **DataProcessor**: Validates incoming slices, emits to renderer. No local aggregation in remote mode.
 - **UnifiedGridRenderer**: Manages viewport state, ring-buffer uploads, drives `updatePaintNode()`.
 - **HeatmapIntensityNode**: Single-quad QSG material. Samples intensity + palette on GPU.
+- **HeatmapGlyphNode**: QSG node for glyph quads rendered from atlas textures.
 
 ## Rendering Pipeline
 
@@ -72,25 +73,25 @@ The server produces dense `u8` columns: bids 0-127, asks 128-255.
 ### Client Side
 
 ```
-RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode -> GPU
+RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode + HeatmapGlyphNode -> GPU
 ```
 
-The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering.
+The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering; labels come from the glyph atlas.
 
 ### Key Data Structures
 
 ```
 heatmap_slice message:
-  - time_start / time_end
-  - tick_size / min_price / max_price
-  - column (base64-encoded u8 array)
+  - time_start / time_end / timeframe_ms
+  - min_price / max_price / tick_size / mid_price / last_trade
+  - format=u8 / encoding=base64 / column
+  - liquidity_format=u16 / liquidity_encoding=base64 / liquidity_column / liquidity_scale (optional)
+  - reset (bool)
 ```
 
 ## Protocol
 
-**JSON (v0)**: Used for subscription handshake and snapshots.
-
-**Binary (v1)**: Compact framing for live streaming. Active protocol for heatmap data.
+**JSON (v0)**: Used for subscription handshake, snapshots, and heatmap_slice streaming (base64 payloads).
 
 ## Threading Model
 
@@ -108,6 +109,11 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 - Client maintains 60 FPS regardless of visible cell count.
 - CPU cost in client is constant (GPU does the work).
 
+## Runtime Notes
+
+- Client requires a server connection (no local-only mode).
+- `SENTINEL_HEATMAP_TF` must match on server and client.
+
 ## Related Documentation
 
-- `docs/MARKETDATA.md`: Complete MarketDataCore pipeline, threading, error handling.
+- `docs/MARKETDATA.md`: Complete MarketDataCoreEngine pipeline, threading, error handling.

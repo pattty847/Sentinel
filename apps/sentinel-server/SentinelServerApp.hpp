@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QTcpServer>
 #include <memory>
 #include "../../libs/core/marketdata/MarketDataCoreEngine.hpp"
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
@@ -19,5 +20,6 @@ private:
     std::unique_ptr<MarketDataCoreEngine> m_marketDataCore;
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
+    QTcpServer* m_healthServer = nullptr;
 };
 

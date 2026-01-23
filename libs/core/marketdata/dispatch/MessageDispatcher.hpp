@@ -53,10 +53,39 @@ public:
                     else if (evType == "update") out.events.emplace_back(BookUpdateEvent{product});
                 }
             }
-        } else if (channel == "subscriptions") {
+        } else if (channel == "subscriptions" || type == "subscriptions") {
             std::vector<std::string> ids;
             if (j.contains("product_ids") && j["product_ids"].is_array()) {
                 for (const auto& id : j["product_ids"]) ids.emplace_back(id.get<std::string>());
+            }
+            const nlohmann::json* channels = nullptr;
+            if (j.contains("subscriptions") && j["subscriptions"].contains("channels")) {
+                channels = &j["subscriptions"]["channels"];
+            } else if (j.contains("channels")) {
+                channels = &j["channels"];
+            }
+            if (channels && channels->is_array()) {
+                for (const auto& ch : *channels) {
+                    if (ch.contains("product_ids") && ch["product_ids"].is_array()) {
+                        for (const auto& id : ch["product_ids"]) ids.emplace_back(id.get<std::string>());
+                    }
+                }
+            }
+            if (j.contains("subscriptions") && j["subscriptions"].is_object()) {
+                const auto& subs = j["subscriptions"];
+                for (auto it = subs.begin(); it != subs.end(); ++it) {
+                    if (it.value().is_array()) {
+                        for (const auto& id : it.value()) {
+                            if (id.is_string()) ids.emplace_back(id.get<std::string>());
+                        }
+                    }
+                }
+            } else if (j.contains("subscriptions") && j["subscriptions"].is_array()) {
+                for (const auto& sub : j["subscriptions"]) {
+                    if (sub.contains("product_ids") && sub["product_ids"].is_array()) {
+                        for (const auto& id : sub["product_ids"]) ids.emplace_back(id.get<std::string>());
+                    }
+                }
             }
             out.events.emplace_back(SubscriptionAckEvent{std::move(ids)});
         } else if (type == "error") {

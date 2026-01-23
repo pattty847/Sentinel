@@ -21,6 +21,7 @@ class HeatmapDock;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
+class LabDock;
 
 class MenuBuilder {
 public:
@@ -29,6 +30,7 @@ public:
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
+        LabDock* labDock = nullptr;
     };
 
     struct Callbacks {

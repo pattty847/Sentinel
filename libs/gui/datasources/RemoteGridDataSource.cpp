@@ -86,8 +86,14 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived, this, &RemoteGridDataSource::onL2UpdateReceived);
     connect(&m_client, &SentinelStreamClient::heatmapSliceReceived, this, &RemoteGridDataSource::onHeatmapSliceReceived);
     
-    connect(&m_client, &SentinelStreamClient::connected, [this]{ emit connectionStatusChanged(true); });
-    connect(&m_client, &SentinelStreamClient::disconnected, [this]{ emit connectionStatusChanged(false); });
+    connect(&m_client, &SentinelStreamClient::connected,
+            this,
+            [this]{ emit connectionStatusChanged(true); },
+            Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::disconnected,
+            this,
+            [this]{ emit connectionStatusChanged(false); },
+            Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::errorOccurred, this, &IGridDataSource::errorOccurred);
 }
 

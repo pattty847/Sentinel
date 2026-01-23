@@ -3,6 +3,7 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
+#include "../widgets/LabDock.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QInputDialog>
 #include <QLineEdit>
@@ -35,6 +36,9 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     }
     if (docks.aiCommentaryDock) {
         m_viewMenu->addAction(docks.aiCommentaryDock->toggleViewAction());
+    }
+    if (docks.labDock) {
+        m_viewMenu->addAction(docks.labDock->toggleViewAction());
     }
 }
 

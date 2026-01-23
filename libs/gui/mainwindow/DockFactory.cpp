@@ -4,6 +4,7 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
+#include "../widgets/LabDock.hpp"
 
 DockFactory::DockFactory(QWidget* parent) : m_parent(parent) {
 }
@@ -19,12 +20,15 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.secDock = new SecFilingDock(m_parent);
     m_docks.copenetDock = new CopenetFeedDock(m_parent);
     m_docks.aiCommentaryDock = new AICommentaryFeedDock(m_parent);
+    m_docks.labDock = new LabDock(m_parent);
     
     // Set initial minimum sizes for better default layout
     // (will be updated in LayoutOrchestrator based on screen size)
     m_docks.heatmapDock->setMinimumWidth(800);
     m_docks.heatmapDock->setMinimumHeight(600);
     m_docks.secDock->setMinimumWidth(300);
+    m_docks.labDock->setMinimumWidth(320);
+    m_docks.labDock->setMinimumHeight(240);
     return m_docks;
 }
 

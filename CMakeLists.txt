@@ -70,6 +70,9 @@ if(NOT jwt-cpp_FOUND)
     target_include_directories(jwt-cpp::jwt-cpp INTERFACE "${JWT_CPP_INCLUDE_DIR}")
 endif()
 
+# MSDFGen (GPU text atlas generation)
+find_package(msdfgen CONFIG REQUIRED)
+
 # Googletest (tests only)
 FetchContent_Declare(
     googletest

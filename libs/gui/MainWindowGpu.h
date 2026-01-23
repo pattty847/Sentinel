@@ -33,6 +33,7 @@ class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
+class LabDock;
 
 class DockFactory;
 class QmlSceneController;
@@ -92,6 +93,7 @@ private:
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
+    LabDock* m_labDock = nullptr;
     
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;

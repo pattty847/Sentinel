@@ -3,6 +3,7 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
+#include "../widgets/LabDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
@@ -68,6 +69,10 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.aiCommentaryDock);
         docks.aiCommentaryDock->setFloating(false);
     }
+    if (docks.labDock && docks.labDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.labDock);
+        docks.labDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
@@ -77,6 +82,11 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     // Right: SEC Filing Viewer with Market Data tabbed to it
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
+
+    if (docks.labDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.labDock);
+        m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
+    }
     
     // Bottom: Commentary feeds (small height, split horizontally)
     // Add these AFTER the heatmap so they resize relative to it
@@ -102,6 +112,7 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.secDock, QSize(440, 380));
     applyMinimum(docks.copenetDock, fallback);
     applyMinimum(docks.aiCommentaryDock, fallback);
+    applyMinimum(docks.labDock, QSize(360, 240));
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
@@ -123,5 +134,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.secDock) docks.secDock->show();
     if (docks.copenetDock) docks.copenetDock->show();
     if (docks.aiCommentaryDock) docks.aiCommentaryDock->show();
+    if (docks.labDock) docks.labDock->show();
 }
 

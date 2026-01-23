@@ -87,7 +87,7 @@ void HeatmapDock::buildUi() {
     );
     symbolLayout->addWidget(m_subscribeButton);
     
-    // Status label removed - now shown in bottom status bar
+    symbolLayout->addStretch(1);
     
     // Add symbol bar to main layout (fixed height at bottom)
     mainLayout->addWidget(symbolBar, 0);

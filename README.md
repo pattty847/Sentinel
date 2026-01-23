@@ -65,6 +65,24 @@ cmake --build --preset linux-gcc -j
 
 ---
 
+## Run
+
+Server:
+
+```
+SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/bin/sentinel-server
+```
+
+GUI Client:
+
+```
+SENTINEL_GPU_HEATMAP=1 SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+```
+
+Client requires a server connection; `SENTINEL_HEATMAP_TF` must match on both.
+
+---
+
 ## API Keys
 
 Drop a `key.json` in project root:
@@ -83,7 +101,7 @@ Drop a `key.json` in project root:
 ```
 libs/core/    Pure C++ data layer (no Qt GUI)
 libs/gui/     Qt Quick, QSG rendering, widgets
-apps/         Executables (sentinel_gui, stream_cli)
+apps/         Executables (sentinel_gui, sentinel-server)
 ```
 
 Core handles market data, caching, and transforms. GUI handles all rendering and layout. They don't mix.
@@ -93,7 +111,7 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 ## Docs
 
 - `docs/ARCHITECTURE.md` — dataflow and rendering pipeline
-- `docs/CROSS_COMPATABILITY.md` — platform-specific notes
+- `docs/MARKETDATA.md` — MarketDataCoreEngine pipeline
 
 ---
 

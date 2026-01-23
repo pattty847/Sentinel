@@ -140,6 +140,7 @@ private:
     std::unordered_map<std::string, uint64_t> m_lastSeqByProduct; // l2 sequence tracking (guarded by m_seqMutex)
     std::mutex                      m_seqMutex;
     std::atomic<int64_t>            m_lastHeartbeatMs{0};
+    bool                            m_loggedEmptySubscriptionAck = false;
 
     // Transport-level serialization keeps cross-thread access safe
 

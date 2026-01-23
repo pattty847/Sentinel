@@ -117,6 +117,9 @@ inline void MarketDataCoreEngine::emitError(std::string msg) {
 }
 
 inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
+    if (connected) {
+        m_loggedEmptySubscriptionAck = false;
+    }
     if (m_onConnectionStatus) {
         try {
             m_onConnectionStatus(connected);
@@ -343,14 +346,20 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     {
         auto result = MessageDispatcher::parse(message);
         for (const auto& evt : result.events) {
-            std::visit([this](auto&& ev) {
+            std::visit([this, &message](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
                     emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
-                    sLog_DataN(1, std::string("Subscription confirmed for ") +
-                                      std::to_string(ev.productIds.size()) +
-                                      " symbol(s)");
+                    if (!ev.productIds.empty()) {
+                        sLog_DataN(1, std::string("Subscription confirmed for ") +
+                                          std::to_string(ev.productIds.size()) +
+                                          " symbol(s)");
+                    } else if (!m_loggedEmptySubscriptionAck) {
+                        m_loggedEmptySubscriptionAck = true;
+                        sLog_Data("Subscription confirmed with empty product list; raw payload: "
+                                  << message.dump());
+                    }
                 }
             }, evt);
         }

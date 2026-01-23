@@ -4,6 +4,8 @@
 #include <QPointer>
 #include <QString>
 #include <QTimer>
+#include <QTcpSocket>
+#include <QHostAddress>
 
 SentinelServerApp::SentinelServerApp(QObject* parent) 
     : QObject(parent) 
@@ -19,6 +21,40 @@ SentinelServerApp::~SentinelServerApp() {
 bool SentinelServerApp::initialize() {
     try {
         sLog_App("Initializing Server Components...");
+
+        // Health endpoint (HTTP over TCP)
+        m_healthServer = new QTcpServer(this);
+        const QByteArray portEnv = qgetenv("SENTINEL_HEALTH_PORT");
+        bool ok = false;
+        const int port = portEnv.toInt(&ok);
+        const quint16 healthPort = (ok && port > 0) ? static_cast<quint16>(port) : 8090;
+        if (m_healthServer->listen(QHostAddress::LocalHost, healthPort)) {
+            sLog_App("Health endpoint listening on 127.0.0.1:" << healthPort);
+            connect(m_healthServer, &QTcpServer::newConnection, this, [this]() {
+                while (m_healthServer->hasPendingConnections()) {
+                    QTcpSocket* socket = m_healthServer->nextPendingConnection();
+                    connect(socket, &QTcpSocket::readyRead, this, [socket]() {
+                        const QByteArray request = socket->readAll();
+                        const QByteArray firstLine = request.left(request.indexOf('\n')).trimmed();
+                        const bool isPing = firstLine.startsWith("GET /ping");
+                        const QByteArray body = isPing ? QByteArray("OK") : QByteArray("Not Found");
+                        const QByteArray status = isPing ? QByteArray("200 OK") : QByteArray("404 Not Found");
+                        QByteArray response;
+                        response += "HTTP/1.1 " + status + "\r\n";
+                        response += "Content-Type: text/plain\r\n";
+                        response += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
+                        response += "Connection: close\r\n\r\n";
+                        response += body;
+                        socket->write(response);
+                        socket->flush();
+                        socket->disconnectFromHost();
+                    });
+                    connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+                }
+            });
+        } else {
+            sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort);
+        }
 
         // 1. Authenticator
         m_authenticator = std::make_unique<Authenticator>();

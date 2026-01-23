@@ -52,6 +52,8 @@ set(GRID_CORE_SOURCES
     render/HeatmapGlyphNode.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
+    widgets/LabDock.hpp
+    widgets/LabDock.cpp
 )
 
 set(WIDGET_SOURCES
@@ -85,6 +87,7 @@ qt6_add_qml_module(sentinel_gui_lib
     VERSION 1.0
     QML_FILES
         qml/DepthChartView.qml
+        qml/LabView.qml
         qml/CandleChartView.qml
         qml/controls/VolumeFilter.qml
         qml/controls/PriceResolutionSelector.qml
@@ -118,6 +121,7 @@ target_include_directories(sentinel_gui_lib
 target_link_libraries(sentinel_gui_lib
     PUBLIC
         sentinel_core
+        msdfgen::msdfgen
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets

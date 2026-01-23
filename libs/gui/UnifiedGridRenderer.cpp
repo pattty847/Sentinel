@@ -327,11 +327,6 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
 void UnifiedGridRenderer::init() {
     m_useGpuHeatmap = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP");
     if (m_useGpuHeatmap) {
-        bool ok = false;
-        const int envSize = qgetenv("SENTINEL_HEATMAP_GRID").toInt(&ok);
-        if (ok && envSize > 0) {
-            m_heatmapGridSize = envSize;
-        }
         m_heatmapClock.start();
     }
 
@@ -602,6 +597,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (snapshot.gridSize > 0 && snapshot.gridSize != m_heatmapGridSize) {
             m_heatmapGridSize = snapshot.gridSize;
             m_heatmapTextureDirty = true;
+            sLog_Render("GPU HEATMAP GRID SIZE: " << m_heatmapGridSize << " (server authoritative)");
         }
         auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
         if (!texNode) {

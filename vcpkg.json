@@ -2,12 +2,13 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "sentinel",
   "version-string": "0.1.0",
-  "builtin-baseline": "2e776305f2542cc626716435b0c1baf67bb5ab45",
+  "builtin-baseline": "39922dbab0cafd7a7150d459c6a181c7dee5dfbe",
   "dependencies": [
     "boost-beast",
     "boost-system", 
     "nlohmann-json",
     "openssl",
-    "jwt-cpp"
+    "jwt-cpp",
+    "msdfgen"
   ]
 }
