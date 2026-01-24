@@ -3,6 +3,7 @@
 #include <QSurfaceFormat>
 #include <QSGRendererInterface>
 #include <QQuickWindow>
+#include <QQuickItem>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFrame>
@@ -29,15 +30,24 @@ void HeatmapDock::buildUi() {
     m_qquickView->setPersistentSceneGraph(true);
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
     m_qquickView->setColor(Qt::black);
-    
+
     // Configure surface format for optimal GPU performance
     QSurfaceFormat format = QSurfaceFormat::defaultFormat();
     m_qquickView->setFormat(format);
-    
+
     // Create container widget for QML
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, m_contentWidget);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     mainLayout->addWidget(m_qmlContainer, 1);  // Takes most space
+
+    connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (m_qmlContainer) {
+            m_qmlContainer->setVisible(visible);
+        }
+        if (m_qquickView) {
+            m_qquickView->setVisible(visible);
+        }
+    });
     
     // Create embedded symbol control bar (seamless, no title bar look)
     QWidget* symbolBar = new QWidget(m_contentWidget);
@@ -93,5 +103,12 @@ void HeatmapDock::buildUi() {
     mainLayout->addWidget(symbolBar, 0);
     
     m_contentWidget->setLayout(mainLayout);
+}
+
+QObject* HeatmapDock::rootObject() const {
+    if (m_qquickView) {
+        return m_qquickView->rootObject();
+    }
+    return nullptr;
 }
 

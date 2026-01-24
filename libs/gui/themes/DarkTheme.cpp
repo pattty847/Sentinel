@@ -203,10 +203,22 @@ QString DarkTheme::stylesheet() const {
         }
         
         /* Dock Widgets */
+        QMainWindow {
+            background-color: #1E1E1E;
+        }
+
         QDockWidget {
             color: #E8E8E8;
             titlebar-close-icon: none;
             titlebar-normal-icon: none;
+        }
+
+        QDockWidget::widget {
+            background-color: #1E1E1E;
+        }
+
+        QDockWidget QWidget {
+            background-color: #1E1E1E;
         }
         
         QDockWidget::title {

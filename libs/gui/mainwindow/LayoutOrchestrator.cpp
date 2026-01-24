@@ -7,6 +7,7 @@
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
+#include <QGuiApplication>
 #include <QTabWidget>
 
 LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow) 
@@ -46,7 +47,13 @@ void LayoutOrchestrator::saveLayout(const QString& layoutName) {
 
 void LayoutOrchestrator::configureDockOptions() {
     // Enable docking features - AllowNestedDocks enables side-by-side docking (Windows-style)
-    m_mainWindow->setDockOptions(QMainWindow::AllowTabbedDocks | QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks);
+    const QString platform = QGuiApplication::platformName().toLower();
+    const bool isWayland = platform.contains("wayland");
+    QMainWindow::DockOptions options = QMainWindow::AllowTabbedDocks | QMainWindow::AllowNestedDocks;
+    if (!isWayland) {
+        options |= QMainWindow::AnimatedDocks;
+    }
+    m_mainWindow->setDockOptions(options);
     m_mainWindow->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 }
 
@@ -80,7 +87,6 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, docks.heatmapDock);
     
     // Right: SEC Filing Viewer with Market Data tabbed to it
-    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
 
     if (docks.labDock) {

@@ -41,6 +41,10 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Forces full texture render rather than visible range.
 - `SENTINEL_DUMP_GLYPH_ATLAS` (client)  
   Dumps glyph atlas textures for debugging.
+- `SENTINEL_HEATMAP_LABEL_PX` (client)  
+  Minimum cell pixel height before labels render. Default: `24`.
+- `SENTINEL_MSDF_FONT` (client)  
+  Absolute path to a font file used for MSDF atlas generation (Lab dock).
 
 - `SENTINEL_ORDERBOOK_TICK_SIZE` (server + client)  
   Default order book tick size. Default: `0.10`.
@@ -64,3 +68,5 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Forced by the GUI entrypoint to `d3d11`, `metal`, or `opengl` depending on OS.
 - `QSG_RENDER_LOOP`  
   Forced to `threaded` by the GUI entrypoint.
+- `QT_QPA_PLATFORM`  
+  On Linux, defaults to `xcb` in the GUI entrypoint when unset to avoid Wayland dock glitches.

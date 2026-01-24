@@ -34,7 +34,8 @@ public:
                                 float scale,
                                 bool dollars,
                                 std::vector<GlyphQuad>& whiteQuads,
-                                std::vector<GlyphQuad>& blackQuads);
+                                std::vector<GlyphQuad>& blackQuads,
+                                int onlyColumn = -1);
 
 private:
     static QString formatLiquidityLabel(double value, bool dollars);

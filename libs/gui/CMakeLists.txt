@@ -48,8 +48,14 @@ set(GRID_CORE_SOURCES
     render/HeatmapLabelRenderer.cpp
     render/GlyphAtlas.hpp
     render/GlyphAtlas.cpp
+    render/MsdfAtlas.hpp
+    render/MsdfAtlas.cpp
     render/HeatmapGlyphNode.hpp
     render/HeatmapGlyphNode.cpp
+    render/MsdfGlyphNode.hpp
+    render/MsdfGlyphNode.cpp
+    render/LabTextItem.hpp
+    render/LabTextItem.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
     widgets/LabDock.hpp
@@ -110,6 +116,8 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_intensity.frag
         render/shaders/heatmap_glyph.vert
         render/shaders/heatmap_glyph.frag
+        render/shaders/heatmap_msdf.vert
+        render/shaders/heatmap_msdf.frag
 )
 
 target_include_directories(sentinel_gui_lib 

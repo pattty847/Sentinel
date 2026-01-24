@@ -24,6 +24,7 @@ public:
     
     QWidget* qmlContainer() const { return m_qmlContainer; }
     QQuickView* qquickView() const { return m_qquickView; }
+    QObject* rootObject() const;
     
     // Access to embedded symbol controls
     QLineEdit* symbolInput() const { return m_symbolInput; }

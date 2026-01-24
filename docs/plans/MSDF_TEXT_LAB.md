@@ -64,3 +64,9 @@
 - Lab dock toggles between bitmap and MSDF
 - Single sample string + scale slider
 - No heatmap integration yet
+
+**Notes (current decisions):**
+- Use vcpkg-provided msdfgen; no vendoring.
+- Default font family: Roboto Mono; allow override via `SENTINEL_MSDF_FONT`.
+- Cache MSDF atlas in `data/glyph-cache/msdf` (PNG + JSON metrics).
+- Initial px range: 8.0; adjust in Lab if needed.

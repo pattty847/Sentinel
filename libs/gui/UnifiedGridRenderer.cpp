@@ -755,7 +755,12 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         const float cellH = (srcRect.height() > 0.0f)
             ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRect.height())
             : 0.0f;
-        const float labelThreshold = 12.0f;
+        int labelPx = 24;
+        const int envLabelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
+        if (envLabelPx > 0) {
+            labelPx = envLabelPx;
+        }
+        const float labelThreshold = static_cast<float>(labelPx);
 
         if (labelVisible && cellH >= labelThreshold && m_glyphAtlasesBuilt && window()) {
             const int bucket = pickFontBucket(cellH);
@@ -788,6 +793,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 }
 
                 const bool dollars = (m_liquidityLabelMode != 0);
+                const int latestColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : -1;
                 HeatmapLabelRenderer::buildLabelQuads(snapshot,
                                                       atlas,
                                                       m_labelLiquidityRing,
@@ -804,7 +810,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                                                       scale,
                                                       dollars,
                                                       m_labelWhiteQuads,
-                                                      m_labelBlackQuads);
+                                                      m_labelBlackQuads,
+                                                      latestColumn);
 
                 if (!m_whiteGlyphNode) {
                     m_whiteGlyphNode = new HeatmapGlyphNode();

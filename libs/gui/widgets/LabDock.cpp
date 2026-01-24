@@ -33,5 +33,14 @@ void LabDock::buildUi() {
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     mainLayout->addWidget(m_qmlContainer, 1);
 
+    connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (m_qmlContainer) {
+            m_qmlContainer->setVisible(visible);
+        }
+        if (m_qquickView) {
+            m_qquickView->setVisible(visible);
+        }
+    });
+
     m_contentWidget->setLayout(mainLayout);
 }

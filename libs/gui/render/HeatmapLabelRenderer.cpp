@@ -35,7 +35,8 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
                                            float scale,
                                            bool dollars,
                                            std::vector<GlyphQuad>& whiteQuads,
-                                           std::vector<GlyphQuad>& blackQuads) {
+                                           std::vector<GlyphQuad>& blackQuads,
+                                           int onlyColumn) {
     whiteQuads.clear();
     blackQuads.clear();
 
@@ -54,6 +55,25 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
 
+    int onlyTexX = -1;
+    int onlyI = -1;
+    if (onlyColumn >= 0) {
+        onlyTexX = onlyColumn % gridSize;
+        if (onlyTexX < 0) {
+            onlyTexX += gridSize;
+        }
+        onlyI = onlyTexX - startX;
+        if (onlyI < 0) {
+            onlyI += gridSize;
+        }
+        if (onlyI >= gridSize) {
+            onlyI -= gridSize;
+        }
+        if (onlyI < 0 || onlyI >= cellsX) {
+            return;
+        }
+    }
+
     for (int j = 0; j < cellsY; ++j) {
         int texY = startY + j;
         if (texY < 0) {
@@ -64,12 +84,10 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
             continue;
         }
         const double price = snapshot.maxPrice - (static_cast<double>(texY) * snapshot.tickSize);
-        for (int i = 0; i < cellsX; ++i) {
-            int texX = startX + i;
-            if (texX < 0) {
-                texX = gridSize + (texX % gridSize);
-            }
-            texX = texX % gridSize;
+        const int iStart = (onlyI >= 0) ? onlyI : 0;
+        const int iEnd = (onlyI >= 0) ? (onlyI + 1) : cellsX;
+        for (int i = iStart; i < iEnd; ++i) {
+            const int texX = (onlyI >= 0) ? onlyTexX : ((startX + i) % gridSize + gridSize) % gridSize;
             if (texX < 0 || texX >= gridSize) {
                 continue;
             }

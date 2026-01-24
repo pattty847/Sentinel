@@ -27,6 +27,9 @@ void configureGraphicsBackend() {
         qputenv("QSG_RHI_BACKEND", "metal");
     #else
         qputenv("QSG_RHI_BACKEND", "opengl");
+        if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+            qputenv("QT_QPA_PLATFORM", "xcb");
+        }
     #endif
     qputenv("QSG_RENDER_LOOP", "threaded");
 }

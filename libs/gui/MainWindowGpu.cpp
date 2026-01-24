@@ -52,6 +52,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QHBoxLayout>
 #include <QScreen>
 #include <QApplication>
+#include <QTabWidget>
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     // 1) Initialize data source (remote-only)
@@ -64,14 +65,20 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     setupUI();
     
     // 3) Initialize QML scene controller
-    m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
-    m_qmlController->loadQmlSource();
-    m_qmlController->verifyGpuAcceleration();
+    if (m_qquickView) {
+        m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
+    }
+    if (m_qmlController) {
+        m_qmlController->loadQmlSource();
+        m_qmlController->verifyGpuAcceleration();
+    }
     
     // Set up QML context properties
     m_modeController = new ChartModeController(this);
-    m_qmlController->setChartModeController(m_modeController);
-    m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
+    if (m_qmlController) {
+        m_qmlController->setChartModeController(m_modeController);
+        m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
+    }
     
     // 4) Set up layout orchestrator
     // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
@@ -101,6 +108,9 @@ void MainWindowGPU::setupUI() {
     
     // Prevent repaint storms during setup
     setUpdatesEnabled(false);
+
+    // Ensure dock tabs are placed at the top for all areas.
+    setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
     
     // Create docks via DockFactory
     DockFactory dockFactory(this);
@@ -157,7 +167,9 @@ void MainWindowGPU::onSubscribe() {
         return;
     }
 
-    m_qmlController->updateSymbolInContext(symbol);
+    if (m_qmlController) {
+        m_qmlController->updateSymbolInContext(symbol);
+    }
     propagateSymbolChange(symbol);
     if (m_dataSource) {
         m_dataSource->subscribe(symbol);
@@ -227,6 +239,10 @@ void MainWindowGPU::setupShortcuts() {
 // Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
+    if (!m_qmlController) {
+        sLog_Error("Cannot connect signals: QML controller not initialized");
+        return;
+    }
     auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
     if (!m_dataSource || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");

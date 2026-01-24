@@ -33,6 +33,6 @@ public:
 private:
     QString graphicsApiName(QSGRendererInterface::GraphicsApi api) const;
     
-    QQuickView* m_qquickView;
+    QQuickView* m_qquickView = nullptr;
 };
 

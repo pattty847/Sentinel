@@ -1,5 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import Sentinel.Charts 1.0
 
 Rectangle {
     id: root
@@ -7,6 +8,9 @@ Rectangle {
 
     property real labelScale: 1.0
     property string sampleText: "12.948"
+    property string fontFamily: "Roboto Mono"
+    property int fontPx: 96
+    property real msdfRange: 8.0
 
     Column {
         anchors.fill: parent
@@ -51,6 +55,28 @@ Rectangle {
                     color: "#98a2ad"
                     font.pixelSize: 12
                 }
+
+                Text {
+                    text: "Font Px"
+                    color: "#98a2ad"
+                    font.pixelSize: 12
+                }
+
+                Slider {
+                    id: fontSlider
+                    from: 64
+                    to: 128
+                    stepSize: 1
+                    value: 96
+                    width: 160
+                    onValueChanged: root.fontPx = Math.round(value)
+                }
+
+                Text {
+                    text: root.fontPx + "px"
+                    color: "#98a2ad"
+                    font.pixelSize: 12
+                }
             }
         }
 
@@ -63,31 +89,68 @@ Rectangle {
             border.color: "#1d262e"
             border.width: 1
 
-            Grid {
-                id: grid
+            Row {
                 anchors.centerIn: parent
-                columns: 6
-                spacing: 6
+                spacing: 24
 
-                Repeater {
-                    model: 36
+                Column {
+                    spacing: 10
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        text: "MSDF"
+                        color: "#98a2ad"
+                        font.pixelSize: 12
+                        horizontalAlignment: Text.AlignHCenter
+                        width: 220
+                    }
+
                     Rectangle {
-                        width: 88
-                        height: 52
-                        radius: 4
-                        color: index % 2 === 0 ? "#133842" : "#0f2f37"
+                        width: 220
+                        height: 120
+                        radius: 6
+                        color: "#133842"
+                        border.color: "#1b3c44"
+                        border.width: 1
+
+                        LabTextItem {
+                            anchors.fill: parent
+                            text: root.sampleText
+                            scale: root.labelScale
+                            color: "#e7f1ff"
+                            fontFamily: root.fontFamily
+                            fontPixelSize: root.fontPx
+                            pixelRange: root.msdfRange
+                        }
+                    }
+                }
+
+                Column {
+                    spacing: 10
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        text: "QML"
+                        color: "#98a2ad"
+                        font.pixelSize: 12
+                        horizontalAlignment: Text.AlignHCenter
+                        width: 220
+                    }
+
+                    Rectangle {
+                        width: 220
+                        height: 120
+                        radius: 6
+                        color: "#133842"
                         border.color: "#1b3c44"
                         border.width: 1
 
                         Text {
                             anchors.centerIn: parent
-                            text: {
-                                var base = ((index * 37) % 120) / 10.0
-                                return base.toFixed(3)
-                            }
-                            color: index % 5 === 0 ? "#e7f1ff" : "#95a7b6"
+                            text: root.sampleText
+                            color: "#e7f1ff"
                             font.pixelSize: 12 * root.labelScale
-                            font.family: "Monospace"
+                            font.family: root.fontFamily
                         }
                     }
                 }
