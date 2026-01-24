@@ -215,10 +215,17 @@ QString DarkTheme::stylesheet() const {
 
         QDockWidget::widget {
             background-color: #1E1E1E;
+            border: 1px solid #2E2E2E;
         }
 
         QDockWidget QWidget {
             background-color: #1E1E1E;
+        }
+
+        QMainWindow::separator {
+            background-color: #2E2E2E;
+            width: 1px;
+            height: 1px;
         }
         
         QDockWidget::title {
