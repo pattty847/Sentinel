@@ -6,17 +6,15 @@ Rectangle {
     id: root
     color: "#0c0f12"
 
-    property real labelScale: 1.0
-    property string sampleText: "12.948"
-    property string fontFamily: "Roboto Mono"
-    property int fontPx: 96
-    property real msdfRange: 8.0
+    property int hoveredIndex: -1
+    property var hoveredCandle: ({})
 
     Column {
         anchors.fill: parent
         anchors.margins: 12
         spacing: 12
 
+        // Header bar
         Rectangle {
             height: 42
             width: parent.width
@@ -26,133 +24,226 @@ Rectangle {
             Row {
                 anchors.fill: parent
                 anchors.margins: 10
-                spacing: 12
+                spacing: 16
 
                 Text {
-                    text: "Lab"
+                    text: "Lab - Candlestick Demo"
                     color: "#d6dbe0"
                     font.pixelSize: 14
                     font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Text {
-                    text: "Text Scale"
+                    text: "Candles: " + candleChart.candleCount
                     color: "#98a2ad"
                     font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                    text: "Width:"
+                    color: "#98a2ad"
+                    font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Slider {
-                    id: scaleSlider
-                    from: 0.6
-                    to: 1.8
-                    value: 1.0
-                    width: 180
-                    onValueChanged: root.labelScale = value
+                    id: widthSlider
+                    from: 4
+                    to: 24
+                    value: 12
+                    width: 120
+                    anchors.verticalCenter: parent.verticalCenter
+                    onValueChanged: candleChart.candleWidth = value
                 }
 
                 Text {
-                    text: Number(root.labelScale).toFixed(2) + "x"
+                    text: widthSlider.value.toFixed(0) + "px"
                     color: "#98a2ad"
                     font.pixelSize: 12
+                    width: 36
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Text {
-                    text: "Font Px"
+                    text: "Spacing:"
                     color: "#98a2ad"
                     font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Slider {
-                    id: fontSlider
-                    from: 64
-                    to: 128
-                    stepSize: 1
-                    value: 96
-                    width: 160
-                    onValueChanged: root.fontPx = Math.round(value)
+                    id: spacingSlider
+                    from: 0
+                    to: 12
+                    value: 4
+                    width: 100
+                    anchors.verticalCenter: parent.verticalCenter
+                    onValueChanged: candleChart.candleSpacing = value
                 }
 
                 Text {
-                    text: root.fontPx + "px"
+                    text: spacingSlider.value.toFixed(0) + "px"
                     color: "#98a2ad"
                     font.pixelSize: 12
+                    width: 36
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Button {
+                    text: "Load 30"
+                    onClicked: candleChart.loadDemoData(30)
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Button {
+                    text: "Load 100"
+                    onClicked: candleChart.loadDemoData(100)
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Button {
+                    text: "Clear"
+                    onClicked: candleChart.clearCandles()
+                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
         }
 
+        // Main chart area
         Rectangle {
-            id: testArea
+            id: chartArea
             width: parent.width
-            height: parent.height - 66
+            height: parent.height - 120
             color: "#0f1419"
             radius: 8
             border.color: "#1d262e"
             border.width: 1
 
-            Row {
-                anchors.centerIn: parent
-                spacing: 24
+            CandlestickBatched {
+                id: candleChart
+                anchors.fill: parent
+                anchors.margins: 8
 
-                Column {
-                    spacing: 10
-                    anchors.verticalCenter: parent.verticalCenter
+                candleWidth: 12
+                candleSpacing: 4
 
-                    Text {
-                        text: "MSDF"
-                        color: "#98a2ad"
-                        font.pixelSize: 12
-                        horizontalAlignment: Text.AlignHCenter
-                        width: 220
-                    }
+                Component.onCompleted: {
+                    loadDemoData(30);
+                }
 
-                    Rectangle {
-                        width: 220
-                        height: 120
-                        radius: 6
-                        color: "#133842"
-                        border.color: "#1b3c44"
-                        border.width: 1
-
-                        LabTextItem {
-                            anchors.fill: parent
-                            text: root.sampleText
-                            scale: root.labelScale
-                            color: "#e7f1ff"
-                            fontFamily: root.fontFamily
-                            fontPixelSize: root.fontPx
-                            pixelRange: root.msdfRange
-                        }
+                onHoveredCandleChanged: function(index) {
+                    root.hoveredIndex = index;
+                    if (index >= 0) {
+                        root.hoveredCandle = getCandleAt(index);
+                    } else {
+                        root.hoveredCandle = {};
                     }
                 }
 
+                onCandleClicked: function(index) {
+                    console.log("Candle clicked:", index, JSON.stringify(getCandleAt(index)));
+                }
+            }
+
+            // Hover info overlay
+            Rectangle {
+                visible: root.hoveredIndex >= 0
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.margins: 12
+                width: infoColumn.width + 20
+                height: infoColumn.height + 16
+                color: "#1a2530"
+                radius: 6
+                border.color: "#2b4756"
+                border.width: 1
+
                 Column {
-                    spacing: 10
-                    anchors.verticalCenter: parent.verticalCenter
+                    id: infoColumn
+                    anchors.centerIn: parent
+                    spacing: 4
 
                     Text {
-                        text: "QML"
-                        color: "#98a2ad"
+                        text: "Candle #" + root.hoveredIndex
+                        color: "#d6dbe0"
                         font.pixelSize: 12
-                        horizontalAlignment: Text.AlignHCenter
-                        width: 220
+                        font.bold: true
                     }
 
-                    Rectangle {
-                        width: 220
-                        height: 120
-                        radius: 6
-                        color: "#133842"
-                        border.color: "#1b3c44"
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: root.sampleText
-                            color: "#e7f1ff"
-                            font.pixelSize: 12 * root.labelScale
-                            font.family: root.fontFamily
-                        }
+                    Text {
+                        text: "O: " + (root.hoveredCandle.open || 0).toFixed(2)
+                        color: "#98a2ad"
+                        font.pixelSize: 11
+                        font.family: "Roboto Mono"
                     }
+
+                    Text {
+                        text: "H: " + (root.hoveredCandle.high || 0).toFixed(2)
+                        color: "#98a2ad"
+                        font.pixelSize: 11
+                        font.family: "Roboto Mono"
+                    }
+
+                    Text {
+                        text: "L: " + (root.hoveredCandle.low || 0).toFixed(2)
+                        color: "#98a2ad"
+                        font.pixelSize: 11
+                        font.family: "Roboto Mono"
+                    }
+
+                    Text {
+                        text: "C: " + (root.hoveredCandle.close || 0).toFixed(2)
+                        color: root.hoveredCandle.bullish ? "#2fdd7a" : "#ef5c55"
+                        font.pixelSize: 11
+                        font.family: "Roboto Mono"
+                        font.bold: true
+                    }
+
+                    Text {
+                        text: "Vol: " + ((root.hoveredCandle.volume || 0) / 1000).toFixed(1) + "K"
+                        color: "#98a2ad"
+                        font.pixelSize: 11
+                        font.family: "Roboto Mono"
+                    }
+                }
+            }
+        }
+
+        // Footer info bar
+        Rectangle {
+            width: parent.width
+            height: 36
+            color: "#151a1f"
+            radius: 6
+
+            Row {
+                anchors.fill: parent
+                anchors.margins: 10
+                spacing: 24
+
+                Text {
+                    text: root.hoveredIndex >= 0
+                        ? "Hovering candle " + root.hoveredIndex + " - Click to select"
+                        : "Hover over candles to see OHLCV data"
+                    color: "#98a2ad"
+                    font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                    text: "|"
+                    color: "#3d4f5f"
+                    font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                    text: "GPU Batched Rendering"
+                    color: "#5f8498"
+                    font.pixelSize: 12
+                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
         }

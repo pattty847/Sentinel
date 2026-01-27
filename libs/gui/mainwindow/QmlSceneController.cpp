@@ -8,9 +8,25 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QWidget>
+#include <QQmlEngine>
+#include <QCoreApplication>
 
 QmlSceneController::QmlSceneController(QQuickView* qquickView) 
     : m_qquickView(qquickView) {
+}
+
+static void addSentinelChartsImportPath(QQmlEngine* engine) {
+    if (!engine) return;
+
+    // Add QRC import path for embedded Sentinel.Charts module
+    engine->addImportPath("qrc:/qt/qml");
+
+    // Fallback: add build directory path for development
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString candidate = QDir(appDir).absoluteFilePath("../../libs/gui");
+    if (QFile::exists(QDir(candidate).filePath("qmldir"))) {
+        engine->addImportPath(candidate);
+    }
 }
 
 void QmlSceneController::loadQmlSource() {
@@ -20,6 +36,8 @@ void QmlSceneController::loadQmlSource() {
     
     const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
     if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;  // Override
+
+    addSentinelChartsImportPath(m_qquickView->engine());
     
     if (QFile::exists(qmlPath)) {
         m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));

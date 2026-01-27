@@ -113,6 +113,7 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 
 - Client requires a server connection (no local-only mode).
 - `SENTINEL_HEATMAP_TF` must match on server and client.
+- GUI-only screenshot API listens on `127.0.0.1` and captures the full main window as PNG via `GET /screenshot` (see `SENTINEL_GUI_API_PORT` and `SENTINEL_GUI_SCREENSHOT_DIR`).
 
 ## Related Documentation
 

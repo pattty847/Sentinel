@@ -5,6 +5,10 @@ Sentinel — LabDock
 #include <QVBoxLayout>
 #include <QQuickView>
 #include <QQuickWindow>
+#include <QDir>
+#include <QFile>
+#include <QQmlEngine>
+#include <QCoreApplication>
 
 LabDock::LabDock(QWidget* parent)
     : DockablePanel("LabDock", "Lab", parent) {
@@ -27,7 +31,23 @@ void LabDock::buildUi() {
 
     QSurfaceFormat format = QSurfaceFormat::defaultFormat();
     m_qquickView->setFormat(format);
-    m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/LabView.qml"));
+    // Add QRC import path for embedded Sentinel.Charts module
+    m_qquickView->engine()->addImportPath("qrc:/qt/qml");
+
+    // Fallback: add build directory path for development
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString qmlModulePath = QDir(appDir).absoluteFilePath("../../libs/gui");
+    if (QFile::exists(QDir(qmlModulePath).filePath("qmldir"))) {
+        m_qquickView->engine()->addImportPath(qmlModulePath);
+    }
+    if (QFile::exists(":/Sentinel/Charts/LabView.qml")) {
+        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/LabView.qml"));
+    } else if (QFile::exists(":/qt/qml/Sentinel/Charts/LabView.qml")) {
+        m_qquickView->setSource(QUrl("qrc:/qt/qml/Sentinel/Charts/LabView.qml"));
+    } else {
+        const QString localPath = QDir::current().filePath("libs/gui/qml/LabView.qml");
+        m_qquickView->setSource(QUrl::fromLocalFile(localPath));
+    }
 
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, m_contentWidget);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);

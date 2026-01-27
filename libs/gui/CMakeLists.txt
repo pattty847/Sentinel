@@ -16,6 +16,8 @@ set(GRID_CORE_SOURCES
     mainwindow/MenuBuilder.h
     mainwindow/ShortcutBinder.cpp
     mainwindow/ShortcutBinder.h
+    mainwindow/GuiApiServer.cpp
+    mainwindow/GuiApiServer.h
     
     # Grid system components
     datasources/IGridDataSource.hpp
@@ -48,6 +50,8 @@ set(GRID_CORE_SOURCES
     render/HeatmapLabelRenderer.cpp
     render/GlyphAtlas.hpp
     render/GlyphAtlas.cpp
+    render/CandlestickBatched.hpp
+    render/CandlestickBatched.cpp
     render/MsdfAtlas.hpp
     render/MsdfAtlas.cpp
     render/HeatmapGlyphNode.hpp

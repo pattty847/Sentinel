@@ -56,6 +56,11 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_ZOOM_DEBUG` (client)  
   Enables zoom debug logging.
 
+- `SENTINEL_GUI_API_PORT` (client)  
+  Local GUI-only HTTP API port for screenshot capture. Default: `17100`. Set to `0` to disable.
+- `SENTINEL_GUI_SCREENSHOT_DIR` (client)  
+  Output directory for GUI screenshot captures. Default: `./screenshots`.
+
 - `SENTINEL_LOG_App_INTERVAL`  
 - `SENTINEL_LOG_Data_INTERVAL`  
 - `SENTINEL_LOG_Render_INTERVAL`  

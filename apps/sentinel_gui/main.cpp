@@ -14,6 +14,8 @@ This version modularizes startup logic for maintainability and clarity.
 #include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
+#include "render/LabTextItem.hpp"
+#include "render/CandlestickBatched.hpp"
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
@@ -57,6 +59,11 @@ void registerMetaTypesAndQml() {
     qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
+
+    // Register Sentinel.Charts module types for LabView
+    qmlRegisterModule("Sentinel.Charts", 1, 0);
+    qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
+    qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
 }
 
 // --- Main application entrypoint ---

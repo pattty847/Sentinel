@@ -28,6 +28,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include "widgets/HeatmapDock.hpp"
+#include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/LayoutManager.hpp"
@@ -37,6 +38,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
+#include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QQmlContext>
 #include <QMetaObject>
@@ -53,6 +55,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
+#include <QtGlobal>
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     // 1) Initialize data source (remote-only)
@@ -94,6 +97,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     // 6) Set up connections
     setupConnections();
     setWindowProperties();
+    setupGuiApiServer();
     
     if (!validateComponents()) {
         sLog_Error("Component validation failed - app may not function correctly");
@@ -160,6 +164,42 @@ void MainWindowGPU::setupConnections() {
     connectMarketDataSignals();
 }
 
+void MainWindowGPU::setupGuiApiServer() {
+    const int defaultPort = 17100;
+    int port = defaultPort;
+    if (qEnvironmentVariableIsSet("SENTINEL_GUI_API_PORT")) {
+        bool ok = false;
+        const int envPort = qEnvironmentVariableIntValue("SENTINEL_GUI_API_PORT", &ok);
+        if (ok) {
+            port = envPort;
+        } else {
+            sLog_Error("Invalid SENTINEL_GUI_API_PORT value; using default " << defaultPort);
+        }
+    }
+
+    if (port == 0) {
+        sLog_App("GUI API disabled (SENTINEL_GUI_API_PORT=0)");
+        return;
+    }
+    if (port < 0 || port > 65535) {
+        sLog_Error("GUI API port out of range; using default " << defaultPort);
+        port = defaultPort;
+    }
+
+    QString screenshotDir = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+    if (screenshotDir.isEmpty()) {
+        screenshotDir = QDir::currentPath() + "/screenshots";
+    }
+
+    m_guiApiServer = std::make_unique<GuiApiServer>(this,
+                                                    m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
+                                                    m_labDock ? m_labDock->qquickView() : nullptr,
+                                                    this);
+    if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
+        sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
+    }
+}
+
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty() || !symbol.contains('-')) {
@@ -190,6 +230,12 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 
     if (m_firstShow) {
         m_firstShow = false;
+
+        // Force geometry to available screen size (excludes taskbars)
+        // This helps on WSL/X11 where showMaximized() can sometimes be flaky on startup.
+        if (const auto screen = QApplication::primaryScreen()) {
+            setGeometry(screen->availableGeometry());
+        }
 
         if (windowState() != Qt::WindowMaximized) {
             showMaximized();

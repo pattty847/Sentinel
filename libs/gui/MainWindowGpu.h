@@ -40,6 +40,7 @@ class QmlSceneController;
 class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
+class GuiApiServer;
 
 /**
  *  GPU-Powered Trading Terminal MainWindow
@@ -75,6 +76,7 @@ private:
     void setupConnections();
     void connectMarketDataSignals();
     void setWindowProperties();
+    void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;
@@ -111,6 +113,7 @@ private:
     std::unique_ptr<LayoutOrchestrator> m_layoutOrchestrator;
     std::unique_ptr<MenuBuilder> m_menuBuilder;
     std::unique_ptr<ShortcutBinder> m_shortcutBinder;
+    std::unique_ptr<GuiApiServer> m_guiApiServer;
 
     bool m_firstShow = true;
 };
