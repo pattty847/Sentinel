@@ -76,7 +76,7 @@ SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/bin/sentinel-server
 GUI Client:
 
 ```
-SENTINEL_GPU_HEATMAP=1 SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
 ```
 
 Client requires a server connection; `SENTINEL_HEATMAP_TF` must match on both.

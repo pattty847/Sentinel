@@ -197,6 +197,10 @@ void HeatmapTwapStreamer::onSample() {
             state.lastMidPrice = midPrice;
         }
 
+        if (state.initialized && midPrice > 0.0 && state.lastRecenterMid <= 0.0) {
+            state.pendingReset = true;
+        }
+
         if (state.initialized && midPrice > 0.0 && state.lastRecenterMid > 0.0) {
             const double deltaPct = std::abs(midPrice - state.lastRecenterMid) / state.lastRecenterMid;
             if (deltaPct >= m_recenterDelta) {
@@ -362,8 +366,8 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
 
     QByteArray out;
     const size_t height = bidValues.size();
-    out.resize(static_cast<int>(height));
-    auto* dst = reinterpret_cast<unsigned char*>(out.data());
+    out.resize(static_cast<int>(height * sizeof(uint16_t)));
+    auto* dst = reinterpret_cast<uint16_t*>(out.data());
     for (size_t i = 0; i < height; ++i) {
         double bidNorm = std::clamp(bidValues[i] / denomBid, 0.0, 1.0);
         double askNorm = std::clamp(askValues[i] / denomAsk, 0.0, 1.0);
@@ -373,13 +377,15 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
         if (askNorm < intensityFloor) {
             askNorm = 0.0;
         }
+        uint16_t encoded = 0;
         if (askNorm > 0.0) {
-            dst[i] = static_cast<unsigned char>(128 + std::round(askNorm * 127.0));
+            const double scaled = std::round(askNorm * 32767.0);
+            encoded = static_cast<uint16_t>(0x8000u + std::clamp(scaled, 0.0, 32767.0));
         } else if (bidNorm > 0.0) {
-            dst[i] = static_cast<unsigned char>(std::round(bidNorm * 127.0));
-        } else {
-            dst[i] = 0;
+            const double scaled = std::round(bidNorm * 32767.0);
+            encoded = static_cast<uint16_t>(std::clamp(scaled, 0.0, 32767.0));
         }
+        dst[i] = qToLittleEndian(encoded);
     }
     return out;
 }

@@ -66,12 +66,46 @@ void BeastWsTransport::onSslHandshake(beast::error_code ec) {
     if (ec) { if (onError_) onError_(ec.message()); if (onStatus_) onStatus_(false); return; }
     beast::get_lowest_layer(ws_).expires_never();
     ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-    ws_.async_handshake(host_, target_,
+    ws_.set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
+        req.set(beast::http::field::user_agent, "Sentinel/MarketDataCore");
+        req.set(beast::http::field::origin, "https://advanced-trade.coinbase.com");
+    }));
+    handshakeResponse_ = {};
+    ws_.async_handshake(handshakeResponse_, host_, target_,
         [this](beast::error_code ec){ onWsHandshake(ec); });
 }
 
 void BeastWsTransport::onWsHandshake(beast::error_code ec) {
-    if (ec) { if (onError_) onError_(ec.message()); if (onStatus_) onStatus_(false); return; }
+    if (ec) {
+        if (onError_) {
+            std::string msg = "WS handshake failed: ";
+            msg += ec.message();
+            if (handshakeResponse_.result_int() != 0) {
+                msg += " | status=" + std::to_string(handshakeResponse_.result_int());
+                msg += " reason=" + std::string(handshakeResponse_.reason());
+                std::string headers;
+                for (const auto& field : handshakeResponse_) {
+                    headers += std::string(field.name_string()) + ": " + std::string(field.value()) + "; ";
+                }
+                if (!headers.empty()) {
+                    msg += " headers=[" + headers + "]";
+                }
+            }
+            onError_(msg);
+        }
+        if (onStatus_) onStatus_(false);
+        return;
+    }
+    ws_.control_callback([this](websocket::frame_type kind, beast::string_view) {
+        if (kind == websocket::frame_type::close) {
+            const auto reason = ws_.reason();
+            if (onError_) {
+                std::string msg = "WS close: ";
+                msg += reason.reason.c_str();
+                onError_(msg);
+            }
+        }
+    });
     if (onStatus_) onStatus_(true);
     doRead();
     schedulePing();
@@ -83,6 +117,14 @@ void BeastWsTransport::doRead() {
 
 void BeastWsTransport::onRead(beast::error_code ec, std::size_t) {
     if (ec) {
+        if (ec == websocket::error::closed) {
+            const auto reason = ws_.reason();
+            if (onError_) {
+                std::string msg = "WS closed: ";
+                msg += reason.reason.c_str();
+                onError_(msg);
+            }
+        }
         if (onError_) onError_(ec.message());
         if (onStatus_) onStatus_(false);
         return;

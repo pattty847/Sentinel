@@ -29,6 +29,7 @@ class Session : public std::enable_shared_from_this<Session> {
     websocket::stream<beast::tcp_stream> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
+    SentinelStreamServer* owner_ = nullptr;
     std::unordered_set<std::string> subscriptions_;
     std::vector<std::string> write_queue_;
     std::mutex queue_mutex_;
@@ -40,9 +41,10 @@ class Session : public std::enable_shared_from_this<Session> {
 
 public:
     // Take ownership of the socket
-    explicit Session(tcp::socket&& socket, ServerDataModel& model)
+    explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
         : ws_(std::move(socket))
         , model_(model)
+        , owner_(owner)
     {
     }
 
@@ -88,6 +90,7 @@ public:
         if(ec)
             return fail(ec, "accept");
 
+        sLog_App("Sentinel client connected");
         auto self = shared_from_this();
         
         tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
@@ -135,8 +138,10 @@ public:
         boost::ignore_unused(bytes_transferred);
 
         // This indicates that the session was closed
-        if(ec == websocket::error::closed)
+        if(ec == websocket::error::closed) {
+            sLog_App("Sentinel client disconnected");
             return;
+        }
 
         if(ec)
             return fail(ec, "read");
@@ -161,6 +166,9 @@ public:
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
                     subscriptions_.insert(symbol);
+                    if (owner_) {
+                        owner_->notifyClientSubscribed(symbol);
+                    }
                     
                     // Send ACK
                     nlohmann::json ack;
@@ -214,6 +222,9 @@ public:
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
+                 if (!symbol.empty() && owner_) {
+                     owner_->notifyClientUnsubscribed(symbol);
+                 }
             }
         } catch (const std::exception& e) {
             sLog_Error("Server message parse error: " << e.what());
@@ -292,7 +303,7 @@ public:
         j["mid_price"] = midPrice;
         j["last_trade"] = lastTrade;
         j["reset"] = reset;
-        j["format"] = "u8";
+        j["format"] = "u16";
         j["encoding"] = "base64";
         j["column"] = column.toBase64().toStdString();
         if (!liquidityColumn.isEmpty()) {
@@ -417,7 +428,7 @@ void SentinelStreamServer::doAccept() {
         net::make_strand(m_ioc),
         [this](beast::error_code ec, tcp::socket socket) {
             if (!ec) {
-                std::make_shared<Session>(std::move(socket), m_model)->run();
+                std::make_shared<Session>(std::move(socket), m_model, this)->run();
             } else {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
@@ -427,4 +438,12 @@ void SentinelStreamServer::doAccept() {
                 doAccept();
             }
         });
+}
+
+void SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
+    emit clientSubscribed(QString::fromStdString(symbol));
+}
+
+void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
+    emit clientUnsubscribed(QString::fromStdString(symbol));
 }

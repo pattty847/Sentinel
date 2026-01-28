@@ -21,6 +21,8 @@ void ChartModeController::setMode(ChartMode mode) {
 void ChartModeController::updateComponentVisibility() {
     emit componentVisibilityChanged("tradeScatter", m_currentMode == ChartMode::TRADE_SCATTER);
     emit componentVisibilityChanged("candles", m_currentMode == ChartMode::HIGH_FREQ_CANDLES ||
-                                        m_currentMode == ChartMode::TRADITIONAL_CANDLES);
-    emit componentVisibilityChanged("orderBook", m_currentMode == ChartMode::ORDER_BOOK_HEATMAP);
+                                        m_currentMode == ChartMode::TRADITIONAL_CANDLES ||
+                                        m_currentMode == ChartMode::HYBRID_CANDLES_TRADES);
+    emit componentVisibilityChanged("orderBook", m_currentMode == ChartMode::ORDER_BOOK_HEATMAP ||
+                                        m_currentMode == ChartMode::HYBRID_CANDLES_TRADES);
 }

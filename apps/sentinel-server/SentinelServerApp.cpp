@@ -112,12 +112,28 @@ bool SentinelServerApp::initialize() {
             sLog_Error("MarketDataCore Error: " << error);
         });
 
+        QObject::connect(m_server.get(), &SentinelStreamServer::clientSubscribed, this,
+                         [this](const QString& symbol) {
+                             if (!m_marketDataCore) {
+                                 return;
+                             }
+                             sLog_App("Client subscribe: " << symbol);
+                             m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
+                         }, Qt::QueuedConnection);
+
+        QObject::connect(m_server.get(), &SentinelStreamServer::clientUnsubscribed, this,
+                         [this](const QString& symbol) {
+                             if (!m_marketDataCore) {
+                                 return;
+                             }
+                             sLog_App("Client unsubscribe: " << symbol);
+                             m_marketDataCore->unsubscribeFromSymbols({symbol.toStdString()});
+                         }, Qt::QueuedConnection);
+
         // Start connection
         m_marketDataCore->start();
         
-        // Subscribe to BTC-USD by default for verification
-        sLog_App("Subscribing to default symbol: BTC-USD");
-        m_marketDataCore->subscribeToSymbols({"BTC-USD"});
+        // Default subscribe disabled; wait for client request.
 
         return true;
     } catch (const std::exception& e) {

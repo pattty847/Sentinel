@@ -21,7 +21,7 @@ public:
     static void buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
                                 const GlyphAtlas& atlas,
                                 const std::vector<uint16_t>& liquidityRing,
-                                const std::vector<uint8_t>& intensityRing,
+                                const std::vector<uint16_t>& intensityRing,
                                 const std::vector<double>& liquidityScales,
                                 const QRectF& srcRect,
                                 const QRectF& drawRect,

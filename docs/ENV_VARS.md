@@ -33,8 +33,15 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_HEALTH_PORT` (server)  
   Local health endpoint port for `/ping`. Default: `8090`.
 
-- `SENTINEL_GPU_HEATMAP` (client)  
-  Enables GPU heatmap path when set.
+- `SENTINEL_MDC_HOST` (server)  
+  Override MarketDataCore WebSocket host. Default: `advanced-trade-ws.coinbase.com`.
+- `SENTINEL_MDC_PORT` (server)  
+  Override MarketDataCore WebSocket port. Default: `443`.
+- `SENTINEL_MDC_TARGET` (server)  
+  Override MarketDataCore WebSocket target path. Default: `/v1`.
+- `SENTINEL_MDC_USE_JWT` (server)  
+  Enable JWT on market data subscriptions. Default: `0`. Set to `1` to enable.
+
 - `SENTINEL_GPU_HEATMAP_DEBUG` (client)  
   Enables verbose GPU heatmap diagnostics.
 - `SENTINEL_GPU_HEATMAP_FORCE_FULL` (client)  

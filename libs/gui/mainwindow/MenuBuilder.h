@@ -22,6 +22,7 @@ class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
+class WatchlistDock;
 
 class MenuBuilder {
 public:
@@ -31,6 +32,7 @@ public:
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
+        WatchlistDock* watchlistDock = nullptr;
     };
 
     struct Callbacks {
@@ -38,6 +40,7 @@ public:
         std::function<void()> restoreLayout;
         std::function<void()> resetLayout;
         std::function<void()> openSecFilingViewer;
+        std::function<void()> openFontSettings;
     };
 
     explicit MenuBuilder(QMenuBar* menuBar);

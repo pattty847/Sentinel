@@ -43,7 +43,7 @@ public:
     struct LabelSnapshot {
         Snapshot snapshot;
         std::vector<uint16_t> liquidityRing;
-        std::vector<uint8_t> intensityRing;
+        std::vector<uint16_t> intensityRing;
         std::vector<double> liquidityScales;
     };
 
@@ -61,6 +61,9 @@ public:
                      double liquidityScale,
                      qint64 nowMs);
 
+    void setIntensityBytesPerCell(int bytesPerCell);
+    int intensityBytesPerCell() const;
+
     void updateTimeOffset(float fractionalOffset);
 
     Snapshot snapshot() const;
@@ -72,7 +75,7 @@ public:
     void takePendingUploads(std::vector<PendingColumn>& out);
     void takePendingLabelUploads(std::vector<PendingLabelColumn>& out);
     void copyLiquiditySnapshot(std::vector<uint16_t>& liquidityRing,
-                               std::vector<uint8_t>& intensityRing,
+                               std::vector<uint16_t>& intensityRing,
                                std::vector<double>& liquidityScales,
                                bool& liquidityAvailable) const;
 
@@ -103,10 +106,11 @@ private:
     std::vector<PendingLabelColumn> m_pendingLabelUploads;
 
     mutable std::mutex m_ringMutex;
-    std::vector<uint8_t> m_intensityRing;
+    std::vector<uint16_t> m_intensityRing;
     std::vector<uint16_t> m_liquidityRing;
     std::vector<double> m_liquidityScales;
     bool m_liquidityAvailable = false;
+    int m_intensityBytesPerCell = 1;
 
     std::atomic<float> m_timeOffset{0.0f};
 };

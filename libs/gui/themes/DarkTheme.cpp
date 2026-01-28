@@ -28,6 +28,15 @@ QString DarkTheme::stylesheet() const {
             selection-background-color: #2A4A6A;
             selection-color: #FFFFFF;
         }
+
+        QTreeView {
+            background-color: #1A1C20;
+            color: #C0C0C0;
+            border: 1px solid #2E2E2E;
+            selection-background-color: #2A4A6A;
+            selection-color: #FFFFFF;
+            alternate-background-color: #171A1D;
+        }
         
         QTableWidget::item {
             padding: 4px;
@@ -163,6 +172,30 @@ QString DarkTheme::stylesheet() const {
             background-color: #444;
             margin: 4px 8px;
         }
+
+        /* Toolbars */
+        QToolBar {
+            background-color: #1F2124;
+            border-bottom: 1px solid #2E2E2E;
+            spacing: 6px;
+            padding: 6px;
+        }
+
+        QToolButton {
+            background-color: transparent;
+            border: 1px solid transparent;
+            padding: 4px;
+            border-radius: 4px;
+        }
+
+        QToolButton:hover {
+            background-color: #2A2D31;
+            border-color: #3A3D42;
+        }
+
+        QToolButton:pressed {
+            background-color: #202328;
+        }
         
         /* Scroll Bars */
         QScrollBar:vertical {
@@ -224,8 +257,12 @@ QString DarkTheme::stylesheet() const {
 
         QMainWindow::separator {
             background-color: #2E2E2E;
-            width: 1px;
-            height: 1px;
+            width: 6px;
+            height: 6px;
+        }
+
+        QMainWindow::separator:hover {
+            background-color: #3A4450;
         }
         
         QDockWidget::title {

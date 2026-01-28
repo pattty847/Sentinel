@@ -54,6 +54,7 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
 
     int gridSize = 0;
     int appendMs = 0;
+    int bytesPerCell = 1;
     int step = 1;
     bool haveLastColumn = false;
     bool haveLastLiquidity = false;
@@ -69,6 +70,7 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
         }
         gridSize = m_gridSize;
         appendMs = m_appendMs;
+        bytesPerCell = m_intensityBytesPerCell;
         if (gridSize <= 0 || appendMs <= 0) {
             return;
         }
@@ -107,6 +109,7 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
 
     const int expectedLiquidityBytes = gridSize * static_cast<int>(sizeof(uint16_t));
     const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
+    const int expectedIntensityBytes = gridSize * bytesPerCell;
 
     QByteArray fillColumn;
     if (!haveLastColumn) {
@@ -176,10 +179,19 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
 
         for (int i = 0; i < step - 1; ++i) {
             const int columnIndex = (writeColumn - (step - 1 - i) + gridSize) % gridSize;
-            if (fillColumn.size() == gridSize) {
-                const auto* src = reinterpret_cast<const uint8_t*>(fillColumn.constData());
-                for (int y = 0; y < gridSize; ++y) {
-                    m_intensityRing[static_cast<size_t>(y) * gridSize + columnIndex] = src[y];
+            if (fillColumn.size() == expectedIntensityBytes) {
+                if (bytesPerCell == 1) {
+                    const auto* src = reinterpret_cast<const uint8_t*>(fillColumn.constData());
+                    for (int y = 0; y < gridSize; ++y) {
+                        m_intensityRing[static_cast<size_t>(y) * gridSize + columnIndex] =
+                            static_cast<uint16_t>(src[y]) * 257;
+                    }
+                } else if (bytesPerCell == 2) {
+                    const auto* src = reinterpret_cast<const uint16_t*>(fillColumn.constData());
+                    for (int y = 0; y < gridSize; ++y) {
+                        const uint16_t raw = qFromLittleEndian(src[y]);
+                        m_intensityRing[static_cast<size_t>(y) * gridSize + columnIndex] = raw;
+                    }
                 }
             }
             if (fillLiquidityColumn.size() == expectedLiquidityBytes) {
@@ -192,10 +204,19 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
             }
         }
 
-        if (intensityColumn.size() == gridSize) {
-            const auto* src = reinterpret_cast<const uint8_t*>(intensityColumn.constData());
-            for (int y = 0; y < gridSize; ++y) {
-                m_intensityRing[static_cast<size_t>(y) * gridSize + writeColumn] = src[y];
+        if (intensityColumn.size() == expectedIntensityBytes) {
+            if (bytesPerCell == 1) {
+                const auto* src = reinterpret_cast<const uint8_t*>(intensityColumn.constData());
+                for (int y = 0; y < gridSize; ++y) {
+                    m_intensityRing[static_cast<size_t>(y) * gridSize + writeColumn] =
+                        static_cast<uint16_t>(src[y]) * 257;
+                }
+            } else if (bytesPerCell == 2) {
+                const auto* src = reinterpret_cast<const uint16_t*>(intensityColumn.constData());
+                for (int y = 0; y < gridSize; ++y) {
+                    const uint16_t raw = qFromLittleEndian(src[y]);
+                    m_intensityRing[static_cast<size_t>(y) * gridSize + writeColumn] = raw;
+                }
             }
         }
         if (haveLiquidityColumn) {
@@ -249,6 +270,19 @@ void HeatmapStreamState::updateTimeOffset(float fractionalOffset) {
     const float offset = (static_cast<float>(oldestColumn) + fractionalOffset) /
                          static_cast<float>(gridSize);
     m_timeOffset.store(offset);
+}
+
+void HeatmapStreamState::setIntensityBytesPerCell(int bytesPerCell) {
+    if (bytesPerCell != 1 && bytesPerCell != 2) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    m_intensityBytesPerCell = bytesPerCell;
+}
+
+int HeatmapStreamState::intensityBytesPerCell() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_intensityBytesPerCell;
 }
 
 HeatmapStreamState::Snapshot HeatmapStreamState::snapshot() const {
@@ -326,7 +360,7 @@ void HeatmapStreamState::takePendingLabelUploads(std::vector<PendingLabelColumn>
 }
 
 void HeatmapStreamState::copyLiquiditySnapshot(std::vector<uint16_t>& liquidityRing,
-                                               std::vector<uint8_t>& intensityRing,
+                                               std::vector<uint16_t>& intensityRing,
                                                std::vector<double>& liquidityScales,
                                                bool& liquidityAvailable) const {
     std::lock_guard<std::mutex> lock(m_ringMutex);

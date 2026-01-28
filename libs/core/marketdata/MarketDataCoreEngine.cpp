@@ -34,6 +34,27 @@ namespace {
 MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth)
     : m_auth(auth)
 {
+    if (const char* host = std::getenv("SENTINEL_MDC_HOST")) {
+        if (*host) {
+            m_host = host;
+        }
+    }
+    if (const char* port = std::getenv("SENTINEL_MDC_PORT")) {
+        if (*port) {
+            m_port = port;
+        }
+    }
+    if (const char* target = std::getenv("SENTINEL_MDC_TARGET")) {
+        if (*target) {
+            m_target = target;
+        }
+    }
+    if (const char* useJwt = std::getenv("SENTINEL_MDC_USE_JWT")) {
+        if (*useJwt) {
+            m_useJwt = (std::string_view(useJwt) != "0");
+        }
+    }
+
     // Configure SSL context
     // Prefer explicit CA bundle via env var for Windows/OpenSSL setups where
     // default_verify_paths may not see the system trust store.
@@ -308,19 +329,29 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
         
         // CRITICAL: Wrap JWT creation in try/catch to prevent I/O thread from dying
         std::string jwt;
-        try {
-            jwt = m_auth.createJwt();
-        } catch (const std::exception& e) {
-            sLog_Error(std::string("JWT creation failed in subscription handler: ") + e.what());
-            emitError(std::string("Failed to create JWT for subscription: ") + e.what());
-            return; // Exit gracefully without crashing I/O thread
+        if (m_useJwt) {
+            try {
+                jwt = m_auth.createJwt();
+            } catch (const std::exception& e) {
+                sLog_Error(std::string("JWT creation failed in subscription handler: ") + e.what());
+                emitError(std::string("Failed to create JWT for subscription: ") + e.what());
+                return; // Exit gracefully without crashing I/O thread
+            }
         }
-        
         const auto frames = (type == "subscribe") ? m_subscriptions.buildSubscribeMsgs(jwt)
                                                    : m_subscriptions.buildUnsubscribeMsgs(jwt);
         
         if (m_transport && m_connected.load()) {
             for (const auto& frame : frames) {
+                try {
+                    auto j = nlohmann::json::parse(frame);
+                    if (j.contains("jwt")) {
+                        j["jwt"] = "<redacted>";
+                    }
+                    sLog_DataN(1, std::string("WS ") + type + " frame: " + j.dump());
+                } catch (const std::exception&) {
+                    sLog_DataN(1, std::string("WS ") + type + " frame (raw): " + frame);
+                }
                 m_transport->send(frame);
             }
         }
@@ -333,6 +364,14 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     // Record message arrival time for latency analysis
     auto arrival_time = std::chrono::system_clock::now();
     
+    static std::atomic<int> rawLogCount{0};
+    const int count = rawLogCount.load();
+    if (count < 5) {
+        if (rawLogCount.fetch_add(1) < 5) {
+            sLog_Data("MDC RX: " << message.dump());
+        }
+    }
+
     std::string channel = message.value("channel", "");
     // Consider any incoming message as liveness to avoid premature reconnection before first heartbeat arrives
     m_lastHeartbeatMs.store(steadyClockMs());
@@ -349,6 +388,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
             std::visit([this, &message](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
+                    sLog_Error("Provider error: " << ev.message << " | raw=" << message.dump());
                     emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
                     if (!ev.productIds.empty()) {
@@ -362,6 +402,9 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
                     }
                 }
             }, evt);
+        }
+        if (channel.empty() && result.events.empty()) {
+            sLog_Data("MDC unclassified message: " << message.dump());
         }
     }
     
@@ -621,12 +664,22 @@ void MarketDataCoreEngine::sendHeartbeatSubscribe() {
             nlohmann::json msg;
             msg["type"] = "subscribe";
             msg["channel"] = ch::kHeartbeats;
-            // Heartbeats do not require product_ids
-            msg["jwt"] = m_auth.createJwt();
-            m_transport->send(msg.dump());
+            if (m_useJwt) {
+                msg["jwt"] = m_auth.createJwt();
+            }
+            const std::string payload = msg.dump();
+            if (m_useJwt) {
+                nlohmann::json redacted = msg;
+                if (redacted.contains("jwt")) {
+                    redacted["jwt"] = "<redacted>";
+                }
+                sLog_DataN(1, std::string("WS subscribe frame: ") + redacted.dump());
+            } else {
+                sLog_DataN(1, std::string("WS subscribe frame: ") + payload);
+            }
+            m_transport->send(payload);
         } catch (const std::exception& e) {
-            sLog_Error(std::string("JWT creation failed in sendHeartbeatSubscribe: ") + e.what());
-            // Don't crash I/O thread - just log and continue
+            sLog_Error(std::string("sendHeartbeatSubscribe failed: ") + e.what());
         }
     });
 }

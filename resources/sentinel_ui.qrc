@@ -1,0 +1,16 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file>icons/icon-search.svg</file>
+    <file>icons/icon-heatmap.svg</file>
+    <file>icons/icon-candles.svg</file>
+    <file>icons/icon-hybrid.svg</file>
+    <file>icons/icon-timeframe.svg</file>
+    <file>icons/icon-indicators.svg</file>
+    <file>icons/icon-layout.svg</file>
+    <file>icons/icon-settings.svg</file>
+    <file>icons/icon-fullscreen.svg</file>
+    <file>icons/icon-camera.svg</file>
+    <file>icons/icon-watchlist.svg</file>
+    <file>icons/icon-draw.svg</file>
+  </qresource>
+</RCC>

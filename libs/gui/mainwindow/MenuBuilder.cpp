@@ -4,6 +4,7 @@
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
 #include "../widgets/LabDock.hpp"
+#include "../widgets/WatchlistDock.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QInputDialog>
 #include <QLineEdit>
@@ -30,6 +31,9 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     }
     if (docks.secDock) {
         m_viewMenu->addAction(docks.secDock->toggleViewAction());
+    }
+    if (docks.watchlistDock) {
+        m_viewMenu->addAction(docks.watchlistDock->toggleViewAction());
     }
     if (docks.copenetDock) {
         m_viewMenu->addAction(docks.copenetDock->toggleViewAction());
@@ -86,6 +90,13 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
     m_toolsMenu->addSeparator();
     QAction* settingsAction = m_toolsMenu->addAction("&Settings...");
     settingsAction->setEnabled(false);  // Placeholder for future
+
+    QAction* fontAction = m_toolsMenu->addAction("Font Settings...");
+    QObject::connect(fontAction, &QAction::triggered, [callbacks]() {
+        if (callbacks.openFontSettings) {
+            callbacks.openFontSettings();
+        }
+    });
 }
 
 void MenuBuilder::buildDebugMenu() {

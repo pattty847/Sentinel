@@ -2,6 +2,7 @@
 #include "WsTransport.hpp"
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/ssl.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core/tcp_stream.hpp>  // ensure tcp_stream is declared
 #include <boost/asio/ip/tcp.hpp>
@@ -45,6 +46,7 @@ private:
     beast::flat_buffer buf_;
     net::steady_timer pingTimer_;
     std::deque<std::string> writeQueue_;
+    websocket::response_type handshakeResponse_;
 
     // State
     std::string host_;

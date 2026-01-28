@@ -61,7 +61,7 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
     }
     const int64_t spanMs = m_autoScrollSpanMs;
     const int64_t padMs = static_cast<int64_t>(spanMs * m_paddingFrac);
-    const int64_t viewEnd = sliceStartMs + timeframeMs - padMs;
+    const int64_t viewEnd = sliceStartMs + timeframeMs + padMs;
     const int64_t viewStart = viewEnd - spanMs;
     if (viewEnd <= viewStart) {
         return false;
@@ -90,7 +90,7 @@ bool ViewportAutoScrollController::applySliceAutoScroll(GridViewState& view,
     }
     const int64_t clampedSpanMs = clampSpanMs(m_autoScrollSpanMs, maxSpanMs);
     const int64_t padMs = static_cast<int64_t>(clampedSpanMs * m_paddingFrac);
-    const int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs - padMs;
+    const int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs + padMs;
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
     const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());
@@ -128,7 +128,7 @@ bool ViewportAutoScrollController::applySmoothAutoScroll(GridViewState& view,
     const int64_t streamNowMs = (snapshot.streamBaseMs != std::numeric_limits<int64_t>::min())
         ? (snapshot.streamBaseMs + nowMs + snapshot.appendMs)
         : (snapshot.lastSliceStartMs + snapshot.appendMs);
-    const int64_t viewEnd = streamNowMs + m_autoScrollLagMs - padMs;
+    const int64_t viewEnd = streamNowMs + m_autoScrollLagMs + padMs;
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
     const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());

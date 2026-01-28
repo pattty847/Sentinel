@@ -12,7 +12,7 @@ Related: MainWindowGpu.cpp, DockablePanel.hpp.
 
 #include <QWidget>
 #include <QLineEdit>
-#include <QPushButton>
+#include <QToolButton>
 
 // Forward declarations
 class HeatmapDock;
@@ -21,6 +21,7 @@ class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
+class WatchlistDock;
 
 class DockFactory {
 public:
@@ -31,11 +32,12 @@ public:
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
+        WatchlistDock* watchlistDock = nullptr;
     };
 
     struct SymbolControls {
         QLineEdit* symbolInput = nullptr;
-        QPushButton* subscribeButton = nullptr;
+        QToolButton* subscribeButton = nullptr;
     };
 
     explicit DockFactory(QWidget* parent);

@@ -1,6 +1,7 @@
 #include "QmlSceneController.h"
 #include "../UnifiedGridRenderer.h"
 #include "../ChartModeController.h"
+#include "../themes/ThemeBridge.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QQmlContext>
 #include <QSettings>
@@ -67,6 +68,12 @@ void QmlSceneController::setChartModeController(ChartModeController* controller)
     context->setContextProperty("chartModeController", controller);
 }
 
+void QmlSceneController::setThemeBridge(ThemeBridge* bridge) {
+    if (!m_qquickView || !bridge) return;
+    QQmlContext* context = m_qquickView->rootContext();
+    context->setContextProperty("uiTheme", bridge);
+}
+
 void QmlSceneController::updateSymbolInContext(const QString& symbol) {
     if (m_qquickView) {
         m_qquickView->rootContext()->setContextProperty("symbol", symbol);
@@ -92,5 +99,4 @@ QString QmlSceneController::graphicsApiName(QSGRendererInterface::GraphicsApi ap
         default: return "Unknown";
     }
 }
-
 

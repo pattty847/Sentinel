@@ -1,16 +1,19 @@
 import QtQuick 2.15
 import QtQuick.Controls
 import Sentinel 1.0
-import "controls"
 
 Rectangle {
     id: root
-    color: "black"
+    color: uiTheme ? uiTheme.bg : "black"
     
     property string symbol: "BTC-USD"
     property bool stressTestMode: false
     property var chartModeController: null
     property bool gridModeEnabled: true  // Always true - pure grid-only mode!
+    property bool showHeatmap: true
+    property bool showCandles: false
+
+    // uiTheme is provided by QmlSceneController
     
     // Track current active timeframe for button highlighting
     property int currentActiveTimeframe: 100  // Default
@@ -45,6 +48,17 @@ Rectangle {
             // Grid lines will update their positions via property bindings
         }
     }
+
+    Connections {
+        target: chartModeController
+        function onComponentVisibilityChanged(component, visible) {
+            if (component === "candles") {
+                root.showCandles = visible
+            } else if (component === "orderBook") {
+                root.showHeatmap = visible
+            }
+        }
+    }
     
     UnifiedGridRenderer {
         id: unifiedGridRenderer
@@ -52,9 +66,10 @@ Rectangle {
         anchors.fill: parent
         anchors.rightMargin: 70  // Space for price axis (RIGHT side)
         anchors.bottomMargin: 30 // Space for time axis
-        visible: true
+        visible: root.showHeatmap
         intensityScale: 1.0
         maxCells: 500000
+        heatmapBackgroundColor: root.color
         z: 1
         
         // Update our tracked timeframe when it changes
@@ -67,6 +82,12 @@ Rectangle {
             // Initialize with current timeframe
             root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
         }
+    }
+
+    CandleChartView {
+        id: candleOverlay
+        anchors.fill: unifiedGridRenderer
+        visible: root.showCandles
     }
     
     // 🔬 VERTICAL GRID LINES: Visual confirmation of time column alignment
@@ -376,59 +397,7 @@ Rectangle {
         }
     }
 
-    // Control Panel (top left, below all debug overlays)
-    Column {
-        id: controlPanel
-        anchors.top: gpuStatsOverlay.visible ? gpuStatsOverlay.bottom : fpsOverlay.bottom
-        anchors.left: parent.left
-        anchors.leftMargin: 8
-        anchors.topMargin: 6
-        spacing: 5
-        z: 10
-        
-        // Future: Toggle visibility from menu bar
-        // visible: root.showControlPanel
-        
-        //  MOUSE EVENT ISOLATION: Ensure controls don't interfere with chart
-        // The controls have their own MouseArea components that handle their events
-
-        NavigationControls {
-            target: unifiedGridRenderer
-        }
-        
-        Text {
-            width: 150
-            text: " Active: " + root.currentActiveTimeframe + "ms"
-            color: "#00FF00"
-            font.pixelSize: 12
-            font.bold: true
-            wrapMode: Text.WordWrap
-        }
-        
-        TimeframeSelector {
-            target: unifiedGridRenderer
-        }
-        
-        PriceResolutionSelector {
-            target: unifiedGridRenderer
-        }
-        
-        VolumeFilter {
-            target: unifiedGridRenderer
-            maxVolumeRange: root.maxVolumeRange
-        }
-
-        LiquidityThresholdFilter {
-            target: unifiedGridRenderer
-            maxLiquidityRange: root.maxVolumeRange
-        }
-        
-        GridResolutionSelector {
-            target: unifiedGridRenderer
-        }
-        
-        
-    }
+    // Control UI removed in favor of top toolbar (chart-only controls)
 
     // Keyboard Shortcuts
     focus: true

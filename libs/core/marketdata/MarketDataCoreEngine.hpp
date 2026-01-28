@@ -112,9 +112,10 @@ private:
 
     // Subscription helpers
     void replaySubscriptionsOnConnect();
-    const std::string               m_host   = "advanced-trade-ws.coinbase.com";
-    const std::string               m_port   = "443";
-    const std::string               m_target = "/";
+    std::string                     m_host   = "advanced-trade-ws.coinbase.com";
+    std::string                     m_port   = "443";
+    std::string                     m_target = "/v1";
+    bool                            m_useJwt = false;
     std::vector<std::string>        m_products;
 
     Authenticator&                  m_auth;

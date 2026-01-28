@@ -16,6 +16,7 @@ Related: MainWindowGpu.cpp, UnifiedGridRenderer.h, ChartModeController.h.
 
 // Forward declarations
 class ChartModeController;
+class ThemeBridge;
 class UnifiedGridRenderer;
 
 class QmlSceneController {
@@ -25,6 +26,7 @@ public:
     void loadQmlSource();
     void verifyGpuAcceleration();
     void setChartModeController(ChartModeController* controller);
+    void setThemeBridge(ThemeBridge* bridge);
     void updateSymbolInContext(const QString& symbol);
     
     UnifiedGridRenderer* getUnifiedGridRenderer() const;

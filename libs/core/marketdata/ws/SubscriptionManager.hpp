@@ -24,13 +24,17 @@ private:
     std::vector<std::string> buildMsgs(const std::string& type, const std::string& jwt) const {
         std::vector<std::string> out;
         if (m_desired.empty()) return out;
-        // level2 (subscribe) + market_trades
-        for (const char* channel : {ch::kL2Subscribe, ch::kTrades}) {
+        // level2 (subscribe) + market_trades + heartbeats
+        for (const char* channel : {ch::kL2Subscribe, ch::kTrades, ch::kHeartbeats}) {
             nlohmann::json msg;
             msg["type"] = type;
-            msg["product_ids"] = m_desired;
             msg["channel"] = channel;
-            msg["jwt"] = jwt;
+            if (std::string_view(channel) != ch::kHeartbeats) {
+                msg["product_ids"] = m_desired;
+            }
+            if (!jwt.empty()) {
+                msg["jwt"] = jwt;
+            }
             out.emplace_back(msg.dump());
         }
         return out;

@@ -20,6 +20,8 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/FontManager.hpp"
+#include <QResource>
 
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
@@ -74,6 +76,10 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
 
+    // Register resources embedded in the static GUI library.
+    Q_INIT_RESOURCE(sentinel_ui_resources);
+    Q_INIT_RESOURCE(sentinel_ui_fonts);
+
     // Initialize and apply theme
     ThemeManager& themeManager = ThemeManager::instance();
     themeManager.initializeDefaults();
@@ -81,6 +87,8 @@ int main(int argc, char *argv[])
     if (!themeManager.applyTheme("dark", &app)) {
         sLog_Error("Failed to apply default theme");
     }
+
+    FontManager::instance().initialize(&app);
 
     registerMetaTypesAndQml();
 

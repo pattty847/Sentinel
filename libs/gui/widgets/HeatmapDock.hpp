@@ -3,6 +3,8 @@
 #include "DockablePanel.hpp"
 #include <QWidget>
 #include <QQuickView>
+#include <QToolButton>
+#include "TopToolbar.hpp"
 #include <QSurfaceFormat>
 #include <QSGRendererInterface>
 #include <QLineEdit>
@@ -28,11 +30,13 @@ public:
     
     // Access to embedded symbol controls
     QLineEdit* symbolInput() const { return m_symbolInput; }
-    QPushButton* subscribeButton() const { return m_subscribeButton; }
+    QToolButton* subscribeButton() const { return m_toolbar ? m_toolbar->subscribeButton() : nullptr; }
+    TopToolbar* toolbar() const { return m_toolbar; }
 
 private:
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
+    TopToolbar* m_toolbar = nullptr;
     
     // Embedded symbol control widgets
     QLineEdit* m_symbolInput = nullptr;

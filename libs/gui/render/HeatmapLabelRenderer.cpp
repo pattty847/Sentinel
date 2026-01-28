@@ -8,13 +8,13 @@ Sentinel — HeatmapLabelRenderer
 #include <limits>
 
 namespace {
-bool useBlackLabel(uint8_t encoded) {
+bool useBlackLabel(uint16_t encoded) {
     if (encoded == 0) {
         return false;
     }
-    const float magnitude = (encoded >= 128)
-        ? (static_cast<float>(encoded - 128) / 127.0f)
-        : (static_cast<float>(encoded) / 127.0f);
+    const float magnitude = (encoded >= 0x8000u)
+        ? (static_cast<float>(encoded - 0x8000u) / 32767.0f)
+        : (static_cast<float>(encoded) / 32767.0f);
     return magnitude > 0.5f;
 }
 } // namespace
@@ -22,7 +22,7 @@ bool useBlackLabel(uint8_t encoded) {
 void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
                                            const GlyphAtlas& atlas,
                                            const std::vector<uint16_t>& liquidityRing,
-                                           const std::vector<uint8_t>& intensityRing,
+                                           const std::vector<uint16_t>& intensityRing,
                                            const std::vector<double>& liquidityScales,
                                            const QRectF& srcRect,
                                            const QRectF& drawRect,
@@ -109,7 +109,7 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
                 continue;
             }
 
-            uint8_t encoded = 255;
+            uint16_t encoded = 0xFFFFu;
             if (haveIntensity) {
                 encoded = intensityRing[ringIndex];
                 if (encoded == 0) {

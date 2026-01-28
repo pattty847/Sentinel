@@ -21,6 +21,14 @@ public:
     void start();
     void stop();
 
+signals:
+    void clientSubscribed(const QString& symbol);
+    void clientUnsubscribed(const QString& symbol);
+
+public:
+    void notifyClientSubscribed(const std::string& symbol);
+    void notifyClientUnsubscribed(const std::string& symbol);
+
 private:
     void doAccept();
     

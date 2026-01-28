@@ -71,6 +71,7 @@ set(WIDGET_SOURCES
     "widgets/CommentaryFeedDock.cpp"
     "widgets/CopenetFeedDock.cpp"
     "widgets/DockablePanel.cpp"
+    "widgets/FontSettingsDialog.cpp"
     "widgets/HeatmapDock.cpp"
     "widgets/LayoutManager.cpp"
     "marketdata/MarketDataCoreQt.cpp"
@@ -79,10 +80,14 @@ set(WIDGET_SOURCES
     "widgets/SecFilingDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
+    "widgets/TopToolbar.cpp"
+    "widgets/WatchlistDock.cpp"
 )
 
 set(THEME_SOURCES
     "themes/DarkTheme.cpp"
+    "themes/FontManager.cpp"
+    "themes/ThemeBridge.cpp"
     "themes/ThemeManager.cpp"
 )
 
@@ -99,12 +104,88 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/DepthChartView.qml
         qml/LabView.qml
         qml/CandleChartView.qml
+        qml/Theme.qml
         qml/controls/VolumeFilter.qml
         qml/controls/PriceResolutionSelector.qml
         qml/controls/TimeframeSelector.qml
         qml/controls/GridResolutionSelector.qml
         qml/controls/NavigationControls.qml
         qml/controls/LiquidityThresholdFilter.qml
+        qml/controls/ChartToolRail.qml
+)
+
+set(SENTINEL_ICON_DIR "${CMAKE_SOURCE_DIR}/resources/icons")
+set(SENTINEL_ICON_FILES
+    "${SENTINEL_ICON_DIR}/icon-search.svg"
+    "${SENTINEL_ICON_DIR}/icon-heatmap.svg"
+    "${SENTINEL_ICON_DIR}/icon-candles.svg"
+    "${SENTINEL_ICON_DIR}/icon-hybrid.svg"
+    "${SENTINEL_ICON_DIR}/icon-timeframe.svg"
+    "${SENTINEL_ICON_DIR}/icon-indicators.svg"
+    "${SENTINEL_ICON_DIR}/icon-layout.svg"
+    "${SENTINEL_ICON_DIR}/icon-settings.svg"
+    "${SENTINEL_ICON_DIR}/icon-fullscreen.svg"
+    "${SENTINEL_ICON_DIR}/icon-camera.svg"
+    "${SENTINEL_ICON_DIR}/icon-watchlist.svg"
+    "${SENTINEL_ICON_DIR}/icon-draw.svg"
+)
+
+set(SENTINEL_FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts/RobotoMono")
+set(SENTINEL_FONT_FILES
+    "${SENTINEL_FONT_DIR}/RobotoMono-Regular.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-Medium.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-Bold.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-Light.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-SemiBold.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-ExtraLight.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-Thin.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-Italic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-BoldItalic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-LightItalic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-MediumItalic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-SemiBoldItalic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-ExtraLightItalic.ttf"
+    "${SENTINEL_FONT_DIR}/RobotoMono-ThinItalic.ttf"
+)
+
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-search.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-search.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-heatmap.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-heatmap.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-candles.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-candles.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-hybrid.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-hybrid.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-timeframe.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-timeframe.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-indicators.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-indicators.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-layout.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-layout.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-settings.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-settings.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-fullscreen.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-fullscreen.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-camera.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-camera.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-watchlist.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-watchlist.svg")
+set_source_files_properties("${SENTINEL_ICON_DIR}/icon-draw.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-draw.svg")
+
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Regular.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Regular.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Medium.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Medium.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Bold.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Bold.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Light.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Light.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-SemiBold.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-SemiBold.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-ExtraLight.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-ExtraLight.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Thin.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Thin.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Italic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Italic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-BoldItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-BoldItalic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-LightItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-LightItalic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-MediumItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-MediumItalic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-SemiBoldItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-SemiBoldItalic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-ExtraLightItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-ExtraLightItalic.ttf")
+set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-ThinItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-ThinItalic.ttf")
+
+qt_add_resources(sentinel_gui_lib sentinel_ui_resources
+    PREFIX "/icons"
+    FILES
+        ${SENTINEL_ICON_FILES}
+)
+
+qt_add_resources(sentinel_gui_lib sentinel_ui_fonts
+    PREFIX "/"
+    FILES
+        ${SENTINEL_FONT_FILES}
 )
 
 qt_add_shaders(sentinel_gui_lib heatmap_shaders
@@ -142,6 +223,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Quick
         Qt6::Qml
         Qt6::QuickControls2
+        Qt6::Svg
 )
 
 qt_add_resources(sentinel_gui_lib "resources"

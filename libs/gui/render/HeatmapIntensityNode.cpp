@@ -75,6 +75,11 @@ public:
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_RED, GL_UNSIGNED_BYTE,
                                                     upload.second.constData());
+                            } else if (byteCount == height * 2) {
+                                gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+                                gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
+                                                    GL_RED, GL_UNSIGNED_SHORT,
+                                                    upload.second.constData());
                             } else if (byteCount == height * 4) {
                                 gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,

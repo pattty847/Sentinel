@@ -14,13 +14,14 @@ Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
 #include <QMainWindow>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QPushButton>
+#include <QToolButton>
 #include <QLabel>
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QQuickView>
 #include <QSGRendererInterface>
 #include <QCloseEvent>
+#include <QPointer>
 #include <memory>
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
@@ -34,6 +35,9 @@ class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
+class WatchlistDock;
+class TopToolbar;
+class ThemeBridge;
 
 class DockFactory;
 class QmlSceneController;
@@ -86,6 +90,7 @@ private:
     void onRestoreLayout();
     void onResetLayout();
     void onOpenSecFilingViewer();
+    void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
     
@@ -96,10 +101,11 @@ private:
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
     LabDock* m_labDock = nullptr;
+    WatchlistDock* m_watchlistDock = nullptr;
     
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;
-    QPushButton* m_subscribeButton = nullptr;
+    QToolButton* m_subscribeButton = nullptr;
     
     // QML scene (managed via QmlSceneController)
     QQuickView* m_qquickView = nullptr;
@@ -107,6 +113,7 @@ private:
     
     // Controllers
     ChartModeController* m_modeController = nullptr;
+    ThemeBridge* m_themeBridge = nullptr;
     
     // Modular components
     std::unique_ptr<QmlSceneController> m_qmlController;
@@ -114,6 +121,7 @@ private:
     std::unique_ptr<MenuBuilder> m_menuBuilder;
     std::unique_ptr<ShortcutBinder> m_shortcutBinder;
     std::unique_ptr<GuiApiServer> m_guiApiServer;
+    QPointer<class FontSettingsDialog> m_fontDialog;
 
     bool m_firstShow = true;
 };

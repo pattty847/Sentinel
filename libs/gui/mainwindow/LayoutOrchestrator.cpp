@@ -4,6 +4,7 @@
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
 #include "../widgets/LabDock.hpp"
+#include "../widgets/WatchlistDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
@@ -80,18 +81,32 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.labDock);
         docks.labDock->setFloating(false);
     }
+    if (docks.watchlistDock && docks.watchlistDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.watchlistDock);
+        docks.watchlistDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     // TradingView-like: Heatmap/Chart as the dominant left pane
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, docks.heatmapDock);
     
-    // Right: SEC Filing Viewer with Market Data tabbed to it
+    // Right: Watchlist as primary, with SEC + Lab tabbed
+    if (docks.watchlistDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.watchlistDock);
+    }
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
+    if (docks.watchlistDock) {
+        m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.secDock);
+    }
 
     if (docks.labDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.labDock);
-        m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
+        if (docks.watchlistDock) {
+            m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.labDock);
+        } else {
+            m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
+        }
     }
     
     // Bottom: Commentary feeds (small height, split horizontally)
@@ -119,19 +134,32 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.copenetDock, fallback);
     applyMinimum(docks.aiCommentaryDock, fallback);
     applyMinimum(docks.labDock, QSize(360, 240));
+    applyMinimum(docks.watchlistDock, QSize(320, 360));
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
     
     // Vertical split: 10% bottom, 90% main area
-    m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
+    if (docks.watchlistDock) {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {10, 90, 90}, Qt::Vertical);
+    } else {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
+    }
     
-    // Horizontal split: 70% heatmap (left), 30% SEC (right)
-    m_mainWindow->resizeDocks({docks.heatmapDock, docks.secDock}, {70, 30}, Qt::Horizontal);
+    // Horizontal split: 70% charts (left), 30% right pane
+    if (docks.watchlistDock) {
+        m_mainWindow->resizeDocks({docks.heatmapDock, docks.watchlistDock}, {70, 30}, Qt::Horizontal);
+    } else {
+        m_mainWindow->resizeDocks({docks.heatmapDock, docks.secDock}, {70, 30}, Qt::Horizontal);
+    }
     
     // Tabbed docks share space equally
-    m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
+    if (docks.watchlistDock) {
+        m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
+    } else {
+        m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
+    }
     m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
 }
 
@@ -141,5 +169,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.copenetDock) docks.copenetDock->show();
     if (docks.aiCommentaryDock) docks.aiCommentaryDock->show();
     if (docks.labDock) docks.labDock->show();
+    if (docks.watchlistDock) docks.watchlistDock->show();
 }
 

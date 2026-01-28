@@ -31,6 +31,11 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
+#include "widgets/CopenetFeedDock.hpp"
+#include "widgets/AICommentaryFeedDock.hpp"
+#include "widgets/TopToolbar.hpp"
+#include "widgets/WatchlistDock.hpp"
+#include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/DockFactory.h"
@@ -40,6 +45,8 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "themes/ThemeBridge.hpp"
+#include "themes/ThemeManager.hpp"
 #include <QQmlContext>
 #include <QMetaObject>
 #include <QDir>
@@ -72,6 +79,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
     }
     if (m_qmlController) {
+        m_themeBridge = new ThemeBridge(this);
+        m_themeBridge->applyTheme(ThemeManager::instance().currentTheme());
+        m_qmlController->setThemeBridge(m_themeBridge);
         m_qmlController->loadQmlSource();
         m_qmlController->verifyGpuAcceleration();
     }
@@ -82,6 +92,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->setChartModeController(m_modeController);
         m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
     }
+    m_modeController->setMode(ChartMode::ORDER_BOOK_HEATMAP);
     
     // 4) Set up layout orchestrator
     // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
@@ -129,6 +140,7 @@ void MainWindowGPU::setupUI() {
     m_copenetDock = docks.copenetDock;
     m_aiCommentaryDock = docks.aiCommentaryDock;
     m_labDock = docks.labDock;
+    m_watchlistDock = docks.watchlistDock;
     
     // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
@@ -142,9 +154,28 @@ void MainWindowGPU::setupUI() {
     // Add status bar to main window
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
+
     
     // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
+
+
+    // Heatmap toolbar signals
+    if (m_heatmapDock && m_heatmapDock->toolbar()) {
+        connect(m_heatmapDock->toolbar(), &TopToolbar::chartModeSelected, this, [this](ChartMode mode) {
+            if (m_modeController) {
+                m_modeController->setMode(mode);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityThresholdChanged, this, [this](double value) {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (renderer) {
+                renderer->setProperty("heatmapLiquidityThreshold", value);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
+    }
     
     setUpdatesEnabled(true);
 }
@@ -160,7 +191,16 @@ void MainWindowGPU::setWindowProperties() {
 }
 
 void MainWindowGPU::setupConnections() {
-    connect(m_subscribeButton, &QPushButton::clicked, this, &MainWindowGPU::onSubscribe);
+    if (m_subscribeButton) {
+        connect(m_subscribeButton, &QToolButton::clicked, this, &MainWindowGPU::onSubscribe);
+    }
+    if (m_symbolInput) {
+        connect(m_symbolInput, &QLineEdit::returnPressed, this, [this]() {
+            if (!m_symbolInput) return;
+            m_symbolInput->setText(m_symbolInput->text().trimmed().toUpper());
+            onSubscribe();
+        });
+    }
     connectMarketDataSignals();
 }
 
@@ -262,6 +302,7 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
+    callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
 
     // Set heatmap dock for debug menu access
     m_menuBuilder->setHeatmapDock(m_heatmapDock);
@@ -380,6 +421,16 @@ void MainWindowGPU::onOpenSecFilingViewer() {
     }
 }
 
+void MainWindowGPU::onOpenFontSettings() {
+    if (!m_fontDialog) {
+        m_fontDialog = new FontSettingsDialog(this);
+    }
+    m_fontDialog->show();
+    m_fontDialog->raise();
+    m_fontDialog->activateWindow();
+}
+
+
 LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     LayoutOrchestrator::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
@@ -387,5 +438,7 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
+    docks.watchlistDock = m_watchlistDock;
+    docks.watchlistDock = m_watchlistDock;
     return docks;
 }

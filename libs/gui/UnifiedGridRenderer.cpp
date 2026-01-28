@@ -281,6 +281,15 @@ void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
     emit heatmapLiquidityThresholdChanged();
 }
 
+void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor& color) {
+    if (m_heatmapBackgroundColor == color) {
+        return;
+    }
+    m_heatmapBackgroundColor = color;
+    m_heatmapTextureDirty = true;
+    emit heatmapBackgroundColorChanged();
+}
+
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     if (m_viewState) {
         m_viewState->enableAutoScroll(enabled);
@@ -325,10 +334,8 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
 }
 
 void UnifiedGridRenderer::init() {
-    m_useGpuHeatmap = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP");
-    if (m_useGpuHeatmap) {
-        m_heatmapClock.start();
-    }
+    m_useGpuHeatmap = true;
+    m_heatmapClock.start();
 
     // Register metatypes for cross-thread signal/slot connections
     qRegisterMetaType<Trade>("Trade");
@@ -337,6 +344,7 @@ void UnifiedGridRenderer::init() {
     m_heatmapStream = std::make_unique<HeatmapStreamState>();
     m_heatmapStream->setGridSize(m_heatmapGridSize);
     m_heatmapStream->setAppendMs(100);
+    m_heatmapStream->setIntensityBytesPerCell(m_intensityBytesPerCell);
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
@@ -367,7 +375,8 @@ void UnifiedGridRenderer::init() {
                    double tickSize,
                    const QByteArray& column,
                    const QByteArray& liquidityColumn,
-                   double liquidityScale) {
+                   double liquidityScale,
+                   int intensityBytesPerCell) {
                 Q_UNUSED(sliceEndMs);
                 const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
                 if (!m_useGpuHeatmap) {
@@ -383,8 +392,23 @@ void UnifiedGridRenderer::init() {
                     }
                     return;
                 }
-                if (column.size() > 0 && column.size() != m_heatmapGridSize) {
-                    m_heatmapGridSize = column.size();
+                const int bytesPerCell = (intensityBytesPerCell > 0) ? intensityBytesPerCell : 1;
+                if (bytesPerCell != m_intensityBytesPerCell) {
+                    m_intensityBytesPerCell = bytesPerCell;
+                    m_heatmapTextureDirty = true;
+                    if (m_heatmapStream) {
+                        m_heatmapStream->setIntensityBytesPerCell(bytesPerCell);
+                    }
+                }
+                if ((column.size() % bytesPerCell) != 0) {
+                    return;
+                }
+                const int columnHeight = column.size() / bytesPerCell;
+                if (columnHeight <= 0) {
+                    return;
+                }
+                if (columnHeight != m_heatmapGridSize) {
+                    m_heatmapGridSize = columnHeight;
                     m_heatmapTextureDirty = true;
                     if (m_heatmapStream) {
                         m_heatmapStream->reset(m_heatmapGridSize, minPrice, maxPrice, tickSize);
@@ -398,26 +422,44 @@ void UnifiedGridRenderer::init() {
                     if (debugCount <= 5 || debugCount % 50 == 0) {
                         int bidCount = 0;
                         int askCount = 0;
-                        unsigned char minByte = 255;
-                        unsigned char maxByte = 0;
-                        const auto* bytes = reinterpret_cast<const unsigned char*>(column.constData());
-                        for (int i = 0; i < column.size(); ++i) {
-                            const unsigned char v = bytes[i];
-                            if (v == 0) {
-                                continue;
+                        uint16_t minValue = std::numeric_limits<uint16_t>::max();
+                        uint16_t maxValue = 0;
+                        if (bytesPerCell == 1) {
+                            const auto* bytes = reinterpret_cast<const uint8_t*>(column.constData());
+                            for (int i = 0; i < column.size(); ++i) {
+                                const uint8_t v = bytes[i];
+                                if (v == 0) {
+                                    continue;
+                                }
+                                minValue = std::min<uint16_t>(minValue, static_cast<uint16_t>(v) * 257);
+                                maxValue = std::max<uint16_t>(maxValue, static_cast<uint16_t>(v) * 257);
+                                if (v >= 128) {
+                                    ++askCount;
+                                } else {
+                                    ++bidCount;
+                                }
                             }
-                            minByte = std::min(minByte, v);
-                            maxByte = std::max(maxByte, v);
-                            if (v >= 128) {
-                                ++askCount;
-                            } else {
-                                ++bidCount;
+                        } else if (bytesPerCell == 2) {
+                            const auto* values = reinterpret_cast<const uint16_t*>(column.constData());
+                            for (int i = 0; i < columnHeight; ++i) {
+                                const uint16_t v = qFromLittleEndian(values[i]);
+                                if (v == 0) {
+                                    continue;
+                                }
+                                minValue = std::min(minValue, v);
+                                maxValue = std::max(maxValue, v);
+                                if (v >= 0x8000u) {
+                                    ++askCount;
+                                } else {
+                                    ++bidCount;
+                                }
                             }
                         }
                         sLog_Render("GPU HEATMAP BYTES: bids=" << bidCount
                                     << " asks=" << askCount
-                                    << " min=" << static_cast<int>(minByte)
-                                    << " max=" << static_cast<int>(maxByte));
+                                    << " min=" << minValue
+                                    << " max=" << maxValue
+                                    << " bpp=" << bytesPerCell);
                     }
                 }
 
@@ -432,22 +474,42 @@ void UnifiedGridRenderer::init() {
                 const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
                 QByteArray intensityColumn = column;
                 if (m_heatmapLiquidityThreshold > 0.0 && haveLiquidityColumn && liquidityScale > 0.0 &&
-                    intensityColumn.size() == m_heatmapGridSize) {
+                    intensityColumn.size() == m_heatmapGridSize * bytesPerCell) {
                     const auto* raw = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
                     const double threshold = m_heatmapLiquidityThreshold;
-                    for (int y = 0; y < m_heatmapGridSize; ++y) {
-                        const uint16_t packed = qFromLittleEndian(raw[y]);
-                        if (packed == 0) {
-                            intensityColumn[y] = 0;
-                            continue;
+                    if (bytesPerCell == 1) {
+                        auto* dst = reinterpret_cast<uint8_t*>(intensityColumn.data());
+                        for (int y = 0; y < m_heatmapGridSize; ++y) {
+                            const uint16_t packed = qFromLittleEndian(raw[y]);
+                            if (packed == 0) {
+                                dst[y] = 0;
+                                continue;
+                            }
+                            double value = static_cast<double>(packed) * liquidityScale;
+                            if (m_liquidityLabelMode != 0) {
+                                const double price = maxPrice - (static_cast<double>(y) * tickSize);
+                                value *= price;
+                            }
+                            if (value < threshold) {
+                                dst[y] = 0;
+                            }
                         }
-                        double value = static_cast<double>(packed) * liquidityScale;
-                        if (m_liquidityLabelMode != 0) {
-                            const double price = maxPrice - (static_cast<double>(y) * tickSize);
-                            value *= price;
-                        }
-                        if (value < threshold) {
-                            intensityColumn[y] = 0;
+                    } else if (bytesPerCell == 2) {
+                        auto* dst = reinterpret_cast<uint16_t*>(intensityColumn.data());
+                        for (int y = 0; y < m_heatmapGridSize; ++y) {
+                            const uint16_t packed = qFromLittleEndian(raw[y]);
+                            if (packed == 0) {
+                                dst[y] = 0;
+                                continue;
+                            }
+                            double value = static_cast<double>(packed) * liquidityScale;
+                            if (m_liquidityLabelMode != 0) {
+                                const double price = maxPrice - (static_cast<double>(y) * tickSize);
+                                value *= price;
+                            }
+                            if (value < threshold) {
+                                dst[y] = 0;
+                            }
                         }
                     }
                 }
@@ -612,7 +674,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             ensureHeatmapPaletteImage();
             auto* intensityTexture = window()->createTextureFromImage(m_heatmapImage);
             if (!intensityTexture) {
-                QImage fallback = m_heatmapImage.convertToFormat(QImage::Format_Grayscale8);
+                const QImage::Format fallbackFormat =
+                    (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
+                QImage fallback = m_heatmapImage.convertToFormat(fallbackFormat);
                 intensityTexture = window()->createTextureFromImage(fallback);
             }
             auto* paletteTexture = window()->createTextureFromImage(m_heatmapPaletteImage);
@@ -872,14 +936,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 void UnifiedGridRenderer::ensureHeatmapImage() {
     if (!m_heatmapImage.isNull() && m_heatmapImage.width() == m_heatmapGridSize &&
         m_heatmapImage.height() == m_heatmapGridSize) {
-        return;
+        const QImage::Format expectedFormat =
+            (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
+        if (m_heatmapImage.format() == expectedFormat) {
+            return;
+        }
     }
 
-    m_heatmapImage = QImage(m_heatmapGridSize, m_heatmapGridSize, QImage::Format_Grayscale8);
+    const QImage::Format format =
+        (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
+    m_heatmapImage = QImage(m_heatmapGridSize, m_heatmapGridSize, format);
     if (m_heatmapImage.isNull()) {
         return;
     }
-    m_heatmapImage.fill(Qt::black);
+    m_heatmapImage.fill(m_heatmapBackgroundColor);
 }
 
 void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
@@ -991,15 +1061,25 @@ void UnifiedGridRenderer::applyLabelUploads(
     }
 
     const int expectedLiquidityBytes = gridSize * static_cast<int>(sizeof(uint16_t));
+    const int expectedIntensityBytes = gridSize * m_intensityBytesPerCell;
     for (const auto& upload : uploads) {
         const int column = upload.x;
         if (column < 0 || column >= gridSize) {
             continue;
         }
-        if (upload.intensity.size() == gridSize) {
-            const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
-            for (int y = 0; y < gridSize; ++y) {
-                m_labelIntensityRing[static_cast<size_t>(y) * gridSize + column] = src[y];
+        if (upload.intensity.size() == expectedIntensityBytes) {
+            if (m_intensityBytesPerCell == 1) {
+                const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridSize; ++y) {
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridSize + column] =
+                        static_cast<uint16_t>(src[y]) * 257;
+                }
+            } else if (m_intensityBytesPerCell == 2) {
+                const auto* src = reinterpret_cast<const uint16_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridSize; ++y) {
+                    const uint16_t raw = qFromLittleEndian(src[y]);
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridSize + column] = raw;
+                }
             }
         }
         if (upload.liquidity.size() == expectedLiquidityBytes) {
@@ -1052,8 +1132,8 @@ QString UnifiedGridRenderer::getTextureMemory() const {
         if (snapshot.gridSize <= 0) {
             return "N/A";
         }
-        // Grayscale8 = 1 byte per pixel
-        qint64 bytes = static_cast<qint64>(snapshot.gridSize) * snapshot.gridSize;
+        const int bytesPerPixel = (m_intensityBytesPerCell > 0) ? m_intensityBytesPerCell : 1;
+        qint64 bytes = static_cast<qint64>(snapshot.gridSize) * snapshot.gridSize * bytesPerPixel;
         double mb = bytes / (1024.0 * 1024.0);
         return QString("%1 MB").arg(mb, 0, 'f', 1);
     }
@@ -1062,7 +1142,7 @@ QString UnifiedGridRenderer::getTextureMemory() const {
 
 QString UnifiedGridRenderer::getTextureFormat() const {
     if (m_useGpuHeatmap) {
-        return "Grayscale8";
+        return (m_intensityBytesPerCell == 2) ? "Grayscale16" : "Grayscale8";
     }
     return "N/A";
 }

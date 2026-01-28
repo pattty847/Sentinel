@@ -74,7 +74,8 @@ signals:
                             double tickSize,
                             const QByteArray& column,
                             const QByteArray& liquidityColumn,
-                            double liquidityScale);
+                            double liquidityScale,
+                            int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridHeight);
 
 private:

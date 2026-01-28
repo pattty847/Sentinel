@@ -92,24 +92,28 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
         return;
     }
 
-    const bool isU8 = (format.compare(QStringLiteral("u8"), Qt::CaseInsensitive) == 0);
+    const QString fmt = format.trimmed().toLower();
+    int bytesPerCell = 1;
+    if (fmt == QStringLiteral("u8") || fmt == QStringLiteral("r8")) {
+        bytesPerCell = 1;
+    } else if (fmt == QStringLiteral("u16") || fmt == QStringLiteral("r16") ||
+               fmt == QStringLiteral("r16f")) {
+        bytesPerCell = 2;
+    } else if (fmt == QStringLiteral("f32") || fmt == QStringLiteral("r32f")) {
+        bytesPerCell = 4;
+    }
     const int prevHeight = m_heatmapGridHeight;
     int height = 0;
     QByteArray expanded;
 
-    if (isU8) {
-        height = column.size();
-        if (height <= 0) {
-            return;
-        }
-        expanded = column;
-    } else {
-        height = column.size() / 4;
-        if (height <= 0) {
-            return;
-        }
-        expanded = column;
+    if (bytesPerCell <= 0 || (column.size() % bytesPerCell) != 0) {
+        return;
     }
+    height = column.size() / bytesPerCell;
+    if (height <= 0) {
+        return;
+    }
+    expanded = column;
 
     m_heatmapGridHeight = height;
     const double effectiveTick = tickSize;
@@ -128,7 +132,8 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                             effectiveTick,
                             expanded,
                             liquidityColumn,
-                            liquidityScale);
+                            liquidityScale,
+                            bytesPerCell);
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {
