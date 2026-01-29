@@ -365,6 +365,24 @@ void MainWindowGPU::connectMarketDataSignals() {
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
 
+    // Auto-request history after connect for the current symbol.
+    connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
+            this, [this](bool connected) {
+                if (!connected || !m_dataSource) {
+                    return;
+                }
+                const QString symbol = m_currentSymbol;
+                if (symbol.isEmpty()) {
+                    return;
+                }
+                const int64_t timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+                const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
+                const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
+                const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
+                const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+                m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+            });
+
     // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
