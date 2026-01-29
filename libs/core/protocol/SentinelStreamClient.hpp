@@ -9,6 +9,8 @@
 #include <atomic>
 #include <deque>
 #include <nlohmann/json.hpp>
+#include <QByteArray>
+#include <QVector>
 #include "SentinelStreamProtocol.hpp"
 #include "../marketdata/model/TradeData.h"
 
@@ -18,6 +20,17 @@ using tcp = net::ip::tcp;
 class SentinelStreamClient : public QObject {
     Q_OBJECT
 public:
+    struct HeatmapHistoryColumn {
+        int64_t bucketStartMs = 0;
+        int64_t bucketEndMs = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+        QByteArray intensity;
+        QByteArray liquidity;
+        double liquidityScale = 1.0;
+    };
+
     explicit SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent = nullptr);
     ~SentinelStreamClient();
 
@@ -26,6 +39,10 @@ public:
     
     void subscribe(const std::string& symbol);
     void unsubscribe(const std::string& symbol);
+    void requestHeatmapHistory(const std::string& symbol,
+                               int64_t timeframeMs,
+                               int64_t endTimeMs,
+                               int count);
 
 signals:
     void connected();
@@ -55,6 +72,11 @@ signals:
                               const QByteArray& liquidityColumn,
                               double liquidityScale,
                               bool reset);
+    void heatmapHistoryReceived(const QString& symbol,
+                                int64_t timeframeMs,
+                                int gridWidth,
+                                int gridHeight,
+                                const QVector<HeatmapHistoryColumn>& columns);
 
 private:
     void run();
@@ -84,3 +106,6 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
 };
+
+Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)
+Q_DECLARE_METATYPE(QVector<SentinelStreamClient::HeatmapHistoryColumn>)

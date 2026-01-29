@@ -12,6 +12,8 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
+    qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
+    qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
@@ -78,6 +80,30 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
         {"symbol", symbol}
     };
     
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
+void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
+                                                 int64_t timeframeMs,
+                                                 int64_t endTimeMs,
+                                                 int count) {
+    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        return;
+    }
+    nlohmann::json msg = {
+        {"type", "heatmap_history_request"},
+        {"symbol", symbol},
+        {"timeframe_ms", timeframeMs},
+        {"end_time", endTimeMs},
+        {"count", count}
+    };
+
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -260,6 +286,44 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                        liquidityColumn,
                                        liquidityScale,
                                        reset);
+        } else if (type == "heatmap_history_chunk") {
+             std::string symbol = msg.value("symbol", "");
+             if (symbol.empty()) return;
+             const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+             const int gridWidth = msg.value("grid_width", 0);
+             const int gridHeight = msg.value("grid_height", 0);
+             const std::string encoding = msg.value("encoding", "base64");
+             const std::string liquidityEncoding = msg.value("liquidity_encoding", "base64");
+             const auto columns = msg.value("columns", nlohmann::json::array());
+
+             QVector<HeatmapHistoryColumn> out;
+             if (columns.is_array()) {
+                 out.reserve(static_cast<int>(columns.size()));
+                 for (const auto& item : columns) {
+                     HeatmapHistoryColumn col;
+                     col.bucketStartMs = item.value("time_start", static_cast<int64_t>(0));
+                     col.bucketEndMs = item.value("time_end", static_cast<int64_t>(0));
+                     col.minPrice = item.value("min_price", 0.0);
+                     col.maxPrice = item.value("max_price", 0.0);
+                     col.tickSize = item.value("tick_size", 0.0);
+                     const std::string encoded = item.value("column", "");
+                     if (!encoded.empty() && encoding == "base64") {
+                         col.intensity = QByteArray::fromBase64(QByteArray::fromStdString(encoded));
+                     }
+                     const std::string liqEncoded = item.value("liquidity_column", "");
+                     if (!liqEncoded.empty() && liquidityEncoding == "base64") {
+                         col.liquidity = QByteArray::fromBase64(QByteArray::fromStdString(liqEncoded));
+                     }
+                     col.liquidityScale = item.value("liquidity_scale", 1.0);
+                     out.push_back(std::move(col));
+                 }
+             }
+
+             emit heatmapHistoryReceived(QString::fromStdString(symbol),
+                                         timeframeMs,
+                                         gridWidth,
+                                         gridHeight,
+                                         out);
         }
 
     } catch (const std::exception& e) {

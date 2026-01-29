@@ -3,6 +3,7 @@
 #include "SentinelLogging.hpp"
 #include <QByteArray>
 #include <QProcessEnvironment>
+#include <QStringList>
 #include <QtEndian>
 #include <algorithm>
 #include <chrono>
@@ -18,7 +19,7 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &HeatmapTwapStreamer::onSample);
 
-    m_timeframesMs = {100, 250, 500, 1000, 2000, 5000, 10000};
+    m_timeframesMs = {1000, 60000, 3600000, 86400000};
 
     const QByteArray widthEnv = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH");
     bool ok = false;
@@ -41,11 +42,37 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
         m_defaultTickSize = envTick;
     }
 
+    const QByteArray tfListEnv = qgetenv("SENTINEL_HEATMAP_TIMEFRAMES");
+    if (!tfListEnv.isEmpty()) {
+        QString tfList = QString::fromUtf8(tfListEnv);
+        tfList.replace(',', ' ');
+        tfList = tfList.simplified();
+        const QStringList parts = tfList.isEmpty()
+            ? QStringList()
+            : tfList.split(' ', Qt::SkipEmptyParts);
+        std::vector<int64_t> parsed;
+        parsed.reserve(static_cast<size_t>(parts.size()));
+        for (const auto& part : parts) {
+            bool okPart = false;
+            const int64_t tf = part.toLongLong(&okPart);
+            if (okPart && tf > 0) {
+                parsed.push_back(tf);
+            }
+        }
+        if (!parsed.empty()) {
+            std::sort(parsed.begin(), parsed.end());
+            parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
+            m_timeframesMs = std::move(parsed);
+        }
+    }
+
     const QByteArray tfEnv = qgetenv("SENTINEL_HEATMAP_TF");
     ok = false;
     const int64_t envTf = tfEnv.toLongLong(&ok);
     if (ok && envTf > 0) {
         m_activeTimeframeMs = envTf;
+    } else if (!m_timeframesMs.empty()) {
+        m_activeTimeframeMs = m_timeframesMs.front();
     }
 
     const QByteArray deltaEnv = qgetenv("SENTINEL_HEATMAP_RECENTER_DELTA");
@@ -330,21 +357,23 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                  frame.bucketStartMs,
                  frame.bucketEndMs);
 
-    emit heatmapSliceReady(QString::fromStdString(symbol),
-                           frame.bucketStartMs,
-                           frame.bucketEndMs,
-                           frame.timeframeMs,
-                           m_defaultWidth,
-                           state.height,
-                           state.minPrice,
-                           state.maxPrice,
-                           state.tickSize,
-                           state.lastMidPrice,
-                           lastTrade,
-                           column,
-                           liquidityColumn,
-                           liquidityScale,
-                           reset);
+    if (m_activeTimeframeMs <= 0 || frame.timeframeMs == m_activeTimeframeMs) {
+        emit heatmapSliceReady(QString::fromStdString(symbol),
+                               frame.bucketStartMs,
+                               frame.bucketEndMs,
+                               frame.timeframeMs,
+                               m_defaultWidth,
+                               state.height,
+                               state.minPrice,
+                               state.maxPrice,
+                               state.tickSize,
+                               state.lastMidPrice,
+                               lastTrade,
+                               column,
+                               liquidityColumn,
+                               liquidityScale,
+                               reset);
+    }
 }
 
 void HeatmapTwapStreamer::storeHistory(SymbolState& state,

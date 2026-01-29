@@ -80,11 +80,14 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     : IGridDataSource(parent)
     , m_client(host.toStdString(), port.toStdString())
 {
+    qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
+    qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     connect(&m_client, &SentinelStreamClient::tradeReceived, this, &IGridDataSource::tradeReceived);
     // Connect to new specific signals
     connect(&m_client, &SentinelStreamClient::snapshotReceived, this, &RemoteGridDataSource::onSnapshotReceived);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived, this, &RemoteGridDataSource::onL2UpdateReceived);
     connect(&m_client, &SentinelStreamClient::heatmapSliceReceived, this, &RemoteGridDataSource::onHeatmapSliceReceived);
+    connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived, this, &RemoteGridDataSource::onHeatmapHistoryReceived);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -114,6 +117,13 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
 
 void RemoteGridDataSource::unsubscribe(const QString& symbol) {
     m_client.unsubscribe(symbol.toStdString());
+}
+
+void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
+                                                 int64_t timeframeMs,
+                                                 int64_t endTimeMs,
+                                                 int count) {
+    m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
@@ -212,4 +222,26 @@ void RemoteGridDataSource::onHeatmapSliceReceived(const QString& symbol,
                               liquidityColumn,
                               liquidityScale,
                               reset);
+}
+
+void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
+                                                    int64_t timeframeMs,
+                                                    int gridWidth,
+                                                    int gridHeight,
+                                                    const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns) {
+    QVector<HeatmapHistoryColumn> converted;
+    converted.reserve(columns.size());
+    for (const auto& col : columns) {
+        HeatmapHistoryColumn out;
+        out.bucketStartMs = col.bucketStartMs;
+        out.bucketEndMs = col.bucketEndMs;
+        out.minPrice = col.minPrice;
+        out.maxPrice = col.maxPrice;
+        out.tickSize = col.tickSize;
+        out.intensity = col.intensity;
+        out.liquidity = col.liquidity;
+        out.liquidityScale = col.liquidityScale;
+        converted.push_back(std::move(out));
+    }
+    emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight, converted);
 }

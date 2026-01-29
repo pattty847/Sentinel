@@ -13,11 +13,17 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "GridViewState.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <QtGlobal>
 #include <limits>
 #include <cstring>
+#include <bit>
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
+    const int envCache = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
+    if (envCache > 0) {
+        m_cacheCapacityOverride = envCache;
+    }
 }
 
 DataProcessor::~DataProcessor() {
@@ -42,6 +48,7 @@ void DataProcessor::clearData() {
     m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
     m_heatmapHasLastColumn = false;
     m_heatmapLastColumn.clear();
+    m_heatmapCache.clear();
 }
 
 void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
@@ -143,6 +150,135 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                             liquidityColumn,
                             liquidityScale,
                             bytesPerCell);
+
+    HeatmapGridKey key;
+    key.symbol = symbol.toStdString();
+    key.gridWidth = m_heatmapGridWidth;
+    key.gridHeight = m_heatmapGridHeight;
+    key.timeframeMs = timeframeMs;
+    key.minPrice = minPrice;
+    key.maxPrice = maxPrice;
+    key.tickSize = effectiveTick;
+
+    auto& cache = m_heatmapCache[key];
+    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : m_heatmapGridWidth;
+    if (cache.capacity != capacity) {
+        cache.reset(capacity);
+    }
+    IGridDataSource::HeatmapHistoryColumn entry;
+    entry.bucketStartMs = bucketStartMs;
+    entry.bucketEndMs = bucketEndMs;
+    entry.minPrice = minPrice;
+    entry.maxPrice = maxPrice;
+    entry.tickSize = effectiveTick;
+    entry.intensity = expanded;
+    entry.liquidity = liquidityColumn;
+    entry.liquidityScale = liquidityScale;
+    cache.push(std::move(entry));
+}
+
+void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
+                                             int64_t timeframeMs,
+                                             int gridWidth,
+                                             int gridHeight,
+                                             const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
+    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
+        sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
+                    << " grid=" << gridWidth << "x" << gridHeight
+                    << " tf=" << timeframeMs);
+    }
+
+    if (columns.isEmpty() || gridWidth <= 0 || gridHeight <= 0) {
+        return;
+    }
+
+    const auto& first = columns.front();
+    if (gridHeight <= 0 || first.intensity.isEmpty()) {
+        return;
+    }
+    if ((first.intensity.size() % gridHeight) != 0) {
+        return;
+    }
+    const int bytesPerCellGuess = first.intensity.size() / gridHeight;
+    const int bytesPerCell = (bytesPerCellGuess == 1 || bytesPerCellGuess == 2 || bytesPerCellGuess == 4)
+        ? bytesPerCellGuess
+        : 1;
+
+    HeatmapGridKey key;
+    key.symbol = symbol.toStdString();
+    key.gridWidth = gridWidth;
+    key.gridHeight = gridHeight;
+    key.timeframeMs = timeframeMs;
+    key.minPrice = first.minPrice;
+    key.maxPrice = first.maxPrice;
+    key.tickSize = first.tickSize;
+
+    auto& cache = m_heatmapCache[key];
+    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : gridWidth;
+    if (cache.capacity != capacity) {
+        cache.reset(capacity);
+    }
+
+    emit heatmapRangeReset(first.minPrice, first.maxPrice, first.tickSize, gridWidth, gridHeight);
+
+    for (const auto& col : columns) {
+        IGridDataSource::HeatmapHistoryColumn entry = col;
+        cache.push(entry);
+        emit heatmapColumnReady(col.bucketStartMs,
+                                col.bucketEndMs,
+                                timeframeMs,
+                                col.minPrice,
+                                col.maxPrice,
+                                col.tickSize,
+                                col.intensity,
+                                col.liquidity,
+                                col.liquidityScale,
+                                bytesPerCell);
+    }
+}
+
+size_t DataProcessor::HeatmapGridKeyHash::operator()(const HeatmapGridKey& key) const noexcept {
+    auto hashCombine = [](size_t seed, size_t value) {
+        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    size_t seed = std::hash<std::string>{}(key.symbol);
+    seed = hashCombine(seed, std::hash<int>{}(key.gridWidth));
+    seed = hashCombine(seed, std::hash<int>{}(key.gridHeight));
+    seed = hashCombine(seed, std::hash<int64_t>{}(key.timeframeMs));
+    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.minPrice)));
+    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.maxPrice)));
+    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.tickSize)));
+    return seed;
+}
+
+bool DataProcessor::HeatmapGridKeyEq::operator()(const HeatmapGridKey& a,
+                                                 const HeatmapGridKey& b) const noexcept {
+    return a.symbol == b.symbol &&
+           a.gridWidth == b.gridWidth &&
+           a.gridHeight == b.gridHeight &&
+           a.timeframeMs == b.timeframeMs &&
+           a.minPrice == b.minPrice &&
+           a.maxPrice == b.maxPrice &&
+           a.tickSize == b.tickSize;
+}
+
+void DataProcessor::HeatmapColumnCache::reset(int newCapacity) {
+    capacity = newCapacity;
+    writeIndex = 0;
+    count = 0;
+    columns.clear();
+    if (capacity > 0) {
+        columns.resize(static_cast<size_t>(capacity));
+    }
+}
+
+void DataProcessor::HeatmapColumnCache::push(IGridDataSource::HeatmapHistoryColumn column) {
+    if (capacity <= 0) {
+        return;
+    }
+    columns[static_cast<size_t>(writeIndex)] = std::move(column);
+    writeIndex = (writeIndex + 1) % capacity;
+    count = std::min(count + 1, capacity);
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {

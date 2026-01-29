@@ -12,8 +12,12 @@ Assumptions: Server is authoritative for heatmap columns.
 #pragma once
 #include <QObject>
 #include <QElapsedTimer>
+#include <QVector>
 #include <atomic>
 #include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include "../datasources/IGridDataSource.hpp"
 
 class GridViewState;
@@ -43,6 +47,11 @@ public slots:
                                 const QByteArray& liquidityColumn,
                                 double liquidityScale,
                                 bool reset);
+    void onHeatmapHistoryReceived(const QString& symbol,
+                                  int64_t timeframeMs,
+                                  int gridWidth,
+                                  int gridHeight,
+                                  const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     
 public:
     
@@ -82,6 +91,33 @@ signals:
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
 
 private:
+    struct HeatmapGridKey {
+        std::string symbol;
+        int gridWidth = 0;
+        int gridHeight = 0;
+        int64_t timeframeMs = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+    };
+
+    struct HeatmapGridKeyHash {
+        size_t operator()(const HeatmapGridKey& key) const noexcept;
+    };
+
+    struct HeatmapGridKeyEq {
+        bool operator()(const HeatmapGridKey& a, const HeatmapGridKey& b) const noexcept;
+    };
+
+    struct HeatmapColumnCache {
+        int capacity = 0;
+        int writeIndex = 0;
+        int count = 0;
+        std::vector<IGridDataSource::HeatmapHistoryColumn> columns;
+
+        void reset(int newCapacity);
+        void push(IGridDataSource::HeatmapHistoryColumn column);
+    };
     
     // Components
     GridViewState* m_viewState = nullptr;
@@ -106,5 +142,8 @@ private:
     bool m_heatmapHasLastColumn = false;
     // Shutdown flag to prevent processing after stopProcessing() is called
     std::atomic<bool> m_shuttingDown{false};
+
+    std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;
+    int m_cacheCapacityOverride = 0;
 
 };

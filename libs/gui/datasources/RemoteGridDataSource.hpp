@@ -9,6 +9,10 @@ public:
 
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
+    void requestHeatmapHistory(const QString& symbol,
+                               int64_t timeframeMs,
+                               int64_t endTimeMs,
+                               int count) override;
     
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
@@ -32,6 +36,11 @@ private slots:
                                 const QByteArray& liquidityColumn,
                                 double liquidityScale,
                                 bool reset);
+    void onHeatmapHistoryReceived(const QString& symbol,
+                                  int64_t timeframeMs,
+                                  int gridWidth,
+                                  int gridHeight,
+                                  const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns);
 
 private:
     SentinelStreamClient m_client;

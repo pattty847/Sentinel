@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <QByteArray>
+#include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
 
 /**
@@ -14,12 +15,27 @@
 class IGridDataSource : public QObject {
     Q_OBJECT
 public:
+    struct HeatmapHistoryColumn {
+        int64_t bucketStartMs = 0;
+        int64_t bucketEndMs = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+        QByteArray intensity;
+        QByteArray liquidity;
+        double liquidityScale = 1.0;
+    };
+
     explicit IGridDataSource(QObject* parent = nullptr) : QObject(parent) {}
     virtual ~IGridDataSource() = default;
 
     // Subscription
     virtual void subscribe(const QString& symbol) = 0;
     virtual void unsubscribe(const QString& symbol) = 0;
+    virtual void requestHeatmapHistory(const QString& symbol,
+                                       int64_t timeframeMs,
+                                       int64_t endTimeMs,
+                                       int count) = 0;
 
     // Direct Access (Thread-safe)
     // Returns the dense live order book for high-performance rendering/ingestion.
@@ -46,9 +62,17 @@ signals:
                               const QByteArray& liquidityColumn,
                               double liquidityScale,
                               bool reset);
+    void heatmapHistoryReceived(const QString& symbol,
+                                int64_t timeframeMs,
+                                int gridWidth,
+                                int gridHeight,
+                                const QVector<HeatmapHistoryColumn>& columns);
     
     // Status Signals
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
 };
+
+Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
+Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
 

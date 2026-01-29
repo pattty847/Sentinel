@@ -11,7 +11,9 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Path to a custom CA bundle for TLS verification.
 
 - `SENTINEL_HEATMAP_TF` (server + client)  
-  Heatmap timeframe in milliseconds. Default: `100`. Must match on both.
+  Heatmap timeframe in milliseconds. Default: `1000`. Must match on both.
+- `SENTINEL_HEATMAP_TIMEFRAMES` (server)  
+  Comma/space-separated list of server heatmap anchor timeframes (ms). Default: `1000 60000 3600000 86400000`.
 - `SENTINEL_HEATMAP_GRID_WIDTH` (server + client)  
   Heatmap grid width (history columns). Default: `5120`.
 - `SENTINEL_HEATMAP_GRID_HEIGHT` (client)  
@@ -70,6 +72,8 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Dumps glyph atlas textures for debugging.
 - `SENTINEL_HEATMAP_LABEL_PX` (client)  
   Minimum cell pixel height before labels render. Default: `24`.
+- `SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS` (client)  
+  Client heatmap cache capacity (columns). Default: `gridWidth`.
 - `SENTINEL_MSDF_FONT` (client)  
   Absolute path to a font file used for MSDF atlas generation (Lab dock).
 
