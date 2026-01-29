@@ -40,17 +40,18 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     whiteQuads.clear();
     blackQuads.clear();
 
-    if (!atlas.isBuilt() || snapshot.gridSize <= 0 || snapshot.tickSize <= 0.0) {
+    if (!atlas.isBuilt() || snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0 || snapshot.tickSize <= 0.0) {
         return;
     }
 
-    const int gridSize = snapshot.gridSize;
-    const size_t expectedSize = static_cast<size_t>(gridSize) * gridSize;
+    const int gridWidth = snapshot.gridWidth;
+    const int gridHeight = snapshot.gridHeight;
+    const size_t expectedSize = static_cast<size_t>(gridWidth) * gridHeight;
     if (liquidityRing.size() != expectedSize) {
         return;
     }
     const bool haveIntensity = (intensityRing.size() == expectedSize);
-    const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridSize));
+    const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridWidth));
 
     const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
@@ -58,16 +59,16 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     int onlyTexX = -1;
     int onlyI = -1;
     if (onlyColumn >= 0) {
-        onlyTexX = onlyColumn % gridSize;
+        onlyTexX = onlyColumn % gridWidth;
         if (onlyTexX < 0) {
-            onlyTexX += gridSize;
+            onlyTexX += gridWidth;
         }
         onlyI = onlyTexX - startX;
         if (onlyI < 0) {
-            onlyI += gridSize;
+            onlyI += gridWidth;
         }
-        if (onlyI >= gridSize) {
-            onlyI -= gridSize;
+        if (onlyI >= gridWidth) {
+            onlyI -= gridWidth;
         }
         if (onlyI < 0 || onlyI >= cellsX) {
             return;
@@ -77,21 +78,21 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     for (int j = 0; j < cellsY; ++j) {
         int texY = startY + j;
         if (texY < 0) {
-            texY = gridSize + (texY % gridSize);
+            texY = gridHeight + (texY % gridHeight);
         }
-        texY = texY % gridSize;
-        if (texY < 0 || texY >= gridSize) {
+        texY = texY % gridHeight;
+        if (texY < 0 || texY >= gridHeight) {
             continue;
         }
         const double price = snapshot.maxPrice - (static_cast<double>(texY) * snapshot.tickSize);
         const int iStart = (onlyI >= 0) ? onlyI : 0;
         const int iEnd = (onlyI >= 0) ? (onlyI + 1) : cellsX;
         for (int i = iStart; i < iEnd; ++i) {
-            const int texX = (onlyI >= 0) ? onlyTexX : ((startX + i) % gridSize + gridSize) % gridSize;
-            if (texX < 0 || texX >= gridSize) {
+            const int texX = (onlyI >= 0) ? onlyTexX : ((startX + i) % gridWidth + gridWidth) % gridWidth;
+            if (texX < 0 || texX >= gridWidth) {
                 continue;
             }
-            const size_t ringIndex = static_cast<size_t>(texY) * gridSize + texX;
+            const size_t ringIndex = static_cast<size_t>(texY) * gridWidth + texX;
             const uint16_t raw = liquidityRing[ringIndex];
             if (raw == 0) {
                 continue;

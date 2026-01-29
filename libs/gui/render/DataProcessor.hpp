@@ -64,6 +64,7 @@ public:
     bool isManualTimeframeSet() const;
 
     void setHeatmapGridHeight(int height);
+    void setHeatmapGridDimensions(int width, int height);
     void setHeatmapIntensityScale(double scale);
     void setHeatmapRecenterFraction(double fraction);
     
@@ -78,7 +79,7 @@ signals:
                             const QByteArray& liquidityColumn,
                             double liquidityScale,
                             int intensityBytesPerCell);
-    void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridHeight);
+    void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
 
 private:
     
@@ -92,7 +93,8 @@ private:
     
     
     // GPU heatmap rasterization config
-    int m_heatmapGridHeight = 8192;
+    int m_heatmapGridWidth = 5120;
+    int m_heatmapGridHeight = 2048;
     double m_heatmapIntensityScale = 1.0;
     double m_heatmapMinPrice = 0.0;
     double m_heatmapMaxPrice = 0.0;

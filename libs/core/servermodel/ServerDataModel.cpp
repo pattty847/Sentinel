@@ -135,6 +135,20 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, Tim
     return {};
 }
 
+bool ServerDataModel::getHeatmapHistory(const std::string& symbol,
+                                        int64_t timeframeMs,
+                                        int64_t endTimeMs,
+                                        int count,
+                                        int& outGridWidth,
+                                        int& outGridHeight,
+                                        std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const {
+    if (!m_heatmapStreamer) {
+        return false;
+    }
+    return m_heatmapStreamer->fetchHistory(symbol, timeframeMs, endTimeMs, count,
+                                           outGridWidth, outGridHeight, out);
+}
+
 void ServerDataModel::onTrade(const Trade& trade) {
     if (m_logger) {
         m_logger->logTrade(trade);

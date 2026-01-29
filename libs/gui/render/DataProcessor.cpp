@@ -63,7 +63,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     Q_UNUSED(symbol);
     Q_UNUSED(midPrice);
     Q_UNUSED(lastTrade);
-    Q_UNUSED(gridWidth);
+    const int resolvedWidth = (gridWidth > 0) ? gridWidth : m_heatmapGridWidth;
 
     if (m_shuttingDown.load()) {
         return;
@@ -72,7 +72,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP SLICE RX: tf=" << timeframeMs
                     << " rows=" << column.size()
-                    << " grid=" << gridWidth << "x" << gridHeight
+                    << " grid=" << resolvedWidth << "x" << gridHeight
                     << " reset=" << reset
                     << " format=" << format
                     << " current=" << m_currentTimeframe_ms
@@ -107,6 +107,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
         bytesPerCell = 4;
     }
     const int prevHeight = m_heatmapGridHeight;
+    const int prevWidth = m_heatmapGridWidth;
     int height = 0;
     QByteArray expanded;
 
@@ -122,12 +123,13 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     }
     expanded = column;
 
+    m_heatmapGridWidth = resolvedWidth;
     m_heatmapGridHeight = height;
     const double effectiveTick = tickSize;
-    const bool needsReset = reset || !m_heatmapRangeValid || (prevHeight != height);
+    const bool needsReset = reset || !m_heatmapRangeValid || (prevHeight != height || prevWidth != m_heatmapGridWidth);
 
     if (needsReset) {
-        emit heatmapRangeReset(minPrice, maxPrice, effectiveTick, height);
+        emit heatmapRangeReset(minPrice, maxPrice, effectiveTick, m_heatmapGridWidth, height);
     }
 
     m_heatmapRangeValid = true;
@@ -144,6 +146,15 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {
+    if (height > 0) {
+        m_heatmapGridHeight = height;
+    }
+}
+
+void DataProcessor::setHeatmapGridDimensions(int width, int height) {
+    if (width > 0) {
+        m_heatmapGridWidth = width;
+    }
     if (height > 0) {
         m_heatmapGridHeight = height;
     }

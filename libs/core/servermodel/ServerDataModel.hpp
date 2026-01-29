@@ -25,6 +25,13 @@ public:
     const LiveOrderBook& getLiveOrderBook(const std::string& symbol);
     // History Accessor
     std::vector<OHLCVBar> getHistory(const std::string& symbol, Timeframe tf, size_t limit = 1000) const;
+    bool getHeatmapHistory(const std::string& symbol,
+                           int64_t timeframeMs,
+                           int64_t endTimeMs,
+                           int count,
+                           int& outGridWidth,
+                           int& outGridHeight,
+                           std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const;
 
 public slots:
     void onTrade(const Trade& trade);

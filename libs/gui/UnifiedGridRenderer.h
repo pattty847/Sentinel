@@ -104,7 +104,8 @@ private:
 
     // GPU heatmap path (single quad with streamed columns).
     bool m_useGpuHeatmap = false;
-    int m_heatmapGridSize = 2048;
+    int m_heatmapGridWidth = 5120;
+    int m_heatmapGridHeight = 2048;
     bool m_heatmapTextureDirty = true;
     QImage m_heatmapImage;
     QImage m_heatmapPaletteImage;
@@ -123,7 +124,8 @@ private:
 
     std::array<class GlyphAtlas, 5> m_glyphAtlases;
     bool m_glyphAtlasesBuilt = false;
-    int m_labelRingGridSize = 0;
+    int m_labelRingGridWidth = 0;
+    int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
@@ -302,7 +304,8 @@ private:
     int pickFontBucket(float cellHeight) const;
     float fontBucketPx(int bucket) const;
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
-                           int gridSize);
+                           int gridWidth,
+                           int gridHeight);
 
 private:
     // Property setters

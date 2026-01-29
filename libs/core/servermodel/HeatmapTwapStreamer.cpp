@@ -294,6 +294,8 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         state.pendingReset = false;
         state.runningMaxBid = 0.0;
         state.runningMaxAsk = 0.0;
+        std::lock_guard<std::mutex> lock(m_historyMutex);
+        state.historyByTf.clear();
     }
 
     const double denom = static_cast<double>(frame.timeframeMs);
@@ -317,6 +319,17 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                  << " reset=" << reset);
     }
 
+    storeHistory(state,
+                 frame.timeframeMs,
+                 column,
+                 liquidityColumn,
+                 liquidityScale,
+                 state.minPrice,
+                 state.maxPrice,
+                 state.tickSize,
+                 frame.bucketStartMs,
+                 frame.bucketEndMs);
+
     emit heatmapSliceReady(QString::fromStdString(symbol),
                            frame.bucketStartMs,
                            frame.bucketEndMs,
@@ -332,6 +345,100 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                            liquidityColumn,
                            liquidityScale,
                            reset);
+}
+
+void HeatmapTwapStreamer::storeHistory(SymbolState& state,
+                                       int64_t timeframeMs,
+                                       const QByteArray& column,
+                                       const QByteArray& liquidityColumn,
+                                       double liquidityScale,
+                                       double minPrice,
+                                       double maxPrice,
+                                       double tickSize,
+                                       int64_t bucketStartMs,
+                                       int64_t bucketEndMs) {
+    if (timeframeMs <= 0 || column.isEmpty() || m_defaultWidth <= 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_historyMutex);
+    auto& ring = state.historyByTf[timeframeMs];
+    if (ring.capacity <= 0) {
+        ring.capacity = m_defaultWidth;
+        ring.columns.assign(static_cast<size_t>(ring.capacity), HistoryColumn{});
+        ring.writeIndex = 0;
+        ring.count = 0;
+    } else if (ring.capacity != m_defaultWidth) {
+        ring.capacity = m_defaultWidth;
+        ring.columns.assign(static_cast<size_t>(ring.capacity), HistoryColumn{});
+        ring.writeIndex = 0;
+        ring.count = 0;
+    }
+
+    HistoryColumn entry;
+    entry.bucketStartMs = bucketStartMs;
+    entry.bucketEndMs = bucketEndMs;
+    entry.minPrice = minPrice;
+    entry.maxPrice = maxPrice;
+    entry.tickSize = tickSize;
+    entry.intensity = column;
+    entry.liquidity = liquidityColumn;
+    entry.liquidityScale = liquidityScale;
+
+    ring.columns[static_cast<size_t>(ring.writeIndex)] = std::move(entry);
+    ring.writeIndex = (ring.writeIndex + 1) % ring.capacity;
+    ring.count = std::min(ring.count + 1, ring.capacity);
+}
+
+bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
+                                       int64_t timeframeMs,
+                                       int64_t endTimeMs,
+                                       int count,
+                                       int& outGridWidth,
+                                       int& outGridHeight,
+                                       std::vector<HistoryColumn>& out) const {
+    if (timeframeMs <= 0 || count <= 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_historyMutex);
+    auto it = m_symbols.find(symbol);
+    if (it == m_symbols.end()) {
+        return false;
+    }
+    const auto& state = it->second;
+    auto ringIt = state.historyByTf.find(timeframeMs);
+    if (ringIt == state.historyByTf.end()) {
+        return false;
+    }
+    const auto& ring = ringIt->second;
+    if (ring.count <= 0 || ring.capacity <= 0) {
+        return false;
+    }
+
+    const int requested = std::min(count, ring.count);
+    out.clear();
+    out.reserve(static_cast<size_t>(requested));
+    outGridWidth = ring.capacity;
+    outGridHeight = state.height;
+
+    const int latestIndex = (ring.writeIndex - 1 + ring.capacity) % ring.capacity;
+    int collected = 0;
+    for (int i = 0; i < ring.count && collected < requested; ++i) {
+        const int idx = (latestIndex - i + ring.capacity) % ring.capacity;
+        const auto& col = ring.columns[static_cast<size_t>(idx)];
+        if (endTimeMs > 0 && col.bucketStartMs > endTimeMs) {
+            continue;
+        }
+        out.push_back(col);
+        ++collected;
+    }
+
+    if (out.empty()) {
+        return false;
+    }
+    std::reverse(out.begin(), out.end());
+    return true;
 }
 
 QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,

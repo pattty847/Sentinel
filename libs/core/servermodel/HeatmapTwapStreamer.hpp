@@ -17,6 +17,25 @@ public:
     void start();
     void stop();
 
+    struct HistoryColumn {
+        int64_t bucketStartMs = 0;
+        int64_t bucketEndMs = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+        QByteArray intensity;
+        QByteArray liquidity;
+        double liquidityScale = 1.0;
+    };
+
+    bool fetchHistory(const std::string& symbol,
+                      int64_t timeframeMs,
+                      int64_t endTimeMs,
+                      int count,
+                      int& outGridWidth,
+                      int& outGridHeight,
+                      std::vector<HistoryColumn>& out) const;
+
 signals:
     void heatmapSliceReady(const QString& symbol,
                            int64_t bucketStartMs,
@@ -35,6 +54,13 @@ signals:
                            bool reset);
 
 private:
+    struct HistoryRing {
+        int capacity = 0;
+        int writeIndex = 0;
+        int count = 0;
+        std::vector<HistoryColumn> columns;
+    };
+
     struct TimeframeState {
         int64_t timeframeMs = 0;
         int64_t bucketStartMs = 0;
@@ -58,6 +84,7 @@ private:
         std::vector<double> rowValuesBid;
         std::vector<double> rowValuesAsk;
         std::vector<TimeframeState> frames;
+        std::unordered_map<int64_t, HistoryRing> historyByTf;
     };
 
     void onSample();
@@ -72,6 +99,16 @@ private:
                         TimeframeState& frame,
                         double lastTrade,
                         double midPrice);
+    void storeHistory(SymbolState& state,
+                      int64_t timeframeMs,
+                      const QByteArray& column,
+                      const QByteArray& liquidityColumn,
+                      double liquidityScale,
+                      double minPrice,
+                      double maxPrice,
+                      double tickSize,
+                      int64_t bucketStartMs,
+                      int64_t bucketEndMs);
     QByteArray toIntensityColumnSigned(SymbolState& state,
                                        const std::vector<double>& bidValues,
                                        const std::vector<double>& askValues);
@@ -99,4 +136,5 @@ private:
 
     std::vector<int64_t> m_timeframesMs;
     std::unordered_map<std::string, SymbolState> m_symbols;
+    mutable std::mutex m_historyMutex;
 };

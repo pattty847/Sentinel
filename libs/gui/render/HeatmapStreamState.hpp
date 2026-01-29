@@ -28,7 +28,8 @@ public:
     };
 
     struct Snapshot {
-        int gridSize = 0;
+        int gridWidth = 0;
+        int gridHeight = 0;
         int appendMs = 0;
         int64_t lastSliceStartMs = std::numeric_limits<int64_t>::min();
         int64_t timeOriginMs = 0;
@@ -49,8 +50,8 @@ public:
 
     HeatmapStreamState() = default;
 
-    void reset(int gridSize, double minPrice, double maxPrice, double tickSize);
-    void setGridSize(int gridSize);
+    void reset(int gridWidth, int gridHeight, double minPrice, double maxPrice, double tickSize);
+    void setGridDimensions(int gridWidth, int gridHeight);
     void setAppendMs(int appendMs);
     void updateRange(double minPrice, double maxPrice, double tickSize);
 
@@ -80,10 +81,11 @@ public:
                                bool& liquidityAvailable) const;
 
 private:
-    void resetLocked(int gridSize);
+    void resetLocked(int gridWidth, int gridHeight);
 
     mutable std::mutex m_stateMutex;
-    int m_gridSize = 0;
+    int m_gridWidth = 0;
+    int m_gridHeight = 0;
     int m_appendMs = 0;
     int m_writeColumn = 0;
     qint64 m_lastAppendMs = 0;

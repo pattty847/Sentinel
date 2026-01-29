@@ -222,6 +222,47 @@ public:
                     do_write(snapshot.dump());
                     
                 }
+            } else if (type == "heatmap_history_request") {
+                std::string symbol = j.value("symbol", "");
+                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
+                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
+                const int count = j.value("count", 0);
+                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
+                    std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
+                    int gridWidth = 0;
+                    int gridHeight = 0;
+                    const bool ok = model_.getHeatmapHistory(symbol, timeframeMs, endTimeMs, count,
+                                                            gridWidth, gridHeight, columns);
+                    nlohmann::json payload;
+                    payload["type"] = "heatmap_history_chunk";
+                    payload["symbol"] = symbol;
+                    payload["timeframe_ms"] = timeframeMs;
+                    payload["grid_width"] = gridWidth;
+                    payload["grid_height"] = gridHeight;
+                    payload["format"] = "u16";
+                    payload["encoding"] = "base64";
+                    payload["liquidity_format"] = "u16";
+                    payload["liquidity_encoding"] = "base64";
+                    auto arr = nlohmann::json::array();
+                    if (ok) {
+                        for (const auto& col : columns) {
+                            nlohmann::json item;
+                            item["time_start"] = col.bucketStartMs;
+                            item["time_end"] = col.bucketEndMs;
+                            item["min_price"] = col.minPrice;
+                            item["max_price"] = col.maxPrice;
+                            item["tick_size"] = col.tickSize;
+                            item["column"] = col.intensity.toBase64().toStdString();
+                            if (!col.liquidity.isEmpty()) {
+                                item["liquidity_column"] = col.liquidity.toBase64().toStdString();
+                                item["liquidity_scale"] = col.liquidityScale;
+                            }
+                            arr.push_back(std::move(item));
+                        }
+                    }
+                    payload["columns"] = std::move(arr);
+                    do_write(payload.dump());
+                }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
