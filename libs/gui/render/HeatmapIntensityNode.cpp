@@ -18,7 +18,7 @@ public:
         Q_UNUSED(oldMaterial);
         auto* material = static_cast<HeatmapIntensityMaterial*>(newMaterial);
         QByteArray* data = state.uniformData();
-        const int uniformSize = sizeof(float) * (16 + 4);
+        const int uniformSize = sizeof(float) * (16 + 8);
         if (data->size() != uniformSize) {
             data->resize(uniformSize);
         }
@@ -32,7 +32,9 @@ public:
 
         const float opacity = state.opacity();
         const QVector4D params(opacity, material->gamma(), material->contrast(), material->timeOffset());
+        const QVector4D params2(material->shaderFloor(), 0.0f, 0.0f, 0.0f);
         memcpy(data->data() + 64, &params, sizeof(QVector4D));
+        memcpy(data->data() + 64 + sizeof(QVector4D), &params2, sizeof(QVector4D));
         changed = true;
 
         return changed;
@@ -122,6 +124,9 @@ int HeatmapIntensityMaterial::compare(const QSGMaterial* other) const {
     if (m_contrast != rhs->m_contrast) {
         return m_contrast < rhs->m_contrast ? -1 : 1;
     }
+    if (m_shaderFloor != rhs->m_shaderFloor) {
+        return m_shaderFloor < rhs->m_shaderFloor ? -1 : 1;
+    }
     return 0;
 }
 
@@ -173,6 +178,11 @@ void HeatmapIntensityNode::setContrast(float contrast) {
 
 void HeatmapIntensityNode::setTimeOffset(float offset) {
     m_material.setTimeOffset(offset);
+    markDirty(QSGNode::DirtyMaterial);
+}
+
+void HeatmapIntensityNode::setShaderFloor(float floor) {
+    m_material.setShaderFloor(floor);
     markDirty(QSGNode::DirtyMaterial);
 }
 

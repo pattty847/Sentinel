@@ -1,6 +1,4 @@
 # IDE and Editor files
-# .cursor/
-# .cursorindexingignore
 .clangd
 
 # .vscode/ - Keep tracked for shared project settings
@@ -113,16 +111,16 @@ ENV/
 .python-version
 
 # Claude AI settings
+.cursor/
 .claude/
 CLAUDE.md
 AGENTS.md
 GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
-docs/archive/
-docs/refactor/
-docs/untracked/
-docs/backups/
+!docs/archive/
+!docs/plans/
+!docs/refactor/
 data/
 
 # Random files

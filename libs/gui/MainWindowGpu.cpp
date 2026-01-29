@@ -34,6 +34,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "widgets/CopenetFeedDock.hpp"
 #include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
+#include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
@@ -175,6 +176,19 @@ void MainWindowGPU::setupUI() {
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
+        connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (!renderer) return;
+            if (!m_heatmapSettingsDialog) {
+                m_heatmapSettingsDialog = new HeatmapSettingsDialog(renderer, this);
+            } else {
+                m_heatmapSettingsDialog->setRenderer(renderer);
+            }
+            m_heatmapSettingsDialog->show();
+            m_heatmapSettingsDialog->raise();
+            m_heatmapSettingsDialog->activateWindow();
+        });
     }
     
     setUpdatesEnabled(true);

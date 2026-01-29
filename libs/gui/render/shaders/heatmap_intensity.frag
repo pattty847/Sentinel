@@ -9,16 +9,19 @@ layout(binding = 2) uniform sampler2D paletteTex;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 params;
+    vec4 params2;
 };
 
 void main() {
     vec2 uv = vec2(fract(v_texcoord.x + params.w), v_texcoord.y);
     float encoded = texture(intensityTex, uv).r;
     if (encoded <= 0.0001) {
-        fragColor = vec4(0.0, 0.0, 0.0, params.x);
+        fragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
     float gamma = params.y;
+    float contrast = params.z;
+    float floorVal = params2.x;
 
     // Detect bid vs ask: bytes 0-127 = bid, 128-255 = ask
     float isAsk = step(0.5, encoded);
@@ -29,7 +32,8 @@ void main() {
     float magnitude = mix(encoded * 2.0, (encoded - 0.5) * 2.0, isAsk);
     
     // Apply gamma for brightness control, ensure minimum visibility
-    float adjusted = pow(max(magnitude, 0.1), gamma);
+    float adjusted = pow(max(magnitude, floorVal), gamma);
+    adjusted = clamp((adjusted - 0.5) * contrast + 0.5, 0.0, 1.0);
     
     // Map to palette: bids use 0.0-0.5, asks use 0.5-1.0
     float u = mix(adjusted * 0.49, 0.51 + adjusted * 0.49, isAsk);

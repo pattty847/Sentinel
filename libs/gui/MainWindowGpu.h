@@ -38,6 +38,7 @@ class LabDock;
 class WatchlistDock;
 class TopToolbar;
 class ThemeBridge;
+class HeatmapSettingsDialog;
 
 class DockFactory;
 class QmlSceneController;
@@ -122,6 +123,7 @@ private:
     std::unique_ptr<ShortcutBinder> m_shortcutBinder;
     std::unique_ptr<GuiApiServer> m_guiApiServer;
     QPointer<class FontSettingsDialog> m_fontDialog;
+    QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
 
     bool m_firstShow = true;
 };

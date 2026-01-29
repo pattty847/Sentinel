@@ -280,6 +280,15 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         return;
     }
 
+    bool reset = false;
+    if (state.pendingReset && midPrice > 0.0) {
+        applyBandRange(state, midPrice, frame.timeframeMs);
+        reset = true;
+        state.pendingReset = false;
+        state.runningMaxBid = 0.0;
+        state.runningMaxAsk = 0.0;
+    }
+
     const double denom = static_cast<double>(frame.timeframeMs);
     std::vector<double> twapBid(frame.accumBid.size(), 0.0);
     std::vector<double> twapAsk(frame.accumAsk.size(), 0.0);
@@ -288,15 +297,9 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         twapAsk[i] = (denom > 0.0) ? (frame.accumAsk[i] / denom) : 0.0;
     }
 
-    const QByteArray column = toIntensityColumnSigned(twapBid, twapAsk);
+    const QByteArray column = toIntensityColumnSigned(state, twapBid, twapAsk);
     double liquidityScale = 1.0;
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
-    bool reset = false;
-    if (state.pendingReset && midPrice > 0.0) {
-        applyBandRange(state, midPrice, frame.timeframeMs);
-        reset = true;
-        state.pendingReset = false;
-    }
 
     static int logCount = 0;
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 10) == 0) {
@@ -321,14 +324,49 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                            reset);
 }
 
-QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double>& bidValues,
-                                                        const std::vector<double>& askValues) const {
+QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
+                                                        const std::vector<double>& bidValues,
+                                                        const std::vector<double>& askValues) {
     if (bidValues.empty() || askValues.empty()) {
         return {};
     }
+    QByteArray modeEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MODE").toLower();
+    enum class NormalizeMode { Linear, Log, Power };
+    NormalizeMode mode = NormalizeMode::Log;
+    if (modeEnv == "linear") {
+        mode = NormalizeMode::Linear;
+    } else if (modeEnv == "power" || modeEnv == "pow") {
+        mode = NormalizeMode::Power;
+    } else if (modeEnv == "log") {
+        mode = NormalizeMode::Log;
+    }
+
+    const QByteArray maxModeEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MAX_MODE").toLower();
+    const bool useRunningMax = (maxModeEnv != "column");
+    double runningMaxDecay = 0.995;
+    const QByteArray decayEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MAX_DECAY");
+    bool ok = false;
+    const double decayOverride = decayEnv.toDouble(&ok);
+    if (ok && decayOverride > 0.0 && decayOverride <= 1.0) {
+        runningMaxDecay = decayOverride;
+    }
+
+    double logScale = 1000.0;
+    const QByteArray logScaleEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_LOG_SCALE");
+    const double logScaleOverride = logScaleEnv.toDouble(&ok);
+    if (ok && logScaleOverride > 0.0) {
+        logScale = logScaleOverride;
+    }
+
+    double powerExp = 0.4;
+    const QByteArray powerEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_POWER");
+    const double powerOverride = powerEnv.toDouble(&ok);
+    if (ok && powerOverride > 0.0 && powerOverride <= 1.0) {
+        powerExp = powerOverride;
+    }
+
     double intensityFloor = 0.001;
     const QByteArray floorEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_FLOOR");
-    bool ok = false;
     const double floorOverride = floorEnv.toDouble(&ok);
     if (ok && floorOverride >= 0.0 && floorOverride <= 1.0) {
         intensityFloor = floorOverride;
@@ -353,8 +391,23 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
             }
         }
     }
-    const double denomBid = (maxBid > 0.0) ? maxBid : 1.0;
-    const double denomAsk = (maxAsk > 0.0) ? maxAsk : 1.0;
+    if (useRunningMax) {
+        if (state.runningMaxBid <= 0.0) {
+            state.runningMaxBid = maxBid;
+        } else {
+            state.runningMaxBid = std::max(maxBid, state.runningMaxBid * runningMaxDecay);
+        }
+        if (state.runningMaxAsk <= 0.0) {
+            state.runningMaxAsk = maxAsk;
+        } else {
+            state.runningMaxAsk = std::max(maxAsk, state.runningMaxAsk * runningMaxDecay);
+        }
+    }
+
+    const double denomBid = (useRunningMax ? state.runningMaxBid : maxBid);
+    const double denomAsk = (useRunningMax ? state.runningMaxAsk : maxAsk);
+    const double safeDenomBid = (denomBid > 0.0) ? denomBid : 1.0;
+    const double safeDenomAsk = (denomAsk > 0.0) ? denomAsk : 1.0;
 
     static int logCount = 0;
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 20) == 0) {
@@ -369,8 +422,30 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(const std::vector<double
     out.resize(static_cast<int>(height * sizeof(uint16_t)));
     auto* dst = reinterpret_cast<uint16_t*>(out.data());
     for (size_t i = 0; i < height; ++i) {
-        double bidNorm = std::clamp(bidValues[i] / denomBid, 0.0, 1.0);
-        double askNorm = std::clamp(askValues[i] / denomAsk, 0.0, 1.0);
+        const double bidValue = bidValues[i];
+        const double askValue = askValues[i];
+        double bidNorm = 0.0;
+        double askNorm = 0.0;
+        if (bidValue > 0.0) {
+            if (mode == NormalizeMode::Log) {
+                bidNorm = std::log1p(bidValue * logScale) / std::log1p(safeDenomBid * logScale);
+            } else if (mode == NormalizeMode::Power) {
+                bidNorm = std::pow(bidValue / safeDenomBid, powerExp);
+            } else {
+                bidNorm = bidValue / safeDenomBid;
+            }
+        }
+        if (askValue > 0.0) {
+            if (mode == NormalizeMode::Log) {
+                askNorm = std::log1p(askValue * logScale) / std::log1p(safeDenomAsk * logScale);
+            } else if (mode == NormalizeMode::Power) {
+                askNorm = std::pow(askValue / safeDenomAsk, powerExp);
+            } else {
+                askNorm = askValue / safeDenomAsk;
+            }
+        }
+        bidNorm = std::clamp(bidNorm, 0.0, 1.0);
+        askNorm = std::clamp(askNorm, 0.0, 1.0);
         if (bidNorm < intensityFloor) {
             bidNorm = 0.0;
         }

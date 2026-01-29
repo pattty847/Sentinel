@@ -60,6 +60,16 @@ Rectangle {
         }
     }
     
+    Rectangle {
+        id: heatmapBackground
+        anchors.fill: parent
+        anchors.rightMargin: 70  // Space for price axis (RIGHT side)
+        anchors.bottomMargin: 30 // Space for time axis
+        color: root.color
+        visible: root.showHeatmap
+        z: 0
+    }
+
     UnifiedGridRenderer {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
@@ -69,7 +79,7 @@ Rectangle {
         visible: root.showHeatmap
         intensityScale: 1.0
         maxCells: 500000
-        heatmapBackgroundColor: root.color
+        heatmapBackgroundColor: "black"
         z: 1
         
         // Update our tracked timeframe when it changes

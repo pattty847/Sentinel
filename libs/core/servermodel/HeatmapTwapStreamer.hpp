@@ -47,6 +47,8 @@ private:
         double tickSize = 1.0;
         double lastMidPrice = 0.0;
         double lastRecenterMid = 0.0;
+        double runningMaxBid = 0.0;
+        double runningMaxAsk = 0.0;
         int height = 0;
         int64_t lastSampleMs = 0;
         bool initialized = false;
@@ -68,8 +70,9 @@ private:
                         TimeframeState& frame,
                         double lastTrade,
                         double midPrice);
-    QByteArray toIntensityColumnSigned(const std::vector<double>& bidValues,
-                                       const std::vector<double>& askValues) const;
+    QByteArray toIntensityColumnSigned(SymbolState& state,
+                                       const std::vector<double>& bidValues,
+                                       const std::vector<double>& askValues);
     QByteArray toLiquidityColumn(const std::vector<double>& bidValues,
                                  const std::vector<double>& askValues,
                                  double& outScale) const;

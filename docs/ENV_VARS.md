@@ -25,7 +25,17 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_HEATMAP_BAND_SLOW` (server)  
   Band percent for slow timeframes. Default: `0.35`.
 - `SENTINEL_HEATMAP_INTENSITY_FLOOR` (server)  
-  Minimum intensity cutoff in [0.0, 1.0]. Default: `0.01`.
+  Minimum intensity cutoff in [0.0, 1.0]. Default: `0.001`.
+- `SENTINEL_HEATMAP_INTENSITY_MODE` (server)  
+  Intensity normalization mode: `log` (default), `power`, or `linear`.
+- `SENTINEL_HEATMAP_INTENSITY_LOG_SCALE` (server)  
+  Log scale factor for `log` mode. Default: `1000`.
+- `SENTINEL_HEATMAP_INTENSITY_POWER` (server)  
+  Exponent for `power` mode. Default: `0.4`.
+- `SENTINEL_HEATMAP_INTENSITY_MAX_MODE` (server)  
+  Max normalization mode: `running` (default) or `column`.
+- `SENTINEL_HEATMAP_INTENSITY_MAX_DECAY` (server)  
+  Running max decay factor in (0, 1]. Default: `0.995`.
 - `SENTINEL_HEATMAP_RECENTER` (client)  
   Recenter fraction for client processing. Default: `0.15`.
 - `SENTINEL_HEATMAP_SLICE_LOG` (server + client)  
@@ -46,6 +56,12 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Enables verbose GPU heatmap diagnostics.
 - `SENTINEL_GPU_HEATMAP_FORCE_FULL` (client)  
   Forces full texture render rather than visible range.
+- `SENTINEL_HEATMAP_GAMMA` (client)  
+  Heatmap gamma applied in the shader. Default: `1.05`.
+- `SENTINEL_HEATMAP_CONTRAST` (client)  
+  Heatmap contrast applied in the shader. Default: `1.15`.
+- `SENTINEL_HEATMAP_SHADER_FLOOR` (client)  
+  Minimum shader brightness floor in [0.0, 1.0]. Default: `0.1`.
 - `SENTINEL_DUMP_GLYPH_ATLAS` (client)  
   Dumps glyph atlas textures for debugging.
 - `SENTINEL_HEATMAP_LABEL_PX` (client)  

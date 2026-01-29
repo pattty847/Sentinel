@@ -290,6 +290,36 @@ void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor& color) {
     emit heatmapBackgroundColorChanged();
 }
 
+void UnifiedGridRenderer::setHeatmapGamma(double gamma) {
+    const double clamped = std::clamp(gamma, 0.1, 5.0);
+    if (std::abs(m_heatmapGamma - clamped) < 1e-6) {
+        return;
+    }
+    m_heatmapGamma = clamped;
+    update();
+    emit heatmapGammaChanged();
+}
+
+void UnifiedGridRenderer::setHeatmapContrast(double contrast) {
+    const double clamped = std::clamp(contrast, 0.1, 5.0);
+    if (std::abs(m_heatmapContrast - clamped) < 1e-6) {
+        return;
+    }
+    m_heatmapContrast = clamped;
+    update();
+    emit heatmapContrastChanged();
+}
+
+void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
+    const double clamped = std::clamp(floor, 0.0, 0.5);
+    if (std::abs(m_heatmapShaderFloor - clamped) < 1e-6) {
+        return;
+    }
+    m_heatmapShaderFloor = clamped;
+    update();
+    emit heatmapShaderFloorChanged();
+}
+
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     if (m_viewState) {
         m_viewState->enableAutoScroll(enabled);
@@ -361,6 +391,21 @@ void UnifiedGridRenderer::init() {
             QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
                 m_dataProcessor->setHeatmapRecenterFraction(recenter);
             }, Qt::QueuedConnection);
+        }
+        ok = false;
+        const double gamma = qgetenv("SENTINEL_HEATMAP_GAMMA").toDouble(&ok);
+        if (ok && gamma > 0.0) {
+            m_heatmapGamma = gamma;
+        }
+        ok = false;
+        const double contrast = qgetenv("SENTINEL_HEATMAP_CONTRAST").toDouble(&ok);
+        if (ok && contrast > 0.0) {
+            m_heatmapContrast = contrast;
+        }
+        ok = false;
+        const double floorVal = qgetenv("SENTINEL_HEATMAP_SHADER_FLOOR").toDouble(&ok);
+        if (ok && floorVal >= 0.0 && floorVal <= 1.0) {
+            m_heatmapShaderFloor = floorVal;
         }
     }
     
@@ -684,8 +729,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 intensityTexture->setFiltering(QSGTexture::Nearest);
                 paletteTexture->setFiltering(QSGTexture::Linear);
                 texNode->setTextures(intensityTexture, paletteTexture);
-                texNode->setGamma(1.05f);
-                texNode->setContrast(1.15f);
                 m_heatmapTextureDirty = false;
             }
         }
@@ -693,6 +736,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         const QRectF bounds = boundingRect();
         QRectF drawRect = bounds;
         texNode->setRect(drawRect);
+        texNode->setGamma(static_cast<float>(m_heatmapGamma));
+        texNode->setContrast(static_cast<float>(m_heatmapContrast));
+        texNode->setShaderFloor(static_cast<float>(m_heatmapShaderFloor));
 
         if (m_viewState && m_viewState->isTimeWindowValid() &&
             snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {

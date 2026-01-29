@@ -80,6 +80,7 @@ set(WIDGET_SOURCES
     "widgets/SecFilingDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
+    "widgets/HeatmapSettingsDialog.cpp"
     "widgets/TopToolbar.cpp"
     "widgets/WatchlistDock.cpp"
 )

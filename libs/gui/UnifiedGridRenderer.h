@@ -57,6 +57,9 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double autoScrollPaddingFrac READ autoScrollPaddingFrac WRITE setAutoScrollPaddingFrac NOTIFY autoScrollPaddingFracChanged)
     Q_PROPERTY(bool autoScrollSmoothEnabled READ autoScrollSmoothEnabled WRITE setAutoScrollSmoothEnabled NOTIFY autoScrollSmoothEnabledChanged)
     Q_PROPERTY(QColor heatmapBackgroundColor READ heatmapBackgroundColor WRITE setHeatmapBackgroundColor NOTIFY heatmapBackgroundColorChanged)
+    Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
+    Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
+    Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
     
     // Debug Overlay Toggles
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
@@ -114,6 +117,9 @@ private:
     double m_autoScrollPaddingFrac = 0.08;
     bool m_smoothAutoScrollEnabled = true;
     QColor m_heatmapBackgroundColor = QColor(18, 20, 24);
+    double m_heatmapGamma = 1.05;
+    double m_heatmapContrast = 1.15;
+    double m_heatmapShaderFloor = 0.1;
 
     std::array<class GlyphAtlas, 5> m_glyphAtlases;
     bool m_glyphAtlasesBuilt = false;
@@ -154,6 +160,9 @@ public:
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
+    double heatmapGamma() const { return m_heatmapGamma; }
+    double heatmapContrast() const { return m_heatmapContrast; }
+    double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
     
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
@@ -238,6 +247,9 @@ public:
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
     Q_INVOKABLE double getZoomFactor() const;
+    void setHeatmapGamma(double gamma);
+    void setHeatmapContrast(double contrast);
+    void setHeatmapShaderFloor(double floor);
 
 public:
     // Real-time data integration
@@ -265,6 +277,9 @@ signals:
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
     void heatmapBackgroundColorChanged();
+    void heatmapGammaChanged();
+    void heatmapContrastChanged();
+    void heatmapShaderFloorChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();

@@ -8,6 +8,7 @@ layout(location = 0) out vec2 v_texcoord;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 params;
+    vec4 params2;
 };
 
 void main() {

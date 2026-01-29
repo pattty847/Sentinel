@@ -160,6 +160,7 @@ void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std
         return;
     }
 
+    // TODO: Look into this more.
     // Apply deltas to our local LiveOrderBook replica
     // We need to convert indices back to prices to use the public applyUpdates API
     // This is slightly inefficient (idx -> price -> idx) but keeps LiveOrderBook encapsulation intact.
