@@ -22,7 +22,10 @@ SentinelStreamClient::~SentinelStreamClient() {
 
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
-    
+    m_ioc.restart();
+    m_isConnected = false;
+    m_writeQueue.clear();
+
     m_running = true;
     m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
     
@@ -52,7 +55,7 @@ void SentinelStreamClient::disconnectFromServer() {
     if (m_isConnected) {
         // Close websocket gracefully... or just stop ioc
     }
-    
+    m_isConnected = false;
     m_ioc.stop();
     if (m_thread.joinable()) {
         m_thread.join();

@@ -6,6 +6,7 @@ Threading: GUI thread only.
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 class GridViewState;
 class HeatmapStreamState;
@@ -36,6 +37,7 @@ public:
 private:
     int64_t m_autoScrollLagMs = 0;
     int64_t m_autoScrollSpanMs = 0;
+    int64_t m_lastViewEndMs = std::numeric_limits<int64_t>::min();
     double m_paddingFrac = 0.05;
     bool m_smoothEnabled = true;
 };

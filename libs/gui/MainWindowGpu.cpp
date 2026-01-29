@@ -91,7 +91,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
-        m_qmlController->updateSymbolInContext("BTC-USD");  // Default symbol
+        const QString defaultSymbol = QStringLiteral("BTC-USD");
+        m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
+        m_currentSymbol = defaultSymbol;
     }
     m_modeController->setMode(ChartMode::ORDER_BOOK_HEATMAP);
     
@@ -271,6 +273,7 @@ void MainWindowGPU::onSubscribe() {
 }
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
+    m_currentSymbol = symbol;
     emit symbolChanged(symbol);
 }
 

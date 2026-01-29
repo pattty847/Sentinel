@@ -75,8 +75,6 @@ void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     // TODO: Wire trades into candle/overlay pipeline.
 }
 
-// onLiveOrderBookUpdated(QString) removed: legacy pass-through; MainWindow connects Core→DataProcessor directly
-
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
                                        double minPrice, double maxPrice) {
     if (m_viewState) {
@@ -756,7 +754,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 intensityTexture = window()->createTextureFromImage(fallback);
             }
             auto* paletteTexture = window()->createTextureFromImage(m_heatmapPaletteImage);
-            if (intensityTexture && paletteTexture) {
+            if (!intensityTexture || !paletteTexture) {
+                delete intensityTexture;
+                delete paletteTexture;
+            } else {
                 intensityTexture->setFiltering(QSGTexture::Nearest);
                 paletteTexture->setFiltering(QSGTexture::Linear);
                 texNode->setTextures(intensityTexture, paletteTexture);

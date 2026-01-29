@@ -49,6 +49,7 @@ private:
 class HeatmapIntensityNode final : public QSGGeometryNode {
 public:
     HeatmapIntensityNode();
+    ~HeatmapIntensityNode() override;
     void setRect(const QRectF& rect);
     void setSourceRect(const QRectF& rect);
     QRectF getSourceRect() const { return m_sourceRect; }

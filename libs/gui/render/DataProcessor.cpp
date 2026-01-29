@@ -117,6 +117,8 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     const int prevWidth = m_heatmapGridWidth;
     int height = 0;
     QByteArray expanded;
+    const int64_t lastSliceStart = m_heatmapLastSliceStart;
+    bool forceReset = false;
 
     if (bytesPerCell <= 0 || (column.size() % bytesPerCell) != 0) {
         return;
@@ -133,7 +135,24 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     m_heatmapGridWidth = resolvedWidth;
     m_heatmapGridHeight = height;
     const double effectiveTick = tickSize;
-    const bool needsReset = reset || !m_heatmapRangeValid || (prevHeight != height || prevWidth != m_heatmapGridWidth);
+    if (lastSliceStart != std::numeric_limits<int64_t>::min()) {
+        if (bucketStartMs <= lastSliceStart) {
+            forceReset = true;
+        } else if (timeframeMs > 0 && resolvedWidth > 0) {
+            const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * timeframeMs;
+            if (maxGapMs > 0 && (bucketStartMs - lastSliceStart) > maxGapMs) {
+                forceReset = true;
+            }
+        }
+    }
+    if (forceReset) {
+        m_heatmapRangeValid = false;
+        m_heatmapLastColumn.clear();
+        m_heatmapHasLastColumn = false;
+        m_heatmapCache.clear();
+    }
+    const bool needsReset = reset || forceReset || !m_heatmapRangeValid ||
+                            (prevHeight != height || prevWidth != m_heatmapGridWidth);
 
     if (needsReset) {
         emit heatmapRangeReset(minPrice, maxPrice, effectiveTick, m_heatmapGridWidth, height);
@@ -175,6 +194,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     entry.liquidity = liquidityColumn;
     entry.liquidityScale = liquidityScale;
     cache.push(std::move(entry));
+    m_heatmapLastSliceStart = bucketStartMs;
 }
 
 void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,

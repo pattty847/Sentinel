@@ -137,6 +137,13 @@ HeatmapIntensityNode::HeatmapIntensityNode()
     setMaterial(&m_material);
 }
 
+HeatmapIntensityNode::~HeatmapIntensityNode() {
+    delete m_material.intensityTexture();
+    delete m_material.paletteTexture();
+    m_material.setIntensityTexture(nullptr);
+    m_material.setPaletteTexture(nullptr);
+}
+
 void HeatmapIntensityNode::setRect(const QRectF& rect) {
     if (m_rect == rect) {
         return;
@@ -154,6 +161,14 @@ void HeatmapIntensityNode::setSourceRect(const QRectF& rect) {
 }
 
 void HeatmapIntensityNode::setTextures(QSGTexture* intensity, QSGTexture* palette) {
+    QSGTexture* oldIntensity = m_material.intensityTexture();
+    QSGTexture* oldPalette = m_material.paletteTexture();
+    if (oldIntensity && oldIntensity != intensity) {
+        delete oldIntensity;
+    }
+    if (oldPalette && oldPalette != palette) {
+        delete oldPalette;
+    }
     m_material.setIntensityTexture(intensity);
     m_material.setPaletteTexture(palette);
     if (intensity) {

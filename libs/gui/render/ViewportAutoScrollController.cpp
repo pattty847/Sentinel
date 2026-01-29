@@ -28,6 +28,7 @@ void ViewportAutoScrollController::setSmoothEnabled(bool enabled) {
 
 void ViewportAutoScrollController::resetSpan() {
     m_autoScrollSpanMs = 0;
+    m_lastViewEndMs = std::numeric_limits<int64_t>::min();
 }
 
 void ViewportAutoScrollController::updateLagFromView(const GridViewState& view,
@@ -67,6 +68,7 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
         return false;
     }
     view.setViewport(viewStart, viewEnd, snapshot.minPrice, snapshot.maxPrice);
+    m_lastViewEndMs = viewEnd;
     return true;
 }
 
@@ -90,7 +92,10 @@ bool ViewportAutoScrollController::applySliceAutoScroll(GridViewState& view,
     }
     const int64_t clampedSpanMs = clampSpanMs(m_autoScrollSpanMs, maxSpanMs);
     const int64_t padMs = static_cast<int64_t>(clampedSpanMs * m_paddingFrac);
-    const int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs + padMs;
+    int64_t viewEnd = sliceStartMs + timeframeMs + m_autoScrollLagMs + padMs;
+    if (m_lastViewEndMs != std::numeric_limits<int64_t>::min() && viewEnd < m_lastViewEndMs) {
+        viewEnd = m_lastViewEndMs;
+    }
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
     const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());
@@ -102,6 +107,7 @@ bool ViewportAutoScrollController::applySliceAutoScroll(GridViewState& view,
         viewMax = heatmapMid + priceSpan * 0.5;
     }
     view.setViewport(viewStart, viewEnd, viewMin, viewMax);
+    m_lastViewEndMs = viewEnd;
     return true;
 }
 
@@ -128,7 +134,10 @@ bool ViewportAutoScrollController::applySmoothAutoScroll(GridViewState& view,
     const int64_t streamNowMs = (snapshot.streamBaseMs != std::numeric_limits<int64_t>::min())
         ? (snapshot.streamBaseMs + nowMs + snapshot.appendMs)
         : (snapshot.lastSliceStartMs + snapshot.appendMs);
-    const int64_t viewEnd = streamNowMs + m_autoScrollLagMs + padMs;
+    int64_t viewEnd = streamNowMs + m_autoScrollLagMs + padMs;
+    if (m_lastViewEndMs != std::numeric_limits<int64_t>::min() && viewEnd < m_lastViewEndMs) {
+        viewEnd = m_lastViewEndMs;
+    }
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
     const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());
@@ -141,6 +150,7 @@ bool ViewportAutoScrollController::applySmoothAutoScroll(GridViewState& view,
     }
 
     view.setViewport(viewStart, viewEnd, viewMin, viewMax);
+    m_lastViewEndMs = viewEnd;
     return true;
 }
 
@@ -168,6 +178,7 @@ bool ViewportAutoScrollController::applyPanToAutoScroll(GridViewState& view,
         const double newMin = view.getMinPrice() + priceDelta;
         const double newMax = view.getMaxPrice() + priceDelta;
         view.setViewport(newStart, newEnd, newMin, newMax);
+        m_lastViewEndMs = newEnd;
     }
     return true;
 }

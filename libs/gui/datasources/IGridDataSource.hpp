@@ -37,7 +37,7 @@ public:
                                        int64_t endTimeMs,
                                        int count) = 0;
 
-    // Direct Access (Thread-safe)
+    // Direct Access (GUI-thread only)
     // Returns the dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
 

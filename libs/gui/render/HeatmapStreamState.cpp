@@ -77,6 +77,12 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
             return;
         }
 
+        lastSliceStartMs = m_lastSliceStartMs;
+        if (lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
+            sliceStartMs <= lastSliceStartMs) {
+            return;
+        }
+
         if (m_timeOriginMs == 0) {
             m_timeOriginMs = sliceStartMs;
         }
@@ -92,7 +98,6 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
             }
         }
 
-        lastSliceStartMs = m_lastSliceStartMs;
         if (lastSliceStartMs != std::numeric_limits<int64_t>::min() && appendMs > 0) {
             const int64_t dt = sliceStartMs - lastSliceStartMs;
             if (dt > 0) {

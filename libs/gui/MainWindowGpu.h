@@ -107,6 +107,7 @@ private:
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;
     QToolButton* m_subscribeButton = nullptr;
+    QString m_currentSymbol;
     
     // QML scene (managed via QmlSceneController)
     QQuickView* m_qquickView = nullptr;

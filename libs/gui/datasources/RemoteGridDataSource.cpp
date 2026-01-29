@@ -82,12 +82,17 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
 {
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
-    connect(&m_client, &SentinelStreamClient::tradeReceived, this, &IGridDataSource::tradeReceived);
+    connect(&m_client, &SentinelStreamClient::tradeReceived,
+            this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
     // Connect to new specific signals
-    connect(&m_client, &SentinelStreamClient::snapshotReceived, this, &RemoteGridDataSource::onSnapshotReceived);
-    connect(&m_client, &SentinelStreamClient::l2UpdateReceived, this, &RemoteGridDataSource::onL2UpdateReceived);
-    connect(&m_client, &SentinelStreamClient::heatmapSliceReceived, this, &RemoteGridDataSource::onHeatmapSliceReceived);
-    connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived, this, &RemoteGridDataSource::onHeatmapHistoryReceived);
+    connect(&m_client, &SentinelStreamClient::snapshotReceived,
+            this, &RemoteGridDataSource::onSnapshotReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::l2UpdateReceived,
+            this, &RemoteGridDataSource::onL2UpdateReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::heatmapSliceReceived,
+            this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
+            this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -97,7 +102,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this,
             [this]{ emit connectionStatusChanged(false); },
             Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::errorOccurred, this, &IGridDataSource::errorOccurred);
+    connect(&m_client, &SentinelStreamClient::errorOccurred,
+            this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
 }
 
 void RemoteGridDataSource::connectToServer() {
