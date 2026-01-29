@@ -108,6 +108,8 @@ public:
                    int64_t bucketStartMs,
                    int64_t bucketEndMs,
                    int64_t timeframeMs,
+                   int gridWidth,
+                   int gridHeight,
                    double minPrice,
                    double maxPrice,
                    double tickSize,
@@ -118,6 +120,7 @@ public:
                    double liquidityScale,
                    bool reset) {
                 self->on_heatmap_slice(symbol, bucketStartMs, bucketEndMs, timeframeMs,
+                                       gridWidth, gridHeight,
                                        minPrice, maxPrice, tickSize, midPrice, lastTrade,
                                        column, liquidityColumn, liquidityScale, reset);
             });
@@ -279,6 +282,8 @@ public:
                           int64_t bucketStartMs,
                           int64_t bucketEndMs,
                           int64_t timeframeMs,
+                          int gridWidth,
+                          int gridHeight,
                           double minPrice,
                           double maxPrice,
                           double tickSize,
@@ -297,6 +302,8 @@ public:
         j["time_start"] = bucketStartMs;
         j["time_end"] = bucketEndMs;
         j["timeframe_ms"] = timeframeMs;
+        j["grid_width"] = gridWidth;
+        j["grid_height"] = gridHeight;
         j["min_price"] = minPrice;
         j["max_price"] = maxPrice;
         j["tick_size"] = tickSize;

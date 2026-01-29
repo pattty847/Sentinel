@@ -31,6 +31,8 @@ public slots:
                                 int64_t bucketStartMs,
                                 int64_t bucketEndMs,
                                 int64_t timeframeMs,
+                                int gridWidth,
+                                int gridHeight,
                                 double minPrice,
                                 double maxPrice,
                                 double tickSize,

@@ -48,6 +48,8 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                                            int64_t bucketStartMs,
                                            int64_t bucketEndMs,
                                            int64_t timeframeMs,
+                                           int gridWidth,
+                                           int gridHeight,
                                            double minPrice,
                                            double maxPrice,
                                            double tickSize,
@@ -61,6 +63,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     Q_UNUSED(symbol);
     Q_UNUSED(midPrice);
     Q_UNUSED(lastTrade);
+    Q_UNUSED(gridWidth);
 
     if (m_shuttingDown.load()) {
         return;
@@ -69,6 +72,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP SLICE RX: tf=" << timeframeMs
                     << " rows=" << column.size()
+                    << " grid=" << gridWidth << "x" << gridHeight
                     << " reset=" << reset
                     << " format=" << format
                     << " current=" << m_currentTimeframe_ms
@@ -109,8 +113,11 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     if (bytesPerCell <= 0 || (column.size() % bytesPerCell) != 0) {
         return;
     }
-    height = column.size() / bytesPerCell;
+    height = (gridHeight > 0) ? gridHeight : (column.size() / bytesPerCell);
     if (height <= 0) {
+        return;
+    }
+    if (column.size() / bytesPerCell != height) {
         return;
     }
     expanded = column;

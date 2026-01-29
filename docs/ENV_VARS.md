@@ -12,8 +12,10 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 
 - `SENTINEL_HEATMAP_TF` (server + client)  
   Heatmap timeframe in milliseconds. Default: `100`. Must match on both.
+- `SENTINEL_HEATMAP_GRID_WIDTH` (server)  
+  Heatmap grid width (history columns). Default: `5120`.
 - `SENTINEL_HEATMAP_GRID` (server)  
-  Heatmap grid height. Default: `2048`. Client uses server-provided grid size.
+  Heatmap grid height (price buckets). Default: `2048`. Client uses server-provided grid size.
 - `SENTINEL_HEATMAP_TICK_SIZE` (server)  
   Default tick size for heatmap grid. Default: `1.0`.
 - `SENTINEL_HEATMAP_RECENTER_DELTA` (server)  

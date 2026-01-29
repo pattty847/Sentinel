@@ -20,8 +20,15 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
 
     m_timeframesMs = {100, 250, 500, 1000, 2000, 5000, 10000};
 
-    const QByteArray heightEnv = qgetenv("SENTINEL_HEATMAP_GRID");
+    const QByteArray widthEnv = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH");
     bool ok = false;
+    const int envWidth = widthEnv.toInt(&ok);
+    if (ok && envWidth > 0) {
+        m_defaultWidth = envWidth;
+    }
+
+    const QByteArray heightEnv = qgetenv("SENTINEL_HEATMAP_GRID");
+    ok = false;
     const int envHeight = heightEnv.toInt(&ok);
     if (ok && envHeight > 0) {
         m_defaultHeight = envHeight;
@@ -306,6 +313,7 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         sLog_App("Heatmap slice emit: " << QString::fromStdString(symbol)
                  << " tf=" << frame.timeframeMs
                  << " rows=" << column.size()
+                 << " grid=" << m_defaultWidth << "x" << state.height
                  << " reset=" << reset);
     }
 
@@ -313,6 +321,8 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                            frame.bucketStartMs,
                            frame.bucketEndMs,
                            frame.timeframeMs,
+                           m_defaultWidth,
+                           state.height,
                            state.minPrice,
                            state.maxPrice,
                            state.tickSize,

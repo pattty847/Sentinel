@@ -222,6 +222,8 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
              const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
              const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+             const int gridWidth = msg.value("grid_width", 0);
+             const int gridHeight = msg.value("grid_height", 0);
              const double minPrice = msg.value("min_price", 0.0);
              const double maxPrice = msg.value("max_price", 0.0);
              const double tickSize = msg.value("tick_size", 0.0);
@@ -246,6 +248,8 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                        startMs,
                                        endMs,
                                        timeframeMs,
+                                       gridWidth,
+                                       gridHeight,
                                        minPrice,
                                        maxPrice,
                                        tickSize,

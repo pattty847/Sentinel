@@ -22,6 +22,8 @@ signals:
                            int64_t bucketStartMs,
                            int64_t bucketEndMs,
                            int64_t timeframeMs,
+                           int gridWidth,
+                           int gridHeight,
                            double minPrice,
                            double maxPrice,
                            double tickSize,
@@ -90,6 +92,7 @@ private:
     double m_bandMedium = 0.25;
     double m_bandSlow = 0.35;
 
+    int m_defaultWidth = 5120;
     int m_defaultHeight = 2048;
     double m_defaultTickSize = 1.0;
     int64_t m_activeTimeframeMs = 100;
