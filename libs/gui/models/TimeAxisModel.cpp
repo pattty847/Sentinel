@@ -1,13 +1,16 @@
 #include "TimeAxisModel.hpp"
 #include "../render/GridViewState.hpp"
+#include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
 
-// Define nice time steps (in milliseconds)
+// Define nice time steps (in milliseconds) — include sub-100ms for zoomed-in view
 const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
+    {25, "25ms"},
+    {50, "50ms"},
     {100, "100ms"},       // 0.1 second
-    {250, "250ms"},       // 0.25 second  
+    {250, "250ms"},       // 0.25 second
     {500, "500ms"},       // 0.5 second
     {1000, "1s"},         // 1 second
     {2000, "2s"},         // 2 seconds
@@ -70,20 +73,71 @@ void TimeAxisModel::recalculateTicks() {
     }
 }
 
+bool TimeAxisModel::updateEffectiveViewport() {
+    m_effectiveViewportValid = false;
+    if (!isViewportValid()) {
+        return false;
+    }
+
+    const double viewStart = getViewportStart();
+    const double viewEnd = getViewportEnd();
+    const double viewSpan = viewEnd - viewStart;
+    const double viewWidth = getViewportWidth();
+    if (viewSpan <= 0.0 || viewWidth <= 0.0) {
+        return false;
+    }
+
+    m_effectiveStart = viewStart;
+    m_effectiveEnd = viewEnd;
+    m_effectiveOffsetPx = 0.0;
+    m_effectiveSpanPx = viewWidth;
+    m_effectiveViewportValid = true;
+
+    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
+        return true;
+    }
+
+    if (auto* grid = renderer()) {
+        qint64 dataStart = 0;
+        qint64 dataEnd = 0;
+        if (grid->heatmapDataTimeRange(dataStart, dataEnd)) {
+            const double overlapStart = std::max(viewStart, static_cast<double>(dataStart));
+            const double overlapEnd = std::min(viewEnd, static_cast<double>(dataEnd));
+            if (overlapEnd <= overlapStart) {
+                m_effectiveViewportValid = false;
+                return false;
+            }
+            if (overlapStart > viewStart || overlapEnd < viewEnd) {
+                const double ratioStart = (overlapStart - viewStart) / viewSpan;
+                const double ratioEnd = (overlapEnd - viewStart) / viewSpan;
+                m_effectiveOffsetPx = viewWidth * ratioStart;
+                m_effectiveSpanPx = viewWidth * (ratioEnd - ratioStart);
+                m_effectiveStart = overlapStart;
+                m_effectiveEnd = overlapEnd;
+                m_effectiveViewportValid = (m_effectiveSpanPx > 0.0);
+            }
+        }
+    }
+
+    return m_effectiveViewportValid;
+}
+
 void TimeAxisModel::calculateTicks() {
     clearTicks();
     
     if (!isViewportValid()) return;
+    if (!updateEffectiveViewport()) return;
     
-    qint64 timeStart = static_cast<qint64>(getViewportStart());
-    qint64 timeEnd = static_cast<qint64>(getViewportEnd());
+    qint64 timeStart = static_cast<qint64>(m_effectiveStart);
+    qint64 timeEnd = static_cast<qint64>(m_effectiveEnd);
     qint64 timeRange = timeEnd - timeStart;
     
     if (timeRange <= 0) return;
     
-    // Target 6-12 ticks for good spacing
-    int targetTicks = static_cast<int>(getViewportWidth() / 80.0); // ~80 pixels per tick
-    targetTicks = std::max(4, std::min(15, targetTicks));
+    // Adaptive tick count: when zoomed in to few columns, show more ticks (up to column-level)
+    int targetTicks = static_cast<int>(m_effectiveSpanPx / 80.0); // ~80 pixels per tick when zoomed out
+    targetTicks = std::max(4, std::min(25, targetTicks));
+    // When visible time span is small, allow finer steps (handled by TIME_STEPS and step picker)
     
     qint64 step = calculateNiceTimeStep(timeRange, targetTicks);
     if (step <= 0) return;
@@ -114,22 +168,57 @@ QString TimeAxisModel::formatLabel(double value) const {
     qint64 timestampMs = static_cast<qint64>(value);
     
     // Use the range to determine appropriate formatting
-    qint64 rangeMs = static_cast<qint64>(getViewportEnd() - getViewportStart());
+    qint64 rangeMs = m_effectiveViewportValid
+        ? static_cast<qint64>(m_effectiveEnd - m_effectiveStart)
+        : static_cast<qint64>(getViewportEnd() - getViewportStart());
     
     return formatTimeLabel(timestampMs, rangeMs);
 }
 
 double TimeAxisModel::getViewportStart() const {
-    return m_viewState ? static_cast<double>(m_viewState->getVisibleTimeStart()) : 0.0;
+    if (!m_viewState) {
+        return 0.0;
+    }
+    double timeStart = static_cast<double>(m_viewState->getVisibleTimeStart());
+    if (m_viewState->isDragging()) {
+        const QPointF pan = m_viewState->getPanVisualOffset();
+        const double timeEnd = static_cast<double>(m_viewState->getVisibleTimeEnd());
+        const double timeRange = timeEnd - timeStart;
+        const double viewportW = getViewportWidth();
+        if (!pan.isNull() && timeRange > 0.0 && viewportW > 0.0) {
+            const double timePixelsToUnits = timeRange / viewportW;
+            timeStart += -pan.x() * timePixelsToUnits;
+        }
+    }
+    return timeStart;
 }
 
 double TimeAxisModel::getViewportEnd() const {
-    return m_viewState ? static_cast<double>(m_viewState->getVisibleTimeEnd()) : 60000.0;
+    if (!m_viewState) {
+        return 60000.0;
+    }
+    double timeEnd = static_cast<double>(m_viewState->getVisibleTimeEnd());
+    if (m_viewState->isDragging()) {
+        const QPointF pan = m_viewState->getPanVisualOffset();
+        const double timeStart = static_cast<double>(m_viewState->getVisibleTimeStart());
+        const double timeRange = timeEnd - timeStart;
+        const double viewportW = getViewportWidth();
+        if (!pan.isNull() && timeRange > 0.0 && viewportW > 0.0) {
+            const double timePixelsToUnits = timeRange / viewportW;
+            timeEnd += -pan.x() * timePixelsToUnits;
+        }
+    }
+    return timeEnd;
 }
 
 double TimeAxisModel::valueToScreenPosition(double value) const {
     if (!isViewportValid()) return 0.0;
-    
+
+    if (m_effectiveViewportValid && m_effectiveEnd > m_effectiveStart) {
+        double normalized = (value - m_effectiveStart) / (m_effectiveEnd - m_effectiveStart);
+        return m_effectiveOffsetPx + normalized * m_effectiveSpanPx;
+    }
+
     double timeStart = getViewportStart();
     double timeEnd = getViewportEnd();
     
@@ -174,7 +263,15 @@ QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const 
     // TradingView-style adaptive formatting:
     // Show minimal info, add context only at boundaries
     
-    if (stepMs >= 86400000) {
+    if (stepMs < 100) {
+        // Sub-100ms: show ms only, second context at second boundaries
+        int ms = dateTime.time().msec();
+        int second = dateTime.time().second();
+        if (second == 0 && ms == 0) {
+            return dateTime.toString(":ss");
+        }
+        return QString(".%1").arg(ms, 3, 10, QChar('0'));
+    } else if (stepMs >= 86400000) {
         // Day scale or larger - show day of month, month at boundaries
         int day = dateTime.date().day();
         if (day == 1) {

@@ -23,6 +23,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QtEndian>
 #include <QFont>
 #include <QFontDatabase>
+#include <QStringList>
 #include <algorithm>
 #include <cmath>
 
@@ -524,6 +525,10 @@ void UnifiedGridRenderer::init() {
                     }
                 }
 
+                if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
+                    m_heatmapTickSize = tickSize;
+                    emit heatmapTickSizeChanged();
+                }
                 if (m_heatmapStream) {
                     m_heatmapStream->updateRange(minPrice, maxPrice, tickSize);
                     if (timeframeMs > 0) {
@@ -635,6 +640,10 @@ void UnifiedGridRenderer::init() {
                     m_heatmapGridHeight = gridHeight;
                 }
                 m_heatmapTextureDirty = true;
+                if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
+                    m_heatmapTickSize = tickSize;
+                    emit heatmapTickSizeChanged();
+                }
                 if (m_heatmapStream) {
                     m_heatmapStream->reset(m_heatmapGridWidth, m_heatmapGridHeight,
                                            minPrice, maxPrice, tickSize);
@@ -1231,6 +1240,39 @@ QString UnifiedGridRenderer::getTextureFormat() const {
     return "N/A";
 }
 
+QString UnifiedGridRenderer::getLabelRingMemory() const {
+    if (m_labelRingGridWidth <= 0 || m_labelRingGridHeight <= 0) {
+        return "Label ring: N/A";
+    }
+    const qint64 cells = static_cast<qint64>(m_labelRingGridWidth) * m_labelRingGridHeight;
+    const qint64 bytesIntensity = cells * static_cast<qint64>(sizeof(uint16_t));
+    const qint64 bytesLiquidity = cells * static_cast<qint64>(sizeof(uint16_t));
+    const qint64 bytesScales = static_cast<qint64>(m_labelRingGridWidth) * static_cast<qint64>(sizeof(double));
+    const qint64 totalBytes = bytesIntensity + bytesLiquidity + bytesScales;
+    const double mb = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+    return QString("Label ring: %1 MB").arg(mb, 0, 'f', 2);
+}
+
+QString UnifiedGridRenderer::getGlyphAtlasMemory() const {
+    qint64 totalBytes = 0;
+    int builtCount = 0;
+    for (const auto& atlas : m_glyphAtlases) {
+        if (!atlas.isBuilt()) {
+            continue;
+        }
+        const QImage& image = atlas.image();
+        if (!image.isNull()) {
+            totalBytes += image.sizeInBytes();
+            ++builtCount;
+        }
+    }
+    if (totalBytes <= 0) {
+        return "Glyph atlas: N/A";
+    }
+    const double mb = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+    return QString("Glyph atlas: %1 MB (%2)").arg(mb, 0, 'f', 2).arg(builtCount);
+}
+
 double UnifiedGridRenderer::getUploadBandwidth() const {
     return m_uploadBandwidthMBps.load();
 }
@@ -1317,10 +1359,231 @@ double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewSta
 double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
 QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
 
+bool UnifiedGridRenderer::heatmapDataPriceRange(double& outMin, double& outMax) const {
+    if (!m_heatmapStream) {
+        return false;
+    }
+    const auto snapshot = m_heatmapStream->snapshot();
+    if (snapshot.tickSize <= 0.0 || snapshot.maxPrice <= snapshot.minPrice) {
+        return false;
+    }
+    outMin = snapshot.minPrice;
+    outMax = snapshot.maxPrice;
+    return true;
+}
+
+bool UnifiedGridRenderer::heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const {
+    if (!m_heatmapStream) {
+        return false;
+    }
+    const auto snapshot = m_heatmapStream->snapshot();
+    if (snapshot.appendMs <= 0 || snapshot.gridWidth <= 0) {
+        return false;
+    }
+    const int64_t bufferSpanMs = static_cast<int64_t>(snapshot.gridWidth) * snapshot.appendMs;
+    if (bufferSpanMs <= 0) {
+        return false;
+    }
+    int64_t dataEnd = 0;
+    if (snapshot.lastSliceStartMs != std::numeric_limits<int64_t>::min()) {
+        dataEnd = snapshot.lastSliceStartMs + snapshot.appendMs;
+    } else if (snapshot.timeOriginMs != 0) {
+        dataEnd = snapshot.timeOriginMs + bufferSpanMs;
+    } else {
+        return false;
+    }
+    const int64_t dataStart = dataEnd - bufferSpanMs;
+    if (dataEnd <= dataStart) {
+        return false;
+    }
+    outStart = dataStart;
+    outEnd = dataEnd;
+    return true;
+}
+
 // ===== QML DEBUG API =====
 // Debug and monitoring methods for QML
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Size:%1x%2").arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
+QString UnifiedGridRenderer::getViewportMathDebug() const {
+    if (!m_viewState) {
+        return "Viewport: N/A";
+    }
+    const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
+    const QRectF bounds = boundingRect();
+    const double widthF = bounds.width();
+    const double heightF = bounds.height();
+
+    qint64 timeStart = m_viewState->getVisibleTimeStart();
+    qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+    double minPrice = m_viewState->getMinPrice();
+    double maxPrice = m_viewState->getMaxPrice();
+
+    double timeStartF = static_cast<double>(timeStart);
+    double timeEndF = static_cast<double>(timeEnd);
+    double minPriceF = minPrice;
+    double maxPriceF = maxPrice;
+
+    const QPointF pan = m_viewState->getPanVisualOffset();
+    const double timeRange = static_cast<double>(timeEnd - timeStart);
+    const double priceRange = maxPrice - minPrice;
+    if (!pan.isNull() && widthF > 0.0 && heightF > 0.0 &&
+        timeRange > 0.0 && priceRange > 0.0 && m_viewState->isDragging()) {
+        const double timePixelsToUnits = timeRange / widthF;
+        const double pricePixelsToUnits = priceRange / heightF;
+        const double timeDelta = -pan.x() * timePixelsToUnits;
+        const double priceDelta = pan.y() * pricePixelsToUnits;
+        timeStartF += timeDelta;
+        timeEndF += timeDelta;
+        minPriceF += priceDelta;
+        maxPriceF += priceDelta;
+    }
+
+    const bool forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
+    const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
+    const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
+    const double viewTimeSpan = timeEndF - timeStartF;
+    const double viewPriceSpan = maxPriceF - minPriceF;
+
+    QStringList lines;
+    lines << "Viewport Math"
+          << QString("view.time: %1 → %2 (%3 ms)")
+                 .arg(static_cast<qint64>(timeStartF))
+                 .arg(static_cast<qint64>(timeEndF))
+                 .arg(static_cast<qint64>(std::max(0.0, viewTimeSpan)))
+          << QString("view.price: %1 → %2 (Δ%3)")
+                 .arg(minPriceF, 0, 'f', 4)
+                 .arg(maxPriceF, 0, 'f', 4)
+                 .arg(std::max(0.0, viewPriceSpan), 0, 'f', 4)
+          << QString("tick: %1  grid: %2x%3  append: %4")
+                 .arg(snapshot.tickSize, 0, 'f', 6)
+                 .arg(gridWidth)
+                 .arg(gridHeight)
+                 .arg(snapshot.appendMs);
+
+    if (snapshot.appendMs > 0 && snapshot.tickSize > 0.0 &&
+        snapshot.timeOriginMs != 0 && viewTimeSpan > 0.0 && viewPriceSpan > 0.0) {
+        const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
+        const int64_t lastSlice = snapshot.lastSliceStartMs;
+        double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
+            ? static_cast<double>(lastSlice + snapshot.appendMs)
+            : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
+        double dataStart = dataEnd - static_cast<double>(bufferSpanMs);
+        const double dataMin = snapshot.minPrice;
+        const double dataMax = snapshot.maxPrice;
+
+        const double overlapStart = std::max(timeStartF, dataStart);
+        const double overlapEnd = std::min(timeEndF, dataEnd);
+        const double overlapMin = std::max(minPriceF, dataMin);
+        const double overlapMax = std::min(maxPriceF, dataMax);
+
+        lines << QString("data.time: %1 → %2").arg(static_cast<qint64>(dataStart))
+                                               .arg(static_cast<qint64>(dataEnd))
+              << QString("data.price: %1 → %2").arg(dataMin, 0, 'f', 4)
+                                                .arg(dataMax, 0, 'f', 4)
+              << QString("overlap.time: %1 → %2")
+                     .arg(static_cast<qint64>(overlapStart))
+                     .arg(static_cast<qint64>(overlapEnd))
+              << QString("overlap.price: %1 → %2")
+                     .arg(overlapMin, 0, 'f', 4)
+                     .arg(overlapMax, 0, 'f', 4);
+
+        QRectF drawRect = bounds;
+        QRectF srcRect(0, 0, gridWidth, gridHeight);
+        if (!forceFull && overlapEnd > overlapStart && overlapMax > overlapMin) {
+            const double overlapTimeSpan = overlapEnd - overlapStart;
+            const double overlapPriceSpan = overlapMax - overlapMin;
+            const double timeRatioStart = (overlapStart - timeStartF) / viewTimeSpan;
+            const double timeRatioEnd = (overlapEnd - timeStartF) / viewTimeSpan;
+            const double priceRatioTop = (maxPriceF - overlapMax) / viewPriceSpan;
+            const double priceRatioBottom = (maxPriceF - overlapMin) / viewPriceSpan;
+
+            drawRect = QRectF(
+                bounds.x() + widthF * timeRatioStart,
+                bounds.y() + heightF * priceRatioTop,
+                widthF * (timeRatioEnd - timeRatioStart),
+                heightF * (priceRatioBottom - priceRatioTop));
+
+            const double maxCoordX = static_cast<double>(gridWidth);
+            const double maxCoordY = static_cast<double>(gridHeight);
+            const double srcW = std::clamp(overlapTimeSpan / snapshot.appendMs, 1.0, maxCoordX);
+            const double srcH = std::clamp(overlapPriceSpan / snapshot.tickSize, 1.0, maxCoordY);
+            double srcX = (overlapStart - dataStart) / snapshot.appendMs;
+            double srcY = (snapshot.maxPrice - overlapMax) / snapshot.tickSize;
+            srcX = std::clamp(srcX, 0.0, maxCoordX - srcW);
+            srcY = std::clamp(srcY, 0.0, maxCoordY - srcH);
+            srcRect = QRectF(srcX, srcY, srcW, srcH);
+        }
+
+        const double cellW = (srcRect.width() > 0.0) ? (drawRect.width() / srcRect.width()) : 0.0;
+        const double cellH = (srcRect.height() > 0.0) ? (drawRect.height() / srcRect.height()) : 0.0;
+
+        lines << QString("drawRect: x%1 y%2 w%3 h%4")
+                     .arg(drawRect.x(), 0, 'f', 1)
+                     .arg(drawRect.y(), 0, 'f', 1)
+                     .arg(drawRect.width(), 0, 'f', 1)
+                     .arg(drawRect.height(), 0, 'f', 1)
+              << QString("srcRect: x%1 y%2 w%3 h%4")
+                     .arg(srcRect.x(), 0, 'f', 2)
+                     .arg(srcRect.y(), 0, 'f', 2)
+                     .arg(srcRect.width(), 0, 'f', 2)
+                     .arg(srcRect.height(), 0, 'f', 2)
+              << QString("cell: %1 x %2 px").arg(cellW, 0, 'f', 2).arg(cellH, 0, 'f', 2)
+              << QString("forceFull: %1  dragging: %2")
+                     .arg(forceFull ? "yes" : "no")
+                     .arg(m_viewState->isDragging() ? "yes" : "no");
+    } else {
+        lines << "data: N/A";
+    }
+
+    return lines.join('\n');
+}
+
+QString UnifiedGridRenderer::getDataPipelineDebug() const {
+    QStringList lines;
+    lines << "Data Pipeline";
+
+    if (!m_heatmapStream) {
+        lines << "stream: N/A";
+        return lines.join('\n');
+    }
+
+    const auto snapshot = m_heatmapStream->snapshot();
+    const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
+    const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
+    const int pendingUploads = m_heatmapStream->pendingUploadCount();
+    const int writeColumn = m_heatmapStream->writeColumn();
+    const qint64 lastAppendMs = m_heatmapStream->lastAppendMs();
+    const qint64 nowMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
+    const qint64 ageMs = (lastAppendMs > 0 && nowMs >= lastAppendMs) ? (nowMs - lastAppendMs) : -1;
+
+    lines << QString("grid: %1x%2  append: %3 ms")
+                 .arg(gridWidth)
+                 .arg(gridHeight)
+                 .arg(snapshot.appendMs)
+          << QString("tick: %1  range: %2 → %3")
+                 .arg(snapshot.tickSize, 0, 'f', 6)
+                 .arg(snapshot.minPrice, 0, 'f', 4)
+                 .arg(snapshot.maxPrice, 0, 'f', 4)
+          << QString("last slice: %1  age: %2 ms")
+                 .arg(snapshot.lastSliceStartMs)
+                 .arg(ageMs)
+          << QString("pending uploads: %1  ring cursor: %2/%3")
+                 .arg(pendingUploads)
+                 .arg(writeColumn)
+                 .arg(gridWidth)
+          << QString("liquidity labels: %1")
+                 .arg(snapshot.liquidityAvailable ? "yes" : "no");
+
+    if (snapshot.timeOriginMs != 0) {
+        lines << QString("time origin: %1").arg(snapshot.timeOriginMs);
+    }
+    if (snapshot.streamBaseMs != std::numeric_limits<int64_t>::min()) {
+        lines << QString("stream base: %1").arg(snapshot.streamBaseMs);
+    }
+
+    return lines.join('\n');
+}
 QString UnifiedGridRenderer::getPerformanceStats() const { return "N/A (SentinelMonitor removed)"; }
 double UnifiedGridRenderer::getCurrentFPS() const { return m_currentFps.load(); }
 double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }

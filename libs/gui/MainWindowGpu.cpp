@@ -270,11 +270,26 @@ void MainWindowGPU::onSubscribe() {
     if (m_dataSource) {
         m_dataSource->subscribe(symbol);
     }
+    if (m_connected) {
+        requestHeatmapHistoryForSymbol(symbol);
+    }
 }
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     m_currentSymbol = symbol;
     emit symbolChanged(symbol);
+}
+
+void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    const int64_t timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+    const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
+    const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
+    const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
+    const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
@@ -378,12 +393,7 @@ void MainWindowGPU::connectMarketDataSignals() {
                 if (symbol.isEmpty()) {
                     return;
                 }
-                const int64_t timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
-                const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
-                const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
-                const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
-                const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
-                m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+                requestHeatmapHistoryForSymbol(symbol);
             });
 
     // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
@@ -398,6 +408,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted fo
     if (m_statusBar) {
         m_statusBar->setConnectionStatus(connected);
     }
+    m_connected = connected;
 
     if (m_subscribeButton) {
         m_subscribeButton->setText(connected ? "Subscribe" : "Connect");

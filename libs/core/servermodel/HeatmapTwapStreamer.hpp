@@ -132,6 +132,7 @@ private:
     int m_defaultWidth = 5120;
     int m_defaultHeight = 2048;
     double m_defaultTickSize = 1.0;
+    bool m_fixedTickSize = true;
     int64_t m_activeTimeframeMs = 100;
 
     std::vector<int64_t> m_timeframesMs;

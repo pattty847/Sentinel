@@ -49,10 +49,16 @@ private:
     
     qint64 calculateNiceTimeStep(qint64 rangeMs, int targetTicks) const;
     QString formatTimeLabel(qint64 timestampMs, qint64 stepMs) const;
+    bool updateEffectiveViewport();
     
     // Predefined nice time steps
     static const std::vector<TimeStep> TIME_STEPS;
     
     // Timezone for display formatting (default UTC)
     QTimeZone m_timezone = QTimeZone::utc();
+    double m_effectiveStart = 0.0;
+    double m_effectiveEnd = 0.0;
+    double m_effectiveOffsetPx = 0.0;
+    double m_effectiveSpanPx = 0.0;
+    bool m_effectiveViewportValid = false;
 };

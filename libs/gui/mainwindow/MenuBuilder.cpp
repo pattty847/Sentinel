@@ -102,8 +102,8 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
 void MenuBuilder::buildDebugMenu() {
     m_debugMenu = m_menuBar->addMenu("&Debug");
 
-    // GPU Stats overlay toggle
-    QAction* gpuStatsAction = m_debugMenu->addAction("GPU Stats");
+    // Resource usage overlay toggle
+    QAction* gpuStatsAction = m_debugMenu->addAction("Resource Usage");
     gpuStatsAction->setCheckable(true);
     gpuStatsAction->setChecked(false);
     QObject::connect(gpuStatsAction, &QAction::toggled, [this](bool checked) {
@@ -150,19 +150,6 @@ void MenuBuilder::buildDebugMenu() {
             QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
             if (renderer) {
                 renderer->setProperty("showViewportMathOverlay", checked);
-            }
-        }
-    });
-
-    // Memory/Cache overlay toggle
-    QAction* memoryCacheAction = m_debugMenu->addAction("Memory/Cache");
-    memoryCacheAction->setCheckable(true);
-    memoryCacheAction->setChecked(false);
-    QObject::connect(memoryCacheAction, &QAction::toggled, [this](bool checked) {
-        if (m_heatmapDock && m_heatmapDock->qquickView()) {
-            QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
-            if (renderer) {
-                renderer->setProperty("showMemoryCacheOverlay", checked);
             }
         }
     });

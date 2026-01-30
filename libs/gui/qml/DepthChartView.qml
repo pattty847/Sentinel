@@ -147,7 +147,7 @@ Rectangle {
             return unifiedGridRenderer.visibleTimeStart + (index * step * timeframe);
         }
         
-        //  DYNAMIC GRID LINES: Synchronized with TimeAxisModel
+        //  DYNAMIC GRID LINES: Synchronized with TimeAxisModel; move with pan for immediate feedback
         Repeater {
             id: gridRepeater
             model: root.showTimeGrid ? timeAxisModel : null
@@ -185,6 +185,7 @@ Rectangle {
         PriceAxisModel {
             id: priceAxisModel
             target: unifiedGridRenderer
+            tickSize: unifiedGridRenderer.heatmapTickSize
         }
         
         Repeater {
@@ -193,7 +194,10 @@ Rectangle {
             Item {
                 width: priceAxis.width
                 height: 16
-                y: model.position - 8  // Center label on tick position
+                // Apply pan offset so axis labels move immediately with mouse drag
+                // Model position is already the row center (in screen px).
+                // Nudge down slightly so text center aligns visually with row center.
+                y: model.position - 8 + 1.5
                 
                 // Only show if within clipped bounds (with margin)
                 visible: y >= -4 && y <= priceAxis.height - 12
@@ -240,7 +244,8 @@ Rectangle {
             Item {
                 width: 80
                 height: timeAxis.height
-                x: model.position - 40  // Center label on tick position
+                // Apply pan offset so axis labels move immediately with mouse drag
+                x: model.position - 40
                 
                 // Only show if within clipped bounds
                 visible: x >= -40 && x <= timeAxis.width - 40
@@ -279,6 +284,7 @@ Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         radius: 4
         z: 10
+        visible: unifiedGridRenderer.showGpuStatsOverlay
         width: Math.max(fpsText.implicitWidth, debugText.implicitWidth) + 12
         height: fpsText.implicitHeight + debugText.implicitHeight + 10
 
@@ -305,7 +311,7 @@ Rectangle {
         Timer {
             interval: 250
             repeat: true
-            running: true
+            running: fpsOverlay.visible
             onTriggered: {
                 fpsText.text = "FPS: " + unifiedGridRenderer.getCurrentFPS().toFixed(1);
                 var zoom = unifiedGridRenderer.getZoomFactor();
@@ -346,7 +352,7 @@ Rectangle {
                 color: "#FFD700"
                 font.pixelSize: 11
                 font.bold: true
-                text: "📊 GPU Stats"
+                text: "📊 Resource Usage"
             }
 
             Text {
@@ -390,6 +396,20 @@ Rectangle {
                 font.pixelSize: 10
                 text: "Dirty Regions: 0"
             }
+
+            Text {
+                id: labelRingText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Label ring: N/A"
+            }
+
+            Text {
+                id: glyphAtlasText
+                color: "#9ef6ff"
+                font.pixelSize: 10
+                text: "Glyph atlas: N/A"
+            }
         }
 
         Timer {
@@ -403,6 +423,76 @@ Rectangle {
                 uploadBandwidthText.text = "Upload: " + unifiedGridRenderer.getUploadBandwidth().toFixed(2) + " MB/s";
                 ringCursorText.text = "Ring Cursor: " + unifiedGridRenderer.getRingCursorInfo();
                 dirtyRegionsText.text = "Dirty Regions: " + unifiedGridRenderer.getDirtyRegionCount();
+                labelRingText.text = unifiedGridRenderer.getLabelRingMemory();
+                glyphAtlasText.text = unifiedGridRenderer.getGlyphAtlasMemory();
+            }
+        }
+    }
+
+    // Data Pipeline overlay (Tier 1 debug info)
+    Rectangle {
+        id: dataPipelineOverlay
+        anchors.left: parent.left
+        anchors.top: viewportMathOverlay.visible
+                     ? viewportMathOverlay.bottom
+                     : (gpuStatsOverlay.visible ? gpuStatsOverlay.bottom : parent.top)
+        anchors.leftMargin: 8
+        anchors.topMargin: 4
+        color: Qt.rgba(0, 0, 0, 0.45)
+        radius: 4
+        z: 10
+        visible: unifiedGridRenderer.showDataPipelineOverlay
+        width: dataPipelineText.implicitWidth + 12
+        height: dataPipelineText.implicitHeight + 10
+
+        Text {
+            id: dataPipelineText
+            anchors.centerIn: parent
+            color: "#9ef6ff"
+            font.pixelSize: 10
+            font.family: "monospace"
+            text: ""
+        }
+
+        Timer {
+            interval: 250
+            repeat: true
+            running: dataPipelineOverlay.visible
+            onTriggered: {
+                dataPipelineText.text = unifiedGridRenderer.getDataPipelineDebug();
+            }
+        }
+    }
+
+    // Viewport Math overlay (Tier 1 debug info)
+    Rectangle {
+        id: viewportMathOverlay
+        anchors.left: parent.left
+        anchors.top: gpuStatsOverlay.visible ? gpuStatsOverlay.bottom : parent.top
+        anchors.leftMargin: 8
+        anchors.topMargin: 4
+        color: Qt.rgba(0, 0, 0, 0.45)
+        radius: 4
+        z: 10
+        visible: unifiedGridRenderer.showViewportMathOverlay
+        width: viewportMathText.implicitWidth + 12
+        height: viewportMathText.implicitHeight + 10
+
+        Text {
+            id: viewportMathText
+            anchors.centerIn: parent
+            color: "#9ef6ff"
+            font.pixelSize: 10
+            font.family: "monospace"
+            text: ""
+        }
+
+        Timer {
+            interval: 250
+            repeat: true
+            running: viewportMathOverlay.visible
+            onTriggered: {
+                viewportMathText.text = unifiedGridRenderer.getViewportMathDebug();
             }
         }
     }

@@ -89,6 +89,8 @@ private slots:
 protected:
     GridViewState* m_viewState = nullptr;
     std::vector<TickInfo> m_ticks;
+    UnifiedGridRenderer* m_renderer = nullptr;
+    UnifiedGridRenderer* renderer() const { return m_renderer; }
     
     // Viewport dimensions
     double m_viewportWidth = 800.0;

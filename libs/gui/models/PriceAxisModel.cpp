@@ -1,10 +1,69 @@
 #include "PriceAxisModel.hpp"
 #include "../render/GridViewState.hpp"
+#include "../UnifiedGridRenderer.h"
 #include <QDebug>
+#include <algorithm>
 #include <cmath>
 
 PriceAxisModel::PriceAxisModel(QObject* parent)
     : AxisModel(parent) {
+}
+
+void PriceAxisModel::setTickSize(double size) {
+    if (size > 0.0 && size != m_tickSize) {
+        m_tickSize = size;
+        emit tickSizeChanged();
+        recalculateTicks();
+    }
+}
+
+bool PriceAxisModel::updateEffectiveViewport() {
+    m_effectiveViewportValid = false;
+    if (!isViewportValid()) {
+        return false;
+    }
+
+    const double viewMin = getViewportStart();
+    const double viewMax = getViewportEnd();
+    const double viewSpan = viewMax - viewMin;
+    const double viewHeight = getViewportHeight();
+    if (viewSpan <= 0.0 || viewHeight <= 0.0) {
+        return false;
+    }
+
+    m_effectiveMinPrice = viewMin;
+    m_effectiveMaxPrice = viewMax;
+    m_effectiveOffsetPx = 0.0;
+    m_effectiveSpanPx = viewHeight;
+    m_effectiveViewportValid = true;
+
+    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
+        return true;
+    }
+
+    if (auto* grid = renderer()) {
+        double dataMin = 0.0;
+        double dataMax = 0.0;
+        if (grid->heatmapDataPriceRange(dataMin, dataMax)) {
+            const double overlapMin = std::max(viewMin, dataMin);
+            const double overlapMax = std::min(viewMax, dataMax);
+            if (overlapMax <= overlapMin) {
+                m_effectiveViewportValid = false;
+                return false;
+            }
+            if (overlapMin > viewMin || overlapMax < viewMax) {
+                const double ratioTop = (viewMax - overlapMax) / viewSpan;
+                const double ratioBottom = (viewMax - overlapMin) / viewSpan;
+                m_effectiveOffsetPx = viewHeight * ratioTop;
+                m_effectiveSpanPx = viewHeight * (ratioBottom - ratioTop);
+                m_effectiveMinPrice = overlapMin;
+                m_effectiveMaxPrice = overlapMax;
+                m_effectiveViewportValid = (m_effectiveSpanPx > 0.0);
+            }
+        }
+    }
+
+    return m_effectiveViewportValid;
 }
 
 void PriceAxisModel::recalculateTicks() {
@@ -19,42 +78,47 @@ void PriceAxisModel::calculateTicks() {
     clearTicks();
     
     if (!isViewportValid()) return;
+    if (!updateEffectiveViewport()) return;
     
-    double priceMin = getViewportStart();
-    double priceMax = getViewportEnd();
+    double priceMin = m_effectiveMinPrice;
+    double priceMax = m_effectiveMaxPrice;
     double priceRange = priceMax - priceMin;
     
     if (priceRange <= 0) return;
-    
-    // Target 8-12 ticks for good spacing
-    int targetTicks = static_cast<int>(getViewportHeight() / 60.0); // ~60 pixels per tick
-    targetTicks = std::max(4, std::min(15, targetTicks));
-    
-    double step = calculateNicePriceStep(priceRange, targetTicks);
-    // Snap axis ticks to current bucket size hint to align grid with cells
-    if (m_viewState) {
-        double bucket = m_viewState->calculateOptimalPriceResolution();
-        if (bucket > 0.0) {
-            double multiples = std::max(1.0, std::round(step / bucket));
-            step = multiples * bucket;
-        }
+
+    // Pixel-driven stride: only skip rows when the label won't fit
+    const double bucket = (m_tickSize > 0.0)
+        ? m_tickSize
+        : (m_viewState ? m_viewState->calculateOptimalPriceResolution() : 1.0);
+    if (bucket <= 0.0) {
+        return;
     }
-    if (step <= 0) return;
-    
-    // Find first tick at or below priceMin
-    double firstTick = std::floor(priceMin / step) * step;
-    
-    // Generate ticks
-    for (double price = firstTick; price <= priceMax + step * 0.1; price += step) {
-        if (price < priceMin - step * 0.1) continue;
-        
-        double screenY = valueToScreenPosition(price);
-        
-        // Check if tick is within visible area
+
+    const double rowsVisible = priceRange / bucket;
+    if (rowsVisible <= 0.0) {
+        return;
+    }
+
+    const double rowHeightPx = m_effectiveSpanPx / rowsVisible;
+    // Approximate label height: QML font is 10px; add a little padding.
+    constexpr double kLabelPx = 12.0;
+    const int stride = std::max(1, static_cast<int>(std::ceil(kLabelPx / std::max(1e-6, rowHeightPx))));
+
+    // Align ticks to row centers. Use a base on bucket boundary.
+    const double base = std::floor(priceMin / bucket) * bucket;
+    const int startRow = std::max(0, static_cast<int>(std::floor((priceMin - base) / bucket)));
+    const int endRow = static_cast<int>(std::ceil((priceMax - base) / bucket));
+
+    for (int row = startRow; row <= endRow; row += stride) {
+        const double price = base + (static_cast<double>(row) + 0.5) * bucket;
+        if (price < priceMin || price > priceMax + bucket * 0.5) {
+            continue;
+        }
+
+        const double screenY = valueToScreenPosition(price);
         if (screenY >= 0 && screenY <= getViewportHeight()) {
-            QString label = formatLabel(price);
-            bool isMajor = true; // All price ticks are major for now
-            
+            const QString label = formatLabel(price);
+            const bool isMajor = (row % stride == 0);
             addTick(price, screenY, label, isMajor);
         }
     }
@@ -66,7 +130,9 @@ void PriceAxisModel::calculateTicks() {
 
 QString PriceAxisModel::formatLabel(double value) const {
     // Determine appropriate decimal places based on the price range
-    double priceRange = getViewportEnd() - getViewportStart();
+    double priceRange = m_effectiveViewportValid
+        ? (m_effectiveMaxPrice - m_effectiveMinPrice)
+        : (getViewportEnd() - getViewportStart());
     
     if (priceRange > 1000) {
         // Large prices - no decimals
@@ -81,16 +147,49 @@ QString PriceAxisModel::formatLabel(double value) const {
 }
 
 double PriceAxisModel::getViewportStart() const {
-    return m_viewState ? m_viewState->getMinPrice() : 0.0;
+    if (!m_viewState) {
+        return 0.0;
+    }
+    double minPrice = m_viewState->getMinPrice();
+    if (m_viewState->isDragging()) {
+        const QPointF pan = m_viewState->getPanVisualOffset();
+        const double maxPrice = m_viewState->getMaxPrice();
+        const double priceRange = maxPrice - minPrice;
+        const double viewportH = getViewportHeight();
+        if (!pan.isNull() && priceRange > 0.0 && viewportH > 0.0) {
+            const double pricePixelsToUnits = priceRange / viewportH;
+            minPrice += pan.y() * pricePixelsToUnits;
+        }
+    }
+    return minPrice;
 }
 
 double PriceAxisModel::getViewportEnd() const {
-    return m_viewState ? m_viewState->getMaxPrice() : 100.0;
+    if (!m_viewState) {
+        return 100.0;
+    }
+    double maxPrice = m_viewState->getMaxPrice();
+    if (m_viewState->isDragging()) {
+        const QPointF pan = m_viewState->getPanVisualOffset();
+        const double minPrice = m_viewState->getMinPrice();
+        const double priceRange = maxPrice - minPrice;
+        const double viewportH = getViewportHeight();
+        if (!pan.isNull() && priceRange > 0.0 && viewportH > 0.0) {
+            const double pricePixelsToUnits = priceRange / viewportH;
+            maxPrice += pan.y() * pricePixelsToUnits;
+        }
+    }
+    return maxPrice;
 }
 
 double PriceAxisModel::valueToScreenPosition(double value) const {
     if (!isViewportValid()) return 0.0;
-    
+
+    if (m_effectiveViewportValid && m_effectiveMaxPrice > m_effectiveMinPrice) {
+        double normalized = (value - m_effectiveMinPrice) / (m_effectiveMaxPrice - m_effectiveMinPrice);
+        return m_effectiveOffsetPx + m_effectiveSpanPx * (1.0 - normalized);
+    }
+
     double priceMin = getViewportStart();
     double priceMax = getViewportEnd();
     

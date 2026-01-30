@@ -73,6 +73,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
+    Q_PROPERTY(double heatmapTickSize READ heatmapTickSize NOTIFY heatmapTickSizeChanged)
 
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
 
@@ -96,6 +97,7 @@ private:
     bool m_showModeFlagsOverlay = false;
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
+    double m_heatmapTickSize = 0.0;
 
     bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
     QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
@@ -188,6 +190,10 @@ public:
     
     //  VISUAL TRANSFORM: Getter for QML pan offset
     Q_INVOKABLE QPointF getPanVisualOffset() const;
+    double heatmapTickSize() const { return m_heatmapTickSize; }
+
+    bool heatmapDataPriceRange(double& outMin, double& outMax) const;
+    bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
     
     //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
@@ -211,6 +217,8 @@ public:
     
     //  DEBUG: Detailed grid debug information
     Q_INVOKABLE QString getDetailedGridDebug() const;
+    Q_INVOKABLE QString getViewportMathDebug() const;
+    Q_INVOKABLE QString getDataPipelineDebug() const;
     
     //  PERFORMANCE MONITORING API
     Q_INVOKABLE void togglePerformanceOverlay();
@@ -226,6 +234,8 @@ public:
     Q_INVOKABLE double getUploadBandwidth() const;       // MB/s
     Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
     Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
+    Q_INVOKABLE QString getLabelRingMemory() const;      // Label ring memory usage
+    Q_INVOKABLE QString getGlyphAtlasMemory() const;     // Glyph atlas memory usage
 
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
@@ -285,6 +295,7 @@ signals:
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
+    void heatmapTickSizeChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;

@@ -21,7 +21,8 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_HEATMAP_GRID` (server)  
   Heatmap grid height (price buckets). Default: `2048`. Client also accepts this as a legacy height override.
 - `SENTINEL_HEATMAP_TICK_SIZE` (server)  
-  Default tick size for heatmap grid. Default: `1.0`.
+  Fixed tick size for heatmap grid rows (locks row size; banding only recenters). Default: `1.0`.  
+  Set to `0` to enable dynamic tick sizing based on band percent.
 - `SENTINEL_HEATMAP_RECENTER_DELTA` (server)  
   Recenter threshold as fraction of mid price. Default: `0.01`.
 - `SENTINEL_HEATMAP_BAND_FAST` (server)  
@@ -48,6 +49,8 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Enables periodic heatmap slice logging.
 - `SENTINEL_HEALTH_PORT` (server)  
   Local health endpoint port for `/ping`. Default: `8090`.
+- `SENTINEL_SERVER_DEFAULT_SYMBOLS` (server)  
+  Symbols to auto-subscribe on server start (comma/space-separated). Default: `BTC-USD`.
 
 - `SENTINEL_MDC_HOST` (server)  
   Override MarketDataCore WebSocket host. Default: `advanced-trade-ws.coinbase.com`.
@@ -56,7 +59,7 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_MDC_TARGET` (server)  
   Override MarketDataCore WebSocket target path. Default: `/v1`.
 - `SENTINEL_MDC_USE_JWT` (server)  
-  Enable JWT on market data subscriptions. Default: `0`. Set to `1` to enable.
+  Enable JWT on market data subscriptions. Default: `0`. Set to `1` to enable (any other value disables).
 
 - `SENTINEL_GPU_HEATMAP_DEBUG` (client)  
   Enables verbose GPU heatmap diagnostics.

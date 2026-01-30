@@ -6,6 +6,7 @@
 #include <QTimer>
 #include <QTcpSocket>
 #include <QHostAddress>
+#include <QStringList>
 
 SentinelServerApp::SentinelServerApp(QObject* parent) 
     : QObject(parent) 
@@ -127,13 +128,49 @@ bool SentinelServerApp::initialize() {
                                  return;
                              }
                              sLog_App("Client unsubscribe: " << symbol);
-                             m_marketDataCore->unsubscribeFromSymbols({symbol.toStdString()});
+                             const std::string native = symbol.toStdString();
+                             if (m_defaultSymbols.find(native) != m_defaultSymbols.end()) {
+                                 sLog_App("Skipping unsubscribe for pinned default symbol: " << symbol);
+                                 return;
+                             }
+                             m_marketDataCore->unsubscribeFromSymbols({native});
                          }, Qt::QueuedConnection);
 
         // Start connection
         m_marketDataCore->start();
-        
-        // Default subscribe disabled; wait for client request.
+
+        // Default subscribe to symbols so server builds history before clients connect.
+        const QByteArray defaultEnv = qgetenv("SENTINEL_SERVER_DEFAULT_SYMBOLS");
+        QString symbolsSpec = defaultEnv.isEmpty() ? QStringLiteral("BTC-USD") : QString::fromUtf8(defaultEnv);
+        symbolsSpec.replace(',', ' ');
+        symbolsSpec = symbolsSpec.simplified();
+        const QStringList symbols = symbolsSpec.isEmpty()
+            ? QStringList()
+            : symbolsSpec.split(' ', Qt::SkipEmptyParts);
+
+        std::vector<std::string> symbolList;
+        symbolList.reserve(static_cast<size_t>(symbols.size()));
+        for (const auto& sym : symbols) {
+            const QString normalized = sym.trimmed().toUpper();
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            const std::string native = normalized.toStdString();
+            if (m_defaultSymbols.insert(native).second) {
+                symbolList.push_back(native);
+            }
+        }
+
+        if (!symbolList.empty()) {
+            QTimer::singleShot(0, this, [this, symbolList]() mutable {
+                if (!m_marketDataCore) {
+                    return;
+                }
+                sLog_App("Server default subscribe: " << QString::fromStdString(symbolList.front())
+                             << (symbolList.size() > 1 ? " (+more)" : ""));
+                m_marketDataCore->subscribeToSymbols(symbolList);
+            });
+        }
 
         return true;
     } catch (const std::exception& e) {

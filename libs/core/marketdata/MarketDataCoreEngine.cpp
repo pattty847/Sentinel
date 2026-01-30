@@ -51,7 +51,7 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth)
     }
     if (const char* useJwt = std::getenv("SENTINEL_MDC_USE_JWT")) {
         if (*useJwt) {
-            m_useJwt = (std::string_view(useJwt) != "0");
+            m_useJwt = (std::string_view(useJwt) == "1");
         }
     }
 

@@ -16,22 +16,26 @@ void AxisModel::setTarget(QQuickItem* target) {
     emit targetChanged();
     
     // Try to extract GridViewState from UnifiedGridRenderer
-    if (auto* renderer = qobject_cast<UnifiedGridRenderer*>(target)) {
-        GridViewState* viewState = renderer->getViewState();
-        if (viewState) {
-            setGridViewState(viewState);
-            
-            // Also connect to size changes
-            connect(renderer, &QQuickItem::widthChanged, this, [this, renderer]() {
-                setViewportSize(renderer->width(), renderer->height());
-            });
-            connect(renderer, &QQuickItem::heightChanged, this, [this, renderer]() {
-                setViewportSize(renderer->width(), renderer->height());
-            });
-            
-            // Initialize viewport size
-            setViewportSize(renderer->width(), renderer->height());
-        }
+    m_renderer = qobject_cast<UnifiedGridRenderer*>(target);
+    if (!m_renderer) {
+        setGridViewState(nullptr);
+        return;
+    }
+
+    GridViewState* viewState = m_renderer->getViewState();
+    if (viewState) {
+        setGridViewState(viewState);
+        
+        // Also connect to size changes
+        connect(m_renderer, &QQuickItem::widthChanged, this, [this]() {
+            setViewportSize(m_renderer->width(), m_renderer->height());
+        });
+        connect(m_renderer, &QQuickItem::heightChanged, this, [this]() {
+            setViewportSize(m_renderer->width(), m_renderer->height());
+        });
+        
+        // Initialize viewport size
+        setViewportSize(m_renderer->width(), m_renderer->height());
     }
 }
 
@@ -49,6 +53,8 @@ void AxisModel::setGridViewState(GridViewState* viewState) {
     // Connect to new view state
     if (m_viewState) {
         connect(m_viewState, &GridViewState::viewportChanged,
+               this, &AxisModel::onViewportChanged);
+        connect(m_viewState, &GridViewState::panVisualOffsetChanged,
                this, &AxisModel::onViewportChanged);
         
         // Trigger initial calculation

@@ -83,6 +83,7 @@ private:
     void setWindowProperties();
     void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
+    void requestHeatmapHistoryForSymbol(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;
     
@@ -108,6 +109,7 @@ private:
     QLineEdit* m_symbolInput = nullptr;
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
+    bool m_connected = false;
     
     // QML scene (managed via QmlSceneController)
     QQuickView* m_qquickView = nullptr;

@@ -10,6 +10,7 @@
  */
 class PriceAxisModel : public AxisModel {
     Q_OBJECT
+    Q_PROPERTY(double tickSize READ tickSize WRITE setTickSize NOTIFY tickSizeChanged)
     
 public:
     explicit PriceAxisModel(QObject* parent = nullptr);
@@ -24,7 +25,21 @@ protected:
     double getViewportEnd() const override;
     double valueToScreenPosition(double value) const override;
     
+signals:
+    void tickSizeChanged();
+
 private:
+    double tickSize() const { return m_tickSize; }
+    void setTickSize(double size);
     double calculateNicePriceStep(double range, int targetTicks) const;
     int getDecimalPlaces(double step) const;
+
+    double m_tickSize = 0.0;
+    double m_effectiveMinPrice = 0.0;
+    double m_effectiveMaxPrice = 0.0;
+    double m_effectiveOffsetPx = 0.0;
+    double m_effectiveSpanPx = 0.0;
+    bool m_effectiveViewportValid = false;
+
+    bool updateEffectiveViewport();
 };

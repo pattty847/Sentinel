@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QTcpServer>
 #include <memory>
+#include <unordered_set>
 #include "../../libs/core/marketdata/MarketDataCoreEngine.hpp"
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
@@ -21,5 +22,6 @@ private:
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
     QTcpServer* m_healthServer = nullptr;
+    std::unordered_set<std::string> m_defaultSymbols;
 };
 

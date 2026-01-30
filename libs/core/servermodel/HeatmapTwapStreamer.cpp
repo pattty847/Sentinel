@@ -38,8 +38,13 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent
     const QByteArray tickEnv = qgetenv("SENTINEL_HEATMAP_TICK_SIZE");
     ok = false;
     const double envTick = tickEnv.toDouble(&ok);
-    if (ok && envTick > 0.0) {
-        m_defaultTickSize = envTick;
+    if (ok) {
+        if (envTick > 0.0) {
+            m_defaultTickSize = envTick;
+            m_fixedTickSize = true;
+        } else {
+            m_fixedTickSize = false;
+        }
     }
 
     const QByteArray tfListEnv = qgetenv("SENTINEL_HEATMAP_TIMEFRAMES");
@@ -135,11 +140,17 @@ void HeatmapTwapStreamer::ensureSymbolState(const std::string& symbol, SymbolSta
         : (m_timeframesMs.empty() ? 1000 : m_timeframesMs.front());
     const double center = (midPrice > 0.0) ? midPrice : state.lastRecenterMid;
     if (center > 0.0) {
-        const double bandPct = bandForTimeframe(bandTf);
-        const double rangeSpan = center * bandPct * 2.0;
-        state.tickSize = (rangeSpan > 0.0) ? (rangeSpan / static_cast<double>(state.height)) : state.tickSize;
-        state.minPrice = center - (rangeSpan * 0.5);
-        state.maxPrice = center + (rangeSpan * 0.5);
+        if (m_fixedTickSize && state.tickSize > 0.0) {
+            const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
+            state.minPrice = center - (rangeSpan * 0.5);
+            state.maxPrice = center + (rangeSpan * 0.5);
+        } else {
+            const double bandPct = bandForTimeframe(bandTf);
+            const double rangeSpan = center * bandPct * 2.0;
+            state.tickSize = (rangeSpan > 0.0) ? (rangeSpan / static_cast<double>(state.height)) : state.tickSize;
+            state.minPrice = center - (rangeSpan * 0.5);
+            state.maxPrice = center + (rangeSpan * 0.5);
+        }
         state.lastRecenterMid = center;
     } else {
         const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
@@ -179,6 +190,17 @@ void HeatmapTwapStreamer::applyBandRange(SymbolState& state, double midPrice, in
     if (midPrice <= 0.0 || state.height <= 0) {
         return;
     }
+    if (m_fixedTickSize && state.tickSize > 0.0) {
+        const double rangeSpan = static_cast<double>(state.height) * state.tickSize;
+        if (rangeSpan <= 0.0) {
+            return;
+        }
+        state.minPrice = midPrice - (rangeSpan * 0.5);
+        state.maxPrice = midPrice + (rangeSpan * 0.5);
+        state.lastRecenterMid = midPrice;
+        return;
+    }
+
     const double bandPct = bandForTimeframe(timeframeMs);
     const double rangeSpan = midPrice * bandPct * 2.0;
     if (rangeSpan <= 0.0) {
