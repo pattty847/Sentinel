@@ -122,6 +122,7 @@ GEMINI.md
 !docs/plans/
 !docs/refactor/
 data/
+/screenshots/
 
 # Random files
 liquidity_timeseries_log.txt
