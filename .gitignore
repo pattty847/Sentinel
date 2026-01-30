@@ -110,11 +110,11 @@ venv/
 ENV/
 .python-version
 
-# Claude AI settings
+# AI settings
 .cursor/
 .claude/
 CLAUDE.md
-AGENTS.md
+# AGENTS.md
 GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
