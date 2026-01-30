@@ -20,7 +20,7 @@ bool useBlackLabel(uint16_t encoded) {
 } // namespace
 
 void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
-                                           const GlyphAtlas& atlas,
+                                           const MsdfAtlas& atlas,
                                            const std::vector<uint16_t>& liquidityRing,
                                            const std::vector<uint16_t>& intensityRing,
                                            const std::vector<double>& liquidityScales,
@@ -75,6 +75,7 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
         }
     }
 
+    const float padding = static_cast<float>(atlas.paddingPx());
     for (int j = 0; j < cellsY; ++j) {
         int texY = startY + j;
         if (texY < 0) {
@@ -128,10 +129,10 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
                 if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
                     continue;
                 }
-                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()));
-                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()));
-                minY = std::min(minY, static_cast<float>(glyph.bounds.top()));
-                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()));
+                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()) - padding);
+                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()) + padding);
+                minY = std::min(minY, static_cast<float>(glyph.bounds.top()) - padding);
+                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()) + padding);
                 penX += glyph.advance;
             }
             if (!std::isfinite(minX) || !std::isfinite(maxX)) {
@@ -151,10 +152,10 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
                     continue;
                 }
 
-                const float x0 = originX + (penX + glyph.bounds.left()) * scale;
-                const float y0 = originY + (glyph.bounds.top()) * scale;
-                const float x1 = originX + (penX + glyph.bounds.right()) * scale;
-                const float y1 = originY + (glyph.bounds.bottom()) * scale;
+                const float x0 = originX + (penX + glyph.bounds.left() - padding) * scale;
+                const float y0 = originY + (glyph.bounds.top() - padding) * scale;
+                const float x1 = originX + (penX + glyph.bounds.right() + padding) * scale;
+                const float y1 = originY + (glyph.bounds.bottom() + padding) * scale;
 
                 const float u0 = static_cast<float>(glyph.uv.left());
                 const float v0 = static_cast<float>(glyph.uv.top());
@@ -245,8 +246,5 @@ QString HeatmapLabelRenderer::formatLiquidityLabel(double value, bool dollars) {
         number = QString::number(scaled, 'f', 0);
     }
 
-    if (dollars) {
-        return QString("$%1%2").arg(number, suffix);
-    }
     return QString("%1%2").arg(number, suffix);
 }

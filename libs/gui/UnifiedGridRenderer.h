@@ -32,11 +32,12 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <limits>
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
-#include "render/GlyphAtlas.hpp"
+#include "render/MsdfAtlas.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
 
 class DataProcessor;
+class MsdfGlyphNode;
 
 /**
  *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
@@ -124,8 +125,8 @@ private:
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.1;
 
-    std::array<class GlyphAtlas, 5> m_glyphAtlases;
-    bool m_glyphAtlasesBuilt = false;
+    MsdfAtlas m_msdfAtlas;
+    bool m_msdfAtlasBuilt = false;
     int m_labelRingGridWidth = 0;
     int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
@@ -133,8 +134,8 @@ private:
     std::vector<double> m_labelLiquidityScales;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
-    class HeatmapGlyphNode* m_whiteGlyphNode = nullptr;
-    class HeatmapGlyphNode* m_blackGlyphNode = nullptr;
+    class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
+    class MsdfGlyphNode* m_blackGlyphNode = nullptr;
 
     // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
@@ -235,7 +236,7 @@ public:
     Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
     Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
     Q_INVOKABLE QString getLabelRingMemory() const;      // Label ring memory usage
-    Q_INVOKABLE QString getGlyphAtlasMemory() const;     // Glyph atlas memory usage
+    Q_INVOKABLE QString getGlyphAtlasMemory() const;     // MSDF atlas memory usage
 
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
@@ -311,9 +312,7 @@ protected:
 private:
     void ensureHeatmapImage();
     void ensureHeatmapPaletteImage();
-    void buildGlyphAtlases();
-    int pickFontBucket(float cellHeight) const;
-    float fontBucketPx(int bucket) const;
+    void buildMsdfAtlas();
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
                            int gridWidth,
                            int gridHeight);

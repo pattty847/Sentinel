@@ -71,6 +71,20 @@ TopToolbar::TopToolbar(QWidget* parent)
     liqLabel->setStyleSheet("QLabel { color: #B6C2CF; padding-left: 4px; }");
     addWidget(liqLabel);
 
+    QLabel* modeLabel = new QLabel("Mode", this);
+    modeLabel->setStyleSheet("QLabel { color: #B6C2CF; padding-left: 6px; }");
+    addWidget(modeLabel);
+
+    m_liquidityModeCombo = new QComboBox(this);
+    m_liquidityModeCombo->addItems({"Asset", "USD"});
+    m_liquidityModeCombo->setFixedWidth(80);
+    m_liquidityModeCombo->setToolTip("Liquidity label mode");
+    addWidget(m_liquidityModeCombo);
+    connect(m_liquidityModeCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            &TopToolbar::liquidityLabelModeChanged);
+
     m_liquiditySlider = new QSlider(Qt::Horizontal, this);
     m_liquiditySlider->setRange(0, 1000);
     m_liquiditySlider->setFixedWidth(120);

@@ -177,6 +177,13 @@ void MainWindowGPU::setupUI() {
                 renderer->setProperty("heatmapLiquidityThreshold", value);
             }
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityLabelModeChanged, this, [this](int mode) {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (renderer) {
+                renderer->setProperty("liquidityLabelMode", mode);
+            }
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
             if (!m_qmlController) return;

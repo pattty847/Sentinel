@@ -34,8 +34,7 @@ Column {
     Text {
         text: {
             if (!root.target) return "Min Liquidity: 0.00"
-            var prefix = root.target.liquidityLabelMode !== 0 ? "$" : ""
-            return "Min Liquidity: " + prefix + root.target.heatmapLiquidityThreshold.toFixed(2)
+            return "Min Liquidity: " + root.target.heatmapLiquidityThreshold.toFixed(2)
         }
         color: "#00FF00"
         font.pixelSize: 11

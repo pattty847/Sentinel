@@ -21,8 +21,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QMetaType>
 #include <QTimer>
 #include <QtEndian>
-#include <QFont>
-#include <QFontDatabase>
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
@@ -30,8 +28,8 @@ Assumptions: The render strategies are compatible and can be layered together.
 // New modular architecture includes
 #include "render/GridViewState.hpp"
 #include "render/DataProcessor.hpp"
-#include "render/GlyphAtlas.hpp"
-#include "render/HeatmapGlyphNode.hpp"
+#include "render/MsdfAtlas.hpp"
+#include "render/MsdfGlyphNode.hpp"
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
@@ -394,7 +392,7 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
-    buildGlyphAtlases();
+    buildMsdfAtlas();
     
     // Create DataProcessor on worker thread for background processing
     m_dataProcessorThread = std::make_unique<QThread>();
@@ -911,19 +909,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         const float cellH = (srcRect.height() > 0.0f)
             ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRect.height())
             : 0.0f;
-        int labelPx = 24;
+        int labelPx = 14;
         const int envLabelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
         if (envLabelPx > 0) {
             labelPx = envLabelPx;
         }
         const float labelThreshold = static_cast<float>(labelPx);
 
-        if (labelVisible && cellH >= labelThreshold && m_glyphAtlasesBuilt && window()) {
-            const int bucket = pickFontBucket(cellH);
-            const float fontPx = fontBucketPx(bucket);
-            const float scale = (fontPx > 0.0f) ? (cellH / fontPx) : 1.0f;
-            const GlyphAtlas& atlas = m_glyphAtlases[static_cast<size_t>(bucket)];
-            if (!atlas.isBuilt()) {
+        if (labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window()) {
+            const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
+            const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
+            if (!m_msdfAtlas.isBuilt()) {
                 if (m_whiteGlyphNode) {
                     m_labelWhiteQuads.clear();
                     m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
@@ -951,7 +947,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 const bool dollars = (m_liquidityLabelMode != 0);
                 const int latestColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : -1;
                 HeatmapLabelRenderer::buildLabelQuads(snapshot,
-                                                      atlas,
+                                                      m_msdfAtlas,
                                                       m_labelLiquidityRing,
                                                       m_labelIntensityRing,
                                                       m_labelLiquidityScales,
@@ -970,20 +966,22 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                                                       latestColumn);
 
                 if (!m_whiteGlyphNode) {
-                    m_whiteGlyphNode = new HeatmapGlyphNode();
+                    m_whiteGlyphNode = new MsdfGlyphNode();
                     m_whiteGlyphNode->setColor(Qt::white);
                     m_whiteGlyphNode->ensureCapacity(32000);
                     texNode->appendChildNode(m_whiteGlyphNode);
                 }
                 if (!m_blackGlyphNode) {
-                    m_blackGlyphNode = new HeatmapGlyphNode();
+                    m_blackGlyphNode = new MsdfGlyphNode();
                     m_blackGlyphNode->setColor(Qt::black);
                     m_blackGlyphNode->ensureCapacity(32000);
                     texNode->appendChildNode(m_blackGlyphNode);
                 }
 
-                m_whiteGlyphNode->setAtlas(atlas.image(), window());
-                m_blackGlyphNode->setAtlas(atlas.image(), window());
+                m_whiteGlyphNode->setAtlas(m_msdfAtlas.image(), window());
+                m_whiteGlyphNode->setPxRange(m_msdfAtlas.pxRange());
+                m_blackGlyphNode->setAtlas(m_msdfAtlas.image(), window());
+                m_blackGlyphNode->setPxRange(m_msdfAtlas.pxRange());
                 m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
                 m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
             }
@@ -1085,53 +1083,20 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
     }
 }
 
-void UnifiedGridRenderer::buildGlyphAtlases() {
-    if (m_glyphAtlasesBuilt) {
+void UnifiedGridRenderer::buildMsdfAtlas() {
+    if (m_msdfAtlasBuilt) {
         return;
     }
-    static const QString charset = QStringLiteral("0123456789.kMB$+-");
-    const std::array<int, 5> sizes = {12, 20, 32, 48, 96};
-    const QFont baseFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    for (size_t i = 0; i < m_glyphAtlases.size(); ++i) {
-        QFont font = baseFont;
-        font.setPixelSize(sizes[i]);
-        m_glyphAtlases[i].build(font, charset);
+    MsdfAtlas::BuildParams params;
+    params.fontFamily = "Roboto Mono";
+    params.fontPx = 64;
+    params.pxRange = 8.0f;
+    params.charset = QStringLiteral("0123456789.kMB+-");
+    if (m_msdfAtlas.build(params)) {
         if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
-            const QString path = QString("/tmp/sentinel_glyph_atlas_%1.png").arg(sizes[i]);
-            m_glyphAtlases[i].image().save(path);
+            m_msdfAtlas.image().save("/tmp/sentinel_msdf_atlas.png");
         }
-    }
-    m_glyphAtlasesBuilt = true;
-}
-
-int UnifiedGridRenderer::pickFontBucket(float cellHeight) const {
-    if (cellHeight < 18.0f) {
-        return 0;
-    }
-    if (cellHeight < 28.0f) {
-        return 1;
-    }
-    if (cellHeight < 48.0f) {
-        return 2;
-    }
-    if (cellHeight < 80.0f) {
-        return 3;
-    }
-    return 4;
-}
-
-float UnifiedGridRenderer::fontBucketPx(int bucket) const {
-    switch (bucket) {
-    case 0:
-        return 12.0f;
-    case 1:
-        return 20.0f;
-    case 2:
-        return 32.0f;
-    case 3:
-        return 48.0f;
-    default:
-        return 96.0f;
+        m_msdfAtlasBuilt = true;
     }
 }
 
@@ -1254,23 +1219,15 @@ QString UnifiedGridRenderer::getLabelRingMemory() const {
 }
 
 QString UnifiedGridRenderer::getGlyphAtlasMemory() const {
-    qint64 totalBytes = 0;
-    int builtCount = 0;
-    for (const auto& atlas : m_glyphAtlases) {
-        if (!atlas.isBuilt()) {
-            continue;
-        }
-        const QImage& image = atlas.image();
-        if (!image.isNull()) {
-            totalBytes += image.sizeInBytes();
-            ++builtCount;
-        }
+    if (!m_msdfAtlas.isBuilt()) {
+        return "MSDF atlas: N/A";
     }
-    if (totalBytes <= 0) {
-        return "Glyph atlas: N/A";
+    const QImage& image = m_msdfAtlas.image();
+    if (image.isNull()) {
+        return "MSDF atlas: N/A";
     }
-    const double mb = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
-    return QString("Glyph atlas: %1 MB (%2)").arg(mb, 0, 'f', 2).arg(builtCount);
+    const double mb = static_cast<double>(image.sizeInBytes()) / (1024.0 * 1024.0);
+    return QString("MSDF atlas: %1 MB").arg(mb, 0, 'f', 2);
 }
 
 double UnifiedGridRenderer::getUploadBandwidth() const {

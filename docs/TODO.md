@@ -45,8 +45,6 @@ Each feature is a self-contained block. Use this template:
 **Updated:** 2026-01-30
 
 #### Now
-- [ ] Swap GlyphAtlas -> MsdfAtlas and HeatmapGlyphNode -> MsdfGlyphNode in UnifiedGridRenderer
-- [ ] MSDF label UVs: use full cell UVs (cell + padding), keep linear filtering, single atlas size
 - [ ] Label geo cache: cache per-column quads; rebuild only when column/viewport/thresholds change
 - [ ] Thresholds: store raw liquidity/intensity per cell so past columns can be re-evaluated
 
@@ -57,10 +55,12 @@ _(empty)_
 - [ ] Wire MSDF atlas cache into label path (load from disk on startup, upload once)
 
 #### Done
-_(nothing yet)_
+- [x] Swap GlyphAtlas -> MsdfAtlas and HeatmapGlyphNode -> MsdfGlyphNode in UnifiedGridRenderer (2026-01-30)
+- [x] MSDF label UVs: use full cell UVs (cell + padding), keep linear filtering, single atlas size (2026-01-30)
 
 #### Session log
 - **2026-01-30** — MSDF Lab text looks correct; heatmap labels still bitmap. Next: wire MSDF into heatmap labels, then label-geometry cache.
+- **2026-01-30** — Swapped heatmap labels to MSDF atlas/nodes and padded UVs. Next: add label-geometry cache + threshold reevaluation.
 
 ---
 

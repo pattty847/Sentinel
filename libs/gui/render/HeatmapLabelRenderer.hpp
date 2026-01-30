@@ -11,15 +11,15 @@ Threading: Render thread only.
 #include <vector>
 
 #include "HeatmapStreamState.hpp"
-#include "GlyphAtlas.hpp"
-#include "HeatmapGlyphNode.hpp"
+#include "MsdfAtlas.hpp"
+#include "MsdfGlyphNode.hpp"
 
 class HeatmapLabelRenderer {
 public:
-    using GlyphQuad = HeatmapGlyphNode::GlyphQuad;
+    using GlyphQuad = MsdfGlyphNode::GlyphQuad;
 
     static void buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
-                                const GlyphAtlas& atlas,
+                                const MsdfAtlas& atlas,
                                 const std::vector<uint16_t>& liquidityRing,
                                 const std::vector<uint16_t>& intensityRing,
                                 const std::vector<double>& liquidityScales,
