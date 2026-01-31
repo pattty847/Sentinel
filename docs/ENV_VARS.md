@@ -49,6 +49,16 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Enables periodic heatmap slice logging.
 - `SENTINEL_HEALTH_PORT` (server)  
   Local health endpoint port for `/ping`. Default: `8090`.
+- `SENTINEL_SEC_PORT` (server + client)  
+  Local SEC backend HTTP port for `/sec/*`. Default: `17110`.
+- `SENTINEL_SEC_PYTHON` (server)  
+  Override Python executable used to run SEC scripts.
+- `SENTINEL_SEC_SCRIPTS_DIR` (server)  
+  Override path to the `scripts` directory that contains `sec/`.
+- `SENTINEL_SEC_TIMEOUT_MS` (server)  
+  Max time (ms) to allow a single SEC request before timing out. Default: `30000`.
+- `SENTINEL_SEC_MAX_OUTPUT_BYTES` (server)  
+  Max stdout payload size accepted from SEC scripts. Default: `5242880`.
 - `SENTINEL_SERVER_DEFAULT_SYMBOLS` (server)  
   Symbols to auto-subscribe on server start (comma/space-separated). Default: `BTC-USD`.
 
@@ -79,6 +89,10 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Client heatmap cache capacity (columns). Default: `gridWidth`.
 - `SENTINEL_MSDF_FONT` (client)  
   Absolute path to a font file used for MSDF atlas generation (Lab dock).
+- `SENTINEL_MSDF_DEBUG_STATS` (client)  
+  Enables verbose MSDF atlas generation stats (glyph bounds, translate, range, min/max channel values).
+- `SENTINEL_MSDF_CACHE_DIR` (client)  
+  Override directory used for MSDF atlas PNG/JSON cache. Default: `./resources/glyph-cache/msdf` (falls back to `./data/glyph-cache/msdf` if not writable).
 
 - `SENTINEL_ORDERBOOK_TICK_SIZE` (server + client)  
   Default order book tick size. Default: `0.10`.
@@ -100,6 +114,11 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_LOG_Render_INTERVAL`  
 - `SENTINEL_LOG_Debug_INTERVAL`  
   Per-category log throttle interval overrides (positive integer).
+
+## SEC backend (Python)
+
+- `SEC_API_USER_AGENT`  
+  User-Agent string required by SEC EDGAR. Format: `Name/1.0 (email@example.com)`.
 
 ## Qt/Graphics (set by app)
 
