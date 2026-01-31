@@ -1,7 +1,12 @@
-import aiosqlite
 import logging
 import os
 from typing import List, Dict, Optional, Union, Any
+
+try:
+    import aiosqlite
+except ImportError as e:
+    aiosqlite = None
+    _AIOSQLITE_IMPORT_ERROR = e
 
 class SqlCacheManager:
     """
@@ -23,15 +28,23 @@ class SqlCacheManager:
         """
         self.db_path = db_path
         self._ensure_db_directory()
-    
+
+        if aiosqlite is None:
+            logging.warning("aiosqlite not installed; SQL cache disabled.")
+
     def _ensure_db_directory(self):
         """Ensures the directory for the database exists."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+
+    def _require_aiosqlite(self):
+        if aiosqlite is None:
+            raise RuntimeError(f"aiosqlite is required for SQL cache usage: {_AIOSQLITE_IMPORT_ERROR}")
 
     async def initialize_db(self):
         """
         Creates the necessary tables if they do not exist.
         """
+        self._require_aiosqlite()
         logging.info(f"Initializing database at {self.db_path}")
         async with aiosqlite.connect(self.db_path) as db:
             # Table A: financial_history (The Matrix)
@@ -75,6 +88,7 @@ class SqlCacheManager:
             data (Dict): Dictionary containing metric data (e.g., 'revenue': {'quarterly': [...]}).
                          Expected structure matches FinancialDataProcessor output.
         """
+        self._require_aiosqlite()
         async with aiosqlite.connect(self.db_path) as db:
             for metric, history in data.items():
                 # Skip metadata keys
@@ -125,6 +139,7 @@ class SqlCacheManager:
             confidence (float): Confidence score of the extraction.
             doc_date (str): Date of the source document.
         """
+        self._require_aiosqlite()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO industrial_graph (
@@ -159,6 +174,7 @@ class SqlCacheManager:
         Returns:
             Optional[str]: Date string (YYYY-MM-DD) or None if no data.
         """
+        self._require_aiosqlite()
         query = "SELECT MAX(period_end_date) as last_date FROM financial_history WHERE ticker = ?"
         params = [ticker.upper()]
         
@@ -183,6 +199,7 @@ class SqlCacheManager:
         Returns:
             List[Dict]: List of records.
         """
+        self._require_aiosqlite()
         query = "SELECT * FROM financial_history WHERE ticker = ?"
         params = [ticker.upper()]
         
@@ -210,6 +227,7 @@ class SqlCacheManager:
         Returns:
             List[Dict]: List of relationships.
         """
+        self._require_aiosqlite()
         query = "SELECT * FROM industrial_graph WHERE source_ticker = ?"
         params = [ticker.upper()]
         

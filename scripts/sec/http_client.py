@@ -4,6 +4,7 @@ import logging
 import time
 import asyncio
 import aiohttp
+from urllib.parse import urlparse
 from typing import Dict, Optional, Union
 
 class SecHttpClient:
@@ -50,7 +51,8 @@ class SecHttpClient:
             "Host": "data.sec.gov" # Default host, may need overrides
         }
         self.request_interval = rate_limit_sleep
-        self.last_request_time = 0
+        self._rate_lock = asyncio.Lock()
+        self._next_allowed_time = 0.0
         self._session: Optional[aiohttp.ClientSession] = None
         self._archive_session: Optional[aiohttp.ClientSession] = None
 
@@ -122,6 +124,45 @@ class SecHttpClient:
             self._archive_session = aiohttp.ClientSession()
         return self._archive_session
 
+    async def _rate_limit(self) -> None:
+        """Enforce a global SEC request interval across concurrent coroutines."""
+        async with self._rate_lock:
+            now = time.monotonic()
+            wait_time = max(0.0, self._next_allowed_time - now)
+            self._next_allowed_time = max(self._next_allowed_time, now) + self.request_interval
+
+        if wait_time > 0:
+            logging.debug(f"Rate limit: sleeping for {wait_time:.3f}s")
+            await asyncio.sleep(wait_time)
+
+    def _build_headers(self, headers: Optional[Dict]) -> Dict:
+        """Merge custom headers with defaults while ensuring User-Agent is present."""
+        request_headers = dict(self.default_headers)
+        if headers:
+            request_headers.update(headers)
+
+        if not request_headers.get("User-Agent"):
+            if self.user_agent:
+                request_headers["User-Agent"] = self.user_agent
+            else:
+                logging.error("CRITICAL: No User-Agent available for SEC request.")
+
+        return request_headers
+
+    async def _get_session_for_url(self, url: str, headers: Optional[Dict]) -> aiohttp.ClientSession:
+        """Select session based on target host to keep pools separated."""
+        host = None
+        if headers and headers.get("Host"):
+            host = headers.get("Host")
+        else:
+            parsed = urlparse(url)
+            host = parsed.hostname
+
+        if host and host.lower().startswith("www.sec.gov"):
+            return await self._get_archive_session()
+
+        return await self._get_session()
+
     async def make_request(self, url: str, max_retries: int = 3, headers: Optional[Dict] = None, is_json: bool = True) -> Optional[Union[Dict, str]]:
         """
         Performs a rate-limited, retrying asynchronous HTTP GET request to a given URL.
@@ -153,32 +194,12 @@ class SecHttpClient:
                 ultimately fails after all retries or encounters a non-retryable error
                 (e.g., 404 Not Found).
         """
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-
-        if time_since_last < self.request_interval:
-            sleep_time = self.request_interval - time_since_last
-            logging.debug(f"Rate limit: sleeping for {sleep_time:.3f}s")
-            await asyncio.sleep(sleep_time)
-
-        session = await self._get_session()
-
-        # Determine which headers to use - prioritize provided headers, fallback to default
-        request_headers = headers if headers is not None else self.default_headers
-        # Ensure User-Agent is present, warn if missing entirely
-        if not request_headers.get('User-Agent'):
-             logging.warning(f"User-Agent not found in request headers for {url}. Using default if possible.")
-             # Fallback explicitly if custom headers were provided but lacked User-Agent
-             if headers is not None and not headers.get('User-Agent') and self.default_headers.get('User-Agent'):
-                   request_headers = self.default_headers
-             elif not self.default_headers.get('User-Agent'):
-                  logging.error(f"CRITICAL: No User-Agent available in default or custom headers for {url}. Request likely to fail.")
-                  # Assign empty dict if absolutely no User-Agent is set anywhere, though request will likely fail
-                  request_headers = request_headers or {}
+        await self._rate_limit()
+        request_headers = self._build_headers(headers)
+        session = await self._get_session_for_url(url, request_headers)
 
         for attempt in range(max_retries):
             try:
-                self.last_request_time = time.time()
                 logging.debug(f"Making request (Attempt {attempt+1}/{max_retries}): GET {url} Headers: {request_headers}")
                 # Use the determined headers
                 async with session.get(url, headers=request_headers, timeout=10) as response:
@@ -254,13 +275,7 @@ class SecHttpClient:
             Optional[Union[Dict, str]]: The response content or None if failed
         """
         # Rate limiting
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-
-        if time_since_last < self.request_interval:
-            sleep_time = self.request_interval - time_since_last
-            logging.debug(f"Rate limit: sleeping for {sleep_time:.3f}s")
-            await asyncio.sleep(sleep_time)
+        await self._rate_limit()
 
         session = await self._get_archive_session()
 
@@ -279,7 +294,6 @@ class SecHttpClient:
 
         for attempt in range(max_retries):
             try:
-                self.last_request_time = time.time()
                 logging.debug(f"Making archive request (Attempt {attempt+1}/{max_retries}): GET {url}")
                 
                 async with session.get(url, headers=archive_headers, timeout=15) as response:

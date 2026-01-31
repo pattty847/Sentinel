@@ -561,5 +561,4 @@ class FinancialDataProcessor:
             Dict: A dictionary containing calculated ratios (currently empty).
         """
         logging.warning("_calculate_ratios is not fully implemented.")
-        # TODO: Implement ratio calculations based on extracted summary_metrics if needed.
-        return {} 
+        return {}

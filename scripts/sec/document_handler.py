@@ -108,8 +108,7 @@ class FilingDocumentHandler:
 
             if not isinstance(index_data, dict) or 'directory' not in index_data:
                 logging.warning(f"index.json for {accession_no} did not return expected structure. Type: {type(index_data)}. Attempting index.htm next.")
-                # TODO: Optionally fallback to parsing index.htm here if index.json fails
-                return None # For now, return None if JSON fails
+                return await self._get_filing_documents_from_index_html(accession_no_clean, cik_for_url)
 
             documents = []
             for item in index_data.get('directory', {}).get('item', []):
@@ -127,6 +126,46 @@ class FilingDocumentHandler:
 
         except Exception as e:
             logging.error(f"Error fetching/parsing index.json for document list ({accession_no}): {e}", exc_info=True)
+            return await self._get_filing_documents_from_index_html(accession_no_clean, cik_for_url)
+
+    async def _get_filing_documents_from_index_html(self, accession_no_clean: str, cik_for_url: str) -> Optional[List[Dict]]:
+        """Fallback: parse index.htm for document links when index.json is unavailable."""
+        index_html_url = f"{self.BASE_ARCHIVE_URL}/{cik_for_url}/{accession_no_clean}/index.htm"
+        logging.info(f"Fetching document list via index.htm: {index_html_url}")
+        try:
+            index_html = await self.http_client.make_archive_request(index_html_url, is_json=False)
+            if not index_html or not isinstance(index_html, str):
+                logging.warning(f"index.htm fetch failed or returned non-text for {accession_no_clean}")
+                return None
+
+            # Extract href targets from index table
+            hrefs = re.findall(r'''href=["']([^"']+)["']''', index_html, flags=re.IGNORECASE)
+            documents = []
+            seen = set()
+            for href in hrefs:
+                name = os.path.basename(href)
+                if not name:
+                    continue
+                if name.lower().startswith("index") or name.lower().endswith("-index.html"):
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                documents.append({
+                    "name": name,
+                    "type": None,
+                    "size": None,
+                    "last_modified": None
+                })
+
+            if not documents:
+                logging.warning(f"No document links found in index.htm for {accession_no_clean}")
+                return None
+
+            logging.info(f"Found {len(documents)} documents in index.htm for {accession_no_clean}")
+            return documents
+        except Exception as e:
+            logging.error(f"Error parsing index.htm for {accession_no_clean}: {e}", exc_info=True)
             return None
 
     async def download_form_document(self, accession_number: str, document_name: str, ticker: Optional[str] = None) -> Optional[str]:
@@ -306,7 +345,12 @@ class FilingDocumentHandler:
         
         # 1. Get document list
         documents = await self.get_filing_documents_list(accession_no, ticker)
-        if not documents: return None
+        if not documents:
+            logging.info("Document list unavailable, trying heuristic fallback.")
+            fallback = await self._find_primary_document_name(accession_no, cik_for_url)
+            if fallback and fallback.lower().endswith(('.htm', '.html')):
+                return await self.download_form_document(accession_no, fallback, ticker)
+            return None
         
         html_doc_name = None
         

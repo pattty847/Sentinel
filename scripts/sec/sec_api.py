@@ -4,10 +4,10 @@ import logging
 import xml.etree.ElementTree as ET
 import asyncio
 import re
+from pathlib import Path
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Union, Tuple, Any, Callable, Awaitable
-from dotenv import load_dotenv
 from .http_client import SecHttpClient
 from .cache_manager import SecCacheManager
 from .document_handler import FilingDocumentHandler
@@ -16,9 +16,15 @@ from .financial_processor import FinancialDataProcessor
 from .supply_chain_parser import SupplyChainParser
 from .sql_cache_manager import SqlCacheManager
 
-import pandas as pd
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
-load_dotenv()
+if load_dotenv:
+    load_dotenv()
+else:
+    logging.debug("python-dotenv not installed; skipping .env loading")
 class SECDataFetcher:
     """
     Acts as a facade/orchestrator for fetching and processing data from SEC EDGAR APIs.
@@ -48,8 +54,8 @@ class SECDataFetcher:
     # - TRANSACTION_CODE_MAP, ACQUISITION_CODES, DISPOSITION_CODES -> Form4Processor
     # - KEY_FINANCIAL_SUMMARY_METRICS -> FinancialDataProcessor
 
-    def __init__(self, user_agent: str = None, cache_dir: str = "data/edgar",
-                 rate_limit_sleep: float = 0.1):
+    def __init__(self, user_agent: str = None, cache_dir: Optional[str] = None,
+                 db_path: Optional[str] = None, rate_limit_sleep: float = 0.1):
         """
         Initialize the SECDataFetcher orchestrator.
 
@@ -61,11 +67,16 @@ class SECDataFetcher:
             rate_limit_sleep (float, optional): Seconds to wait between API requests for the HTTP client.
                                                Defaults to 0.1.
         """
+        # Resolve base paths without relying on CWD
+        base_dir = Path(__file__).resolve().parents[2]
+        resolved_cache_dir = Path(cache_dir) if cache_dir else base_dir / "data" / "edgar"
+        resolved_db_path = Path(db_path) if db_path else base_dir / "data" / "sentinel.db"
+
         # Initialize HttpClient, CacheManager, and other processors here
         resolved_user_agent = user_agent or os.environ.get('SEC_API_USER_AGENT')
         self.http_client = SecHttpClient(user_agent=resolved_user_agent, rate_limit_sleep=rate_limit_sleep)
-        self.cache_manager = SecCacheManager(cache_dir=cache_dir)
-        self.sql_manager = SqlCacheManager() # Initialize SQL manager
+        self.cache_manager = SecCacheManager(cache_dir=str(resolved_cache_dir))
+        self.sql_manager = SqlCacheManager(db_path=str(resolved_db_path)) # Initialize SQL manager
         self.document_handler = FilingDocumentHandler(http_client=self.http_client, cik_lookup_func=self.get_cik_for_ticker)
         self.form4_processor = Form4Processor(
             document_handler=self.document_handler,
@@ -205,85 +216,145 @@ class SECDataFetcher:
             logging.error(f"Error fetching facts for {ticker}: {e}")
             return None
 
+    def _normalize_cik(self, cik_value: Any) -> Optional[str]:
+        """Normalize CIK into a zero-padded 10-digit string."""
+        if cik_value is None:
+            return None
+        cik_str = str(cik_value).strip()
+        if not cik_str.isdigit():
+            return None
+        return cik_str.zfill(10)
+
+    def _extract_recent_filings(self, submissions: Dict, cik_for_url: str, form_filter: Optional[str] = None) -> List[Dict]:
+        """Extract filings list from submissions JSON, optionally filtering by form type."""
+        recent_filings = submissions.get('filings', {}).get('recent', {})
+        if not recent_filings:
+            return []
+
+        form_list = recent_filings.get('form', [])
+        filing_date_list = recent_filings.get('filingDate', [])
+        accession_number_list = recent_filings.get('accessionNumber', [])
+        report_date_list = recent_filings.get('reportDate', [])
+        primary_document_list = recent_filings.get('primaryDocument', [])
+        primary_doc_desc_list = recent_filings.get('primaryDocDescription', [])
+
+        min_len = min(len(form_list), len(filing_date_list), len(accession_number_list))
+        filings = []
+        for i in range(min_len):
+            form = form_list[i]
+            if form_filter and form != form_filter:
+                continue
+            filing_date = filing_date_list[i] if i < len(filing_date_list) else None
+            accession_no = accession_number_list[i]
+            report_date = report_date_list[i] if i < len(report_date_list) else None
+
+            accession_no_cleaned = accession_no.replace('-', '')
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_for_url}/{accession_no_cleaned}/"
+
+            primary_doc = primary_document_list[i] if i < len(primary_document_list) else None
+            primary_doc_desc = primary_doc_desc_list[i] if i < len(primary_doc_desc_list) else None
+
+            filings.append({
+                'accession_no': accession_no,
+                'filing_date': filing_date,
+                'form': form,
+                'report_date': report_date,
+                'url': filing_url,
+                'primary_document': primary_doc,
+                'primary_document_description': primary_doc_desc
+            })
+
+        return filings
+
     async def get_filings_by_form(self, ticker: str, form_type: str, days_back: int = 90, use_cache: bool = True) -> List[Dict]:
         """ Fetches a list of filings of a specific form type within a given timeframe."""
         ticker = ticker.upper()
+        if not form_type:
+            logging.error("Form type is required for get_filings_by_form.")
+            return []
         logging.debug(f"Getting {form_type} filings for {ticker} (days back: {days_back}, cache: {use_cache})")
         if use_cache:
             cache_data = await self.cache_manager.load_data(ticker, 'forms', form_type=form_type)
             if cache_data:
-                cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-                if isinstance(cache_data, list):
-                    filtered_cache = [f for f in cache_data if f.get('filing_date', '') >= cutoff_date]
+                cached_filings = None
+                if isinstance(cache_data, dict) and isinstance(cache_data.get("filings"), list):
+                    cached_filings = cache_data.get("filings")
+                elif isinstance(cache_data, list):
+                    logging.warning(f"Legacy cache format for {ticker} {form_type}; ignoring to avoid partial results.")
+                    cached_filings = None
+
+                if cached_filings is not None:
+                    cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+                    filtered_cache = [f for f in cached_filings if f.get('filing_date', '') >= cutoff_date]
                     logging.debug(f"Found {len(filtered_cache)} fresh {form_type} filings in cache for {ticker}.")
                     return filtered_cache
-                else:
-                    logging.warning(f"Expected list from filings cache for {ticker} {form_type}, got {type(cache_data)}. Ignoring cache.")
 
         submissions = await self.get_company_submissions(ticker, use_cache=use_cache)
         if not submissions:
             logging.warning(f"No submissions data found for {ticker}, cannot extract filings.")
             return []
 
-        cik = submissions.get('cik')
+        cik = self._normalize_cik(submissions.get('cik'))
         if not cik:
-             cik_lookup = await self.get_cik_for_ticker(ticker)
-             if not cik_lookup:
-                  logging.error(f"Cannot get CIK for {ticker} to process filings.")
-                  return []
-             cik = cik_lookup
+            cik_lookup = await self.get_cik_for_ticker(ticker)
+            if not cik_lookup:
+                logging.error(f"Cannot get CIK for {ticker} to process filings.")
+                return []
+            cik = cik_lookup
 
-        filings = []
+        cik_for_url = str(cik).lstrip('0')
+
         cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
         try:
-            recent_filings = submissions.get('filings', {}).get('recent', {})
-            if not recent_filings:
-                logging.info(f"No 'recent' filings found in submissions data for {ticker}.")
+            filings_all = self._extract_recent_filings(submissions, cik_for_url, form_filter=form_type)
+            if not filings_all:
+                logging.info(f"No '{form_type}' filings found in submissions data for {ticker}.")
                 return []
 
-            # Extract data lists safely
-            form_list = recent_filings.get('form', [])
-            filing_date_list = recent_filings.get('filingDate', [])
-            accession_number_list = recent_filings.get('accessionNumber', [])
-            report_date_list = recent_filings.get('reportDate', [])
-            primary_document_list = recent_filings.get('primaryDocument', [])
-            primary_doc_desc_list = recent_filings.get('primaryDocDescription', []) # Added Description
+            await self.cache_manager.save_data(
+                ticker,
+                'forms',
+                {
+                    "as_of": datetime.now().strftime("%Y-%m-%d"),
+                    "form_type": form_type,
+                    "filings": filings_all
+                },
+                form_type=form_type
+            )
 
-            min_len = min(len(form_list), len(filing_date_list), len(accession_number_list), len(report_date_list))
-
-            logging.debug(f"Processing {min_len} recent filing entries for {ticker}.")
-            for i in range(min_len):
-                form = form_list[i]
-                filing_date = filing_date_list[i]
-                accession_no = accession_number_list[i]
-                report_date = report_date_list[i]
-
-                if form == form_type and filing_date >= cutoff_date:
-                    accession_no_cleaned = accession_no.replace('-', '')
-                    # Use CIK without leading zeros for URL path
-                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{accession_no_cleaned}/"
-
-                    primary_doc = primary_document_list[i] if i < len(primary_document_list) else None
-                    primary_doc_desc = primary_doc_desc_list[i] if i < len(primary_doc_desc_list) else None
-
-                    filing_dict = {
-                        'accession_no': accession_no,
-                        'filing_date': filing_date,
-                        'form': form,
-                        'report_date': report_date,
-                        'url': filing_url,
-                        'primary_document': primary_doc,
-                        'primary_document_description': primary_doc_desc
-                    }
-                    filings.append(filing_dict)
-
-            logging.info(f"Extracted {len(filings)} {form_type} filings for {ticker} within {days_back} days.")
-            if filings:
-                 await self.cache_manager.save_data(ticker, 'forms', filings, form_type=form_type)
-            return filings
+            filtered = [f for f in filings_all if f.get('filing_date', '') >= cutoff_date]
+            logging.info(f"Extracted {len(filtered)} {form_type} filings for {ticker} within {days_back} days.")
+            return filtered
         except Exception as e:
              logging.error(f"Error processing filings for {ticker}: {e}", exc_info=True)
              return []
+
+    async def get_recent_filings(self, ticker: str, days_back: int = 90, use_cache: bool = True) -> List[Dict]:
+        """Fetches recent filings across all form types for a ticker."""
+        ticker = ticker.upper()
+        submissions = await self.get_company_submissions(ticker, use_cache=use_cache)
+        if not submissions:
+            logging.warning(f"No submissions data found for {ticker}, cannot extract filings.")
+            return []
+
+        cik = self._normalize_cik(submissions.get('cik'))
+        if not cik:
+            cik_lookup = await self.get_cik_for_ticker(ticker)
+            if not cik_lookup:
+                logging.error(f"Cannot get CIK for {ticker} to process filings.")
+                return []
+            cik = cik_lookup
+
+        cik_for_url = str(cik).lstrip('0')
+        filings_all = self._extract_recent_filings(submissions, cik_for_url, form_filter=None)
+        if not filings_all:
+            logging.info(f"No recent filings found in submissions data for {ticker}.")
+            return []
+
+        cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        filtered = [f for f in filings_all if f.get('filing_date', '') >= cutoff_date]
+        logging.info(f"Extracted {len(filtered)} filings for {ticker} within {days_back} days.")
+        return filtered
 
     # === CONVENIENCE FILING WRAPPERS ===
     async def fetch_insider_filings(self, ticker: str, days_back: int = 90, use_cache: bool = True) -> List[Dict]:
@@ -328,8 +399,11 @@ class SECDataFetcher:
         
         if summary:
             # Persist to SQL for faster future access and querying
-            await self.sql_manager.initialize_db() # Ensure DB is ready (idempotent)
-            await self.sql_manager.save_financial_history(ticker, summary)
+            try:
+                await self.sql_manager.initialize_db() # Ensure DB is ready (idempotent)
+                await self.sql_manager.save_financial_history(ticker, summary)
+            except Exception as e:
+                logging.warning(f"SQL cache unavailable or failed for {ticker}: {e}")
             
         return summary
 

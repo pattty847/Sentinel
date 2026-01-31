@@ -1,6 +1,9 @@
 import logging
 import xml.etree.ElementTree as ET
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 from typing import List, Dict, Optional, TYPE_CHECKING, Callable, Awaitable
 
 # Import FilingDocumentHandler for dependency injection
@@ -394,6 +397,12 @@ class Form4Processor:
                 key if fetching or analysis fails. May include 'dataframe' if successful.
         """
         ticker = ticker.upper()
+
+        if pd is None:
+            return {
+                'ticker': ticker,
+                'error': "pandas is not installed; analysis unavailable."
+            }
 
         # Get *parsed* transactions first (not UI formatted)
         # Need a method that fetches filings and processes them without UI formatting
