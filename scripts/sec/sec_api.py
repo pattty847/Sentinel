@@ -69,8 +69,17 @@ class SECDataFetcher:
         """
         # Resolve base paths without relying on CWD
         base_dir = Path(__file__).resolve().parents[2]
-        resolved_cache_dir = Path(cache_dir) if cache_dir else base_dir / "data" / "edgar"
-        resolved_db_path = Path(db_path) if db_path else base_dir / "data" / "sentinel.db"
+        if cache_dir:
+            cache_path = Path(cache_dir)
+            resolved_cache_dir = cache_path if cache_path.is_absolute() else (base_dir / cache_path)
+        else:
+            resolved_cache_dir = base_dir / "data" / "edgar"
+
+        if db_path:
+            db_path_obj = Path(db_path)
+            resolved_db_path = db_path_obj if db_path_obj.is_absolute() else (base_dir / db_path_obj)
+        else:
+            resolved_db_path = base_dir / "data" / "sentinel.db"
 
         # Initialize HttpClient, CacheManager, and other processors here
         resolved_user_agent = user_agent or os.environ.get('SEC_API_USER_AGENT')
