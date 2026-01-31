@@ -59,7 +59,17 @@ bool SentinelServerApp::initialize() {
 
         // 1. Authenticator
         m_authenticator = std::make_unique<Authenticator>();
-        
+
+        // SEC backend endpoint
+        m_secServer = std::make_unique<SecBackendServer>();
+        const QByteArray secPortEnv = qgetenv("SENTINEL_SEC_PORT");
+        bool secOk = false;
+        const int secPortValue = secPortEnv.toInt(&secOk);
+        const quint16 secPort = (secOk && secPortValue > 0) ? static_cast<quint16>(secPortValue) : 17110;
+        if (!m_secServer->start(secPort)) {
+            sLog_Warning("SEC backend unavailable on 127.0.0.1:" << secPort);
+        }
+
         // 2. Market Data Core
         m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator);
         

@@ -4,6 +4,8 @@ add_executable(sentinel_server
     main.cpp
     SentinelServerApp.cpp
     SentinelServerApp.hpp
+    SecBackendServer.cpp
+    SecBackendServer.hpp
 )
 
 target_link_libraries(sentinel_server

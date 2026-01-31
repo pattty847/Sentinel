@@ -7,6 +7,7 @@
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
 #include "../../libs/core/protocol/SentinelStreamServer.hpp"
+#include "SecBackendServer.hpp"
 
 class SentinelServerApp : public QObject {
     Q_OBJECT
@@ -21,6 +22,7 @@ private:
     std::unique_ptr<MarketDataCoreEngine> m_marketDataCore;
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
+    std::unique_ptr<SecBackendServer> m_secServer;
     QTcpServer* m_healthServer = nullptr;
     std::unordered_set<std::string> m_defaultSymbols;
 };
