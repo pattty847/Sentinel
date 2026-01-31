@@ -52,6 +52,9 @@ async def main() -> int:
             raise ValueError("Missing ticker")
 
         form_type = payload.get("form_type") or None
+        if isinstance(form_type, str):
+            if form_type.strip().lower() in {"form 4", "form4"}:
+                form_type = "4"
         days_back = int(payload.get("days_back", 90))
         use_cache = bool(payload.get("use_cache", True))
 
