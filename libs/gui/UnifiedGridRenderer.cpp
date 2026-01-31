@@ -919,72 +919,59 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window()) {
             const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
             const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
-            if (!m_msdfAtlas.isBuilt()) {
-                if (m_whiteGlyphNode) {
-                    m_labelWhiteQuads.clear();
-                    m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
-                }
-                if (m_blackGlyphNode) {
-                    m_labelBlackQuads.clear();
-                    m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
-                }
-            } else {
-                const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-                const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridWidth);
-                const int startX = static_cast<int>(std::floor(baseX));
-                const float fracX = baseX - static_cast<float>(startX);
-                const float baseY = static_cast<float>(srcRect.y());
-                const int startY = static_cast<int>(std::floor(baseY));
-                const float fracY = baseY - static_cast<float>(startY);
+            const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+            const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridWidth);
+            const int startX = static_cast<int>(std::floor(baseX));
+            const float fracX = baseX - static_cast<float>(startX);
+            const float baseY = static_cast<float>(srcRect.y());
+            const int startY = static_cast<int>(std::floor(baseY));
+            const float fracY = baseY - static_cast<float>(startY);
 
-                if (m_labelWhiteQuads.capacity() < 32000) {
-                    m_labelWhiteQuads.reserve(32000);
-                }
-                if (m_labelBlackQuads.capacity() < 32000) {
-                    m_labelBlackQuads.reserve(32000);
-                }
-
-                const bool dollars = (m_liquidityLabelMode != 0);
-                const int latestColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : -1;
-                HeatmapLabelRenderer::buildLabelQuads(snapshot,
-                                                      m_msdfAtlas,
-                                                      m_labelLiquidityRing,
-                                                      m_labelIntensityRing,
-                                                      m_labelLiquidityScales,
-                                                      srcRect,
-                                                      drawRect,
-                                                      startX,
-                                                      startY,
-                                                      fracX,
-                                                      fracY,
-                                                      cellW,
-                                                      cellH,
-                                                      scale,
-                                                      dollars,
-                                                      m_labelWhiteQuads,
-                                                      m_labelBlackQuads,
-                                                      latestColumn);
-
-                if (!m_whiteGlyphNode) {
-                    m_whiteGlyphNode = new MsdfGlyphNode();
-                    m_whiteGlyphNode->setColor(Qt::white);
-                    m_whiteGlyphNode->ensureCapacity(32000);
-                    texNode->appendChildNode(m_whiteGlyphNode);
-                }
-                if (!m_blackGlyphNode) {
-                    m_blackGlyphNode = new MsdfGlyphNode();
-                    m_blackGlyphNode->setColor(Qt::black);
-                    m_blackGlyphNode->ensureCapacity(32000);
-                    texNode->appendChildNode(m_blackGlyphNode);
-                }
-
-                m_whiteGlyphNode->setAtlas(m_msdfAtlas.image(), window());
-                m_whiteGlyphNode->setPxRange(m_msdfAtlas.pxRange());
-                m_blackGlyphNode->setAtlas(m_msdfAtlas.image(), window());
-                m_blackGlyphNode->setPxRange(m_msdfAtlas.pxRange());
-                m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
-                m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
+            if (m_labelWhiteQuads.capacity() < 32000) {
+                m_labelWhiteQuads.reserve(32000);
             }
+            if (m_labelBlackQuads.capacity() < 32000) {
+                m_labelBlackQuads.reserve(32000);
+            }
+
+            const bool dollars = (m_liquidityLabelMode != 0);
+            HeatmapLabelRenderer::buildLabelQuads(snapshot,
+                                                  m_msdfAtlas,
+                                                  m_labelLiquidityRing,
+                                                  m_labelIntensityRing,
+                                                  m_labelLiquidityScales,
+                                                  srcRect,
+                                                  drawRect,
+                                                  startX,
+                                                  startY,
+                                                  fracX,
+                                                  fracY,
+                                                  cellW,
+                                                  cellH,
+                                                  scale,
+                                                  dollars,
+                                                  m_labelWhiteQuads,
+                                                  m_labelBlackQuads);
+
+            if (!m_whiteGlyphNode) {
+                m_whiteGlyphNode = new MsdfGlyphNode();
+                m_whiteGlyphNode->setColor(Qt::white);
+                m_whiteGlyphNode->ensureCapacity(32000);
+                texNode->appendChildNode(m_whiteGlyphNode);
+            }
+            if (!m_blackGlyphNode) {
+                m_blackGlyphNode = new MsdfGlyphNode();
+                m_blackGlyphNode->setColor(Qt::black);
+                m_blackGlyphNode->ensureCapacity(32000);
+                texNode->appendChildNode(m_blackGlyphNode);
+            }
+
+            m_whiteGlyphNode->setAtlas(m_msdfAtlas.image(), window());
+            m_whiteGlyphNode->setPxRange(m_msdfAtlas.pxRange());
+            m_blackGlyphNode->setAtlas(m_msdfAtlas.image(), window());
+            m_blackGlyphNode->setPxRange(m_msdfAtlas.pxRange());
+            m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
+            m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
         } else {
             if (m_whiteGlyphNode) {
                 m_labelWhiteQuads.clear();
@@ -1218,7 +1205,7 @@ QString UnifiedGridRenderer::getLabelRingMemory() const {
     return QString("Label ring: %1 MB").arg(mb, 0, 'f', 2);
 }
 
-QString UnifiedGridRenderer::getGlyphAtlasMemory() const {
+QString UnifiedGridRenderer::getMsdfAtlasMemory() const {
     if (!m_msdfAtlas.isBuilt()) {
         return "MSDF atlas: N/A";
     }

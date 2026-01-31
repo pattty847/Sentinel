@@ -405,7 +405,7 @@ Rectangle {
             }
 
             Text {
-                id: glyphAtlasText
+                id: msdfAtlasText
                 color: "#9ef6ff"
                 font.pixelSize: 10
                 text: "Glyph atlas: N/A"
@@ -424,7 +424,7 @@ Rectangle {
                 ringCursorText.text = "Ring Cursor: " + unifiedGridRenderer.getRingCursorInfo();
                 dirtyRegionsText.text = "Dirty Regions: " + unifiedGridRenderer.getDirtyRegionCount();
                 labelRingText.text = unifiedGridRenderer.getLabelRingMemory();
-                glyphAtlasText.text = unifiedGridRenderer.getGlyphAtlasMemory();
+                msdfAtlasText.text = unifiedGridRenderer.getMsdfAtlasMemory();
             }
         }
     }

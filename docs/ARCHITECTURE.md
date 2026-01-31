@@ -7,7 +7,7 @@ Sentinel is a GPU-accelerated trading terminal built on a mandatory client-serve
 ## Core Principles
 
 - **Client-Server Split**: Ingestion and visualization are decoupled. Server handles data, client handles rendering.
-- **GPU-Resident Rendering**: Heatmaps and labels are rendered directly on GPU via streamed intensity textures and a glyph atlas.
+- **GPU-Resident Rendering**: Heatmaps and labels are rendered directly on GPU via streamed intensity textures and an MSDF atlas.
 - **Hot Path Efficiency**: Pre-aggregated buffers minimize overhead between server and GPU; transport is JSON + base64 today.
 - **Deterministic Threading**: Network I/O (Boost.Beast), aggregation, and rendering run on dedicated threads.
 
@@ -27,7 +27,7 @@ libs/
   gui/
     UnifiedGridRenderer   # GPU pipeline orchestration
     datasources/          # RemoteGridDataSource
-    render/               # GPU nodes + glyph atlas (HeatmapIntensityNode, HeatmapGlyphNode)
+    render/               # GPU nodes + MSDF atlas (HeatmapIntensityNode, MsdfGlyphNode)
     qml/                  # UI components
 ```
 
@@ -58,7 +58,7 @@ WebSocket -> SentinelStreamClient -> RemoteGridDataSource -> DataProcessor -> Un
 - **DataProcessor**: Validates incoming slices, emits to renderer. No local aggregation in remote mode.
 - **UnifiedGridRenderer**: Manages viewport state, ring-buffer uploads, drives `updatePaintNode()`.
 - **HeatmapIntensityNode**: Single-quad QSG material. Samples intensity + palette on GPU.
-- **HeatmapGlyphNode**: QSG node for glyph quads rendered from atlas textures.
+- **MsdfGlyphNode**: QSG node for MSDF glyph quads rendered from atlas textures.
 
 ## Rendering Pipeline
 
@@ -73,10 +73,10 @@ The server produces dense `u8` columns: bids 0-127, asks 128-255.
 ### Client Side
 
 ```
-RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode + HeatmapGlyphNode -> GPU
+RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode + MsdfGlyphNode -> GPU
 ```
 
-The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering; labels come from the glyph atlas.
+The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering; labels come from the MSDF atlas.
 
 ### Key Data Structures
 

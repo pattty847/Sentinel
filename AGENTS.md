@@ -40,7 +40,7 @@ Everything the AI does must protect those three truths.
 Server: Transport → Dispatch → MarketDataCoreEngine → ServerDataModel → HeatmapTwapStreamer
         → SentinelStreamServer → WebSocket
 Client: SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer
-        → HeatmapIntensityNode + HeatmapGlyphNode → GPU
+        → HeatmapIntensityNode + MsdfGlyphNode → GPU
 ```
 
 ### **Invariant**

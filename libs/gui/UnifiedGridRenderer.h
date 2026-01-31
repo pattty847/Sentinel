@@ -236,7 +236,7 @@ public:
     Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
     Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
     Q_INVOKABLE QString getLabelRingMemory() const;      // Label ring memory usage
-    Q_INVOKABLE QString getGlyphAtlasMemory() const;     // MSDF atlas memory usage
+    Q_INVOKABLE QString getMsdfAtlasMemory() const;     // MSDF atlas memory usage
 
     //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);

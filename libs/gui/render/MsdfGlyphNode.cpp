@@ -141,11 +141,14 @@ void MsdfGlyphNode::setAtlas(const QImage& image, QQuickWindow* window) {
 }
 
 void MsdfGlyphNode::setColor(const QColor& color) {
+    const QVector4D vec(color.redF(), color.greenF(), color.blueF(), color.alphaF());
+    if (m_material.color() == vec) return;
     m_material.setColor(color);
     updateMaterial();
 }
 
 void MsdfGlyphNode::setPxRange(float pxRange) {
+    if (m_material.pxRange() == pxRange) return;
     m_material.setPxRange(pxRange);
     updateMaterial();
 }
