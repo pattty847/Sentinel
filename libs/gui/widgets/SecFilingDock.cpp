@@ -77,7 +77,7 @@ void SecFilingDock::buildUi() {
     QGroupBox* transactionsGroup = new QGroupBox("Insider Transactions", m_contentWidget);
     QVBoxLayout* transactionsLayout = new QVBoxLayout();
     m_transactionsTable = new QTableView(transactionsGroup);
-    m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
+    m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Position", "Transaction", "Shares", "Price", "Value"});
     m_transactionsTable->setModel(m_transactionsModel);
     m_transactionsTable->horizontalHeader()->setStretchLastSection(true);
     transactionsLayout->addWidget(m_transactionsTable);
@@ -148,8 +148,11 @@ void SecFilingDock::onTransactionsReady(const QList<SecApiClient::Transaction>& 
     displayTransactions(transactions);
 }
 
-void SecFilingDock::onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics) {
-    displayFinancials(metrics);
+void SecFilingDock::onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics,
+                                      const QString& periodEnd,
+                                      const QString& sourceForm,
+                                      const QString& entityName) {
+    displayFinancials(metrics, periodEnd, sourceForm, entityName);
 }
 
 void SecFilingDock::onApiError(const QString& error) {
@@ -175,29 +178,40 @@ void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
 
 void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
     m_transactionsModel->clear();
-    m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
+    m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Position", "Transaction", "Shares", "Price", "Value"});
     
     for (const auto& tx : transactions) {
         QList<QStandardItem*> row;
         row << new QStandardItem(tx.date);
         row << new QStandardItem(tx.insiderName);
+        row << new QStandardItem(tx.position);
         row << new QStandardItem(tx.transactionType);
         row << new QStandardItem(QString::number(tx.shares));
         row << new QStandardItem(QString::number(tx.price));
+        row << new QStandardItem(QString::number(tx.value));
         m_transactionsModel->appendRow(row);
     }
 }
 
-void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics) {
-    QString text = "Financial Summary\n\n";
-    for (const auto& metric : metrics) {
-        QString value = metric.value;
-        if (!metric.unit.isEmpty()) {
-            value += " " + metric.unit;
-        }
-        text += QString("%1: %2\n").arg(metric.name, value);
+void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics,
+                                      const QString& periodEnd,
+                                      const QString& sourceForm,
+                                      const QString& entityName) {
+    QString text;
+    if (!entityName.isEmpty()) {
+        text += QString("%1\n").arg(entityName);
     }
-    
+    if (!periodEnd.isEmpty() || !sourceForm.isEmpty()) {
+        text += QString("Period End: %1    Source: %2\n").arg(periodEnd, sourceForm);
+    }
+    text += "\nFinancial Summary\n\n";
+    for (const auto& metric : metrics) {
+        QString line = QString("%1: %2").arg(metric.name, metric.value);
+        if (!metric.periodType.isEmpty() || !metric.period.isEmpty() || !metric.form.isEmpty()) {
+            line += QString("   (%1 %2 %3)").arg(metric.periodType, metric.period, metric.form);
+        }
+        text += line + "\n";
+    }
     m_financialsDisplay->setPlainText(text);
 }
 

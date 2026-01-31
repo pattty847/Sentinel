@@ -1,312 +1,247 @@
 #include "SecApiClient.hpp"
-#include <QCoreApplication>
-#include <QDir>
-#include <QFileInfo>
-#include <QStandardPaths>
-#include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QJsonParseError>
+#include <QNetworkRequest>
 
 SecApiClient::SecApiClient(QObject* parent)
     : QObject(parent)
-    , m_pythonProcess(nullptr)
-    , m_pythonReady(false)
-    , m_initTimer(new QTimer(this))
+    , m_network(new QNetworkAccessManager(this))
+    , m_serverReady(false)
 {
-    initializePython();
+    initializeServer();
 }
 
-SecApiClient::~SecApiClient() {
-    if (m_pythonProcess) {
-        m_pythonProcess->kill();
-        m_pythonProcess->waitForFinished(3000);
-    }
-}
+SecApiClient::~SecApiClient() = default;
 
-void SecApiClient::initializePython() {
-    emit statusUpdate("Initializing SEC API...");
-    
-    // Test if we can import the SEC module
-    QString testCommand = QString(
-        "import sys; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "print('SEC_API_READY')"
-    ).arg(getSecModulePath());
-    
-    m_currentOperation = "init";
-    executePythonCommand(testCommand, "init");
+void SecApiClient::initializeServer() {
+    emit statusUpdate("Checking SEC backend...");
+
+    QNetworkRequest request(QUrl(baseUrl() + "/sec/ping"));
+    auto* reply = m_network->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const QByteArray payload = reply->readAll();
+        const bool networkOk = reply->error() == QNetworkReply::NoError;
+        const QString networkError = reply->errorString();
+        reply->deleteLater();
+
+        if (!networkOk) {
+            m_serverReady = false;
+            emit apiError("SEC backend not reachable: " + networkError);
+            return;
+        }
+
+        QJsonParseError error;
+        const QJsonDocument doc = QJsonDocument::fromJson(payload, &error);
+        if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+            m_serverReady = false;
+            emit apiError("SEC backend returned invalid JSON");
+            return;
+        }
+
+        const QJsonObject obj = doc.object();
+        if (!obj.value("ok").toBool()) {
+            m_serverReady = false;
+            emit apiError("SEC backend not ready");
+            return;
+        }
+
+        m_serverReady = true;
+        emit statusUpdate("SEC backend ready");
+    });
 }
 
 void SecApiClient::fetchFilings(const QString& ticker, const QString& formType) {
-    if (!m_pythonReady) {
-        emit apiError("SEC API not ready");
+    if (ticker.trimmed().isEmpty()) {
+        emit apiError("Ticker required");
         return;
     }
-    
-    emit statusUpdate(QString("Fetching %1 filings for %2...").arg(formType.isEmpty() ? "all" : formType, ticker));
 
-    QStringList args;
-    args << ticker;
-    if (!formType.isEmpty()) {
-        args << formType;
+    QJsonObject payload;
+    payload["ticker"] = ticker.trimmed().toUpper();
+    QString normalizedForm = formType.trimmed();
+    if (normalizedForm == "Form 4") {
+        normalizedForm = "4";
+    }
+    if (!normalizedForm.isEmpty() && normalizedForm != "All") {
+        payload["form_type"] = normalizedForm;
     }
 
-    runSecScript("sec/sec_fetch_filings.py", args, "filings");
+    emit statusUpdate(QString("Fetching filings for %1...").arg(ticker.trimmed().toUpper()));
+    postJson("/sec/filings", payload, "filings");
 }
 
 void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
-    if (!m_pythonReady) {
-        emit apiError("SEC API not ready");
+    if (ticker.trimmed().isEmpty()) {
+        emit apiError("Ticker required");
         return;
     }
-    
-    emit statusUpdate(QString("Fetching insider transactions for %1...").arg(ticker));
 
-    QStringList args;
-    args << ticker;
+    QJsonObject payload;
+    payload["ticker"] = ticker.trimmed().toUpper();
 
-    runSecScript("sec/sec_fetch_transactions.py", args, "transactions");
+    emit statusUpdate(QString("Fetching insider transactions for %1...").arg(ticker.trimmed().toUpper()));
+    postJson("/sec/insider", payload, "transactions");
 }
 
 void SecApiClient::fetchFinancialSummary(const QString& ticker) {
-    if (!m_pythonReady) {
-        emit apiError("SEC API not ready");
-        return;
-    }
-    
-    emit statusUpdate(QString("Fetching financial summary for %1...").arg(ticker));
-
-    QStringList args;
-    args << ticker;
-
-    runSecScript("sec/sec_fetch_financials.py", args, "financials");
-}
-
-void SecApiClient::executePythonCommand(const QString& command, const QString& operation) {
-    if (m_pythonProcess && m_pythonProcess->state() != QProcess::NotRunning) {
-        m_pythonProcess->kill();
-        m_pythonProcess->waitForFinished(1000);
-    }
-    
-    if (m_pythonProcess) {
-        m_pythonProcess->deleteLater();
-    }
-    
-    m_pythonProcess = new QProcess(this);
-    connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &SecApiClient::onPythonFinished);
-    connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
-    
-    QStringList args;
-    args << "-c" << command;
-
-    QString pythonExe = getPythonExecutable();
-    m_pythonProcess->start(pythonExe, args);
-}
-
-void SecApiClient::runSecScript(const QString& scriptName,
-                                const QStringList& args,
-                                const QString& operation) {
-    if (m_pythonProcess && m_pythonProcess->state() != QProcess::NotRunning) {
-        m_pythonProcess->kill();
-        m_pythonProcess->waitForFinished(1000);
-    }
-
-    if (m_pythonProcess) {
-        m_pythonProcess->deleteLater();
-    }
-
-    m_pythonProcess = new QProcess(this);
-    connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &SecApiClient::onPythonFinished);
-    connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
-
-    QString pythonExe = getPythonExecutable();
-    QString scriptsPath = getScriptsPath();
-    QString scriptPath = QDir(scriptsPath).absoluteFilePath(scriptName);
-
-    QStringList fullArgs;
-    fullArgs << scriptPath;
-    fullArgs << args;
-
-    m_currentOperation = operation;
-    m_pythonProcess->start(pythonExe, fullArgs);
-}
-
-void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus) {
-    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-        QString error = QString("Python process failed (exit code %1): %2")
-                       .arg(exitCode)
-                       .arg(m_pythonProcess->readAllStandardError());
-        emit apiError(error);
+    if (ticker.trimmed().isEmpty()) {
+        emit apiError("Ticker required");
         return;
     }
 
-    QString output = m_pythonProcess->readAllStandardOutput();
-    
-    if (m_currentOperation == "init") {
-        if (output.contains("SEC_API_READY")) {
-            m_pythonReady = true;
-            emit statusUpdate("SEC API ready");
-        } else {
-            emit apiError("Failed to initialize SEC API: " + output);
-        }
-        return;
-    }
-    
-    // Parse data outputs
-    if (output.contains("FILINGS_DATA:")) {
-        QString jsonStr = output.mid(output.indexOf("FILINGS_DATA:") + 13).trimmed();
-        parseFilingsData(jsonStr);
-    }
-    else if (output.contains("TRANSACTIONS_DATA:")) {
-        QString jsonStr = output.mid(output.indexOf("TRANSACTIONS_DATA:") + 18).trimmed();
-        parseTransactionsData(jsonStr);
-    }
-    else if (output.contains("FINANCIALS_DATA:")) {
-        QString jsonStr = output.mid(output.indexOf("FINANCIALS_DATA:") + 16).trimmed();
-        parseFinancialsData(jsonStr);
-    }
-    else {
-        emit apiError("Unexpected output: " + output);
-    }
+    QJsonObject payload;
+    payload["ticker"] = ticker.trimmed().toUpper();
+
+    emit statusUpdate(QString("Fetching financial summary for %1...").arg(ticker.trimmed().toUpper()));
+    postJson("/sec/financials", payload, "financials");
 }
 
-void SecApiClient::onPythonError(QProcess::ProcessError error) {
-    QString errorString = QString("Python process error (%1): %2")
-                         .arg(error)
-                         .arg(m_pythonProcess->errorString());
-    emit apiError(errorString);
+void SecApiClient::postJson(const QString& path, const QJsonObject& payload, const QString& operation) {
+    QNetworkRequest request(QUrl(baseUrl() + path));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    auto* reply = m_network->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, operation]() {
+        handleReply(reply, operation);
+    });
 }
 
-QString SecApiClient::getPythonExecutable() const {
-    // Try to use the venv python first
-    QDir currentDir = QDir::current();
-    QString venvPython = currentDir.absoluteFilePath(".venv/Scripts/python.exe");
-    
-    if (QFileInfo::exists(venvPython)) {
-        return venvPython;
-    }
-    
-    // Fallback to system python
-    #ifdef Q_OS_WIN
-    return "python";
-    #else
-    return "python3";
-    #endif
-}
+void SecApiClient::handleReply(QNetworkReply* reply, const QString& operation) {
+    const QByteArray payload = reply->readAll();
+    const bool networkOk = reply->error() == QNetworkReply::NoError;
+    const QString networkError = reply->errorString();
+    reply->deleteLater();
 
-QString SecApiClient::getSecModulePath() const {
-    // Return scripts directory so that scripts/sec/ can be imported as sec
-    return getScriptsPath();
-}
-
-QString SecApiClient::getScriptsPath() const {
-    // 1) Try alongside the application binary: <appDir>/scripts
-    QString appDir = QCoreApplication::applicationDirPath();
-    QDir dir(appDir);
-    if (dir.cd("scripts")) {
-        return dir.absolutePath();
-    }
-
-    // 2) Try current working directory: ./scripts
-    dir = QDir(QDir::current());
-    if (dir.cd("scripts")) {
-        return dir.absolutePath();
-    }
-
-    // 3) Try one level up from the application dir: <appDir>/../scripts
-    dir = QDir(appDir);
-    if (dir.cdUp() && dir.cd("scripts")) {
-        return dir.absolutePath();
-    }
-
-    // Fallback: relative to current directory
-    return QDir::current().absoluteFilePath("scripts");
-}
-
-void SecApiClient::parseFilingsData(const QString& jsonStr) {
     QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
-    
-    if (error.error != QJsonParseError::NoError) {
-        emit apiError("Failed to parse filings data: " + error.errorString());
+    const QJsonDocument doc = QJsonDocument::fromJson(payload, &error);
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+        emit apiError("SEC backend invalid JSON response");
         return;
     }
-    
+
+    const QJsonObject obj = doc.object();
+    if (!networkOk || !obj.value("ok").toBool(true)) {
+        const QString detail = obj.value("error").toString();
+        emit apiError(detail.isEmpty() ? networkError : detail);
+        return;
+    }
+
+    if (operation == "filings") {
+        parseFilingsData(obj);
+    } else if (operation == "transactions") {
+        parseTransactionsData(obj);
+    } else if (operation == "financials") {
+        parseFinancialsData(obj);
+    } else {
+        emit apiError("Unknown SEC operation");
+    }
+}
+
+QString SecApiClient::baseUrl() const {
+    const QByteArray portEnv = qgetenv("SENTINEL_SEC_PORT");
+    bool ok = false;
+    const int portValue = portEnv.toInt(&ok);
+    const int port = (ok && portValue > 0) ? portValue : 17110;
+    return QString("http://127.0.0.1:%1").arg(port);
+}
+
+void SecApiClient::parseFilingsData(const QJsonObject& obj) {
+    const QJsonArray array = obj.value("data").toArray();
     QList<Filing> filings;
-    QJsonArray array = doc.array();
-    
+    filings.reserve(array.size());
+
     for (const QJsonValue& value : array) {
-        QJsonObject obj = value.toObject();
+        const QJsonObject filingObj = value.toObject();
         Filing filing;
-        filing.date = obj["filingDate"].toString();
-        filing.formType = obj["form"].toString();
-        filing.description = obj["description"].toString();
-        filing.url = obj["url"].toString();
+        filing.accessionNo = filingObj.value("accession_no").toString();
+        filing.date = filingObj.value("filing_date").toString();
+        filing.formType = filingObj.value("form").toString();
+        filing.reportDate = filingObj.value("report_date").toString();
+        filing.description = filingObj.value("primary_document_description").toString();
+        filing.url = filingObj.value("url").toString();
+        filing.primaryDocument = filingObj.value("primary_document").toString();
+        if (filing.description.isEmpty()) {
+            filing.description = filing.primaryDocument;
+        }
         filings.append(filing);
     }
-    
+
     emit filingsReady(filings);
     emit statusUpdate(QString("Loaded %1 filings").arg(filings.size()));
 }
 
-void SecApiClient::parseTransactionsData(const QString& jsonStr) {
-    QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
-    
-    if (error.error != QJsonParseError::NoError) {
-        emit apiError("Failed to parse transactions data: " + error.errorString());
-        return;
-    }
-    
+void SecApiClient::parseTransactionsData(const QJsonObject& obj) {
+    const QJsonArray array = obj.value("data").toArray();
     QList<Transaction> transactions;
-    QJsonArray array = doc.array();
-    
+    transactions.reserve(array.size());
+
     for (const QJsonValue& value : array) {
-        QJsonObject obj = value.toObject();
+        const QJsonObject txObj = value.toObject();
         Transaction tx;
-        tx.date = obj["transactionDate"].toString();
-        tx.insiderName = obj["insiderName"].toString();
-        tx.transactionType = obj["transactionType"].toString();
-        tx.shares = obj["shares"].toDouble();
-        tx.price = obj["price"].toDouble();
+        tx.date = txObj.value("date").toString();
+        tx.insiderName = txObj.value("filer").toString();
+        tx.position = txObj.value("position").toString();
+        tx.transactionType = txObj.value("type").toString();
+        tx.shares = txObj.value("shares").toDouble();
+        tx.price = txObj.value("price").toDouble();
+        tx.value = txObj.value("value").toDouble();
+        tx.formUrl = txObj.value("form_url").toString();
+        tx.primaryDocument = txObj.value("primary_document").toString();
         transactions.append(tx);
     }
-    
+
     emit transactionsReady(transactions);
     emit statusUpdate(QString("Loaded %1 transactions").arg(transactions.size()));
 }
 
-void SecApiClient::parseFinancialsData(const QString& jsonStr) {
-    QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
-    
-    if (error.error != QJsonParseError::NoError) {
-        emit apiError("Failed to parse financials data: " + error.errorString());
-        return;
+static QString formatMetricValue(const QJsonValue& value) {
+    if (value.isString()) {
+        return value.toString();
     }
-    
+    if (value.isDouble()) {
+        return QString::number(value.toDouble(), 'g', 12);
+    }
+    return QString();
+}
+
+void SecApiClient::parseFinancialsData(const QJsonObject& obj) {
+    const QJsonObject dataObj = obj.value("data").toObject();
     QList<FinancialMetric> metrics;
-    QJsonObject obj = doc.object();
-    
-    for (auto it = obj.begin(); it != obj.end(); ++it) {
+
+    const QString entityName = dataObj.value("entityName").toString();
+    const QString periodEnd = dataObj.value("period_end").toString();
+    const QString sourceForm = dataObj.value("source_form").toString();
+
+    const QStringList metaKeys = {"ticker", "entityName", "cik", "source_form", "period_end"};
+
+    for (auto it = dataObj.begin(); it != dataObj.end(); ++it) {
+        if (metaKeys.contains(it.key())) {
+            continue;
+        }
+        const QJsonObject metricObj = it.value().toObject();
+        const QJsonArray quarterly = metricObj.value("quarterly").toArray();
+        const QJsonArray annual = metricObj.value("annual").toArray();
+
+        QJsonObject entry;
+        QString periodType;
+        if (!quarterly.isEmpty()) {
+            entry = quarterly.first().toObject();
+            periodType = "quarterly";
+        } else if (!annual.isEmpty()) {
+            entry = annual.first().toObject();
+            periodType = "annual";
+        }
+
         FinancialMetric metric;
         metric.name = it.key();
-        if (it.value().isString()) {
-            metric.value = it.value().toString();
-            metric.unit = "";
-        } else if (it.value().isObject()) {
-            QJsonObject metricObj = it.value().toObject();
-            metric.value = metricObj["value"].toString();
-            metric.unit = metricObj["unit"].toString();
-        } else {
-            metric.value = QString::number(it.value().toDouble());
-            metric.unit = "";
-        }
+        metric.period = entry.value("period").toString();
+        metric.form = entry.value("form").toString();
+        metric.periodType = periodType;
+        metric.value = formatMetricValue(entry.value("value"));
         metrics.append(metric);
     }
-    
-    emit financialsReady(metrics);
+
+    emit financialsReady(metrics, periodEnd, sourceForm, entityName);
     emit statusUpdate("Financial summary loaded");
 }

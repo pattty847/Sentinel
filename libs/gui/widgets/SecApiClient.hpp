@@ -3,15 +3,12 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
-#include <QJsonObject>
-#include <QJsonArray>
 #include <QJsonDocument>
-#include <QProcess>
-#include <QTimer>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 
 /**
- * Direct Python SEC API client that runs helper scripts via subprocess.
- * Replaces the microservice approach with direct subprocess calls to scripts/sec_fetch_*.py.
+ * SEC API client that talks to the local server endpoints.
  */
 class SecApiClient : public QObject {
     Q_OBJECT
@@ -21,27 +18,36 @@ public:
     ~SecApiClient();
 
     struct Filing {
+        QString accessionNo;
         QString date;
         QString formType;
+        QString reportDate;
         QString description;
         QString url;
+        QString primaryDocument;
     };
 
     struct Transaction {
         QString date;
         QString insiderName;
+        QString position;
         QString transactionType;
         double shares;
         double price;
+        double value;
+        QString formUrl;
+        QString primaryDocument;
     };
 
     struct FinancialMetric {
         QString name;
         QString value;
-        QString unit;
+        QString period;
+        QString form;
+        QString periodType;
     };
 
-    bool isReady() const { return m_pythonReady; }
+    bool isReady() const { return m_serverReady; }
 
 public slots:
     void fetchFilings(const QString& ticker, const QString& formType = QString());
@@ -51,27 +57,22 @@ public slots:
 signals:
     void filingsReady(const QList<Filing>& filings);
     void transactionsReady(const QList<Transaction>& transactions);
-    void financialsReady(const QList<FinancialMetric>& metrics);
+    void financialsReady(const QList<FinancialMetric>& metrics,
+                         const QString& periodEnd,
+                         const QString& sourceForm,
+                         const QString& entityName);
     void apiError(const QString& error);
     void statusUpdate(const QString& message);
 
-private slots:
-    void onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onPythonError(QProcess::ProcessError error);
-
 private:
-    void initializePython();
-    void executePythonCommand(const QString& command, const QString& operation);
-    void runSecScript(const QString& scriptName, const QStringList& args, const QString& operation);
-    QString getPythonExecutable() const;
-    QString getSecModulePath() const;
-    QString getScriptsPath() const;
-    void parseFilingsData(const QString& jsonStr);
-    void parseTransactionsData(const QString& jsonStr);
-    void parseFinancialsData(const QString& jsonStr);
+    void initializeServer();
+    void postJson(const QString& path, const QJsonObject& payload, const QString& operation);
+    void handleReply(QNetworkReply* reply, const QString& operation);
+    QString baseUrl() const;
+    void parseFilingsData(const QJsonObject& obj);
+    void parseTransactionsData(const QJsonObject& obj);
+    void parseFinancialsData(const QJsonObject& obj);
 
-    QProcess* m_pythonProcess;
-    QString m_currentOperation;
-    bool m_pythonReady;
-    QTimer* m_initTimer;
+    QNetworkAccessManager* m_network;
+    bool m_serverReady;
 };

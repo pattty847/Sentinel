@@ -9,10 +9,6 @@
 #include <QTextEdit>
 #include <QLabel>
 #include <QStandardItemModel>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QJsonDocument>
-#include <QHash>
 
 /**
  * SEC Filing Viewer dock widget.
@@ -33,7 +29,10 @@ private slots:
     void fetchFinancialSummary();
     void onFilingsReady(const QList<SecApiClient::Filing>& filings);
     void onTransactionsReady(const QList<SecApiClient::Transaction>& transactions);
-    void onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics);
+    void onFinancialsReady(const QList<SecApiClient::FinancialMetric>& metrics,
+                           const QString& periodEnd,
+                           const QString& sourceForm,
+                           const QString& entityName);
     void onApiError(const QString& error);
     void onStatusUpdate(const QString& message);
 
@@ -41,7 +40,10 @@ private:
     void updateStatus(const QString& message, bool isError = false);
     void displayFilings(const QList<SecApiClient::Filing>& filings);
     void displayTransactions(const QList<SecApiClient::Transaction>& transactions);
-    void displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics);
+    void displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics,
+                           const QString& periodEnd,
+                           const QString& sourceForm,
+                           const QString& entityName);
     
     SecApiClient* m_apiClient;
     
