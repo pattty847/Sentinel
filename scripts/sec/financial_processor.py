@@ -69,26 +69,36 @@ class FinancialDataProcessor:
         fp = entry.get('fp', '')
         fy = entry.get('fy')
         
-        # Prioritize frame field if available
-        if frame:
-            # Check for quarterly pattern: CY2023Q3 or CY2023Q3I
-            quarterly_match = re.match(r'CY(\d{4})Q(\d)', frame)
-            if quarterly_match:
-                year = quarterly_match.group(1)
-                quarter = quarterly_match.group(2)
-                return f"Q{quarter} {year}"
-            
-            # Check for annual pattern: CY2023
-            annual_match = re.match(r'CY(\d{4})$', frame)
-            if annual_match:
-                return annual_match.group(1)
-        
-        # Fall back to fp + fy
+        # Prefer fiscal period fields (fp/fy) when present.
+        #
+        # SEC `frame` values are calendar-year based (CY2024Q2, etc.). For companies
+        # with non-calendar fiscal years (e.g., AAPL), using `frame` produces
+        # misleading labels and "duplicate-looking" quarters. fp/fy aligns with the
+        # company's fiscal calendar.
         if fp and fy:
             if fp.startswith('Q'):
                 return f"{fp} {fy}"
             elif fp == 'FY':
+                # For FY entries, the fiscal year is often equal to the end-date year
+                # (and `fy` can be inconsistent across company facts entries).
+                end_date = entry.get('end') or entry.get('date')
+                if isinstance(end_date, str) and len(end_date) >= 4:
+                    return end_date[:4]
                 return str(fy)
+
+        # Fall back to `frame` if fiscal period fields are missing.
+        if frame:
+            # Check for quarterly pattern: CY2023Q3 or CY2023Q3I
+            quarterly_match = re.match(r"CY(\d{4})Q(\d)", frame)
+            if quarterly_match:
+                year = quarterly_match.group(1)
+                quarter = quarterly_match.group(2)
+                return f"Q{quarter} {year}"
+
+            # Check for annual pattern: CY2023
+            annual_match = re.match(r"CY(\d{4})$", frame)
+            if annual_match:
+                return annual_match.group(1)
         
         # Last resort: just return the year
         if fy:
@@ -252,7 +262,11 @@ class FinancialDataProcessor:
         # Group by (period, end_date)
         grouped = {}
         for entry in entries:
-            key = (entry.get('period'), entry.get('date'))
+            # Prefer a stable key based on fiscal period code + end date.
+            # Some company facts entries can carry inconsistent `fy` values for the same
+            # end date (e.g., AAPL), which makes `period` strings diverge even when the
+            # underlying point is the same. Grouping by (fp,end) collapses those.
+            key = (entry.get('fp') or entry.get('period'), entry.get('date'))
             if key not in grouped:
                 grouped[key] = []
             grouped[key].append(entry)
@@ -344,12 +358,20 @@ class FinancialDataProcessor:
 
             # Collect data from all units (USD, shares, etc.)
             all_entries = []
+
+            # Keep the financial time series focused on core forms.
+            # (8-K and other forms can inject partial/YTD/one-off values.)
+            allowed_forms = {"10-Q", "10-K"}
+
             for unit_name, unit_data in units.items():
                 if not isinstance(unit_data, list):
                     continue
                 
                 for entry in unit_data:
                     if not entry or 'val' not in entry or 'end' not in entry:
+                        continue
+
+                    if entry.get('form') and entry.get('form') not in allowed_forms:
                         continue
                     
                     # Create formatted entry (include start for duration calculation)
@@ -510,7 +532,7 @@ class FinancialDataProcessor:
 
         # Iterate through the required metrics defined in the mapping
         for metric_key, (taxonomy, concept_tag) in self.KEY_FINANCIAL_SUMMARY_METRICS.items():
-            fact_history = self._get_fact_history(company_facts, taxonomy, concept_tag)
+            fact_history = self._get_fact_history(company_facts, taxonomy, concept_tag, metric_key=metric_key)
 
             if fact_history:
                 has_data = True
