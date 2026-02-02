@@ -72,16 +72,14 @@ cmake --build --preset linux-gcc -j
 Server:
 
 ```
-SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/bin/sentinel-server
+./build/linux-gcc/bin/sentinel-server
 ```
 
 GUI Client:
 
 ```
-SENTINEL_HEATMAP_TF=100 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+./build/linux-gcc/apps/sentinel_gui/sentinel_gui
 ```
-
-Client requires a server connection; `SENTINEL_HEATMAP_TF` must match on both.
 
 ---
 
@@ -161,4 +159,5 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 ## License
 
 AGPL-3.0
+
 
