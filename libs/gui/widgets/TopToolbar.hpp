@@ -1,6 +1,5 @@
 #pragma once
 #include <QToolBar>
-#include <QActionGroup>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSlider>
@@ -35,7 +34,6 @@ private:
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
 
     QLineEdit* m_symbolSearch = nullptr;
-    QActionGroup* m_chartModeGroup = nullptr;
     QComboBox* m_timeframeCombo = nullptr;
     QComboBox* m_chartTypeCombo = nullptr;
     QSlider* m_liquiditySlider = nullptr;

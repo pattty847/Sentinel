@@ -9,7 +9,6 @@
 
 TopToolbar::TopToolbar(QWidget* parent)
     : QToolBar(parent)
-    , m_chartModeGroup(new QActionGroup(this))
 {
     setMovable(false);
     setFloatable(false);
@@ -27,29 +26,25 @@ TopToolbar::TopToolbar(QWidget* parent)
     addWidget(m_symbolSearch);
 
     m_subscribeButton = new QToolButton(this);
-    m_subscribeButton->setIcon(QIcon(":/icons/icon-search.svg"));
+    m_subscribeButton->setIcon(QIcon(":/svg/search.svg"));
     m_subscribeButton->setToolTip("Subscribe");
     addWidget(m_subscribeButton);
     connect(m_subscribeButton, &QToolButton::clicked, this, &TopToolbar::subscribeRequested);
 
     addSeparator();
 
-    m_chartModeGroup->setExclusive(true);
-    auto* heatmapAction = addAction(QIcon(":/icons/icon-heatmap.svg"), "Heatmap");
+    // Chart mode toggles (all independent, can combine)
+    auto* candleAction = addAction(QIcon(":/svg/candlestick_chart.svg"), "Candles");
+    candleAction->setCheckable(true);
+    auto* heatmapAction = addAction(QIcon(":/svg/grid_view.svg"), "Heatmap");
     heatmapAction->setCheckable(true);
     heatmapAction->setChecked(true);
-    auto* candleAction = addAction(QIcon(":/icons/icon-candles.svg"), "Candles");
-    candleAction->setCheckable(true);
-    auto* hybridAction = addAction(QIcon(":/icons/icon-hybrid.svg"), "Both");
-    hybridAction->setCheckable(true);
+    auto* tpoAction = addAction(QIcon(":/svg/tpo_chart.svg"), "TPO");
+    tpoAction->setCheckable(true);
 
-    m_chartModeGroup->addAction(heatmapAction);
-    m_chartModeGroup->addAction(candleAction);
-    m_chartModeGroup->addAction(hybridAction);
-
-    connect(heatmapAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::ORDER_BOOK_HEATMAP); });
     connect(candleAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::TRADITIONAL_CANDLES); });
-    connect(hybridAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::HYBRID_CANDLES_TRADES); });
+    connect(heatmapAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::ORDER_BOOK_HEATMAP); });
+    connect(tpoAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::HYBRID_CANDLES_TRADES); });
 
     addSeparator();
 
@@ -96,15 +91,15 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     addSeparator();
 
-    QAction* indicatorsAction = addIconAction(":/icons/icon-indicators.svg", "Indicators", "Indicators");
-    QAction* layoutsAction = addIconAction(":/icons/icon-layout.svg", "Layouts", "Layouts");
+    QAction* indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators");
+    QAction* layoutsAction = addIconAction(":/svg/layout.svg", "Layouts", "Layouts");
 
     addSeparator();
 
-    QAction* quickSearchAction = addIconAction(":/icons/icon-search.svg", "Quick Search", "Quick Search");
-    QAction* settingsAction = addIconAction(":/icons/icon-settings.svg", "Settings", "Settings");
-    QAction* fullscreenAction = addIconAction(":/icons/icon-fullscreen.svg", "Fullscreen", "Toggle Fullscreen");
-    QAction* screenshotAction = addIconAction(":/icons/icon-camera.svg", "Screenshot", "Screenshot");
+    QAction* quickSearchAction = addIconAction(":/svg/search.svg", "Quick Search", "Quick Search");
+    QAction* settingsAction = addIconAction(":/svg/settings.svg", "Settings", "Settings");
+    QAction* fullscreenAction = addIconAction(":/svg/full_screen.svg", "Fullscreen", "Toggle Fullscreen");
+    QAction* screenshotAction = addIconAction(":/svg/camera.svg", "Screenshot", "Screenshot");
 
     connect(indicatorsAction, &QAction::triggered, this, &TopToolbar::indicatorsRequested);
     connect(layoutsAction, &QAction::triggered, this, &TopToolbar::layoutsRequested);

@@ -95,7 +95,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
 
     // Register resources embedded in the static GUI library.
-    Q_INIT_RESOURCE(sentinel_ui_resources);
+    Q_INIT_RESOURCE(sentinel_svg_resources);
     Q_INIT_RESOURCE(sentinel_ui_fonts);
 
     // Initialize and apply theme

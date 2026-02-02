@@ -3,6 +3,9 @@
 **Source of truth for all AI assistants working on Sentinel.**
 Claude, Gemini, Cursor, ChatGPT must follow this file.
 
+Machine: Windows 11
+Build: cmake --build --preset windows-msvc-vs
+
 ---
 
 # **1. Mission**

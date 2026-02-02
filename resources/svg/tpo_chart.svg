@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+     viewBox="0 0 24 24" fill="none">
+  <!-- frame -->
+  <rect x="3" y="3" width="18" height="18" rx="2"
+        stroke="#FFFFFF" stroke-width="1.4"/>
+
+  <!-- TPO profile: expand -> POC -> contract -->
+  <rect x="7" y="5"  width="4"  height="2" rx="0.6" fill="#FFFFFF"/>   
+  <rect x="7" y="8"  width="6"  height="2" rx="0.6" fill="#FFFFFF"/>  
+  <rect x="7" y="11" width="9" height="2" rx="0.6" fill="#FFFFFF"/> 
+  <rect x="7" y="14" width="6"  height="2" rx="0.6" fill="#FFFFFF"/> 
+  <rect x="7" y="17" width="4"  height="2" rx="0.6" fill="#FFFFFF"/>
+</svg>

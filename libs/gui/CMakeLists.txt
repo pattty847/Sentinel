@@ -114,20 +114,21 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/controls/ChartToolRail.qml
 )
 
-set(SENTINEL_ICON_DIR "${CMAKE_SOURCE_DIR}/resources/icons")
-set(SENTINEL_ICON_FILES
-    "${SENTINEL_ICON_DIR}/icon-search.svg"
-    "${SENTINEL_ICON_DIR}/icon-heatmap.svg"
-    "${SENTINEL_ICON_DIR}/icon-candles.svg"
-    "${SENTINEL_ICON_DIR}/icon-hybrid.svg"
-    "${SENTINEL_ICON_DIR}/icon-timeframe.svg"
-    "${SENTINEL_ICON_DIR}/icon-indicators.svg"
-    "${SENTINEL_ICON_DIR}/icon-layout.svg"
-    "${SENTINEL_ICON_DIR}/icon-settings.svg"
-    "${SENTINEL_ICON_DIR}/icon-fullscreen.svg"
-    "${SENTINEL_ICON_DIR}/icon-camera.svg"
-    "${SENTINEL_ICON_DIR}/icon-watchlist.svg"
-    "${SENTINEL_ICON_DIR}/icon-draw.svg"
+set(SENTINEL_SVG_DIR "${CMAKE_SOURCE_DIR}/resources/svg")
+set(SENTINEL_SVG_FILES
+    "${SENTINEL_SVG_DIR}/browse.svg"
+    "${SENTINEL_SVG_DIR}/camera.svg"
+    "${SENTINEL_SVG_DIR}/candlestick_chart.svg"
+    "${SENTINEL_SVG_DIR}/full_screen.svg"
+    "${SENTINEL_SVG_DIR}/grid_view.svg"
+    "${SENTINEL_SVG_DIR}/indicators.svg"
+    "${SENTINEL_SVG_DIR}/layout.svg"
+    "${SENTINEL_SVG_DIR}/line_chart.svg"
+    "${SENTINEL_SVG_DIR}/record.svg"
+    "${SENTINEL_SVG_DIR}/reset_settings.svg"
+    "${SENTINEL_SVG_DIR}/search.svg"
+    "${SENTINEL_SVG_DIR}/settings.svg"
+    "${SENTINEL_SVG_DIR}/tpo_chart.svg"
 )
 
 set(SENTINEL_FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts/RobotoMono")
@@ -148,19 +149,6 @@ set(SENTINEL_FONT_FILES
     "${SENTINEL_FONT_DIR}/RobotoMono-ThinItalic.ttf"
 )
 
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-search.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-search.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-heatmap.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-heatmap.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-candles.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-candles.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-hybrid.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-hybrid.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-timeframe.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-timeframe.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-indicators.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-indicators.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-layout.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-layout.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-settings.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-settings.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-fullscreen.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-fullscreen.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-camera.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-camera.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-watchlist.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-watchlist.svg")
-set_source_files_properties("${SENTINEL_ICON_DIR}/icon-draw.svg" PROPERTIES QT_RESOURCE_ALIAS "icon-draw.svg")
-
 set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Regular.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Regular.ttf")
 set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Medium.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Medium.ttf")
 set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-Bold.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-Bold.ttf")
@@ -176,10 +164,24 @@ set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-SemiBoldItalic.ttf"
 set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-ExtraLightItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-ExtraLightItalic.ttf")
 set_source_files_properties("${SENTINEL_FONT_DIR}/RobotoMono-ThinItalic.ttf" PROPERTIES QT_RESOURCE_ALIAS "fonts/RobotoMono/RobotoMono-ThinItalic.ttf")
 
-qt_add_resources(sentinel_gui_lib sentinel_ui_resources
-    PREFIX "/icons"
+set_source_files_properties("${SENTINEL_SVG_DIR}/browse.svg" PROPERTIES QT_RESOURCE_ALIAS "browse.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/camera.svg" PROPERTIES QT_RESOURCE_ALIAS "camera.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/candlestick_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "candlestick_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/full_screen.svg" PROPERTIES QT_RESOURCE_ALIAS "full_screen.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/grid_view.svg" PROPERTIES QT_RESOURCE_ALIAS "grid_view.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/indicators.svg" PROPERTIES QT_RESOURCE_ALIAS "indicators.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/layout.svg" PROPERTIES QT_RESOURCE_ALIAS "layout.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/line_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "line_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/record.svg" PROPERTIES QT_RESOURCE_ALIAS "record.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/reset_settings.svg" PROPERTIES QT_RESOURCE_ALIAS "reset_settings.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/search.svg" PROPERTIES QT_RESOURCE_ALIAS "search.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/settings.svg" PROPERTIES QT_RESOURCE_ALIAS "settings.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/tpo_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "tpo_chart.svg")
+
+qt_add_resources(sentinel_gui_lib sentinel_svg_resources
+    PREFIX "/svg"
     FILES
-        ${SENTINEL_ICON_FILES}
+        ${SENTINEL_SVG_FILES}
 )
 
 qt_add_resources(sentinel_gui_lib sentinel_ui_fonts
