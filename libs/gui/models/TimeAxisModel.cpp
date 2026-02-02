@@ -66,11 +66,7 @@ void TimeAxisModel::setTimezone(const QString& tzId) {
 }
 
 void TimeAxisModel::recalculateTicks() {
-    if (isViewportValid()) {
-        beginResetModel();
-        calculateTicks();
-        endResetModel();
-    }
+    updateTicksAndNotify();
 }
 
 bool TimeAxisModel::updateEffectiveViewport() {
@@ -134,13 +130,22 @@ void TimeAxisModel::calculateTicks() {
     
     if (timeRange <= 0) return;
     
-    // Adaptive tick count: when zoomed in to few columns, show more ticks (up to column-level)
-    int targetTicks = static_cast<int>(m_effectiveSpanPx / 80.0); // ~80 pixels per tick when zoomed out
-    targetTicks = std::max(4, std::min(25, targetTicks));
-    // When visible time span is small, allow finer steps (handled by TIME_STEPS and step picker)
-    
+    constexpr double kMinLabelGapPx = 80.0;
+    const double viewportPx = std::max(1.0, m_effectiveSpanPx);
+    int maxLabelCount = static_cast<int>(std::floor(viewportPx / kMinLabelGapPx));
+    maxLabelCount = std::max(2, maxLabelCount);
+    const int targetTicks = std::max(1, maxLabelCount - 1);
+
     qint64 step = calculateNiceTimeStep(timeRange, targetTicks);
     if (step <= 0) return;
+
+    if (m_lastNiceStepMs > 0) {
+        const double ratio = static_cast<double>(step) / static_cast<double>(m_lastNiceStepMs);
+        if (ratio <= 1.2 && ratio >= 0.83) {
+            step = m_lastNiceStepMs;
+        }
+    }
+    m_lastNiceStepMs = step;
     
     // Find first tick at or before timeStart
     qint64 firstTick = (timeStart / step) * step;
@@ -179,36 +184,32 @@ double TimeAxisModel::getViewportStart() const {
     if (!m_viewState) {
         return 0.0;
     }
-    double timeStart = static_cast<double>(m_viewState->getVisibleTimeStart());
+    double start = static_cast<double>(m_viewState->getVisibleTimeStart());
     if (m_viewState->isDragging()) {
-        const QPointF pan = m_viewState->getPanVisualOffset();
-        const double timeEnd = static_cast<double>(m_viewState->getVisibleTimeEnd());
-        const double timeRange = timeEnd - timeStart;
-        const double viewportW = getViewportWidth();
-        if (!pan.isNull() && timeRange > 0.0 && viewportW > 0.0) {
-            const double timePixelsToUnits = timeRange / viewportW;
-            timeStart += -pan.x() * timePixelsToUnits;
+        const double viewWidth = getViewportWidth();
+        const double timeRange = static_cast<double>(m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
+        if (viewWidth > 0.0 && timeRange > 0.0) {
+            const double timePixelsToMs = timeRange / viewWidth;
+            start += (-m_viewState->getPanVisualOffset().x() * timePixelsToMs);
         }
     }
-    return timeStart;
+    return start;
 }
 
 double TimeAxisModel::getViewportEnd() const {
     if (!m_viewState) {
         return 60000.0;
     }
-    double timeEnd = static_cast<double>(m_viewState->getVisibleTimeEnd());
+    double end = static_cast<double>(m_viewState->getVisibleTimeEnd());
     if (m_viewState->isDragging()) {
-        const QPointF pan = m_viewState->getPanVisualOffset();
-        const double timeStart = static_cast<double>(m_viewState->getVisibleTimeStart());
-        const double timeRange = timeEnd - timeStart;
-        const double viewportW = getViewportWidth();
-        if (!pan.isNull() && timeRange > 0.0 && viewportW > 0.0) {
-            const double timePixelsToUnits = timeRange / viewportW;
-            timeEnd += -pan.x() * timePixelsToUnits;
+        const double viewWidth = getViewportWidth();
+        const double timeRange = static_cast<double>(m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
+        if (viewWidth > 0.0 && timeRange > 0.0) {
+            const double timePixelsToMs = timeRange / viewWidth;
+            end += (-m_viewState->getPanVisualOffset().x() * timePixelsToMs);
         }
     }
-    return timeEnd;
+    return end;
 }
 
 double TimeAxisModel::valueToScreenPosition(double value) const {

@@ -33,7 +33,14 @@ static void addSentinelChartsImportPath(QQmlEngine* engine) {
 void QmlSceneController::loadQmlSource() {
     // Configurable path (extract from config)
     QSettings config("config.ini", QSettings::IniFormat);
-    QString qmlPath = config.value("qml/path", QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath())).toString();
+    QString qmlPath;
+#ifdef SENTINEL_SOURCE_DIR
+    qmlPath = config.value("qml/path",
+                           QString("%1/libs/gui/qml/DepthChartView.qml").arg(QString::fromUtf8(SENTINEL_SOURCE_DIR))).toString();
+#else
+    qmlPath = config.value("qml/path",
+                           QString("%1/libs/gui/qml/DepthChartView.qml").arg(QDir::currentPath())).toString();
+#endif
     
     const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
     if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;  // Override

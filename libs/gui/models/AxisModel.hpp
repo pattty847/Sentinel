@@ -24,6 +24,7 @@ class UnifiedGridRenderer;
 class AxisModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(QQuickItem* target READ target WRITE setTarget NOTIFY targetChanged)
+    Q_PROPERTY(int labelCount READ labelCount NOTIFY labelCountChanged)
     
 public:
     enum Role {
@@ -41,12 +42,14 @@ public:
     
 signals:
     void targetChanged();
+    void labelCountChanged();
     
 public:
     // QAbstractListModel interface
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
+    int labelCount() const { return m_labelCapacity; }
     
     // Configuration
     void setGridViewState(GridViewState* viewState);
@@ -62,6 +65,8 @@ protected:
         QString label;          // Formatted label
         bool isMajorTick;      // Major or minor tick
         
+        TickInfo()
+            : value(0.0), position(0.0), label(), isMajorTick(false) {}
         TickInfo(double v, double pos, const QString& lbl, bool major = true)
             : value(v), position(pos), label(lbl), isMajorTick(major) {}
     };
@@ -82,15 +87,19 @@ protected:
     void clearTicks();
     void addTick(double value, double position, const QString& label, bool isMajorTick = true);
     virtual double valueToScreenPosition(double value) const;
+    void updateTicksAndNotify();
     
 private slots:
     void onViewportChanged();
+    void onPanVisualOffsetChanged();
 
 protected:
     GridViewState* m_viewState = nullptr;
     std::vector<TickInfo> m_ticks;
     UnifiedGridRenderer* m_renderer = nullptr;
     UnifiedGridRenderer* renderer() const { return m_renderer; }
+    int m_labelCapacity = 32;
+    int m_tickWriteIndex = 0;
     
     // Viewport dimensions
     double m_viewportWidth = 800.0;

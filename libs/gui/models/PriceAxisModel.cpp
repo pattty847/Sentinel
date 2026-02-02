@@ -67,11 +67,7 @@ bool PriceAxisModel::updateEffectiveViewport() {
 }
 
 void PriceAxisModel::recalculateTicks() {
-    if (isViewportValid()) {
-        beginResetModel();
-        calculateTicks();
-        endResetModel();
-    }
+    updateTicksAndNotify();
 }
 
 void PriceAxisModel::calculateTicks() {
@@ -80,46 +76,83 @@ void PriceAxisModel::calculateTicks() {
     if (!isViewportValid()) return;
     if (!updateEffectiveViewport()) return;
     
-    double priceMin = m_effectiveMinPrice;
-    double priceMax = m_effectiveMaxPrice;
+    const double priceMin = m_effectiveMinPrice;
+    const double priceMax = m_effectiveMaxPrice;
     double priceRange = priceMax - priceMin;
-    
-    if (priceRange <= 0) return;
+    if (priceRange <= 0.0) {
+        priceRange = 1.0;
+    }
 
-    // Pixel-driven stride: only skip rows when the label won't fit
-    const double bucket = (m_tickSize > 0.0)
+    const double viewportPx = std::max(1.0, m_effectiveSpanPx);
+    constexpr double kMinLabelGapPx = 60.0;
+    int maxLabelCount = static_cast<int>(std::floor(viewportPx / kMinLabelGapPx));
+    maxLabelCount = std::max(2, maxLabelCount);
+
+    const double rawSpacing = priceRange / static_cast<double>(maxLabelCount - 1);
+    const double tickSize = (m_tickSize > 0.0)
         ? m_tickSize
         : (m_viewState ? m_viewState->calculateOptimalPriceResolution() : 1.0);
-    if (bucket <= 0.0) {
+    if (tickSize <= 0.0) {
         return;
     }
 
-    const double rowsVisible = priceRange / bucket;
-    if (rowsVisible <= 0.0) {
-        return;
-    }
-
-    const double rowHeightPx = m_effectiveSpanPx / rowsVisible;
-    // Approximate label height: QML font is 10px; add a little padding.
-    constexpr double kLabelPx = 12.0;
-    const int stride = std::max(1, static_cast<int>(std::ceil(kLabelPx / std::max(1e-6, rowHeightPx))));
-
-    // Align ticks to row centers. Use a base on bucket boundary.
-    const double base = std::floor(priceMin / bucket) * bucket;
-    const int startRow = std::max(0, static_cast<int>(std::floor((priceMin - base) / bucket)));
-    const int endRow = static_cast<int>(std::ceil((priceMax - base) / bucket));
-
-    for (int row = startRow; row <= endRow; row += stride) {
-        const double price = base + (static_cast<double>(row) + 0.5) * bucket;
-        if (price < priceMin || price > priceMax + bucket * 0.5) {
-            continue;
+    auto niceNumber = [](double value, bool roundDown) -> double {
+        if (value <= 0.0) return 1.0;
+        const double exponent = std::floor(std::log10(value));
+        const double magnitude = std::pow(10.0, exponent);
+        const double fraction = value / magnitude;
+        double niceFraction = 1.0;
+        if (roundDown) {
+            if (fraction < 1.5) {
+                niceFraction = 1.0;
+            } else if (fraction < 3.0) {
+                niceFraction = 2.0;
+            } else if (fraction < 7.0) {
+                niceFraction = 5.0;
+            } else {
+                niceFraction = 10.0;
+            }
+        } else {
+            if (fraction <= 1.0) {
+                niceFraction = 1.0;
+            } else if (fraction <= 2.0) {
+                niceFraction = 2.0;
+            } else if (fraction <= 5.0) {
+                niceFraction = 5.0;
+            } else {
+                niceFraction = 10.0;
+            }
         }
+        return niceFraction * magnitude;
+    };
 
+    double niceSpacing = niceNumber(rawSpacing, true);
+    niceSpacing = std::max(niceSpacing, tickSize);
+    niceSpacing = std::round(niceSpacing / tickSize) * tickSize;
+    if (niceSpacing <= 0.0) {
+        return;
+    }
+
+    if (m_lastNiceSpacing > 0.0) {
+        const double ratio = niceSpacing / m_lastNiceSpacing;
+        if (ratio <= 1.2 && ratio >= 0.83) {
+            niceSpacing = m_lastNiceSpacing;
+        }
+    }
+    m_lastNiceSpacing = niceSpacing;
+
+    const double firstTick = std::floor(priceMin / niceSpacing) * niceSpacing;
+    const double lastTick = std::ceil(priceMax / niceSpacing) * niceSpacing;
+
+    int safeCount = 0;
+    for (double price = firstTick; price <= lastTick + (tickSize * 0.5); price += niceSpacing) {
         const double screenY = valueToScreenPosition(price);
         if (screenY >= 0 && screenY <= getViewportHeight()) {
             const QString label = formatLabel(price);
-            const bool isMajor = (row % stride == 0);
-            addTick(price, screenY, label, isMajor);
+            addTick(price, screenY, label, true);
+        }
+        if (++safeCount > 1000) {
+            break;
         }
     }
     
@@ -152,13 +185,11 @@ double PriceAxisModel::getViewportStart() const {
     }
     double minPrice = m_viewState->getMinPrice();
     if (m_viewState->isDragging()) {
-        const QPointF pan = m_viewState->getPanVisualOffset();
-        const double maxPrice = m_viewState->getMaxPrice();
-        const double priceRange = maxPrice - minPrice;
-        const double viewportH = getViewportHeight();
-        if (!pan.isNull() && priceRange > 0.0 && viewportH > 0.0) {
-            const double pricePixelsToUnits = priceRange / viewportH;
-            minPrice += pan.y() * pricePixelsToUnits;
+        const double viewHeight = getViewportHeight();
+        const double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+        if (viewHeight > 0.0 && priceRange > 0.0) {
+            const double pricePixelsToUnits = priceRange / viewHeight;
+            minPrice += (m_viewState->getPanVisualOffset().y() * pricePixelsToUnits);
         }
     }
     return minPrice;
@@ -170,13 +201,11 @@ double PriceAxisModel::getViewportEnd() const {
     }
     double maxPrice = m_viewState->getMaxPrice();
     if (m_viewState->isDragging()) {
-        const QPointF pan = m_viewState->getPanVisualOffset();
-        const double minPrice = m_viewState->getMinPrice();
-        const double priceRange = maxPrice - minPrice;
-        const double viewportH = getViewportHeight();
-        if (!pan.isNull() && priceRange > 0.0 && viewportH > 0.0) {
-            const double pricePixelsToUnits = priceRange / viewportH;
-            maxPrice += pan.y() * pricePixelsToUnits;
+        const double viewHeight = getViewportHeight();
+        const double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+        if (viewHeight > 0.0 && priceRange > 0.0) {
+            const double pricePixelsToUnits = priceRange / viewHeight;
+            maxPrice += (m_viewState->getPanVisualOffset().y() * pricePixelsToUnits);
         }
     }
     return maxPrice;

@@ -18,6 +18,7 @@ build.ninja
 .ninja_deps
 .rcc/
 .qt/
+.qtcreator/
 
 # CMake generated files
 CMakeFiles/
@@ -118,9 +119,10 @@ CLAUDE.md
 GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
-!docs/archive/
-!docs/plans/
-!docs/refactor/
+/docs/lessons/
+/docs/plans/
+/docs/refactors/
+/
 data/
 /screenshots/
 

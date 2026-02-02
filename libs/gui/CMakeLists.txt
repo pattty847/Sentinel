@@ -97,6 +97,7 @@ add_library(sentinel_gui_lib ${GUI_SOURCES})
 qt6_add_qml_module(sentinel_gui_lib
     URI Sentinel.Charts
     VERSION 1.0
+    NO_PLUGIN
     QML_FILES
         qml/DepthChartView.qml
         qml/LabView.qml
@@ -219,6 +220,11 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Qml
         Qt6::QuickControls2
         Qt6::Svg
+)
+
+target_compile_definitions(sentinel_gui_lib
+    PRIVATE
+        SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 qt_add_resources(sentinel_gui_lib "resources"

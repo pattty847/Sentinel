@@ -224,7 +224,26 @@ Single source of truth for open work. Read it at session start. Update it as you
 
 ---
 
-# **10. References**
+# **10. Performance Lessons (QML/Axis)**
+
+### **What Worked**
+
+* Profile early (QML Profiler / CPU profiler) before guessing.
+* Keep axis labels pixel-density driven, not data-tick driven.
+* Stabilize label count across zoom (nice ticks).
+* Use fixed-capacity axis models + role-scoped `dataChanged` to avoid churn.
+* During drag, recompute axis range from visual pan, not QML offsets.
+
+### **Never Again**
+
+* Don’t `beginResetModel()` during pan/zoom for QML Repeaters.
+* Don’t tie label density directly to data tick size.
+* Don’t assume GPU bottleneck when QML churn is present.
+* Don’t bind per-label pan offsets in QML; move the math to the model.
+
+---
+
+# **11. References**
 
 * `docs/ARCHITECTURE.md` - Overall system design
 * `docs/MARKETDATA.md` - MarketDataCoreEngine pipeline

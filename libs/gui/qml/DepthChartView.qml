@@ -31,7 +31,7 @@ Rectangle {
     property int lastTimeframe: 0
     
     // 🔬 VISUAL DEBUG: Grid line toggle (Ctrl+G to toggle)
-    property bool showTimeGrid: true
+    property bool showTimeGrid: false
     
     //  SIGNAL CONNECTIONS: Update axes when viewport or timeframe changes
     Connections {
@@ -158,7 +158,7 @@ Rectangle {
                 color: model.isMajorTick ? "#F0F0F0" : "#DCDCDC"
                 visible: root.showTimeGrid
                 
-                x: model.position
+                x: model.position + unifiedGridRenderer.panVisualOffset.x
             }
         }
     }
@@ -188,28 +188,30 @@ Rectangle {
             tickSize: unifiedGridRenderer.heatmapTickSize
         }
         
-        Repeater {
-            model: priceAxisModel
+        Item {
+            id: priceAxisLabels
+            anchors.fill: parent
             
-            Item {
-                width: priceAxis.width
-                height: 16
-                // Apply pan offset so axis labels move immediately with mouse drag
-                // Model position is already the row center (in screen px).
-                // Nudge down slightly so text center aligns visually with row center.
-                y: model.position - 8 + 1.5
+            Repeater {
+                model: priceAxisModel
                 
-                // Only show if within clipped bounds (with margin)
-                visible: y >= -4 && y <= priceAxis.height - 12
-                
-                Text {
-                    anchors.left: parent.left
-                    anchors.leftMargin: 8
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: "#E0E0E0"
-                    font.pixelSize: 10
-                    font.family: "monospace"
-                    text: model.label
+                Item {
+                    width: priceAxis.width
+                    height: 16
+                    // Model position is already the row center (in screen px).
+                    // Nudge down slightly so text center aligns visually with row center.
+                    y: model.position - 8 + 1.5
+                    visible: model.label !== ""
+                    
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: "#E0E0E0"
+                        font.pixelSize: 10
+                        font.family: "monospace"
+                        text: model.label
+                    }
                 }
             }
         }
@@ -238,24 +240,26 @@ Rectangle {
             target: unifiedGridRenderer
         }
         
-        Repeater {
-            model: timeAxisModel
+        Item {
+            id: timeAxisLabels
+            anchors.fill: parent
             
-            Item {
-                width: 80
-                height: timeAxis.height
-                // Apply pan offset so axis labels move immediately with mouse drag
-                x: model.position - 40
+            Repeater {
+                model: timeAxisModel
                 
-                // Only show if within clipped bounds
-                visible: x >= -40 && x <= timeAxis.width - 40
-                
-                Text {
-                    anchors.centerIn: parent
-                    color: "#E0E0E0"
-                    font.pixelSize: 10
-                    font.family: "monospace"
-                    text: model.label
+                Item {
+                    width: 80
+                    height: timeAxis.height
+                    x: model.position - 40
+                    visible: model.label !== ""
+                    
+                    Text {
+                        anchors.centerIn: parent
+                        color: "#E0E0E0"
+                        font.pixelSize: 10
+                        font.family: "monospace"
+                        text: model.label
+                    }
                 }
             }
         }

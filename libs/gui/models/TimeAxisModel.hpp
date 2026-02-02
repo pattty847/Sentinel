@@ -61,4 +61,5 @@ private:
     double m_effectiveOffsetPx = 0.0;
     double m_effectiveSpanPx = 0.0;
     bool m_effectiveViewportValid = false;
+    qint64 m_lastNiceStepMs = 0;
 };

@@ -45,7 +45,11 @@ void LabDock::buildUi() {
     } else if (QFile::exists(":/qt/qml/Sentinel/Charts/LabView.qml")) {
         m_qquickView->setSource(QUrl("qrc:/qt/qml/Sentinel/Charts/LabView.qml"));
     } else {
+#ifdef SENTINEL_SOURCE_DIR
+        const QString localPath = QDir(QString::fromUtf8(SENTINEL_SOURCE_DIR)).filePath("libs/gui/qml/LabView.qml");
+#else
         const QString localPath = QDir::current().filePath("libs/gui/qml/LabView.qml");
+#endif
         m_qquickView->setSource(QUrl::fromLocalFile(localPath));
     }
 

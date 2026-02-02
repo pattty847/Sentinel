@@ -22,11 +22,12 @@ This version modularizes startup logic for maintainability and clarity.
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include <QResource>
-
+#include <QCoreApplication>
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
     #ifdef Q_OS_WIN
-        qputenv("QSG_RHI_BACKEND", "d3d11");
+        // Force OpenGL on Windows for heatmap texture uploads.
+        qputenv("QSG_RHI_BACKEND", "opengl");
     #elif defined(Q_OS_MACOS)
         qputenv("QSG_RHI_BACKEND", "metal");
     #else
@@ -35,7 +36,14 @@ void configureGraphicsBackend() {
             qputenv("QT_QPA_PLATFORM", "xcb");
         }
     #endif
-    qputenv("QSG_RENDER_LOOP", "threaded");
+    if (qEnvironmentVariableIsSet("SENTINEL_QSG_RENDER_LOOP")) {
+        const QByteArray loop = qgetenv("SENTINEL_QSG_RENDER_LOOP");
+        if (!loop.isEmpty()) {
+            qputenv("QSG_RENDER_LOOP", loop);
+        }
+    } else if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP")) {
+        qputenv("QSG_RENDER_LOOP", "threaded");
+    }
 }
 
 // --- Surface format configuration ---
@@ -73,6 +81,11 @@ int main(int argc, char *argv[])
 {
     configureGraphicsBackend();
     configureSurfaceFormat();
+
+    const int disableCompress = qEnvironmentVariableIntValue("SENTINEL_DISABLE_HF_EVENT_COMPRESSION");
+    if (disableCompress == 1) {
+        QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
+    }
 
     QApplication app(argc, argv);
 

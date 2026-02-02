@@ -22,6 +22,8 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QCloseEvent>
 #include <QShowEvent>
 #include <QStatusBar>
+#include <QElapsedTimer>
+#include <QThread>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "UnifiedGridRenderer.h"
@@ -148,6 +150,8 @@ void MainWindowGPU::setupUI() {
     // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
+    if (m_qquickView) {
+    }
     
     // Get symbol controls
     auto symbolControls = dockFactory.getSymbolControls();

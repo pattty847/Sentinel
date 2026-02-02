@@ -4,9 +4,9 @@
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
-
 AxisModel::AxisModel(QObject* parent)
     : QAbstractListModel(parent) {
+    m_ticks.assign(static_cast<size_t>(m_labelCapacity), TickInfo());
 }
 
 void AxisModel::setTarget(QQuickItem* target) {
@@ -46,6 +46,8 @@ void AxisModel::setGridViewState(GridViewState* viewState) {
     if (m_viewState) {
         disconnect(m_viewState, &GridViewState::viewportChanged, 
                   this, &AxisModel::onViewportChanged);
+        disconnect(m_viewState, &GridViewState::panVisualOffsetChanged,
+                  this, &AxisModel::onPanVisualOffsetChanged);
     }
     
     m_viewState = viewState;
@@ -55,8 +57,7 @@ void AxisModel::setGridViewState(GridViewState* viewState) {
         connect(m_viewState, &GridViewState::viewportChanged,
                this, &AxisModel::onViewportChanged);
         connect(m_viewState, &GridViewState::panVisualOffsetChanged,
-               this, &AxisModel::onViewportChanged);
-        
+               this, &AxisModel::onPanVisualOffsetChanged);
         // Trigger initial calculation
         onViewportChanged();
     }
@@ -76,11 +77,12 @@ void AxisModel::setViewportSize(double width, double height) {
 
 int AxisModel::rowCount(const QModelIndex& parent) const {
     Q_UNUSED(parent)
-    return static_cast<int>(m_ticks.size());
+    return m_labelCapacity;
 }
 
 QVariant AxisModel::data(const QModelIndex& index, int role) const {
-    if (!index.isValid() || index.row() >= static_cast<int>(m_ticks.size())) {
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_labelCapacity ||
+        index.row() >= static_cast<int>(m_ticks.size())) {
         return QVariant();
     }
     
@@ -107,12 +109,13 @@ QHash<int, QByteArray> AxisModel::roleNames() const {
 }
 
 void AxisModel::onViewportChanged() {
-    if (!m_viewState || !isViewportValid()) return;
-    
-    // Recalculate ticks
-    beginResetModel();
-    calculateTicks();
-    endResetModel();
+    updateTicksAndNotify();
+}
+
+void AxisModel::onPanVisualOffsetChanged() {
+    if (m_viewState && m_viewState->isDragging()) {
+        updateTicksAndNotify();
+    }
 }
 
 double AxisModel::calculateNiceStep(double range, int targetTicks) const {
@@ -161,11 +164,70 @@ bool AxisModel::isViewportValid() const {
 }
 
 void AxisModel::clearTicks() {
-    m_ticks.clear();
+    if (static_cast<int>(m_ticks.size()) != m_labelCapacity) {
+        m_ticks.assign(static_cast<size_t>(m_labelCapacity), TickInfo());
+        emit labelCountChanged();
+    } else {
+        for (auto& tick : m_ticks) {
+            tick = TickInfo();
+        }
+    }
+    m_tickWriteIndex = 0;
 }
 
 void AxisModel::addTick(double value, double position, const QString& label, bool isMajorTick) {
-    m_ticks.emplace_back(value, position, label, isMajorTick);
+    if (m_tickWriteIndex >= m_labelCapacity) {
+        return;
+    }
+    m_ticks[static_cast<size_t>(m_tickWriteIndex++)] = TickInfo(value, position, label, isMajorTick);
+}
+
+void AxisModel::updateTicksAndNotify() {
+    if (!m_viewState || !isViewportValid()) return;
+
+    const std::vector<TickInfo> previousTicks = m_ticks;
+    calculateTicks();
+
+    if (m_labelCapacity <= 0) {
+        return;
+    }
+
+    bool positionChanged = false;
+    bool labelChanged = false;
+    bool majorChanged = false;
+    const double kPosEps = 0.01;
+
+    const size_t count = std::min(previousTicks.size(), m_ticks.size());
+    for (size_t i = 0; i < count; ++i) {
+        const TickInfo& before = previousTicks[i];
+        const TickInfo& after = m_ticks[i];
+        if (std::abs(before.position - after.position) > kPosEps) {
+            positionChanged = true;
+        }
+        if (before.label != after.label) {
+            labelChanged = true;
+        }
+        if (before.isMajorTick != after.isMajorTick) {
+            majorChanged = true;
+        }
+    }
+
+    if (!positionChanged && !labelChanged && !majorChanged) {
+        return;
+    }
+
+    QVector<int> roles;
+    if (positionChanged) {
+        roles << PositionRole;
+    }
+    if (labelChanged) {
+        roles << LabelRole;
+    }
+    if (majorChanged) {
+        roles << IsMajorTickRole;
+    }
+
+    emit dataChanged(index(0, 0), index(m_labelCapacity - 1, 0), roles);
 }
 
 double AxisModel::valueToScreenPosition(double value) const {
