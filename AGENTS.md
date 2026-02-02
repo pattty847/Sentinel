@@ -246,7 +246,17 @@ Single source of truth for open work. Read it at session start. Update it as you
 
 ---
 
-# **11. References**
+# **11. Coinbase API Implementation Notes**
+
+* REST candles (Advanced Trade): `GET /api/v3/brokerage/products/{product_id}/candles` with `start`, `end`, `granularity`, `limit` (max 350).
+* Granularity mapping is based on timeframe seconds (e.g., 60 -> ONE_MINUTE, 300 -> FIVE_MINUTE).
+* REST JWT `uri` claim uses: `METHOD + host + path` (no query string).
+* If auth endpoint returns 401, retry public candles endpoint: `/api/v3/brokerage/market/products/{product_id}/candles` (no auth).
+* TLS on Windows: load CA bundle from `resources/certs/ca-bundle.crt` or set `SENTINEL_CA_BUNDLE` env var.
+
+---
+
+# **12. References**
 
 * `docs/ARCHITECTURE.md` - Overall system design
 * `docs/MARKETDATA.md` - MarketDataCoreEngine pipeline

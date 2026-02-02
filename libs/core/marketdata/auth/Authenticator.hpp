@@ -25,6 +25,7 @@ public:
     [[nodiscard]] std::string createJwt() const;
     /// Return a REST JWT signed for a specific request (method + host + path).
     [[nodiscard]] std::string createRestJwt(const std::string& method,
+                                            const std::string& host,
                                             const std::string& path) const;
 
     // Non-copyable, movable.

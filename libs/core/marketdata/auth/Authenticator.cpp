@@ -52,17 +52,18 @@ std::string Authenticator::createJwt() const {
 }
 
 std::string Authenticator::createRestJwt(const std::string& method,
+                                         const std::string& host,
                                          const std::string& path) const {
     if (m_keyId.empty() || m_privateKey.empty()) {
         throw std::runtime_error("🔑 Authenticator: API key/secret missing – cannot create JWT");
     }
-    if (method.empty() || path.empty()) {
-        throw std::runtime_error("🔑 Authenticator: REST JWT requires method and path");
+    if (method.empty() || host.empty() || path.empty()) {
+        throw std::runtime_error("🔑 Authenticator: REST JWT requires method, host, and path");
     }
 
     try {
         const std::string nonce = generateNonce();
-        const std::string uri = method + " " + path;
+        const std::string uri = method + " " + host + path;
 
         auto token = jwt::create()
             .set_subject(m_keyId)

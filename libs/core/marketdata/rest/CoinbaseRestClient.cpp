@@ -17,9 +17,13 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 namespace {
-std::string buildCandlesPath(const std::string& productId) {
+std::string buildCandlesPath(const std::string& productId, bool usePublic) {
     std::ostringstream oss;
-    oss << "/api/v3/brokerage/products/" << productId << "/candles";
+    if (usePublic) {
+        oss << "/api/v3/brokerage/market/products/" << productId << "/candles";
+    } else {
+        oss << "/api/v3/brokerage/products/" << productId << "/candles";
+    }
     return oss.str();
 }
 
@@ -27,9 +31,10 @@ std::string buildCandlesTarget(const std::string& productId,
                                int64_t startSec,
                                int64_t endSec,
                                const std::string& granularity,
-                               int limit) {
+                               int limit,
+                               bool usePublic) {
     std::ostringstream oss;
-    oss << buildCandlesPath(productId)
+    oss << buildCandlesPath(productId, usePublic)
         << "?start=" << startSec
         << "&end=" << endSec
         << "&granularity=" << granularity
@@ -149,41 +154,57 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         stream.set_verify_mode(ssl::verify_peer);
         stream.handshake(ssl::stream_base::client);
 
-        const std::string path = buildCandlesPath(productId);
-        const std::string target = buildCandlesTarget(productId, startSec, endSec, granularity, limit);
-        const std::string jwt = m_auth.createRestJwt("GET", path);
+        auto doRequest = [&](bool usePublic) -> std::optional<nlohmann::json> {
+            const std::string path = buildCandlesPath(productId, usePublic);
+            const std::string target = buildCandlesTarget(productId, startSec, endSec, granularity, limit, usePublic);
 
-        http::request<http::string_body> req{http::verb::get, target, 11};
-        req.set(http::field::host, m_host);
-        req.set(http::field::user_agent, "Sentinel/Rest");
-        req.set(http::field::authorization, std::string("Bearer ") + jwt);
-        req.set(http::field::accept, "application/json");
+            http::request<http::string_body> req{http::verb::get, target, 11};
+            req.set(http::field::host, m_host);
+            req.set(http::field::user_agent, "Sentinel/Rest");
+            req.set(http::field::accept, "application/json");
 
-        http::write(stream, req);
-
-        beast::flat_buffer buffer;
-        http::response<http::string_body> res;
-        http::read(stream, buffer, res);
-
-        beast::error_code ec;
-        stream.shutdown(ec);
-
-        if (res.result() != http::status::ok) {
-            std::ostringstream oss;
-            oss << "HTTP " << res.result_int() << " " << res.reason();
-            if (!res.body().empty()) {
-                std::string body = res.body();
-                if (body.size() > 512) {
-                    body.resize(512);
-                    body += "...";
-                }
-                oss << " | " << body;
+            if (!usePublic) {
+                const std::string jwt = m_auth.createRestJwt("GET", m_host, path);
+                req.set(http::field::authorization, std::string("Bearer ") + jwt);
             }
-            result.error = oss.str();
+
+            http::write(stream, req);
+
+            beast::flat_buffer buffer;
+            http::response<http::string_body> res;
+            http::read(stream, buffer, res);
+
+            if (res.result() != http::status::ok) {
+                std::ostringstream oss;
+                oss << "HTTP " << res.result_int() << " " << res.reason();
+                if (!res.body().empty()) {
+                    std::string body = res.body();
+                    if (body.size() > 512) {
+                        body.resize(512);
+                        body += "...";
+                    }
+                    oss << " | " << body;
+                }
+                result.error = oss.str();
+                return std::nullopt;
+            }
+
+            return nlohmann::json::parse(res.body());
+        };
+
+        auto jsonOpt = doRequest(false);
+        if (!jsonOpt && result.error.find("401") != std::string::npos) {
+            sLog_Warning("REST candles: auth failed, retrying public endpoint");
+            jsonOpt = doRequest(true);
+        }
+
+        if (!jsonOpt) {
+            beast::error_code shutdownEc;
+            stream.shutdown(shutdownEc);
             return result;
         }
 
-        auto json = nlohmann::json::parse(res.body());
+        auto json = std::move(*jsonOpt);
         if (!json.contains("candles") || !json["candles"].is_array()) {
             result.error = "missing candles in response";
             return result;
@@ -207,6 +228,8 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         }
 
         result.ok = true;
+        beast::error_code shutdownEc;
+        stream.shutdown(shutdownEc);
         return result;
     } catch (const std::exception& e) {
         result.error = e.what();
