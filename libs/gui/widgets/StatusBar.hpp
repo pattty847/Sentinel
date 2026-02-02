@@ -20,6 +20,7 @@ public:
     void setConnectionStatus(bool connected);
     void setCpuUsage(int percent);
     void setGpuUsage(int percent);
+    void setFps(double fps);
     void setLatency(int milliseconds);
     void setReadyStatus(const QString& status = "Ready");
     void showVersion();
@@ -30,12 +31,14 @@ private slots:
 private:
     QLabel* m_readyLabel;
     QLabel* m_connectionLabel;
+    QLabel* m_fpsLabel;
     QLabel* m_cpuLabel;
     QLabel* m_gpuLabel;
     QLabel* m_latencyLabel;
     QLabel* m_versionLabel;
-    
+
     // Metrics storage
+    double m_fps = 0.0;
     int m_cpuPercent = 0;
     int m_gpuPercent = 0;
     int m_latencyMs = 0;

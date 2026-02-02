@@ -1,0 +1,103 @@
+# Sentinel Configuration Template
+# Copy this file to sentinel.yaml and customize your settings.
+# User-specific overrides go in .sentinel.yaml (not tracked in git).
+# CLI environment variables override these values.
+# See docs/ENV_VARS.md for complete list of available settings.
+
+# =============================================================================
+# Heatmap Settings (Server + Client)
+# =============================================================================
+heatmap:
+  # Timeframe in milliseconds (MUST match on server + client)
+  timeframe: 1000
+
+  # Grid dimensions
+  grid_width: 5120   # Time columns (history depth)
+  grid_height: 2048  # Price buckets
+
+  # Price grid behavior (server)
+  tick_size: 1.0      # Fixed tick size (0 = dynamic based on band_pct)
+  recenter_delta: 0.01  # Recenter threshold as fraction of mid price
+
+  # Band percentages for dynamic tick sizing (server)
+  band_fast: 0.15   # Fast timeframes (< 1 minute)
+  band_med: 0.25    # Medium timeframes (1-60 minutes)
+  band_slow: 0.35   # Slow timeframes (> 1 hour)
+
+  # Intensity normalization (server)
+  intensity_mode: log        # Options: log, power, linear
+  intensity_floor: 0.001     # Minimum intensity cutoff [0.0, 1.0]
+  intensity_log_scale: 1000  # Log scale factor (log mode only)
+  intensity_power: 0.4       # Exponent (power mode only)
+  intensity_max_mode: running  # Options: running, column
+  intensity_max_decay: 0.995   # Running max decay factor (0, 1]
+
+  # Visual settings (client)
+  gamma: 1.05       # Gamma correction
+  contrast: 1.15    # Contrast adjustment
+  label_px: 24      # Min cell height (px) before labels render
+
+  # Initial viewport (client)
+  initial_viewport_pct: 10  # Time zoom (% of grid width)
+  # initial_price_pct: auto  # Price zoom (omit for square cells)
+
+# =============================================================================
+# Server Settings
+# =============================================================================
+server:
+  # Market data WebSocket connection (Coinbase Advanced Trade)
+  host: advanced-trade-ws.coinbase.com
+  port: 443
+  target: /v1
+
+  # Auto-subscribe symbols on server startup (comma/space-separated)
+  default_symbols: BTC-USD
+
+  # Health check endpoint
+  health_port: 8090
+
+  # JWT authentication for market data subscriptions
+  use_jwt: 0  # Set to 1 to enable (requires key.json)
+
+  # SSL verification (optional)
+  # ssl_ca_bundle: /path/to/ca-bundle.crt
+
+# =============================================================================
+# GUI Settings (Client)
+# =============================================================================
+gui:
+  # Screenshot API (HTTP endpoint for automated captures)
+  api_port: 17100          # Set to 0 to disable
+  screenshot_dir: ./screenshots
+
+  # QML path override (for development)
+  # qml_path: /path/to/custom/qml
+
+  # Rendering backend (automatically set by platform)
+  # qsg_render_loop: threaded  # Options: threaded, basic, windows
+
+# =============================================================================
+# Order Book Settings
+# =============================================================================
+orderbook:
+  tick_size: 0.10    # Default tick size
+  band_pct: 0.30     # Default band percent
+
+# =============================================================================
+# Debug & Logging
+# =============================================================================
+# Uncomment to enable debug features:
+#
+# gpu_heatmap:
+#   debug: 1              # Verbose GPU diagnostics
+#   force_full: 1         # Force full texture render
+#   dump_glyph_atlas: 1   # Dump glyph atlas textures
+#
+# logging:
+#   app_interval: 1000    # App log throttle (ms)
+#   data_interval: 1000   # Data log throttle (ms)
+#   render_interval: 1000 # Render log throttle (ms)
+#   debug_interval: 100   # Debug log throttle (ms)
+#
+# zoom:
+#   debug: 1  # Enable zoom debug logging

@@ -4,6 +4,8 @@
 #include <QTimer>
 #include <QApplication>
 #include <QStyle>
+#include <chrono>
+#include <fstream>
 
 StatusBar::StatusBar(QWidget* parent)
     : QWidget(parent)
@@ -32,7 +34,12 @@ StatusBar::StatusBar(QWidget* parent)
     m_connectionLabel = new QLabel("Disconnected", this);
     m_connectionLabel->setStyleSheet("QLabel { color: #ff4444; font-size: 10px; }");
     layout->addWidget(m_connectionLabel);
-    
+
+    // FPS
+    m_fpsLabel = new QLabel("FPS: --", this);
+    m_fpsLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
+    layout->addWidget(m_fpsLabel);
+
     // CPU usage
     m_cpuLabel = new QLabel("CPU: --%", this);
     m_cpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
@@ -85,10 +92,19 @@ void StatusBar::setCpuUsage(int percent) {
 void StatusBar::setGpuUsage(int percent) {
     m_gpuPercent = percent;
     m_gpuLabel->setText(QString("GPU: %1%").arg(percent));
-    
+
     // Color coding: green < 50%, yellow < 80%, red >= 80%
     QString color = percent < 50 ? "#44ff44" : (percent < 80 ? "#ffaa00" : "#ff4444");
     m_gpuLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
+}
+
+void StatusBar::setFps(double fps) {
+    m_fps = fps;
+    m_fpsLabel->setText(QString("FPS: %1").arg(static_cast<int>(fps)));
+
+    // Color coding: green >= 55, yellow >= 30, red < 30
+    QString color = fps >= 55 ? "#44ff44" : (fps >= 30 ? "#ffaa00" : "#ff4444");
+    m_fpsLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
 }
 
 void StatusBar::setLatency(int milliseconds) {
@@ -108,6 +124,25 @@ void StatusBar::updateMetrics() {
     // Placeholder: Update metrics display
     // TODO: Connect to actual system metrics when available
     // For now, just refresh the display
+    // #region agent log
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const auto deltaMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+    last = now;
+    if (deltaMs > 2000) {
+        std::ofstream out("c:\\Users\\Pepe\\Documents\\Programming\\Sentinel\\.cursor\\debug.log", std::ios::app);
+        if (out.is_open()) {
+            const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+            out << "{\"sessionId\":\"debug-session\",\"runId\":\"post-fix\",\"hypothesisId\":\"H4\","
+                   "\"location\":\"StatusBar.cpp:121\",\"message\":\"statusbar_tick_jank\","
+                   "\"data\":{\"deltaMs\":"
+                << deltaMs
+                << "},\"timestamp\":" << ts << "}\n";
+        }
+    }
+    // #endregion
 }
 
 void StatusBar::showVersion() {
