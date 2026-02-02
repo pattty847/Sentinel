@@ -15,7 +15,7 @@ Each feature is a self-contained block. Use this template:
 **Updated:** 2026-02-02
 
 #### Now
-- [ ] Serve 1s candles from live trade aggregation (no REST history)
+- [x] Serve 1s candles from live trade aggregation (no REST history)
 - [ ] Roll up 1m candles to custom timeframes (on-demand)
 - [ ] Add server-side candle cache per (symbol, timeframe)
 
@@ -29,9 +29,11 @@ Each feature is a self-contained block. Use this template:
 #### Done
 - [x] Coinbase REST candles fetcher + REST JWT (2026-02-02)
 - [x] WS candle_history_request / candle_history_chunk (server + client) (2026-02-02)
+- [x] 1s candles from trade aggregation history (2026-02-02)
 
 #### Session log
 - **2026-02-02** — Added Coinbase REST candle history endpoint and WS request/response. Next: 1s candles + rollups + caching.
+- **2026-02-02** — Implemented 1s candle history from trade aggregation for WS requests.
 ### F<N>: <Short name>
 **Status:** active | paused | done
 **Created:** YYYY-MM-DD

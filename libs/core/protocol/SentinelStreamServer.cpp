@@ -289,6 +289,55 @@ public:
                             std::chrono::system_clock::now().time_since_epoch()).count());
                 }
 
+                if (timeframeSec == 1) {
+                    const int64_t endMs = endTimeSec * 1000;
+                    if (limit > 10000) {
+                        limit = 10000;
+                    }
+                    const auto history = model_.getHistory(symbol, Timeframe::OneSecond, static_cast<size_t>(limit));
+                    std::vector<OHLCVBar> filtered;
+                    filtered.reserve(history.size());
+                    for (const auto& bar : history) {
+                        if (bar.timestamp_ms <= endMs) {
+                            filtered.push_back(bar);
+                        }
+                    }
+
+                    const int64_t tfMs = 1000;
+                    const int64_t nowMs = static_cast<int64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+
+                    int64_t startTimeSec = endTimeSec - (timeframeSec * static_cast<int64_t>(limit));
+                    if (startTimeSec < 0) {
+                        startTimeSec = 0;
+                    }
+
+                    nlohmann::json payload;
+                    payload["type"] = "candle_history_chunk";
+                    payload["symbol"] = symbol;
+                    payload["timeframe_sec"] = timeframeSec;
+                    payload["start_time_sec"] = startTimeSec;
+                    payload["end_time_sec"] = endTimeSec;
+                    auto arr = nlohmann::json::array();
+                    for (const auto& bar : filtered) {
+                        const bool isClosed = (bar.timestamp_ms + tfMs) <= nowMs;
+                        nlohmann::json item;
+                        item["time_start_ms"] = bar.timestamp_ms;
+                        item["time_end_ms"] = bar.timestamp_ms + tfMs;
+                        item["open"] = bar.open;
+                        item["high"] = bar.high;
+                        item["low"] = bar.low;
+                        item["close"] = bar.close;
+                        item["volume"] = bar.volume;
+                        item["is_closed"] = isClosed;
+                        arr.push_back(std::move(item));
+                    }
+                    payload["candles"] = std::move(arr);
+                    do_write(payload.dump());
+                    return;
+                }
+
                 const auto granularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
                 if (!granularity) {
                     send_error("candle_history_request", symbol, "unsupported timeframe_sec");
