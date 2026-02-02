@@ -6,6 +6,8 @@
 class UnifiedGridRenderer;
 class QDoubleSpinBox;
 class QPushButton;
+class QSlider;
+class QLabel;
 
 class HeatmapSettingsDialog : public QDialog {
     Q_OBJECT
@@ -17,14 +19,17 @@ public:
 
 private:
     void buildUi();
-    void applyGamma(double value);
-    void applyContrast(double value);
-    void applyShaderFloor(double value);
+    void applyGamma(int sliderValue);
+    void applyContrast(int sliderValue);
+    void applyShaderFloor(int sliderValue);
     void logSettings() const;
 
     QPointer<UnifiedGridRenderer> m_renderer;
-    QDoubleSpinBox* m_gammaSpin = nullptr;
-    QDoubleSpinBox* m_contrastSpin = nullptr;
-    QDoubleSpinBox* m_floorSpin = nullptr;
+    QSlider* m_gammaSlider = nullptr;
+    QLabel* m_gammaLabel = nullptr;
+    QSlider* m_contrastSlider = nullptr;
+    QLabel* m_contrastLabel = nullptr;
+    QSlider* m_floorSlider = nullptr;
+    QLabel* m_floorLabel = nullptr;
     QPushButton* m_logButton = nullptr;
 };

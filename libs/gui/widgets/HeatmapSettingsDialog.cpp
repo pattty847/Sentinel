@@ -2,23 +2,37 @@
 #include "../UnifiedGridRenderer.h"
 #include "SentinelLogging.hpp"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QFormLayout>
-#include <QDoubleSpinBox>
+#include <QSlider>
+#include <QLabel>
 #include <QPushButton>
 #include <QDialogButtonBox>
-#include <QLabel>
 
 namespace {
-QDoubleSpinBox* makeSpin(QWidget* parent, double minVal, double maxVal, double step, int decimals) {
-    auto* spin = new QDoubleSpinBox(parent);
-    spin->setRange(minVal, maxVal);
-    spin->setSingleStep(step);
-    spin->setDecimals(decimals);
-    spin->setStyleSheet(
-        "QDoubleSpinBox { background-color: #252A31; color: #E6EDF3; border: 1px solid #3A3F46; padding: 6px; }"
-        "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 14px; }"
+// Helper to create styled slider with value label
+struct SliderWithLabel {
+    QSlider* slider;
+    QLabel* label;
+};
+
+SliderWithLabel makeSlider(QWidget* parent, int minVal, int maxVal, int defaultVal) {
+    auto* slider = new QSlider(Qt::Horizontal, parent);
+    slider->setRange(minVal, maxVal);
+    slider->setValue(defaultVal);
+    slider->setMinimumWidth(200);
+    slider->setStyleSheet(
+        "QSlider::groove:horizontal { background: #252A31; height: 6px; border-radius: 3px; }"
+        "QSlider::handle:horizontal { background: #2B5A7A; width: 16px; height: 16px; margin: -5px 0; border-radius: 8px; }"
+        "QSlider::handle:horizontal:hover { background: #3472A0; }"
     );
-    return spin;
+
+    auto* label = new QLabel(parent);
+    label->setMinimumWidth(50);
+    label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    label->setStyleSheet("QLabel { color: #E6EDF3; font-weight: 600; }");
+
+    return {slider, label};
 }
 } // namespace
 
@@ -41,36 +55,58 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer* renderer) {
 void HeatmapSettingsDialog::buildUi() {
     auto* layout = new QVBoxLayout(this);
 
-    auto* header = new QLabel("Heatmap Rendering", this);
-    header->setStyleSheet("QLabel { color: #B6C2CF; font-weight: 600; padding-bottom: 6px; }");
+    auto* header = new QLabel("Heatmap Color Controls", this);
+    header->setStyleSheet("QLabel { color: #B6C2CF; font-weight: 600; font-size: 14px; padding-bottom: 8px; }");
     layout->addWidget(header);
 
     auto* form = new QFormLayout();
     form->setLabelAlignment(Qt::AlignLeft);
     form->setFormAlignment(Qt::AlignTop);
+    form->setHorizontalSpacing(12);
+    form->setVerticalSpacing(12);
 
-    m_gammaSpin = makeSpin(this, 0.1, 5.0, 0.05, 2);
-    m_contrastSpin = makeSpin(this, 0.1, 5.0, 0.05, 2);
-    m_floorSpin = makeSpin(this, 0.0, 0.5, 0.01, 3);
+    // Gamma: 0.1-5.0, step 0.05, default 1.05
+    auto [gammaSlider, gammaLabel] = makeSlider(this, 10, 500, 105);
+    m_gammaSlider = gammaSlider;
+    m_gammaLabel = gammaLabel;
+    auto* gammaRow = new QHBoxLayout();
+    gammaRow->addWidget(m_gammaSlider);
+    gammaRow->addWidget(m_gammaLabel);
+    form->addRow("Gamma", gammaRow);
 
-    form->addRow("Gamma", m_gammaSpin);
-    form->addRow("Contrast", m_contrastSpin);
-    form->addRow("Shader floor", m_floorSpin);
+    // Contrast: 0.1-5.0, step 0.05, default 1.15
+    auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 115);
+    m_contrastSlider = contrastSlider;
+    m_contrastLabel = contrastLabel;
+    auto* contrastRow = new QHBoxLayout();
+    contrastRow->addWidget(m_contrastSlider);
+    contrastRow->addWidget(m_contrastLabel);
+    form->addRow("Contrast", contrastRow);
+
+    // Floor: 0.0-0.5, step 0.01, default 0.01
+    auto [floorSlider, floorLabel] = makeSlider(this, 0, 50, 1);
+    m_floorSlider = floorSlider;
+    m_floorLabel = floorLabel;
+    auto* floorRow = new QHBoxLayout();
+    floorRow->addWidget(m_floorSlider);
+    floorRow->addWidget(m_floorLabel);
+    form->addRow("Shader Floor", floorRow);
 
     layout->addLayout(form);
 
     auto* buttons = new QDialogButtonBox(this);
-    m_logButton = buttons->addButton("Log settings", QDialogButtonBox::ActionRole);
+    m_logButton = buttons->addButton("Log Settings", QDialogButtonBox::ActionRole);
     auto* closeButton = buttons->addButton(QDialogButtonBox::Close);
     buttons->setStyleSheet(
-        "QDialogButtonBox QPushButton { background-color: #2B5A7A; color: #FFFFFF; border: none; padding: 6px 12px; border-radius: 4px; }"
+        "QDialogButtonBox QPushButton { background-color: #2B5A7A; color: #FFFFFF; border: none; padding: 8px 16px; border-radius: 4px; }"
         "QDialogButtonBox QPushButton:hover { background-color: #3472A0; }"
     );
     layout->addWidget(buttons);
 
-    connect(m_gammaSpin, &QDoubleSpinBox::valueChanged, this, &HeatmapSettingsDialog::applyGamma);
-    connect(m_contrastSpin, &QDoubleSpinBox::valueChanged, this, &HeatmapSettingsDialog::applyContrast);
-    connect(m_floorSpin, &QDoubleSpinBox::valueChanged, this, &HeatmapSettingsDialog::applyShaderFloor);
+    // Connect sliders to apply functions (live preview!)
+    connect(m_gammaSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyGamma);
+    connect(m_contrastSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyContrast);
+    connect(m_floorSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyShaderFloor);
     connect(m_logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
@@ -79,27 +115,40 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     if (!m_renderer) {
         return;
     }
-    const QSignalBlocker blockGamma(m_gammaSpin);
-    const QSignalBlocker blockContrast(m_contrastSpin);
-    const QSignalBlocker blockFloor(m_floorSpin);
-    m_gammaSpin->setValue(m_renderer->heatmapGamma());
-    m_contrastSpin->setValue(m_renderer->heatmapContrast());
-    m_floorSpin->setValue(m_renderer->heatmapShaderFloor());
+    // Convert double values to slider positions
+    const QSignalBlocker blockGamma(m_gammaSlider);
+    const QSignalBlocker blockContrast(m_contrastSlider);
+    const QSignalBlocker blockFloor(m_floorSlider);
+
+    m_gammaSlider->setValue(static_cast<int>(m_renderer->heatmapGamma() * 100));
+    m_contrastSlider->setValue(static_cast<int>(m_renderer->heatmapContrast() * 100));
+    m_floorSlider->setValue(static_cast<int>(m_renderer->heatmapShaderFloor() * 100));
+
+    // Update labels
+    m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
+    m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
+    m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
 }
 
-void HeatmapSettingsDialog::applyGamma(double value) {
+void HeatmapSettingsDialog::applyGamma(int sliderValue) {
+    const double value = sliderValue / 100.0;
+    m_gammaLabel->setText(QString::number(value, 'f', 2));
     if (m_renderer) {
         m_renderer->setHeatmapGamma(value);
     }
 }
 
-void HeatmapSettingsDialog::applyContrast(double value) {
+void HeatmapSettingsDialog::applyContrast(int sliderValue) {
+    const double value = sliderValue / 100.0;
+    m_contrastLabel->setText(QString::number(value, 'f', 2));
     if (m_renderer) {
         m_renderer->setHeatmapContrast(value);
     }
 }
 
-void HeatmapSettingsDialog::applyShaderFloor(double value) {
+void HeatmapSettingsDialog::applyShaderFloor(int sliderValue) {
+    const double value = sliderValue / 100.0;
+    m_floorLabel->setText(QString::number(value, 'f', 3));
     if (m_renderer) {
         m_renderer->setHeatmapShaderFloor(value);
     }
