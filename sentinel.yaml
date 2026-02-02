@@ -22,8 +22,7 @@ heatmap:
   gamma: 1.05
   contrast: 1.15
   # label_px: 24  # Min cell height for labels
-
-  echo %SENTINEL_QSG_RENDER_LOOP%label_px: 9999  # Disable labels
+  label_px: 9999  # Disable labels
 
 server:
   # Market data connection

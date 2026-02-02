@@ -7,36 +7,6 @@ Sentinel — PerformanceMonitor
 #include <QTextStream>
 #include <QThread>
 #include <numeric>
-#include <chrono>
-#include <fstream>
-#include <sstream>
-
-// #region agent log
-namespace {
-inline int64_t debugNowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
-inline void appendDebugLog(const char* location,
-                           const char* message,
-                           const char* hypothesisId,
-                           const std::string& dataJson,
-                           const char* runId = "post-fix") {
-    std::ofstream out("c:\\Users\\Pepe\\Documents\\Programming\\Sentinel\\.cursor\\debug.log", std::ios::app);
-    if (!out.is_open()) {
-        return;
-    }
-    out << "{\"sessionId\":\"debug-session\",\"runId\":\"" << runId
-        << "\",\"hypothesisId\":\"" << hypothesisId
-        << "\",\"location\":\"" << location
-        << "\",\"message\":\"" << message
-        << "\",\"data\":" << dataJson
-        << ",\"timestamp\":" << debugNowMs() << "}\n";
-}
-}  // namespace
-// #endregion
 
 PerformanceMonitor& PerformanceMonitor::instance() {
     static PerformanceMonitor instance;
@@ -72,14 +42,6 @@ void PerformanceMonitor::onFrameSwapped() {
         m_frameTimesMs.push_back(frameTimeMs);
         if (m_frameTimesMs.size() > MAX_FRAME_SAMPLES) {
             m_frameTimesMs.pop_front();
-        }
-        if (frameTimeMs > 40) {
-            std::ostringstream payload;
-            payload << "{"
-                    << "\"frameTimeMs\":" << frameTimeMs
-                    << ",\"thread\":" << reinterpret_cast<quintptr>(QThread::currentThreadId())
-                    << "}";
-            appendDebugLog("PerformanceMonitor.cpp:34", "frame_swap_slow", "H5", payload.str());
         }
 
         // Calculate average frame time
@@ -152,16 +114,6 @@ void PerformanceMonitor::updateCpuMetrics() {
                 prevTotal = total;
             }
         }
-    }
-    const auto end = std::chrono::steady_clock::now();
-    const auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    if (durationMs > 10) {
-        std::ostringstream payload;
-        payload << "{"
-                << "\"durationMs\":" << durationMs
-                << ",\"thread\":" << reinterpret_cast<quintptr>(QThread::currentThreadId())
-                << "}";
-        appendDebugLog("PerformanceMonitor.cpp:77", "cpu_metrics_slow", "H6", payload.str());
     }
 #else
     // TODO: Windows/macOS CPU tracking

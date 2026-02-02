@@ -4,8 +4,6 @@
 #include <QTimer>
 #include <QApplication>
 #include <QStyle>
-#include <chrono>
-#include <fstream>
 
 StatusBar::StatusBar(QWidget* parent)
     : QWidget(parent)
@@ -121,28 +119,8 @@ void StatusBar::setReadyStatus(const QString& status) {
 }
 
 void StatusBar::updateMetrics() {
-    // Placeholder: Update metrics display
-    // TODO: Connect to actual system metrics when available
-    // For now, just refresh the display
-    // #region agent log
-    static auto last = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    const auto deltaMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
-    last = now;
-    if (deltaMs > 2000) {
-        std::ofstream out("c:\\Users\\Pepe\\Documents\\Programming\\Sentinel\\.cursor\\debug.log", std::ios::app);
-        if (out.is_open()) {
-            const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
-            out << "{\"sessionId\":\"debug-session\",\"runId\":\"post-fix\",\"hypothesisId\":\"H4\","
-                   "\"location\":\"StatusBar.cpp:121\",\"message\":\"statusbar_tick_jank\","
-                   "\"data\":{\"deltaMs\":"
-                << deltaMs
-                << "},\"timestamp\":" << ts << "}\n";
-        }
-    }
-    // #endregion
+    // Metrics are now updated directly via PerformanceMonitor signals
+    // This periodic timer is kept for potential future use
 }
 
 void StatusBar::showVersion() {

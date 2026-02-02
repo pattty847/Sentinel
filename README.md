@@ -85,6 +85,46 @@ Client requires a server connection; `SENTINEL_HEATMAP_TF` must match on both.
 
 ---
 
+## Configuration
+
+Sentinel uses YAML configuration files for runtime settings. This is more convenient than setting dozens of environment variables.
+
+**Setup:**
+
+```bash
+# Copy the template to create your config
+cp sentinel.yaml.template sentinel.yaml
+
+# (Optional) Create user-specific overrides not tracked in git
+cp sentinel.yaml.template .sentinel.yaml
+```
+
+**Config Priority:**
+
+1. CLI environment variables (highest)
+2. `.sentinel.yaml` (user overrides)
+3. `sentinel.yaml` (project defaults)
+
+**Common settings:**
+
+```yaml
+heatmap:
+  timeframe: 1000      # communicates to client the timeframe
+  grid_width: 5120
+  grid_height: 2048
+
+server:
+  default_symbols: BTC-USD,ETH-USD    # comma separated list
+
+gui:
+  api_port: 17100      # Screenshot API endpoint
+  screenshot_dir: ./screenshots
+```
+
+See `sentinel.yaml.template` for all options or `docs/ENV_VARS.md` for complete reference.
+
+---
+
 ## API Keys
 
 Drop a `key.json` in project root:
@@ -114,6 +154,7 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 
 - `docs/ARCHITECTURE.md` — dataflow and rendering pipeline
 - `docs/MARKETDATA.md` — MarketDataCoreEngine pipeline
+- `docs/FEATURES.md` - Outline of features for the terminal
 
 ---
 

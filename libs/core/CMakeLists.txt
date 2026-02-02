@@ -4,6 +4,8 @@ add_library(sentinel_core
     Cpp20Utils.hpp
     Version.cpp
     Version.hpp
+    ConfigLoader.cpp
+    ConfigLoader.hpp
     marketdata/MarketDataCoreEngine.cpp
     marketdata/MarketDataCoreEngine.hpp
     marketdata/auth/Authenticator.cpp
@@ -33,11 +35,13 @@ add_library(sentinel_core
 
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
+find_package(yaml-cpp CONFIG REQUIRED)
 # Dependencies found in root CMakeLists.txt via vcpkg
 # - Boost (with system component)
 # - nlohmann_json
 # - OpenSSL
 # - jwt-cpp (via FetchContent)
+# - yaml-cpp
 
 target_include_directories(sentinel_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -50,6 +54,7 @@ target_link_libraries(sentinel_core
         Boost::system          # required by beast
         OpenSSL::SSL
         OpenSSL::Crypto
+        yaml-cpp::yaml-cpp
     PRIVATE
         nlohmann_json::nlohmann_json
         jwt-cpp::jwt-cpp

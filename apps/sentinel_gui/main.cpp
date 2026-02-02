@@ -21,6 +21,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include "SentinelLogging.hpp"
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
+#include "ConfigLoader.hpp"
 #include <QResource>
 #include <QCoreApplication>
 // --- Hardware backend/environment setup ---
@@ -79,6 +80,10 @@ void registerMetaTypesAndQml() {
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
+    // Load config files first (sets environment variables)
+    ConfigLoader::loadAndSetEnv("sentinel.yaml");
+    ConfigLoader::loadUserOverrides(".sentinel.yaml");
+
     configureGraphicsBackend();
     configureSurfaceFormat();
 

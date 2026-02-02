@@ -4,7 +4,9 @@ set(GRID_CORE_SOURCES
     MainWindowGpu.h
     ChartModeController.cpp
     ChartModeController.h
-    
+    PerformanceMonitor.cpp
+    PerformanceMonitor.hpp
+
     # MainWindow modular components
     mainwindow/DockFactory.cpp
     mainwindow/DockFactory.h

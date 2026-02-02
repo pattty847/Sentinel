@@ -5,10 +5,11 @@
   "builtin-baseline": "39922dbab0cafd7a7150d459c6a181c7dee5dfbe",
   "dependencies": [
     "boost-beast",
-    "boost-system", 
+    "boost-system",
     "nlohmann-json",
     "openssl",
     "jwt-cpp",
-    "msdfgen"
+    "msdfgen",
+    "yaml-cpp"
   ]
 }

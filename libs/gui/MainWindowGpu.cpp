@@ -41,6 +41,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
+#include "PerformanceMonitor.hpp"
 #include "mainwindow/DockFactory.h"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
@@ -87,6 +88,21 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->setThemeBridge(m_themeBridge);
         m_qmlController->loadQmlSource();
         m_qmlController->verifyGpuAcceleration();
+    }
+
+    // Attach PerformanceMonitor to QML window for FPS tracking
+    if (m_qquickView) {
+        PerformanceMonitor::instance().attachToWindow(m_qquickView);
+        sLog_App("PerformanceMonitor attached to QML window");
+    }
+
+    // Connect StatusBar to PerformanceMonitor signals
+    if (m_statusBar) {
+        auto& perfMon = PerformanceMonitor::instance();
+        connect(&perfMon, &PerformanceMonitor::fpsChanged, m_statusBar, &StatusBar::setFps);
+        connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
+        connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
+        sLog_App("StatusBar connected to PerformanceMonitor");
     }
     
     // Set up QML context properties

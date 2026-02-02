@@ -19,6 +19,7 @@ bool ConfigLoader::loadAndSetEnv(const std::string& configPath) {
     try {
         setEnvFromYaml(configPath);
         s_loadedFiles.push_back(configPath);
+        std::cout << "Loaded config: " << configPath << std::endl;
         return true;
     } catch (const std::exception& e) {
         std::cerr << "ERROR: Failed to load config " << configPath << ": " << e.what() << std::endl;

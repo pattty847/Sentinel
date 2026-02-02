@@ -9,6 +9,8 @@
 # Build artifacts and directories
 vcpkg_installed/
 build/
+build-windows/
+out/
 .cache/
 compile_commands.json
 CMakeCache.txt
@@ -19,6 +21,13 @@ build.ninja
 .rcc/
 .qt/
 .qtcreator/
+
+# Visual Studio (Windows)
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 
 # CMake generated files
 CMakeFiles/
@@ -38,6 +47,7 @@ config.json
 .env
 .env.local
 .env.*.local
+.sentinel.yaml  # User-specific config overrides
 
 # Log files
 *.log
