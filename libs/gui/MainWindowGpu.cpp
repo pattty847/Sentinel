@@ -102,7 +102,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         connect(&perfMon, &PerformanceMonitor::fpsChanged, m_statusBar, &StatusBar::setFps);
         connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
         connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
-        sLog_App("StatusBar connected to PerformanceMonitor");
+        connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
+        sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
     }
     
     // Set up QML context properties

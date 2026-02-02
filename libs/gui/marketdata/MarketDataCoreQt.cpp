@@ -85,4 +85,12 @@ void MarketDataCoreQt::wireCallbacks() {
             emit self->errorOccurred(errorQ);
         }, Qt::QueuedConnection);
     });
+
+    m_core.onLatency([self](int latencyMs) {
+        if (!self) return;
+        QMetaObject::invokeMethod(self.data(), [self, latencyMs]() {
+            if (!self) return;
+            emit self->latencyReceived(latencyMs);
+        }, Qt::QueuedConnection);
+    });
 }

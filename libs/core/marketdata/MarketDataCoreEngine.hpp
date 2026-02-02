@@ -47,6 +47,7 @@ public:
                                                       const std::vector<OrderBookLevel>&)>;
     using ConnectionStatusCb = std::function<void(bool)>;
     using ErrorCb = std::function<void(const std::string&)>;
+    using LatencyCb = std::function<void(int)>;  // Latency in milliseconds
 
     explicit MarketDataCoreEngine(Authenticator& auth);
 
@@ -70,6 +71,7 @@ public:
     void onLiveOrderBookInitialized(OrderBookInitializedCb cb) { m_onLiveOrderBookInitialized = std::move(cb); }
     void onConnectionStatus(ConnectionStatusCb cb) { m_onConnectionStatus = std::move(cb); }
     void onError(ErrorCb cb) { m_onError = std::move(cb); }
+    void onLatency(LatencyCb cb) { m_onLatency = std::move(cb); }
 
 private:
     // Connection lifecycle
@@ -150,4 +152,5 @@ private:
     OrderBookInitializedCb           m_onLiveOrderBookInitialized;
     ConnectionStatusCb               m_onConnectionStatus;
     ErrorCb                          m_onError;
+    LatencyCb                        m_onLatency;
 };

@@ -29,6 +29,7 @@ signals:
                                   const std::vector<OrderBookLevel>& asks);
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
+    void latencyReceived(int milliseconds);
 
 private:
     void wireCallbacks();

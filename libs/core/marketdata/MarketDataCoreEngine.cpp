@@ -488,8 +488,17 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
         // Parse ISO8601 timestamp: "2023-02-09T20:32:50.714964855Z"
         std::string timestamp_str = message["timestamp"];
         exchange_timestamp = Cpp20Utils::parseISO8601(timestamp_str);
-        
-        // Record order book latency (exchange → arrival)
+
+        // Calculate WebSocket latency: local receive time - Coinbase server time
+        auto local_time = std::chrono::system_clock::now();
+        auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            local_time - exchange_timestamp
+        ).count();
+
+        // Emit latency to monitoring system
+        if (m_onLatency && latency_ms >= 0 && latency_ms < 10000) {  // Sanity check: 0-10s
+            m_onLatency(static_cast<int>(latency_ms));
+        }
     }
     
     if (!message.contains("events")) return;
