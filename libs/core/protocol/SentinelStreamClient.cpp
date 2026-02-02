@@ -14,6 +14,8 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
+    qRegisterMetaType<CandleBar>("CandleBar");
+    qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
@@ -105,6 +107,30 @@ void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
         {"timeframe_ms", timeframeMs},
         {"end_time", endTimeMs},
         {"count", count}
+    };
+
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
+void SentinelStreamClient::requestCandleHistory(const std::string& symbol,
+                                                int64_t timeframeSec,
+                                                int64_t endTimeSec,
+                                                int limit) {
+    if (symbol.empty() || timeframeSec <= 0) {
+        return;
+    }
+    nlohmann::json msg = {
+        {"type", "candle_history_request"},
+        {"symbol", symbol},
+        {"timeframe_sec", timeframeSec},
+        {"end_time_sec", endTimeSec},
+        {"limit", limit}
     };
 
     std::string str = msg.dump();
@@ -327,6 +353,36 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                          gridWidth,
                                          gridHeight,
                                          out);
+        } else if (type == "candle_history_chunk") {
+             std::string symbol = msg.value("symbol", "");
+             if (symbol.empty()) return;
+             const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));
+             const int64_t startTimeSec = msg.value("start_time_sec", static_cast<int64_t>(0));
+             const int64_t endTimeSec = msg.value("end_time_sec", static_cast<int64_t>(0));
+             const auto candles = msg.value("candles", nlohmann::json::array());
+
+             QVector<CandleBar> out;
+             if (candles.is_array()) {
+                 out.reserve(static_cast<int>(candles.size()));
+                 for (const auto& item : candles) {
+                     CandleBar bar;
+                     bar.timeStartMs = item.value("time_start_ms", static_cast<int64_t>(0));
+                     bar.timeEndMs = item.value("time_end_ms", static_cast<int64_t>(0));
+                     bar.open = item.value("open", 0.0);
+                     bar.high = item.value("high", 0.0);
+                     bar.low = item.value("low", 0.0);
+                     bar.close = item.value("close", 0.0);
+                     bar.volume = item.value("volume", 0.0);
+                     bar.isClosed = item.value("is_closed", false);
+                     out.push_back(bar);
+                 }
+             }
+
+             emit candleHistoryReceived(QString::fromStdString(symbol),
+                                        timeframeSec,
+                                        startTimeSec,
+                                        endTimeSec,
+                                        out);
         }
 
     } catch (const std::exception& e) {

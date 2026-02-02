@@ -15,6 +15,8 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
+#include "../marketdata/auth/Authenticator.hpp"
+#include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "Cpp20Utils.hpp"
 
@@ -263,6 +265,87 @@ public:
                     payload["columns"] = std::move(arr);
                     do_write(payload.dump());
                 }
+            } else if (type == "candle_history_request") {
+                std::string symbol = j.value("symbol", "");
+                const int64_t timeframeSec = j.value("timeframe_sec", static_cast<int64_t>(0));
+                int64_t endTimeSec = j.value("end_time_sec", static_cast<int64_t>(0));
+                int limit = j.value("limit", 350);
+
+                if (symbol.empty() || timeframeSec <= 0) {
+                    send_error("candle_history_request", symbol, "missing symbol or timeframe_sec");
+                    return;
+                }
+
+                if (limit <= 0) {
+                    limit = 350;
+                }
+                if (limit > 350) {
+                    limit = 350;
+                }
+
+                if (endTimeSec <= 0) {
+                    endTimeSec = static_cast<int64_t>(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                }
+
+                const auto granularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
+                if (!granularity) {
+                    send_error("candle_history_request", symbol, "unsupported timeframe_sec");
+                    return;
+                }
+
+                const int64_t startTimeSec = endTimeSec - (timeframeSec * static_cast<int64_t>(limit));
+                if (startTimeSec <= 0) {
+                    send_error("candle_history_request", symbol, "invalid start time");
+                    return;
+                }
+
+                auto self = shared_from_this();
+                std::thread([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit, granularity]() {
+                    CandleFetchResult res = self->owner_->restClient().fetchProductCandles(
+                        symbol, startTimeSec, endTimeSec, *granularity, limit);
+
+                    if (!res.ok) {
+                        self->send_error("candle_history_request", symbol,
+                                         std::string("fetch failed: ") + res.error);
+                        return;
+                    }
+
+                    std::sort(res.candles.begin(), res.candles.end(),
+                              [](const OHLCVBar& a, const OHLCVBar& b) {
+                                  return a.timestamp_ms < b.timestamp_ms;
+                              });
+
+                    const int64_t tfMs = timeframeSec * 1000;
+                    const int64_t nowMs = static_cast<int64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+
+                    nlohmann::json payload;
+                    payload["type"] = "candle_history_chunk";
+                    payload["symbol"] = symbol;
+                    payload["timeframe_sec"] = timeframeSec;
+                    payload["start_time_sec"] = startTimeSec;
+                    payload["end_time_sec"] = endTimeSec;
+                    auto arr = nlohmann::json::array();
+                    for (auto& bar : res.candles) {
+                        bar.is_closed = (bar.timestamp_ms + tfMs) <= nowMs;
+                        nlohmann::json item;
+                        item["time_start_ms"] = bar.timestamp_ms;
+                        item["time_end_ms"] = bar.timestamp_ms + tfMs;
+                        item["open"] = bar.open;
+                        item["high"] = bar.high;
+                        item["low"] = bar.low;
+                        item["close"] = bar.close;
+                        item["volume"] = bar.volume;
+                        item["is_closed"] = bar.is_closed;
+                        arr.push_back(std::move(item));
+                    }
+                    payload["candles"] = std::move(arr);
+
+                    self->do_write(payload.dump());
+                }).detach();
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
@@ -373,6 +456,17 @@ public:
                 shared_from_this(),
                 std::move(payload)));
     }
+
+    void send_error(const std::string& context, const std::string& symbol, const std::string& message) {
+        nlohmann::json err;
+        err["type"] = "error";
+        err["context"] = context;
+        if (!symbol.empty()) {
+            err["symbol"] = symbol;
+        }
+        err["message"] = message;
+        do_write(err.dump());
+    }
     
     void on_write_post(std::string payload) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -416,9 +510,13 @@ public:
 
 // ============================================================================
 
-SentinelStreamServer::SentinelStreamServer(ServerDataModel& model, int port, QObject* parent)
+SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
+                                           Authenticator& auth,
+                                           int port,
+                                           QObject* parent)
     : QObject(parent)
     , m_model(model)
+    , m_restClient(std::make_unique<CoinbaseRestClient>(auth))
     , m_port(port)
 {
 }
@@ -494,4 +592,8 @@ void SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
 
 void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
     emit clientUnsubscribed(QString::fromStdString(symbol));
+}
+
+CoinbaseRestClient& SentinelStreamServer::restClient() {
+    return *m_restClient;
 }

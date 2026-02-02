@@ -30,6 +30,16 @@ public:
         QByteArray liquidity;
         double liquidityScale = 1.0;
     };
+    struct CandleBar {
+        int64_t timeStartMs = 0;
+        int64_t timeEndMs = 0;
+        double open = 0.0;
+        double high = 0.0;
+        double low = 0.0;
+        double close = 0.0;
+        double volume = 0.0;
+        bool isClosed = false;
+    };
 
     explicit SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent = nullptr);
     ~SentinelStreamClient();
@@ -43,6 +53,10 @@ public:
                                int64_t timeframeMs,
                                int64_t endTimeMs,
                                int count);
+    void requestCandleHistory(const std::string& symbol,
+                              int64_t timeframeSec,
+                              int64_t endTimeSec,
+                              int limit);
 
 signals:
     void connected();
@@ -77,6 +91,11 @@ signals:
                                 int gridWidth,
                                 int gridHeight,
                                 const QVector<HeatmapHistoryColumn>& columns);
+    void candleHistoryReceived(const QString& symbol,
+                               int64_t timeframeSec,
+                               int64_t startTimeSec,
+                               int64_t endTimeSec,
+                               const QVector<CandleBar>& candles);
 
 private:
     void run();
@@ -109,3 +128,5 @@ private:
 
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::HeatmapHistoryColumn>)
+Q_DECLARE_METATYPE(SentinelStreamClient::CandleBar)
+Q_DECLARE_METATYPE(QVector<SentinelStreamClient::CandleBar>)

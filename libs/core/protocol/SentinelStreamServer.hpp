@@ -9,13 +9,19 @@
 #include <thread>
 #include "../servermodel/ServerDataModel.hpp"
 
+class Authenticator;
+class CoinbaseRestClient;
+
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
 class SentinelStreamServer : public QObject {
     Q_OBJECT
 public:
-    explicit SentinelStreamServer(ServerDataModel& model, int port, QObject* parent = nullptr);
+    explicit SentinelStreamServer(ServerDataModel& model,
+                                  Authenticator& auth,
+                                  int port,
+                                  QObject* parent = nullptr);
     ~SentinelStreamServer();
 
     void start();
@@ -28,11 +34,13 @@ signals:
 public:
     void notifyClientSubscribed(const std::string& symbol);
     void notifyClientUnsubscribed(const std::string& symbol);
+    CoinbaseRestClient& restClient();
 
 private:
     void doAccept();
     
     ServerDataModel& m_model;
+    std::unique_ptr<CoinbaseRestClient> m_restClient;
     int m_port;
     
     net::io_context m_ioc;

@@ -67,7 +67,7 @@ bool SentinelServerApp::initialize() {
         m_serverModel = std::make_unique<ServerDataModel>();
 
         // 4. Stream Server
-        m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, 8080);
+        m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, *m_authenticator, 8080);
         m_server->start();
         
         // Connect MarketDataCoreEngine -> ServerDataModel via queued invocations

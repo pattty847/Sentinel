@@ -14,6 +14,8 @@ enum class MessageType {
     HeatmapSlice,
     HeatmapHistoryRequest,
     HeatmapHistoryChunk,
+    CandleHistoryRequest,
+    CandleHistoryChunk,
     TickDelta, // Maybe for later
     Error,
     Unknown
@@ -28,6 +30,8 @@ inline std::string toString(MessageType t) {
         case MessageType::HeatmapSlice: return "heatmap_slice";
         case MessageType::HeatmapHistoryRequest: return "heatmap_history_request";
         case MessageType::HeatmapHistoryChunk: return "heatmap_history_chunk";
+        case MessageType::CandleHistoryRequest: return "candle_history_request";
+        case MessageType::CandleHistoryChunk: return "candle_history_chunk";
         case MessageType::Error: return "error";
         default: return "unknown";
     }
@@ -41,6 +45,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "heatmap_slice") return MessageType::HeatmapSlice;
     if (s == "heatmap_history_request") return MessageType::HeatmapHistoryRequest;
     if (s == "heatmap_history_chunk") return MessageType::HeatmapHistoryChunk;
+    if (s == "candle_history_request") return MessageType::CandleHistoryRequest;
+    if (s == "candle_history_chunk") return MessageType::CandleHistoryChunk;
     if (s == "error") return MessageType::Error;
     return MessageType::Unknown;
 }

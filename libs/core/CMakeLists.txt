@@ -14,6 +14,8 @@ add_library(sentinel_core
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
+    marketdata/rest/CoinbaseRestClient.hpp
+    marketdata/rest/CoinbaseRestClient.cpp
     marketdata/model/LiveOrderBook.cpp
     SentinelLogging.cpp
     SentinelLogging.hpp

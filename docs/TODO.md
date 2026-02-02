@@ -8,6 +8,30 @@ Each feature is a self-contained block. Use this template:
 
 ```
 ---
+
+### F11: Coinbase REST Candle History
+**Status:** active
+**Created:** 2026-02-02
+**Updated:** 2026-02-02
+
+#### Now
+- [ ] Serve 1s candles from live trade aggregation (no REST history)
+- [ ] Roll up 1m candles to custom timeframes (on-demand)
+- [ ] Add server-side candle cache per (symbol, timeframe)
+
+#### Next
+- [ ] Merge REST history with live candles (overwrite forming bar when closed)
+- [ ] Add gap rendering hints for no-trade buckets
+
+#### Later
+- [ ] Persist candle cache to disk for fast restart
+
+#### Done
+- [x] Coinbase REST candles fetcher + REST JWT (2026-02-02)
+- [x] WS candle_history_request / candle_history_chunk (server + client) (2026-02-02)
+
+#### Session log
+- **2026-02-02** — Added Coinbase REST candle history endpoint and WS request/response. Next: 1s candles + rollups + caching.
 ### F<N>: <Short name>
 **Status:** active | paused | done
 **Created:** YYYY-MM-DD

@@ -32,24 +32,7 @@ std::string Authenticator::createJwt() const {
     }
     
     try {
-        // Generate a random nonce (following the Coinbase tutorial exactly)
-        unsigned char nonce_raw[16];
-        if (RAND_bytes(nonce_raw, sizeof(nonce_raw)) != 1) {
-            throw std::runtime_error("🔑 Authenticator: Failed to generate random nonce");
-        }
-        
-        // Base64 encode the nonce so it's JSON-safe (jwt-cpp requires UTF-8 safe strings)
-        BIO *bio, *b64;
-        BUF_MEM *bufferPtr;
-        b64 = BIO_new(BIO_f_base64());
-        bio = BIO_new(BIO_s_mem());
-        bio = BIO_push(b64, bio);
-        BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-        BIO_write(bio, nonce_raw, sizeof(nonce_raw));
-        BIO_flush(bio);
-        BIO_get_mem_ptr(bio, &bufferPtr);
-        std::string nonce(bufferPtr->data, bufferPtr->length);
-        BIO_free_all(bio);
+        const std::string nonce = generateNonce();
 
         // Create JWT token following the Coinbase tutorial format
         auto token = jwt::create()
@@ -65,6 +48,37 @@ std::string Authenticator::createJwt() const {
     }
     catch (const std::exception& ex) {
         throw std::runtime_error(std::string("🔑 Authenticator: JWT generation failed: ") + ex.what());
+    }
+}
+
+std::string Authenticator::createRestJwt(const std::string& method,
+                                         const std::string& host,
+                                         const std::string& path) const {
+    if (m_keyId.empty() || m_privateKey.empty()) {
+        throw std::runtime_error("🔑 Authenticator: API key/secret missing – cannot create JWT");
+    }
+    if (method.empty() || host.empty() || path.empty()) {
+        throw std::runtime_error("🔑 Authenticator: REST JWT requires method, host, and path");
+    }
+
+    try {
+        const std::string nonce = generateNonce();
+        const std::string uri = method + " " + host + path;
+
+        auto token = jwt::create()
+            .set_subject(m_keyId)
+            .set_issuer("cdp")
+            .set_not_before(std::chrono::system_clock::now())
+            .set_expires_at(std::chrono::system_clock::now() + std::chrono::seconds{120})
+            .set_header_claim("kid", jwt::claim(m_keyId))
+            .set_header_claim("nonce", jwt::claim(nonce))
+            .set_payload_claim("uri", jwt::claim(uri))
+            .set_payload_claim("uris", jwt::claim(nlohmann::json::array({uri})))
+            .sign(jwt::algorithm::es256("", m_privateKey));
+
+        return token;
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(std::string("🔑 Authenticator: REST JWT generation failed: ") + ex.what());
     }
 }
 
@@ -94,3 +108,24 @@ void Authenticator::loadKeyFile(const std::string& path) {
     
     sLog_App(std::string("Authenticator: Successfully loaded API keys from [") + path + "]");
 } 
+
+std::string Authenticator::generateNonce() {
+    unsigned char nonce_raw[16];
+    if (RAND_bytes(nonce_raw, sizeof(nonce_raw)) != 1) {
+        throw std::runtime_error("🔑 Authenticator: Failed to generate random nonce");
+    }
+    
+    BIO* bio = nullptr;
+    BIO* b64 = nullptr;
+    BUF_MEM* bufferPtr = nullptr;
+    b64 = BIO_new(BIO_f_base64());
+    bio = BIO_new(BIO_s_mem());
+    bio = BIO_push(b64, bio);
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+    BIO_write(bio, nonce_raw, sizeof(nonce_raw));
+    BIO_flush(bio);
+    BIO_get_mem_ptr(bio, &bufferPtr);
+    std::string nonce(bufferPtr->data, bufferPtr->length);
+    BIO_free_all(bio);
+    return nonce;
+}
