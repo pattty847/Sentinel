@@ -12,12 +12,12 @@ Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20
 
 ## Server-Client Main Branch Recent Changes
 
-<img width="1918" height="1030" alt="image" src="https://github.com/user-attachments/assets/945eca03-91f2-4af7-899a-70a594847cf3" />
+<img width="2559" height="1392" alt="image" src="https://github.com/user-attachments/assets/48372665-9f01-4652-95bd-3c7bc7133734" />
 
 - Full Server Client architecture
 - Entirely GPU based heatmap rasterization and rendering
 - One quad, texture sampling
-- 60 FPS, easily higher
+- 60 FPS, 125 FPS Pan/Zoom
 - 8192 x 8192 - 67M Cells, easily can push higher
 - TWAP Heatmap Cell Aggregation
 - Full Docking Framework
@@ -118,3 +118,4 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 ## License
 
 AGPL-3.0
+
