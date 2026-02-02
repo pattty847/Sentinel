@@ -8,6 +8,7 @@
 #include <boost/asio/ssl/stream.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <filesystem>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -16,13 +17,19 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 namespace {
+std::string buildCandlesPath(const std::string& productId) {
+    std::ostringstream oss;
+    oss << "/api/v3/brokerage/products/" << productId << "/candles";
+    return oss.str();
+}
+
 std::string buildCandlesTarget(const std::string& productId,
                                int64_t startSec,
                                int64_t endSec,
                                const std::string& granularity,
                                int limit) {
     std::ostringstream oss;
-    oss << "/api/v3/brokerage/products/" << productId << "/candles"
+    oss << buildCandlesPath(productId)
         << "?start=" << startSec
         << "&end=" << endSec
         << "&granularity=" << granularity
@@ -61,6 +68,29 @@ bool parseInt64(const nlohmann::json& v, int64_t& out) {
     }
     return false;
 }
+
+std::optional<std::string> resolveCaBundlePath() {
+    if (const char* envPath = std::getenv("SENTINEL_CA_BUNDLE")) {
+        if (envPath[0] != '\0') {
+            return std::string(envPath);
+        }
+    }
+
+    const std::filesystem::path candidates[] = {
+        std::filesystem::path("resources") / "certs" / "ca-bundle.crt",
+        std::filesystem::path("..") / "resources" / "certs" / "ca-bundle.crt",
+        std::filesystem::path("..") / ".." / "resources" / "certs" / "ca-bundle.crt"
+    };
+
+    for (const auto& path : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) {
+            return path.string();
+        }
+    }
+
+    return std::nullopt;
+}
 }
 
 CoinbaseRestClient::CoinbaseRestClient(Authenticator& auth, std::string host, std::string port)
@@ -96,6 +126,13 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         net::io_context ioc;
         ssl::context ctx{ssl::context::tlsv12_client};
         ctx.set_default_verify_paths();
+        if (auto caPath = resolveCaBundlePath()) {
+            beast::error_code ec;
+            ctx.load_verify_file(*caPath, ec);
+            if (ec) {
+                sLog_Warning("REST TLS: Failed to load CA bundle [" << *caPath << "]: " << ec.message());
+            }
+        }
 
         tcp::resolver resolver{ioc};
         beast::ssl_stream<beast::tcp_stream> stream{ioc, ctx};
@@ -112,8 +149,9 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         stream.set_verify_mode(ssl::verify_peer);
         stream.handshake(ssl::stream_base::client);
 
+        const std::string path = buildCandlesPath(productId);
         const std::string target = buildCandlesTarget(productId, startSec, endSec, granularity, limit);
-        const std::string jwt = m_auth.createRestJwt("GET", m_host, target);
+        const std::string jwt = m_auth.createRestJwt("GET", path);
 
         http::request<http::string_body> req{http::verb::get, target, 11};
         req.set(http::field::host, m_host);
@@ -133,6 +171,14 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         if (res.result() != http::status::ok) {
             std::ostringstream oss;
             oss << "HTTP " << res.result_int() << " " << res.reason();
+            if (!res.body().empty()) {
+                std::string body = res.body();
+                if (body.size() > 512) {
+                    body.resize(512);
+                    body += "...";
+                }
+                oss << " | " << body;
+            }
             result.error = oss.str();
             return result;
         }

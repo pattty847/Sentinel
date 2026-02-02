@@ -393,7 +393,20 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
-    
+
+    // Initialize heatmap color gradients with vibrant "Sentinel" preset
+    m_bidGradient = ColorGradient{
+        {0.0f, QColor(0, 30, 30)},      // Dark teal (almost black)
+        {0.5f, QColor(0, 120, 100)},    // Medium teal
+        {1.0f, QColor(0, 255, 200)}     // Electric cyan
+    };
+    m_askGradient = ColorGradient{
+        {0.0f, QColor(40, 0, 0)},       // Dark red (almost black)
+        {0.5f, QColor(180, 40, 20)},    // Medium red
+        {0.85f, QColor(255, 100, 30)},  // Bright red-orange
+        {1.0f, QColor(255, 200, 50)}    // Hot orange/yellow
+    };
+
     // Create DataProcessor on worker thread for background processing
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
@@ -772,6 +785,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
         }
 
+        // Palette-only update (colors/gamma changed but not grid size)
+        if (m_heatmapPaletteDirty && !m_heatmapImage.isNull()) {
+            m_heatmapPaletteImage = QImage();  // Force regeneration
+            ensureHeatmapPaletteImage();
+            m_heatmapTextureDirty = true;  // Trigger full texture update
+        }
+
         const QRectF bounds = boundingRect();
         QRectF drawRect = bounds;
         texNode->setRect(drawRect);
@@ -1030,7 +1050,7 @@ void UnifiedGridRenderer::ensureHeatmapImage() {
 }
 
 void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
-    if (!m_heatmapPaletteImage.isNull()) {
+    if (!m_heatmapPaletteImage.isNull() && !m_heatmapPaletteDirty) {
         return;
     }
 
@@ -1043,31 +1063,27 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
     }
 
     auto* row = reinterpret_cast<QRgb*>(m_heatmapPaletteImage.scanLine(0));
-    const float gamma = 0.65f;
+    const float gamma = static_cast<float>(m_heatmapPaletteGamma);
+
     for (int i = 0; i < width; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(width - 1);
         const bool isAsk = (i >= width / 2);
         const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
         const float x = std::clamp(localT, 0.0f, 1.0f);
+
+        // Apply gamma curve for dramatic dark→bright progression
         const float curve = std::pow(x, gamma);
 
-        // Base hues: bids = teal/green, asks = red/orange.
-        const int r0 = isAsk ? 255 : 18;
-        const int g0 = isAsk ? 64 : 255;
-        const int b0 = isAsk ? 32 : 160;
+        // Get color from gradient based on curved position
+        const QColor color = isAsk ? m_askGradient.interpolate(curve) : m_bidGradient.interpolate(curve);
 
-        const int r1 = isAsk ? 255 : 180;
-        const int g1 = isAsk ? 200 : 255;
-        const int b1 = isAsk ? 120 : 220;
-
-        const int r = static_cast<int>(r0 + (r1 - r0) * curve);
-        const int g = static_cast<int>(g0 + (g1 - g0) * curve);
-        const int b = static_cast<int>(b0 + (b1 - b0) * curve);
-        row[i] = qRgba(std::clamp(r, 0, 255),
-                       std::clamp(g, 0, 255),
-                       std::clamp(b, 0, 255),
-                       255);
+        row[i] = qRgba(color.red(), color.green(), color.blue(), 255);
     }
+
+    m_heatmapPaletteDirty = false;
+    sLog_Render("Heatmap palette regenerated with gamma=" << gamma
+                << " bid_stops=" << m_bidGradient.stops.size()
+                << " ask_stops=" << m_askGradient.stops.size());
 }
 
 void UnifiedGridRenderer::buildMsdfAtlas() {

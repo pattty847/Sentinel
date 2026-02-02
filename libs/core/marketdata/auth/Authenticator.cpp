@@ -52,18 +52,17 @@ std::string Authenticator::createJwt() const {
 }
 
 std::string Authenticator::createRestJwt(const std::string& method,
-                                         const std::string& host,
                                          const std::string& path) const {
     if (m_keyId.empty() || m_privateKey.empty()) {
         throw std::runtime_error("🔑 Authenticator: API key/secret missing – cannot create JWT");
     }
-    if (method.empty() || host.empty() || path.empty()) {
-        throw std::runtime_error("🔑 Authenticator: REST JWT requires method, host, and path");
+    if (method.empty() || path.empty()) {
+        throw std::runtime_error("🔑 Authenticator: REST JWT requires method and path");
     }
 
     try {
         const std::string nonce = generateNonce();
-        const std::string uri = method + " " + host + path;
+        const std::string uri = method + " " + path;
 
         auto token = jwt::create()
             .set_subject(m_keyId)
@@ -73,7 +72,6 @@ std::string Authenticator::createRestJwt(const std::string& method,
             .set_header_claim("kid", jwt::claim(m_keyId))
             .set_header_claim("nonce", jwt::claim(nonce))
             .set_payload_claim("uri", jwt::claim(uri))
-            .set_payload_claim("uris", jwt::claim(nlohmann::json::array({uri})))
             .sign(jwt::algorithm::es256("", m_privateKey));
 
         return token;

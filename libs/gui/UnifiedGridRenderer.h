@@ -40,6 +40,47 @@ class DataProcessor;
 class MsdfGlyphNode;
 
 /**
+ * ColorStop - Single color point in a gradient
+ */
+struct ColorStop {
+    float position;  // 0.0 - 1.0
+    QColor color;
+
+    ColorStop(float pos, const QColor& col) : position(pos), color(col) {}
+};
+
+/**
+ * ColorGradient - Multi-stop color gradient for heatmap palette
+ */
+struct ColorGradient {
+    std::vector<ColorStop> stops;
+
+    ColorGradient() = default;
+    ColorGradient(std::initializer_list<ColorStop> stopList) : stops(stopList) {}
+
+    QColor interpolate(float t) const {
+        if (stops.empty()) return QColor(0, 0, 0);
+        if (stops.size() == 1 || t <= stops.front().position) return stops.front().color;
+        if (t >= stops.back().position) return stops.back().color;
+
+        // Find surrounding stops
+        for (size_t i = 0; i < stops.size() - 1; ++i) {
+            if (t >= stops[i].position && t <= stops[i + 1].position) {
+                const float localT = (t - stops[i].position) / (stops[i + 1].position - stops[i].position);
+                const QColor& c0 = stops[i].color;
+                const QColor& c1 = stops[i + 1].color;
+                return QColor(
+                    c0.red() + (c1.red() - c0.red()) * localT,
+                    c0.green() + (c1.green() - c0.green()) * localT,
+                    c0.blue() + (c1.blue() - c0.blue()) * localT
+                );
+            }
+        }
+        return stops.back().color;
+    }
+};
+
+/**
  *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
  * 
  * Slim QML adapter that delegates to the V2 modular architecture.
@@ -123,7 +164,13 @@ private:
     QColor m_heatmapBackgroundColor = QColor(18, 20, 24);
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
-    double m_heatmapShaderFloor = 0.1;
+    double m_heatmapShaderFloor = 0.01;  // Lowered from 0.1 to allow true blacks
+
+    // Palette color system
+    double m_heatmapPaletteGamma = 2.0;  // Raised from hardcoded 0.65 for dramatic contrast
+    ColorGradient m_bidGradient;
+    ColorGradient m_askGradient;
+    bool m_heatmapPaletteDirty = true;
 
     MsdfAtlas m_msdfAtlas;
     bool m_msdfAtlasBuilt = false;

@@ -382,6 +382,43 @@ _(no entries yet)_
 ---
 ---
 
+### F12: Heatmap Color System Overhaul
+**Status:** active
+**Created:** 2026-02-02
+**Updated:** 2026-02-02
+
+#### Now
+- [ ] Fix hardcoded palette in `ensureHeatmapPaletteImage()` - make it dynamic
+- [ ] Implement multi-stop gradient system (3-5 color stops per side)
+- [ ] Create vibrant "Sentinel" preset (dark→bright with full saturation)
+  - Bids: (0,30,30) → (0,120,100) → (0,255,200) electric cyan
+  - Asks: (40,0,0) → (180,40,20) → (255,100,30) → (255,200,50) hot orange
+- [ ] Fix palette gamma (change 0.65 → 2.0+ for dramatic contrast)
+- [ ] Lower shader floor to 0.0-0.01 (allow true blacks for low liquidity)
+- [ ] Add palette regeneration trigger when color settings change
+
+#### Next
+- [ ] Add preset system: Classic, Fire, Ocean, Monochrome, Matrix
+- [ ] Replace number spinboxes with QSliders in HeatmapSettingsDialog
+- [ ] Add color picker widgets for custom bid/ask colors
+- [ ] Add "Intensity Curve" slider (replaces hardcoded 0.65 gamma)
+- [ ] Add live preview in settings dialog
+
+#### Later
+- [ ] Per-exchange color profiles (Coinbase vs Binance palettes)
+- [ ] Time-of-day adaptive colors (bright during trading hours, dark at night)
+- [ ] Heatmap color based on velocity/absorption (not just liquidity)
+- [ ] "Hot spot" mode - highlight extreme liquidity with pulsing effect
+
+#### Done
+- [x] Identified hardcoded palette as root cause of bland colors (2026-02-02)
+- [x] Analyzed reference heatmap (Binance-style) for color strategy (2026-02-02)
+
+#### Session log
+- **2026-02-02** — Discovered hardcoded RGB values and backwards gamma (0.65) in palette generation. Settings dialog was wired correctly but palette never regenerated! Solution: dynamic multi-stop gradients with high gamma (2.0+) and near-zero floor for dramatic dark→bright progression.
+
+---
+
 ### F10: Chart Toolbar Implementation
 
 **Status:** active
