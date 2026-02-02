@@ -87,26 +87,3 @@ _(nothing yet)_
 
 #### Session log
 _(no entries yet)_
-
----
-
-### F2: Axis performance tuning
-**Status:** done
-**Created:** 2026-02-01
-**Updated:** 2026-02-01
-
-#### Now (current sprint — do these first)
-_(empty)_
-
-#### Next (queued — pick up when Now is clear)
-_(empty)_
-
-#### Later (ideas / low-priority)
-_(empty)_
-
-#### Done
-- [x] Stabilize axis labels with fixed-capacity model + nice ticks (2026-02-01)
-- [x] Cut pan/zoom binding overhead; live axis updates during drag (2026-02-01)
-
-#### Session log
-- **2026-02-01** — Axis labels now update live on drag with ~110 FPS; time axis nice ticks + hysteresis in place. Done.
