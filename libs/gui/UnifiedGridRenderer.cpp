@@ -396,9 +396,9 @@ void UnifiedGridRenderer::init() {
 
     // Initialize heatmap color gradients with vibrant "Sentinel" preset
     m_bidGradient = ColorGradient{
-        {0.0f, QColor(0, 30, 30)},      // Dark teal (almost black)
-        {0.5f, QColor(0, 120, 100)},    // Medium teal
-        {1.0f, QColor(0, 255, 200)}     // Electric cyan
+        {0.0f, QColor(10, 40, 0)},      // Almost black green
+        {0.5f, QColor(60, 160, 30)},    // Medium green
+        {1.0f, QColor(100, 255, 50)}    // Electric neon green
     };
     m_askGradient = ColorGradient{
         {0.0f, QColor(40, 0, 0)},       // Dark red (almost black)
