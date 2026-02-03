@@ -80,6 +80,11 @@ std::optional<std::string> resolveCaBundlePath() {
             return std::string(envPath);
         }
     }
+    if (const char* envPath = std::getenv("SENTINEL_SSL_CA_BUNDLE")) {
+        if (envPath[0] != '\0') {
+            return std::string(envPath);
+        }
+    }
 
     const std::filesystem::path candidates[] = {
         std::filesystem::path("resources") / "certs" / "ca-bundle.crt",

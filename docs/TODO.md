@@ -18,10 +18,13 @@ Each feature is a self-contained block. Use this template:
 - [x] Serve 1s candles from live trade aggregation (no REST history)
 - [ ] Roll up 1m candles to custom timeframes (on-demand)
 - [ ] Add server-side candle cache per (symbol, timeframe)
+- [x] Stream live candle updates over WS (barUpdate/barClosed)
+- [x] Add server-side gating for candle updates (threshold + silence)
 
 #### Next
 - [ ] Merge REST history with live candles (overwrite forming bar when closed)
 - [ ] Add gap rendering hints for no-trade buckets
+- [ ] Candle stream verifier script (auto-start server + swap config; manual fallback)
 
 #### Later
 - [ ] Persist candle cache to disk for fast restart
@@ -30,10 +33,15 @@ Each feature is a self-contained block. Use this template:
 - [x] Coinbase REST candles fetcher + REST JWT (2026-02-02)
 - [x] WS candle_history_request / candle_history_chunk (server + client) (2026-02-02)
 - [x] 1s candles from trade aggregation history (2026-02-02)
+- [x] Live candle WS updates (barUpdate/barClosed) (2026-02-02)
+- [x] Server-side candle update gating (2026-02-02)
 
 #### Session log
 - **2026-02-02** — Added Coinbase REST candle history endpoint and WS request/response. Next: 1s candles + rollups + caching.
 - **2026-02-02** — Implemented 1s candle history from trade aggregation for WS requests.
+- **2026-02-02** — Added live candle WS updates with seq per (symbol, tf); gating next.
+- **2026-02-02** — Added basic gating on candle updates (high/low, close move, silence).
+- **2026-02-02** — Deferred robust candle test harness; add script later with auto-run + manual fallback.
 ### F<N>: <Short name>
 **Status:** active | paused | done
 **Created:** YYYY-MM-DD

@@ -383,6 +383,30 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                         startTimeSec,
                                         endTimeSec,
                                         out);
+        } else if (type == "candle_bar_update" || type == "candle_bar_closed") {
+             std::string symbol = msg.value("symbol", "");
+             if (symbol.empty()) return;
+             const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));
+             const int64_t bucketStartMs = msg.value("bucket_start_ms", static_cast<int64_t>(0));
+             const int64_t seq = msg.value("seq", static_cast<int64_t>(0));
+             const auto item = msg.value("candle", nlohmann::json::object());
+
+             CandleBar bar;
+             bar.timeStartMs = item.value("time_start_ms", static_cast<int64_t>(0));
+             bar.timeEndMs = item.value("time_end_ms", static_cast<int64_t>(0));
+             bar.open = item.value("open", 0.0);
+             bar.high = item.value("high", 0.0);
+             bar.low = item.value("low", 0.0);
+             bar.close = item.value("close", 0.0);
+             bar.volume = item.value("volume", 0.0);
+             bar.isClosed = item.value("is_closed", false);
+
+             const auto symbolQ = QString::fromStdString(symbol);
+             if (type == "candle_bar_closed") {
+                 emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+             } else {
+                 emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+             }
         }
 
     } catch (const std::exception& e) {

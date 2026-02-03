@@ -96,6 +96,16 @@ signals:
                                int64_t startTimeSec,
                                int64_t endTimeSec,
                                const QVector<CandleBar>& candles);
+    void candleBarUpdateReceived(const QString& symbol,
+                                 int64_t timeframeSec,
+                                 int64_t bucketStartMs,
+                                 int64_t seq,
+                                 const CandleBar& candle);
+    void candleBarClosedReceived(const QString& symbol,
+                                 int64_t timeframeSec,
+                                 int64_t bucketStartMs,
+                                 int64_t seq,
+                                 const CandleBar& candle);
 
 private:
     void run();

@@ -129,6 +129,79 @@ void ConfigLoader::setEnvFromYaml(const std::string& filePath) {
             setenv("SENTINEL_SERVER_DEFAULT_SYMBOLS", srv["default_symbols"].as<std::string>().c_str(), 0);
 #endif
         }
+        if (srv["ssl_ca_bundle"]) {
+#ifdef _WIN32
+            _putenv_s("SENTINEL_SSL_CA_BUNDLE", srv["ssl_ca_bundle"].as<std::string>().c_str());
+#else
+            setenv("SENTINEL_SSL_CA_BUNDLE", srv["ssl_ca_bundle"].as<std::string>().c_str(), 0);
+#endif
+        }
+        if (srv["candles"]) {
+            auto candles = srv["candles"];
+            if (candles["update_bps_fast"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_BPS_FAST", std::to_string(candles["update_bps_fast"].as<double>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_BPS_FAST", std::to_string(candles["update_bps_fast"].as<double>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_bps_slow"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_BPS_SLOW", std::to_string(candles["update_bps_slow"].as<double>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_BPS_SLOW", std::to_string(candles["update_bps_slow"].as<double>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_tick_mult_fast"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", std::to_string(candles["update_tick_mult_fast"].as<int>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", std::to_string(candles["update_tick_mult_fast"].as<int>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_tick_mult_slow"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", std::to_string(candles["update_tick_mult_slow"].as<int>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", std::to_string(candles["update_tick_mult_slow"].as<int>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_silence_ms_fast"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", std::to_string(candles["update_silence_ms_fast"].as<int>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", std::to_string(candles["update_silence_ms_fast"].as<int>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_silence_ms_slow"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", std::to_string(candles["update_silence_ms_slow"].as<int>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", std::to_string(candles["update_silence_ms_slow"].as<int>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_volume_fast"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", std::to_string(candles["update_volume_fast"].as<double>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", std::to_string(candles["update_volume_fast"].as<double>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_volume_slow"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", std::to_string(candles["update_volume_slow"].as<double>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", std::to_string(candles["update_volume_slow"].as<double>()).c_str(), 0);
+#endif
+            }
+            if (candles["update_tick_size"]) {
+#ifdef _WIN32
+                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_SIZE", std::to_string(candles["update_tick_size"].as<double>()).c_str());
+#else
+                setenv("SENTINEL_CANDLE_UPDATE_TICK_SIZE", std::to_string(candles["update_tick_size"].as<double>()).c_str(), 0);
+#endif
+            }
+        }
     }
 
     if (root["gui"]) {

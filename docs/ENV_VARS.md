@@ -9,6 +9,8 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Enables server mode when set (server entrypoint sets this to `1`).
 - `SENTINEL_SSL_CA_BUNDLE` (server)  
   Path to a custom CA bundle for TLS verification.
+- `SENTINEL_CA_BUNDLE` (server)  
+  Alias for `SENTINEL_SSL_CA_BUNDLE` (legacy/short).
 
 - `SENTINEL_HEATMAP_TF` (server + client)  
   Heatmap timeframe in milliseconds. Default: `1000`. Must match on both.
@@ -51,6 +53,24 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Local health endpoint port for `/ping`. Default: `8090`.
 - `SENTINEL_SERVER_DEFAULT_SYMBOLS` (server)  
   Symbols to auto-subscribe on server start (comma/space-separated). Default: `BTC-USD`.
+- `SENTINEL_CANDLE_UPDATE_BPS_FAST` (server)  
+  Bps threshold for candle updates on fast timeframes (<=1s). Default: `0.00005` (0.5 bps).
+- `SENTINEL_CANDLE_UPDATE_BPS_SLOW` (server)  
+  Bps threshold for candle updates on slow timeframes (>1s). Default: `0.0002` (2 bps).
+- `SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST` (server)  
+  Tick multiplier for update gating on fast timeframes. Default: `1`.
+- `SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW` (server)  
+  Tick multiplier for update gating on slow timeframes. Default: `2`.
+- `SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST` (server)  
+  Max silence (ms) before forcing an update on fast timeframes. Default: `200`.
+- `SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW` (server)  
+  Max silence (ms) before forcing an update on slow timeframes. Default: `1000`.
+- `SENTINEL_CANDLE_UPDATE_VOLUME_FAST` (server)  
+  Volume delta threshold for update gating on fast timeframes. Default: `0.0` (disabled).
+- `SENTINEL_CANDLE_UPDATE_VOLUME_SLOW` (server)  
+  Volume delta threshold for update gating on slow timeframes. Default: `0.0` (disabled).
+- `SENTINEL_CANDLE_UPDATE_TICK_SIZE` (server)  
+  Tick size used for update gating (overrides orderbook tick size). Default: `0` (falls back to `SENTINEL_ORDERBOOK_TICK_SIZE`).
 
 - `SENTINEL_MDC_HOST` (server)  
   Override MarketDataCore WebSocket host. Default: `advanced-trade-ws.coinbase.com`.

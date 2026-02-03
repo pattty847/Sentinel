@@ -26,6 +26,76 @@ namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
 namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
+namespace {
+struct CandleGateConfig {
+    double bpsFast = 0.00005;  // 0.5 bps
+    double bpsSlow = 0.0002;   // 2 bps
+    int tickMultFast = 1;
+    int tickMultSlow = 2;
+    int64_t silenceMsFast = 200;
+    int64_t silenceMsSlow = 1000;
+    double volumeFast = 0.0;
+    double volumeSlow = 0.0;
+    double tickSize = 0.0;
+};
+
+double envDouble(const char* name, double fallback) {
+    if (const char* v = std::getenv(name)) {
+        if (v[0] == '\0') return fallback;
+        try {
+            return std::stod(v);
+        } catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+int envInt(const char* name, int fallback) {
+    if (const char* v = std::getenv(name)) {
+        if (v[0] == '\0') return fallback;
+        try {
+            return std::stoi(v);
+        } catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+int64_t envInt64(const char* name, int64_t fallback) {
+    if (const char* v = std::getenv(name)) {
+        if (v[0] == '\0') return fallback;
+        try {
+            return static_cast<int64_t>(std::stoll(v));
+        } catch (...) {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+const CandleGateConfig& candleGateConfig() {
+    static CandleGateConfig cfg = [] {
+        CandleGateConfig c;
+        c.bpsFast = envDouble("SENTINEL_CANDLE_UPDATE_BPS_FAST", c.bpsFast);
+        c.bpsSlow = envDouble("SENTINEL_CANDLE_UPDATE_BPS_SLOW", c.bpsSlow);
+        c.tickMultFast = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", c.tickMultFast);
+        c.tickMultSlow = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", c.tickMultSlow);
+        c.silenceMsFast = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", c.silenceMsFast);
+        c.silenceMsSlow = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", c.silenceMsSlow);
+        c.volumeFast = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", c.volumeFast);
+        c.volumeSlow = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", c.volumeSlow);
+        c.tickSize = envDouble("SENTINEL_CANDLE_UPDATE_TICK_SIZE", c.tickSize);
+        if (c.tickSize <= 0.0) {
+            c.tickSize = envDouble("SENTINEL_ORDERBOOK_TICK_SIZE", 0.0);
+        }
+        return c;
+    }();
+    return cfg;
+}
+}
+
 // Echoes back all received WebSocket messages
 class Session : public std::enable_shared_from_this<Session> {
     websocket::stream<beast::tcp_stream> ws_;
@@ -40,6 +110,17 @@ class Session : public std::enable_shared_from_this<Session> {
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection heatmapConn_;
+    QMetaObject::Connection barUpdatedConn_;
+    QMetaObject::Connection barClosedConn_;
+
+    struct CandleStreamState {
+        int64_t seq = 0;
+        OHLCVBar lastBar;
+        int64_t lastSentMs = 0;
+        bool hasLast = false;
+    };
+    std::unordered_map<std::string, CandleStreamState> candleStates_;
+    std::mutex candle_mutex_;
 
 public:
     // Take ownership of the socket
@@ -54,6 +135,8 @@ public:
         QObject::disconnect(tradeConn_);
         QObject::disconnect(bookConn_);
         QObject::disconnect(heatmapConn_);
+        QObject::disconnect(barUpdatedConn_);
+        QObject::disconnect(barClosedConn_);
     }
 
     // Get on the correct executor
@@ -125,6 +208,16 @@ public:
                                        gridWidth, gridHeight,
                                        minPrice, maxPrice, tickSize, midPrice, lastTrade,
                                        column, liquidityColumn, liquidityScale, reset);
+            });
+
+        barUpdatedConn_ = QObject::connect(&model_, &ServerDataModel::barUpdated,
+            [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+                self->on_bar_updated(symbol, tf, bar);
+            });
+
+        barClosedConn_ = QObject::connect(&model_, &ServerDataModel::barClosed,
+            [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+                self->on_bar_closed(symbol, tf, bar);
             });
             
         do_read();
@@ -494,6 +587,122 @@ public:
         }
 
         do_write(j.dump());
+    }
+
+    static bool should_emit_update(const OHLCVBar& bar,
+                                   const CandleStreamState& state,
+                                   int64_t tfSec,
+                                   int64_t nowMs) {
+        if (!state.hasLast) {
+            return true;
+        }
+
+        const CandleGateConfig& cfg = candleGateConfig();
+        const OHLCVBar& last = state.lastBar;
+        const bool highChanged = bar.high > last.high;
+        const bool lowChanged = bar.low < last.low;
+
+        const double closeDelta = std::abs(bar.close - last.close);
+        const double tickSize = cfg.tickSize;
+        const int tickMultiplier = (tfSec <= 1) ? cfg.tickMultFast : cfg.tickMultSlow;
+        const double bpsThreshold = (tfSec <= 1) ? cfg.bpsFast : cfg.bpsSlow;
+        const double priceThreshold = std::max(tickSize * tickMultiplier,
+                                               bar.close * bpsThreshold);
+        const bool closeMoved = closeDelta >= priceThreshold;
+
+        const double volumeDelta = bar.volume - last.volume;
+        const double volumeThreshold = (tfSec <= 1) ? cfg.volumeFast : cfg.volumeSlow;
+        const bool volumeMoved = volumeThreshold > 0.0 && volumeDelta >= volumeThreshold;
+
+        const int64_t maxSilenceMs = (tfSec <= 1) ? cfg.silenceMsFast : cfg.silenceMsSlow;
+        const bool silence = (nowMs - state.lastSentMs) >= maxSilenceMs;
+
+        return highChanged || lowChanged || closeMoved || volumeMoved || silence;
+    }
+
+    void on_bar_updated(const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+        const std::string sym = symbol.toStdString();
+        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+
+        const int64_t tfSec = static_cast<int64_t>(tf);
+        const std::string key = sym + "|" + std::to_string(tfSec);
+        const int64_t nowMs = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
+        CandleStreamState state;
+        {
+            std::lock_guard<std::mutex> lock(candle_mutex_);
+            auto& entry = candleStates_[key];
+            if (!should_emit_update(bar, entry, tfSec, nowMs)) {
+                return;
+            }
+            entry.seq++;
+            entry.lastBar = bar;
+            entry.lastSentMs = nowMs;
+            entry.hasLast = true;
+            state = entry;
+        }
+
+        nlohmann::json item;
+        item["time_start_ms"] = bar.timestamp_ms;
+        item["time_end_ms"] = bar.timestamp_ms + tfSec * 1000;
+        item["open"] = bar.open;
+        item["high"] = bar.high;
+        item["low"] = bar.low;
+        item["close"] = bar.close;
+        item["volume"] = bar.volume;
+        item["is_closed"] = bar.is_closed;
+
+        nlohmann::json payload;
+        payload["type"] = "candle_bar_update";
+        payload["symbol"] = sym;
+        payload["timeframe_sec"] = tfSec;
+        payload["bucket_start_ms"] = bar.timestamp_ms;
+        payload["seq"] = state.seq;
+        payload["candle"] = std::move(item);
+
+        do_write(payload.dump());
+    }
+
+    void on_bar_closed(const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+        const std::string sym = symbol.toStdString();
+        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+
+        const int64_t tfSec = static_cast<int64_t>(tf);
+        const std::string key = sym + "|" + std::to_string(tfSec);
+        CandleStreamState state;
+        {
+            std::lock_guard<std::mutex> lock(candle_mutex_);
+            auto& entry = candleStates_[key];
+            entry.seq++;
+            entry.lastBar = bar;
+            entry.lastSentMs = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            entry.hasLast = true;
+            state = entry;
+        }
+
+        nlohmann::json item;
+        item["time_start_ms"] = bar.timestamp_ms;
+        item["time_end_ms"] = bar.timestamp_ms + tfSec * 1000;
+        item["open"] = bar.open;
+        item["high"] = bar.high;
+        item["low"] = bar.low;
+        item["close"] = bar.close;
+        item["volume"] = bar.volume;
+        item["is_closed"] = true;
+
+        nlohmann::json payload;
+        payload["type"] = "candle_bar_closed";
+        payload["symbol"] = sym;
+        payload["timeframe_sec"] = tfSec;
+        payload["bucket_start_ms"] = bar.timestamp_ms;
+        payload["seq"] = state.seq;
+        payload["candle"] = std::move(item);
+
+        do_write(payload.dump());
     }
 
     // Thread-safe write
