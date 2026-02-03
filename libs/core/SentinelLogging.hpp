@@ -20,7 +20,7 @@ namespace sentinel::log_throttle {
     inline constexpr int kApp    = 1;
     inline constexpr int kData   = 20;
     inline constexpr int kRender = 100;
-    inline constexpr int kDebug  = 10;
+    inline constexpr int kDebug  = 1;
 }
 
 // Throttle interval overridable via SENTINEL_LOG_<Cat>_INTERVAL

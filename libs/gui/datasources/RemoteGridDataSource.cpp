@@ -97,6 +97,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onCandleBarUpdateReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarClosedReceived,
             this, &RemoteGridDataSource::onCandleBarClosedReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleHistoryReceived,
+            this, &RemoteGridDataSource::onCandleHistoryReceived, Qt::QueuedConnection);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -134,6 +136,13 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
                                                  int64_t endTimeMs,
                                                  int count) {
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
+void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
+                                                int64_t timeframeSec,
+                                                int64_t endTimeSec,
+                                                int limit) {
+    m_client.requestCandleHistory(symbol.toStdString(), timeframeSec, endTimeSec, limit);
 }
 
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
@@ -296,4 +305,36 @@ void RemoteGridDataSource::onCandleBarClosedReceived(const QString& symbol,
     out.isClosed = true;
     out.seq = seq;
     m_candleBuffer->applyUpdate(symbol, timeframeSec, out, seq, true);
+}
+
+void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
+                                                   int64_t timeframeSec,
+                                                   int64_t startTimeSec,
+                                                   int64_t endTimeSec,
+                                                   const QVector<SentinelStreamClient::CandleBar>& candles) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    int64_t seq = 0;
+    for (const auto& bar : candles) {
+        CandleSeriesBuffer::CandleBar out;
+        out.timeStartMs = bar.timeStartMs;
+        out.timeEndMs = bar.timeEndMs;
+        out.open = bar.open;
+        out.high = bar.high;
+        out.low = bar.low;
+        out.close = bar.close;
+        out.volume = bar.volume;
+        out.isClosed = bar.isClosed;
+        out.seq = ++seq;
+        m_candleBuffer->applyUpdate(symbol, timeframeSec, out, out.seq, out.isClosed);
+    }
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Candle history applied: symbol=%1 tfSec=%2 startSec=%3 endSec=%4 count=%5")
+                   .arg(symbol)
+                   .arg(timeframeSec)
+                   .arg(startTimeSec)
+                   .arg(endTimeSec)
+                   .arg(candles.size()));
+    }
 }

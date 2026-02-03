@@ -163,7 +163,7 @@ _(no entries yet)_
 
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-02-03
 
 #### Now (current sprint — do these first)
 
@@ -194,6 +194,11 @@ _(no entries yet)_
 
 * **2026-02-02** — Performance headroom finally makes unified rendering viable without hacks.
 * **2026-02-02** — Added HeatmapDock → ChartDock rename task; dock already titled "Charts" but class name needs update.
+* **2026-02-03** - Defaulted chart mode to hybrid candles+heatmap and auto-request candle history on reconnect.
+* **2026-02-03** - Gate auto-subscribe on user action; size candle history request to visible window.
+* **2026-02-03** - Wire toolbar timeframe to renderer/candles and add 1s option.
+* **2026-02-03** - Add SENTINEL_CHART_DEBUG logging for timeframe + candle overlay diagnostics.
+* **2026-02-03** - Apply panVisualOffset in viewport transform to prevent candle snap.
 
 ---
 
@@ -494,24 +499,24 @@ _(no entries yet)_
 ---
 
 ### F13: Comment Cleanup (libs/ — senior-dev standard)
-**Status:** active
+**Status:** complete
 **Created:** 2026-02-03
 **Updated:** 2026-02-03
 
 #### Now
-- [ ] Continue cleanup pass on remaining files with egregious comments
+- [x] Continue cleanup pass on remaining files with egregious comments
 
 #### Next
-- [ ] **Audit:** Generate list of files with `//` comments (e.g. `rg "//" libs/ --files-with-matches` or search in IDE). ~102 files, ~1016 comments.
-- [ ] **Triage per file:** Open each file; for each comment decide: **gut** (remove), **concise** (one line “why”), or **deeper** (keep/expand only if non-obvious invariant or protocol).
-- [ ] **Gut:** Remove COT, “what” comments, Python-style `#`, filler, TODOs with no ticket, and file-header essays.
-- [ ] **Concise:** Replace verbose blocks with a single “why” line where intent is subtle.
-- [ ] **Deeper:** Add or keep “why” only for protocol/threading/magic numbers/invariants; ensure C++ style (`//` or `/* */`), no stray `#`.
-- [ ] **Check:** Build + quick sanity run after each batch of files.
+- [x] **Audit:** Generate list of files with `//` comments (e.g. `rg "//" libs/ --files-with-matches` or search in IDE). ~102 files, ~1016 comments.
+- [x] **Triage per file:** Open each file; for each comment decide: **gut** (remove), **concise** (one line “why”), or **deeper** (keep/expand only if non-obvious invariant or protocol).
+- [x] **Gut:** Remove COT, “what” comments, Python-style `#`, filler, TODOs with no ticket, and file-header essays.
+- [x] **Concise:** Replace verbose blocks with a single “why” line where intent is subtle.
+- [x] **Deeper:** Add or keep “why” only for protocol/threading/magic numbers/invariants; ensure C++ style (`//` or `/* */`), no stray `#`.
+- [x] **Check:** Build + quick sanity run after each batch of files.
 
 #### Later
-- [ ] Apply same policy to `apps/` and `libs/gui` if desired.
-- [ ] Add or point to commenting rules in AGENTS.md (done: §3).
+- [x] Apply same policy to `apps/` and `libs/gui` if desired.
+- [x] Add or point to commenting rules in AGENTS.md (done: §3).
 
 #### Done
 - [x] Commenting guidelines added to AGENTS.md §3 (2026-02-03)

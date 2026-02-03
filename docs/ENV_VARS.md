@@ -109,6 +109,8 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Overrides QML path used by the GUI.
 - `SENTINEL_ZOOM_DEBUG` (client)  
   Enables zoom debug logging.
+- `SENTINEL_CHART_DEBUG` (client)  
+  Enables verbose chart timeframe + candle overlay diagnostics (history ranges, buffer size, ms/px).
 
 - `SENTINEL_GUI_API_PORT` (client)  
   Local GUI-only HTTP API port for screenshot capture. Default: `17100`. Set to `0` to disable.

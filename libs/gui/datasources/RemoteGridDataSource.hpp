@@ -15,6 +15,10 @@ public:
                                int64_t timeframeMs,
                                int64_t endTimeMs,
                                int count) override;
+    void requestCandleHistory(const QString& symbol,
+                              int64_t timeframeSec,
+                              int64_t endTimeSec,
+                              int limit) override;
     
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
@@ -54,6 +58,11 @@ private slots:
                                    int64_t bucketStartMs,
                                    int64_t seq,
                                    const SentinelStreamClient::CandleBar& bar);
+    void onCandleHistoryReceived(const QString& symbol,
+                                 int64_t timeframeSec,
+                                 int64_t startTimeSec,
+                                 int64_t endTimeSec,
+                                 const QVector<SentinelStreamClient::CandleBar>& candles);
 
 private:
     SentinelStreamClient m_client;

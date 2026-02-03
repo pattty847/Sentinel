@@ -7,6 +7,21 @@
 #include <QIcon>
 #include <QSlider>
 
+namespace {
+const char* labelForTimeframeMs(int64_t ms) {
+    switch (ms) {
+        case 1000: return "1s";
+        case 60000: return "1m";
+        case 300000: return "5m";
+        case 900000: return "15m";
+        case 3600000: return "1h";
+        case 14400000: return "4h";
+        case 86400000: return "1D";
+        default: return nullptr;
+    }
+}
+}
+
 TopToolbar::TopToolbar(QWidget* parent)
     : QToolBar(parent)
 {
@@ -49,7 +64,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     addSeparator();
 
     m_timeframeCombo = new QComboBox(this);
-    m_timeframeCombo->addItems({"1m", "5m", "15m", "1h", "4h", "1D"});
+    m_timeframeCombo->addItems({"1s", "1m", "5m", "15m", "1h", "4h", "1D"});
     m_timeframeCombo->setFixedWidth(70);
     addWidget(m_timeframeCombo);
     connect(m_timeframeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::timeframeSelected);
@@ -121,4 +136,16 @@ QToolButton* TopToolbar::addIconButton(const QString& iconPath, const QString& t
     button->setToolTip(tooltip);
     addWidget(button);
     return button;
+}
+
+void TopToolbar::setTimeframeMs(int64_t ms) {
+    if (!m_timeframeCombo) {
+        return;
+    }
+    if (const char* label = labelForTimeframeMs(ms)) {
+        const int idx = m_timeframeCombo->findText(label);
+        if (idx >= 0 && idx != m_timeframeCombo->currentIndex()) {
+            m_timeframeCombo->setCurrentIndex(idx);
+        }
+    }
 }

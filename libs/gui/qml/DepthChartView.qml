@@ -12,7 +12,7 @@ Rectangle {
     property var chartModeController: null
     property bool gridModeEnabled: true
     property bool showHeatmap: true
-    property bool showCandles: false
+    property bool showCandles: true
 
     property int currentActiveTimeframe: 100
 
@@ -85,7 +85,7 @@ Rectangle {
         viewState: unifiedGridRenderer.viewState
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
-        timeframeSec: 1
+        timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))
         z: 2
     }
     

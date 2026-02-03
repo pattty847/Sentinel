@@ -70,6 +70,7 @@ private:
     void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
     void requestHeatmapHistoryForSymbol(const QString& symbol);
+    void requestCandleHistoryForSymbol(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;
     
@@ -94,6 +95,7 @@ private:
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
     bool m_connected = false;
+    bool m_userSubscribed = false;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
     

@@ -56,6 +56,31 @@
 #include <QApplication>
 #include <QTabWidget>
 #include <QtGlobal>
+#include <unordered_map>
+
+namespace {
+int timeframeMsFromLabel(const QString& label) {
+    static const std::unordered_map<std::string, int> map{
+        {"1s", 1000},
+        {"1m", 60000},
+        {"5m", 300000},
+        {"15m", 900000},
+        {"1h", 3600000},
+        {"4h", 14400000},
+        {"1D", 86400000},
+    };
+    auto it = map.find(label.toStdString());
+    if (it == map.end()) {
+        return 0;
+    }
+    return it->second;
+}
+
+bool chartDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
+    return enabled;
+}
+}
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
@@ -96,7 +121,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }
-    m_modeController->setMode(ChartMode::ORDER_BOOK_HEATMAP);
+    m_modeController->setMode(ChartMode::HYBRID_CANDLES_TRADES);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -180,6 +205,27 @@ void MainWindowGPU::setupUI() {
             m_heatmapSettingsDialog->raise();
             m_heatmapSettingsDialog->activateWindow();
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
+            if (!m_qmlController) {
+                return;
+            }
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (!renderer) {
+                return;
+            }
+            const int ms = timeframeMsFromLabel(label);
+            if (ms <= 0) {
+                return;
+            }
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Chart TF select: %1 -> %2ms").arg(label).arg(ms));
+            }
+            renderer->setTimeframe(ms);
+            if (m_connected && m_userSubscribed) {
+                requestHeatmapHistoryForSymbol(m_currentSymbol);
+                requestCandleHistoryForSymbol(m_currentSymbol);
+            }
+        });
     }
     
     setUpdatesEnabled(true);
@@ -247,6 +293,7 @@ void MainWindowGPU::onSubscribe() {
         return;
     }
 
+    m_userSubscribed = true;
     if (m_qmlController) {
         m_qmlController->updateSymbolInContext(symbol);
     }
@@ -256,6 +303,7 @@ void MainWindowGPU::onSubscribe() {
     }
     if (m_connected) {
         requestHeatmapHistoryForSymbol(symbol);
+        requestCandleHistoryForSymbol(symbol);
     }
 }
 
@@ -268,12 +316,65 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    const int64_t timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+    int64_t timeframeMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->getCurrentTimeframe();
+        }
+    }
+    if (timeframeMs <= 0) {
+        timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+    }
     const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
     const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
     const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
     const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Heatmap history request: symbol=%1 tfMs=%2 count=%3")
+                   .arg(symbol)
+                   .arg(tf)
+                   .arg(count));
+    }
     m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+}
+
+void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeSec = 1;
+    int limit = 2000;
+    int64_t endTimeSec = 0;
+    qint64 viewStart = 0;
+    qint64 viewEnd = 0;
+    int64_t rendererTfMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            rendererTfMs = renderer->getCurrentTimeframe();
+            const int64_t timeframeMs = rendererTfMs;
+            timeframeSec = std::max<int64_t>(1, (timeframeMs + 999) / 1000);
+            viewStart = renderer->getVisibleTimeStart();
+            viewEnd = renderer->getVisibleTimeEnd();
+            if (viewEnd > viewStart) {
+                const int64_t spanSec = std::max<int64_t>(1, (viewEnd - viewStart) / 1000);
+                const int64_t spanBars = std::max<int64_t>(1, spanSec / timeframeSec);
+                const int64_t cap = (timeframeSec <= 1) ? 10000 : 350;
+                limit = static_cast<int>(std::min<int64_t>(cap, spanBars));
+                endTimeSec = viewEnd / 1000;
+            }
+        }
+    }
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Candle history request: symbol=%1 tfMs=%2 tfSec=%3 limit=%4 endSec=%5 view=[%6..%7]")
+                   .arg(symbol)
+                   .arg(rendererTfMs)
+                   .arg(timeframeSec)
+                   .arg(limit)
+                   .arg(endTimeSec)
+                   .arg(viewStart)
+                   .arg(viewEnd));
+    }
+    m_dataSource->requestCandleHistory(symbol, timeframeSec, endTimeSec, limit);
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
@@ -346,6 +447,19 @@ void MainWindowGPU::connectMarketDataSignals() {
         sLog_Error("Cannot connect signals: Missing components");
         return;
     }
+
+    if (m_heatmapDock && m_heatmapDock->toolbar()) {
+        const int64_t envTf = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+        if (envTf > 0) {
+            unifiedGridRenderer->setTimeframe(static_cast<int>(envTf));
+        }
+        m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("Chart TF init: env=%1 renderer=%2")
+                       .arg(envTf)
+                       .arg(unifiedGridRenderer->getCurrentTimeframe()));
+        }
+    }
     
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
@@ -366,11 +480,16 @@ void MainWindowGPU::connectMarketDataSignals() {
                 if (!connected || !m_dataSource) {
                     return;
                 }
+                if (!m_userSubscribed) {
+                    return;
+                }
                 const QString symbol = m_currentSymbol;
                 if (symbol.isEmpty()) {
                     return;
                 }
+                m_dataSource->subscribe(symbol);
                 requestHeatmapHistoryForSymbol(symbol);
+                requestCandleHistoryForSymbol(symbol);
             });
 
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,

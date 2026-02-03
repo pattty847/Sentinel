@@ -5,11 +5,13 @@ GPU-batched candlestick overlay (demo data only).
 #include "CandlestickOverlayItem.hpp"
 #include "GridViewState.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QVector3D>
 #include <QMatrix4x4>
+#include <QElapsedTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -69,6 +71,11 @@ inline QPointF mapWorld(const QMatrix4x4& m, qint64 timeMs, double price) {
                                   static_cast<float>(price),
                                   0.0f));
     return QPointF(p.x(), p.y());
+}
+
+bool candleDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
+    return enabled;
 }
 
 } // namespace
@@ -294,6 +301,41 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     auto endIt = std::upper_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeEnd,
                                   [](qint64 t, const CandleOverlayBar& c) { return t < c.timeStartMs; });
     const int visibleCount = static_cast<int>(std::distance(startIt, endIt));
+
+    if (candleDebugEnabled()) {
+        static QElapsedTimer timer;
+        static bool started = false;
+        if (!started) {
+            timer.start();
+            started = true;
+        }
+        if (timer.elapsed() > 1000) {
+            const double spanMs = static_cast<double>(timeEnd - timeStart);
+            const double msPerPixel = (width() > 0.0) ? (spanMs / width()) : 0.0;
+            const QPointF pan = m_viewState ? m_viewState->getPanVisualOffset() : QPointF();
+            const bool dragging = m_viewState ? m_viewState->isDragging() : false;
+            const qint64 visFirst = (visibleCount > 0) ? startIt->timeStartMs : 0;
+            const qint64 visLast = (visibleCount > 0) ? (endIt - 1)->timeStartMs : 0;
+            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
+                       .arg(m_symbol)
+                       .arg(m_timeframeSec)
+                       .arg(timeStart)
+                       .arg(timeEnd)
+                       .arg(visibleCount)
+                       .arg(hasData ? "live" : "demo"));
+            sLog_Debug(QString("Candle overlay scale: spanMs=%1 msPerPx=%2 width=%3")
+                       .arg(spanMs, 0, 'f', 1)
+                       .arg(msPerPixel, 0, 'f', 3)
+                       .arg(width(), 0, 'f', 1));
+            sLog_Debug(QString("Candle overlay pan: dragging=%1 pan=(%2,%3) visFirst=%4 visLast=%5")
+                       .arg(dragging ? "true" : "false")
+                       .arg(pan.x(), 0, 'f', 1)
+                       .arg(pan.y(), 0, 'f', 1)
+                       .arg(visFirst)
+                       .arg(visLast));
+            timer.restart();
+        }
+    }
 
     if (visibleCount <= 0) {
         root->wickGeometry->allocate(0);

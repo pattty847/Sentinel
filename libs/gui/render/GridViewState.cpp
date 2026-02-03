@@ -66,7 +66,7 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
     QMatrix4x4 transform;
     transform.scale(sx, sy, 1.0);
     transform.translate(-static_cast<double>(m_visibleTimeStart_ms), -m_maxPrice, 0.0);
-    if (m_isDragging && !m_panVisualOffset.isNull()) {
+    if (!m_panVisualOffset.isNull()) {
         QMatrix4x4 screenSpace;
         screenSpace.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
         transform = screenSpace * transform;

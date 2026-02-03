@@ -1,6 +1,7 @@
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
+#include <QElapsedTimer>
 
 SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
     : QObject(parent)
@@ -296,6 +297,25 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                  liquidityColumn = QByteArray::fromBase64(QByteArray::fromStdString(liquidityEncoded));
              }
 
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 static QElapsedTimer timer;
+                 static bool started = false;
+                 if (!started) {
+                     timer.start();
+                     started = true;
+                 }
+                 if (timer.elapsed() > 1000) {
+                     sLog_Debug(QString("Heatmap slice recv: symbol=%1 tfMs=%2 start=%3 end=%4 grid=%5x%6")
+                                .arg(QString::fromStdString(symbol))
+                                .arg(timeframeMs)
+                                .arg(startMs)
+                                .arg(endMs)
+                                .arg(gridWidth)
+                                .arg(gridHeight));
+                     timer.restart();
+                 }
+             }
+
              emit heatmapSliceReceived(QString::fromStdString(symbol),
                                        startMs,
                                        endMs,
@@ -345,6 +365,18 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                  }
              }
 
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 const int count = out.size();
+                 const int64_t first = count > 0 ? out.front().bucketStartMs : 0;
+                 const int64_t last = count > 0 ? out.back().bucketStartMs : 0;
+                 sLog_Debug(QString("Heatmap history recv: symbol=%1 tfMs=%2 count=%3 first=%4 last=%5")
+                            .arg(QString::fromStdString(symbol))
+                            .arg(timeframeMs)
+                            .arg(count)
+                            .arg(first)
+                            .arg(last));
+             }
+
              emit heatmapHistoryReceived(QString::fromStdString(symbol),
                                          timeframeMs,
                                          gridWidth,
@@ -373,6 +405,20 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                      bar.isClosed = item.value("is_closed", false);
                      out.push_back(bar);
                  }
+             }
+
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 const int count = out.size();
+                 const int64_t first = count > 0 ? out.front().timeStartMs : 0;
+                 const int64_t last = count > 0 ? out.back().timeStartMs : 0;
+                 sLog_Debug(QString("Candle history recv: symbol=%1 tfSec=%2 count=%3 first=%4 last=%5 startSec=%6 endSec=%7")
+                            .arg(QString::fromStdString(symbol))
+                            .arg(timeframeSec)
+                            .arg(count)
+                            .arg(first)
+                            .arg(last)
+                            .arg(startTimeSec)
+                            .arg(endTimeSec));
              }
 
              emit candleHistoryReceived(QString::fromStdString(symbol),
