@@ -10,9 +10,11 @@ Threading: Update on GUI thread; rendering on render thread.
 #include <vector>
 #include <cstdint>
 #include <QtQml/qqmlregistration.h>
+#include "HeatmapTimeMapping.hpp"
 
 class GridViewState;
 class CandleSeriesBuffer;
+class UnifiedGridRenderer;
 
 struct CandleOverlayBar {
     qint64 timeStartMs = 0;
@@ -29,6 +31,7 @@ class CandlestickOverlayItem : public QQuickItem {
 
     Q_PROPERTY(QObject* viewState READ viewState WRITE setViewState NOTIFY viewStateChanged)
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
+    Q_PROPERTY(QObject* heatmapRenderer READ heatmapRenderer WRITE setHeatmapRenderer NOTIFY heatmapRendererChanged)
     Q_PROPERTY(QString symbol READ symbol WRITE setSymbol NOTIFY symbolChanged)
     Q_PROPERTY(int timeframeSec READ timeframeSec WRITE setTimeframeSec NOTIFY timeframeSecChanged)
 
@@ -39,6 +42,8 @@ public:
     void setViewState(QObject* viewState);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
+    QObject* heatmapRenderer() const;
+    void setHeatmapRenderer(QObject* renderer);
     QString symbol() const { return m_symbol; }
     void setSymbol(const QString& symbol);
     int timeframeSec() const { return m_timeframeSec; }
@@ -47,6 +52,7 @@ public:
 signals:
     void viewStateChanged();
     void candleBufferChanged();
+    void heatmapRendererChanged();
     void symbolChanged();
     void timeframeSecChanged();
 
@@ -64,8 +70,11 @@ private:
 
     QPointer<GridViewState> m_viewState;
     QPointer<CandleSeriesBuffer> m_candleBuffer;
+    QPointer<UnifiedGridRenderer> m_heatmapRenderer;
     QMetaObject::Connection m_viewportChangedConn;
     QMetaObject::Connection m_panChangedConn;
+    QMetaObject::Connection m_rendererViewportConn;
+    QMetaObject::Connection m_rendererTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;
 
     std::vector<CandleOverlayBar> m_demoCandles;
@@ -76,6 +85,7 @@ private:
     uint64_t m_lastViewportVersion = 0;
     QSizeF m_lastSize;
     bool m_geometryDirty = true;
+    HeatmapTimeMapping m_lastMapping;
 
     QString m_symbol;
     int m_timeframeSec = 1;

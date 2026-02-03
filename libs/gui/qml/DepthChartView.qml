@@ -83,6 +83,7 @@ Rectangle {
         anchors.fill: unifiedGridRenderer
         visible: root.showCandles
         viewState: unifiedGridRenderer.viewState
+        heatmapRenderer: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
         timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))

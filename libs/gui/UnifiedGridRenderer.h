@@ -23,6 +23,7 @@
 #include "render/MsdfAtlas.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
+#include "render/HeatmapTimeMapping.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
@@ -142,6 +143,7 @@ private:
     ColorGradient m_bidGradient;
     ColorGradient m_askGradient;
     bool m_heatmapPaletteDirty = true;
+    HeatmapTimeMapping m_lastMapping;
 
     MsdfAtlas m_msdfAtlas;
     bool m_msdfAtlasBuilt = false;
@@ -239,6 +241,7 @@ public:
     Q_INVOKABLE int getDirtyRegionCount() const;
     Q_INVOKABLE QString getLabelRingMemory() const;
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
+    HeatmapTimeMapping lastHeatmapMapping() const { return m_lastMapping; }
 
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);

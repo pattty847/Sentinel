@@ -756,10 +756,22 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
         const QRectF bounds = boundingRect();
         QRectF drawRect = bounds;
+        QRectF srcRect(0, 0, gridWidth, gridHeight);
         texNode->setRect(drawRect);
         texNode->setGamma(static_cast<float>(m_heatmapGamma));
         texNode->setContrast(static_cast<float>(m_heatmapContrast));
         texNode->setShaderFloor(static_cast<float>(m_heatmapShaderFloor));
+        const int64_t lastSlice = snapshot.lastSliceStartMs;
+        double dataStart = 0.0;
+        bool dataStartValid = false;
+        if (snapshot.appendMs > 0 && gridWidth > 0) {
+            const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
+            const double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
+                ? static_cast<double>(lastSlice + snapshot.appendMs)
+                : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
+            dataStart = dataEnd - static_cast<double>(bufferSpanMs);
+            dataStartValid = (dataEnd > dataStart);
+        }
 
         if (m_viewState && m_viewState->isTimeWindowValid() &&
             snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
@@ -791,7 +803,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
                 drawRect = bounds;
                 texNode->setRect(drawRect);
-                texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+                srcRect = QRectF(0, 0, gridWidth, gridHeight);
+                texNode->setSourceRect(srcRect);
                 texNode->setTimeOffset(0.0f);
             } else if (timeEndF > timeStartF && maxPriceF > minPriceF) {
                 const double maxCoordX = static_cast<double>(gridWidth);
@@ -801,14 +814,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 if (viewTimeSpan <= 0.0 || viewPriceSpan <= 0.0) {
                     drawRect = QRectF();
                     texNode->setRect(drawRect);
-                    texNode->setSourceRect(QRectF());
+                    srcRect = QRectF();
+                    texNode->setSourceRect(srcRect);
                 } else {
-                    const int64_t lastSlice = snapshot.lastSliceStartMs;
-                    const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
-                    double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
-                        ? static_cast<double>(lastSlice + snapshot.appendMs)
-                        : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
-                    double dataStart = dataEnd - static_cast<double>(bufferSpanMs);
                     const double dataMin = snapshot.minPrice;
                     const double dataMax = snapshot.maxPrice;
 
@@ -820,7 +828,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                     if (overlapEnd <= overlapStart || overlapMax <= overlapMin) {
                         drawRect = QRectF();
                         texNode->setRect(drawRect);
-                        texNode->setSourceRect(QRectF());
+                        srcRect = QRectF();
+                        texNode->setSourceRect(srcRect);
                     } else {
                         const double overlapTimeSpan = overlapEnd - overlapStart;
                         const double overlapPriceSpan = overlapMax - overlapMin;
@@ -843,24 +852,40 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                         double srcY = (snapshot.maxPrice - overlapMax) / snapshot.tickSize;
                         srcX = std::clamp(srcX, 0.0, maxCoordX - srcW);
                         srcY = std::clamp(srcY, 0.0, maxCoordY - srcH);
-                        texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+                        srcRect = QRectF(srcX, srcY, srcW, srcH);
+                        texNode->setSourceRect(srcRect);
                     }
                 }
             } else {
                 drawRect = bounds;
                 texNode->setRect(drawRect);
-                texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+                srcRect = QRectF(0, 0, gridWidth, gridHeight);
+                texNode->setSourceRect(srcRect);
             }
         } else {
             drawRect = bounds;
             texNode->setRect(drawRect);
-            texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+            srcRect = QRectF(0, 0, gridWidth, gridHeight);
+            texNode->setSourceRect(srcRect);
         }
 
         const bool forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
         if (!forceFull) {
             texNode->setTimeOffset(snapshot.timeOffset);
         }
+        m_lastMapping.drawRect = drawRect;
+        m_lastMapping.srcRect = srcRect;
+        m_lastMapping.dataStartMs = dataStart;
+        m_lastMapping.appendMs = static_cast<double>(snapshot.appendMs);
+        m_lastMapping.gridWidth = gridWidth;
+        m_lastMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+        m_lastMapping.valid = (dataStartValid &&
+                               snapshot.timeOriginMs != 0 &&
+                               snapshot.appendMs > 0 &&
+                               gridWidth > 0 &&
+                               drawRect.width() > 0.0 &&
+                               srcRect.width() > 0.0);
+        m_lastMapping.cellW = m_lastMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
 
         if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
             gridWidth > 0 && gridHeight > 0) {

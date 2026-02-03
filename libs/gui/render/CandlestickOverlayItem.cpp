@@ -5,12 +5,11 @@ GPU-batched candlestick overlay (demo data only).
 #include "CandlestickOverlayItem.hpp"
 #include "GridViewState.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
+#include "../UnifiedGridRenderer.h"
 #include "SentinelLogging.hpp"
 
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
-#include <QVector3D>
-#include <QMatrix4x4>
 #include <QElapsedTimer>
 #include <algorithm>
 #include <cmath>
@@ -66,16 +65,20 @@ inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
     v += 6;
 }
 
-inline QPointF mapWorld(const QMatrix4x4& m, qint64 timeMs, double price) {
-    QVector3D p = m.map(QVector3D(static_cast<float>(timeMs),
-                                  static_cast<float>(price),
-                                  0.0f));
-    return QPointF(p.x(), p.y());
-}
-
 bool candleDebugEnabled() {
     static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
     return enabled;
+}
+
+bool mappingChanged(const HeatmapTimeMapping& a, const HeatmapTimeMapping& b) {
+    return a.valid != b.valid ||
+        a.drawRect != b.drawRect ||
+        a.srcRect != b.srcRect ||
+        a.dataStartMs != b.dataStartMs ||
+        a.appendMs != b.appendMs ||
+        a.gridWidth != b.gridWidth ||
+        a.timeOffset != b.timeOffset ||
+        a.cellW != b.cellW;
 }
 
 } // namespace
@@ -91,6 +94,10 @@ QObject* CandlestickOverlayItem::viewState() const {
 
 QObject* CandlestickOverlayItem::candleBuffer() const {
     return static_cast<QObject*>(m_candleBuffer.data());
+}
+
+QObject* CandlestickOverlayItem::heatmapRenderer() const {
+    return static_cast<QObject*>(m_heatmapRenderer.data());
 }
 
 void CandlestickOverlayItem::setViewState(QObject* viewState) {
@@ -113,6 +120,29 @@ void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
     connectCandleSignals();
     markGeometryDirty();
     emit candleBufferChanged();
+}
+
+void CandlestickOverlayItem::setHeatmapRenderer(QObject* renderer) {
+    if (m_heatmapRenderer == renderer) {
+        return;
+    }
+    if (m_rendererViewportConn) {
+        disconnect(m_rendererViewportConn);
+    }
+    if (m_rendererTimeframeConn) {
+        disconnect(m_rendererTimeframeConn);
+    }
+    m_heatmapRenderer = qobject_cast<UnifiedGridRenderer*>(renderer);
+    if (m_heatmapRenderer) {
+        m_rendererViewportConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
+            markGeometryDirty();
+        });
+        m_rendererTimeframeConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
+            markGeometryDirty();
+        });
+    }
+    markGeometryDirty();
+    emit heatmapRendererChanged();
 }
 
 void CandlestickOverlayItem::setSymbol(const QString& symbol) {
@@ -244,7 +274,20 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_viewState || !m_viewState->isTimeWindowValid()) {
+    if (!m_viewState || !m_viewState->isTimeWindowValid() || !m_heatmapRenderer) {
+        root->wickGeometry->allocate(0);
+        root->bodyGeometry->allocate(0);
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
+
+    const HeatmapTimeMapping mapping = m_heatmapRenderer->lastHeatmapMapping();
+    if (mappingChanged(mapping, m_lastMapping)) {
+        m_lastMapping = mapping;
+        m_geometryDirty = true;
+    }
+    if (!mapping.valid) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -350,7 +393,25 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
-    const QMatrix4x4 xform = m_viewState->calculateViewportTransform(boundingRect());
+    const QRectF bounds = boundingRect();
+    double minPrice = m_viewState->getMinPrice();
+    double maxPrice = m_viewState->getMaxPrice();
+    const QPointF pan = m_viewState->getPanVisualOffset();
+    double priceSpan = maxPrice - minPrice;
+    if (!pan.isNull() && bounds.height() > 0.0 && priceSpan > 0.0 && m_viewState->isDragging()) {
+        const double pricePixelsToUnits = priceSpan / bounds.height();
+        const double priceDelta = pan.y() * pricePixelsToUnits;
+        minPrice += priceDelta;
+        maxPrice += priceDelta;
+        priceSpan = maxPrice - minPrice;
+    }
+    if (priceSpan <= 0.0 || bounds.height() <= 0.0) {
+        root->wickGeometry->allocate(0);
+        root->bodyGeometry->allocate(0);
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
 
     const uchar wickR = 240;
     const uchar wickG = 240;
@@ -369,19 +430,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const auto& c = *it;
         const bool bullish = c.close >= c.open;
 
-        const qint64 stepMs = (c.timeEndMs > c.timeStartMs)
-            ? (c.timeEndMs - c.timeStartMs)
-            : ((m_timeframeSec > 0) ? static_cast<qint64>(m_timeframeSec) * 1000 : 1000);
-        const QPointF p0 = mapWorld(xform, c.timeStartMs, c.open);
-        const QPointF p1 = mapWorld(xform, c.timeStartMs, c.close);
-        const QPointF pHigh = mapWorld(xform, c.timeStartMs, c.high);
-        const QPointF pLow = mapWorld(xform, c.timeStartMs, c.low);
-        const QPointF pNext = mapWorld(xform, c.timeStartMs + stepMs, c.open);
-
-        const float x0 = static_cast<float>(p0.x());
-        const float x1 = static_cast<float>(pNext.x());
-        float bodyWidth = std::max(1.0f, (x1 - x0) * 0.7f);
-        const float centerX = (x0 + x1) * 0.5f;
+        const double colF = (static_cast<double>(c.timeStartMs) - mapping.dataStartMs) / mapping.appendMs;
+        const double baseColF = mapping.srcRect.x() + static_cast<double>(mapping.timeOffset) * mapping.gridWidth;
+        const double x = mapping.drawRect.x() + (colF - baseColF) * mapping.cellW;
+        const float x0 = static_cast<float>(x);
+        const float x1 = static_cast<float>(x + mapping.cellW);
+        float bodyWidth = std::max(1.0f, static_cast<float>(mapping.cellW) * 0.7f);
+        const float centerX = x0 + static_cast<float>(mapping.cellW) * 0.5f;
         const float bodyX0 = centerX - bodyWidth * 0.5f;
         const float bodyX1 = centerX + bodyWidth * 0.5f;
 
@@ -389,14 +444,18 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const float wickX0 = centerX - wickWidth * 0.5f;
         const float wickX1 = centerX + wickWidth * 0.5f;
 
-        const float yHigh = static_cast<float>(pHigh.y());
-        const float yLow = static_cast<float>(pLow.y());
-        const float yOpen = static_cast<float>(p0.y());
-        const float yClose = static_cast<float>(p1.y());
-        const float bodyY0 = std::min(yOpen, yClose);
-        const float bodyY1 = std::max(yOpen, yClose);
+        const double yHigh = bounds.y() + bounds.height() * ((maxPrice - c.high) / priceSpan);
+        const double yLow = bounds.y() + bounds.height() * ((maxPrice - c.low) / priceSpan);
+        const double yOpen = bounds.y() + bounds.height() * ((maxPrice - c.open) / priceSpan);
+        const double yClose = bounds.y() + bounds.height() * ((maxPrice - c.close) / priceSpan);
+        const float yHighF = static_cast<float>(yHigh);
+        const float yLowF = static_cast<float>(yLow);
+        const float yOpenF = static_cast<float>(yOpen);
+        const float yCloseF = static_cast<float>(yClose);
+        const float bodyY0 = std::min(yOpenF, yCloseF);
+        const float bodyY1 = std::max(yOpenF, yCloseF);
 
-        addQuad(wickVerts, wickX0, yHigh, wickX1, yLow, wickR, wickG, wickB, wickA);
+        addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
         if (bullish) {
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bullR, bullG, bullB, bullA);
         } else {
