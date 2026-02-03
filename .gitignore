@@ -1,5 +1,5 @@
 # IDE and Editor files
-.clangd
+# .clangd is tracked so we can force C++20 for clangd (shared)
 
 # .vscode/ - Keep tracked for shared project settings
 *.swp

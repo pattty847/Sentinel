@@ -1,0 +1,5 @@
+# Force C++20 for clangd so std::span, std::filesystem, and dependency headers parse correctly.
+# compile_commands.json from CMake+MSVC uses /std:c++20; clangd doesn't always apply it to every TU.
+CompileFlags:
+  Add:
+    - -std=c++20
