@@ -492,3 +492,35 @@ _(no entries yet)_
 - **2026-02-02** — Toolbar is visually complete but many buttons emit signals without backend implementation.
 
 ---
+
+### F13: Comment Cleanup (libs/ — senior-dev standard)
+**Status:** active
+**Created:** 2026-02-03
+**Updated:** 2026-02-03
+
+#### Now
+- [ ] Continue cleanup pass on remaining files with egregious comments
+
+#### Next
+- [ ] **Audit:** Generate list of files with `//` comments (e.g. `rg "//" libs/ --files-with-matches` or search in IDE). ~102 files, ~1016 comments.
+- [ ] **Triage per file:** Open each file; for each comment decide: **gut** (remove), **concise** (one line “why”), or **deeper** (keep/expand only if non-obvious invariant or protocol).
+- [ ] **Gut:** Remove COT, “what” comments, Python-style `#`, filler, TODOs with no ticket, and file-header essays.
+- [ ] **Concise:** Replace verbose blocks with a single “why” line where intent is subtle.
+- [ ] **Deeper:** Add or keep “why” only for protocol/threading/magic numbers/invariants; ensure C++ style (`//` or `/* */`), no stray `#`.
+- [ ] **Check:** Build + quick sanity run after each batch of files.
+
+#### Later
+- [ ] Apply same policy to `apps/` and `libs/gui` if desired.
+- [ ] Add or point to commenting rules in AGENTS.md (done: §3).
+
+#### Done
+- [x] Commenting guidelines added to AGENTS.md §3 (2026-02-03)
+- [x] Outline for comment cleanup added to TODO (2026-02-03)
+- [x] Cleaned up 10 egregious files: SentinelLogging.cpp, AxisModel.hpp, Authenticator.hpp, LayoutManager.cpp, HeatmapDock.cpp, TimeframeAggregator.hpp, CandlestickBatched.cpp, MenuBuilder.cpp, ShortcutBinder.cpp, UnifiedGridRenderer.cpp (2026-02-03)
+
+#### Session log
+- **2026-02-03** — Outlined efficient pass: audit → triage per file (gut / concise / deeper) → batch by dir, verify build. Deferred to dedicated session.
+- **2026-02-03** — Re-added a handful of “why” comments for platform quirks, latency sanity, and zoom/pan thresholds.
+- **2026-02-03** — Cleaned up 10 worst offenders: removed verbose section headers, Doxygen blocks, redundant file headers, and “what” comments. Kept minimal “why” comments for threading/invariants only. Files now follow AGENTS.md §3 standards.
+
+---

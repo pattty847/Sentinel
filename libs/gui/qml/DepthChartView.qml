@@ -10,44 +10,29 @@ Rectangle {
     property string symbol: "BTC-USD"
     property bool stressTestMode: false
     property var chartModeController: null
-    property bool gridModeEnabled: true  // Always true - pure grid-only mode!
+    property bool gridModeEnabled: true
     property bool showHeatmap: true
     property bool showCandles: false
 
-    // uiTheme is provided by QmlSceneController
-    
-    // Track current active timeframe for button highlighting
-    property int currentActiveTimeframe: 100  // Default
-    
-    //  ASSET-AWARE VOLUME SCALING: Dynamic range based on asset type
+    property int currentActiveTimeframe: 100
+
+    // Asset-specific volume ranges (BTC/ETH/DOGE differ by orders of magnitude)
     property real maxVolumeRange: {
-        if (symbol.includes("BTC")) return 100.0;  // BTC range: 0-100
-        if (symbol.includes("ETH")) return 500.0;  // ETH range: 0-500
-        if (symbol.includes("DOGE")) return 10000.0; // DOGE range: 0-10k
-        return 1000.0; // Default range for other assets
+        if (symbol.includes("BTC")) return 100.0;
+        if (symbol.includes("ETH")) return 500.0;
+        if (symbol.includes("DOGE")) return 10000.0;
+        return 1000.0;
     }
     
-    // 🚨 DEBUG STATE: Track axis changes
     property real lastTimeSpan: 0
     property int lastTimeframe: 0
-    
-    // 🔬 VISUAL DEBUG: Grid line toggle (Ctrl+G to toggle)
     property bool showTimeGrid: false
-    
-    //  SIGNAL CONNECTIONS: Update axes when viewport or timeframe changes
+
     Connections {
         target: unifiedGridRenderer
-        function onViewportChanged() {
-            // QML property bindings will automatically recalculate 
-            // when the underlying properties change - no explicit update needed
-        }
-        function onTimeframeChanged() {
-            // QML property bindings will automatically recalculate 
-            // when timeframeMs property changes - no explicit update needed
-        }
-        function onPanVisualOffsetChanged() {
-            // Grid lines will update their positions via property bindings
-        }
+        function onViewportChanged() {}
+        function onTimeframeChanged() {}
+        function onPanVisualOffsetChanged() {}
     }
 
     Connections {
@@ -64,8 +49,8 @@ Rectangle {
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
-        anchors.rightMargin: 70  // Space for price axis (RIGHT side)
-        anchors.bottomMargin: 30 // Space for time axis
+        anchors.rightMargin: 70
+        anchors.bottomMargin: 30
         color: root.color
         visible: root.showHeatmap
         z: 0
@@ -75,22 +60,20 @@ Rectangle {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
         anchors.fill: parent
-        anchors.rightMargin: 70  // Space for price axis (RIGHT side)
-        anchors.bottomMargin: 30 // Space for time axis
+        anchors.rightMargin: 70
+        anchors.bottomMargin: 30
         visible: root.showHeatmap
         intensityScale: 1.0
         maxCells: 500000
         heatmapBackgroundColor: "black"
         z: 1
         
-        // Update our tracked timeframe when it changes
         onTimeframeChanged: {
             root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
             console.log(" Timeframe changed to:", root.currentActiveTimeframe, "ms")
         }
         
         Component.onCompleted: {
-            // Initialize with current timeframe
             root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
         }
     }
@@ -106,20 +89,14 @@ Rectangle {
         z: 2
     }
     
-    // 🔬 VERTICAL GRID LINES: Visual confirmation of time column alignment
     Item {
         id: gridLines
         anchors.fill: unifiedGridRenderer
         visible: root.showTimeGrid
-        z: 3  // Above chart and ensure visibility
-        
-        //  MOUSE EVENT TRANSPARENCY: Don't interfere with chart mouse events
-        enabled: false  // Make this item transparent to mouse events
-        
-        //  COORDINATE SYSTEM INTEGRATION: Use proper CoordinateSystem
+        z: 3
+        enabled: false
+
         function getXForTimePoint(timePoint) {
-            // Use the same coordinate system as the heatmap cells (without visual pan offset)
-            // Create viewport object matching the C++ CoordinateSystem
             var viewport = {
                 timeStart_ms: unifiedGridRenderer.visibleTimeStart,
                 timeEnd_ms: unifiedGridRenderer.visibleTimeEnd,
@@ -129,7 +106,6 @@ Rectangle {
                 height: unifiedGridRenderer.height
             };
             
-            // Calculate normalized coordinates (same as CoordinateSystem::worldToScreen)
             var timeRange = viewport.timeEnd_ms - viewport.timeStart_ms;
             var priceRange = viewport.priceMax - viewport.priceMin;
             
@@ -138,13 +114,11 @@ Rectangle {
             var normalizedTime = (timePoint - viewport.timeStart_ms) / timeRange;
             var normalizedPrice = (unifiedGridRenderer.minPrice - viewport.priceMin) / priceRange;
             
-            // Clamp to viewport bounds
             normalizedTime = Math.max(0, Math.min(1, normalizedTime));
             normalizedPrice = Math.max(0, Math.min(1, normalizedPrice));
             
-            // Convert to screen coordinates (same as CoordinateSystem)
             var x = normalizedTime * viewport.width;
-            var y = (1.0 - normalizedPrice) * viewport.height;  // Flip Y for screen coordinates
+            var y = (1.0 - normalizedPrice) * viewport.height;
             
             return x;
         }
@@ -153,7 +127,6 @@ Rectangle {
             return unifiedGridRenderer.visibleTimeStart + (index * step * timeframe);
         }
         
-        //  DYNAMIC GRID LINES: Synchronized with TimeAxisModel; move with pan for immediate feedback
         Repeater {
             id: gridRepeater
             model: root.showTimeGrid ? timeAxisModel : null
@@ -169,25 +142,22 @@ Rectangle {
         }
     }
     
-    //  PRICE AXIS (Y-AXIS) - RIGHT SIDE with PriceAxisModel
     Rectangle {
         id: priceAxis
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 30
-        anchors.topMargin: 10  // Prevent label clipping at top
+        anchors.topMargin: 10
         width: 70
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 2
         
-        enabled: false  // Transparent to mouse events
-        
-        // Clip labels to axis bounds
+        enabled: false
         clip: true
-        
+
         PriceAxisModel {
             id: priceAxisModel
             target: unifiedGridRenderer
@@ -204,8 +174,6 @@ Rectangle {
                 Item {
                     width: priceAxis.width
                     height: 16
-                    // Model position is already the row center (in screen px).
-                    // Nudge down slightly so text center aligns visually with row center.
                     y: model.position - 8 + 1.5
                     visible: model.label !== ""
                     
@@ -223,24 +191,21 @@ Rectangle {
         }
     }
     
-    //  TIME AXIS (X-AXIS) - BOTTOM with TimeAxisModel
     Rectangle {
         id: timeAxis
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom  
-        anchors.rightMargin: 70  // Match price axis width
+        anchors.rightMargin: 70
         height: 30
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 2
         
-        enabled: false  // Transparent to mouse events
-        
-        // Clip labels to axis bounds
+        enabled: false
         clip: true
-        
+
         TimeAxisModel {
             id: timeAxisModel
             target: unifiedGridRenderer
@@ -271,7 +236,6 @@ Rectangle {
         }
     }
     
-    // Corner piece where axes meet (bottom-right)
     Rectangle {
         id: axisCorner
         anchors.right: parent.right
@@ -284,7 +248,6 @@ Rectangle {
         z: 3
     }
 
-    // FPS overlay (polls QML invokable for now).
     Rectangle {
         id: fpsOverlay
         anchors.left: parent.left
@@ -339,7 +302,6 @@ Rectangle {
         }
     }
 
-    // GPU Stats overlay (Tier 1 debug info)
     Rectangle {
         id: gpuStatsOverlay
         anchors.left: parent.left
@@ -439,7 +401,6 @@ Rectangle {
         }
     }
 
-    // Data Pipeline overlay (Tier 1 debug info)
     Rectangle {
         id: dataPipelineOverlay
         anchors.left: parent.left
@@ -474,7 +435,6 @@ Rectangle {
         }
     }
 
-    // Viewport Math overlay (Tier 1 debug info)
     Rectangle {
         id: viewportMathOverlay
         anchors.left: parent.left
@@ -507,9 +467,6 @@ Rectangle {
         }
     }
 
-    // Control UI removed in favor of top toolbar (chart-only controls)
-
-    // Keyboard Shortcuts
     focus: true
     Keys.onPressed: function(event) {
         switch(event.key) {

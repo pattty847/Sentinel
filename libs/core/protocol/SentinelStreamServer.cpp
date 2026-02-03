@@ -96,7 +96,6 @@ const CandleGateConfig& candleGateConfig() {
 }
 }
 
-// Echoes back all received WebSocket messages
 class Session : public std::enable_shared_from_this<Session> {
     websocket::stream<beast::tcp_stream> ws_;
     beast::flat_buffer buffer_;
@@ -106,7 +105,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::vector<std::string> write_queue_;
     std::mutex queue_mutex_;
     
-    // Connection handles for signal disconnection (if needed)
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection heatmapConn_;
@@ -123,7 +121,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::mutex candle_mutex_;
 
 public:
-    // Take ownership of the socket
     explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
         : ws_(std::move(socket))
         , model_(model)
@@ -139,24 +136,18 @@ public:
         QObject::disconnect(barClosedConn_);
     }
 
-    // Get on the correct executor
     void run() {
-        // We need to be executing within a strand to perform async operations
-        // on the I/O objects in this session.
         net::dispatch(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_run,
                 shared_from_this()));
     }
 
-    // Start the asynchronous operation
     void on_run() {
-        // Set suggested timeout settings for the websocket
         ws_.set_option(
             websocket::stream_base::timeout::suggested(
                 beast::role_type::server));
 
-        // Set a decorator to change the Server of the handshake
         ws_.set_option(websocket::stream_base::decorator(
             [](websocket::response_type& res) {
                 res.set(http::field::server,
@@ -164,7 +155,6 @@ public:
                         " sentinel-server");
             }));
 
-        // Accept the websocket handshake
         ws_.async_accept(
             beast::bind_front_handler(
                 &Session::on_accept,
@@ -224,7 +214,6 @@ public:
     }
 
     void do_read() {
-        // Read a message into our buffer
         ws_.async_read(
             buffer_,
             beast::bind_front_handler(
@@ -235,7 +224,6 @@ public:
     void on_read(beast::error_code ec, std::size_t bytes_transferred) {
         boost::ignore_unused(bytes_transferred);
 
-        // This indicates that the session was closed
         if(ec == websocket::error::closed) {
             sLog_App("Sentinel client disconnected");
             return;
@@ -244,14 +232,9 @@ public:
         if(ec)
             return fail(ec, "read");
 
-        // Handle message
         std::string msg = beast::buffers_to_string(buffer_.data());
         handle_message(msg);
-
-        // Clear the buffer
         buffer_.consume(buffer_.size());
-
-        // Do another read
         do_read();
     }
 
@@ -268,24 +251,12 @@ public:
                         owner_->notifyClientSubscribed(symbol);
                     }
                     
-                    // Send ACK
                     nlohmann::json ack;
                     ack["type"] = "ack";
                     ack["symbol"] = symbol;
                     do_write(ack.dump());
 
-                    // Send Initial Snapshot
                     auto& hotData = model_.ensureSymbol(symbol);
-                    // Use a helper to serialize the snapshot
-                    // We need to capture the dense book state
-                    
-                    // Capture dense view
-                    // auto view = hotData.liveBook.captureDenseSnapshot();
-                    // Or simpler: iterate non-zero levels
-                    // We can use getBids/getAsks which are dense vectors, but they are raw.
-                    // We need price/quantity pairs for the client (JSON format).
-                    // This is heavy for JSON, but okay for MVP.
-                    
                     nlohmann::json snapshot;
                     snapshot["type"] = "snapshot";
                     snapshot["symbol"] = symbol;
@@ -500,10 +471,6 @@ public:
         }
     }
     
-    // ------------------------------------------------------------------------
-    // DATA HANDLERS (Called from ServerDataModel thread)
-    // ------------------------------------------------------------------------
-    
     void on_trade(const Trade& trade) {
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
@@ -522,7 +489,6 @@ public:
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
         
-        // Retrieve price conversion helper from the model's SymbolHotData
         auto& symbolData = model_.ensureSymbol(pid);
         const auto& book = symbolData.liveBook;
 
@@ -705,9 +671,7 @@ public:
         do_write(payload.dump());
     }
 
-    // Thread-safe write
     void do_write(std::string payload) {
-        // Post to the strand to ensure serialization
         net::post(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_write_post,
@@ -731,7 +695,6 @@ public:
         write_queue_.push_back(std::move(payload));
         
         if (write_queue_.size() > 1) {
-            // Write already in progress
             return;
         }
         
@@ -739,7 +702,6 @@ public:
     }
     
     void internal_async_write() {
-        // Assumes queue is not empty and we are on the strand
         ws_.async_write(
             net::buffer(write_queue_.front()),
             beast::bind_front_handler(
@@ -759,7 +721,6 @@ public:
     }
 
     void fail(beast::error_code ec, char const* what) {
-        // Don't log "End of file" or "Connection reset" as errors during shutdown
         if (ec != websocket::error::closed && ec != net::error::operation_aborted) {
              sLog_Error("Session error: " << what << ": " << ec.message().c_str());
         }
@@ -789,7 +750,6 @@ void SentinelStreamServer::start() {
     try {
         m_running = true;
         
-        // Setup acceptor
         tcp::endpoint endpoint(tcp::v4(), m_port);
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
@@ -836,8 +796,6 @@ void SentinelStreamServer::doAccept() {
             } else {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
-            
-            // Accept the next connection
             if (m_running) {
                 doAccept();
             }

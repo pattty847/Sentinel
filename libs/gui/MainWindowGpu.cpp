@@ -1,14 +1,3 @@
-/*
-Sentinel — MainWindowGpu
-Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
-Inputs/Outputs: Connects remote data source signals to UnifiedGridRenderer slots.
-Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
-Performance: Connection logic is part of the user-initiated subscription setup.
-Integration: Wires the remote data source to the QML renderer.
-Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
-Related: MainWindowGpu.h, UnifiedGridRenderer.h.
-Assumptions: Remote data source connects before subscribe() is called.
-*/
 #include <QQuickView>
 #include <QLabel>
 #include <QLineEdit>
@@ -69,16 +58,11 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QtGlobal>
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
-    // 1) Initialize data source (remote-only)
     auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
-    
-    // 2) Create dock widgets via DockFactory
     setupUI();
-    
-    // 3) Initialize QML scene controller
     if (m_qquickView) {
         m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
     }
@@ -96,8 +80,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         PerformanceMonitor::instance().attachToWindow(m_qquickView);
         sLog_App("PerformanceMonitor attached to QML window");
     }
-
-    // Connect StatusBar to PerformanceMonitor signals
     if (m_statusBar) {
         auto& perfMon = PerformanceMonitor::instance();
         connect(&perfMon, &PerformanceMonitor::fpsChanged, m_statusBar, &StatusBar::setFps);
@@ -107,7 +89,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
     }
     
-    // Set up QML context properties
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
@@ -116,19 +97,13 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_currentSymbol = defaultSymbol;
     }
     m_modeController->setMode(ChartMode::ORDER_BOOK_HEATMAP);
-    
-    // 4) Set up layout orchestrator
-    // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
-    // because resizeDocks() doesn't work correctly when window is at default 640x480 size.
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
-    
-    // 5) Set up menu bar and shortcuts
+    // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
     m_shortcutBinder = std::make_unique<ShortcutBinder>(this);
     setupMenuBar();
     setupShortcuts();
     
-    // 6) Set up connections
     setupConnections();
     setWindowProperties();
     setupGuiApiServer();
@@ -143,14 +118,8 @@ MainWindowGPU::~MainWindowGPU() {
 }
 
 void MainWindowGPU::setupUI() {
-    
-    // Prevent repaint storms during setup
     setUpdatesEnabled(false);
-
-    // Ensure dock tabs are placed at the top for all areas.
     setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
-    
-    // Create docks via DockFactory
     DockFactory dockFactory(this);
     auto docks = dockFactory.createDocks();
     m_heatmapDock = docks.heatmapDock;
@@ -165,13 +134,10 @@ void MainWindowGPU::setupUI() {
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
     
-    // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
     if (m_qquickView) {
     }
-    
-    // Get symbol controls
     auto symbolControls = dockFactory.getSymbolControls();
     m_symbolInput = symbolControls.symbolInput;
     m_subscribeButton = symbolControls.subscribeButton;
@@ -179,13 +145,7 @@ void MainWindowGPU::setupUI() {
     // Add status bar to main window
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
-
-    
-    // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
-
-
-    // Heatmap toolbar signals
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::chartModeSelected, this, [this](ChartMode mode) {
             if (m_modeController) {
@@ -225,13 +185,8 @@ void MainWindowGPU::setupUI() {
     setUpdatesEnabled(true);
 }
 
-// QML loading and GPU verification moved to QmlSceneController
-
-// Styles are now handled by individual dock widgets
-
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
-    // Set window state to maximized (will be applied when window is shown)
     setWindowState(Qt::WindowMaximized);
 }
 
@@ -332,8 +287,6 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
     if (m_firstShow) {
         m_firstShow = false;
 
-        // Force geometry to available screen size (excludes taskbars)
-        // This helps on WSL/X11 where showMaximized() can sometimes be flaky on startup.
         if (const auto screen = QApplication::primaryScreen()) {
             setGeometry(screen->availableGeometry());
         }
@@ -364,8 +317,6 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
-
-    // Set heatmap dock for debug menu access
     m_menuBuilder->setHeatmapDock(m_heatmapDock);
 
     m_menuBuilder->buildMenus(docks, callbacks);
@@ -384,7 +335,6 @@ void MainWindowGPU::setupShortcuts() {
     m_shortcutBinder->bindShortcuts(callbacks, docks);
 }
 
-// Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
     if (!m_qmlController) {
@@ -411,8 +361,6 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
-
-    // Auto-request history after connect for the current symbol.
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, [this](bool connected) {
                 if (!connected || !m_dataSource) {
@@ -425,15 +373,13 @@ void MainWindowGPU::connectMarketDataSignals() {
                 requestHeatmapHistoryForSymbol(symbol);
             });
 
-    // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
                 sLog_Error("DataSource error: " << error);
             });
 }
 
-void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted for clarity
-    // Update bottom status bar
+void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     if (m_statusBar) {
         m_statusBar->setConnectionStatus(connected);
     }
@@ -452,13 +398,10 @@ bool MainWindowGPU::validateComponents() {
     return true;
 }
 
-// Layout arrangement moved to LayoutOrchestrator
-
 void MainWindowGPU::resetLayoutToDefault() {
     m_layoutOrchestrator->resetLayoutToDefault(getDockWidgets());
 }
 
-// UnifiedGridRenderer access moved to QmlSceneController
 
 void MainWindowGPU::onSaveLayout() {
     bool ok;

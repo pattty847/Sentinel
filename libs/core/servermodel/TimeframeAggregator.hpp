@@ -18,7 +18,6 @@ struct OHLCVBar {
     bool is_closed = false;
 };
 
-// Enum for timeframe resolution in seconds
 enum class Timeframe : int {
     OneSecond = 1,
     OneMinute = 60,
@@ -31,23 +30,17 @@ class TimeframeAggregator : public QObject {
 public:
     explicit TimeframeAggregator(QObject* parent = nullptr);
     
-    // Core input
     void onTrade(const Trade& trade);
     
-    // Accessors
     std::vector<OHLCVBar> getHistory(const std::string& symbol, Timeframe tf, size_t limit = 1000) const;
 
 signals:
-    // Emitted when a bar is completed (time rolled over)
     void barClosed(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
-    // Emitted on every update (for real-time candle drawing)
     void barUpdated(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
 
 private:
     struct SymbolState {
-        // Current forming bar for each timeframe
         std::unordered_map<Timeframe, OHLCVBar> activeBars;
-        // History storage (ring buffer concept, but vector for now)
         std::unordered_map<Timeframe, std::vector<OHLCVBar>> history;
     };
     

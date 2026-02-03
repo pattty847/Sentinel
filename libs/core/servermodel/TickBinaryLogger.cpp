@@ -10,7 +10,6 @@ namespace fs = std::filesystem;
 TickBinaryLogger::TickBinaryLogger(const std::string& baseDir) 
     : m_baseDir(baseDir) 
 {
-    // Ensure base directory exists
     if (!fs::exists(m_baseDir)) {
         fs::create_directories(m_baseDir);
     }
@@ -18,7 +17,6 @@ TickBinaryLogger::TickBinaryLogger(const std::string& baseDir)
 
 TickBinaryLogger::~TickBinaryLogger() {
     flush();
-    // Streams close automatically
 }
 
 void TickBinaryLogger::flush() {
@@ -40,7 +38,6 @@ void TickBinaryLogger::logTrade(const Trade& trade) {
     LogFile& file = getFileForSymbol(trade.product_id, ts);
     if (!file.stream.is_open()) return;
     
-    // Prepare Payload
     LogFormat::TradePayload payload;
     payload.price = trade.price;
     payload.size = trade.size;
@@ -52,7 +49,6 @@ void TickBinaryLogger::logTrade(const Trade& trade) {
     header.timestamp_ms = ts;
     header.payload_len = sizeof(payload) + trade.trade_id.length();
     
-    // Write
     file.stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
     file.stream.write(reinterpret_cast<const char*>(&payload), sizeof(payload));
     if (!trade.trade_id.empty()) {
@@ -70,10 +66,6 @@ void TickBinaryLogger::logBookUpdate(const std::string& symbol, const std::vecto
         
     LogFile& file = getFileForSymbol(symbol, ts);
     if (!file.stream.is_open()) return;
-    
-    // Prepare Payload
-    // Just a sequence of Deltas.
-    // Length = deltas.size() * sizeof(BookDeltaPayload)
     
     LogFormat::RecordHeader header;
     header.type = LogFormat::RecordType::BookUpdate;
@@ -109,9 +101,6 @@ void TickBinaryLogger::rotateFile(LogFile& file, const std::string& symbol, uint
         file.stream.close();
     }
     
-    // Directory structure: data/market/BTC-USD/2023-10-27/
-    // File: 14.bin (hour)
-    
     using namespace std::chrono;
     auto tp = system_clock::time_point(milliseconds(timestamp_ms));
     auto day_tp = floor<days>(tp);
@@ -146,7 +135,6 @@ void TickBinaryLogger::rotateFile(LogFile& file, const std::string& symbol, uint
     if (isNew) {
         LogFormat::FileHeader fh;
         fh.created_at_ms = timestamp_ms;
-        // Safe copy symbol
         size_t len = std::min(symbol.length(), sizeof(fh.symbol) - 1);
         std::memcpy(fh.symbol, symbol.c_str(), len);
         fh.symbol[len] = '\0';

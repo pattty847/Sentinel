@@ -85,7 +85,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
-    // Connect to new specific signals
     connect(&m_client, &SentinelStreamClient::snapshotReceived,
             this, &RemoteGridDataSource::onSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived,
@@ -118,7 +117,7 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
     
-    // Ensure we have a replica ready - initialize on snapshot for authoritative range.
+    // Initialize replica on snapshot for authoritative range.
     std::string s = symbol.toStdString();
     if (m_replicaBooks.find(s) == m_replicaBooks.end()) {
         m_replicaBooks.emplace(s, std::make_unique<LiveOrderBook>(s));
@@ -156,7 +155,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     
     auto& book = *m_replicaBooks[symbol];
     
-    // Re-initialize (clears data) using banded range around best bid/ask.
+    // Re-initialize using banded range around best bid/ask.
     const double tickSize = getOrderBookTickSize();
     const double bandPct = getOrderBookBandPct();
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);

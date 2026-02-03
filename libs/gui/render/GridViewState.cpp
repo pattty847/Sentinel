@@ -1,16 +1,5 @@
-/*
-Sentinel — GridViewState
-Role: Implements the mathematical logic for panning and zooming the chart viewport.
-Inputs/Outputs: Implements formulas for updating time/price ranges based on mouse deltas.
-Threading: All code is designed to be executed on the main GUI thread.
-Performance: Calculations are optimized for real-time interactive performance.
-Integration: The concrete implementation of the viewport state machine.
-Observability: No internal logging; events are logged from the header's declared methods.
-Related: GridViewState.hpp.
-Assumptions: Zoom logic correctly implements "zoom-to-cursor" functionality.
-*/
+// GridViewState: viewport pan/zoom math; main GUI thread only.
 #include "GridViewState.hpp"
-// CoordinateSystem not used directly here
 #include <QMatrix4x4>
 #include <QSizeF>
 #include <QDebug>
@@ -66,12 +55,6 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
     if (!m_timeWindowValid || itemBounds.isEmpty()) {
         return QMatrix4x4();
     }
-
-    // Map world (time ms, price) → screen pixels
-    // World X range: [m_visibleTimeStart_ms, m_visibleTimeEnd_ms]
-    // World Y range: [m_minPrice, m_maxPrice] (increase up)
-    // Screen: width x height with Y down. We flip Y with a negative scale.
-
     const double timeRange = static_cast<double>(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
     const double priceRange = (m_maxPrice - m_minPrice);
     if (timeRange <= 0.0 || priceRange <= 0.0 || m_viewportWidth <= 0.0 || m_viewportHeight <= 0.0) {
@@ -79,17 +62,10 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
     }
 
     const double sx = m_viewportWidth / timeRange;
-    const double sy = -m_viewportHeight / priceRange; // flip Y so higher price is higher on screen
-
+    const double sy = -m_viewportHeight / priceRange;
     QMatrix4x4 transform;
-
-    // Scale world to pixels
     transform.scale(sx, sy, 1.0);
-
-    // Translate world origin so timeStart→x=0, priceMax→y=0 after flip
     transform.translate(-static_cast<double>(m_visibleTimeStart_ms), -m_maxPrice, 0.0);
-
-    // Apply visual pan offset in pixel space last (drag feedback)
     if (m_isDragging && !m_panVisualOffset.isNull()) {
         QMatrix4x4 screenSpace;
         screenSpace.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
@@ -100,7 +76,6 @@ QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) c
 }
 
 void GridViewState::handleZoom(double delta, const QPointF& center) {
-    // Delegate to cursor-aware implementation using current viewport size
     handleZoomWithViewport(delta, center, QSizeF(m_viewportWidth, m_viewportHeight));
 }
 
@@ -108,19 +83,12 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
 
     static const bool kZoomDebug = qEnvironmentVariableIsSet("SENTINEL_ZOOM_DEBUG");
-    
-    // Apply clamped delta for controlled zoom
     double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
     double zoomMultiplier = 1.0 + clampedDelta;
     double newZoom = m_zoomFactor * zoomMultiplier;
-    
-    // Clamp zoom levels (0.1x to MAX_ZOOM_FACTOR)
     newZoom = std::max(0.1, std::min(MAX_ZOOM_FACTOR, newZoom));
-    
     if (newZoom != m_zoomFactor) {
-        //  ZOOM TO MOUSE POINTER: Calculate center point with proper coordinate conversion
         if (center.x() >= 0 && center.y() >= 0) {
-            // Get current viewport ranges
             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
             double currentPriceRange = m_maxPrice - m_minPrice;
             if (currentTimeRange <= 0) {
@@ -129,8 +97,6 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             if (currentPriceRange <= 0.0) {
                 currentPriceRange = 1.0;
             }
-            
-            // Calculate new ranges based on zoom factor - ensure positive values
             const double timeRangeD = static_cast<double>(currentTimeRange) * (m_zoomFactor / newZoom);
             const bool zoomingOut = (newZoom < m_zoomFactor);
             const int64_t newTimeRange = std::max<int64_t>(
@@ -138,18 +104,12 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                 static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD) : std::floor(timeRangeD))
             );
             const double newPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
-            
-            // Validate ranges to prevent invalid coordinates
             if (newTimeRange <= 0 || newPriceRange <= 0.0) {
                 qDebug() << "🚨 ZOOM ABORT: Invalid range calculated - TimeRange:" << newTimeRange << "PriceRange:" << newPriceRange;
                 return;
             }
-            
-            // Convert mouse position to normalized coordinates (0.0 to 1.0)
             double centerTimeRatio = center.x() / viewportSize.width();
-            double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());  // Invert Y for price
-            
-            // Clamp ratios to valid range
+            double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
             centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
             
@@ -158,12 +118,8 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                          << "Zoom:" << m_zoomFactor << "->" << newZoom
                          << "Mouse(" << center.x() << "," << center.y() << ")";
             }
-            
-            // Calculate current center point in data coordinates
             int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
             double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
-            
-            // Update viewport bounds around the center point
             const double newTimeRangeD = static_cast<double>(newTimeRange);
             const double newTimeStartD = static_cast<double>(currentCenterTime) - (newTimeRangeD * centerTimeRatio);
             const double newTimeEndD = newTimeStartD + newTimeRangeD;
@@ -187,14 +143,10 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                          << "bounds" << m_visibleTimeStart_ms << m_visibleTimeEnd_ms
                          << m_minPrice << m_maxPrice;
             }
-
-            // Final validation - ensure time range is positive and price range is valid
             if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
                 qDebug() << "🚨 ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
                 return;
             }
-            
-            // Apply validated bounds via central setter to bump version and signal change
             setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
             
             if constexpr (kTraceZoomInteractions) {
@@ -204,10 +156,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                          << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
             }
         }
-        
         m_zoomFactor = newZoom;
-        
-        // Disable auto-scroll when user manually zooms
         if (m_autoScrollEnabled) {
             m_autoScrollEnabled = false;
             emit autoScrollEnabledChanged();
@@ -240,14 +189,10 @@ void GridViewState::handlePanEnd(bool applyViewport) {
     if (!applyViewport) {
         return;
     }
-
-    const double threshold = 1.0; // pixels
+    const double threshold = 1.0;
     double timeDeltaF = 0.0;
     double priceDelta = 0.0;
     if (m_panVisualOffset.manhattanLength() > threshold && m_viewportWidth > 0 && m_viewportHeight > 0) {
-        // Create viewport for coordinate conversion
-        // TODO: figure out why we aren't using 'viewport'
-        // Convert visual offset to data coordinates using CoordinateSystem
         int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
         double priceRange = m_maxPrice - m_minPrice;
         
@@ -258,25 +203,17 @@ void GridViewState::handlePanEnd(bool applyViewport) {
         const int64_t timeDelta = static_cast<int64_t>(std::floor(timeDeltaF));
         m_panRemainderTimeMs = timeDeltaF - static_cast<double>(timeDelta);
         priceDelta = m_panVisualOffset.y() * pricePixelsToUnits;
-        
-        // Apply to viewport through setViewport
         setViewport(m_visibleTimeStart_ms + timeDelta,
                    m_visibleTimeEnd_ms + timeDelta,
                    m_minPrice + priceDelta,
                    m_maxPrice + priceDelta);
     }
-    // Do not clear visual offset here; let the renderer clear it
-    // after geometry is resynchronized to avoid visual snap-back.
 }
 
 void GridViewState::handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
-    
-    // Apply zoom sensitivity and clamp the delta
     double processedDelta = rawDelta * ZOOM_SENSITIVITY;
     processedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, processedDelta));
-    
-    // Use the existing viewport-aware zoom logic
     handleZoomWithViewport(processedDelta, center, viewportSize);
 }
 
@@ -304,13 +241,11 @@ void GridViewState::clearPanVisualOffset() {
     }
 }
 
-// Directional pan methods
 void GridViewState::panLeft() {
     if (!m_timeWindowValid) return;
-    
+    // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    int64_t panAmount = timeRange * 0.1; // Pan 10% of visible range
-    
+    int64_t panAmount = timeRange * 0.1;
     setViewport(
         m_visibleTimeStart_ms - panAmount,
         m_visibleTimeEnd_ms - panAmount,
@@ -321,10 +256,9 @@ void GridViewState::panLeft() {
 
 void GridViewState::panRight() {
     if (!m_timeWindowValid) return;
-    
+    // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     int64_t timeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    int64_t panAmount = timeRange * 0.1; // Pan 10% of visible range
-    
+    int64_t panAmount = timeRange * 0.1;
     setViewport(
         m_visibleTimeStart_ms + panAmount,
         m_visibleTimeEnd_ms + panAmount,
@@ -335,10 +269,9 @@ void GridViewState::panRight() {
 
 void GridViewState::panUp() {
     if (!m_timeWindowValid) return;
-    
+    // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     double priceRange = m_maxPrice - m_minPrice;
-    double panAmount = priceRange * 0.1; // Pan 10% of visible range
-    
+    double panAmount = priceRange * 0.1;
     setViewport(
         m_visibleTimeStart_ms,
         m_visibleTimeEnd_ms,
@@ -349,10 +282,9 @@ void GridViewState::panUp() {
 
 void GridViewState::panDown() {
     if (!m_timeWindowValid) return;
-    
+    // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     double priceRange = m_maxPrice - m_minPrice;
-    double panAmount = priceRange * 0.1; // Pan 10% of visible range
-    
+    double panAmount = priceRange * 0.1;
     setViewport(
         m_visibleTimeStart_ms,
         m_visibleTimeEnd_ms,
@@ -362,22 +294,12 @@ void GridViewState::panDown() {
 }
 
 double GridViewState::calculateOptimalPriceResolution() const {
-    if (!m_timeWindowValid) return 1.0;  // Default fallback
-    
-    // Calculate price span (this is the key - how much price range is visible)
+    if (!m_timeWindowValid) return 1.0;
     double priceSpan = m_maxPrice - m_minPrice;
-    
-    //  PRICE-SPAN-BASED LOD: Use price range to determine resolution
-    // When zoomed out (large price range), use coarser buckets
-    if (priceSpan > 500) {               // > $500 range: $25 buckets  
-        return 25.0;
-    } else if (priceSpan > 100) {        // > $100 range: $5 buckets
-        return 5.0;
-    } else if (priceSpan > 50) {         // > $50 range: $1 buckets
-        return 1.0;
-    } else if (priceSpan > 10) {         // > $10 range: $0.50 buckets
-        return 0.50;
-    } else {                             // <= $10 range: $0.25 buckets
-        return 0.25;
-    }
+    // Bucket sizes tuned for stable label density across zoom.
+    if (priceSpan > 500) return 25.0;
+    if (priceSpan > 100) return 5.0;
+    if (priceSpan > 50) return 1.0;
+    if (priceSpan > 10) return 0.50;
+    return 0.25;
 }

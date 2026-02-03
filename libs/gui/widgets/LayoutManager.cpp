@@ -10,10 +10,8 @@ void LayoutManager::saveLayout(QMainWindow* window, const QString& layoutName) {
     settings.beginGroup("layouts");
     settings.beginGroup(layoutName);
     
-    // Save version for compatibility checking
     settings.setValue("version", APP_LAYOUT_VERSION);
     
-    // Save window state
     QByteArray state = window->saveState();
     settings.setValue("state", state);
     
@@ -29,15 +27,13 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     settings.beginGroup("layouts");
     settings.beginGroup(layoutName);
     
-    // Check version compatibility
     int savedVersion = settings.value("version", 0).toInt();
     if (savedVersion != APP_LAYOUT_VERSION) {
         qWarning() << "Layout version mismatch:" << savedVersion << "vs" << APP_LAYOUT_VERSION
                    << "- falling back to default layout";
-        // Purge incompatible layout so we don't keep restoring stale geometry
         settings.endGroup();
         settings.beginGroup(layoutName);
-        settings.remove(QString());  // Clear current layout group
+        settings.remove(QString());
         settings.endGroup();
         settings.endGroup();
         return false;
@@ -81,11 +77,8 @@ void LayoutManager::deleteLayout(const QString& layoutName) {
 void LayoutManager::resetToDefault(QMainWindow* window) {
     if (!window) return;
     
-    // Clear saved default layout
     deleteLayout(defaultLayoutName());
     
-    // Call resetLayoutToDefault() slot on MainWindowGPU
-    // This uses Qt's signal/slot mechanism to invoke the method
     QMetaObject::invokeMethod(window, "resetLayoutToDefault", Qt::QueuedConnection);
 }
 

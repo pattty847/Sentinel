@@ -82,7 +82,6 @@ ServerDataModel::ServerDataModel(QObject* parent)
     , m_aggregator(std::make_unique<TimeframeAggregator>())
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this))
 {
-    // Forward aggregation signals
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -93,11 +92,9 @@ ServerDataModel::ServerDataModel(QObject* parent)
 }
 
 ServerDataModel::~ServerDataModel() {
-    // Unique ptr handles cleanup
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
-    // Upgradable lock pattern
     {
         std::shared_lock lock(m_mutex);
         auto it = m_symbols.find(symbol);
@@ -154,7 +151,6 @@ void ServerDataModel::onTrade(const Trade& trade) {
         m_logger->logTrade(trade);
     }
     
-    // Update aggregates
     if (m_aggregator) {
         m_aggregator->onTrade(trade);
     }
@@ -162,7 +158,6 @@ void ServerDataModel::onTrade(const Trade& trade) {
     auto& data = ensureSymbol(trade.product_id);
     data.lastTradePrice = trade.price;
     
-    // Rebroadcast to streamers
     emit tradeBroadcast(trade);
 }
 
@@ -174,10 +169,6 @@ void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std
         return;
     }
 
-    // TODO: Look into this more.
-    // Apply deltas to our local LiveOrderBook replica
-    // We need to convert indices back to prices to use the public applyUpdates API
-    // This is slightly inefficient (idx -> price -> idx) but keeps LiveOrderBook encapsulation intact.
     std::vector<BookLevelUpdate> updates;
     updates.reserve(deltas.size());
     
@@ -188,15 +179,12 @@ void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std
         updates.push_back({d.isBid, price, d.qty});
     }
     
-    // We don't need the output deltas, we just want to update the state
     data.liveBook.applyUpdates(updates, now, nullptr);
     
-    // Persistence
     if (m_logger) {
         m_logger->logBookUpdate(symbol, deltas);
     }
     
-    // Rebroadcast to streamers
     emit bookUpdateBroadcast(productId, deltas);
 }
 
@@ -226,8 +214,6 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
-    // Re-initialize the book to clear old state
-    // TODO: Unify this logic with client-side book initialization to avoid drift
     const double tickSize = getOrderBookTickSize();
     const double bandPct = getOrderBookBandPct();
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);

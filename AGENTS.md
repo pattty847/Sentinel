@@ -61,6 +61,7 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 * Use modern C++20: RAII, smart pointers, no naked new/delete.
 * Prefer explicit types for public APIs.
 * Use expressive names; comment only where intent is subtle.
+* **Comments:** Prefer code as documentation. When you do comment, explain *why* (decisions, invariants, protocol quirks), not *what* (the code already shows that). No COT, filler, or meta-commentary in the codebase. File headers: one short line (role/threading) if needed; no essays.
 * Separate concerns: logic in core, visuals in gui.
 * If you add an ENV VAR to the program, make sure to outline it to docs/ENV_VARS.md.
 * Qt resources: when adding SVGs/icons via CMake, use `QT_RESOURCE_ALIAS` (or explicit aliases) so runtime paths are stable (e.g., `:/icons/icon-*.svg`). Avoid absolute path aliases.

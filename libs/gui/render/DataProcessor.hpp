@@ -1,14 +1,4 @@
-/*
-Sentinel — DataProcessor
-Role: Receives remote heatmap slices and forwards columns to the GPU renderer.
-Inputs/Outputs: Takes heatmap slice payloads; emits column and range reset signals.
-Threading: Lives and operates on a dedicated QThread; receives data from main and signals back.
-Performance: Minimal work to keep upload cadence smooth.
-Integration: Owned by UnifiedGridRenderer; GPU-only heatmap path.
-Observability: Logs ingest diagnostics via sLog_Render when enabled.
-Related: DataProcessor.cpp, UnifiedGridRenderer.h, GridViewState.hpp.
-Assumptions: Server is authoritative for heatmap columns.
-*/
+// Dedicated QThread processor for remote heatmap slices; server is authoritative for columns.
 #pragma once
 #include <QObject>
 #include <QElapsedTimer>
@@ -30,7 +20,6 @@ public:
     ~DataProcessor();
 
 public slots:
-    // Data ingestion (slots for cross-thread invocation)
     void onHeatmapSliceReceived(const QString& symbol,
                                 int64_t bucketStartMs,
                                 int64_t bucketEndMs,
@@ -54,11 +43,8 @@ public slots:
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     
 public:
-    
-    // Configuration
     void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
     
-    // Control
     void clearData();
     void startProcessing();
     void stopProcessing();
@@ -119,16 +105,12 @@ private:
         void push(IGridDataSource::HeatmapHistoryColumn column);
     };
     
-    // Components
     GridViewState* m_viewState = nullptr;
     
-    // Manual timeframe management
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
     int64_t m_currentTimeframe_ms = 100;
     
-    
-    // GPU heatmap rasterization config
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;
     double m_heatmapIntensityScale = 1.0;
@@ -140,7 +122,6 @@ private:
     int64_t m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
     QByteArray m_heatmapLastColumn;
     bool m_heatmapHasLastColumn = false;
-    // Shutdown flag to prevent processing after stopProcessing() is called
     std::atomic<bool> m_shuttingDown{false};
 
     std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;

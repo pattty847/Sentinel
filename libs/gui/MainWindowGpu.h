@@ -1,14 +1,4 @@
-/*
-Sentinel — MainWindowGpu
-Role: Main QWidget-based window, hosting the QML GPU chart and native UI controls.
-Inputs/Outputs: Manages the lifecycle of the remote data source and UI controllers.
-Threading: Runs on the main GUI thread; connects worker thread data signals to the QML scene.
-Performance: UI setup is a one-time cost; not on the real-time data hot path.
-Integration: Wires the remote data source to the QML renderer.
-Observability: Logs lifecycle and connection status via qDebug.
-Related: MainWindowGpu.cpp, DepthChartView.qml.
-Assumptions: The hosted QML scene exposes a 'unifiedGridRenderer' object.
-*/
+/* Main GUI window; main thread only. Hosts QML GPU chart and dockable widgets. */
 #pragma once
 
 #include <QMainWindow>
@@ -47,10 +37,6 @@ class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
 
-/**
- *  GPU-Powered Trading Terminal MainWindow
- * Clean, focused implementation for GPU rendering with dockable widgets
- */
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
 
@@ -68,7 +54,7 @@ signals:
 private slots:
     void onSubscribe();
     void onConnectionStatusChanged(bool connected);
-    void resetLayoutToDefault();  // Slot for LayoutManager to call
+    void resetLayoutToDefault();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -95,8 +81,6 @@ private:
     void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
-    
-    // Dock widgets (created via DockFactory)
     HeatmapDock* m_heatmapDock = nullptr;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
@@ -110,16 +94,12 @@ private:
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
     bool m_connected = false;
-    
-    // QML scene (managed via QmlSceneController)
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
     
     // Controllers
     ChartModeController* m_modeController = nullptr;
     ThemeBridge* m_themeBridge = nullptr;
-    
-    // Modular components
     std::unique_ptr<QmlSceneController> m_qmlController;
     std::unique_ptr<LayoutOrchestrator> m_layoutOrchestrator;
     std::unique_ptr<MenuBuilder> m_menuBuilder;

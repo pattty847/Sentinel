@@ -14,8 +14,6 @@ void AxisModel::setTarget(QQuickItem* target) {
     
     m_target = target;
     emit targetChanged();
-    
-    // Try to extract GridViewState from UnifiedGridRenderer
     m_renderer = qobject_cast<UnifiedGridRenderer*>(target);
     if (!m_renderer) {
         setGridViewState(nullptr);
@@ -25,16 +23,12 @@ void AxisModel::setTarget(QQuickItem* target) {
     GridViewState* viewState = m_renderer->getViewState();
     if (viewState) {
         setGridViewState(viewState);
-        
-        // Also connect to size changes
         connect(m_renderer, &QQuickItem::widthChanged, this, [this]() {
             setViewportSize(m_renderer->width(), m_renderer->height());
         });
         connect(m_renderer, &QQuickItem::heightChanged, this, [this]() {
             setViewportSize(m_renderer->width(), m_renderer->height());
         });
-        
-        // Initialize viewport size
         setViewportSize(m_renderer->width(), m_renderer->height());
     }
 }
@@ -51,8 +45,7 @@ void AxisModel::setGridViewState(GridViewState* viewState) {
     }
     
     m_viewState = viewState;
-    
-    // Connect to new view state
+
     if (m_viewState) {
         connect(m_viewState, &GridViewState::viewportChanged,
                this, &AxisModel::onViewportChanged);
@@ -124,8 +117,6 @@ double AxisModel::calculateNiceStep(double range, int targetTicks) const {
     double rawStep = range / targetTicks;
     double magnitude = std::pow(10.0, std::floor(std::log10(rawStep)));
     double normalizedStep = rawStep / magnitude;
-    
-    // Choose nice step sizes
     double niceStep;
     if (normalizedStep <= 1.0) {
         niceStep = 1.0;
@@ -231,7 +222,6 @@ void AxisModel::updateTicksAndNotify() {
 }
 
 double AxisModel::valueToScreenPosition(double value) const {
-    // Default implementation - to be overridden by subclasses
     double start = getViewportStart();
     double end = getViewportEnd();
     

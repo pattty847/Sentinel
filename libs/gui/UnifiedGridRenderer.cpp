@@ -1,14 +1,4 @@
-/*
-Sentinel — UnifiedGridRenderer
-Role: Implements the data batching and rendering orchestration logic.
-Inputs/Outputs: Buffers incoming data; passes it to rendering strategies in updatePaintNode.
-Threading: Data receiving slots run on main thread; updatePaintNode runs on the render thread.
-Performance: Batches high-frequency data events into single, throttled screen updates via a QTimer.
-Integration: Defines the specific set of render strategies that compose the final chart.
-Observability: Traces the data flow from reception to rendering via qDebug.
-Related: UnifiedGridRenderer.h, HeatmapStrategy.h, TradeStrategy.h, CoordinateSystem.h.
-Assumptions: The render strategies are compatible and can be layered together.
-*/
+// Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
 #include "datasources/IGridDataSource.hpp"
@@ -24,8 +14,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
-
-// New modular architecture includes
 #include "render/GridViewState.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/MsdfAtlas.hpp"
@@ -71,7 +59,6 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     Q_UNUSED(trade);
-    // TODO: Wire trades into candle/overlay pipeline.
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
@@ -88,7 +75,6 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
-    // Mark transform dirty for rendering update
     update();
 }
 
@@ -99,12 +85,9 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF
     if (newGeometry.size() != oldGeometry.size()) {
         sLog_Render("UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
-        // Keep GridViewState in sync with the item size for accurate coord math
         if (m_viewState) {
             m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
         }
-
-        // Size change only affects transform, not geometry topology
         update();
     }
 }
@@ -213,8 +196,6 @@ void UnifiedGridRenderer::clearData() {
     if (m_viewState) {
         m_viewState->resetZoom();
     }
-
-    // Delegate to DataProcessor
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData, Qt::QueuedConnection);
     }
@@ -340,8 +321,6 @@ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) co
     viewport.priceMax = m_viewState->getMaxPrice();
     viewport.width = width();
     viewport.height = height();
-    
-    // NO pan offset applied - that's handled by the node transform in updatePaintNode
     return CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
 }
 
@@ -355,8 +334,6 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     viewport.priceMax = m_viewState->getMaxPrice();
     viewport.width = width();
     viewport.height = height();
-    
-    // NO pan offset removed - node transform handles it
     return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
 }
 
@@ -380,8 +357,6 @@ void UnifiedGridRenderer::init() {
             m_heatmapGridHeight = envHeightLegacy;
         }
     }
-
-    // Register metatypes for cross-thread signal/slot connections
     qRegisterMetaType<Trade>("Trade");
     
     m_viewState = std::make_unique<GridViewState>(this);
@@ -393,8 +368,6 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
-
-    // Initialize heatmap color gradients with vibrant "Sentinel" preset
     m_bidGradient = ColorGradient{
         {0.0f, QColor(10, 40, 0)},      // Almost black green
         {0.5f, QColor(60, 160, 30)},    // Medium green
@@ -406,8 +379,6 @@ void UnifiedGridRenderer::init() {
         {0.85f, QColor(255, 100, 30)},  // Bright red-orange
         {1.0f, QColor(255, 200, 50)}    // Hot orange/yellow
     };
-
-    // Create DataProcessor on worker thread for background processing
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
@@ -436,7 +407,6 @@ void UnifiedGridRenderer::init() {
         }
     }
     
-    // Connect signals with QueuedConnection for thread safety
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
             this,
             [this](int64_t sliceStartMs,
@@ -668,16 +638,10 @@ void UnifiedGridRenderer::init() {
                 update();
             },
             Qt::QueuedConnection);
-    
-    // Start the worker thread
     m_dataProcessorThread->start();
-    
-    // Initialize viewport size immediately to avoid 0x0 transforms
     if (width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
     }
-
-    // Set ViewState immediately as it's available
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
         m_dataProcessor->setGridViewState(m_viewState.get());
     }, Qt::QueuedConnection);
@@ -784,8 +748,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 m_heatmapTextureDirty = false;
             }
         }
-
-        // Palette-only update (colors/gamma changed but not grid size)
         if (m_heatmapPaletteDirty && !m_heatmapImage.isNull()) {
             m_heatmapPaletteImage = QImage();  // Force regeneration
             ensureHeatmapPaletteImage();
@@ -1056,7 +1018,6 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
 
     const int width = 512;
     const int height = 1;
-    // Use ARGB32 format which matches QRgb (0xAARRGGBB) layout
     m_heatmapPaletteImage = QImage(width, height, QImage::Format_ARGB32);
     if (m_heatmapPaletteImage.isNull()) {
         return;
@@ -1070,11 +1031,7 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
         const bool isAsk = (i >= width / 2);
         const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
         const float x = std::clamp(localT, 0.0f, 1.0f);
-
-        // Apply gamma curve for dramatic dark→bright progression
         const float curve = std::pow(x, gamma);
-
-        // Get color from gradient based on curved position
         const QColor color = isAsk ? m_askGradient.interpolate(curve) : m_bidGradient.interpolate(curve);
 
         row[i] = qRgba(color.red(), color.green(), color.blue(), 255);
@@ -1176,7 +1133,6 @@ void UnifiedGridRenderer::fitHeatmapToDataRange() {
     update();
 }
 
-// ===== GPU STATS DEBUG API =====
 QString UnifiedGridRenderer::getTextureSize() const {
     if (m_useGpuHeatmap && m_heatmapStream) {
         const auto snapshot = m_heatmapStream->snapshot();
@@ -1256,8 +1212,6 @@ int UnifiedGridRenderer::getDirtyRegionCount() const {
     return 0;
 }
 
-// ===== QT EVENT HANDLERS =====
-// Mouse and wheel event handling for user interaction
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
         m_viewState->handlePanStart(event->position()); 
@@ -1291,7 +1245,6 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
         if (m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController && !panAppliedToAuto) {
             m_autoScrollController->updateLagFromView(*m_viewState, *m_heatmapStream);
         }
-        // Keep visual pan until resync arrives to avoid snap-back
         if (autoScroll) {
             m_panSyncPending = true;
         }
@@ -1306,8 +1259,6 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     } else event->ignore(); 
 }
 
-// ===== QML PROPERTY GETTERS =====
-// Read-only property access for QML bindings
 int UnifiedGridRenderer::getCurrentTimeResolution() const { return static_cast<int>(m_currentTimeframe_ms); }
 double UnifiedGridRenderer::getCurrentPriceResolution() const { return m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0; }
 double UnifiedGridRenderer::getScreenWidth() const { return width(); }
@@ -1361,8 +1312,6 @@ bool UnifiedGridRenderer::heatmapDataTimeRange(qint64& outStart, qint64& outEnd)
     return true;
 }
 
-// ===== QML DEBUG API =====
-// Debug and monitoring methods for QML
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Size:%1x%2").arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getViewportMathDebug() const {
@@ -1549,15 +1498,11 @@ double UnifiedGridRenderer::getCurrentFPS() const { return m_currentFps.load(); 
 double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 
-// ===== QML DATA API =====
-// Methods for data input and manipulation from QML
 void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
-void UnifiedGridRenderer::togglePerformanceOverlay() { /* No-op: SentinelMonitor removed */ }
+void UnifiedGridRenderer::togglePerformanceOverlay() { }
 
-// ===== QML PAN/ZOOM CONTROLS =====
-// Methods for pan and zoom control from QML
 void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); update(); } }

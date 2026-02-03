@@ -164,7 +164,6 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     
     doRead();
 
-    // Flush pending writes
     net::post(m_strand, [this]() {
         if (!m_writeQueue.empty()) {
             doWrite();
@@ -219,7 +218,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
         std::string type = msg.value("type", "unknown");
         
         if (type == "snapshot") {
-            // Process snapshot
             std::string symbol = msg.value("symbol", "");
             if (symbol.empty()) return;
             
@@ -267,7 +265,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              t.size = msg.value("size", 0.0);
              std::string side = msg.value("side", "");
              t.side = (side == "buy") ? AggressorSide::Buy : AggressorSide::Sell;
-             // t.timestamp? 
              
              emit tradeReceived(t);
         } else if (type == "heatmap_slice") {

@@ -1,14 +1,4 @@
-/*
-Sentinel — CoordinateSystem
-Role: Implements the mathematical logic for linear coordinate transformations.
-Inputs/Outputs: Implements the world-to-screen and screen-to-world mapping functions.
-Threading: All methods are pure functions and inherently thread-safe.
-Performance: The implementation uses simple and efficient arithmetic.
-Integration: The concrete implementation of the coordinate transformation utility.
-Observability: No internal logging.
-Related: CoordinateSystem.h.
-Assumptions: Assumes an inverted Y-axis for screen coordinates (0 at the top).
-*/
+// Pure functions for world-to-screen coordinate transforms; assumes inverted Y-axis (0 at top).
 #include "CoordinateSystem.h"
 #include <QDebug>
 #include <cmath>
@@ -22,10 +12,9 @@ QPointF CoordinateSystem::worldToScreen(int64_t timestamp_ms, double price, cons
     double normalizedTime = normalizeTime(timestamp_ms, viewport);
     double normalizedPrice = normalizePrice(price, viewport);
     
-    // IMPORTANT: Do not clamp here. We let callers cull off-viewport primitives
-    // so we don't fold out-of-range timestamps back to x=0 or x=width.
+    // Don't clamp: callers cull off-viewport primitives to avoid folding out-of-range timestamps.
     double x = normalizedTime * viewport.width;
-    double y = (1.0 - normalizedPrice) * viewport.height;  // Flip Y for screen coordinates
+    double y = (1.0 - normalizedPrice) * viewport.height;
     
     return QPointF(x, y);
 }
@@ -48,10 +37,7 @@ QPointF CoordinateSystem::screenToWorld(const QPointF& screenPos, const Viewport
 QMatrix4x4 CoordinateSystem::calculateTransform(const Viewport& viewport) {
     QMatrix4x4 transform;
     
-    // Scale from normalized [0,1] to screen coordinates
     transform.scale(viewport.width, viewport.height, 1.0);
-    
-    // Flip Y axis for screen coordinates
     transform.scale(1.0, -1.0, 1.0);
     transform.translate(0.0, -1.0, 0.0);
     

@@ -24,8 +24,6 @@ SecApiClient::~SecApiClient() {
 
 void SecApiClient::initializePython() {
     emit statusUpdate("Initializing SEC API...");
-    
-    // Test if we can import the SEC module
     QString testCommand = QString(
         "import sys; "
         "sys.path.insert(0, r'%1'); "
@@ -180,7 +178,6 @@ void SecApiClient::onPythonError(QProcess::ProcessError error) {
 }
 
 QString SecApiClient::getPythonExecutable() const {
-    // Try to use the venv python first
     QDir currentDir = QDir::current();
     QString venvPython = currentDir.absoluteFilePath(".venv/Scripts/python.exe");
     
@@ -197,31 +194,26 @@ QString SecApiClient::getPythonExecutable() const {
 }
 
 QString SecApiClient::getSecModulePath() const {
-    // Return scripts directory so that scripts/sec/ can be imported as sec
     return getScriptsPath();
 }
 
 QString SecApiClient::getScriptsPath() const {
-    // 1) Try alongside the application binary: <appDir>/scripts
     QString appDir = QCoreApplication::applicationDirPath();
     QDir dir(appDir);
     if (dir.cd("scripts")) {
         return dir.absolutePath();
     }
 
-    // 2) Try current working directory: ./scripts
     dir = QDir(QDir::current());
     if (dir.cd("scripts")) {
         return dir.absolutePath();
     }
 
-    // 3) Try one level up from the application dir: <appDir>/../scripts
     dir = QDir(appDir);
     if (dir.cdUp() && dir.cd("scripts")) {
         return dir.absolutePath();
     }
 
-    // Fallback: relative to current directory
     return QDir::current().absoluteFilePath("scripts");
 }
 

@@ -7,11 +7,7 @@
 #include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
 
-/**
- * @brief Abstract interface for supplying market data to the grid.
- * 
- * Supports remote client-server access via WebSocket.
- */
+// Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
     Q_OBJECT
 public:
@@ -29,7 +25,6 @@ public:
     explicit IGridDataSource(QObject* parent = nullptr) : QObject(parent) {}
     virtual ~IGridDataSource() = default;
 
-    // Subscription
     virtual void subscribe(const QString& symbol) = 0;
     virtual void unsubscribe(const QString& symbol) = 0;
     virtual void requestHeatmapHistory(const QString& symbol,
@@ -37,8 +32,7 @@ public:
                                        int64_t endTimeMs,
                                        int count) = 0;
 
-    // Direct Access (GUI-thread only)
-    // Returns the dense live order book for high-performance rendering/ingestion.
+    // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
 
 signals:
@@ -68,7 +62,6 @@ signals:
                                 int gridHeight,
                                 const QVector<HeatmapHistoryColumn>& columns);
     
-    // Status Signals
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
 };

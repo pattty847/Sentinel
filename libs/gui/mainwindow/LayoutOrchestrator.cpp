@@ -16,7 +16,6 @@ LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow)
 }
 
 void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
-    // Prevent repaint storms during layout changes
     m_mainWindow->setUpdatesEnabled(false);
     
     configureDockOptions();
@@ -36,7 +35,6 @@ void LayoutOrchestrator::resetLayoutToDefault(const DockWidgets& docks) {
 bool LayoutOrchestrator::restoreLayout(const DockWidgets& docks, const QString& layoutName) {
     bool success = LayoutManager::restoreLayout(m_mainWindow, layoutName);
     if (success) {
-        // Apply constraints after restore to ensure minimum sizes are respected
         applyDockConstraints(docks);
     }
     return success;
@@ -51,6 +49,7 @@ void LayoutOrchestrator::configureDockOptions() {
     const QString platform = QGuiApplication::platformName().toLower();
     const bool isWayland = platform.contains("wayland");
     QMainWindow::DockOptions options = QMainWindow::AllowTabbedDocks | QMainWindow::AllowNestedDocks;
+    // Wayland: animated docks can glitch during layout restores.
     if (!isWayland) {
         options |= QMainWindow::AnimatedDocks;
     }
@@ -59,8 +58,6 @@ void LayoutOrchestrator::configureDockOptions() {
 }
 
 void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
-    // Remove all docks from their current positions first
-    // This ensures they're removed from any tab groups or nested layouts
     if (docks.heatmapDock && docks.heatmapDock->parent() == m_mainWindow) {
         m_mainWindow->removeDockWidget(docks.heatmapDock);
         docks.heatmapDock->setFloating(false);
@@ -88,10 +85,7 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
-    // TradingView-like: Heatmap/Chart as the dominant left pane
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, docks.heatmapDock);
-    
-    // Right: Watchlist as primary, with SEC + Lab tabbed
     if (docks.watchlistDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.watchlistDock);
     }
@@ -108,9 +102,6 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
             m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
         }
     }
-    
-    // Bottom: Commentary feeds (small height, split horizontally)
-    // Add these AFTER the heatmap so they resize relative to it
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
     m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
@@ -139,8 +130,6 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
-    
-    // Vertical split: 10% bottom, 90% main area
     if (docks.watchlistDock) {
         m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {10, 90, 90}, Qt::Vertical);
     } else {
@@ -153,8 +142,6 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     } else {
         m_mainWindow->resizeDocks({docks.heatmapDock, docks.secDock}, {70, 30}, Qt::Horizontal);
     }
-    
-    // Tabbed docks share space equally
     if (docks.watchlistDock) {
         m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
     } else {

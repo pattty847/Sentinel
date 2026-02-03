@@ -1,8 +1,4 @@
-/*
-Sentinel — CandlestickBatched
-Role: GPU-batched candlestick renderer for QML (Lab/testing).
-Threading: Update on GUI thread; rendering on render thread.
-*/
+// GPU-batched candlestick renderer for QML (Lab/testing); updates on GUI thread, renders on render thread.
 #pragma once
 
 #include <QColor>
@@ -11,9 +7,8 @@ Threading: Update on GUI thread; rendering on render thread.
 #include <QtQml/qqmlregistration.h>
 #include <vector>
 
-// OHLCV candle data
 struct CandleData {
-    qint64 timestamp = 0;  // Unix ms
+    qint64 timestamp = 0;
     double open = 0.0;
     double high = 0.0;
     double low = 0.0;
@@ -57,7 +52,6 @@ public:
     Q_INVOKABLE void loadDemoData(int count = 30);
     Q_INVOKABLE QVariantMap getCandleAt(int index) const;
 
-    // View control
     Q_INVOKABLE void setTimeWindow(qint64 startTimeMs, qint64 endTimeMs);
     Q_INVOKABLE void setAutoLOD(bool enabled);
     Q_INVOKABLE void forceTimeFrame(int timeframeMs);
@@ -102,7 +96,7 @@ private:
     int m_maxCandles = 10000;
     int m_hoveredCandle = -1;
 
-    QColor m_bullishColor = QColor(47, 221, 122, 220);   // Green
-    QColor m_bearishColor = QColor(239, 92, 85, 220);    // Red
+    QColor m_bullishColor = QColor(47, 221, 122, 220);
+    QColor m_bearishColor = QColor(239, 92, 85, 220);
     QColor m_wickColor = QColor(255, 255, 255, 200);
 };
