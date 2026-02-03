@@ -86,6 +86,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_themeBridge = new ThemeBridge(this);
         m_themeBridge->applyTheme(ThemeManager::instance().currentTheme());
         m_qmlController->setThemeBridge(m_themeBridge);
+        m_qmlController->setDataSource(m_dataSource.get());
         m_qmlController->loadQmlSource();
         m_qmlController->verifyGpuAcceleration();
     }

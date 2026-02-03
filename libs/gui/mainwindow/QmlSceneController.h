@@ -27,6 +27,7 @@ public:
     void verifyGpuAcceleration();
     void setChartModeController(ChartModeController* controller);
     void setThemeBridge(ThemeBridge* bridge);
+    void setDataSource(QObject* source);
     void updateSymbolInContext(const QString& symbol);
     
     UnifiedGridRenderer* getUnifiedGridRenderer() const;

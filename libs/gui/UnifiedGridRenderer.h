@@ -122,6 +122,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
+    Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
 
 private:
     // Rendering configuration
@@ -218,6 +219,7 @@ public:
     
     // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
+    QObject* viewState() const { return m_viewState.get(); }
     
     // Debug overlay accessors
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }

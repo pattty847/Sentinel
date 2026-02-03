@@ -1,9 +1,11 @@
 #pragma once
 #include "IGridDataSource.hpp"
+#include "CandleSeriesBuffer.hpp"
 #include "../../core/protocol/SentinelStreamClient.hpp"
 
 class RemoteGridDataSource : public IGridDataSource {
     Q_OBJECT
+    Q_PROPERTY(QObject* candleBuffer READ candleBuffer CONSTANT)
 public:
     explicit RemoteGridDataSource(const QString& host, const QString& port, QObject* parent = nullptr);
 
@@ -16,6 +18,7 @@ public:
     
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
+    QObject* candleBuffer() const { return m_candleBuffer.get(); }
 
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
@@ -41,9 +44,20 @@ private slots:
                                   int gridWidth,
                                   int gridHeight,
                                   const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns);
+    void onCandleBarUpdateReceived(const QString& symbol,
+                                   int64_t timeframeSec,
+                                   int64_t bucketStartMs,
+                                   int64_t seq,
+                                   const SentinelStreamClient::CandleBar& bar);
+    void onCandleBarClosedReceived(const QString& symbol,
+                                   int64_t timeframeSec,
+                                   int64_t bucketStartMs,
+                                   int64_t seq,
+                                   const SentinelStreamClient::CandleBar& bar);
 
 private:
     SentinelStreamClient m_client;
+    std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
     // Or we might change the interface to not return references? 
     // IGridDataSource::getDirectLiveOrderBook returns const ref.

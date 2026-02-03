@@ -16,6 +16,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include "models/PriceAxisModel.hpp"
 #include "render/LabTextItem.hpp"
 #include "render/CandlestickBatched.hpp"
+#include "render/CandlestickOverlayItem.hpp"
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
@@ -75,6 +76,7 @@ void registerMetaTypesAndQml() {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
+    qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
 }
 
 // --- Main application entrypoint ---

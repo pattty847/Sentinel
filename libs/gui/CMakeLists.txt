@@ -25,6 +25,8 @@ set(GRID_CORE_SOURCES
     datasources/IGridDataSource.hpp
     datasources/RemoteGridDataSource.hpp
     datasources/RemoteGridDataSource.cpp
+    datasources/CandleSeriesBuffer.hpp
+    datasources/CandleSeriesBuffer.cpp
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.h
     CoordinateSystem.cpp
@@ -46,6 +48,8 @@ set(GRID_CORE_SOURCES
     render/DataProcessor.cpp
     render/HeatmapStreamState.hpp
     render/HeatmapStreamState.cpp
+    render/CandlestickOverlayItem.hpp
+    render/CandlestickOverlayItem.cpp
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
     render/HeatmapLabelRenderer.hpp
@@ -100,6 +104,9 @@ qt6_add_qml_module(sentinel_gui_lib
     URI Sentinel.Charts
     VERSION 1.0
     NO_PLUGIN
+    SOURCES
+        render/CandlestickOverlayItem.hpp
+        render/CandlestickOverlayItem.cpp
     QML_FILES
         qml/DepthChartView.qml
         qml/LabView.qml
@@ -207,6 +214,7 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
 
 target_include_directories(sentinel_gui_lib 
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/render
 )
 
 # Dependencies found in root CMakeLists.txt via vcpkg

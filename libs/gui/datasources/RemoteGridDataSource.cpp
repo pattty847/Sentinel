@@ -82,6 +82,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
 {
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
+    m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
     // Connect to new specific signals
@@ -93,6 +94,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
+            this, &RemoteGridDataSource::onCandleBarUpdateReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleBarClosedReceived,
+            this, &RemoteGridDataSource::onCandleBarClosedReceived, Qt::QueuedConnection);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -250,4 +255,46 @@ void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
         converted.push_back(std::move(out));
     }
     emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight, converted);
+}
+
+void RemoteGridDataSource::onCandleBarUpdateReceived(const QString& symbol,
+                                                     int64_t timeframeSec,
+                                                     int64_t,
+                                                     int64_t seq,
+                                                     const SentinelStreamClient::CandleBar& bar) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    CandleSeriesBuffer::CandleBar out;
+    out.timeStartMs = bar.timeStartMs;
+    out.timeEndMs = bar.timeEndMs;
+    out.open = bar.open;
+    out.high = bar.high;
+    out.low = bar.low;
+    out.close = bar.close;
+    out.volume = bar.volume;
+    out.isClosed = bar.isClosed;
+    out.seq = seq;
+    m_candleBuffer->applyUpdate(symbol, timeframeSec, out, seq, false);
+}
+
+void RemoteGridDataSource::onCandleBarClosedReceived(const QString& symbol,
+                                                     int64_t timeframeSec,
+                                                     int64_t,
+                                                     int64_t seq,
+                                                     const SentinelStreamClient::CandleBar& bar) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    CandleSeriesBuffer::CandleBar out;
+    out.timeStartMs = bar.timeStartMs;
+    out.timeEndMs = bar.timeEndMs;
+    out.open = bar.open;
+    out.high = bar.high;
+    out.low = bar.low;
+    out.close = bar.close;
+    out.volume = bar.volume;
+    out.isClosed = true;
+    out.seq = seq;
+    m_candleBuffer->applyUpdate(symbol, timeframeSec, out, seq, true);
 }

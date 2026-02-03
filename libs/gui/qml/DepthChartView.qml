@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls
 import Sentinel 1.0
+import Sentinel.Charts 1.0
 
 Rectangle {
     id: root
@@ -94,10 +95,15 @@ Rectangle {
         }
     }
 
-    CandleChartView {
+    CandlestickOverlayItem {
         id: candleOverlay
         anchors.fill: unifiedGridRenderer
         visible: root.showCandles
+        viewState: unifiedGridRenderer.viewState
+        candleBuffer: dataSource ? dataSource.candleBuffer : null
+        symbol: root.symbol
+        timeframeSec: 1
+        z: 2
     }
     
     // 🔬 VERTICAL GRID LINES: Visual confirmation of time column alignment

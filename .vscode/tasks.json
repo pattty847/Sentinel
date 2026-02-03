@@ -1,0 +1,120 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure (Ninja)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--preset", "windows-msvc-ninja"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "detail": "Run CMake configure with Ninja preset. Do this before first build or after CMakeLists changes."
+        },
+        {
+            "label": "CMake: Configure (VS)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--preset", "windows-msvc-vs"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "detail": "Run CMake configure with Visual Studio preset."
+        },
+        {
+            "label": "Build (Ninja)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "--preset", "windows-msvc-ninja"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$msCompile",
+            "detail": "Build with Ninja preset. Produces compile_commands.json for clangd."
+        },
+        {
+            "label": "Build (VS)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "--preset", "windows-msvc-vs", "--config", "Debug"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": "$msCompile",
+            "detail": "Build with Visual Studio preset (Debug)."
+        },
+        {
+            "label": "Run Sentinel GUI",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/windows-msvc-ninja/apps/sentinel_gui/sentinel_gui.exe",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Launch the Sentinel GUI app (Ninja build). Build first if needed."
+        },
+        {
+            "label": "Run Sentinel GUI (VS)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/windows-msvc-vs/apps/sentinel_gui/Debug/sentinel_gui.exe",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Launch the Sentinel GUI app (VS Debug build)."
+        },
+        {
+            "label": "Run Sentinel Server",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/windows-msvc-ninja/bin/sentinel-server.exe",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Launch the Sentinel server (Ninja build). Build first if needed."
+        },
+        {
+            "label": "Run Sentinel Server (VS)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/windows-msvc-vs/bin/Debug/sentinel-server.exe",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "none",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Launch the Sentinel server (VS Debug build)."
+        }
+    ]
+}

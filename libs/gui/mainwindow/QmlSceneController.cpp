@@ -81,6 +81,12 @@ void QmlSceneController::setThemeBridge(ThemeBridge* bridge) {
     context->setContextProperty("uiTheme", bridge);
 }
 
+void QmlSceneController::setDataSource(QObject* source) {
+    if (!m_qquickView || !source) return;
+    QQmlContext* context = m_qquickView->rootContext();
+    context->setContextProperty("dataSource", source);
+}
+
 void QmlSceneController::updateSymbolInContext(const QString& symbol) {
     if (m_qquickView) {
         m_qquickView->rootContext()->setContextProperty("symbol", symbol);
