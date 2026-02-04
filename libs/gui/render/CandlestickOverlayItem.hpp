@@ -66,7 +66,6 @@ private:
     void connectCandleSignals();
     void disconnectCandleSignals();
     void markGeometryDirty();
-    void ensureDemoCandles();
 
     QPointer<GridViewState> m_viewState;
     QPointer<CandleSeriesBuffer> m_candleBuffer;
@@ -76,11 +75,6 @@ private:
     QMetaObject::Connection m_rendererViewportConn;
     QMetaObject::Connection m_rendererTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;
-
-    std::vector<CandleOverlayBar> m_demoCandles;
-    qint64 m_demoStartMs = 0;
-    qint64 m_demoEndMs = 0;
-    qint64 m_demoStepMs = 0;
 
     uint64_t m_lastViewportVersion = 0;
     QSizeF m_lastSize;

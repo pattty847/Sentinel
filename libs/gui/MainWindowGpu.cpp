@@ -406,6 +406,14 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
             }
         }
     }
+    if (viewEnd <= viewStart) {
+        QTimer::singleShot(250, this, [this, symbol]() {
+            if (m_connected) {
+                requestCandleHistoryForSymbol(symbol);
+            }
+        });
+        return;
+    }
     if (chartDebugEnabled()) {
         sLog_Debug(QString("Candle history request: symbol=%1 tfMs=%2 tfSec=%3 limit=%4 endSec=%5 view=[%6..%7]")
                    .arg(symbol)

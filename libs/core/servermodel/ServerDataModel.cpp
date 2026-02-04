@@ -2,26 +2,31 @@
 #include "SentinelLogging.hpp"
 #include <QProcessEnvironment>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 
 namespace {
-double getOrderBookTickSize() {
-    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
+int64_t localNowMs() {
+    const auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
+double readEnvDouble(const char* key, double fallback, double minValue) {
+    const QByteArray env = qgetenv(key);
     bool ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok && envTick > 0.0) {
-        return envTick;
+    const double value = env.toDouble(&ok);
+    if (ok && value > minValue) {
+        return value;
     }
-    return 0.10;
+    return fallback;
+}
+
+double getOrderBookTickSize() {
+    return readEnvDouble("SENTINEL_ORDERBOOK_TICK_SIZE", 0.10, 0.0);
 }
 
 double getOrderBookBandPct() {
-    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
-    bool ok = false;
-    const double envBand = bandEnv.toDouble(&ok);
-    if (ok && envBand > 0.0) {
-        return envBand;
-    }
-    return 0.30;
+    return readEnvDouble("SENTINEL_ORDERBOOK_BAND_PCT", 0.30, 0.0);
 }
 
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
@@ -76,6 +81,29 @@ std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bi
 }
 }
 
+int64_t ServerDataModel::exchangeNowMs() const {
+    const int64_t offset = m_exchangeOffsetMs.load(std::memory_order_relaxed);
+    if (offset == 0) {
+        return localNowMs();
+    }
+    return localNowMs() - offset;
+}
+
+void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
+    const int64_t nowMs = localNowMs();
+    const int64_t rawOffset = nowMs - exchangeMs;
+    if (std::llabs(rawOffset) > 10000) {
+        return;
+    }
+    const int64_t prev = m_exchangeOffsetMs.load(std::memory_order_relaxed);
+    if (prev == 0) {
+        m_exchangeOffsetMs.store(rawOffset, std::memory_order_relaxed);
+        return;
+    }
+    const int64_t smoothed = static_cast<int64_t>(prev * 0.9 + rawOffset * 0.1);
+    m_exchangeOffsetMs.store(smoothed, std::memory_order_relaxed);
+}
+
 ServerDataModel::ServerDataModel(QObject* parent) 
     : QObject(parent)
     , m_logger(std::make_unique<TickBinaryLogger>())
@@ -89,6 +117,15 @@ ServerDataModel::ServerDataModel(QObject* parent)
             this, &ServerDataModel::heatmapSliceReady);
 
     m_heatmapStreamer->start();
+
+    m_candleTimer.setTimerType(Qt::PreciseTimer);
+    m_candleTimer.setInterval(250);
+    connect(&m_candleTimer, &QTimer::timeout, this, [this]() {
+        if (m_aggregator) {
+            m_aggregator->tick(exchangeNowMs());
+        }
+    });
+    m_candleTimer.start();
 }
 
 ServerDataModel::~ServerDataModel() {
@@ -150,7 +187,11 @@ void ServerDataModel::onTrade(const Trade& trade) {
     if (m_logger) {
         m_logger->logTrade(trade);
     }
-    
+
+    const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        trade.timestamp.time_since_epoch()).count();
+    updateExchangeOffsetMs(exchangeMs);
+
     if (m_aggregator) {
         m_aggregator->onTrade(trade);
     }
@@ -167,7 +208,10 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
 
+    updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
+
     if (data.liveBook.getTickSize() <= 0.0) {
+        sLog_Warning("Order book update ignored - book not initialized for " << symbol);
         return;
     }
 

@@ -633,6 +633,7 @@ public:
         const int64_t nowMs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
+        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
 
         CandleStreamState state;
         {
@@ -646,6 +647,14 @@ public:
             entry.lastSentMs = nowMs;
             entry.hasLast = true;
             state = entry;
+        }
+        if (logBars) {
+            sLog_App("Candle bar update: symbol=" << symbol
+                                                  << " tfSec=" << tfSec
+                                                  << " start=" << bar.timestamp_ms
+                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                                                  << " now=" << nowMs
+                                                  << " closed=" << (bar.is_closed ? "true" : "false"));
         }
 
         nlohmann::json item;
@@ -676,6 +685,7 @@ public:
         const int64_t tfSec = static_cast<int64_t>(tf);
         const std::string key = sym + "|" + std::to_string(tfSec);
         CandleStreamState state;
+        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
@@ -686,6 +696,14 @@ public:
                     std::chrono::system_clock::now().time_since_epoch()).count());
             entry.hasLast = true;
             state = entry;
+        }
+        if (logBars) {
+            const int64_t nowMs = state.lastSentMs;
+            sLog_App("Candle bar closed: symbol=" << symbol
+                                                  << " tfSec=" << tfSec
+                                                  << " start=" << bar.timestamp_ms
+                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                                                  << " now=" << nowMs);
         }
 
         nlohmann::json item;

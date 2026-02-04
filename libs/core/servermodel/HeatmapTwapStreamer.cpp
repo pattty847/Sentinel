@@ -216,8 +216,7 @@ void HeatmapTwapStreamer::applyBandRange(SymbolState& state, double midPrice, in
 }
 
 void HeatmapTwapStreamer::onSample() {
-    const auto now = std::chrono::system_clock::now();
-    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    const int64_t nowMs = m_model.exchangeNowMs();
 
     const auto symbols = m_model.getSymbolsSnapshot();
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {

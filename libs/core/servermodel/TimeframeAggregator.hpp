@@ -31,6 +31,7 @@ public:
     explicit TimeframeAggregator(QObject* parent = nullptr);
     
     void onTrade(const Trade& trade);
+    void tick(int64_t nowMs);
     
     std::vector<OHLCVBar> getHistory(const std::string& symbol, Timeframe tf, size_t limit = 1000) const;
 

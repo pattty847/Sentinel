@@ -750,6 +750,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         double dataStart = 0.0;
         double dataEnd = 0.0;
         bool dataStartValid = false;
+        double actualDataStart = 0.0;
+        double actualDataEnd = 0.0;
         if (snapshot.appendMs > 0 && gridWidth > 0) {
             const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
             dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
@@ -757,6 +759,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
             dataStart = dataEnd - static_cast<double>(bufferSpanMs);
             dataStartValid = (dataEnd > dataStart);
+            if (snapshot.filledColumns > 0) {
+                const int64_t filledSpanMs = static_cast<int64_t>(snapshot.filledColumns) * snapshot.appendMs;
+                actualDataEnd = dataEnd;
+                actualDataStart = dataEnd - static_cast<double>(filledSpanMs);
+            }
         }
 
         if (m_viewState && m_viewState->isTimeWindowValid() &&
@@ -862,8 +869,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_lastMapping.drawRect = drawRect;
         m_lastMapping.srcRect = srcRect;
         m_lastMapping.dataStartMs = dataStart;
+        m_lastMapping.actualDataStartMs = actualDataStart;
+        m_lastMapping.actualDataEndMs = actualDataEnd;
         m_lastMapping.appendMs = static_cast<double>(snapshot.appendMs);
         m_lastMapping.gridWidth = gridWidth;
+        m_lastMapping.filledColumns = snapshot.filledColumns;
         m_lastMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
         m_lastMapping.valid = (dataStartValid &&
                                snapshot.timeOriginMs != 0 &&

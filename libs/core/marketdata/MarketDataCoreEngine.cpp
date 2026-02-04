@@ -302,7 +302,8 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     auto arrival_time = std::chrono::system_clock::now();
     
     static std::atomic<int> rawLogCount{0};
-    sLog_DataN(5, "MDC RX: " << message.dump());
+    // RAW WS FEED LOGGING
+    // sLog_DataN(5, "MDC RX: " << message.dump());
 
     std::string channel = message.value("channel", "");
     m_lastHeartbeatMs.store(steadyClockMs());

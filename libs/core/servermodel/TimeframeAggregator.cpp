@@ -5,6 +5,98 @@
 TimeframeAggregator::TimeframeAggregator(QObject* parent) : QObject(parent) {
 }
 
+void TimeframeAggregator::tick(int64_t nowMs) {
+    std::unique_lock lock(m_mutex);
+
+    const Timeframe frames[] = { Timeframe::OneSecond, Timeframe::OneMinute, Timeframe::FiveMinutes, Timeframe::OneHour };
+
+    for (auto& [symbol, state] : m_states) {
+        for (auto tf : frames) {
+            const int64_t tfMs = static_cast<int64_t>(tf) * 1000;
+            if (tfMs <= 0) {
+                continue;
+            }
+
+            const int64_t currentStart = getBarStartTimestamp(nowMs, tf);
+            auto& currentBar = state.activeBars[tf];
+            auto& hist = state.history[tf];
+
+            double lastClose = 0.0;
+            bool hasLast = false;
+            if (currentBar.count > 0) {
+                lastClose = currentBar.close;
+                hasLast = true;
+            } else if (!hist.empty()) {
+                lastClose = hist.back().close;
+                hasLast = true;
+            }
+
+            if (!hasLast) {
+                continue;
+            }
+
+            if (currentBar.timestamp_ms == 0) {
+                currentBar.timestamp_ms = currentStart;
+                currentBar.open = lastClose;
+                currentBar.high = lastClose;
+                currentBar.low = lastClose;
+                currentBar.close = lastClose;
+                currentBar.volume = 0.0;
+                currentBar.count = 0;
+                currentBar.is_closed = false;
+                emit barUpdated(QString::fromStdString(symbol), tf, currentBar);
+                continue;
+            }
+
+            if (currentStart <= currentBar.timestamp_ms) {
+                continue;
+            }
+
+            if (!currentBar.is_closed) {
+                OHLCVBar closedBar = currentBar;
+                closedBar.is_closed = true;
+                hist.push_back(closedBar);
+                if (hist.size() > 10000) {
+                    hist.erase(hist.begin(), hist.begin() + 1000);
+                }
+                emit barClosed(QString::fromStdString(symbol), tf, closedBar);
+            }
+
+            int64_t nextStart = currentBar.timestamp_ms + tfMs;
+            int emptyCount = 0;
+            while (nextStart < currentStart && emptyCount < 300) {
+                OHLCVBar emptyBar{};
+                emptyBar.timestamp_ms = nextStart;
+                emptyBar.open = lastClose;
+                emptyBar.high = lastClose;
+                emptyBar.low = lastClose;
+                emptyBar.close = lastClose;
+                emptyBar.volume = 0.0;
+                emptyBar.count = 0;
+                emptyBar.is_closed = true;
+                hist.push_back(emptyBar);
+                if (hist.size() > 10000) {
+                    hist.erase(hist.begin(), hist.begin() + 1000);
+                }
+                emit barClosed(QString::fromStdString(symbol), tf, emptyBar);
+                nextStart += tfMs;
+                emptyCount++;
+            }
+
+            currentBar = OHLCVBar{};
+            currentBar.timestamp_ms = currentStart;
+            currentBar.open = lastClose;
+            currentBar.high = lastClose;
+            currentBar.low = lastClose;
+            currentBar.close = lastClose;
+            currentBar.volume = 0.0;
+            currentBar.count = 0;
+            currentBar.is_closed = false;
+            emit barUpdated(QString::fromStdString(symbol), tf, currentBar);
+        }
+    }
+}
+
 void TimeframeAggregator::onTrade(const Trade& trade) {
     std::unique_lock lock(m_mutex);
     

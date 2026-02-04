@@ -75,8 +75,11 @@ bool mappingChanged(const HeatmapTimeMapping& a, const HeatmapTimeMapping& b) {
         a.drawRect != b.drawRect ||
         a.srcRect != b.srcRect ||
         a.dataStartMs != b.dataStartMs ||
+        a.actualDataStartMs != b.actualDataStartMs ||
+        a.actualDataEndMs != b.actualDataEndMs ||
         a.appendMs != b.appendMs ||
         a.gridWidth != b.gridWidth ||
+        a.filledColumns != b.filledColumns ||
         a.timeOffset != b.timeOffset ||
         a.cellW != b.cellW;
 }
@@ -227,47 +230,6 @@ void CandlestickOverlayItem::markGeometryDirty() {
     update();
 }
 
-void CandlestickOverlayItem::ensureDemoCandles() {
-    if (!m_viewState || !m_viewState->isTimeWindowValid()) {
-        return;
-    }
-
-    const qint64 timeStart = m_viewState->getVisibleTimeStart();
-    const qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-    if (timeEnd <= timeStart) {
-        return;
-    }
-
-    if (m_demoStartMs == timeStart && m_demoEndMs == timeEnd && !m_demoCandles.empty()) {
-        return;
-    }
-
-    m_demoCandles.clear();
-    m_demoStartMs = timeStart;
-    m_demoEndMs = timeEnd;
-
-    const int targetCount = 200;
-    const qint64 span = std::max<qint64>(1, timeEnd - timeStart);
-    const qint64 step = std::max<qint64>(1, span / targetCount);
-    m_demoStepMs = step;
-
-    const double minPrice = m_viewState->getMinPrice();
-    const double maxPrice = m_viewState->getMaxPrice();
-    const double mid = (minPrice + maxPrice) * 0.5;
-    const double amp = std::max(1e-6, (maxPrice - minPrice) * 0.2);
-
-    m_demoCandles.reserve(targetCount);
-    for (int i = 0; i < targetCount; ++i) {
-        const qint64 t = timeStart + static_cast<qint64>(i) * step;
-        const double wave = std::sin(static_cast<double>(i) * 0.35);
-        const double open = mid + wave * amp * 0.6;
-        const double close = mid + std::cos(static_cast<double>(i) * 0.35) * amp * 0.6;
-        const double high = std::max(open, close) + amp * 0.2;
-        const double low = std::min(open, close) - amp * 0.2;
-        m_demoCandles.push_back({t, t + step, open, high, low, close});
-    }
-}
-
 QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     auto* root = static_cast<CandleOverlayNode*>(oldNode);
     if (!root) {
@@ -335,15 +297,43 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
     }
     if (!hasData) {
-        ensureDemoCandles();
-        m_visibleCandles = m_demoCandles;
+        root->wickGeometry->allocate(0);
+        root->bodyGeometry->allocate(0);
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
     }
 
     auto startIt = std::lower_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeStart,
                                     [](const CandleOverlayBar& c, qint64 t) { return c.timeStartMs < t; });
     auto endIt = std::upper_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeEnd,
                                   [](qint64 t, const CandleOverlayBar& c) { return t < c.timeStartMs; });
-    const int visibleCount = static_cast<int>(std::distance(startIt, endIt));
+    const double baseColF = mapping.srcRect.x() + static_cast<double>(mapping.timeOffset) * mapping.gridWidth;
+    double anchorBaseColF = baseColF;
+    if (mapping.actualDataEndMs > mapping.actualDataStartMs && mapping.appendMs > 0.0) {
+        const double shiftCols = (mapping.actualDataStartMs - mapping.dataStartMs) / mapping.appendMs;
+        anchorBaseColF = baseColF - shiftCols;
+    }
+    const double visibleColStart = anchorBaseColF;
+    const double visibleColEnd = anchorBaseColF + mapping.srcRect.width();
+    const bool haveActualRange = (mapping.actualDataEndMs > mapping.actualDataStartMs);
+    std::vector<CandleOverlayBar> filtered;
+    filtered.reserve(static_cast<size_t>(std::distance(startIt, endIt)));
+    for (auto it = startIt; it != endIt; ++it) {
+        if (haveActualRange) {
+            if (it->timeStartMs < static_cast<qint64>(mapping.actualDataStartMs) ||
+                it->timeStartMs >= static_cast<qint64>(mapping.actualDataEndMs)) {
+                continue;
+            }
+        }
+        const double colF = (static_cast<double>(it->timeStartMs) - mapping.actualDataStartMs) / mapping.appendMs;
+        const double colEndF = colF + 1.0;
+        if (colEndF <= visibleColStart || colF >= visibleColEnd) {
+            continue;
+        }
+        filtered.push_back(*it);
+    }
+    const int visibleCount = static_cast<int>(filtered.size());
 
     if (candleDebugEnabled()) {
         static QElapsedTimer timer;
@@ -357,15 +347,36 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const double msPerPixel = (width() > 0.0) ? (spanMs / width()) : 0.0;
             const QPointF pan = m_viewState ? m_viewState->getPanVisualOffset() : QPointF();
             const bool dragging = m_viewState ? m_viewState->isDragging() : false;
-            const qint64 visFirst = (visibleCount > 0) ? startIt->timeStartMs : 0;
-            const qint64 visLast = (visibleCount > 0) ? (endIt - 1)->timeStartMs : 0;
+            const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
+            const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
+            const qint64 newestCandle = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
+            const double newestColF = (visibleCount > 0)
+                ? (static_cast<double>(newestCandle) - mapping.dataStartMs) / mapping.appendMs
+                : 0.0;
+            const bool autoScroll = m_viewState ? m_viewState->isAutoScrollEnabled() : false;
             sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
                        .arg(m_symbol)
                        .arg(m_timeframeSec)
                        .arg(timeStart)
                        .arg(timeEnd)
                        .arg(visibleCount)
-                       .arg(hasData ? "live" : "demo"));
+                       .arg(hasData ? "live" : "none"));
+            sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 timeOffset=%4 baseColF=%5 srcX=%6 srcW=%7 drawX=%8 drawW=%9")
+                       .arg(static_cast<qint64>(mapping.dataStartMs))
+                       .arg(static_cast<qint64>(mapping.appendMs))
+                       .arg(mapping.gridWidth)
+                       .arg(mapping.timeOffset, 0, 'f', 4)
+                       .arg(baseColF, 0, 'f', 3)
+                       .arg(mapping.srcRect.x(), 0, 'f', 3)
+                       .arg(mapping.srcRect.width(), 0, 'f', 3)
+                       .arg(mapping.drawRect.x(), 0, 'f', 1)
+                       .arg(mapping.drawRect.width(), 0, 'f', 1));
+            sLog_Debug(QString("Candle mapping newest: t=%1 colF=%2 visCols=[%3..%4] autoScroll=%5")
+                       .arg(newestCandle)
+                       .arg(newestColF, 0, 'f', 3)
+                       .arg(visibleColStart, 0, 'f', 3)
+                       .arg(visibleColEnd, 0, 'f', 3)
+                       .arg(autoScroll ? "true" : "false"));
             sLog_Debug(QString("Candle overlay scale: spanMs=%1 msPerPx=%2 width=%3")
                        .arg(spanMs, 0, 'f', 1)
                        .arg(msPerPixel, 0, 'f', 3)
@@ -426,13 +437,11 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const uchar bearB = 80;
     const uchar bearA = 220;
 
-    for (auto it = startIt; it != endIt; ++it) {
-        const auto& c = *it;
+    for (const auto& c : filtered) {
         const bool bullish = c.close >= c.open;
 
-        const double colF = (static_cast<double>(c.timeStartMs) - mapping.dataStartMs) / mapping.appendMs;
-        const double baseColF = mapping.srcRect.x() + static_cast<double>(mapping.timeOffset) * mapping.gridWidth;
-        const double x = mapping.drawRect.x() + (colF - baseColF) * mapping.cellW;
+        const double colF = (static_cast<double>(c.timeStartMs) - mapping.actualDataStartMs) / mapping.appendMs;
+        const double x = mapping.drawRect.x() + (colF - anchorBaseColF) * mapping.cellW;
         const float x0 = static_cast<float>(x);
         const float x1 = static_cast<float>(x + mapping.cellW);
         float bodyWidth = std::max(1.0f, static_cast<float>(mapping.cellW) * 0.7f);

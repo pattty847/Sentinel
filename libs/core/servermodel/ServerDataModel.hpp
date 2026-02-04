@@ -4,8 +4,10 @@
 #include <shared_mutex>
 #include <string>
 #include <memory>
+#include <atomic>
 #include <QObject>
 #include <QByteArray>
+#include <QTimer>
 #include "SymbolHotData.hpp"
 #include "HeatmapTwapStreamer.hpp"
 #include "TickBinaryLogger.hpp"
@@ -32,6 +34,7 @@ public:
                            int& outGridWidth,
                            int& outGridHeight,
                            std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const;
+    int64_t exchangeNowMs() const;
 
 public slots:
     void onTrade(const Trade& trade);
@@ -66,9 +69,13 @@ signals:
                            bool reset);
 
 private:
+    void updateExchangeOffsetMs(int64_t exchangeMs);
+
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
     std::unique_ptr<TickBinaryLogger> m_logger;
     std::unique_ptr<TimeframeAggregator> m_aggregator;
     std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
+    std::atomic<int64_t> m_exchangeOffsetMs{0};
+    QTimer m_candleTimer;
 };
