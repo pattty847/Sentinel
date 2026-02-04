@@ -6,6 +6,8 @@ set(GRID_CORE_SOURCES
     ChartModeController.h
     PerformanceMonitor.cpp
     PerformanceMonitor.hpp
+    config/GuiConfigStore.cpp
+    config/GuiConfigStore.hpp
 
     # MainWindow modular components
     mainwindow/DockFactory.cpp

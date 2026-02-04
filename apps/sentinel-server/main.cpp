@@ -1,6 +1,7 @@
 #include <QCoreApplication>
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
+#include "ConfigLoader.hpp"
 
 int main(int argc, char *argv[]) {
     // Set up logging
@@ -8,8 +9,12 @@ int main(int argc, char *argv[]) {
     sLog_App("Starting Sentinel Server...");
 
     QCoreApplication app(argc, argv);
+
+    ServerConfig serverConfig;
+    ConfigLoader::loadServerConfig("sentinel.yaml", &serverConfig);
+    ConfigLoader::loadServerConfig(".sentinel.yaml", &serverConfig);
     
-    SentinelServerApp serverApp;
+    SentinelServerApp serverApp(serverConfig);
     if (!serverApp.initialize()) {
         sLog_Error("Failed to initialize server application");
         return 1;

@@ -12,16 +12,16 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_CA_BUNDLE` (server)  
   Alias for `SENTINEL_SSL_CA_BUNDLE` (legacy/short).
 
-- `SENTINEL_HEATMAP_TF` (server + client)  
-  Heatmap timeframe in milliseconds. Default: `1000`. Must match on both.
+- `SENTINEL_HEATMAP_TF` (server)  
+  Heatmap timeframe in milliseconds. Default: `1000`. Client now uses server_config.
 - `SENTINEL_HEATMAP_TIMEFRAMES` (server)  
   Comma/space-separated list of server heatmap anchor timeframes (ms). Default: `1000 60000 3600000 86400000`.
-- `SENTINEL_HEATMAP_GRID_WIDTH` (server + client)  
+- `SENTINEL_HEATMAP_GRID_WIDTH` (server)  
   Heatmap grid width (history columns). Default: `5120`.
-- `SENTINEL_HEATMAP_GRID_HEIGHT` (client)  
+- `SENTINEL_HEATMAP_GRID_HEIGHT` (server)  
   Heatmap grid height (price buckets). Default: `2048`.
 - `SENTINEL_HEATMAP_GRID` (server)  
-  Heatmap grid height (price buckets). Default: `2048`. Client also accepts this as a legacy height override.
+  Heatmap grid height (price buckets). Default: `2048`. Legacy alias for height on server.
 - `SENTINEL_HEATMAP_TICK_SIZE` (server)  
   Fixed tick size for heatmap grid rows (locks row size; banding only recenters). Default: `1.0`.  
   Set to `0` to enable dynamic tick sizing based on band percent.
@@ -45,12 +45,14 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
   Max normalization mode: `running` (default) or `column`.
 - `SENTINEL_HEATMAP_INTENSITY_MAX_DECAY` (server)  
   Running max decay factor in (0, 1]. Default: `0.995`.
-- `SENTINEL_HEATMAP_RECENTER` (client)  
-  Recenter fraction for client processing. Default: `0.15`.
+- `SENTINEL_HEATMAP_RECENTER` (client, deprecated)  
+  Deprecated; client ignores. Use `SENTINEL_HEATMAP_RECENTER_DELTA` on server.
 - `SENTINEL_HEATMAP_SLICE_LOG` (server + client)  
   Enables periodic heatmap slice logging.
 - `SENTINEL_HEALTH_PORT` (server)  
   Local health endpoint port for `/ping`. Default: `8090`.
+- `SENTINEL_STREAM_PORT` (server)  
+  WebSocket stream port for SentinelStreamServer. Default: `8080`.
 - `SENTINEL_SERVER_DEFAULT_SYMBOLS` (server)  
   Symbols to auto-subscribe on server start (comma/space-separated). Default: `BTC-USD`.
 - `SENTINEL_CANDLE_UPDATE_BPS_FAST` (server)  
@@ -100,9 +102,9 @@ Defaults shown are the in-code fallbacks when the variable is unset or invalid.
 - `SENTINEL_MSDF_FONT` (client)  
   Absolute path to a font file used for MSDF atlas generation (Lab dock).
 
-- `SENTINEL_ORDERBOOK_TICK_SIZE` (server + client)  
+- `SENTINEL_ORDERBOOK_TICK_SIZE` (server)  
   Default order book tick size. Default: `0.10`.
-- `SENTINEL_ORDERBOOK_BAND_PCT` (server + client)  
+- `SENTINEL_ORDERBOOK_BAND_PCT` (server)  
   Default order book band percent. Default: `0.30`.
 
 - `SENTINEL_QML_PATH` (client)  

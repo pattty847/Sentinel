@@ -1,29 +1,9 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
-#include <QProcessEnvironment>
+#include "../config/GuiConfigStore.hpp"
 
 namespace {
-double getOrderBookTickSize() {
-    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
-    bool ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok && envTick > 0.0) {
-        return envTick;
-    }
-    return 0.10;
-}
-
-double getOrderBookBandPct() {
-    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
-    bool ok = false;
-    const double envBand = bandEnv.toDouble(&ok);
-    if (ok && envBand > 0.0) {
-        return envBand;
-    }
-    return 0.30;
-}
-
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
                                            const std::vector<OrderBookLevel>& asks,
                                            double bandPct) {
@@ -99,6 +79,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onCandleBarClosedReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleHistoryReceived,
             this, &RemoteGridDataSource::onCandleHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::serverConfigReceived,
+            this, &RemoteGridDataSource::onServerConfigReceived, Qt::QueuedConnection);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -165,8 +147,8 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto& book = *m_replicaBooks[symbol];
     
     // Re-initialize using banded range around best bid/ask.
-    const double tickSize = getOrderBookTickSize();
-    const double bandPct = getOrderBookBandPct();
+    const double tickSize = m_serverConfig.orderbook.tickSize;
+    const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     book.initialize(minPrice, maxPrice, tickSize);
     
@@ -189,6 +171,11 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     
     sLog_Data(QString("RemoteGridDataSource: Snapshot applied for %1 (%2 bids, %3 asks)")
               .arg(productId).arg(bids.size()).arg(asks.size()));
+}
+
+void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
+    m_serverConfig = config;
+    GuiConfigStore::instance().setServerConfig(config);
 }
 
 void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates) {

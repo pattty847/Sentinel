@@ -2,6 +2,7 @@
 #include "IGridDataSource.hpp"
 #include "CandleSeriesBuffer.hpp"
 #include "../../core/protocol/SentinelStreamClient.hpp"
+#include "../config/GuiConfigStore.hpp"
 
 class RemoteGridDataSource : public IGridDataSource {
     Q_OBJECT
@@ -63,6 +64,7 @@ private slots:
                                  int64_t startTimeSec,
                                  int64_t endTimeSec,
                                  const QVector<SentinelStreamClient::CandleBar>& candles);
+    void onServerConfigReceived(const ServerConfig& config);
 
 private:
     SentinelStreamClient m_client;
@@ -73,4 +75,5 @@ private:
     // So RemoteGridDataSource MUST maintain a local replica.
     
     mutable std::unordered_map<std::string, std::unique_ptr<LiveOrderBook>> m_replicaBooks;
+    ServerConfig m_serverConfig;
 };

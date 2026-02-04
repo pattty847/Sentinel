@@ -22,6 +22,7 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
+#include "config/GuiConfigStore.hpp"
 
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
@@ -341,28 +342,32 @@ void UnifiedGridRenderer::init() {
     m_useGpuHeatmap = true;
     m_heatmapClock.start();
 
-    bool ok = false;
-    const int envWidth = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH").toInt(&ok);
-    if (ok && envWidth > 0) {
-        m_heatmapGridWidth = envWidth;
-    }
-    ok = false;
-    const int envHeight = qgetenv("SENTINEL_HEATMAP_GRID_HEIGHT").toInt(&ok);
-    if (ok && envHeight > 0) {
-        m_heatmapGridHeight = envHeight;
-    } else {
-        ok = false;
-        const int envHeightLegacy = qgetenv("SENTINEL_HEATMAP_GRID").toInt(&ok);
-        if (ok && envHeightLegacy > 0) {
-            m_heatmapGridHeight = envHeightLegacy;
+    const auto& store = GuiConfigStore::instance();
+    if (store.hasServerConfig()) {
+        const auto& server = store.serverConfig();
+        if (server.heatmap.gridWidth > 0) {
+            m_heatmapGridWidth = server.heatmap.gridWidth;
         }
+        if (server.heatmap.gridHeight > 0) {
+            m_heatmapGridHeight = server.heatmap.gridHeight;
+        }
+        if (server.heatmap.activeTimeframeMs > 0) {
+            m_currentTimeframe_ms = server.heatmap.activeTimeframeMs;
+        }
+    }
+    const auto& client = store.clientConfig();
+    m_heatmapGamma = client.heatmap.gamma;
+    m_heatmapContrast = client.heatmap.contrast;
+    m_heatmapShaderFloor = client.heatmap.shaderFloor;
+    if (client.heatmap.labelPx > 0) {
+        m_heatmapLabelPx = client.heatmap.labelPx;
     }
     qRegisterMetaType<Trade>("Trade");
     
     m_viewState = std::make_unique<GridViewState>(this);
     m_heatmapStream = std::make_unique<HeatmapStreamState>();
     m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
-    m_heatmapStream->setAppendMs(100);
+    m_heatmapStream->setAppendMs(static_cast<int>(m_currentTimeframe_ms));
     m_heatmapStream->setIntensityBytesPerCell(m_intensityBytesPerCell);
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
@@ -382,29 +387,9 @@ void UnifiedGridRenderer::init() {
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
-    if (m_useGpuHeatmap) {
-        ok = false;
-        const double recenter = qgetenv("SENTINEL_HEATMAP_RECENTER").toDouble(&ok);
-        if (ok && recenter > 0.0) {
-            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
-                m_dataProcessor->setHeatmapRecenterFraction(recenter);
-            }, Qt::QueuedConnection);
-        }
-        ok = false;
-        const double gamma = qgetenv("SENTINEL_HEATMAP_GAMMA").toDouble(&ok);
-        if (ok && gamma > 0.0) {
-            m_heatmapGamma = gamma;
-        }
-        ok = false;
-        const double contrast = qgetenv("SENTINEL_HEATMAP_CONTRAST").toDouble(&ok);
-        if (ok && contrast > 0.0) {
-            m_heatmapContrast = contrast;
-        }
-        ok = false;
-        const double floorVal = qgetenv("SENTINEL_HEATMAP_SHADER_FLOOR").toDouble(&ok);
-        if (ok && floorVal >= 0.0 && floorVal <= 1.0) {
-            m_heatmapShaderFloor = floorVal;
-        }
+    applyClientConfig(store.clientConfig());
+    if (store.hasServerConfig()) {
+        applyServerConfig(store.serverConfig());
     }
     
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
@@ -917,11 +902,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         const float cellH = (srcRectCurrent.height() > 0.0f)
             ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
             : 0.0f;
-        int labelPx = 14;
-        const int envLabelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
-        if (envLabelPx > 0) {
-            labelPx = envLabelPx;
-        }
+        const int labelPx = (m_heatmapLabelPx > 0) ? m_heatmapLabelPx : 14;
         const float labelThreshold = static_cast<float>(labelPx);
 
         if (labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window()) {
@@ -1078,11 +1059,74 @@ void UnifiedGridRenderer::buildMsdfAtlas() {
     params.fontPx = 64;
     params.pxRange = 8.0f;
     params.charset = QStringLiteral("0123456789.kMB+-");
+    const QByteArray envFont = qgetenv("SENTINEL_MSDF_FONT");
+    if (!envFont.isEmpty()) {
+        params.fontPath = QString::fromUtf8(envFont);
+    } else {
+        const auto& client = GuiConfigStore::instance().clientConfig();
+        if (!client.gui.msdfFontPath.empty()) {
+            params.fontPath = QString::fromStdString(client.gui.msdfFontPath);
+        }
+    }
     if (m_msdfAtlas.build(params)) {
         if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
             m_msdfAtlas.image().save("/tmp/sentinel_msdf_atlas.png");
         }
         m_msdfAtlasBuilt = true;
+    }
+}
+
+void UnifiedGridRenderer::applyClientConfig(const ClientConfig& config) {
+    setHeatmapGamma(config.heatmap.gamma);
+    setHeatmapContrast(config.heatmap.contrast);
+    setHeatmapShaderFloor(config.heatmap.shaderFloor);
+    if (config.heatmap.labelPx > 0) {
+        m_heatmapLabelPx = config.heatmap.labelPx;
+    }
+    update();
+    if (m_dataProcessor && config.heatmap.clientCacheColumns > 0) {
+        const int capacity = config.heatmap.clientCacheColumns;
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, capacity]() {
+            m_dataProcessor->setCacheCapacityOverride(capacity);
+        }, Qt::QueuedConnection);
+    }
+}
+
+void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) {
+    bool gridChanged = false;
+    if (config.heatmap.gridWidth > 0 && config.heatmap.gridWidth != m_heatmapGridWidth) {
+        m_heatmapGridWidth = config.heatmap.gridWidth;
+        gridChanged = true;
+    }
+    if (config.heatmap.gridHeight > 0 && config.heatmap.gridHeight != m_heatmapGridHeight) {
+        m_heatmapGridHeight = config.heatmap.gridHeight;
+        gridChanged = true;
+    }
+    if (gridChanged) {
+        m_heatmapTextureDirty = true;
+        if (m_heatmapStream) {
+            m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
+        }
+    }
+
+    int64_t forcedTf = config.heatmap.activeTimeframeMs;
+    if (forcedTf <= 0 && !config.heatmap.timeframesMs.empty()) {
+        forcedTf = config.heatmap.timeframesMs.front();
+    }
+    if (forcedTf > 0) {
+        setTimeframe(static_cast<int>(forcedTf));
+        if (m_dataProcessor) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, forcedTf]() {
+                m_dataProcessor->setServerTimeframe(forcedTf);
+            }, Qt::QueuedConnection);
+        }
+    }
+
+    if (m_dataProcessor && config.heatmap.recenterDelta > 0.0) {
+        const double recenter = config.heatmap.recenterDelta;
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
+            m_dataProcessor->setHeatmapRecenterFraction(recenter);
+        }, Qt::QueuedConnection);
     }
 }
 

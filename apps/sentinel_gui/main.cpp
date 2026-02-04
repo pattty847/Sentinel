@@ -23,6 +23,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
+#include "config/GuiConfigStore.hpp"
 #include <QResource>
 #include <QCoreApplication>
 // --- Hardware backend/environment setup ---
@@ -82,9 +83,10 @@ void registerMetaTypesAndQml() {
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
-    // Load config files first (sets environment variables)
-    ConfigLoader::loadAndSetEnv("sentinel.yaml");
-    ConfigLoader::loadUserOverrides(".sentinel.yaml");
+    ClientConfig clientConfig;
+    ConfigLoader::loadClientConfig("sentinel.yaml", &clientConfig);
+    ConfigLoader::loadClientConfig(".sentinel.yaml", &clientConfig);
+    GuiConfigStore::instance().setClientConfig(clientConfig);
 
     configureGraphicsBackend();
     configureSurfaceFormat();
@@ -111,6 +113,8 @@ int main(int argc, char *argv[])
     FontManager::instance().initialize(&app);
 
     registerMetaTypesAndQml();
+    qRegisterMetaType<ServerConfig>("ServerConfig");
+    qRegisterMetaType<ClientConfig>("ClientConfig");
 
     MainWindowGPU window;
     window.show();

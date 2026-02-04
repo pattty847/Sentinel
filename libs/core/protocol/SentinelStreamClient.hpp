@@ -13,6 +13,7 @@
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
 #include "../marketdata/model/TradeData.h"
+#include "../config/ConfigTypes.hpp"
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -62,6 +63,7 @@ signals:
     void connected();
     void disconnected();
     void errorOccurred(const QString& error);
+    void serverConfigReceived(const ServerConfig& config);
     
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices

@@ -17,6 +17,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
+    qRegisterMetaType<ServerConfig>("ServerConfig");
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
@@ -217,8 +218,58 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
     try {
         auto msg = nlohmann::json::parse(msgStr);
         std::string type = msg.value("type", "unknown");
-        
-        if (type == "snapshot") {
+
+        if (type == "server_config") {
+            ServerConfig cfg;
+            const int schema = msg.value("schema_version", 0);
+            if (schema != 1) {
+                sLog_Warning("server_config schema version unsupported: " << schema);
+            }
+            if (msg.contains("timeframes_ms") && msg["timeframes_ms"].is_array()) {
+                cfg.heatmap.timeframesMs.clear();
+                for (const auto& item : msg["timeframes_ms"]) {
+                    const int64_t tf = item.get<int64_t>();
+                    if (tf > 0) {
+                        cfg.heatmap.timeframesMs.push_back(tf);
+                    }
+                }
+            }
+            if (msg.contains("heatmap") && msg["heatmap"].is_object()) {
+                const auto& hm = msg["heatmap"];
+                cfg.heatmap.gridWidth = hm.value("grid_width", cfg.heatmap.gridWidth);
+                cfg.heatmap.gridHeight = hm.value("grid_height", cfg.heatmap.gridHeight);
+                cfg.heatmap.tickSize = hm.value("tick_size", cfg.heatmap.tickSize);
+                cfg.heatmap.recenterDelta = hm.value("recenter_delta", cfg.heatmap.recenterDelta);
+                cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
+            }
+            if (msg.contains("orderbook") && msg["orderbook"].is_object()) {
+                const auto& ob = msg["orderbook"];
+                cfg.orderbook.tickSize = ob.value("tick_size", cfg.orderbook.tickSize);
+                cfg.orderbook.bandPct = ob.value("band_pct", cfg.orderbook.bandPct);
+            }
+            if (msg.contains("candles") && msg["candles"].is_object()) {
+                const auto& cd = msg["candles"];
+                cfg.candles.bpsFast = cd.value("update_bps_fast", cfg.candles.bpsFast);
+                cfg.candles.bpsSlow = cd.value("update_bps_slow", cfg.candles.bpsSlow);
+                cfg.candles.tickMultFast = cd.value("update_tick_mult_fast", cfg.candles.tickMultFast);
+                cfg.candles.tickMultSlow = cd.value("update_tick_mult_slow", cfg.candles.tickMultSlow);
+                cfg.candles.silenceMsFast = cd.value("update_silence_ms_fast", cfg.candles.silenceMsFast);
+                cfg.candles.silenceMsSlow = cd.value("update_silence_ms_slow", cfg.candles.silenceMsSlow);
+                cfg.candles.volumeFast = cd.value("update_volume_fast", cfg.candles.volumeFast);
+                cfg.candles.volumeSlow = cd.value("update_volume_slow", cfg.candles.volumeSlow);
+                cfg.candles.tickSize = cd.value("update_tick_size", cfg.candles.tickSize);
+            }
+            if (msg.contains("default_symbols") && msg["default_symbols"].is_array()) {
+                cfg.defaultSymbols.clear();
+                for (const auto& item : msg["default_symbols"]) {
+                    if (item.is_string()) {
+                        cfg.defaultSymbols.push_back(item.get<std::string>());
+                    }
+                }
+            }
+
+            emit serverConfigReceived(cfg);
+        } else if (type == "snapshot") {
             std::string symbol = msg.value("symbol", "");
             if (symbol.empty()) return;
             

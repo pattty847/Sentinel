@@ -91,7 +91,7 @@ heatmap_slice message:
 
 ## Protocol
 
-**JSON (v0)**: Used for subscription handshake, snapshots, and heatmap_slice streaming (base64 payloads).
+**JSON (v0)**: Used for subscription handshake, snapshots, server_config, and heatmap_slice streaming (base64 payloads).
 
 ## Threading Model
 
@@ -112,7 +112,7 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 ## Runtime Notes
 
 - Client requires a server connection (no local-only mode).
-- `SENTINEL_HEATMAP_TF` must match on server and client.
+- Server is authoritative for heatmap config and timeframes; client consumes `server_config` on connect.
 - GUI-only screenshot API listens on `127.0.0.1` and captures the full main window as PNG via `GET /screenshot` (see `SENTINEL_GUI_API_PORT` and `SENTINEL_GUI_SCREENSHOT_DIR`).
 
 ## Related Documentation

@@ -155,5 +155,5 @@ void HeatmapSettingsDialog::logSettings() const {
     sLog_App("Heatmap settings: gamma=" << m_renderer->heatmapGamma()
              << " contrast=" << m_renderer->heatmapContrast()
              << " shader_floor=" << m_renderer->heatmapShaderFloor()
-             << " (env: SENTINEL_HEATMAP_GAMMA, SENTINEL_HEATMAP_CONTRAST, SENTINEL_HEATMAP_SHADER_FLOOR)");
+             << " (client config overrides)");
 }

@@ -62,6 +62,8 @@ public:
     void setHeatmapGridDimensions(int width, int height);
     void setHeatmapIntensityScale(double scale);
     void setHeatmapRecenterFraction(double fraction);
+    void setCacheCapacityOverride(int capacity);
+    void setServerTimeframe(int64_t timeframeMs);
     
 signals:
     void heatmapColumnReady(int64_t sliceStartMs,
@@ -110,6 +112,7 @@ private:
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
     int64_t m_currentTimeframe_ms = 100;
+    int64_t m_forcedTimeframeMs = 0;
     
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;

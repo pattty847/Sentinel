@@ -149,7 +149,7 @@ Exposes a local HTTP endpoint for automated screenshots of the UI.
 
 * Server is the only producer of heatmap columns.
 * Client must not emit local LTSE columns in remote mode.
-* Timeframe is locked by `SENTINEL_HEATMAP_TF` (server + client).
+* Timeframe is locked by server_config (server authoritative).
 * Heatmap grid height and tick size are authoritative from server.
 * Client requires server connection (no local-only mode).
 

@@ -94,6 +94,39 @@ const CandleGateConfig& candleGateConfig() {
     }();
     return cfg;
 }
+
+nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
+    nlohmann::json payload;
+    payload["type"] = "server_config";
+    payload["schema_version"] = 1;
+    payload["timeframes_ms"] = cfg.heatmap.timeframesMs;
+    payload["heatmap"] = {
+        {"grid_width", cfg.heatmap.gridWidth},
+        {"grid_height", cfg.heatmap.gridHeight},
+        {"tick_size", cfg.heatmap.tickSize},
+        {"recenter_delta", cfg.heatmap.recenterDelta}
+    };
+    if (cfg.heatmap.activeTimeframeMs > 0) {
+        payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;
+    }
+    payload["orderbook"] = {
+        {"tick_size", cfg.orderbook.tickSize},
+        {"band_pct", cfg.orderbook.bandPct}
+    };
+    payload["candles"] = {
+        {"update_bps_fast", cfg.candles.bpsFast},
+        {"update_bps_slow", cfg.candles.bpsSlow},
+        {"update_tick_mult_fast", cfg.candles.tickMultFast},
+        {"update_tick_mult_slow", cfg.candles.tickMultSlow},
+        {"update_silence_ms_fast", cfg.candles.silenceMsFast},
+        {"update_silence_ms_slow", cfg.candles.silenceMsSlow},
+        {"update_volume_fast", cfg.candles.volumeFast},
+        {"update_volume_slow", cfg.candles.volumeSlow},
+        {"update_tick_size", cfg.candles.tickSize}
+    };
+    payload["default_symbols"] = cfg.defaultSymbols;
+    return payload;
+}
 }
 
 class Session : public std::enable_shared_from_this<Session> {
@@ -167,6 +200,11 @@ public:
 
         sLog_App("Sentinel client connected");
         auto self = shared_from_this();
+
+        if (owner_) {
+            auto configPayload = buildServerConfigPayload(owner_->serverConfig());
+            do_write(configPayload.dump());
+        }
         
         tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
             [self](const Trade& trade) {
@@ -731,11 +769,13 @@ public:
 
 SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
                                            Authenticator& auth,
+                                           const ServerConfig& config,
                                            int port,
                                            QObject* parent)
     : QObject(parent)
     , m_model(model)
     , m_restClient(std::make_unique<CoinbaseRestClient>(auth))
+    , m_serverConfig(config)
     , m_port(port)
 {
 }

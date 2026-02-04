@@ -20,10 +20,6 @@ Assumptions: Server is authoritative for heatmap columns.
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
-    const int envCache = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
-    if (envCache > 0) {
-        m_cacheCapacityOverride = envCache;
-    }
 }
 
 DataProcessor::~DataProcessor() {
@@ -86,10 +82,7 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
                     << " manual=" << m_manualTimeframeSet);
     }
 
-    const QByteArray desiredTfEnv = qgetenv("SENTINEL_HEATMAP_TF");
-    bool tfOk = false;
-    const int64_t desiredTf = desiredTfEnv.toLongLong(&tfOk);
-    if (tfOk && desiredTf > 0 && timeframeMs > 0 && timeframeMs != desiredTf) {
+    if (m_forcedTimeframeMs > 0 && timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
         return;
     }
 
@@ -211,6 +204,9 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
     if (columns.isEmpty() || gridWidth <= 0 || gridHeight <= 0) {
         return;
     }
+    if (m_forcedTimeframeMs > 0 && timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
+        return;
+    }
 
     const auto& first = columns.front();
     if (gridHeight <= 0 || first.intensity.isEmpty()) {
@@ -324,6 +320,18 @@ void DataProcessor::setHeatmapIntensityScale(double scale) {
 
 void DataProcessor::setHeatmapRecenterFraction(double fraction) {
     m_heatmapRecenterFraction = std::clamp(fraction, 0.01, 0.45);
+}
+
+void DataProcessor::setCacheCapacityOverride(int capacity) {
+    if (capacity > 0) {
+        m_cacheCapacityOverride = capacity;
+    }
+}
+
+void DataProcessor::setServerTimeframe(int64_t timeframeMs) {
+    if (timeframeMs > 0) {
+        m_forcedTimeframeMs = timeframeMs;
+    }
 }
 
 void DataProcessor::setPriceResolution(double resolution) {

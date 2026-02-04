@@ -38,6 +38,7 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
 #include <QQmlContext>
@@ -83,7 +84,10 @@ bool chartDebugEnabled() {
 }
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
-    auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    auto remote = std::make_unique<RemoteGridDataSource>(
+        QString::fromStdString(clientConfig.server.host),
+        QString::fromStdString(clientConfig.server.port));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
@@ -99,6 +103,28 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->loadQmlSource();
         m_qmlController->verifyGpuAcceleration();
     }
+
+    auto* configStore = &GuiConfigStore::instance();
+    connect(configStore, &GuiConfigStore::serverConfigUpdated, this, [this](const ServerConfig& config) {
+        if (m_qmlController) {
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->applyServerConfig(config);
+                if (m_heatmapDock && m_heatmapDock->toolbar()) {
+                    m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
+                }
+            }
+        }
+        if (!config.defaultSymbols.empty() && !m_userSubscribed) {
+            const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front());
+            if (m_symbolInput) {
+                m_symbolInput->setText(defaultSymbol);
+            }
+            if (m_qmlController) {
+                m_qmlController->updateSymbolInContext(defaultSymbol);
+            }
+            m_currentSymbol = defaultSymbol;
+        }
+    });
 
     // Attach PerformanceMonitor to QML window for FPS tracking
     if (m_qquickView) {
@@ -251,7 +277,8 @@ void MainWindowGPU::setupConnections() {
 }
 
 void MainWindowGPU::setupGuiApiServer() {
-    const int defaultPort = 17100;
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    const int defaultPort = clientConfig.gui.apiPort;
     int port = defaultPort;
     if (qEnvironmentVariableIsSet("SENTINEL_GUI_API_PORT")) {
         bool ok = false;
@@ -264,7 +291,7 @@ void MainWindowGPU::setupGuiApiServer() {
     }
 
     if (port == 0) {
-        sLog_App("GUI API disabled (SENTINEL_GUI_API_PORT=0)");
+        sLog_App("GUI API disabled (api_port=0)");
         return;
     }
     if (port < 0 || port > 65535) {
@@ -272,7 +299,13 @@ void MainWindowGPU::setupGuiApiServer() {
         port = defaultPort;
     }
 
-    QString screenshotDir = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+    QString screenshotDir = QString::fromStdString(clientConfig.gui.screenshotDir);
+    if (qEnvironmentVariableIsSet("SENTINEL_GUI_SCREENSHOT_DIR")) {
+        const QString envDir = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+        if (!envDir.isEmpty()) {
+            screenshotDir = envDir;
+        }
+    }
     if (screenshotDir.isEmpty()) {
         screenshotDir = QDir::currentPath() + "/screenshots";
     }
@@ -323,12 +356,21 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
         }
     }
     if (timeframeMs <= 0) {
-        timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
+        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            timeframeMs = serverConfig.heatmap.timeframesMs.front();
+        }
     }
-    const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
-    const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
+    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    const int requestCount = clientConfig.heatmap.clientCacheColumns;
+    const int gridWidth = serverConfig.heatmap.gridWidth;
     const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
-    const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+        tf = serverConfig.heatmap.timeframesMs.front();
+    }
     if (chartDebugEnabled()) {
         sLog_Debug(QString("Heatmap history request: symbol=%1 tfMs=%2 count=%3")
                    .arg(symbol)
@@ -449,16 +491,25 @@ void MainWindowGPU::connectMarketDataSignals() {
     }
 
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
-        const int64_t envTf = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
-        if (envTf > 0) {
-            unifiedGridRenderer->setTimeframe(static_cast<int>(envTf));
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        int64_t tf = serverConfig.heatmap.activeTimeframeMs;
+        if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            tf = serverConfig.heatmap.timeframesMs.front();
+        }
+        if (tf > 0) {
+            unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
         }
         m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
         if (chartDebugEnabled()) {
-            sLog_Debug(QString("Chart TF init: env=%1 renderer=%2")
-                       .arg(envTf)
+            sLog_Debug(QString("Chart TF init: server=%1 renderer=%2")
+                       .arg(tf)
                        .arg(unifiedGridRenderer->getCurrentTimeframe()));
         }
+    }
+
+    unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
+    if (GuiConfigStore::instance().hasServerConfig()) {
+        unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
     }
     
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <mutex>
 #include <limits>
+#include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
 #include "render/MsdfAtlas.hpp"
@@ -138,6 +139,7 @@ private:
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
+    int m_heatmapLabelPx = 14;
 
     double m_heatmapPaletteGamma = 2.0;
     ColorGradient m_bidGradient;
@@ -242,6 +244,8 @@ public:
     Q_INVOKABLE QString getLabelRingMemory() const;
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
     HeatmapTimeMapping lastHeatmapMapping() const { return m_lastMapping; }
+    void applyClientConfig(const ClientConfig& config);
+    void applyServerConfig(const ServerConfig& config);
 
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);

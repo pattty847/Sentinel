@@ -7,9 +7,24 @@
 #include <QTcpSocket>
 #include <QHostAddress>
 #include <QStringList>
+#include <algorithm>
+#include <cctype>
 
-SentinelServerApp::SentinelServerApp(QObject* parent) 
-    : QObject(parent) 
+namespace {
+template <typename T, typename Fn>
+void safeInvoke(QPointer<T> ptr, Fn&& fn) {
+    QMetaObject::invokeMethod(ptr.data(), [ptr, fn = std::forward<Fn>(fn)]() mutable {
+        if (!ptr) {
+            return;
+        }
+        fn(*ptr);
+    }, Qt::QueuedConnection);
+}
+} // namespace
+
+SentinelServerApp::SentinelServerApp(const ServerConfig& config, QObject* parent) 
+    : QObject(parent)
+    , m_serverConfig(config)
 {
 }
 
@@ -58,50 +73,71 @@ bool SentinelServerApp::initialize() {
         }
 
         // 1. Authenticator
-        m_authenticator = std::make_unique<Authenticator>();
+        try {
+            m_authenticator = std::make_unique<Authenticator>();
+        } catch (const std::exception& e) {
+            sLog_Error("Authenticator init failed: " << e.what());
+            return false;
+        }
         
         // 2. Market Data Core
-        m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator);
+        try {
+            m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator);
+        } catch (const std::exception& e) {
+            sLog_Error("MarketDataCoreEngine init failed: " << e.what());
+            return false;
+        }
         
         // 3. Server Data Model
-        m_serverModel = std::make_unique<ServerDataModel>();
+        try {
+            m_serverModel = std::make_unique<ServerDataModel>();
+        } catch (const std::exception& e) {
+            sLog_Error("ServerDataModel init failed: " << e.what());
+            return false;
+        }
 
         // 4. Stream Server
-        m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, *m_authenticator, 8080);
-        m_server->start();
+        try {
+            quint16 streamPort = 8080;
+            const QByteArray streamEnv = qgetenv("SENTINEL_STREAM_PORT");
+            bool streamOk = false;
+            const int envStreamPort = streamEnv.toInt(&streamOk);
+            if (streamOk && envStreamPort > 0 && envStreamPort <= 65535) {
+                streamPort = static_cast<quint16>(envStreamPort);
+            }
+            m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, *m_authenticator, m_serverConfig, streamPort);
+            m_server->start();
+        } catch (const std::exception& e) {
+            sLog_Error("SentinelStreamServer init failed: " << e.what());
+            return false;
+        }
         
         // Connect MarketDataCoreEngine -> ServerDataModel via queued invocations
         QPointer<ServerDataModel> modelPtr(m_serverModel.get());
         m_marketDataCore->onTrade([modelPtr](const Trade& trade) {
-            if (!modelPtr) return;
             Trade tradeCopy = trade;
-            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, tradeCopy]() mutable {
-                if (!modelPtr) return;
-                modelPtr->onTrade(tradeCopy);
-            }, Qt::QueuedConnection);
+            safeInvoke(modelPtr, [tradeCopy](ServerDataModel& model) mutable {
+                model.onTrade(tradeCopy);
+            });
         });
         m_marketDataCore->onLiveOrderBookLevelUpdates([modelPtr](const std::string& productId,
                                                                  const std::vector<BookLevelUpdate>& updates,
                                                                  int64_t exchangeMs) {
-            if (!modelPtr) return;
             QString productIdQ = QString::fromStdString(productId);
             std::vector<BookLevelUpdate> updatesCopy = updates;
-            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, productIdQ, updatesCopy = std::move(updatesCopy), exchangeMs]() mutable {
-                if (!modelPtr) return;
-                modelPtr->onLiveOrderBookLevelUpdates(productIdQ, updatesCopy, static_cast<qint64>(exchangeMs));
-            }, Qt::QueuedConnection);
+            safeInvoke(modelPtr, [productIdQ, updatesCopy = std::move(updatesCopy), exchangeMs](ServerDataModel& model) mutable {
+                model.onLiveOrderBookLevelUpdates(productIdQ, updatesCopy, static_cast<qint64>(exchangeMs));
+            });
         });
         m_marketDataCore->onLiveOrderBookInitialized([modelPtr](const std::string& productId,
                                                                 const std::vector<OrderBookLevel>& bids,
                                                                 const std::vector<OrderBookLevel>& asks) {
-            if (!modelPtr) return;
             QString productIdQ = QString::fromStdString(productId);
             std::vector<OrderBookLevel> bidsCopy = bids;
             std::vector<OrderBookLevel> asksCopy = asks;
-            QMetaObject::invokeMethod(modelPtr.data(), [modelPtr, productIdQ, bidsCopy = std::move(bidsCopy), asksCopy = std::move(asksCopy)]() mutable {
-                if (!modelPtr) return;
-                modelPtr->onLiveOrderBookInitialized(productIdQ, bidsCopy, asksCopy);
-            }, Qt::QueuedConnection);
+            safeInvoke(modelPtr, [productIdQ, bidsCopy = std::move(bidsCopy), asksCopy = std::move(asksCopy)](ServerDataModel& model) mutable {
+                model.onLiveOrderBookInitialized(productIdQ, bidsCopy, asksCopy);
+            });
         });
         
         // Wire up callbacks for logging
@@ -155,25 +191,31 @@ bool SentinelServerApp::initialize() {
         // Start connection
         m_marketDataCore->start();
 
-        // Default subscribe to symbols so server builds history before clients connect.
-        const QByteArray defaultEnv = qgetenv("SENTINEL_SERVER_DEFAULT_SYMBOLS");
-        QString symbolsSpec = defaultEnv.isEmpty() ? QStringLiteral("BTC-USD") : QString::fromUtf8(defaultEnv);
-        symbolsSpec.replace(',', ' ');
-        symbolsSpec = symbolsSpec.simplified();
-        const QStringList symbols = symbolsSpec.isEmpty()
-            ? QStringList()
-            : symbolsSpec.split(' ', Qt::SkipEmptyParts);
-
-        std::vector<std::string> symbolList;
-        symbolList.reserve(static_cast<size_t>(symbols.size()));
-        for (const auto& sym : symbols) {
-            const QString normalized = sym.trimmed().toUpper();
-            if (normalized.isEmpty()) {
-                continue;
+        auto parseDefaultSymbols = [](const std::vector<std::string>& input) {
+            std::vector<std::string> out;
+            out.reserve(input.size());
+            std::unordered_set<std::string> seen;
+            for (const auto& sym : input) {
+                if (sym.empty()) {
+                    continue;
+                }
+                std::string normalized = sym;
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::toupper(c));
+                });
+                if (seen.insert(normalized).second) {
+                    out.push_back(normalized);
+                }
             }
-            const std::string native = normalized.toStdString();
-            if (m_defaultSymbols.insert(native).second) {
-                symbolList.push_back(native);
+            return out;
+        };
+
+        const auto normalizedSymbols = parseDefaultSymbols(m_serverConfig.defaultSymbols);
+        std::vector<std::string> symbolList;
+        symbolList.reserve(normalizedSymbols.size());
+        for (const auto& sym : normalizedSymbols) {
+            if (m_defaultSymbols.insert(sym).second) {
+                symbolList.push_back(sym);
             }
         }
 

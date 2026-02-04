@@ -9,6 +9,7 @@ namespace protocol {
 enum class MessageType {
     Subscribe,
     Unsubscribe,
+    ServerConfig,
     Snapshot,
     SliceBatch,
     HeatmapSlice,
@@ -27,6 +28,7 @@ inline std::string toString(MessageType t) {
     switch (t) {
         case MessageType::Subscribe: return "subscribe";
         case MessageType::Unsubscribe: return "unsubscribe";
+        case MessageType::ServerConfig: return "server_config";
         case MessageType::Snapshot: return "snapshot";
         case MessageType::SliceBatch: return "slice_batch";
         case MessageType::HeatmapSlice: return "heatmap_slice";
@@ -44,6 +46,7 @@ inline std::string toString(MessageType t) {
 inline MessageType fromString(const std::string& s) {
     if (s == "subscribe") return MessageType::Subscribe;
     if (s == "unsubscribe") return MessageType::Unsubscribe;
+    if (s == "server_config") return MessageType::ServerConfig;
     if (s == "snapshot") return MessageType::Snapshot;
     if (s == "slice_batch") return MessageType::SliceBatch;
     if (s == "heatmap_slice") return MessageType::HeatmapSlice;
