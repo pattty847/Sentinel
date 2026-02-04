@@ -763,10 +763,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         texNode->setShaderFloor(static_cast<float>(m_heatmapShaderFloor));
         const int64_t lastSlice = snapshot.lastSliceStartMs;
         double dataStart = 0.0;
+        double dataEnd = 0.0;
         bool dataStartValid = false;
         if (snapshot.appendMs > 0 && gridWidth > 0) {
             const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
-            const double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
+            dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
                 ? static_cast<double>(lastSlice + snapshot.appendMs)
                 : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
             dataStart = dataEnd - static_cast<double>(bufferSpanMs);
@@ -904,17 +905,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
         }
 
-        const QRectF srcRect = texNode->getSourceRect();
+        const QRectF srcRectCurrent = texNode->getSourceRect();
         const bool labelVisible = (!drawRect.isEmpty() && !bounds.isEmpty() &&
-                                   srcRect.width() > 0.0 && srcRect.height() > 0.0 &&
+                                   srcRectCurrent.width() > 0.0 && srcRectCurrent.height() > 0.0 &&
                                    snapshot.liquidityAvailable &&
                                    m_labelRingGridWidth == gridWidth &&
                                    m_labelRingGridHeight == gridHeight);
-        const float cellW = (srcRect.width() > 0.0f)
-            ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRect.width())
+        const float cellW = (srcRectCurrent.width() > 0.0f)
+            ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRectCurrent.width())
             : 0.0f;
-        const float cellH = (srcRect.height() > 0.0f)
-            ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRect.height())
+        const float cellH = (srcRectCurrent.height() > 0.0f)
+            ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
             : 0.0f;
         int labelPx = 14;
         const int envLabelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
@@ -927,10 +928,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
             const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
             const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-            const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridWidth);
+            const float baseX = static_cast<float>(srcRectCurrent.x()) + (timeOffset * gridWidth);
             const int startX = static_cast<int>(std::floor(baseX));
             const float fracX = baseX - static_cast<float>(startX);
-            const float baseY = static_cast<float>(srcRect.y());
+            const float baseY = static_cast<float>(srcRectCurrent.y());
             const int startY = static_cast<int>(std::floor(baseY));
             const float fracY = baseY - static_cast<float>(startY);
 
@@ -947,7 +948,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                                                   m_labelLiquidityRing,
                                                   m_labelIntensityRing,
                                                   m_labelLiquidityScales,
-                                                  srcRect,
+                                                  srcRectCurrent,
                                                   drawRect,
                                                   startX,
                                                   startY,

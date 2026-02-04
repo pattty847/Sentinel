@@ -24,4 +24,3 @@ private:
     QTcpServer* m_healthServer = nullptr;
     std::unordered_set<std::string> m_defaultSymbols;
 };
-

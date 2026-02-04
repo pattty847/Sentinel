@@ -218,7 +218,7 @@ Single source of truth for open work. Read it at session start. Update it as you
 
 ### **Agent Rules**
 
-* At session start: read `docs/TODO.md`, identify active features relevant to current work.
+* If asked: read `docs/TODO.md`, identify active features relevant to current work.
 * When you finish a task: check the box `[x]`, move it to Done with today's date.
 * When pausing or ending a session: update the session log and set Updated date.
 * If the user pivots to a new feature: append a new `F<N>` block at the bottom.

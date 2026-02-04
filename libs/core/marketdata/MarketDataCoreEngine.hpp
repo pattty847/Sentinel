@@ -85,12 +85,10 @@ private:
     void handleHeartbeats(const nlohmann::json& message);
     void startHeartbeatWatchdog();
     void triggerImmediateReconnect(const char* reason);
-    int checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot);
     void sendHeartbeatSubscribe();
 
     void emitError(std::string msg);
     void emitConnectionStatus(bool connected);
-    static bool isServerModeEnabled();
 
     void replaySubscriptionsOnConnect();
     std::string                     m_host   = "advanced-trade-ws.coinbase.com";

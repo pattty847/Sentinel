@@ -161,33 +161,6 @@ void ServerDataModel::onTrade(const Trade& trade) {
     emit tradeBroadcast(trade);
 }
 
-void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas) {
-    std::string symbol = productId.toStdString();
-    SymbolHotData& data = ensureSymbol(symbol);
-
-    if (data.liveBook.getTickSize() <= 0.0) {
-        return;
-    }
-
-    std::vector<BookLevelUpdate> updates;
-    updates.reserve(deltas.size());
-    
-    auto now = std::chrono::system_clock::now();
-    
-    for (const auto& d : deltas) {
-        double price = data.liveBook.index_to_price(d.idx);
-        updates.push_back({d.isBid, price, d.qty});
-    }
-    
-    data.liveBook.applyUpdates(updates, now, nullptr);
-    
-    if (m_logger) {
-        m_logger->logBookUpdate(symbol, deltas);
-    }
-    
-    emit bookUpdateBroadcast(productId, deltas);
-}
-
 void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
                                                   const std::vector<BookLevelUpdate>& updates,
                                                   qint64 exchangeMs) {

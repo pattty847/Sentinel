@@ -6,7 +6,6 @@
 #include "Cpp20Utils.hpp"
 #include <thread>
 #include <chrono>
-#include <span>
 #include <algorithm>
 #include <random>
 #include <utility>
@@ -76,7 +75,6 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth)
         m_connected.store(up);
         sLog_DataN(1, std::string("WebSocket transport status changed: ") + (up ? "UP" : "DOWN"));
         if (up) {
-            m_lastSeqByProduct.clear();
             m_lastHeartbeatMs.store(steadyClockMs());
             {
                 std::lock_guard<std::mutex> lock(m_seqMutex);
@@ -132,11 +130,6 @@ inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
             sLog_Error(std::string("Connection status callback exception: ") + e.what());
         }
     }
-}
-
-bool MarketDataCoreEngine::isServerModeEnabled() {
-    const char* env = std::getenv("SENTINEL_SERVER_MODE");
-    return env && *env;
 }
 
 void MarketDataCoreEngine::subscribeToSymbols(const std::vector<std::string>& symbols) {
@@ -309,12 +302,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     auto arrival_time = std::chrono::system_clock::now();
     
     static std::atomic<int> rawLogCount{0};
-    const int count = rawLogCount.load();
-    if (count < 5) {
-        if (rawLogCount.fetch_add(1) < 5) {
-            sLog_Data("MDC RX: " << message.dump());
-        }
-    }
+    sLog_DataN(5, "MDC RX: " << message.dump());
 
     std::string channel = message.value("channel", "");
     m_lastHeartbeatMs.store(steadyClockMs());
@@ -477,6 +465,8 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
                                                  const std::string& product_id,
                                                  const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
+    // thread_local is safe here because dispatch() is always called from the same io_context thread.
+    // Avoids repeated allocations in hot path. If io_context ever uses a thread pool, this must be revisited.
     thread_local std::vector<BookLevelUpdate> levelUpdates;
     levelUpdates.clear();
     levelUpdates.reserve(event["updates"].size());
@@ -486,16 +476,8 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
             continue;
         }
 
-        std::string side = update["side"];
-        if (side == "offer") {
-            side = "ask";
-        }
-
+        std::string side = side_norm::normalize(update["side"].get<std::string>());
         const bool isBid = (side == "bid");
-        if (!isBid && side != "ask") {
-            continue;
-        }
-
         double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
         double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
 
@@ -554,20 +536,6 @@ void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
             scheduleReconnect();
         }
     });
-}
-
-int MarketDataCoreEngine::checkAndTrackSequence(const std::string& product_id, uint64_t seq, bool isSnapshot) {
-    // l2_data: delivery guaranteed; sequence is diagnostic only, never gate processing.
-    std::lock_guard<std::mutex> lock(m_seqMutex);
-    if (isSnapshot) {
-        m_lastSeqByProduct[product_id] = seq;
-        return 0;
-    }
-    auto it = m_lastSeqByProduct.find(product_id);
-    if (it == m_lastSeqByProduct.end() || seq >= it->second) {
-        m_lastSeqByProduct[product_id] = seq;
-    }
-    return 0;
 }
 
 void MarketDataCoreEngine::sendHeartbeatSubscribe() {
