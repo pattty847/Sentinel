@@ -199,6 +199,7 @@ _(no entries yet)_
 * **2026-02-03** - Wire toolbar timeframe to renderer/candles and add 1s option.
 * **2026-02-03** - Add SENTINEL_CHART_DEBUG logging for timeframe + candle overlay diagnostics.
 * **2026-02-03** - Apply panVisualOffset in viewport transform to prevent candle snap.
+* **2026-02-03** - Documented Option A world-space heatmap/candle alignment plan in `docs/refactors/HEATMAP_CANDLES_OPTION_A.md`.
 
 ---
 
