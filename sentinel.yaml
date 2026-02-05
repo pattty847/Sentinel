@@ -1,6 +1,5 @@
 # Sentinel Configuration
-# This file sets environment variables for both server and client.
-# CLI env vars override these values.
+# This file configures server + client defaults.
 # User-specific overrides go in .sentinel.yaml (not tracked in git)
 
 heatmap:
@@ -17,6 +16,18 @@ heatmap:
 
   # Price grid
   tick_size: 1.0  # Fixed tick size (0 = dynamic)
+  recenter_delta: 0.01
+  band_fast: 0.15
+  band_medium: 0.25
+  band_slow: 0.35
+
+  # Intensity normalization (server-side)
+  intensity_mode: log          # log | linear | power
+  intensity_max_mode: running  # running | column
+  intensity_max_decay: 0.995
+  intensity_log_scale: 1000.0
+  intensity_power: 0.4
+  intensity_floor: 0.001
 
   # Visual settings (client only)
   gamma: 1.05
@@ -56,9 +67,13 @@ gui:
 # heatmap:
 #   recenter: 0.15
 #   band_fast: 0.15
-#   band_med: 0.25
+#   band_medium: 0.25
 #   band_slow: 0.35
 #   intensity_mode: log
+#   intensity_max_mode: running
+#   intensity_max_decay: 0.995
+#   intensity_log_scale: 1000.0
+#   intensity_power: 0.4
 #   intensity_floor: 0.001
 #
 # server:

@@ -65,6 +65,8 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 * Separate concerns: logic in core, visuals in gui.
 * If you add an ENV VAR to the program, make sure to outline it to docs/ENV_VARS.md.
 * Qt resources: when adding SVGs/icons via CMake, use `QT_RESOURCE_ALIAS` (or explicit aliases) so runtime paths are stable (e.g., `:/icons/icon-*.svg`). Avoid absolute path aliases.
+* Backwards compatibility is optional unless explicitly required in this doc. If a simpler or faster design is better, propose it.
+* Performance invariants (GPU-first, `setViewport()`, minimal churn) matter more than preserving legacy patterns.
 
 ### **Threading Rules**
 
