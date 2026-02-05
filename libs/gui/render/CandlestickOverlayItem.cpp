@@ -308,12 +308,19 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                                     [](const CandleOverlayBar& c, qint64 t) { return c.timeStartMs < t; });
     auto endIt = std::upper_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeEnd,
                                   [](qint64 t, const CandleOverlayBar& c) { return t < c.timeStartMs; });
-    const double baseColF = mapping.srcRect.x() + static_cast<double>(mapping.timeOffset) * mapping.gridWidth;
+    // IMPORTANT: `HeatmapTimeMapping.timeOffset` is a ring-buffer *physical* sampling offset used by the heatmap shader.
+    // Candles are drawn in world-space time, so their screen mapping must stay in *logical* column space and MUST NOT
+    // incorporate the ring's physical offset, otherwise candles will appear to drift left/right every time the ring advances.
+    const double baseColF = mapping.srcRect.x();
+
+    // Candle columns are expressed relative to `actualDataStartMs` (filled window start), while the heatmap srcRect.x()
+    // is expressed relative to `dataStartMs` (full ring start). Convert between the two by shifting the base.
     double anchorBaseColF = baseColF;
     if (mapping.actualDataEndMs > mapping.actualDataStartMs && mapping.appendMs > 0.0) {
         const double shiftCols = (mapping.actualDataStartMs - mapping.dataStartMs) / mapping.appendMs;
         anchorBaseColF = baseColF - shiftCols;
     }
+
     const double visibleColStart = anchorBaseColF;
     const double visibleColEnd = anchorBaseColF + mapping.srcRect.width();
     const bool haveActualRange = (mapping.actualDataEndMs > mapping.actualDataStartMs);
