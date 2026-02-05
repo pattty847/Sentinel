@@ -68,6 +68,24 @@
       { "name": "windows-msvc-ninja",  "configurePreset": "windows-msvc-ninja" },
       { "name": "mac-clang",    "configurePreset": "mac-clang" },
       { "name": "linux-gcc",    "configurePreset": "linux-gcc" }
+    ],
+
+    "testPresets": [
+      {
+        "name": "windows-msvc-vs",
+        "configurePreset": "windows-msvc-vs",
+        "configuration": "Debug",
+        "output": {
+          "outputOnFailure": true
+        }
+      },
+      {
+        "name": "windows-msvc-ninja",
+        "configurePreset": "windows-msvc-ninja",
+        "output": {
+          "outputOnFailure": true
+        }
+      }
     ]
   }
   

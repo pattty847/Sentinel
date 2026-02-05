@@ -10,5 +10,7 @@ enable_testing()
 # - MessageDispatcher: Channel-based message routing
 # - SubscriptionManager: Symbol subscription lifecycle
 add_subdirectory(marketdata)
+add_subdirectory(render)
 
 message(STATUS "Marketdata tests configured (3 test suites)")
+message(STATUS "Render tests configured (1 test suite)")

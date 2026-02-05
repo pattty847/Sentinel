@@ -765,6 +765,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
         }
 
+        double viewTimeStartF = 0.0;
+        double viewTimeEndF = 0.0;
+        double viewMinPriceF = 0.0;
+        double viewMaxPriceF = 0.0;
+
         if (m_viewState && m_viewState->isTimeWindowValid() &&
             snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
             const qint64 timeStart = m_viewState->getVisibleTimeStart();
@@ -791,6 +796,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 minPriceF += priceDelta;
                 maxPriceF += priceDelta;
             }
+
+            viewTimeStartF = timeStartF;
+            viewTimeEndF = timeEndF;
+            viewMinPriceF = minPriceF;
+            viewMaxPriceF = maxPriceF;
 
             if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
                 drawRect = bounds;
@@ -865,22 +875,33 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (!forceFull) {
             texNode->setTimeOffset(snapshot.timeOffset);
         }
-        m_lastMapping.drawRect = drawRect;
-        m_lastMapping.srcRect = srcRect;
-        m_lastMapping.dataStartMs = dataStart;
-        m_lastMapping.actualDataStartMs = actualDataStart;
-        m_lastMapping.actualDataEndMs = actualDataEnd;
-        m_lastMapping.appendMs = static_cast<double>(snapshot.appendMs);
-        m_lastMapping.gridWidth = gridWidth;
-        m_lastMapping.filledColumns = snapshot.filledColumns;
-        m_lastMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-        m_lastMapping.valid = (dataStartValid &&
+        m_lastTimeAxisMapping.viewStartMs = viewTimeStartF;
+        m_lastTimeAxisMapping.viewEndMs = viewTimeEndF;
+        m_lastTimeAxisMapping.viewMinPrice = viewMinPriceF;
+        m_lastTimeAxisMapping.viewMaxPrice = viewMaxPriceF;
+        m_lastTimeAxisMapping.drawRect = drawRect;
+        m_lastTimeAxisMapping.srcRect = srcRect;
+        m_lastTimeAxisMapping.dataStartMs = dataStart;
+        m_lastTimeAxisMapping.dataEndMs = dataEnd;
+        m_lastTimeAxisMapping.actualDataStartMs = actualDataStart;
+        m_lastTimeAxisMapping.actualDataEndMs = actualDataEnd;
+        m_lastTimeAxisMapping.dataMinPrice = snapshot.minPrice;
+        m_lastTimeAxisMapping.dataMaxPrice = snapshot.maxPrice;
+        m_lastTimeAxisMapping.appendMs = static_cast<double>(snapshot.appendMs);
+        m_lastTimeAxisMapping.tickSize = snapshot.tickSize;
+        m_lastTimeAxisMapping.gridWidth = gridWidth;
+        m_lastTimeAxisMapping.gridHeight = gridHeight;
+        m_lastTimeAxisMapping.filledColumns = snapshot.filledColumns;
+        m_lastTimeAxisMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+        m_lastTimeAxisMapping.valid = (dataStartValid &&
                                snapshot.timeOriginMs != 0 &&
                                snapshot.appendMs > 0 &&
                                gridWidth > 0 &&
                                drawRect.width() > 0.0 &&
                                srcRect.width() > 0.0);
-        m_lastMapping.cellW = m_lastMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
+        m_lastTimeAxisMapping.cellW = m_lastTimeAxisMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
+        m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
+            ? (drawRect.height() / srcRect.height()) : 0.0;
 
         if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
             gridWidth > 0 && gridHeight > 0) {
@@ -917,13 +938,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window()) {
             const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
             const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
-            const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-            const float baseX = static_cast<float>(srcRectCurrent.x()) + (timeOffset * gridWidth);
-            const int startX = static_cast<int>(std::floor(baseX));
-            const float fracX = baseX - static_cast<float>(startX);
-            const float baseY = static_cast<float>(srcRectCurrent.y());
-            const int startY = static_cast<int>(std::floor(baseY));
-            const float fracY = baseY - static_cast<float>(startY);
 
             if (m_labelWhiteQuads.capacity() < 32000) {
                 m_labelWhiteQuads.reserve(32000);
@@ -933,19 +947,12 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
 
             const bool dollars = (m_liquidityLabelMode != 0);
-            HeatmapLabelRenderer::buildLabelQuads(snapshot,
+            HeatmapLabelRenderer::buildLabelQuads(m_lastTimeAxisMapping,
+                                                  snapshot,
                                                   m_msdfAtlas,
                                                   m_labelLiquidityRing,
                                                   m_labelIntensityRing,
                                                   m_labelLiquidityScales,
-                                                  srcRectCurrent,
-                                                  drawRect,
-                                                  startX,
-                                                  startY,
-                                                  fracX,
-                                                  fracY,
-                                                  cellW,
-                                                  cellH,
                                                   scale,
                                                   dollars,
                                                   m_labelWhiteQuads,

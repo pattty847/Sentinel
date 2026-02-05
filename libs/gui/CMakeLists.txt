@@ -54,6 +54,7 @@ set(GRID_CORE_SOURCES
     render/CandlestickOverlayItem.cpp
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
+    render/TimeAxisMapping.hpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
     render/CandlestickBatched.hpp

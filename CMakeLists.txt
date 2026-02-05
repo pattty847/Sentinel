@@ -110,6 +110,7 @@ add_subdirectory(apps/sentinel_gui)
 add_subdirectory(apps/sentinel-server)
 enable_testing()
 add_subdirectory(tests/marketdata)
+add_subdirectory(tests/render)
 
 # ────────────────────────────────────────────────────────────────
 # LOG

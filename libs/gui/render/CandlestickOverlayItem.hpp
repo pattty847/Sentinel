@@ -10,7 +10,7 @@ Threading: Update on GUI thread; rendering on render thread.
 #include <vector>
 #include <cstdint>
 #include <QtQml/qqmlregistration.h>
-#include "HeatmapTimeMapping.hpp"
+#include "TimeAxisMapping.hpp"
 
 class GridViewState;
 class CandleSeriesBuffer;
@@ -79,7 +79,7 @@ private:
     uint64_t m_lastViewportVersion = 0;
     QSizeF m_lastSize;
     bool m_geometryDirty = true;
-    HeatmapTimeMapping m_lastMapping;
+    TimeAxisMapping m_lastMapping;
 
     QString m_symbol;
     int m_timeframeSec = 1;

@@ -25,21 +25,23 @@ TEST(SubscriptionManager, SubscribeToSingleProduct) {
 
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
 
-    // Should produce 2 frames: level2 + market_trades
-    ASSERT_EQ(frames.size(), 2);
+    // Should produce 3 frames: level2 + market_trades + heartbeats
+    ASSERT_EQ(frames.size(), 3);
 
     // Parse and verify structure
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
         EXPECT_EQ(json["type"], "subscribe");
-        EXPECT_EQ(json["jwt"], "test_jwt");
-
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 1);
-        EXPECT_EQ(product_ids[0], "BTC-USD");
-
         std::string channel = json["channel"];
-        EXPECT_TRUE(channel == "level2" || channel == "market_trades");
+        EXPECT_EQ(json["jwt"], "test_jwt");
+        EXPECT_TRUE(channel == "level2" || channel == "market_trades" || channel == "heartbeats");
+        if (channel != "heartbeats") {
+            auto product_ids = json["product_ids"];
+            ASSERT_EQ(product_ids.size(), 1);
+            EXPECT_EQ(product_ids[0], "BTC-USD");
+        } else {
+            EXPECT_FALSE(json.contains("product_ids"));
+        }
     }
 }
 
@@ -49,21 +51,30 @@ TEST(SubscriptionManager, SubscribeToMultipleProducts) {
 
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
 
-    ASSERT_EQ(frames.size(), 2);
+    ASSERT_EQ(frames.size(), 3);
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 3);
-
-        std::vector<std::string> products;
-        for (const auto& id : product_ids) {
-            products.push_back(id.get<std::string>());
+        std::string channel = json["channel"];
+        if (channel != "heartbeats") {
+            auto product_ids = json["product_ids"];
+            ASSERT_EQ(product_ids.size(), 3);
+        } else {
+            EXPECT_FALSE(json.contains("product_ids"));
         }
 
-        EXPECT_TRUE(std::find(products.begin(), products.end(), "BTC-USD") != products.end());
-        EXPECT_TRUE(std::find(products.begin(), products.end(), "ETH-USD") != products.end());
-        EXPECT_TRUE(std::find(products.begin(), products.end(), "SOL-USD") != products.end());
+        std::vector<std::string> products;
+        if (json.contains("product_ids")) {
+            for (const auto& id : json["product_ids"]) {
+                products.push_back(id.get<std::string>());
+            }
+        }
+
+        if (!products.empty()) {
+            EXPECT_TRUE(std::find(products.begin(), products.end(), "BTC-USD") != products.end());
+            EXPECT_TRUE(std::find(products.begin(), products.end(), "ETH-USD") != products.end());
+            EXPECT_TRUE(std::find(products.begin(), products.end(), "SOL-USD") != products.end());
+        }
     }
 }
 
@@ -77,15 +88,19 @@ TEST(SubscriptionManager, UnsubscribeFromProducts) {
 
     auto frames = mgr.buildUnsubscribeMsgs("test_jwt");
 
-    ASSERT_EQ(frames.size(), 2);
+    ASSERT_EQ(frames.size(), 3);
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
         EXPECT_EQ(json["type"], "unsubscribe");
         EXPECT_EQ(json["jwt"], "test_jwt");
-
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 2);
+        std::string channel = json["channel"];
+        if (channel != "heartbeats") {
+            auto product_ids = json["product_ids"];
+            ASSERT_EQ(product_ids.size(), 2);
+        } else {
+            EXPECT_FALSE(json.contains("product_ids"));
+        }
     }
 }
 
@@ -155,7 +170,7 @@ TEST(SubscriptionManager, BothChannelsPresent) {
     mgr.setDesiredProducts({"BTC-USD"});
 
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
-    ASSERT_EQ(frames.size(), 2);
+    ASSERT_EQ(frames.size(), 3);
 
     std::set<std::string> channels;
     for (const auto& frame : frames) {
@@ -165,6 +180,7 @@ TEST(SubscriptionManager, BothChannelsPresent) {
 
     EXPECT_TRUE(channels.count("level2") > 0);
     EXPECT_TRUE(channels.count("market_trades") > 0);
+    EXPECT_TRUE(channels.count("heartbeats") > 0);
 }
 
 // =============================================================================
@@ -224,16 +240,19 @@ TEST(SubscriptionManager, OrderIsStable) {
 
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
 
-    // Channel order should be stable (typically level2 first, then market_trades)
+    // Channel order should be stable (level2, market_trades, heartbeats)
     auto json0 = nlohmann::json::parse(frames[0]);
     auto json1 = nlohmann::json::parse(frames[1]);
+    auto json2 = nlohmann::json::parse(frames[2]);
 
     // Verify both channels exist and order is consistent
     std::string channel0 = json0["channel"];
     std::string channel1 = json1["channel"];
+    std::string channel2 = json2["channel"];
 
-    EXPECT_TRUE((channel0 == "level2" && channel1 == "market_trades") ||
-                (channel0 == "market_trades" && channel1 == "level2"));
+    EXPECT_EQ(channel0, "level2");
+    EXPECT_EQ(channel1, "market_trades");
+    EXPECT_EQ(channel2, "heartbeats");
 }
 
 // =============================================================================
@@ -246,7 +265,7 @@ TEST(SubscriptionManager, DuplicateProductsAreHandled) {
 
     // Implementation may deduplicate or preserve; verify behavior
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
-    EXPECT_EQ(frames.size(), 2);  // Still 2 channels
+    EXPECT_EQ(frames.size(), 3);  // Still 3 channels
 }
 
 TEST(SubscriptionManager, LargeProductList) {
@@ -260,11 +279,15 @@ TEST(SubscriptionManager, LargeProductList) {
     mgr.setDesiredProducts(products);
     auto frames = mgr.buildSubscribeMsgs("test_jwt");
 
-    ASSERT_EQ(frames.size(), 2);
+    ASSERT_EQ(frames.size(), 3);
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
-        EXPECT_EQ(json["product_ids"].size(), 50);
+        if (json["channel"] != "heartbeats") {
+            EXPECT_EQ(json["product_ids"].size(), 50);
+        } else {
+            EXPECT_FALSE(json.contains("product_ids"));
+        }
     }
 }
 
@@ -273,11 +296,11 @@ TEST(SubscriptionManager, EmptyStringJWT) {
     mgr.setDesiredProducts({"BTC-USD"});
 
     auto frames = mgr.buildSubscribeMsgs("");
-    ASSERT_EQ(frames.size(), 2);
+    ASSERT_EQ(frames.size(), 3);
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
-        EXPECT_EQ(json["jwt"], "");
+        EXPECT_FALSE(json.contains("jwt"));
     }
 }
 
@@ -291,11 +314,11 @@ TEST(SubscriptionManager, TypicalReconnectScenario) {
     // Initial subscription
     mgr.setDesiredProducts({"BTC-USD", "ETH-USD"});
     auto initial_frames = mgr.buildSubscribeMsgs("jwt_1");
-    EXPECT_EQ(initial_frames.size(), 2);
+    EXPECT_EQ(initial_frames.size(), 3);
 
     // Simulate reconnect (same desired set, new JWT)
     auto reconnect_frames = mgr.buildSubscribeMsgs("jwt_2");
-    EXPECT_EQ(reconnect_frames.size(), 2);
+    EXPECT_EQ(reconnect_frames.size(), 3);
 
     // Product IDs should be the same, only JWT differs
     auto json_initial = nlohmann::json::parse(initial_frames[0]);

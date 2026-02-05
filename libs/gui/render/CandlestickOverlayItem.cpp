@@ -70,7 +70,7 @@ bool candleDebugEnabled() {
     return enabled;
 }
 
-bool mappingChanged(const HeatmapTimeMapping& a, const HeatmapTimeMapping& b) {
+bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
     return a.valid != b.valid ||
         a.drawRect != b.drawRect ||
         a.srcRect != b.srcRect ||
@@ -81,7 +81,11 @@ bool mappingChanged(const HeatmapTimeMapping& a, const HeatmapTimeMapping& b) {
         a.gridWidth != b.gridWidth ||
         a.filledColumns != b.filledColumns ||
         a.timeOffset != b.timeOffset ||
-        a.cellW != b.cellW;
+        a.cellW != b.cellW ||
+        a.viewStartMs != b.viewStartMs ||
+        a.viewEndMs != b.viewEndMs ||
+        a.viewMinPrice != b.viewMinPrice ||
+        a.viewMaxPrice != b.viewMaxPrice;
 }
 
 } // namespace
@@ -244,7 +248,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const HeatmapTimeMapping mapping = m_heatmapRenderer->lastHeatmapMapping();
+    const TimeAxisMapping mapping = m_heatmapRenderer->lastTimeAxisMapping();
     if (mappingChanged(mapping, m_lastMapping)) {
         m_lastMapping = mapping;
         m_geometryDirty = true;
@@ -304,41 +308,25 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    auto startIt = std::lower_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeStart,
-                                    [](const CandleOverlayBar& c, qint64 t) { return c.timeStartMs < t; });
-    auto endIt = std::upper_bound(m_visibleCandles.begin(), m_visibleCandles.end(), timeEnd,
-                                  [](qint64 t, const CandleOverlayBar& c) { return t < c.timeStartMs; });
-    // IMPORTANT: `HeatmapTimeMapping.timeOffset` is a ring-buffer *physical* sampling offset used by the heatmap shader.
-    // Candles are drawn in world-space time, so their screen mapping must stay in *logical* column space and MUST NOT
-    // incorporate the ring's physical offset, otherwise candles will appear to drift left/right every time the ring advances.
-    const double baseColF = mapping.srcRect.x();
-
-    // Candle columns are expressed relative to `actualDataStartMs` (filled window start), while the heatmap srcRect.x()
-    // is expressed relative to `dataStartMs` (full ring start). Convert between the two by shifting the base.
-    double anchorBaseColF = baseColF;
-    if (mapping.actualDataEndMs > mapping.actualDataStartMs && mapping.appendMs > 0.0) {
-        const double shiftCols = (mapping.actualDataStartMs - mapping.dataStartMs) / mapping.appendMs;
-        anchorBaseColF = baseColF - shiftCols;
-    }
-
-    const double visibleColStart = anchorBaseColF;
-    const double visibleColEnd = anchorBaseColF + mapping.srcRect.width();
+    // Filter candles to visible data range using TimeAxisMapping
+    const double visStartMs = mapping.visibleDataStartMs();
+    const double visEndMs = mapping.visibleDataEndMs();
     const bool haveActualRange = (mapping.actualDataEndMs > mapping.actualDataStartMs);
+
     std::vector<CandleOverlayBar> filtered;
-    filtered.reserve(static_cast<size_t>(std::distance(startIt, endIt)));
-    for (auto it = startIt; it != endIt; ++it) {
+    filtered.reserve(m_visibleCandles.size());
+    for (const auto& c : m_visibleCandles) {
         if (haveActualRange) {
-            if (it->timeStartMs < static_cast<qint64>(mapping.actualDataStartMs) ||
-                it->timeStartMs >= static_cast<qint64>(mapping.actualDataEndMs)) {
+            if (c.timeStartMs < static_cast<qint64>(mapping.actualDataStartMs) ||
+                c.timeStartMs >= static_cast<qint64>(mapping.actualDataEndMs)) {
                 continue;
             }
         }
-        const double colF = (static_cast<double>(it->timeStartMs) - mapping.actualDataStartMs) / mapping.appendMs;
-        const double colEndF = colF + 1.0;
-        if (colEndF <= visibleColStart || colF >= visibleColEnd) {
+        const double candleEndMs = static_cast<double>(c.timeStartMs) + mapping.appendMs;
+        if (candleEndMs <= visStartMs || static_cast<double>(c.timeStartMs) >= visEndMs) {
             continue;
         }
-        filtered.push_back(*it);
+        filtered.push_back(c);
     }
     const int visibleCount = static_cast<int>(filtered.size());
 
@@ -356,10 +344,6 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const bool dragging = m_viewState ? m_viewState->isDragging() : false;
             const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
-            const qint64 newestCandle = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
-            const double newestColF = (visibleCount > 0)
-                ? (static_cast<double>(newestCandle) - mapping.dataStartMs) / mapping.appendMs
-                : 0.0;
             const bool autoScroll = m_viewState ? m_viewState->isAutoScrollEnabled() : false;
             sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
                        .arg(m_symbol)
@@ -368,26 +352,19 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                        .arg(timeEnd)
                        .arg(visibleCount)
                        .arg(hasData ? "live" : "none"));
-            sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 timeOffset=%4 baseColF=%5 srcX=%6 srcW=%7 drawX=%8 drawW=%9")
+            sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 srcX=%4 srcW=%5 drawX=%6 drawW=%7")
                        .arg(static_cast<qint64>(mapping.dataStartMs))
                        .arg(static_cast<qint64>(mapping.appendMs))
                        .arg(mapping.gridWidth)
-                       .arg(mapping.timeOffset, 0, 'f', 4)
-                       .arg(baseColF, 0, 'f', 3)
                        .arg(mapping.srcRect.x(), 0, 'f', 3)
                        .arg(mapping.srcRect.width(), 0, 'f', 3)
                        .arg(mapping.drawRect.x(), 0, 'f', 1)
                        .arg(mapping.drawRect.width(), 0, 'f', 1));
-            sLog_Debug(QString("Candle mapping newest: t=%1 colF=%2 visCols=[%3..%4] autoScroll=%5")
-                       .arg(newestCandle)
-                       .arg(newestColF, 0, 'f', 3)
-                       .arg(visibleColStart, 0, 'f', 3)
-                       .arg(visibleColEnd, 0, 'f', 3)
-                       .arg(autoScroll ? "true" : "false"));
-            sLog_Debug(QString("Candle overlay scale: spanMs=%1 msPerPx=%2 width=%3")
+            sLog_Debug(QString("Candle overlay scale: spanMs=%1 msPerPx=%2 width=%3 autoScroll=%4")
                        .arg(spanMs, 0, 'f', 1)
                        .arg(msPerPixel, 0, 'f', 3)
-                       .arg(width(), 0, 'f', 1));
+                       .arg(width(), 0, 'f', 1)
+                       .arg(autoScroll ? "true" : "false"));
             sLog_Debug(QString("Candle overlay pan: dragging=%1 pan=(%2,%3) visFirst=%4 visLast=%5")
                        .arg(dragging ? "true" : "false")
                        .arg(pan.x(), 0, 'f', 1)
@@ -411,26 +388,6 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
-    const QRectF bounds = boundingRect();
-    double minPrice = m_viewState->getMinPrice();
-    double maxPrice = m_viewState->getMaxPrice();
-    const QPointF pan = m_viewState->getPanVisualOffset();
-    double priceSpan = maxPrice - minPrice;
-    if (!pan.isNull() && bounds.height() > 0.0 && priceSpan > 0.0 && m_viewState->isDragging()) {
-        const double pricePixelsToUnits = priceSpan / bounds.height();
-        const double priceDelta = pan.y() * pricePixelsToUnits;
-        minPrice += priceDelta;
-        maxPrice += priceDelta;
-        priceSpan = maxPrice - minPrice;
-    }
-    if (priceSpan <= 0.0 || bounds.height() <= 0.0) {
-        root->wickGeometry->allocate(0);
-        root->bodyGeometry->allocate(0);
-        root->wickNode->markDirty(QSGNode::DirtyGeometry);
-        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
-        return root;
-    }
-
     const uchar wickR = 240;
     const uchar wickG = 240;
     const uchar wickB = 240;
@@ -447,12 +404,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     for (const auto& c : filtered) {
         const bool bullish = c.close >= c.open;
 
-        const double colF = (static_cast<double>(c.timeStartMs) - mapping.actualDataStartMs) / mapping.appendMs;
-        const double x = mapping.drawRect.x() + (colF - anchorBaseColF) * mapping.cellW;
-        const float x0 = static_cast<float>(x);
-        const float x1 = static_cast<float>(x + mapping.cellW);
-        float bodyWidth = std::max(1.0f, static_cast<float>(mapping.cellW) * 0.7f);
-        const float centerX = x0 + static_cast<float>(mapping.cellW) * 0.5f;
+        // X: world time → screen via TimeAxisMapping (no timeOffset, no manual column math)
+        const double x = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
+        const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
+        const double candleW = xEnd - x;
+        float bodyWidth = std::max(1.0f, static_cast<float>(candleW) * 0.7f);
+        const float centerX = static_cast<float>(x + candleW * 0.5);
         const float bodyX0 = centerX - bodyWidth * 0.5f;
         const float bodyX1 = centerX + bodyWidth * 0.5f;
 
@@ -460,14 +417,11 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const float wickX0 = centerX - wickWidth * 0.5f;
         const float wickX1 = centerX + wickWidth * 0.5f;
 
-        const double yHigh = bounds.y() + bounds.height() * ((maxPrice - c.high) / priceSpan);
-        const double yLow = bounds.y() + bounds.height() * ((maxPrice - c.low) / priceSpan);
-        const double yOpen = bounds.y() + bounds.height() * ((maxPrice - c.open) / priceSpan);
-        const double yClose = bounds.y() + bounds.height() * ((maxPrice - c.close) / priceSpan);
-        const float yHighF = static_cast<float>(yHigh);
-        const float yLowF = static_cast<float>(yLow);
-        const float yOpenF = static_cast<float>(yOpen);
-        const float yCloseF = static_cast<float>(yClose);
+        // Y: price → screen via TimeAxisMapping (pan already baked in)
+        const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
+        const float yLowF  = static_cast<float>(mapping.priceToScreenY(c.low));
+        const float yOpenF = static_cast<float>(mapping.priceToScreenY(c.open));
+        const float yCloseF = static_cast<float>(mapping.priceToScreenY(c.close));
         const float bodyY0 = std::min(yOpenF, yCloseF);
         const float bodyY1 = std::max(yOpenF, yCloseF);
 
