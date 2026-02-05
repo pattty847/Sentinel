@@ -9,11 +9,14 @@
 #include <mutex>
 #include "../protocol/HeatmapSlice.hpp"
 #include "IHeatmapDataSource.hpp"
+#include "../config/ConfigTypes.hpp"
 
 class HeatmapTwapStreamer : public QObject {
     Q_OBJECT
 public:
-    explicit HeatmapTwapStreamer(IHeatmapDataSource& model, QObject* parent = nullptr);
+    explicit HeatmapTwapStreamer(IHeatmapDataSource& model,
+                                 const ServerHeatmapConfig& config,
+                                 QObject* parent = nullptr);
 
     void start();
     void stop();
@@ -108,6 +111,7 @@ private:
     void applyBandRange(SymbolState& state, double midPrice, int64_t timeframeMs);
 
     IHeatmapDataSource& m_model;
+    ServerHeatmapConfig m_config;
     QTimer m_timer;
     int m_sampleMs = 50;
 

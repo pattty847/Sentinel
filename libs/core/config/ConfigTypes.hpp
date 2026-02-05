@@ -12,6 +12,9 @@ struct ServerHeatmapConfig {
     double recenterDelta = 0.01;
     std::vector<int64_t> timeframesMs{1000, 60000, 3600000, 86400000};
     int64_t activeTimeframeMs = 0;
+    double bandFast = 0.15;
+    double bandMedium = 0.25;
+    double bandSlow = 0.35;
 };
 
 struct ServerOrderBookConfig {

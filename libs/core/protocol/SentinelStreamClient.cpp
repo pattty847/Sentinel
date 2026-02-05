@@ -241,6 +241,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 cfg.heatmap.gridHeight = hm.value("grid_height", cfg.heatmap.gridHeight);
                 cfg.heatmap.tickSize = hm.value("tick_size", cfg.heatmap.tickSize);
                 cfg.heatmap.recenterDelta = hm.value("recenter_delta", cfg.heatmap.recenterDelta);
+                cfg.heatmap.bandFast = hm.value("band_fast", cfg.heatmap.bandFast);
+                cfg.heatmap.bandMedium = hm.value("band_medium", cfg.heatmap.bandMedium);
+                cfg.heatmap.bandSlow = hm.value("band_slow", cfg.heatmap.bandSlow);
                 cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
             }
             if (msg.contains("orderbook") && msg["orderbook"].is_object()) {

@@ -15,11 +15,12 @@
 #include "TimeframeAggregator.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../protocol/HeatmapSlice.hpp"
+#include "../config/ConfigTypes.hpp"
 
 class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
 public:
-    explicit ServerDataModel(QObject* parent = nullptr);
+    explicit ServerDataModel(const ServerConfig& config, QObject* parent = nullptr);
     ~ServerDataModel();
 
     SymbolHotData& ensureSymbol(const std::string& symbol) override;
@@ -61,6 +62,7 @@ private:
 
     // Slots are invoked on the main thread; subsystems assume single-threaded access.
     mutable std::shared_mutex m_mutex;
+    ServerConfig m_serverConfig;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
     std::unique_ptr<TickBinaryLogger> m_logger;
     std::unique_ptr<TimeframeAggregator> m_aggregator;

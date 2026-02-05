@@ -2,8 +2,6 @@
 #include "IHeatmapDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
-#include <QProcessEnvironment>
-#include <QStringList>
 #include <QtEndian>
 #include <algorithm>
 #include <chrono>
@@ -13,99 +11,50 @@ namespace {
 constexpr int64_t kMsPerSecond = 1000;
 }
 
-HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model, QObject* parent)
+HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
+                                         const ServerHeatmapConfig& config,
+                                         QObject* parent)
     : QObject(parent)
-    , m_model(model) {
+    , m_model(model)
+    , m_config(config) {
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &HeatmapTwapStreamer::onSample);
 
-    m_timeframesMs = {1000, 60000, 3600000, 86400000};
-
-    const QByteArray widthEnv = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH");
-    bool ok = false;
-    const int envWidth = widthEnv.toInt(&ok);
-    if (ok && envWidth > 0) {
-        m_defaultWidth = envWidth;
+    m_timeframesMs = m_config.timeframesMs;
+    if (m_timeframesMs.empty()) {
+        m_timeframesMs = {1000, 60000, 3600000, 86400000};
     }
 
-    const QByteArray heightEnv = qgetenv("SENTINEL_HEATMAP_GRID");
-    ok = false;
-    const int envHeight = heightEnv.toInt(&ok);
-    if (ok && envHeight > 0) {
-        m_defaultHeight = envHeight;
+    if (m_config.gridWidth > 0) {
+        m_defaultWidth = m_config.gridWidth;
+    }
+    if (m_config.gridHeight > 0) {
+        m_defaultHeight = m_config.gridHeight;
+    }
+    if (m_config.tickSize > 0.0) {
+        m_defaultTickSize = m_config.tickSize;
+        m_fixedTickSize = true;
+    } else {
+        m_fixedTickSize = false;
     }
 
-    const QByteArray tickEnv = qgetenv("SENTINEL_HEATMAP_TICK_SIZE");
-    ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok) {
-        if (envTick > 0.0) {
-            m_defaultTickSize = envTick;
-            m_fixedTickSize = true;
-        } else {
-            m_fixedTickSize = false;
-        }
-    }
-
-    const QByteArray tfListEnv = qgetenv("SENTINEL_HEATMAP_TIMEFRAMES");
-    if (!tfListEnv.isEmpty()) {
-        QString tfList = QString::fromUtf8(tfListEnv);
-        tfList.replace(',', ' ');
-        tfList = tfList.simplified();
-        const QStringList parts = tfList.isEmpty()
-            ? QStringList()
-            : tfList.split(' ', Qt::SkipEmptyParts);
-        std::vector<int64_t> parsed;
-        parsed.reserve(static_cast<size_t>(parts.size()));
-        for (const auto& part : parts) {
-            bool okPart = false;
-            const int64_t tf = part.toLongLong(&okPart);
-            if (okPart && tf > 0) {
-                parsed.push_back(tf);
-            }
-        }
-        if (!parsed.empty()) {
-            std::sort(parsed.begin(), parsed.end());
-            parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
-            m_timeframesMs = std::move(parsed);
-        }
-    }
-
-    const QByteArray tfEnv = qgetenv("SENTINEL_HEATMAP_TF");
-    ok = false;
-    const int64_t envTf = tfEnv.toLongLong(&ok);
-    if (ok && envTf > 0) {
-        m_activeTimeframeMs = envTf;
+    if (m_config.activeTimeframeMs > 0) {
+        m_activeTimeframeMs = m_config.activeTimeframeMs;
     } else if (!m_timeframesMs.empty()) {
         m_activeTimeframeMs = m_timeframesMs.front();
     }
 
-    const QByteArray deltaEnv = qgetenv("SENTINEL_HEATMAP_RECENTER_DELTA");
-    ok = false;
-    const double envDelta = deltaEnv.toDouble(&ok);
-    if (ok && envDelta > 0.0) {
-        m_recenterDelta = envDelta;
+    if (m_config.recenterDelta > 0.0) {
+        m_recenterDelta = m_config.recenterDelta;
     }
-
-    const QByteArray bandFastEnv = qgetenv("SENTINEL_HEATMAP_BAND_FAST");
-    ok = false;
-    const double bandFast = bandFastEnv.toDouble(&ok);
-    if (ok && bandFast > 0.0) {
-        m_bandFast = bandFast;
+    if (m_config.bandFast > 0.0) {
+        m_bandFast = m_config.bandFast;
     }
-
-    const QByteArray bandMedEnv = qgetenv("SENTINEL_HEATMAP_BAND_MED");
-    ok = false;
-    const double bandMed = bandMedEnv.toDouble(&ok);
-    if (ok && bandMed > 0.0) {
-        m_bandMedium = bandMed;
+    if (m_config.bandMedium > 0.0) {
+        m_bandMedium = m_config.bandMedium;
     }
-
-    const QByteArray bandSlowEnv = qgetenv("SENTINEL_HEATMAP_BAND_SLOW");
-    ok = false;
-    const double bandSlow = bandSlowEnv.toDouble(&ok);
-    if (ok && bandSlow > 0.0) {
-        m_bandSlow = bandSlow;
+    if (m_config.bandSlow > 0.0) {
+        m_bandSlow = m_config.bandSlow;
     }
 }
 

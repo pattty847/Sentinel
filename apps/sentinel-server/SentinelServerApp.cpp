@@ -90,7 +90,7 @@ bool SentinelServerApp::initialize() {
         
         // 3. Server Data Model
         try {
-            m_serverModel = std::make_unique<ServerDataModel>();
+        m_serverModel = std::make_unique<ServerDataModel>(m_serverConfig);
         } catch (const std::exception& e) {
             sLog_Error("ServerDataModel init failed: " << e.what());
             return false;

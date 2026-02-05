@@ -28,73 +28,6 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
-struct CandleGateConfig {
-    double bpsFast = 0.00005;  // 0.5 bps
-    double bpsSlow = 0.0002;   // 2 bps
-    int tickMultFast = 1;
-    int tickMultSlow = 2;
-    int64_t silenceMsFast = 200;
-    int64_t silenceMsSlow = 1000;
-    double volumeFast = 0.0;
-    double volumeSlow = 0.0;
-    double tickSize = 0.0;
-};
-
-double envDouble(const char* name, double fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return std::stod(v);
-        } catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-int envInt(const char* name, int fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return std::stoi(v);
-        } catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-int64_t envInt64(const char* name, int64_t fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return static_cast<int64_t>(std::stoll(v));
-        } catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-const CandleGateConfig& candleGateConfig() {
-    static CandleGateConfig cfg = [] {
-        CandleGateConfig c;
-        c.bpsFast = envDouble("SENTINEL_CANDLE_UPDATE_BPS_FAST", c.bpsFast);
-        c.bpsSlow = envDouble("SENTINEL_CANDLE_UPDATE_BPS_SLOW", c.bpsSlow);
-        c.tickMultFast = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", c.tickMultFast);
-        c.tickMultSlow = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", c.tickMultSlow);
-        c.silenceMsFast = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", c.silenceMsFast);
-        c.silenceMsSlow = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", c.silenceMsSlow);
-        c.volumeFast = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", c.volumeFast);
-        c.volumeSlow = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", c.volumeSlow);
-        c.tickSize = envDouble("SENTINEL_CANDLE_UPDATE_TICK_SIZE", c.tickSize);
-        if (c.tickSize <= 0.0) {
-            c.tickSize = envDouble("SENTINEL_ORDERBOOK_TICK_SIZE", 0.0);
-        }
-        return c;
-    }();
-    return cfg;
-}
 
 nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     nlohmann::json payload;
@@ -105,7 +38,10 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
         {"grid_width", cfg.heatmap.gridWidth},
         {"grid_height", cfg.heatmap.gridHeight},
         {"tick_size", cfg.heatmap.tickSize},
-        {"recenter_delta", cfg.heatmap.recenterDelta}
+        {"recenter_delta", cfg.heatmap.recenterDelta},
+        {"band_fast", cfg.heatmap.bandFast},
+        {"band_medium", cfg.heatmap.bandMedium},
+        {"band_slow", cfg.heatmap.bandSlow}
     };
     if (cfg.heatmap.activeTimeframeMs > 0) {
         payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;
@@ -565,19 +501,20 @@ public:
 
     static bool should_emit_update(const OHLCVBar& bar,
                                    const CandleStreamState& state,
+                                   const ServerCandleGateConfig& cfg,
+                                   const ServerOrderBookConfig& obConfig,
                                    int64_t tfSec,
                                    int64_t nowMs) {
         if (!state.hasLast) {
             return true;
         }
 
-        const CandleGateConfig& cfg = candleGateConfig();
         const OHLCVBar& last = state.lastBar;
         const bool highChanged = bar.high > last.high;
         const bool lowChanged = bar.low < last.low;
 
         const double closeDelta = std::abs(bar.close - last.close);
-        const double tickSize = cfg.tickSize;
+        const double tickSize = (cfg.tickSize > 0.0) ? cfg.tickSize : obConfig.tickSize;
         const int tickMultiplier = (tfSec <= 1) ? cfg.tickMultFast : cfg.tickMultSlow;
         const double bpsThreshold = (tfSec <= 1) ? cfg.bpsFast : cfg.bpsSlow;
         const double priceThreshold = std::max(tickSize * tickMultiplier,
@@ -609,7 +546,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
-            if (!should_emit_update(bar, entry, tfSec, nowMs)) {
+            if (!should_emit_update(bar, entry, owner_->serverConfig().candles,
+                                    owner_->serverConfig().orderbook, tfSec, nowMs)) {
                 return;
             }
             entry.seq++;

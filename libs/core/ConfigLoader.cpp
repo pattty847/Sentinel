@@ -90,45 +90,25 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     }
 
     if (heatmapNode) {
-        if (readScalar(heatmapNode, "grid_width", cfg.heatmap.gridWidth)) {
-            applyEnv("SENTINEL_HEATMAP_GRID_WIDTH", std::to_string(cfg.heatmap.gridWidth));
+        readScalar(heatmapNode, "grid_width", cfg.heatmap.gridWidth);
+        readScalar(heatmapNode, "grid_height", cfg.heatmap.gridHeight);
+        readScalar(heatmapNode, "tick_size", cfg.heatmap.tickSize);
+        readScalar(heatmapNode, "timeframe", cfg.heatmap.activeTimeframeMs);
+        if (!readScalar(heatmapNode, "recenter_delta", cfg.heatmap.recenterDelta)) {
+            readScalar(heatmapNode, "recenter", cfg.heatmap.recenterDelta);
         }
-        if (readScalar(heatmapNode, "grid_height", cfg.heatmap.gridHeight)) {
-            applyEnv("SENTINEL_HEATMAP_GRID_HEIGHT", std::to_string(cfg.heatmap.gridHeight));
-            applyEnv("SENTINEL_HEATMAP_GRID", std::to_string(cfg.heatmap.gridHeight));
-        }
-        if (readScalar(heatmapNode, "tick_size", cfg.heatmap.tickSize)) {
-            applyEnv("SENTINEL_HEATMAP_TICK_SIZE", std::to_string(cfg.heatmap.tickSize));
-        }
-        if (readScalar(heatmapNode, "timeframe", cfg.heatmap.activeTimeframeMs)) {
-            applyEnv("SENTINEL_HEATMAP_TF", std::to_string(cfg.heatmap.activeTimeframeMs));
-        }
-        if (readScalar(heatmapNode, "recenter_delta", cfg.heatmap.recenterDelta)) {
-            applyEnv("SENTINEL_HEATMAP_RECENTER_DELTA", std::to_string(cfg.heatmap.recenterDelta));
-        } else if (readScalar(heatmapNode, "recenter", cfg.heatmap.recenterDelta)) {
-            applyEnv("SENTINEL_HEATMAP_RECENTER_DELTA", std::to_string(cfg.heatmap.recenterDelta));
-        }
+        readScalar(heatmapNode, "band_fast", cfg.heatmap.bandFast);
+        readScalar(heatmapNode, "band_medium", cfg.heatmap.bandMedium);
+        readScalar(heatmapNode, "band_slow", cfg.heatmap.bandSlow);
         if (heatmapNode["timeframes"]) {
             auto parsed = parseTimeframes(heatmapNode["timeframes"]);
             if (!parsed.empty()) {
                 cfg.heatmap.timeframesMs = std::move(parsed);
-                std::ostringstream oss;
-                for (size_t i = 0; i < cfg.heatmap.timeframesMs.size(); ++i) {
-                    if (i > 0) oss << ' ';
-                    oss << cfg.heatmap.timeframesMs[i];
-                }
-                applyEnv("SENTINEL_HEATMAP_TIMEFRAMES", oss.str());
             }
         } else if (heatmapNode["timeframes_ms"]) {
             auto parsed = parseTimeframes(heatmapNode["timeframes_ms"]);
             if (!parsed.empty()) {
                 cfg.heatmap.timeframesMs = std::move(parsed);
-                std::ostringstream oss;
-                for (size_t i = 0; i < cfg.heatmap.timeframesMs.size(); ++i) {
-                    if (i > 0) oss << ' ';
-                    oss << cfg.heatmap.timeframesMs[i];
-                }
-                applyEnv("SENTINEL_HEATMAP_TIMEFRAMES", oss.str());
             }
         }
     }
@@ -138,52 +118,24 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             const auto symbols = parseSymbolList(serverNode["default_symbols"].as<std::string>());
             if (!symbols.empty()) {
                 cfg.defaultSymbols = symbols;
-                std::ostringstream oss;
-                for (size_t i = 0; i < cfg.defaultSymbols.size(); ++i) {
-                    if (i > 0) oss << ' ';
-                    oss << cfg.defaultSymbols[i];
-                }
-                applyEnv("SENTINEL_SERVER_DEFAULT_SYMBOLS", oss.str());
             }
         }
         if (serverNode["orderbook"]) {
             auto ob = serverNode["orderbook"];
-            if (readScalar(ob, "tick_size", cfg.orderbook.tickSize)) {
-                applyEnv("SENTINEL_ORDERBOOK_TICK_SIZE", std::to_string(cfg.orderbook.tickSize));
-            }
-            if (readScalar(ob, "band_pct", cfg.orderbook.bandPct)) {
-                applyEnv("SENTINEL_ORDERBOOK_BAND_PCT", std::to_string(cfg.orderbook.bandPct));
-            }
+            readScalar(ob, "tick_size", cfg.orderbook.tickSize);
+            readScalar(ob, "band_pct", cfg.orderbook.bandPct);
         }
         if (serverNode["candles"]) {
             auto candles = serverNode["candles"];
-            if (readScalar(candles, "update_bps_fast", cfg.candles.bpsFast)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_BPS_FAST", std::to_string(cfg.candles.bpsFast));
-            }
-            if (readScalar(candles, "update_bps_slow", cfg.candles.bpsSlow)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_BPS_SLOW", std::to_string(cfg.candles.bpsSlow));
-            }
-            if (readScalar(candles, "update_tick_mult_fast", cfg.candles.tickMultFast)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", std::to_string(cfg.candles.tickMultFast));
-            }
-            if (readScalar(candles, "update_tick_mult_slow", cfg.candles.tickMultSlow)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", std::to_string(cfg.candles.tickMultSlow));
-            }
-            if (readScalar(candles, "update_silence_ms_fast", cfg.candles.silenceMsFast)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", std::to_string(cfg.candles.silenceMsFast));
-            }
-            if (readScalar(candles, "update_silence_ms_slow", cfg.candles.silenceMsSlow)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", std::to_string(cfg.candles.silenceMsSlow));
-            }
-            if (readScalar(candles, "update_volume_fast", cfg.candles.volumeFast)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", std::to_string(cfg.candles.volumeFast));
-            }
-            if (readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", std::to_string(cfg.candles.volumeSlow));
-            }
-            if (readScalar(candles, "update_tick_size", cfg.candles.tickSize)) {
-                applyEnv("SENTINEL_CANDLE_UPDATE_TICK_SIZE", std::to_string(cfg.candles.tickSize));
-            }
+            readScalar(candles, "update_bps_fast", cfg.candles.bpsFast);
+            readScalar(candles, "update_bps_slow", cfg.candles.bpsSlow);
+            readScalar(candles, "update_tick_mult_fast", cfg.candles.tickMultFast);
+            readScalar(candles, "update_tick_mult_slow", cfg.candles.tickMultSlow);
+            readScalar(candles, "update_silence_ms_fast", cfg.candles.silenceMsFast);
+            readScalar(candles, "update_silence_ms_slow", cfg.candles.silenceMsSlow);
+            readScalar(candles, "update_volume_fast", cfg.candles.volumeFast);
+            readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
+            readScalar(candles, "update_tick_size", cfg.candles.tickSize);
         }
     }
 

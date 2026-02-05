@@ -1,6 +1,5 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
-#include <QProcessEnvironment>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -9,24 +8,6 @@ namespace {
 int64_t localNowMs() {
     const auto now = std::chrono::system_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-}
-
-double readEnvDouble(const char* key, double fallback, double minValue) {
-    const QByteArray env = qgetenv(key);
-    bool ok = false;
-    const double value = env.toDouble(&ok);
-    if (ok && value > minValue) {
-        return value;
-    }
-    return fallback;
-}
-
-double getOrderBookTickSize() {
-    return readEnvDouble("SENTINEL_ORDERBOOK_TICK_SIZE", 0.10, 0.0);
-}
-
-double getOrderBookBandPct() {
-    return readEnvDouble("SENTINEL_ORDERBOOK_BAND_PCT", 0.30, 0.0);
 }
 
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
@@ -104,11 +85,12 @@ void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
     m_exchangeOffsetMs.store(smoothed, std::memory_order_relaxed);
 }
 
-ServerDataModel::ServerDataModel(QObject* parent) 
+ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
+    , m_serverConfig(config)
     , m_logger(std::make_unique<TickBinaryLogger>())
     , m_aggregator(std::make_unique<TimeframeAggregator>())
-    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this))
+    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
@@ -231,8 +213,8 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
-    const double tickSize = getOrderBookTickSize();
-    const double bandPct = getOrderBookBandPct();
+    const double tickSize = m_serverConfig.orderbook.tickSize;
+    const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     data.liveBook.initialize(minPrice, maxPrice, tickSize);
     
