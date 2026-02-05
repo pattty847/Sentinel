@@ -11,8 +11,8 @@ int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
     ServerConfig serverConfig;
-    ConfigLoader::loadServerConfig("sentinel.yaml", &serverConfig);
-    ConfigLoader::loadServerConfig(".sentinel.yaml", &serverConfig);
+    ConfigLoader::loadServerConfig("config/server_config.yaml", &serverConfig);
+    ConfigLoader::loadServerConfig("config/.server_config.yaml", &serverConfig);
     
     SentinelServerApp serverApp(serverConfig);
     if (!serverApp.initialize()) {

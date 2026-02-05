@@ -84,8 +84,8 @@ void registerMetaTypesAndQml() {
 int main(int argc, char *argv[])
 {
     ClientConfig clientConfig;
-    ConfigLoader::loadClientConfig("sentinel.yaml", &clientConfig);
-    ConfigLoader::loadClientConfig(".sentinel.yaml", &clientConfig);
+    ConfigLoader::loadClientConfig("config/client_config.yaml", &clientConfig);
+    ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
     GuiConfigStore::instance().setClientConfig(clientConfig);
 
     configureGraphicsBackend();
