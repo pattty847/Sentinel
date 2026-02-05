@@ -1,7 +1,7 @@
 # Sentinel Configuration Template
 # Copy this file to sentinel.yaml and customize your settings.
 # User-specific overrides go in .sentinel.yaml (not tracked in git).
-# See docs/ENV_VARS.md for legacy environment settings.
+# Legacy environment settings are discouraged; prefer config files.
 
 # =============================================================================
 # Heatmap Settings (Server + Client)
