@@ -201,7 +201,7 @@ void HeatmapTwapStreamer::onSample() {
     const int64_t nowMs = m_model.exchangeNowMs();
 
     const auto symbols = m_model.getSymbolsSnapshot();
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
+    if (m_config.debugSliceLog) {
         sLog_App("Heatmap sample tick: symbols=" << symbols.size() << " t=" << nowMs);
     }
     for (const auto& symbol : symbols) {
@@ -341,7 +341,7 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
 
     static int logCount = 0;
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 10) == 0) {
+    if (m_config.debugSliceLog && (++logCount % 10) == 0) {
         sLog_App("Heatmap slice emit: " << QString::fromStdString(symbol)
                  << " tf=" << frame.timeframeMs
                  << " rows=" << column.size()
@@ -522,7 +522,7 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
     const double safeDenomAsk = (denomAsk > 0.0) ? denomAsk : 1.0;
 
     static int logCount = 0;
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 20) == 0) {
+    if (m_config.debugSliceLog && (++logCount % 20) == 0) {
         sLog_App("Heatmap column stats: bids=" << nonZeroBid
                  << " asks=" << nonZeroAsk
                  << " maxBid=" << maxBid

@@ -28,6 +28,7 @@ heatmap:
   intensity_log_scale: 1000.0
   intensity_power: 0.4
   intensity_floor: 0.001
+  debug_slice_log: false
 
   # Visual settings (client only)
   gamma: 1.05
@@ -75,6 +76,7 @@ gui:
 #   intensity_log_scale: 1000.0
 #   intensity_power: 0.4
 #   intensity_floor: 0.001
+#   debug_slice_log: false
 #
 # server:
 #   health_port: 8090

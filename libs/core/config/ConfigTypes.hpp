@@ -21,6 +21,7 @@ struct ServerHeatmapConfig {
     double intensityLogScale = 1000.0;
     double intensityPower = 0.4;
     double intensityFloor = 0.001;
+    bool debugSliceLog = false;
 };
 
 struct ServerOrderBookConfig {

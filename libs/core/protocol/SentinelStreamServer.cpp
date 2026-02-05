@@ -47,7 +47,8 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
         {"intensity_max_decay", cfg.heatmap.intensityMaxDecay},
         {"intensity_log_scale", cfg.heatmap.intensityLogScale},
         {"intensity_power", cfg.heatmap.intensityPower},
-        {"intensity_floor", cfg.heatmap.intensityFloor}
+        {"intensity_floor", cfg.heatmap.intensityFloor},
+        {"debug_slice_log", cfg.heatmap.debugSliceLog}
     };
     if (cfg.heatmap.activeTimeframeMs > 0) {
         payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;

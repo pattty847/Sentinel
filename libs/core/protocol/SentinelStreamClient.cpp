@@ -250,6 +250,7 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 cfg.heatmap.intensityLogScale = hm.value("intensity_log_scale", cfg.heatmap.intensityLogScale);
                 cfg.heatmap.intensityPower = hm.value("intensity_power", cfg.heatmap.intensityPower);
                 cfg.heatmap.intensityFloor = hm.value("intensity_floor", cfg.heatmap.intensityFloor);
+                cfg.heatmap.debugSliceLog = hm.value("debug_slice_log", cfg.heatmap.debugSliceLog);
                 cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
             }
             if (msg.contains("orderbook") && msg["orderbook"].is_object()) {
