@@ -59,6 +59,7 @@ signals:
 private:
     void updateExchangeOffsetMs(int64_t exchangeMs);
 
+    // Slots are invoked on the main thread; subsystems assume single-threaded access.
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
     std::unique_ptr<TickBinaryLogger> m_logger;
