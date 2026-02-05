@@ -4,7 +4,7 @@
 
 MarketDataCoreQt::MarketDataCoreQt(Authenticator& auth, QObject* parent)
     : QObject(parent)
-    , m_core(auth)
+    , m_core(auth, ServerMdcConfig{})
 {
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
