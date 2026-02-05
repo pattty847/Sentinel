@@ -8,13 +8,12 @@
 #include <string>
 #include <mutex>
 #include "../protocol/HeatmapSlice.hpp"
-
-class ServerDataModel;
+#include "IHeatmapDataSource.hpp"
 
 class HeatmapTwapStreamer : public QObject {
     Q_OBJECT
 public:
-    explicit HeatmapTwapStreamer(ServerDataModel& model, QObject* parent = nullptr);
+    explicit HeatmapTwapStreamer(IHeatmapDataSource& model, QObject* parent = nullptr);
 
     void start();
     void stop();
@@ -108,7 +107,7 @@ private:
     double bandForTimeframe(int64_t timeframeMs) const;
     void applyBandRange(SymbolState& state, double midPrice, int64_t timeframeMs);
 
-    ServerDataModel& m_model;
+    IHeatmapDataSource& m_model;
     QTimer m_timer;
     int m_sampleMs = 50;
 

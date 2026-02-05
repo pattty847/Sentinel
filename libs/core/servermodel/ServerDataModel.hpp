@@ -10,19 +10,20 @@
 #include <QTimer>
 #include "SymbolHotData.hpp"
 #include "HeatmapTwapStreamer.hpp"
+#include "IHeatmapDataSource.hpp"
 #include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../protocol/HeatmapSlice.hpp"
 
-class ServerDataModel : public QObject {
+class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
 public:
     explicit ServerDataModel(QObject* parent = nullptr);
     ~ServerDataModel();
 
-    SymbolHotData& ensureSymbol(const std::string& symbol);
-    std::vector<std::string> getSymbolsSnapshot() const;
+    SymbolHotData& ensureSymbol(const std::string& symbol) override;
+    std::vector<std::string> getSymbolsSnapshot() const override;
     
     // Snapshot Accessor
     const LiveOrderBook& getLiveOrderBook(const std::string& symbol);
@@ -35,7 +36,7 @@ public:
                            int& outGridWidth,
                            int& outGridHeight,
                            std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const;
-    int64_t exchangeNowMs() const;
+    int64_t exchangeNowMs() const override;
 
 public slots:
     void onTrade(const Trade& trade);

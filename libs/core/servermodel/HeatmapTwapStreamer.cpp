@@ -1,5 +1,5 @@
 #include "HeatmapTwapStreamer.hpp"
-#include "ServerDataModel.hpp"
+#include "IHeatmapDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
 #include <QProcessEnvironment>
@@ -13,7 +13,7 @@ namespace {
 constexpr int64_t kMsPerSecond = 1000;
 }
 
-HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent)
+HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model, QObject* parent)
     : QObject(parent)
     , m_model(model) {
     m_timer.setTimerType(Qt::PreciseTimer);
