@@ -6,7 +6,6 @@ Sentinel — ConfigLoader
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <fstream>
-#include <cstdlib>
 #include <algorithm>
 #include <sstream>
 
@@ -69,14 +68,6 @@ std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
         out.erase(std::unique(out.begin(), out.end()), out.end());
     }
     return out;
-}
-
-void applyEnv(const char* key, const std::string& value) {
-#ifdef _WIN32
-    _putenv_s(key, value.c_str());
-#else
-    setenv(key, value.c_str(), 0);
-#endif
 }
 
 void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
@@ -148,29 +139,17 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
 
     if (serverNode && serverNode["mdc"]) {
         auto mdc = serverNode["mdc"];
-        if (mdc["host"]) {
-            applyEnv("SENTINEL_MDC_HOST", mdc["host"].as<std::string>());
-        } else if (serverNode["host"]) {
-            applyEnv("SENTINEL_MDC_HOST", serverNode["host"].as<std::string>());
-        }
-        if (mdc["port"]) {
-            applyEnv("SENTINEL_MDC_PORT", std::to_string(mdc["port"].as<int>()));
-        } else if (serverNode["port"]) {
-            applyEnv("SENTINEL_MDC_PORT", std::to_string(serverNode["port"].as<int>()));
-        }
-        if (mdc["ssl_ca_bundle"]) {
-            applyEnv("SENTINEL_SSL_CA_BUNDLE", mdc["ssl_ca_bundle"].as<std::string>());
-        }
+        readScalar(mdc, "host", cfg.mdc.host);
+        readScalar(mdc, "port", cfg.mdc.port);
+        readScalar(mdc, "target", cfg.mdc.target);
+        readScalar(mdc, "use_jwt", cfg.mdc.useJwt);
+        readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
     } else if (serverNode) {
-        if (serverNode["host"]) {
-            applyEnv("SENTINEL_MDC_HOST", serverNode["host"].as<std::string>());
-        }
-        if (serverNode["port"]) {
-            applyEnv("SENTINEL_MDC_PORT", std::to_string(serverNode["port"].as<int>()));
-        }
-        if (serverNode["ssl_ca_bundle"]) {
-            applyEnv("SENTINEL_SSL_CA_BUNDLE", serverNode["ssl_ca_bundle"].as<std::string>());
-        }
+        readScalar(serverNode, "host", cfg.mdc.host);
+        readScalar(serverNode, "port", cfg.mdc.port);
+        readScalar(serverNode, "target", cfg.mdc.target);
+        readScalar(serverNode, "use_jwt", cfg.mdc.useJwt);
+        readScalar(serverNode, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
     }
 }
 
@@ -257,19 +236,6 @@ bool ConfigLoader::loadClientConfig(const std::string& configPath, ClientConfig*
     }
 }
 
-bool ConfigLoader::loadAndSetEnv(const std::string& configPath) {
-    return loadServerConfig(configPath, nullptr);
-}
-
-bool ConfigLoader::loadUserOverrides(const std::string& configPath) {
-    return loadServerConfig(configPath, nullptr);
-}
-
 std::vector<std::string> ConfigLoader::getLoadedFiles() {
     return s_loadedFiles;
-}
-
-void ConfigLoader::setEnvFromYaml(const std::string& filePath) {
-    ServerConfig cfg;
-    parseServerConfig(filePath, cfg);
 }

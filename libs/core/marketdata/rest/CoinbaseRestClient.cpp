@@ -8,7 +8,6 @@
 #include <boost/asio/ssl/stream.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <filesystem>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -74,39 +73,22 @@ bool parseInt64(const nlohmann::json& v, int64_t& out) {
     return false;
 }
 
-std::optional<std::string> resolveCaBundlePath() {
-    if (const char* envPath = std::getenv("SENTINEL_CA_BUNDLE")) {
-        if (envPath[0] != '\0') {
-            return std::string(envPath);
-        }
+std::string resolveCaBundlePath(const std::string& configuredPath) {
+    if (!configuredPath.empty()) {
+        return configuredPath;
     }
-    if (const char* envPath = std::getenv("SENTINEL_SSL_CA_BUNDLE")) {
-        if (envPath[0] != '\0') {
-            return std::string(envPath);
-        }
-    }
-
-    const std::filesystem::path candidates[] = {
-        std::filesystem::path("resources") / "certs" / "ca-bundle.crt",
-        std::filesystem::path("..") / "resources" / "certs" / "ca-bundle.crt",
-        std::filesystem::path("..") / ".." / "resources" / "certs" / "ca-bundle.crt"
-    };
-
-    for (const auto& path : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(path, ec)) {
-            return path.string();
-        }
-    }
-
-    return std::nullopt;
+    return "resources/certs/ca-bundle.crt";
 }
 }
 
-CoinbaseRestClient::CoinbaseRestClient(Authenticator& auth, std::string host, std::string port)
+CoinbaseRestClient::CoinbaseRestClient(Authenticator& auth,
+                                       std::string host,
+                                       std::string port,
+                                       std::string sslCaBundle)
     : m_auth(auth)
     , m_host(std::move(host))
-    , m_port(std::move(port)) {
+    , m_port(std::move(port))
+    , m_sslCaBundle(std::move(sslCaBundle)) {
 }
 
 CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& productId,
@@ -136,12 +118,11 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         net::io_context ioc;
         ssl::context ctx{ssl::context::tlsv12_client};
         ctx.set_default_verify_paths();
-        if (auto caPath = resolveCaBundlePath()) {
-            beast::error_code ec;
-            ctx.load_verify_file(*caPath, ec);
-            if (ec) {
-                sLog_Warning("REST TLS: Failed to load CA bundle [" << *caPath << "]: " << ec.message());
-            }
+        const std::string caPath = resolveCaBundlePath(m_sslCaBundle);
+        beast::error_code ec;
+        ctx.load_verify_file(caPath, ec);
+        if (ec) {
+            sLog_Warning("REST TLS: Failed to load CA bundle [" << caPath << "]: " << ec.message());
         }
 
         tcp::resolver resolver{ioc};

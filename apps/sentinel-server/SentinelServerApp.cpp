@@ -82,7 +82,7 @@ bool SentinelServerApp::initialize() {
         
         // 2. Market Data Core
         try {
-            m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator);
+            m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, m_serverConfig.mdc);
         } catch (const std::exception& e) {
             sLog_Error("MarketDataCoreEngine init failed: " << e.what());
             return false;

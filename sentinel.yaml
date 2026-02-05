@@ -38,8 +38,12 @@ heatmap:
 
 server:
   # Market data connection
-  host: advanced-trade-ws.coinbase.com
-  port: 443
+  mdc:
+    host: advanced-trade-ws.coinbase.com
+    port: 443
+    target: /v1
+    use_jwt: false
+    ssl_ca_bundle: resources/certs/ca-bundle.crt
 
   # Auto-subscribe symbols on startup for server, client still needs to subscribe manually
   default_symbols: BTC-USD
@@ -80,4 +84,9 @@ gui:
 #
 # server:
 #   health_port: 8090
-#   ssl_ca_bundle: /path/to/ca-bundle.crt
+#   mdc:
+#     host: advanced-trade-ws.coinbase.com
+#     port: 443
+#     target: /v1
+#     use_jwt: false
+#     ssl_ca_bundle: /path/to/ca-bundle.crt

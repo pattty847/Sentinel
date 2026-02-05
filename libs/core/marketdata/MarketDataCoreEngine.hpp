@@ -20,6 +20,7 @@
 #include "ws/SubscriptionManager.hpp"
 #include "ws/BeastWsTransport.hpp"
 #include "model/TradeData.h"
+#include "../config/ConfigTypes.hpp"
 
 namespace net = boost::asio;
 namespace ssl = net::ssl;
@@ -38,7 +39,7 @@ public:
     using ErrorCb = std::function<void(const std::string&)>;
     using LatencyCb = std::function<void(int)>;
 
-    explicit MarketDataCoreEngine(Authenticator& auth);
+    explicit MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config);
 
     ~MarketDataCoreEngine();
     void start();
@@ -91,10 +92,11 @@ private:
     void emitConnectionStatus(bool connected);
 
     void replaySubscriptionsOnConnect();
-    std::string                     m_host   = "advanced-trade-ws.coinbase.com";
-    std::string                     m_port   = "443";
-    std::string                     m_target = "/v1";
+    std::string                     m_host;
+    std::string                     m_port;
+    std::string                     m_target;
     bool                            m_useJwt = false;
+    std::string                     m_sslCaBundle;
     std::vector<std::string>        m_products;
 
     Authenticator&                  m_auth;

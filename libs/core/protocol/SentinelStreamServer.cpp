@@ -707,7 +707,10 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
                                            QObject* parent)
     : QObject(parent)
     , m_model(model)
-    , m_restClient(std::make_unique<CoinbaseRestClient>(auth))
+    , m_restClient(std::make_unique<CoinbaseRestClient>(auth,
+                                                        "api.coinbase.com",
+                                                        "443",
+                                                        config.mdc.sslCaBundle))
     , m_serverConfig(config)
     , m_port(port)
 {

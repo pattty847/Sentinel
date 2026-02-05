@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <random>
 #include <utility>
-#include <cstdlib>
 #include <string>
 
 namespace {
@@ -20,52 +19,22 @@ namespace {
     static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
 }
 
-MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth)
+MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config)
     : m_auth(auth)
+    , m_host(config.host)
+    , m_port(config.port)
+    , m_target(config.target)
+    , m_useJwt(config.useJwt)
+    , m_sslCaBundle(config.sslCaBundle)
 {
-    if (const char* host = std::getenv("SENTINEL_MDC_HOST")) {
-        if (*host) {
-            m_host = host;
-        }
-    }
-    if (const char* port = std::getenv("SENTINEL_MDC_PORT")) {
-        if (*port) {
-            m_port = port;
-        }
-    }
-    if (const char* target = std::getenv("SENTINEL_MDC_TARGET")) {
-        if (*target) {
-            m_target = target;
-        }
-    }
-    if (const char* useJwt = std::getenv("SENTINEL_MDC_USE_JWT")) {
-        if (*useJwt) {
-            m_useJwt = (std::string_view(useJwt) == "1");
-        }
-    }
-
-    // Windows/OpenSSL: prefer SENTINEL_SSL_CA_BUNDLE; default_verify_paths can miss system store.
-    if (const char* caBundle = std::getenv("SENTINEL_SSL_CA_BUNDLE")) {
-        if (*caBundle) {
-            sLog_Data(std::string("Using custom CA bundle from SENTINEL_SSL_CA_BUNDLE: ") + caBundle);
-            try {
-                m_sslCtx.load_verify_file(caBundle);
-            } catch (const std::exception& e) {
-                sLog_Error(std::string("Failed to load CA bundle from ") + caBundle + ": " + e.what());
-                m_sslCtx.set_default_verify_paths();
-            }
-        } else {
-            m_sslCtx.set_default_verify_paths();
-        }
-    } else {
-        const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
-        try {
-            sLog_Data(std::string("Using default CA bundle: ") + defaultCaBundle);
-            m_sslCtx.load_verify_file(defaultCaBundle);
-        } catch (const std::exception& e) {
-            sLog_Error(std::string("Failed to load default CA bundle from ") + defaultCaBundle + ": " + e.what());
-            m_sslCtx.set_default_verify_paths();
-        }
+    const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
+    const std::string bundlePath = !m_sslCaBundle.empty() ? m_sslCaBundle : defaultCaBundle;
+    try {
+        sLog_Data(std::string("Using CA bundle: ") + bundlePath);
+        m_sslCtx.load_verify_file(bundlePath);
+    } catch (const std::exception& e) {
+        sLog_Error(std::string("Failed to load CA bundle from ") + bundlePath + ": " + e.what());
+        m_sslCtx.set_default_verify_paths();
     }
     m_sslCtx.set_verify_mode(ssl::verify_peer);
     

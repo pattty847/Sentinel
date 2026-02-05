@@ -1,8 +1,7 @@
 # Sentinel Configuration Template
 # Copy this file to sentinel.yaml and customize your settings.
 # User-specific overrides go in .sentinel.yaml (not tracked in git).
-# CLI environment variables override these values.
-# See docs/ENV_VARS.md for complete list of available settings.
+# See docs/ENV_VARS.md for legacy environment settings.
 
 # =============================================================================
 # Heatmap Settings (Server + Client)
@@ -21,7 +20,7 @@ heatmap:
 
   # Band percentages for dynamic tick sizing (server)
   band_fast: 0.15   # Fast timeframes (< 1 minute)
-  band_med: 0.25    # Medium timeframes (1-60 minutes)
+  band_medium: 0.25  # Medium timeframes (1-60 minutes)
   band_slow: 0.35   # Slow timeframes (> 1 hour)
 
   # Intensity normalization (server)
@@ -31,6 +30,7 @@ heatmap:
   intensity_power: 0.4       # Exponent (power mode only)
   intensity_max_mode: running  # Options: running, column
   intensity_max_decay: 0.995   # Running max decay factor (0, 1]
+  debug_slice_log: false     # Log per-slice stats
 
   # Visual settings (client)
   gamma: 1.05       # Gamma correction
@@ -46,21 +46,18 @@ heatmap:
 # =============================================================================
 server:
   # Market data WebSocket connection (Coinbase Advanced Trade)
-  host: advanced-trade-ws.coinbase.com
-  port: 443
-  target: /v1
+  mdc:
+    host: advanced-trade-ws.coinbase.com
+    port: 443
+    target: /v1
+    use_jwt: false
+    ssl_ca_bundle: resources/certs/ca-bundle.crt
 
   # Auto-subscribe symbols on server startup (comma/space-separated)
   default_symbols: BTC-USD
 
   # Health check endpoint
   health_port: 8090
-
-  # JWT authentication for market data subscriptions
-  use_jwt: 0  # Set to 1 to enable (requires key.json)
-
-  # SSL verification (optional)
-  # ssl_ca_bundle: /path/to/ca-bundle.crt
 
 # =============================================================================
 # GUI Settings (Client)

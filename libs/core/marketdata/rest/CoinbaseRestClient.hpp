@@ -15,7 +15,8 @@ class CoinbaseRestClient {
 public:
     explicit CoinbaseRestClient(Authenticator& auth,
                                 std::string host = "api.coinbase.com",
-                                std::string port = "443");
+                                std::string port = "443",
+                                std::string sslCaBundle = {});
 
     CandleFetchResult fetchProductCandles(const std::string& productId,
                                           int64_t startSec,
@@ -29,4 +30,5 @@ private:
     Authenticator& m_auth;
     std::string m_host;
     std::string m_port;
+    std::string m_sslCaBundle;
 };

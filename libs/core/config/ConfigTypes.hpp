@@ -41,10 +41,19 @@ struct ServerCandleGateConfig {
     double tickSize = 0.0;
 };
 
+struct ServerMdcConfig {
+    std::string host = "advanced-trade-ws.coinbase.com";
+    std::string port = "443";
+    std::string target = "/v1";
+    bool useJwt = false;
+    std::string sslCaBundle;
+};
+
 struct ServerConfig {
     ServerHeatmapConfig heatmap;
     ServerOrderBookConfig orderbook;
     ServerCandleGateConfig candles;
+    ServerMdcConfig mdc;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };
 
