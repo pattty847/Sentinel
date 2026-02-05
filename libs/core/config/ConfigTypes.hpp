@@ -15,6 +15,12 @@ struct ServerHeatmapConfig {
     double bandFast = 0.15;
     double bandMedium = 0.25;
     double bandSlow = 0.35;
+    std::string intensityMode{"log"};
+    std::string intensityMaxMode{"running"};
+    double intensityMaxDecay = 0.995;
+    double intensityLogScale = 1000.0;
+    double intensityPower = 0.4;
+    double intensityFloor = 0.001;
 };
 
 struct ServerOrderBookConfig {

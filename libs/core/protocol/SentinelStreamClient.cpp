@@ -244,6 +244,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 cfg.heatmap.bandFast = hm.value("band_fast", cfg.heatmap.bandFast);
                 cfg.heatmap.bandMedium = hm.value("band_medium", cfg.heatmap.bandMedium);
                 cfg.heatmap.bandSlow = hm.value("band_slow", cfg.heatmap.bandSlow);
+                cfg.heatmap.intensityMode = hm.value("intensity_mode", cfg.heatmap.intensityMode);
+                cfg.heatmap.intensityMaxMode = hm.value("intensity_max_mode", cfg.heatmap.intensityMaxMode);
+                cfg.heatmap.intensityMaxDecay = hm.value("intensity_max_decay", cfg.heatmap.intensityMaxDecay);
+                cfg.heatmap.intensityLogScale = hm.value("intensity_log_scale", cfg.heatmap.intensityLogScale);
+                cfg.heatmap.intensityPower = hm.value("intensity_power", cfg.heatmap.intensityPower);
+                cfg.heatmap.intensityFloor = hm.value("intensity_floor", cfg.heatmap.intensityFloor);
                 cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
             }
             if (msg.contains("orderbook") && msg["orderbook"].is_object()) {

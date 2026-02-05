@@ -100,6 +100,12 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         readScalar(heatmapNode, "band_fast", cfg.heatmap.bandFast);
         readScalar(heatmapNode, "band_medium", cfg.heatmap.bandMedium);
         readScalar(heatmapNode, "band_slow", cfg.heatmap.bandSlow);
+        readScalar(heatmapNode, "intensity_mode", cfg.heatmap.intensityMode);
+        readScalar(heatmapNode, "intensity_max_mode", cfg.heatmap.intensityMaxMode);
+        readScalar(heatmapNode, "intensity_max_decay", cfg.heatmap.intensityMaxDecay);
+        readScalar(heatmapNode, "intensity_log_scale", cfg.heatmap.intensityLogScale);
+        readScalar(heatmapNode, "intensity_power", cfg.heatmap.intensityPower);
+        readScalar(heatmapNode, "intensity_floor", cfg.heatmap.intensityFloor);
         if (heatmapNode["timeframes"]) {
             auto parsed = parseTimeframes(heatmapNode["timeframes"]);
             if (!parsed.empty()) {

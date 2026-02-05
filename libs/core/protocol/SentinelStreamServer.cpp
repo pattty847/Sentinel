@@ -41,7 +41,13 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
         {"recenter_delta", cfg.heatmap.recenterDelta},
         {"band_fast", cfg.heatmap.bandFast},
         {"band_medium", cfg.heatmap.bandMedium},
-        {"band_slow", cfg.heatmap.bandSlow}
+        {"band_slow", cfg.heatmap.bandSlow},
+        {"intensity_mode", cfg.heatmap.intensityMode},
+        {"intensity_max_mode", cfg.heatmap.intensityMaxMode},
+        {"intensity_max_decay", cfg.heatmap.intensityMaxDecay},
+        {"intensity_log_scale", cfg.heatmap.intensityLogScale},
+        {"intensity_power", cfg.heatmap.intensityPower},
+        {"intensity_floor", cfg.heatmap.intensityFloor}
     };
     if (cfg.heatmap.activeTimeframeMs > 0) {
         payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;

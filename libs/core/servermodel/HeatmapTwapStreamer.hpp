@@ -44,6 +44,17 @@ signals:
     void heatmapSliceReady(const HeatmapSlice& slice);
 
 private:
+    enum class NormalizeMode { Linear, Log, Power };
+
+    struct IntensityConfig {
+        NormalizeMode mode = NormalizeMode::Log;
+        bool useRunningMax = true;
+        double runningMaxDecay = 0.995;
+        double logScale = 1000.0;
+        double powerExp = 0.4;
+        double intensityFloor = 0.001;
+    };
+
     struct HistoryRing {
         int capacity = 0;
         int writeIndex = 0;
@@ -109,9 +120,11 @@ private:
     static int64_t alignBucketStart(int64_t nowMs, int64_t timeframeMs);
     double bandForTimeframe(int64_t timeframeMs) const;
     void applyBandRange(SymbolState& state, double midPrice, int64_t timeframeMs);
+    IntensityConfig parseIntensityConfig() const;
 
     IHeatmapDataSource& m_model;
     ServerHeatmapConfig m_config;
+    IntensityConfig m_intensity;
     QTimer m_timer;
     int m_sampleMs = 50;
 
