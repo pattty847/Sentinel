@@ -28,22 +28,7 @@ public:
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
-    void onHeatmapSliceReceived(const QString& symbol,
-                                int64_t bucketStartMs,
-                                int64_t bucketEndMs,
-                                int64_t timeframeMs,
-                                int gridWidth,
-                                int gridHeight,
-                                double minPrice,
-                                double maxPrice,
-                                double tickSize,
-                                double midPrice,
-                                double lastTrade,
-                                const QString& format,
-                                const QByteArray& column,
-                                const QByteArray& liquidityColumn,
-                                double liquidityScale,
-                                bool reset);
+    void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
                                   int gridWidth,

@@ -1,4 +1,5 @@
 #include "SentinelStreamServer.hpp"
+#include "HeatmapSlice.hpp"
 #include "SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
@@ -217,25 +218,8 @@ public:
             });
 
         heatmapConn_ = QObject::connect(&model_, &ServerDataModel::heatmapSliceReady,
-            [self](const QString& symbol,
-                   int64_t bucketStartMs,
-                   int64_t bucketEndMs,
-                   int64_t timeframeMs,
-                   int gridWidth,
-                   int gridHeight,
-                   double minPrice,
-                   double maxPrice,
-                   double tickSize,
-                   double midPrice,
-                   double lastTrade,
-                   const QByteArray& column,
-                   const QByteArray& liquidityColumn,
-                   double liquidityScale,
-                   bool reset) {
-                self->on_heatmap_slice(symbol, bucketStartMs, bucketEndMs, timeframeMs,
-                                       gridWidth, gridHeight,
-                                       minPrice, maxPrice, tickSize, midPrice, lastTrade,
-                                       column, liquidityColumn, liquidityScale, reset);
+            [self](const HeatmapSlice& slice) {
+                self->on_heatmap_slice(slice);
             });
 
         barUpdatedConn_ = QObject::connect(&model_, &ServerDataModel::barUpdated,
@@ -548,46 +532,32 @@ public:
         do_write(j.dump());
     }
 
-    void on_heatmap_slice(const QString& symbol,
-                          int64_t bucketStartMs,
-                          int64_t bucketEndMs,
-                          int64_t timeframeMs,
-                          int gridWidth,
-                          int gridHeight,
-                          double minPrice,
-                          double maxPrice,
-                          double tickSize,
-                          double midPrice,
-                          double lastTrade,
-                          const QByteArray& column,
-                          const QByteArray& liquidityColumn,
-                          double liquidityScale,
-                          bool reset) {
-        const std::string sym = symbol.toStdString();
+    void on_heatmap_slice(const HeatmapSlice& slice) {
+        const std::string sym = slice.symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
         nlohmann::json j;
         j["type"] = "heatmap_slice";
         j["symbol"] = sym;
-        j["time_start"] = bucketStartMs;
-        j["time_end"] = bucketEndMs;
-        j["timeframe_ms"] = timeframeMs;
-        j["grid_width"] = gridWidth;
-        j["grid_height"] = gridHeight;
-        j["min_price"] = minPrice;
-        j["max_price"] = maxPrice;
-        j["tick_size"] = tickSize;
-        j["mid_price"] = midPrice;
-        j["last_trade"] = lastTrade;
-        j["reset"] = reset;
-        j["format"] = "u16";
+        j["time_start"] = slice.bucketStartMs;
+        j["time_end"] = slice.bucketEndMs;
+        j["timeframe_ms"] = slice.timeframeMs;
+        j["grid_width"] = slice.gridWidth;
+        j["grid_height"] = slice.gridHeight;
+        j["min_price"] = slice.minPrice;
+        j["max_price"] = slice.maxPrice;
+        j["tick_size"] = slice.tickSize;
+        j["mid_price"] = slice.midPrice;
+        j["last_trade"] = slice.lastTrade;
+        j["reset"] = slice.reset;
+        j["format"] = slice.format.toStdString();
         j["encoding"] = "base64";
-        j["column"] = column.toBase64().toStdString();
-        if (!liquidityColumn.isEmpty()) {
+        j["column"] = slice.column.toBase64().toStdString();
+        if (!slice.liquidityColumn.isEmpty()) {
             j["liquidity_format"] = "u16";
             j["liquidity_encoding"] = "base64";
-            j["liquidity_scale"] = liquidityScale;
-            j["liquidity_column"] = liquidityColumn.toBase64().toStdString();
+            j["liquidity_scale"] = slice.liquidityScale;
+            j["liquidity_column"] = slice.liquidityColumn.toBase64().toStdString();
         }
 
         do_write(j.dump());

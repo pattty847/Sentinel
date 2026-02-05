@@ -13,6 +13,7 @@
 #include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
 #include "../marketdata/model/TradeData.h"
+#include "../protocol/HeatmapSlice.hpp"
 
 class ServerDataModel : public QObject {
     Q_OBJECT
@@ -52,21 +53,7 @@ signals:
     void barClosed(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
 
-    void heatmapSliceReady(const QString& symbol,
-                           int64_t bucketStartMs,
-                           int64_t bucketEndMs,
-                           int64_t timeframeMs,
-                           int gridWidth,
-                           int gridHeight,
-                           double minPrice,
-                           double maxPrice,
-                           double tickSize,
-                           double midPrice,
-                           double lastTrade,
-                           const QByteArray& column,
-                           const QByteArray& liquidityColumn,
-                           double liquidityScale,
-                           bool reset);
+    void heatmapSliceReady(const HeatmapSlice& slice);
 
 private:
     void updateExchangeOffsetMs(int64_t exchangeMs);

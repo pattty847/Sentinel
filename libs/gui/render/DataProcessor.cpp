@@ -47,56 +47,41 @@ void DataProcessor::clearData() {
     m_heatmapCache.clear();
 }
 
-void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
-                                           int64_t bucketStartMs,
-                                           int64_t bucketEndMs,
-                                           int64_t timeframeMs,
-                                           int gridWidth,
-                                           int gridHeight,
-                                           double minPrice,
-                                           double maxPrice,
-                                           double tickSize,
-                                           double midPrice,
-                                           double lastTrade,
-                                           const QString& format,
-                                           const QByteArray& column,
-                                           const QByteArray& liquidityColumn,
-                                           double liquidityScale,
-                                           bool reset) {
-    Q_UNUSED(symbol);
-    Q_UNUSED(midPrice);
-    Q_UNUSED(lastTrade);
-    const int resolvedWidth = (gridWidth > 0) ? gridWidth : m_heatmapGridWidth;
+void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
+    Q_UNUSED(slice.symbol);
+    Q_UNUSED(slice.midPrice);
+    Q_UNUSED(slice.lastTrade);
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
 
     if (m_shuttingDown.load()) {
         return;
     }
 
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
-        sLog_Render("HEATMAP SLICE RX: tf=" << timeframeMs
-                    << " rows=" << column.size()
-                    << " grid=" << resolvedWidth << "x" << gridHeight
-                    << " reset=" << reset
-                    << " format=" << format
+        sLog_Render("HEATMAP SLICE RX: tf=" << slice.timeframeMs
+                    << " rows=" << slice.column.size()
+                    << " grid=" << resolvedWidth << "x" << slice.gridHeight
+                    << " reset=" << slice.reset
+                    << " format=" << slice.format
                     << " current=" << m_currentTimeframe_ms
                     << " manual=" << m_manualTimeframeSet);
     }
 
-    if (m_forcedTimeframeMs > 0 && timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
+    if (m_forcedTimeframeMs > 0 && slice.timeframeMs > 0 && slice.timeframeMs != m_forcedTimeframeMs) {
         return;
     }
 
-    if (timeframeMs > 0 && m_currentTimeframe_ms != timeframeMs) {
-        m_currentTimeframe_ms = timeframeMs;
+    if (slice.timeframeMs > 0 && m_currentTimeframe_ms != slice.timeframeMs) {
+        m_currentTimeframe_ms = slice.timeframeMs;
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.restart();
     }
 
-    if (column.isEmpty()) {
+    if (slice.column.isEmpty()) {
         return;
     }
 
-    const QString fmt = format.trimmed().toLower();
+    const QString fmt = slice.format.trimmed().toLower();
     int bytesPerCell = 1;
     if (fmt == QStringLiteral("u8") || fmt == QStringLiteral("r8")) {
         bytesPerCell = 1;
@@ -113,27 +98,27 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
     const int64_t lastSliceStart = m_heatmapLastSliceStart;
     bool forceReset = false;
 
-    if (bytesPerCell <= 0 || (column.size() % bytesPerCell) != 0) {
+    if (bytesPerCell <= 0 || (slice.column.size() % bytesPerCell) != 0) {
         return;
     }
-    height = (gridHeight > 0) ? gridHeight : (column.size() / bytesPerCell);
+    height = (slice.gridHeight > 0) ? slice.gridHeight : (slice.column.size() / bytesPerCell);
     if (height <= 0) {
         return;
     }
-    if (column.size() / bytesPerCell != height) {
+    if (slice.column.size() / bytesPerCell != height) {
         return;
     }
-    expanded = column;
+    expanded = slice.column;
 
     m_heatmapGridWidth = resolvedWidth;
     m_heatmapGridHeight = height;
-    const double effectiveTick = tickSize;
+    const double effectiveTick = slice.tickSize;
     if (lastSliceStart != std::numeric_limits<int64_t>::min()) {
-        if (bucketStartMs <= lastSliceStart) {
+        if (slice.bucketStartMs <= lastSliceStart) {
             forceReset = true;
-        } else if (timeframeMs > 0 && resolvedWidth > 0) {
-            const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * timeframeMs;
-            if (maxGapMs > 0 && (bucketStartMs - lastSliceStart) > maxGapMs) {
+        } else if (slice.timeframeMs > 0 && resolvedWidth > 0) {
+            const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * slice.timeframeMs;
+            if (maxGapMs > 0 && (slice.bucketStartMs - lastSliceStart) > maxGapMs) {
                 forceReset = true;
             }
         }
@@ -144,32 +129,32 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
         m_heatmapHasLastColumn = false;
         m_heatmapCache.clear();
     }
-    const bool needsReset = reset || forceReset || !m_heatmapRangeValid ||
+    const bool needsReset = slice.reset || forceReset || !m_heatmapRangeValid ||
                             (prevHeight != height || prevWidth != m_heatmapGridWidth);
 
     if (needsReset) {
-        emit heatmapRangeReset(minPrice, maxPrice, effectiveTick, m_heatmapGridWidth, height);
+        emit heatmapRangeReset(slice.minPrice, slice.maxPrice, effectiveTick, m_heatmapGridWidth, height);
     }
 
     m_heatmapRangeValid = true;
-    emit heatmapColumnReady(bucketStartMs,
-                            bucketEndMs,
-                            timeframeMs,
-                            minPrice,
-                            maxPrice,
+    emit heatmapColumnReady(slice.bucketStartMs,
+                            slice.bucketEndMs,
+                            slice.timeframeMs,
+                            slice.minPrice,
+                            slice.maxPrice,
                             effectiveTick,
                             expanded,
-                            liquidityColumn,
-                            liquidityScale,
+                            slice.liquidityColumn,
+                            slice.liquidityScale,
                             bytesPerCell);
 
     HeatmapGridKey key;
-    key.symbol = symbol.toStdString();
+    key.symbol = slice.symbol.toStdString();
     key.gridWidth = m_heatmapGridWidth;
     key.gridHeight = m_heatmapGridHeight;
-    key.timeframeMs = timeframeMs;
-    key.minPrice = minPrice;
-    key.maxPrice = maxPrice;
+    key.timeframeMs = slice.timeframeMs;
+    key.minPrice = slice.minPrice;
+    key.maxPrice = slice.maxPrice;
     key.tickSize = effectiveTick;
 
     auto& cache = m_heatmapCache[key];
@@ -178,16 +163,16 @@ void DataProcessor::onHeatmapSliceReceived(const QString& symbol,
         cache.reset(capacity);
     }
     IGridDataSource::HeatmapHistoryColumn entry;
-    entry.bucketStartMs = bucketStartMs;
-    entry.bucketEndMs = bucketEndMs;
-    entry.minPrice = minPrice;
-    entry.maxPrice = maxPrice;
+    entry.bucketStartMs = slice.bucketStartMs;
+    entry.bucketEndMs = slice.bucketEndMs;
+    entry.minPrice = slice.minPrice;
+    entry.maxPrice = slice.maxPrice;
     entry.tickSize = effectiveTick;
     entry.intensity = expanded;
-    entry.liquidity = liquidityColumn;
-    entry.liquidityScale = liquidityScale;
+    entry.liquidity = slice.liquidityColumn;
+    entry.liquidityScale = slice.liquidityScale;
     cache.push(std::move(entry));
-    m_heatmapLastSliceStart = bucketStartMs;
+    m_heatmapLastSliceStart = slice.bucketStartMs;
 }
 
 void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,

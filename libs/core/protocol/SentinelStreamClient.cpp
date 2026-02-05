@@ -15,6 +15,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
+    qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
     qRegisterMetaType<ServerConfig>("ServerConfig");
@@ -367,22 +368,24 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                  }
              }
 
-             emit heatmapSliceReceived(QString::fromStdString(symbol),
-                                       startMs,
-                                       endMs,
-                                       timeframeMs,
-                                       gridWidth,
-                                       gridHeight,
-                                       minPrice,
-                                       maxPrice,
-                                       tickSize,
-                                       midPrice,
-                                       lastTrade,
-                                       QString::fromStdString(format),
-                                       column,
-                                       liquidityColumn,
-                                       liquidityScale,
-                                       reset);
+             HeatmapSlice slice;
+             slice.symbol = QString::fromStdString(symbol);
+             slice.bucketStartMs = startMs;
+             slice.bucketEndMs = endMs;
+             slice.timeframeMs = timeframeMs;
+             slice.gridWidth = gridWidth;
+             slice.gridHeight = gridHeight;
+             slice.minPrice = minPrice;
+             slice.maxPrice = maxPrice;
+             slice.tickSize = tickSize;
+             slice.midPrice = midPrice;
+             slice.lastTrade = lastTrade;
+             slice.format = QString::fromStdString(format);
+             slice.column = column;
+             slice.liquidityColumn = liquidityColumn;
+             slice.liquidityScale = liquidityScale;
+             slice.reset = reset;
+             emit heatmapSliceReceived(slice);
         } else if (type == "heatmap_history_chunk") {
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;

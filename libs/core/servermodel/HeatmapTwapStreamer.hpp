@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include "../protocol/HeatmapSlice.hpp"
 
 class ServerDataModel;
 
@@ -38,21 +39,7 @@ public:
                       std::vector<HistoryColumn>& out) const;
 
 signals:
-    void heatmapSliceReady(const QString& symbol,
-                           int64_t bucketStartMs,
-                           int64_t bucketEndMs,
-                           int64_t timeframeMs,
-                           int gridWidth,
-                           int gridHeight,
-                           double minPrice,
-                           double maxPrice,
-                           double tickSize,
-                           double midPrice,
-                           double lastTrade,
-                           const QByteArray& column,
-                           const QByteArray& liquidityColumn,
-                           double liquidityScale,
-                           bool reset);
+    void heatmapSliceReady(const HeatmapSlice& slice);
 
 private:
     struct HistoryRing {

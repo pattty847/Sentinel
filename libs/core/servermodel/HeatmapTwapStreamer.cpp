@@ -379,21 +379,24 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                  frame.bucketEndMs);
 
     if (m_activeTimeframeMs <= 0 || frame.timeframeMs == m_activeTimeframeMs) {
-        emit heatmapSliceReady(QString::fromStdString(symbol),
-                               frame.bucketStartMs,
-                               frame.bucketEndMs,
-                               frame.timeframeMs,
-                               m_defaultWidth,
-                               state.height,
-                               state.minPrice,
-                               state.maxPrice,
-                               state.tickSize,
-                               state.lastMidPrice,
-                               lastTrade,
-                               column,
-                               liquidityColumn,
-                               liquidityScale,
-                               reset);
+        HeatmapSlice slice;
+        slice.symbol = QString::fromStdString(symbol);
+        slice.bucketStartMs = frame.bucketStartMs;
+        slice.bucketEndMs = frame.bucketEndMs;
+        slice.timeframeMs = frame.timeframeMs;
+        slice.gridWidth = m_defaultWidth;
+        slice.gridHeight = state.height;
+        slice.minPrice = state.minPrice;
+        slice.maxPrice = state.maxPrice;
+        slice.tickSize = state.tickSize;
+        slice.midPrice = state.lastMidPrice;
+        slice.lastTrade = lastTrade;
+        slice.format = QStringLiteral("u16");
+        slice.column = column;
+        slice.liquidityColumn = liquidityColumn;
+        slice.liquidityScale = liquidityScale;
+        slice.reset = reset;
+        emit heatmapSliceReady(slice);
     }
 }
 

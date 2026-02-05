@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
+#include "../../core/protocol/HeatmapSlice.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -44,22 +45,7 @@ signals:
     void tradeReceived(const Trade& trade);
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void orderBookUpdated(std::shared_ptr<const OrderBook> book);
-    void heatmapSliceReceived(const QString& symbol,
-                              int64_t bucketStartMs,
-                              int64_t bucketEndMs,
-                              int64_t timeframeMs,
-                              int gridWidth,
-                              int gridHeight,
-                              double minPrice,
-                              double maxPrice,
-                              double tickSize,
-                              double midPrice,
-                              double lastTrade,
-                              const QString& format,
-                              const QByteArray& column,
-                              const QByteArray& liquidityColumn,
-                              double liquidityScale,
-                              bool reset);
+    void heatmapSliceReceived(const HeatmapSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,
