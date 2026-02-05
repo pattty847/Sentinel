@@ -1,7 +1,6 @@
 // Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "datasources/IGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
