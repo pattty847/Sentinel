@@ -93,7 +93,7 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 
 * Rebase feature onto dev frequently.
 * Don’t stack branches.
-* Commit as often as you want; clean history optional.
+* Commit groups of logical feats; clean history optional.
 
 If you can understand your commit messages tomorrow morning, they’re good.
 
