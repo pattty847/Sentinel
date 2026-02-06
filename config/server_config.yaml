@@ -1,12 +1,10 @@
 schema_version: 1
 timeframes_ms: [1000, 60000, 3600000, 86400000]
-stream_port: 8080
 heatmap:
-  grid_width: 2048
-  grid_height: 1024
-  tick_size: 1
+  grid_width: 5120
+  grid_height: 2048
+  tick_size: 0
   recenter_delta: 0.01
-  active_timeframe_ms: 1000
 orderbook:
   tick_size: 0.1
   band_pct: 0.3

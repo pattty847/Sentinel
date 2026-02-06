@@ -129,13 +129,7 @@ CLAUDE.md
 GEMINI.md
 
 # Documentation subdirectories (keep only base docs/)
-/docs/lessons/
-/docs/plans/
-/docs/refactors/
-/docs/TODO.md
-/docs/architecture/
-/docs/GUI_TESTING_FRAMEWORK.md
-/docs/plans
+/docs/private/
 
 data/
 /screenshots/
