@@ -41,6 +41,7 @@ Client-only:
 
 Server config (authoritative):
 ```yaml
+stream_port: 8080
 heatmap:
   timeframe: 1000
   grid_width: 2048

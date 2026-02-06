@@ -89,7 +89,7 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
     , m_serverConfig(config)
     , m_logger(std::make_unique<TickBinaryLogger>())
-    , m_aggregator(std::make_unique<TimeframeAggregator>())
+    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);

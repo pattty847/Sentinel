@@ -47,21 +47,6 @@ std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
                 out.push_back(tf);
             }
         }
-    } else if (node.IsScalar()) {
-        const std::string spec = node.as<std::string>();
-        std::string normalized = spec;
-        std::replace(normalized.begin(), normalized.end(), ',', ' ');
-        std::istringstream iss(normalized);
-        std::string token;
-        while (iss >> token) {
-            try {
-                const int64_t tf = std::stoll(token);
-                if (tf > 0) {
-                    out.push_back(tf);
-                }
-            } catch (...) {
-            }
-        }
     }
     if (!out.empty()) {
         std::sort(out.begin(), out.end());
@@ -73,6 +58,7 @@ std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
 void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     YAML::Node root = YAML::LoadFile(filePath);
     YAML::Node serverNode = root["server"];
+    YAML::Node serverRoot = serverNode ? serverNode : root;
     YAML::Node heatmapNode;
     if (serverNode && serverNode["heatmap"]) {
         heatmapNode = serverNode["heatmap"];
@@ -111,20 +97,21 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         }
     }
 
-    if (serverNode) {
-        if (serverNode["default_symbols"]) {
-            const auto symbols = parseSymbolList(serverNode["default_symbols"].as<std::string>());
+    if (serverRoot) {
+        readScalar(serverRoot, "stream_port", cfg.streamPort);
+        if (serverRoot["default_symbols"]) {
+            const auto symbols = parseSymbolList(serverRoot["default_symbols"].as<std::string>());
             if (!symbols.empty()) {
                 cfg.defaultSymbols = symbols;
             }
         }
-        if (serverNode["orderbook"]) {
-            auto ob = serverNode["orderbook"];
+        if (serverRoot["orderbook"]) {
+            auto ob = serverRoot["orderbook"];
             readScalar(ob, "tick_size", cfg.orderbook.tickSize);
             readScalar(ob, "band_pct", cfg.orderbook.bandPct);
         }
-        if (serverNode["candles"]) {
-            auto candles = serverNode["candles"];
+        if (serverRoot["candles"]) {
+            auto candles = serverRoot["candles"];
             readScalar(candles, "update_bps_fast", cfg.candles.bpsFast);
             readScalar(candles, "update_bps_slow", cfg.candles.bpsSlow);
             readScalar(candles, "update_tick_mult_fast", cfg.candles.tickMultFast);
@@ -137,19 +124,19 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         }
     }
 
-    if (serverNode && serverNode["mdc"]) {
-        auto mdc = serverNode["mdc"];
+    if (serverRoot && serverRoot["mdc"]) {
+        auto mdc = serverRoot["mdc"];
         readScalar(mdc, "host", cfg.mdc.host);
         readScalar(mdc, "port", cfg.mdc.port);
         readScalar(mdc, "target", cfg.mdc.target);
         readScalar(mdc, "use_jwt", cfg.mdc.useJwt);
         readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
-    } else if (serverNode) {
-        readScalar(serverNode, "host", cfg.mdc.host);
-        readScalar(serverNode, "port", cfg.mdc.port);
-        readScalar(serverNode, "target", cfg.mdc.target);
-        readScalar(serverNode, "use_jwt", cfg.mdc.useJwt);
-        readScalar(serverNode, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
+    } else if (serverRoot) {
+        readScalar(serverRoot, "host", cfg.mdc.host);
+        readScalar(serverRoot, "port", cfg.mdc.port);
+        readScalar(serverRoot, "target", cfg.mdc.target);
+        readScalar(serverRoot, "use_jwt", cfg.mdc.useJwt);
+        readScalar(serverRoot, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
     }
 }
 

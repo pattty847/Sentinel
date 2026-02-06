@@ -109,6 +109,7 @@ private:
     std::unique_ptr<GuiApiServer> m_guiApiServer;
     QPointer<class FontSettingsDialog> m_fontDialog;
     QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
+    QMetaObject::Connection m_candleViewportConn;
 
     bool m_firstShow = true;
 };

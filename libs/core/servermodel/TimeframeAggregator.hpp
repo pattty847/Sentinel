@@ -22,13 +22,15 @@ enum class Timeframe : int {
     OneSecond = 1,
     OneMinute = 60,
     FiveMinutes = 300,
-    OneHour = 3600
+    OneHour = 3600,
+    OneDay = 86400
 };
 
 class TimeframeAggregator : public QObject {
     Q_OBJECT
 public:
-    explicit TimeframeAggregator(QObject* parent = nullptr);
+    explicit TimeframeAggregator(const std::vector<int64_t>& timeframesMs = {},
+                                 QObject* parent = nullptr);
     
     void onTrade(const Trade& trade);
     void tick(int64_t nowMs);
@@ -47,6 +49,7 @@ private:
     
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, SymbolState> m_states;
+    std::vector<Timeframe> m_timeframes;
     
     void updateBar(SymbolState& state, const std::string& symbol, Timeframe tf, const Trade& trade, int64_t tradeTsMs);
     int64_t getBarStartTimestamp(int64_t tsMs, Timeframe tf);

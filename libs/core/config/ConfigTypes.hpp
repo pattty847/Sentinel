@@ -54,6 +54,7 @@ struct ServerConfig {
     ServerOrderBookConfig orderbook;
     ServerCandleGateConfig candles;
     ServerMdcConfig mdc;
+    uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };
 

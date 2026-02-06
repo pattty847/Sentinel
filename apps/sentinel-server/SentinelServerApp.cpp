@@ -98,13 +98,7 @@ bool SentinelServerApp::initialize() {
 
         // 4. Stream Server
         try {
-            quint16 streamPort = 8080;
-            const QByteArray streamEnv = qgetenv("SENTINEL_STREAM_PORT");
-            bool streamOk = false;
-            const int envStreamPort = streamEnv.toInt(&streamOk);
-            if (streamOk && envStreamPort > 0 && envStreamPort <= 65535) {
-                streamPort = static_cast<quint16>(envStreamPort);
-            }
+            quint16 streamPort = m_serverConfig.streamPort;
             m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, *m_authenticator, m_serverConfig, streamPort);
             m_server->start();
         } catch (const std::exception& e) {

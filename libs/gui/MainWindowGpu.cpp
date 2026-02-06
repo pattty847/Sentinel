@@ -407,11 +407,34 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
         }
     }
     if (viewEnd <= viewStart) {
-        QTimer::singleShot(250, this, [this, symbol]() {
-            if (m_connected) {
-                requestCandleHistoryForSymbol(symbol);
-            }
-        });
+        if (!m_qmlController) {
+            return;
+        }
+        auto* renderer = m_qmlController->getUnifiedGridRenderer();
+        if (!renderer) {
+            return;
+        }
+        if (!m_candleViewportConn) {
+            m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this, symbol]() {
+                if (!m_qmlController) {
+                    return;
+                }
+                auto* liveRenderer = m_qmlController->getUnifiedGridRenderer();
+                if (!liveRenderer) {
+                    return;
+                }
+                if (liveRenderer->getVisibleTimeEnd() <= liveRenderer->getVisibleTimeStart()) {
+                    return;
+                }
+                if (m_candleViewportConn) {
+                    disconnect(m_candleViewportConn);
+                    m_candleViewportConn = QMetaObject::Connection();
+                }
+                if (m_connected) {
+                    requestCandleHistoryForSymbol(symbol);
+                }
+            });
+        }
         return;
     }
     if (chartDebugEnabled()) {

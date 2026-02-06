@@ -1,17 +1,45 @@
 #include "TimeframeAggregator.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <optional>
 
-TimeframeAggregator::TimeframeAggregator(QObject* parent) : QObject(parent) {
+namespace {
+std::optional<Timeframe> timeframeFromMs(int64_t timeframeMs) {
+    switch (timeframeMs) {
+        case 1000: return Timeframe::OneSecond;
+        case 60000: return Timeframe::OneMinute;
+        case 300000: return Timeframe::FiveMinutes;
+        case 3600000: return Timeframe::OneHour;
+        case 86400000: return Timeframe::OneDay;
+        default: return std::nullopt;
+    }
+}
+}
+
+TimeframeAggregator::TimeframeAggregator(const std::vector<int64_t>& timeframesMs, QObject* parent)
+    : QObject(parent) {
+    if (!timeframesMs.empty()) {
+        for (const auto tfMs : timeframesMs) {
+            if (auto tf = timeframeFromMs(tfMs)) {
+                m_timeframes.push_back(*tf);
+            } else {
+                sLog_Warning("TimeframeAggregator: unsupported timeframe_ms=" << tfMs);
+            }
+        }
+    }
+    if (m_timeframes.empty()) {
+        m_timeframes = {Timeframe::OneSecond, Timeframe::OneMinute, Timeframe::FiveMinutes, Timeframe::OneHour};
+    }
+    std::sort(m_timeframes.begin(), m_timeframes.end(),
+              [](Timeframe a, Timeframe b) { return static_cast<int>(a) < static_cast<int>(b); });
+    m_timeframes.erase(std::unique(m_timeframes.begin(), m_timeframes.end()), m_timeframes.end());
 }
 
 void TimeframeAggregator::tick(int64_t nowMs) {
     std::unique_lock lock(m_mutex);
 
-    const Timeframe frames[] = { Timeframe::OneSecond, Timeframe::OneMinute, Timeframe::FiveMinutes, Timeframe::OneHour };
-
     for (auto& [symbol, state] : m_states) {
-        for (auto tf : frames) {
+        for (auto tf : m_timeframes) {
             const int64_t tfMs = static_cast<int64_t>(tf) * 1000;
             if (tfMs <= 0) {
                 continue;
@@ -105,9 +133,7 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
         
     SymbolState& state = m_states[trade.product_id];
     
-    const Timeframe frames[] = { Timeframe::OneSecond, Timeframe::OneMinute, Timeframe::FiveMinutes, Timeframe::OneHour };
-    
-    for (auto tf : frames) {
+    for (auto tf : m_timeframes) {
         updateBar(state, trade.product_id, tf, trade, tsMs);
     }
 }
