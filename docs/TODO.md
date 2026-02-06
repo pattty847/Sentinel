@@ -529,3 +529,26 @@ _(no entries yet)_
 - **2026-02-03** — Cleaned up 10 worst offenders: removed verbose section headers, Doxygen blocks, redundant file headers, and “what” comments. Kept minimal “why” comments for threading/invariants only. Files now follow AGENTS.md §3 standards.
 
 ---
+
+### F14: Agent Notes System (_agent)
+**Status:** done
+**Created:** 2026-02-06
+**Updated:** 2026-02-06
+
+#### Now
+_(empty)_
+
+#### Next
+_(empty)_
+
+#### Later
+_(empty)_
+
+#### Done
+- [x] Add `_agent/` folder with standardized notes files (2026-02-06)
+- [x] Seed invariants, failure modes, repo map, and decisions (2026-02-06)
+- [x] Document agent notes format in AGENTS.md (2026-02-06)
+- [x] Gitignore `_agent/` (2026-02-06)
+
+#### Session log
+- **2026-02-06** — Created `_agent` notes system and seeded initial content; documented format and rules in AGENTS.md.

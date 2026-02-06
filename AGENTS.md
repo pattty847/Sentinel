@@ -8,6 +8,52 @@ Build: cmake --build --preset windows-msvc-vs
 
 ---
 
+# **0. Agent Notes (Local Memory)**
+
+Path: `_agent/` (AI-only scratchpad; keep short and standardized).
+This folder is gitignored by default.
+
+**Rules**
+* Read `_agent/INVARIANTS.md` and `_agent/FAILURE_MODES.md` at session start.
+* Update notes at session end if a new invariant, guardrail, or decision was discovered.
+* Keep entries one line; no paragraphs; ASCII only.
+* Do not add new files unless explicitly requested.
+
+**Files + expected format**
+* File: `_agent/INVARIANTS.md` | Format: `- INV-### | <statement>`
+* File: `_agent/FAILURE_MODES.md` | Format: `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
+* File: `_agent/REPO_MAP.md` | Format: `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
+* File: `_agent/DECISIONS.md` | Format: `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
+
+---
+
+# **0a. Mandatory Agent Behaviors (Low-Ceremony)**
+
+**Invariant Check‑In (start of non‑trivial sessions)**
+* Read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`.
+* State which invariants this task relies on and which might be at risk.
+
+**Invariant Check‑Out (end of session)**
+* Did we discover a new invariant, failure mode, or decision? If yes, update `_agent/` before stopping.
+
+**Failure‑Mode‑First Debugging**
+* Assume the bug is a known failure mode until falsified.
+* Scan `_agent/FAILURE_MODES.md` before inventing new theories.
+
+**Decision Crystallization Trigger**
+* Log in `_agent/DECISIONS.md` when we choose X over Y, reject a tempting alternative, or freeze a previously flexible choice.
+
+**Performance Tripwire (hot paths)**
+* Before coding, state potential per‑frame costs: allocations, object creation, signal emissions, binding re‑evals.
+* If uncertain, treat it as a risk and reduce scope or add guardrails.
+
+**System Context (Sentinel)**
+* Goal: GPU‑first, deterministic, zero‑lag trading terminal (ExoCharts + TradingView + SierraCharts + Bookmap + TradingLite vibes).
+* Future: AI commentary (CopeNet), equity/crypto data (including free sources like yfinance), and richer overlays.
+* Constraint: do not derail for token usage; keep prompts and notes short and enforceable.
+
+---
+
 # **1. Mission**
 
 Sentinel is a GPU-accelerated trading terminal.

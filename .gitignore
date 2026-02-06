@@ -127,9 +127,11 @@ ENV/
 CLAUDE.md
 # AGENTS.md
 GEMINI.md
+_agent/
 
 # Documentation subdirectories (keep only base docs/)
 /docs/private/
+/docs/TODO.md
 
 data/
 /screenshots/
