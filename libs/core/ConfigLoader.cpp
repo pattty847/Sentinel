@@ -6,219 +6,223 @@ Sentinel — ConfigLoader
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <fstream>
-#include <cstdlib>
+#include <algorithm>
+#include <sstream>
 
 std::vector<std::string> ConfigLoader::s_loadedFiles;
 
-bool ConfigLoader::loadAndSetEnv(const std::string& configPath) {
+namespace {
+template <typename T>
+bool readScalar(const YAML::Node& node, const char* key, T& out) {
+    if (!node || !node[key]) {
+        return false;
+    }
+    out = node[key].as<T>();
+    return true;
+}
+
+std::vector<std::string> parseSymbolList(const std::string& spec) {
+    std::string normalized = spec;
+    std::replace(normalized.begin(), normalized.end(), ',', ' ');
+    std::istringstream iss(normalized);
+    std::vector<std::string> out;
+    std::string token;
+    while (iss >> token) {
+        if (!token.empty()) {
+            out.push_back(token);
+        }
+    }
+    return out;
+}
+
+std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
+    std::vector<int64_t> out;
+    if (!node) {
+        return out;
+    }
+    if (node.IsSequence()) {
+        for (const auto& item : node) {
+            const int64_t tf = item.as<int64_t>();
+            if (tf > 0) {
+                out.push_back(tf);
+            }
+        }
+    }
+    if (!out.empty()) {
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+    }
+    return out;
+}
+
+void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
+    YAML::Node root = YAML::LoadFile(filePath);
+    YAML::Node serverNode = root["server"];
+    YAML::Node serverRoot = serverNode ? serverNode : root;
+    YAML::Node heatmapNode;
+    if (serverNode && serverNode["heatmap"]) {
+        heatmapNode = serverNode["heatmap"];
+    } else {
+        heatmapNode = root["heatmap"];
+    }
+
+    if (heatmapNode) {
+        readScalar(heatmapNode, "grid_width", cfg.heatmap.gridWidth);
+        readScalar(heatmapNode, "grid_height", cfg.heatmap.gridHeight);
+        readScalar(heatmapNode, "tick_size", cfg.heatmap.tickSize);
+        readScalar(heatmapNode, "timeframe", cfg.heatmap.activeTimeframeMs);
+        if (!readScalar(heatmapNode, "recenter_delta", cfg.heatmap.recenterDelta)) {
+            readScalar(heatmapNode, "recenter", cfg.heatmap.recenterDelta);
+        }
+        readScalar(heatmapNode, "band_fast", cfg.heatmap.bandFast);
+        readScalar(heatmapNode, "band_medium", cfg.heatmap.bandMedium);
+        readScalar(heatmapNode, "band_slow", cfg.heatmap.bandSlow);
+        readScalar(heatmapNode, "intensity_mode", cfg.heatmap.intensityMode);
+        readScalar(heatmapNode, "intensity_max_mode", cfg.heatmap.intensityMaxMode);
+        readScalar(heatmapNode, "intensity_max_decay", cfg.heatmap.intensityMaxDecay);
+        readScalar(heatmapNode, "intensity_log_scale", cfg.heatmap.intensityLogScale);
+        readScalar(heatmapNode, "intensity_power", cfg.heatmap.intensityPower);
+        readScalar(heatmapNode, "intensity_floor", cfg.heatmap.intensityFloor);
+        readScalar(heatmapNode, "debug_slice_log", cfg.heatmap.debugSliceLog);
+        if (heatmapNode["timeframes"]) {
+            auto parsed = parseTimeframes(heatmapNode["timeframes"]);
+            if (!parsed.empty()) {
+                cfg.heatmap.timeframesMs = std::move(parsed);
+            }
+        } else if (heatmapNode["timeframes_ms"]) {
+            auto parsed = parseTimeframes(heatmapNode["timeframes_ms"]);
+            if (!parsed.empty()) {
+                cfg.heatmap.timeframesMs = std::move(parsed);
+            }
+        }
+    }
+
+    if (serverRoot) {
+        readScalar(serverRoot, "stream_port", cfg.streamPort);
+        if (serverRoot["default_symbols"]) {
+            const auto symbols = parseSymbolList(serverRoot["default_symbols"].as<std::string>());
+            if (!symbols.empty()) {
+                cfg.defaultSymbols = symbols;
+            }
+        }
+        if (serverRoot["orderbook"]) {
+            auto ob = serverRoot["orderbook"];
+            readScalar(ob, "tick_size", cfg.orderbook.tickSize);
+            readScalar(ob, "band_pct", cfg.orderbook.bandPct);
+        }
+        if (serverRoot["candles"]) {
+            auto candles = serverRoot["candles"];
+            readScalar(candles, "update_bps_fast", cfg.candles.bpsFast);
+            readScalar(candles, "update_bps_slow", cfg.candles.bpsSlow);
+            readScalar(candles, "update_tick_mult_fast", cfg.candles.tickMultFast);
+            readScalar(candles, "update_tick_mult_slow", cfg.candles.tickMultSlow);
+            readScalar(candles, "update_silence_ms_fast", cfg.candles.silenceMsFast);
+            readScalar(candles, "update_silence_ms_slow", cfg.candles.silenceMsSlow);
+            readScalar(candles, "update_volume_fast", cfg.candles.volumeFast);
+            readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
+            readScalar(candles, "update_tick_size", cfg.candles.tickSize);
+        }
+    }
+
+    if (serverRoot && serverRoot["mdc"]) {
+        auto mdc = serverRoot["mdc"];
+        readScalar(mdc, "host", cfg.mdc.host);
+        readScalar(mdc, "port", cfg.mdc.port);
+        readScalar(mdc, "target", cfg.mdc.target);
+        readScalar(mdc, "use_jwt", cfg.mdc.useJwt);
+        readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
+    } else if (serverRoot) {
+        readScalar(serverRoot, "host", cfg.mdc.host);
+        readScalar(serverRoot, "port", cfg.mdc.port);
+        readScalar(serverRoot, "target", cfg.mdc.target);
+        readScalar(serverRoot, "use_jwt", cfg.mdc.useJwt);
+        readScalar(serverRoot, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
+    }
+}
+
+void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
+    YAML::Node root = YAML::LoadFile(filePath);
+    YAML::Node clientNode = root["client"];
+    YAML::Node heatmapNode;
+    if (clientNode && clientNode["heatmap"]) {
+        heatmapNode = clientNode["heatmap"];
+    } else {
+        heatmapNode = root["heatmap"];
+    }
+
+    if (heatmapNode) {
+        readScalar(heatmapNode, "gamma", cfg.heatmap.gamma);
+        readScalar(heatmapNode, "contrast", cfg.heatmap.contrast);
+        readScalar(heatmapNode, "shader_floor", cfg.heatmap.shaderFloor);
+        readScalar(heatmapNode, "label_px", cfg.heatmap.labelPx);
+        readScalar(heatmapNode, "client_cache_columns", cfg.heatmap.clientCacheColumns);
+    }
+
+    YAML::Node guiNode;
+    if (clientNode && clientNode["gui"]) {
+        guiNode = clientNode["gui"];
+    } else {
+        guiNode = root["gui"];
+    }
+
+    if (guiNode) {
+        readScalar(guiNode, "api_port", cfg.gui.apiPort);
+        readScalar(guiNode, "screenshot_dir", cfg.gui.screenshotDir);
+        readScalar(guiNode, "msdf_font", cfg.gui.msdfFontPath);
+    }
+
+    if (clientNode && clientNode["server"]) {
+        auto server = clientNode["server"];
+        readScalar(server, "host", cfg.server.host);
+        readScalar(server, "port", cfg.server.port);
+    }
+}
+}
+
+bool ConfigLoader::loadServerConfig(const std::string& configPath, ServerConfig* outConfig) {
     std::ifstream file(configPath);
     if (!file.good()) {
         return false;
     }
 
     try {
-        setEnvFromYaml(configPath);
+        ServerConfig cfg;
+        if (outConfig) {
+            cfg = *outConfig;
+        }
+        parseServerConfig(configPath, cfg);
+        if (outConfig) {
+            *outConfig = cfg;
+        }
         s_loadedFiles.push_back(configPath);
-        std::cout << "Loaded config: " << configPath << std::endl;
+        std::cout << "Loaded server config: " << configPath << std::endl;
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "ERROR: Failed to load config " << configPath << ": " << e.what() << std::endl;
+        std::cerr << "ERROR: Failed to load server config " << configPath << ": " << e.what() << std::endl;
         return false;
     }
 }
 
-bool ConfigLoader::loadUserOverrides(const std::string& configPath) {
-    return loadAndSetEnv(configPath);
+bool ConfigLoader::loadClientConfig(const std::string& configPath, ClientConfig* outConfig) {
+    if (!outConfig) {
+        return false;
+    }
+    std::ifstream file(configPath);
+    if (!file.good()) {
+        return false;
+    }
+
+    try {
+        parseClientConfig(configPath, *outConfig);
+        s_loadedFiles.push_back(configPath);
+        std::cout << "Loaded client config: " << configPath << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: Failed to load client config " << configPath << ": " << e.what() << std::endl;
+        return false;
+    }
 }
 
 std::vector<std::string> ConfigLoader::getLoadedFiles() {
     return s_loadedFiles;
-}
-
-void ConfigLoader::setEnvFromYaml(const std::string& filePath) {
-    YAML::Node root = YAML::LoadFile(filePath);
-
-    // Process each top-level section
-    if (root["heatmap"]) {
-        auto hm = root["heatmap"];
-        if (hm["timeframe"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_TF", std::to_string(hm["timeframe"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_TF", std::to_string(hm["timeframe"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (hm["grid_width"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_GRID_WIDTH", std::to_string(hm["grid_width"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_GRID_WIDTH", std::to_string(hm["grid_width"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (hm["grid_height"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_GRID_HEIGHT", std::to_string(hm["grid_height"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_GRID_HEIGHT", std::to_string(hm["grid_height"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (hm["initial_viewport_pct"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_INITIAL_VIEWPORT_PCT", std::to_string(hm["initial_viewport_pct"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_INITIAL_VIEWPORT_PCT", std::to_string(hm["initial_viewport_pct"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (hm["initial_price_pct"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_INITIAL_PRICE_PCT", std::to_string(hm["initial_price_pct"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_INITIAL_PRICE_PCT", std::to_string(hm["initial_price_pct"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (hm["tick_size"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_TICK_SIZE", std::to_string(hm["tick_size"].as<double>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_TICK_SIZE", std::to_string(hm["tick_size"].as<double>()).c_str(), 0);
-#endif
-        }
-        if (hm["gamma"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_GAMMA", std::to_string(hm["gamma"].as<double>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_GAMMA", std::to_string(hm["gamma"].as<double>()).c_str(), 0);
-#endif
-        }
-        if (hm["contrast"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_CONTRAST", std::to_string(hm["contrast"].as<double>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_CONTRAST", std::to_string(hm["contrast"].as<double>()).c_str(), 0);
-#endif
-        }
-        if (hm["label_px"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_HEATMAP_LABEL_PX", std::to_string(hm["label_px"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_HEATMAP_LABEL_PX", std::to_string(hm["label_px"].as<int>()).c_str(), 0);
-#endif
-        }
-    }
-
-    if (root["server"]) {
-        auto srv = root["server"];
-        if (srv["host"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_MDC_HOST", srv["host"].as<std::string>().c_str());
-#else
-            setenv("SENTINEL_MDC_HOST", srv["host"].as<std::string>().c_str(), 0);
-#endif
-        }
-        if (srv["port"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_MDC_PORT", std::to_string(srv["port"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_MDC_PORT", std::to_string(srv["port"].as<int>()).c_str(), 0);
-#endif
-        }
-        if (srv["default_symbols"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_SERVER_DEFAULT_SYMBOLS", srv["default_symbols"].as<std::string>().c_str());
-#else
-            setenv("SENTINEL_SERVER_DEFAULT_SYMBOLS", srv["default_symbols"].as<std::string>().c_str(), 0);
-#endif
-        }
-        if (srv["ssl_ca_bundle"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_SSL_CA_BUNDLE", srv["ssl_ca_bundle"].as<std::string>().c_str());
-#else
-            setenv("SENTINEL_SSL_CA_BUNDLE", srv["ssl_ca_bundle"].as<std::string>().c_str(), 0);
-#endif
-        }
-        if (srv["candles"]) {
-            auto candles = srv["candles"];
-            if (candles["update_bps_fast"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_BPS_FAST", std::to_string(candles["update_bps_fast"].as<double>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_BPS_FAST", std::to_string(candles["update_bps_fast"].as<double>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_bps_slow"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_BPS_SLOW", std::to_string(candles["update_bps_slow"].as<double>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_BPS_SLOW", std::to_string(candles["update_bps_slow"].as<double>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_tick_mult_fast"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", std::to_string(candles["update_tick_mult_fast"].as<int>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", std::to_string(candles["update_tick_mult_fast"].as<int>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_tick_mult_slow"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", std::to_string(candles["update_tick_mult_slow"].as<int>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", std::to_string(candles["update_tick_mult_slow"].as<int>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_silence_ms_fast"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", std::to_string(candles["update_silence_ms_fast"].as<int>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", std::to_string(candles["update_silence_ms_fast"].as<int>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_silence_ms_slow"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", std::to_string(candles["update_silence_ms_slow"].as<int>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", std::to_string(candles["update_silence_ms_slow"].as<int>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_volume_fast"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", std::to_string(candles["update_volume_fast"].as<double>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", std::to_string(candles["update_volume_fast"].as<double>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_volume_slow"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", std::to_string(candles["update_volume_slow"].as<double>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", std::to_string(candles["update_volume_slow"].as<double>()).c_str(), 0);
-#endif
-            }
-            if (candles["update_tick_size"]) {
-#ifdef _WIN32
-                _putenv_s("SENTINEL_CANDLE_UPDATE_TICK_SIZE", std::to_string(candles["update_tick_size"].as<double>()).c_str());
-#else
-                setenv("SENTINEL_CANDLE_UPDATE_TICK_SIZE", std::to_string(candles["update_tick_size"].as<double>()).c_str(), 0);
-#endif
-            }
-        }
-    }
-
-    if (root["gui"]) {
-        auto gui = root["gui"];
-        if (gui["screenshot_dir"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_GUI_SCREENSHOT_DIR", gui["screenshot_dir"].as<std::string>().c_str());
-#else
-            setenv("SENTINEL_GUI_SCREENSHOT_DIR", gui["screenshot_dir"].as<std::string>().c_str(), 0);
-#endif
-        }
-        if (gui["api_port"]) {
-#ifdef _WIN32
-            _putenv_s("SENTINEL_GUI_API_PORT", std::to_string(gui["api_port"].as<int>()).c_str());
-#else
-            setenv("SENTINEL_GUI_API_PORT", std::to_string(gui["api_port"].as<int>()).c_str(), 0);
-#endif
-        }
-    }
 }

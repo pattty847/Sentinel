@@ -7,7 +7,6 @@
 AICommentaryFeedDock::AICommentaryFeedDock(QWidget* parent)
     : CommentaryFeedDock("AICommentaryFeedDock", "AI Commentary", parent)
 {
-    // Set AI-specific styling (purple/cyan scheme)
     m_messageDisplay->setStyleSheet(
         "QTextEdit { background-color: #1a1a1a; color: #ff00ff; font-family: monospace; }"
     );
@@ -33,10 +32,9 @@ void AICommentaryFeedDock::appendMessage(const QString& source, const QString& t
         formatted = QString("[%1] %2\n").arg(timestamp, text);
     }
     
-    m_messageDisplay->setTextColor(QColor(255, 0, 255));  // Magenta/Purple
+    m_messageDisplay->setTextColor(QColor(255, 0, 255));
     m_messageDisplay->append(formatted);
     
-    // Auto-scroll
     QScrollBar* scrollBar = m_messageDisplay->verticalScrollBar();
     scrollBar->setValue(scrollBar->maximum());
     

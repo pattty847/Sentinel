@@ -1,27 +1,13 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
-#include <QProcessEnvironment>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 
 namespace {
-double getOrderBookTickSize() {
-    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
-    bool ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok && envTick > 0.0) {
-        return envTick;
-    }
-    return 0.10;
-}
-
-double getOrderBookBandPct() {
-    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
-    bool ok = false;
-    const double envBand = bandEnv.toDouble(&ok);
-    if (ok && envBand > 0.0) {
-        return envBand;
-    }
-    return 0.30;
+int64_t localNowMs() {
+    const auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
@@ -76,13 +62,36 @@ std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bi
 }
 }
 
-ServerDataModel::ServerDataModel(QObject* parent) 
+int64_t ServerDataModel::exchangeNowMs() const {
+    const int64_t offset = m_exchangeOffsetMs.load(std::memory_order_relaxed);
+    if (offset == 0) {
+        return localNowMs();
+    }
+    return localNowMs() - offset;
+}
+
+void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
+    const int64_t nowMs = localNowMs();
+    const int64_t rawOffset = nowMs - exchangeMs;
+    if (std::llabs(rawOffset) > 10000) {
+        return;
+    }
+    const int64_t prev = m_exchangeOffsetMs.load(std::memory_order_relaxed);
+    if (prev == 0) {
+        m_exchangeOffsetMs.store(rawOffset, std::memory_order_relaxed);
+        return;
+    }
+    const int64_t smoothed = static_cast<int64_t>(prev * 0.9 + rawOffset * 0.1);
+    m_exchangeOffsetMs.store(smoothed, std::memory_order_relaxed);
+}
+
+ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
+    , m_serverConfig(config)
     , m_logger(std::make_unique<TickBinaryLogger>())
-    , m_aggregator(std::make_unique<TimeframeAggregator>())
-    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this))
+    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
+    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
-    // Forward aggregation signals
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -90,14 +99,21 @@ ServerDataModel::ServerDataModel(QObject* parent)
             this, &ServerDataModel::heatmapSliceReady);
 
     m_heatmapStreamer->start();
+
+    m_candleTimer.setTimerType(Qt::PreciseTimer);
+    m_candleTimer.setInterval(250);
+    connect(&m_candleTimer, &QTimer::timeout, this, [this]() {
+        if (m_aggregator) {
+            m_aggregator->tick(exchangeNowMs());
+        }
+    });
+    m_candleTimer.start();
 }
 
 ServerDataModel::~ServerDataModel() {
-    // Unique ptr handles cleanup
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
-    // Upgradable lock pattern
     {
         std::shared_lock lock(m_mutex);
         auto it = m_symbols.find(symbol);
@@ -153,8 +169,11 @@ void ServerDataModel::onTrade(const Trade& trade) {
     if (m_logger) {
         m_logger->logTrade(trade);
     }
-    
-    // Update aggregates
+
+    const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        trade.timestamp.time_since_epoch()).count();
+    updateExchangeOffsetMs(exchangeMs);
+
     if (m_aggregator) {
         m_aggregator->onTrade(trade);
     }
@@ -162,42 +181,7 @@ void ServerDataModel::onTrade(const Trade& trade) {
     auto& data = ensureSymbol(trade.product_id);
     data.lastTradePrice = trade.price;
     
-    // Rebroadcast to streamers
     emit tradeBroadcast(trade);
-}
-
-void ServerDataModel::onLiveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas) {
-    std::string symbol = productId.toStdString();
-    SymbolHotData& data = ensureSymbol(symbol);
-
-    if (data.liveBook.getTickSize() <= 0.0) {
-        return;
-    }
-
-    // TODO: Look into this more.
-    // Apply deltas to our local LiveOrderBook replica
-    // We need to convert indices back to prices to use the public applyUpdates API
-    // This is slightly inefficient (idx -> price -> idx) but keeps LiveOrderBook encapsulation intact.
-    std::vector<BookLevelUpdate> updates;
-    updates.reserve(deltas.size());
-    
-    auto now = std::chrono::system_clock::now();
-    
-    for (const auto& d : deltas) {
-        double price = data.liveBook.index_to_price(d.idx);
-        updates.push_back({d.isBid, price, d.qty});
-    }
-    
-    // We don't need the output deltas, we just want to update the state
-    data.liveBook.applyUpdates(updates, now, nullptr);
-    
-    // Persistence
-    if (m_logger) {
-        m_logger->logBookUpdate(symbol, deltas);
-    }
-    
-    // Rebroadcast to streamers
-    emit bookUpdateBroadcast(productId, deltas);
 }
 
 void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
@@ -206,7 +190,10 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
 
+    updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
+
     if (data.liveBook.getTickSize() <= 0.0) {
+        sLog_Warning("Order book update ignored - book not initialized for " << symbol);
         return;
     }
 
@@ -226,10 +213,8 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
-    // Re-initialize the book to clear old state
-    // TODO: Unify this logic with client-side book initialization to avoid drift
-    const double tickSize = getOrderBookTickSize();
-    const double bandPct = getOrderBookBandPct();
+    const double tickSize = m_serverConfig.orderbook.tickSize;
+    const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     data.liveBook.initialize(minPrice, maxPrice, tickSize);
     

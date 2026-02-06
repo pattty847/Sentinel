@@ -209,11 +209,6 @@ QString MsdfAtlas::resolveFontPath(const BuildParams& params) const {
     if (!params.fontPath.isEmpty()) {
         return params.fontPath;
     }
-    const QByteArray envPath = qgetenv("SENTINEL_MSDF_FONT");
-    if (!envPath.isEmpty()) {
-        return QString::fromUtf8(envPath);
-    }
-
     const QStringList candidates = candidateFontFileNames(params.fontFamily);
     if (candidates.isEmpty()) {
         return {};

@@ -74,9 +74,36 @@ The server produces dense `u8` columns: bids 0-127, asks 128-255.
 
 ```
 RemoteGridDataSource -> DataProcessor -> UnifiedGridRenderer -> HeatmapIntensityNode + MsdfGlyphNode -> GPU
+                                                             -> CandlestickOverlayItem -> GPU
 ```
 
-The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering; labels come from the MSDF atlas.
+The client receives pre-aggregated columns and uploads directly to GPU textures. No CPU-per-cell rendering; labels come from the MSDF atlas. Candlesticks are rendered as a GPU-batched overlay aligned to the same coordinate plane.
+
+### Coordinate System: `TimeAxisMapping`
+
+All chart layers (heatmap, candles, labels, future TPO/footprint) share a single coordinate mapping: `TimeAxisMapping` (`libs/gui/render/TimeAxisMapping.hpp`).
+
+**Produced once per frame** in `UnifiedGridRenderer::updatePaintNode()` after overlap math. Consumed by all renderers in the same frame.
+
+**Core invariant:** 1 heatmap slice = 1 candlestick bar. Same bucket width (`appendMs`), same epoch-aligned boundaries, same screen mapping.
+
+```
+TimeAxisMapping fields:
+  viewStart/EndMs, viewMin/MaxPrice    — pan-adjusted viewport
+  dataStart/EndMs, actualDataStart/End — ring buffer logical range
+  dataMin/MaxPrice                     — data price bounds
+  appendMs, tickSize, gridWidth/Height — grid parameters
+  drawRect, srcRect, cellW, cellH      — overlap-computed screen geometry
+  timeOffset                           — heatmap shader ONLY (ring buffer offset)
+```
+
+**Key helpers:**
+- `timeToScreenX(timeMs)` — world time → screen X via srcRect/drawRect interpolation. Does NOT use `timeOffset`.
+- `priceToScreenY(price)` — price → screen Y via srcRect/drawRect interpolation.
+- `bucketStartMsForTime(timeMs)` — epoch-aligned bucket start.
+- `visibleDataStartMs() / visibleDataEndMs()` — clamped visible data range.
+
+**Invariant:** `timeOffset` is strictly heatmap-shader-only. Candles and labels MUST NOT incorporate it into screen mapping. They use `timeToScreenX()` / `priceToScreenY()`.
 
 ### Key Data Structures
 
@@ -91,7 +118,7 @@ heatmap_slice message:
 
 ## Protocol
 
-**JSON (v0)**: Used for subscription handshake, snapshots, and heatmap_slice streaming (base64 payloads).
+**JSON (v0)**: Used for subscription handshake, snapshots, server_config, and heatmap_slice streaming (base64 payloads).
 
 ## Threading Model
 
@@ -112,7 +139,7 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 ## Runtime Notes
 
 - Client requires a server connection (no local-only mode).
-- `SENTINEL_HEATMAP_TF` must match on server and client.
+- Server is authoritative for heatmap config and timeframes; client consumes `server_config` on connect.
 - GUI-only screenshot API listens on `127.0.0.1` and captures the full main window as PNG via `GET /screenshot` (see `SENTINEL_GUI_API_PORT` and `SENTINEL_GUI_SCREENSHOT_DIR`).
 
 ## Related Documentation

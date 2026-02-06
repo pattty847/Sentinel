@@ -1,6 +1,7 @@
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
+#include <QElapsedTimer>
 
 SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
     : QObject(parent)
@@ -14,8 +15,10 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
+    qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
+    qRegisterMetaType<ServerConfig>("ServerConfig");
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
@@ -164,7 +167,6 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     
     doRead();
 
-    // Flush pending writes
     net::post(m_strand, [this]() {
         if (!m_writeQueue.empty()) {
             doWrite();
@@ -217,9 +219,68 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
     try {
         auto msg = nlohmann::json::parse(msgStr);
         std::string type = msg.value("type", "unknown");
-        
-        if (type == "snapshot") {
-            // Process snapshot
+
+        if (type == "server_config") {
+            ServerConfig cfg;
+            const int schema = msg.value("schema_version", 0);
+            if (schema != 1) {
+                sLog_Warning("server_config schema version unsupported: " << schema);
+            }
+            if (msg.contains("timeframes_ms") && msg["timeframes_ms"].is_array()) {
+                cfg.heatmap.timeframesMs.clear();
+                for (const auto& item : msg["timeframes_ms"]) {
+                    const int64_t tf = item.get<int64_t>();
+                    if (tf > 0) {
+                        cfg.heatmap.timeframesMs.push_back(tf);
+                    }
+                }
+            }
+            if (msg.contains("heatmap") && msg["heatmap"].is_object()) {
+                const auto& hm = msg["heatmap"];
+                cfg.heatmap.gridWidth = hm.value("grid_width", cfg.heatmap.gridWidth);
+                cfg.heatmap.gridHeight = hm.value("grid_height", cfg.heatmap.gridHeight);
+                cfg.heatmap.tickSize = hm.value("tick_size", cfg.heatmap.tickSize);
+                cfg.heatmap.recenterDelta = hm.value("recenter_delta", cfg.heatmap.recenterDelta);
+                cfg.heatmap.bandFast = hm.value("band_fast", cfg.heatmap.bandFast);
+                cfg.heatmap.bandMedium = hm.value("band_medium", cfg.heatmap.bandMedium);
+                cfg.heatmap.bandSlow = hm.value("band_slow", cfg.heatmap.bandSlow);
+                cfg.heatmap.intensityMode = hm.value("intensity_mode", cfg.heatmap.intensityMode);
+                cfg.heatmap.intensityMaxMode = hm.value("intensity_max_mode", cfg.heatmap.intensityMaxMode);
+                cfg.heatmap.intensityMaxDecay = hm.value("intensity_max_decay", cfg.heatmap.intensityMaxDecay);
+                cfg.heatmap.intensityLogScale = hm.value("intensity_log_scale", cfg.heatmap.intensityLogScale);
+                cfg.heatmap.intensityPower = hm.value("intensity_power", cfg.heatmap.intensityPower);
+                cfg.heatmap.intensityFloor = hm.value("intensity_floor", cfg.heatmap.intensityFloor);
+                cfg.heatmap.debugSliceLog = hm.value("debug_slice_log", cfg.heatmap.debugSliceLog);
+                cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
+            }
+            if (msg.contains("orderbook") && msg["orderbook"].is_object()) {
+                const auto& ob = msg["orderbook"];
+                cfg.orderbook.tickSize = ob.value("tick_size", cfg.orderbook.tickSize);
+                cfg.orderbook.bandPct = ob.value("band_pct", cfg.orderbook.bandPct);
+            }
+            if (msg.contains("candles") && msg["candles"].is_object()) {
+                const auto& cd = msg["candles"];
+                cfg.candles.bpsFast = cd.value("update_bps_fast", cfg.candles.bpsFast);
+                cfg.candles.bpsSlow = cd.value("update_bps_slow", cfg.candles.bpsSlow);
+                cfg.candles.tickMultFast = cd.value("update_tick_mult_fast", cfg.candles.tickMultFast);
+                cfg.candles.tickMultSlow = cd.value("update_tick_mult_slow", cfg.candles.tickMultSlow);
+                cfg.candles.silenceMsFast = cd.value("update_silence_ms_fast", cfg.candles.silenceMsFast);
+                cfg.candles.silenceMsSlow = cd.value("update_silence_ms_slow", cfg.candles.silenceMsSlow);
+                cfg.candles.volumeFast = cd.value("update_volume_fast", cfg.candles.volumeFast);
+                cfg.candles.volumeSlow = cd.value("update_volume_slow", cfg.candles.volumeSlow);
+                cfg.candles.tickSize = cd.value("update_tick_size", cfg.candles.tickSize);
+            }
+            if (msg.contains("default_symbols") && msg["default_symbols"].is_array()) {
+                cfg.defaultSymbols.clear();
+                for (const auto& item : msg["default_symbols"]) {
+                    if (item.is_string()) {
+                        cfg.defaultSymbols.push_back(item.get<std::string>());
+                    }
+                }
+            }
+
+            emit serverConfigReceived(cfg);
+        } else if (type == "snapshot") {
             std::string symbol = msg.value("symbol", "");
             if (symbol.empty()) return;
             
@@ -267,7 +328,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              t.size = msg.value("size", 0.0);
              std::string side = msg.value("side", "");
              t.side = (side == "buy") ? AggressorSide::Buy : AggressorSide::Sell;
-             // t.timestamp? 
              
              emit tradeReceived(t);
         } else if (type == "heatmap_slice") {
@@ -299,22 +359,43 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                  liquidityColumn = QByteArray::fromBase64(QByteArray::fromStdString(liquidityEncoded));
              }
 
-             emit heatmapSliceReceived(QString::fromStdString(symbol),
-                                       startMs,
-                                       endMs,
-                                       timeframeMs,
-                                       gridWidth,
-                                       gridHeight,
-                                       minPrice,
-                                       maxPrice,
-                                       tickSize,
-                                       midPrice,
-                                       lastTrade,
-                                       QString::fromStdString(format),
-                                       column,
-                                       liquidityColumn,
-                                       liquidityScale,
-                                       reset);
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 static QElapsedTimer timer;
+                 static bool started = false;
+                 if (!started) {
+                     timer.start();
+                     started = true;
+                 }
+                 if (timer.elapsed() > 1000) {
+                     sLog_Debug(QString("Heatmap slice recv: symbol=%1 tfMs=%2 start=%3 end=%4 grid=%5x%6")
+                                .arg(QString::fromStdString(symbol))
+                                .arg(timeframeMs)
+                                .arg(startMs)
+                                .arg(endMs)
+                                .arg(gridWidth)
+                                .arg(gridHeight));
+                     timer.restart();
+                 }
+             }
+
+             HeatmapSlice slice;
+             slice.symbol = QString::fromStdString(symbol);
+             slice.bucketStartMs = startMs;
+             slice.bucketEndMs = endMs;
+             slice.timeframeMs = timeframeMs;
+             slice.gridWidth = gridWidth;
+             slice.gridHeight = gridHeight;
+             slice.minPrice = minPrice;
+             slice.maxPrice = maxPrice;
+             slice.tickSize = tickSize;
+             slice.midPrice = midPrice;
+             slice.lastTrade = lastTrade;
+             slice.format = QString::fromStdString(format);
+             slice.column = column;
+             slice.liquidityColumn = liquidityColumn;
+             slice.liquidityScale = liquidityScale;
+             slice.reset = reset;
+             emit heatmapSliceReceived(slice);
         } else if (type == "heatmap_history_chunk") {
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;
@@ -348,6 +429,18 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                  }
              }
 
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 const int count = out.size();
+                 const int64_t first = count > 0 ? out.front().bucketStartMs : 0;
+                 const int64_t last = count > 0 ? out.back().bucketStartMs : 0;
+                 sLog_Debug(QString("Heatmap history recv: symbol=%1 tfMs=%2 count=%3 first=%4 last=%5")
+                            .arg(QString::fromStdString(symbol))
+                            .arg(timeframeMs)
+                            .arg(count)
+                            .arg(first)
+                            .arg(last));
+             }
+
              emit heatmapHistoryReceived(QString::fromStdString(symbol),
                                          timeframeMs,
                                          gridWidth,
@@ -376,6 +469,20 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                      bar.isClosed = item.value("is_closed", false);
                      out.push_back(bar);
                  }
+             }
+
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 const int count = out.size();
+                 const int64_t first = count > 0 ? out.front().timeStartMs : 0;
+                 const int64_t last = count > 0 ? out.back().timeStartMs : 0;
+                 sLog_Debug(QString("Candle history recv: symbol=%1 tfSec=%2 count=%3 first=%4 last=%5 startSec=%6 endSec=%7")
+                            .arg(QString::fromStdString(symbol))
+                            .arg(timeframeSec)
+                            .arg(count)
+                            .arg(first)
+                            .arg(last)
+                            .arg(startTimeSec)
+                            .arg(endTimeSec));
              }
 
              emit candleHistoryReceived(QString::fromStdString(symbol),

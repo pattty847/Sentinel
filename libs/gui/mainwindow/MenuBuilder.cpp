@@ -102,7 +102,6 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
 void MenuBuilder::buildDebugMenu() {
     m_debugMenu = m_menuBar->addMenu("&Debug");
 
-    // Resource usage overlay toggle
     QAction* gpuStatsAction = m_debugMenu->addAction("Resource Usage");
     gpuStatsAction->setCheckable(true);
     gpuStatsAction->setChecked(false);
@@ -115,7 +114,6 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    // Data Pipeline overlay toggle
     QAction* dataPipelineAction = m_debugMenu->addAction("Data Pipeline");
     dataPipelineAction->setCheckable(true);
     dataPipelineAction->setChecked(false);
@@ -128,7 +126,6 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    // Render Strategy overlay toggle
     QAction* renderStrategyAction = m_debugMenu->addAction("Render Strategy");
     renderStrategyAction->setCheckable(true);
     renderStrategyAction->setChecked(false);
@@ -141,7 +138,6 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    // Viewport Math overlay toggle
     QAction* viewportMathAction = m_debugMenu->addAction("Viewport Math");
     viewportMathAction->setCheckable(true);
     viewportMathAction->setChecked(false);
@@ -154,7 +150,6 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    // Mode Flags overlay toggle
     QAction* modeFlagsAction = m_debugMenu->addAction("Mode Flags");
     modeFlagsAction->setCheckable(true);
     modeFlagsAction->setChecked(false);

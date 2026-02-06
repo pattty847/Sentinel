@@ -10,7 +10,6 @@
 #include <QDialogButtonBox>
 
 namespace {
-// Helper to create styled slider with value label
 struct SliderWithLabel {
     QSlider* slider;
     QLabel* label;
@@ -73,8 +72,6 @@ void HeatmapSettingsDialog::buildUi() {
     gammaRow->addWidget(m_gammaSlider);
     gammaRow->addWidget(m_gammaLabel);
     form->addRow("Gamma", gammaRow);
-
-    // Contrast: 0.1-5.0, step 0.05, default 1.15
     auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 115);
     m_contrastSlider = contrastSlider;
     m_contrastLabel = contrastLabel;
@@ -115,7 +112,6 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     if (!m_renderer) {
         return;
     }
-    // Convert double values to slider positions
     const QSignalBlocker blockGamma(m_gammaSlider);
     const QSignalBlocker blockContrast(m_contrastSlider);
     const QSignalBlocker blockFloor(m_floorSlider);
@@ -123,8 +119,6 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     m_gammaSlider->setValue(static_cast<int>(m_renderer->heatmapGamma() * 100));
     m_contrastSlider->setValue(static_cast<int>(m_renderer->heatmapContrast() * 100));
     m_floorSlider->setValue(static_cast<int>(m_renderer->heatmapShaderFloor() * 100));
-
-    // Update labels
     m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
     m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
     m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
@@ -161,5 +155,5 @@ void HeatmapSettingsDialog::logSettings() const {
     sLog_App("Heatmap settings: gamma=" << m_renderer->heatmapGamma()
              << " contrast=" << m_renderer->heatmapContrast()
              << " shader_floor=" << m_renderer->heatmapShaderFloor()
-             << " (env: SENTINEL_HEATMAP_GAMMA, SENTINEL_HEATMAP_CONTRAST, SENTINEL_HEATMAP_SHADER_FLOOR)");
+             << " (client config overrides)");
 }

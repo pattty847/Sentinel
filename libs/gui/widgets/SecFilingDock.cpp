@@ -17,8 +17,6 @@ SecFilingDock::SecFilingDock(QWidget* parent)
     , m_transactionsModel(new QStandardItemModel(this))
 {
     buildUi();
-    
-    // Connect to API client signals
     connect(m_apiClient, &SecApiClient::filingsReady, this, &SecFilingDock::onFilingsReady);
     connect(m_apiClient, &SecApiClient::transactionsReady, this, &SecFilingDock::onTransactionsReady);
     connect(m_apiClient, &SecApiClient::financialsReady, this, &SecFilingDock::onFinancialsReady);
@@ -27,14 +25,11 @@ SecFilingDock::SecFilingDock(QWidget* parent)
 }
 
 QSize SecFilingDock::minimumSizeHint() const {
-    // Enough room for controls plus at least a few table rows
     return QSize(440, 380);
 }
 
 void SecFilingDock::buildUi() {
     QVBoxLayout* layout = new QVBoxLayout(m_contentWidget);
-    
-    // Input controls
     QHBoxLayout* inputLayout = new QHBoxLayout();
     inputLayout->addWidget(new QLabel("Ticker:", m_contentWidget));
     m_tickerInput = new QLineEdit("AAPL", m_contentWidget);
@@ -62,7 +57,6 @@ void SecFilingDock::buildUi() {
     // Tables and display
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_contentWidget);
     
-    // Filings table
     QGroupBox* filingsGroup = new QGroupBox("Filings", m_contentWidget);
     QVBoxLayout* filingsLayout = new QVBoxLayout();
     m_filingsTable = new QTableView(filingsGroup);
@@ -72,8 +66,6 @@ void SecFilingDock::buildUi() {
     filingsLayout->addWidget(m_filingsTable);
     filingsGroup->setLayout(filingsLayout);
     splitter->addWidget(filingsGroup);
-    
-    // Transactions table
     QGroupBox* transactionsGroup = new QGroupBox("Insider Transactions", m_contentWidget);
     QVBoxLayout* transactionsLayout = new QVBoxLayout();
     m_transactionsTable = new QTableView(transactionsGroup);
@@ -83,8 +75,6 @@ void SecFilingDock::buildUi() {
     transactionsLayout->addWidget(m_transactionsTable);
     transactionsGroup->setLayout(transactionsLayout);
     splitter->addWidget(transactionsGroup);
-    
-    // Financials display
     QGroupBox* financialsGroup = new QGroupBox("Financial Summary", m_contentWidget);
     QVBoxLayout* financialsLayout = new QVBoxLayout();
     m_financialsDisplay = new QTextEdit(financialsGroup);
@@ -208,10 +198,8 @@ void SecFilingDock::updateStatus(const QString& message, bool isError) {
 }
 
 void SecFilingDock::onSymbolChanged(const QString& symbol) {
-    // Extract ticker from symbol (e.g., "BTC-USD" -> "BTC")
     QString ticker = symbol.split('-').first();
     m_tickerInput->setText(ticker);
-    // Optionally auto-fetch filings
 }
 
 

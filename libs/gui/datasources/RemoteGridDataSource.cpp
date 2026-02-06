@@ -1,29 +1,9 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
-#include <QProcessEnvironment>
+#include "../config/GuiConfigStore.hpp"
 
 namespace {
-double getOrderBookTickSize() {
-    const QByteArray tickEnv = qgetenv("SENTINEL_ORDERBOOK_TICK_SIZE");
-    bool ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok && envTick > 0.0) {
-        return envTick;
-    }
-    return 0.10;
-}
-
-double getOrderBookBandPct() {
-    const QByteArray bandEnv = qgetenv("SENTINEL_ORDERBOOK_BAND_PCT");
-    bool ok = false;
-    const double envBand = bandEnv.toDouble(&ok);
-    if (ok && envBand > 0.0) {
-        return envBand;
-    }
-    return 0.30;
-}
-
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
                                            const std::vector<OrderBookLevel>& asks,
                                            double bandPct) {
@@ -82,9 +62,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
 {
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
+    qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
+    m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
-    // Connect to new specific signals
     connect(&m_client, &SentinelStreamClient::snapshotReceived,
             this, &RemoteGridDataSource::onSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived,
@@ -93,6 +74,14 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
+            this, &RemoteGridDataSource::onCandleBarUpdateReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleBarClosedReceived,
+            this, &RemoteGridDataSource::onCandleBarClosedReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::candleHistoryReceived,
+            this, &RemoteGridDataSource::onCandleHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::serverConfigReceived,
+            this, &RemoteGridDataSource::onServerConfigReceived, Qt::QueuedConnection);
     
     connect(&m_client, &SentinelStreamClient::connected,
             this,
@@ -113,7 +102,7 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
     
-    // Ensure we have a replica ready - initialize on snapshot for authoritative range.
+    // Initialize replica on snapshot for authoritative range.
     std::string s = symbol.toStdString();
     if (m_replicaBooks.find(s) == m_replicaBooks.end()) {
         m_replicaBooks.emplace(s, std::make_unique<LiveOrderBook>(s));
@@ -130,6 +119,13 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
                                                  int64_t endTimeMs,
                                                  int count) {
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
+void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
+                                                int64_t timeframeSec,
+                                                int64_t endTimeSec,
+                                                int limit) {
+    m_client.requestCandleHistory(symbol.toStdString(), timeframeSec, endTimeSec, limit);
 }
 
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
@@ -151,9 +147,9 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     
     auto& book = *m_replicaBooks[symbol];
     
-    // Re-initialize (clears data) using banded range around best bid/ask.
-    const double tickSize = getOrderBookTickSize();
-    const double bandPct = getOrderBookBandPct();
+    // Re-initialize using banded range around best bid/ask.
+    const double tickSize = m_serverConfig.orderbook.tickSize;
+    const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     book.initialize(minPrice, maxPrice, tickSize);
     
@@ -178,6 +174,11 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
               .arg(productId).arg(bids.size()).arg(asks.size()));
 }
 
+void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
+    m_serverConfig = config;
+    GuiConfigStore::instance().setServerConfig(config);
+}
+
 void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates) {
     std::string symbol = productId.toStdString();
     auto it = m_replicaBooks.find(symbol);
@@ -196,38 +197,8 @@ void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const st
     }
 }
 
-void RemoteGridDataSource::onHeatmapSliceReceived(const QString& symbol,
-                                                  int64_t bucketStartMs,
-                                                  int64_t bucketEndMs,
-                                                  int64_t timeframeMs,
-                                                  int gridWidth,
-                                                  int gridHeight,
-                                                  double minPrice,
-                                                  double maxPrice,
-                                                  double tickSize,
-                                                  double midPrice,
-                                                  double lastTrade,
-                                                  const QString& format,
-                                                  const QByteArray& column,
-                                                  const QByteArray& liquidityColumn,
-                                                  double liquidityScale,
-                                                  bool reset) {
-    emit heatmapSliceReceived(symbol,
-                              bucketStartMs,
-                              bucketEndMs,
-                              timeframeMs,
-                              gridWidth,
-                              gridHeight,
-                              minPrice,
-                              maxPrice,
-                              tickSize,
-                              midPrice,
-                              lastTrade,
-                              format,
-                              column,
-                              liquidityColumn,
-                              liquidityScale,
-                              reset);
+void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
+    emit heatmapSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
@@ -250,4 +221,78 @@ void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
         converted.push_back(std::move(out));
     }
     emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight, converted);
+}
+
+void RemoteGridDataSource::onCandleBarUpdateReceived(const QString& symbol,
+                                                     int64_t timeframeSec,
+                                                     int64_t,
+                                                     int64_t seq,
+                                                     const SentinelStreamClient::CandleBar& bar) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    CandleSeriesBuffer::CandleBar out;
+    out.timeStartMs = bar.timeStartMs;
+    out.timeEndMs = bar.timeEndMs;
+    out.open = bar.open;
+    out.high = bar.high;
+    out.low = bar.low;
+    out.close = bar.close;
+    out.volume = bar.volume;
+    out.isClosed = bar.isClosed;
+    out.seq = seq;
+    m_candleBuffer->applyUpdate(symbol, timeframeSec, out, seq, false);
+}
+
+void RemoteGridDataSource::onCandleBarClosedReceived(const QString& symbol,
+                                                     int64_t timeframeSec,
+                                                     int64_t,
+                                                     int64_t seq,
+                                                     const SentinelStreamClient::CandleBar& bar) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    CandleSeriesBuffer::CandleBar out;
+    out.timeStartMs = bar.timeStartMs;
+    out.timeEndMs = bar.timeEndMs;
+    out.open = bar.open;
+    out.high = bar.high;
+    out.low = bar.low;
+    out.close = bar.close;
+    out.volume = bar.volume;
+    out.isClosed = true;
+    out.seq = seq;
+    m_candleBuffer->applyUpdate(symbol, timeframeSec, out, seq, true);
+}
+
+void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
+                                                   int64_t timeframeSec,
+                                                   int64_t startTimeSec,
+                                                   int64_t endTimeSec,
+                                                   const QVector<SentinelStreamClient::CandleBar>& candles) {
+    if (!m_candleBuffer) {
+        return;
+    }
+    int64_t seq = 0;
+    for (const auto& bar : candles) {
+        CandleSeriesBuffer::CandleBar out;
+        out.timeStartMs = bar.timeStartMs;
+        out.timeEndMs = bar.timeEndMs;
+        out.open = bar.open;
+        out.high = bar.high;
+        out.low = bar.low;
+        out.close = bar.close;
+        out.volume = bar.volume;
+        out.isClosed = bar.isClosed;
+        out.seq = ++seq;
+        m_candleBuffer->applyUpdate(symbol, timeframeSec, out, out.seq, out.isClosed);
+    }
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Candle history applied: symbol=%1 tfSec=%2 startSec=%3 endSec=%4 count=%5")
+                   .arg(symbol)
+                   .arg(timeframeSec)
+                   .arg(startTimeSec)
+                   .arg(endTimeSec)
+                   .arg(candles.size()));
+    }
 }

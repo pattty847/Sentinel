@@ -15,6 +15,14 @@ Core data pipeline validation for the V2 architecture:
 
 **Status**: ✅ All 3 test suites passing
 
+### Render Tests (`render/`)
+
+Mapping and coordinate correctness:
+
+| Test Suite | File | Coverage |
+|------------|------|----------|
+| **TimeAxisMapping** | `test_TimeAxisMapping.cpp` | World ↔ screen mapping, bucket alignment, legacy equivalence |
+
 ### WebSocket Reliability Features
 
 The market data pipeline includes production-grade reliability mechanisms:
@@ -45,6 +53,11 @@ These features were challenging to implement correctly (thanks Codex!) but are e
 ```bash
 cd build-<platform>
 ctest --output-on-failure
+```
+
+### All Tests (via preset)
+```bash
+ctest --preset windows-msvc-vs
 ```
 
 ### Market Data Tests Only
@@ -181,12 +194,7 @@ ctest --output-on-failure
 
 ## Continuous Integration
 
-Tests run automatically on:
-- Every push to `main` branch
-- All pull requests
-- Pre-commit hooks (optional)
-
-**Pass Criteria**: All tests must pass before merge.
+If CI is added later, run the full test suite before merge.
 
 ## Historical Note
 
@@ -200,6 +208,6 @@ The new V2 architecture (GPU-accelerated, async snapshots, lock-free pipelines) 
 
 ---
 
-**Last Updated**: 2025-11-03
-**Test Count**: 2 suites (MessageDispatcher, SubscriptionManager)
+**Last Updated**: 2026-02-05
+**Test Count**: 3 suites (MessageDispatcher, SubscriptionManager, TimeAxisMapping)
 **Status**: ✅ All passing

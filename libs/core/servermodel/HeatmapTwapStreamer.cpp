@@ -1,9 +1,7 @@
 #include "HeatmapTwapStreamer.hpp"
-#include "ServerDataModel.hpp"
+#include "IHeatmapDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QByteArray>
-#include <QProcessEnvironment>
-#include <QStringList>
 #include <QtEndian>
 #include <algorithm>
 #include <chrono>
@@ -13,100 +11,84 @@ namespace {
 constexpr int64_t kMsPerSecond = 1000;
 }
 
-HeatmapTwapStreamer::HeatmapTwapStreamer(ServerDataModel& model, QObject* parent)
+HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
+                                         const ServerHeatmapConfig& config,
+                                         QObject* parent)
     : QObject(parent)
-    , m_model(model) {
+    , m_model(model)
+    , m_config(config) {
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &HeatmapTwapStreamer::onSample);
 
-    m_timeframesMs = {1000, 60000, 3600000, 86400000};
-
-    const QByteArray widthEnv = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH");
-    bool ok = false;
-    const int envWidth = widthEnv.toInt(&ok);
-    if (ok && envWidth > 0) {
-        m_defaultWidth = envWidth;
+    m_timeframesMs = m_config.timeframesMs;
+    if (m_timeframesMs.empty()) {
+        m_timeframesMs = {1000, 60000, 3600000, 86400000};
     }
 
-    const QByteArray heightEnv = qgetenv("SENTINEL_HEATMAP_GRID");
-    ok = false;
-    const int envHeight = heightEnv.toInt(&ok);
-    if (ok && envHeight > 0) {
-        m_defaultHeight = envHeight;
+    if (m_config.gridWidth > 0) {
+        m_defaultWidth = m_config.gridWidth;
+    }
+    if (m_config.gridHeight > 0) {
+        m_defaultHeight = m_config.gridHeight;
+    }
+    if (m_config.tickSize > 0.0) {
+        m_defaultTickSize = m_config.tickSize;
+        m_fixedTickSize = true;
+    } else {
+        m_fixedTickSize = false;
     }
 
-    const QByteArray tickEnv = qgetenv("SENTINEL_HEATMAP_TICK_SIZE");
-    ok = false;
-    const double envTick = tickEnv.toDouble(&ok);
-    if (ok) {
-        if (envTick > 0.0) {
-            m_defaultTickSize = envTick;
-            m_fixedTickSize = true;
-        } else {
-            m_fixedTickSize = false;
-        }
-    }
-
-    const QByteArray tfListEnv = qgetenv("SENTINEL_HEATMAP_TIMEFRAMES");
-    if (!tfListEnv.isEmpty()) {
-        QString tfList = QString::fromUtf8(tfListEnv);
-        tfList.replace(',', ' ');
-        tfList = tfList.simplified();
-        const QStringList parts = tfList.isEmpty()
-            ? QStringList()
-            : tfList.split(' ', Qt::SkipEmptyParts);
-        std::vector<int64_t> parsed;
-        parsed.reserve(static_cast<size_t>(parts.size()));
-        for (const auto& part : parts) {
-            bool okPart = false;
-            const int64_t tf = part.toLongLong(&okPart);
-            if (okPart && tf > 0) {
-                parsed.push_back(tf);
-            }
-        }
-        if (!parsed.empty()) {
-            std::sort(parsed.begin(), parsed.end());
-            parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
-            m_timeframesMs = std::move(parsed);
-        }
-    }
-
-    const QByteArray tfEnv = qgetenv("SENTINEL_HEATMAP_TF");
-    ok = false;
-    const int64_t envTf = tfEnv.toLongLong(&ok);
-    if (ok && envTf > 0) {
-        m_activeTimeframeMs = envTf;
+    if (m_config.activeTimeframeMs > 0) {
+        m_activeTimeframeMs = m_config.activeTimeframeMs;
     } else if (!m_timeframesMs.empty()) {
         m_activeTimeframeMs = m_timeframesMs.front();
     }
 
-    const QByteArray deltaEnv = qgetenv("SENTINEL_HEATMAP_RECENTER_DELTA");
-    ok = false;
-    const double envDelta = deltaEnv.toDouble(&ok);
-    if (ok && envDelta > 0.0) {
-        m_recenterDelta = envDelta;
+    if (m_config.recenterDelta > 0.0) {
+        m_recenterDelta = m_config.recenterDelta;
+    }
+    if (m_config.bandFast > 0.0) {
+        m_bandFast = m_config.bandFast;
+    }
+    if (m_config.bandMedium > 0.0) {
+        m_bandMedium = m_config.bandMedium;
+    }
+    if (m_config.bandSlow > 0.0) {
+        m_bandSlow = m_config.bandSlow;
     }
 
-    const QByteArray bandFastEnv = qgetenv("SENTINEL_HEATMAP_BAND_FAST");
-    ok = false;
-    const double bandFast = bandFastEnv.toDouble(&ok);
-    if (ok && bandFast > 0.0) {
-        m_bandFast = bandFast;
+    m_intensity = parseIntensityConfig();
+}
+
+HeatmapTwapStreamer::IntensityConfig HeatmapTwapStreamer::parseIntensityConfig() const {
+    IntensityConfig out;
+    std::string mode = m_config.intensityMode;
+    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+    if (mode == "linear") {
+        out.mode = NormalizeMode::Linear;
+    } else if (mode == "power" || mode == "pow") {
+        out.mode = NormalizeMode::Power;
+    } else {
+        out.mode = NormalizeMode::Log;
     }
 
-    const QByteArray bandMedEnv = qgetenv("SENTINEL_HEATMAP_BAND_MED");
-    ok = false;
-    const double bandMed = bandMedEnv.toDouble(&ok);
-    if (ok && bandMed > 0.0) {
-        m_bandMedium = bandMed;
-    }
+    std::string maxMode = m_config.intensityMaxMode;
+    std::transform(maxMode.begin(), maxMode.end(), maxMode.begin(), ::tolower);
+    out.useRunningMax = (maxMode != "column");
 
-    const QByteArray bandSlowEnv = qgetenv("SENTINEL_HEATMAP_BAND_SLOW");
-    ok = false;
-    const double bandSlow = bandSlowEnv.toDouble(&ok);
-    if (ok && bandSlow > 0.0) {
-        m_bandSlow = bandSlow;
+    if (m_config.intensityMaxDecay > 0.0 && m_config.intensityMaxDecay <= 1.0) {
+        out.runningMaxDecay = m_config.intensityMaxDecay;
     }
+    if (m_config.intensityLogScale > 0.0) {
+        out.logScale = m_config.intensityLogScale;
+    }
+    if (m_config.intensityPower > 0.0 && m_config.intensityPower <= 1.0) {
+        out.powerExp = m_config.intensityPower;
+    }
+    if (m_config.intensityFloor >= 0.0 && m_config.intensityFloor <= 1.0) {
+        out.intensityFloor = m_config.intensityFloor;
+    }
+    return out;
 }
 
 void HeatmapTwapStreamer::start() {
@@ -216,11 +198,10 @@ void HeatmapTwapStreamer::applyBandRange(SymbolState& state, double midPrice, in
 }
 
 void HeatmapTwapStreamer::onSample() {
-    const auto now = std::chrono::system_clock::now();
-    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    const int64_t nowMs = m_model.exchangeNowMs();
 
     const auto symbols = m_model.getSymbolsSnapshot();
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
+    if (m_config.debugSliceLog) {
         sLog_App("Heatmap sample tick: symbols=" << symbols.size() << " t=" << nowMs);
     }
     for (const auto& symbol : symbols) {
@@ -360,7 +341,7 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
 
     static int logCount = 0;
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 10) == 0) {
+    if (m_config.debugSliceLog && (++logCount % 10) == 0) {
         sLog_App("Heatmap slice emit: " << QString::fromStdString(symbol)
                  << " tf=" << frame.timeframeMs
                  << " rows=" << column.size()
@@ -380,21 +361,24 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                  frame.bucketEndMs);
 
     if (m_activeTimeframeMs <= 0 || frame.timeframeMs == m_activeTimeframeMs) {
-        emit heatmapSliceReady(QString::fromStdString(symbol),
-                               frame.bucketStartMs,
-                               frame.bucketEndMs,
-                               frame.timeframeMs,
-                               m_defaultWidth,
-                               state.height,
-                               state.minPrice,
-                               state.maxPrice,
-                               state.tickSize,
-                               state.lastMidPrice,
-                               lastTrade,
-                               column,
-                               liquidityColumn,
-                               liquidityScale,
-                               reset);
+        HeatmapSlice slice;
+        slice.symbol = QString::fromStdString(symbol);
+        slice.bucketStartMs = frame.bucketStartMs;
+        slice.bucketEndMs = frame.bucketEndMs;
+        slice.timeframeMs = frame.timeframeMs;
+        slice.gridWidth = m_defaultWidth;
+        slice.gridHeight = state.height;
+        slice.minPrice = state.minPrice;
+        slice.maxPrice = state.maxPrice;
+        slice.tickSize = state.tickSize;
+        slice.midPrice = state.lastMidPrice;
+        slice.lastTrade = lastTrade;
+        slice.format = QStringLiteral("u16");
+        slice.column = column;
+        slice.liquidityColumn = liquidityColumn;
+        slice.liquidityScale = liquidityScale;
+        slice.reset = reset;
+        emit heatmapSliceReady(slice);
     }
 }
 
@@ -498,47 +482,7 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
     if (bidValues.empty() || askValues.empty()) {
         return {};
     }
-    QByteArray modeEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MODE").toLower();
-    enum class NormalizeMode { Linear, Log, Power };
-    NormalizeMode mode = NormalizeMode::Log;
-    if (modeEnv == "linear") {
-        mode = NormalizeMode::Linear;
-    } else if (modeEnv == "power" || modeEnv == "pow") {
-        mode = NormalizeMode::Power;
-    } else if (modeEnv == "log") {
-        mode = NormalizeMode::Log;
-    }
-
-    const QByteArray maxModeEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MAX_MODE").toLower();
-    const bool useRunningMax = (maxModeEnv != "column");
-    double runningMaxDecay = 0.995;
-    const QByteArray decayEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_MAX_DECAY");
-    bool ok = false;
-    const double decayOverride = decayEnv.toDouble(&ok);
-    if (ok && decayOverride > 0.0 && decayOverride <= 1.0) {
-        runningMaxDecay = decayOverride;
-    }
-
-    double logScale = 1000.0;
-    const QByteArray logScaleEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_LOG_SCALE");
-    const double logScaleOverride = logScaleEnv.toDouble(&ok);
-    if (ok && logScaleOverride > 0.0) {
-        logScale = logScaleOverride;
-    }
-
-    double powerExp = 0.4;
-    const QByteArray powerEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_POWER");
-    const double powerOverride = powerEnv.toDouble(&ok);
-    if (ok && powerOverride > 0.0 && powerOverride <= 1.0) {
-        powerExp = powerOverride;
-    }
-
-    double intensityFloor = 0.001;
-    const QByteArray floorEnv = qgetenv("SENTINEL_HEATMAP_INTENSITY_FLOOR");
-    const double floorOverride = floorEnv.toDouble(&ok);
-    if (ok && floorOverride >= 0.0 && floorOverride <= 1.0) {
-        intensityFloor = floorOverride;
-    }
+    const IntensityConfig& cfg = m_intensity;
     double maxBid = 0.0;
     double maxAsk = 0.0;
     int nonZeroBid = 0;
@@ -559,26 +503,26 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
             }
         }
     }
-    if (useRunningMax) {
+    if (cfg.useRunningMax) {
         if (state.runningMaxBid <= 0.0) {
             state.runningMaxBid = maxBid;
         } else {
-            state.runningMaxBid = std::max(maxBid, state.runningMaxBid * runningMaxDecay);
+            state.runningMaxBid = std::max(maxBid, state.runningMaxBid * cfg.runningMaxDecay);
         }
         if (state.runningMaxAsk <= 0.0) {
             state.runningMaxAsk = maxAsk;
         } else {
-            state.runningMaxAsk = std::max(maxAsk, state.runningMaxAsk * runningMaxDecay);
+            state.runningMaxAsk = std::max(maxAsk, state.runningMaxAsk * cfg.runningMaxDecay);
         }
     }
 
-    const double denomBid = (useRunningMax ? state.runningMaxBid : maxBid);
-    const double denomAsk = (useRunningMax ? state.runningMaxAsk : maxAsk);
+    const double denomBid = (cfg.useRunningMax ? state.runningMaxBid : maxBid);
+    const double denomAsk = (cfg.useRunningMax ? state.runningMaxAsk : maxAsk);
     const double safeDenomBid = (denomBid > 0.0) ? denomBid : 1.0;
     const double safeDenomAsk = (denomAsk > 0.0) ? denomAsk : 1.0;
 
     static int logCount = 0;
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG") && (++logCount % 20) == 0) {
+    if (m_config.debugSliceLog && (++logCount % 20) == 0) {
         sLog_App("Heatmap column stats: bids=" << nonZeroBid
                  << " asks=" << nonZeroAsk
                  << " maxBid=" << maxBid
@@ -595,29 +539,29 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
         double bidNorm = 0.0;
         double askNorm = 0.0;
         if (bidValue > 0.0) {
-            if (mode == NormalizeMode::Log) {
-                bidNorm = std::log1p(bidValue * logScale) / std::log1p(safeDenomBid * logScale);
-            } else if (mode == NormalizeMode::Power) {
-                bidNorm = std::pow(bidValue / safeDenomBid, powerExp);
+            if (cfg.mode == NormalizeMode::Log) {
+                bidNorm = std::log1p(bidValue * cfg.logScale) / std::log1p(safeDenomBid * cfg.logScale);
+            } else if (cfg.mode == NormalizeMode::Power) {
+                bidNorm = std::pow(bidValue / safeDenomBid, cfg.powerExp);
             } else {
                 bidNorm = bidValue / safeDenomBid;
             }
         }
         if (askValue > 0.0) {
-            if (mode == NormalizeMode::Log) {
-                askNorm = std::log1p(askValue * logScale) / std::log1p(safeDenomAsk * logScale);
-            } else if (mode == NormalizeMode::Power) {
-                askNorm = std::pow(askValue / safeDenomAsk, powerExp);
+            if (cfg.mode == NormalizeMode::Log) {
+                askNorm = std::log1p(askValue * cfg.logScale) / std::log1p(safeDenomAsk * cfg.logScale);
+            } else if (cfg.mode == NormalizeMode::Power) {
+                askNorm = std::pow(askValue / safeDenomAsk, cfg.powerExp);
             } else {
                 askNorm = askValue / safeDenomAsk;
             }
         }
         bidNorm = std::clamp(bidNorm, 0.0, 1.0);
         askNorm = std::clamp(askNorm, 0.0, 1.0);
-        if (bidNorm < intensityFloor) {
+        if (bidNorm < cfg.intensityFloor) {
             bidNorm = 0.0;
         }
-        if (askNorm < intensityFloor) {
+        if (askNorm < cfg.intensityFloor) {
             askNorm = 0.0;
         }
         uint16_t encoded = 0;

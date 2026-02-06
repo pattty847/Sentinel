@@ -16,12 +16,14 @@ This version modularizes startup logic for maintainability and clarity.
 #include "models/PriceAxisModel.hpp"
 #include "render/LabTextItem.hpp"
 #include "render/CandlestickBatched.hpp"
+#include "render/CandlestickOverlayItem.hpp"
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
+#include "config/GuiConfigStore.hpp"
 #include <QResource>
 #include <QCoreApplication>
 // --- Hardware backend/environment setup ---
@@ -75,14 +77,16 @@ void registerMetaTypesAndQml() {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
+    qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
 }
 
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
-    // Load config files first (sets environment variables)
-    ConfigLoader::loadAndSetEnv("sentinel.yaml");
-    ConfigLoader::loadUserOverrides(".sentinel.yaml");
+    ClientConfig clientConfig;
+    ConfigLoader::loadClientConfig("config/client_config.yaml", &clientConfig);
+    ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
+    GuiConfigStore::instance().setClientConfig(clientConfig);
 
     configureGraphicsBackend();
     configureSurfaceFormat();
@@ -109,6 +113,8 @@ int main(int argc, char *argv[])
     FontManager::instance().initialize(&app);
 
     registerMetaTypesAndQml();
+    qRegisterMetaType<ServerConfig>("ServerConfig");
+    qRegisterMetaType<ClientConfig>("ClientConfig");
 
     MainWindowGPU window;
     window.show();

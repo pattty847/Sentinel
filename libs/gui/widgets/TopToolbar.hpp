@@ -14,6 +14,7 @@ public:
     QSlider* liquiditySlider() const { return m_liquiditySlider; }
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
+    void setTimeframeMs(int64_t ms);
 
 signals:
     void subscribeRequested();

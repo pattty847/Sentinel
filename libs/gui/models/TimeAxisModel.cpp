@@ -5,31 +5,13 @@
 #include <cmath>
 #include <algorithm>
 
-// Define nice time steps (in milliseconds) — include sub-100ms for zoomed-in view
 const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
-    {25, "25ms"},
-    {50, "50ms"},
-    {100, "100ms"},       // 0.1 second
-    {250, "250ms"},       // 0.25 second
-    {500, "500ms"},       // 0.5 second
-    {1000, "1s"},         // 1 second
-    {2000, "2s"},         // 2 seconds
-    {5000, "5s"},         // 5 seconds
-    {10000, "10s"},       // 10 seconds
-    {15000, "15s"},       // 15 seconds
-    {30000, "30s"},       // 30 seconds
-    {60000, "1min"},      // 1 minute
-    {120000, "2min"},     // 2 minutes
-    {300000, "5min"},     // 5 minutes
-    {600000, "10min"},    // 10 minutes
-    {900000, "15min"},    // 15 minutes
-    {1800000, "30min"},   // 30 minutes
-    {3600000, "1h"},      // 1 hour
-    {7200000, "2h"},      // 2 hours
-    {14400000, "4h"},     // 4 hours
-    {21600000, "6h"},     // 6 hours
-    {43200000, "12h"},    // 12 hours
-    {86400000, "1d"}      // 1 day
+    {25, "25ms"}, {50, "50ms"}, {100, "100ms"}, {250, "250ms"}, {500, "500ms"},
+    {1000, "1s"}, {2000, "2s"}, {5000, "5s"}, {10000, "10s"}, {15000, "15s"},
+    {30000, "30s"}, {60000, "1min"}, {120000, "2min"}, {300000, "5min"},
+    {600000, "10min"}, {900000, "15min"}, {1800000, "30min"}, {3600000, "1h"},
+    {7200000, "2h"}, {14400000, "4h"}, {21600000, "6h"}, {43200000, "12h"},
+    {86400000, "1d"}
 };
 
 TimeAxisModel::TimeAxisModel(QObject* parent)
@@ -43,8 +25,6 @@ QString TimeAxisModel::timezone() const {
 
 void TimeAxisModel::setTimezone(const QString& tzId) {
     QTimeZone newTz;
-    
-    // Handle common shorthand names
     if (tzId == "UTC" || tzId == "utc") {
         newTz = QTimeZone::utc();
     } else if (tzId == "EST" || tzId == "New York" || tzId == "America/New_York") {
@@ -54,7 +34,6 @@ void TimeAxisModel::setTimezone(const QString& tzId) {
     } else if (tzId == "Tokyo" || tzId == "Asia/Tokyo") {
         newTz = QTimeZone("Asia/Tokyo");
     } else {
-        // Try direct IANA name
         newTz = QTimeZone(tzId.toLatin1());
     }
     
@@ -146,22 +125,13 @@ void TimeAxisModel::calculateTicks() {
         }
     }
     m_lastNiceStepMs = step;
-    
-    // Find first tick at or before timeStart
     qint64 firstTick = (timeStart / step) * step;
-    
-    // Generate ticks
     for (qint64 timestamp = firstTick; timestamp <= timeEnd + step; timestamp += step) {
         if (timestamp < timeStart - step) continue;
-        
         double screenX = valueToScreenPosition(static_cast<double>(timestamp));
-        
-        // Check if tick is within visible area
         if (screenX >= 0 && screenX <= getViewportWidth()) {
             QString label = formatTimeLabel(timestamp, step);
-            bool isMajor = true; // All time ticks are major for now
-            
-            addTick(static_cast<double>(timestamp), screenX, label, isMajor);
+            addTick(static_cast<double>(timestamp), screenX, label, true);
         }
     }
     
@@ -171,8 +141,6 @@ void TimeAxisModel::calculateTicks() {
 
 QString TimeAxisModel::formatLabel(double value) const {
     qint64 timestampMs = static_cast<qint64>(value);
-    
-    // Use the range to determine appropriate formatting
     qint64 rangeMs = m_effectiveViewportValid
         ? static_cast<qint64>(m_effectiveEnd - m_effectiveStart)
         : static_cast<qint64>(getViewportEnd() - getViewportStart());
@@ -224,8 +192,6 @@ double TimeAxisModel::valueToScreenPosition(double value) const {
     double timeEnd = getViewportEnd();
     
     if (timeEnd <= timeStart) return 0.0;
-    
-    // Time axis is horizontal - earlier times at left
     double normalized = (value - timeStart) / (timeEnd - timeStart);
     
     return normalized * getViewportWidth();
@@ -235,21 +201,16 @@ qint64 TimeAxisModel::calculateNiceTimeStep(qint64 rangeMs, int targetTicks) con
     if (rangeMs <= 0 || targetTicks <= 0) return 1000; // Default 1 second
     
     qint64 rawStep = rangeMs / targetTicks;
-    
-    // Find the best matching time step
     auto it = std::lower_bound(TIME_STEPS.begin(), TIME_STEPS.end(), rawStep,
         [](const TimeStep& step, qint64 value) {
             return step.milliseconds < value;
         });
     
     if (it == TIME_STEPS.end()) {
-        // Use the largest step
         return TIME_STEPS.back().milliseconds;
     } else if (it == TIME_STEPS.begin()) {
-        // Use the smallest step
         return TIME_STEPS.front().milliseconds;
     } else {
-        // Choose between current and previous step based on which is closer
         auto prev = it - 1;
         qint64 currDiff = std::abs(it->milliseconds - rawStep);
         qint64 prevDiff = std::abs(prev->milliseconds - rawStep);
@@ -260,12 +221,7 @@ qint64 TimeAxisModel::calculateNiceTimeStep(qint64 rangeMs, int targetTicks) con
 
 QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const {
     QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(timestampMs, m_timezone);
-    
-    // TradingView-style adaptive formatting:
-    // Show minimal info, add context only at boundaries
-    
     if (stepMs < 100) {
-        // Sub-100ms: show ms only, second context at second boundaries
         int ms = dateTime.time().msec();
         int second = dateTime.time().second();
         if (second == 0 && ms == 0) {
@@ -273,48 +229,24 @@ QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const 
         }
         return QString(".%1").arg(ms, 3, 10, QChar('0'));
     } else if (stepMs >= 86400000) {
-        // Day scale or larger - show day of month, month at boundaries
         int day = dateTime.date().day();
-        if (day == 1) {
-            // Month boundary - show month name
-            return dateTime.toString("MMM");
-        }
+        if (day == 1) return dateTime.toString("MMM");
         return QString::number(day);
-        
     } else if (stepMs >= 3600000) {
-        // Hour scale - show hour, date at day boundaries
         int hour = dateTime.time().hour();
-        if (hour == 0) {
-            // Day boundary - show date
-            return dateTime.toString("d MMM");
-        }
+        if (hour == 0) return dateTime.toString("d MMM");
         return dateTime.toString("HH:mm");
-        
     } else if (stepMs >= 60000) {
-        // Minute scale - show HH:MM, hour context at hour boundaries
         int minute = dateTime.time().minute();
-        if (minute == 0) {
-            // Hour boundary - show full time
-            return dateTime.toString("HH:mm");
-        }
+        if (minute == 0) return dateTime.toString("HH:mm");
         return dateTime.toString(":mm");
-        
     } else if (stepMs >= 1000) {
-        // Second scale - show :SS, minute context at minute boundaries
         int second = dateTime.time().second();
-        if (second == 0) {
-            // Minute boundary
-            return dateTime.toString("HH:mm");
-        }
+        if (second == 0) return dateTime.toString("HH:mm");
         return dateTime.toString(":ss");
-        
     } else {
-        // Sub-second - show .ms, second context at second boundaries
         int ms = dateTime.time().msec();
-        if (ms == 0) {
-            // Second boundary
-            return dateTime.toString(":ss");
-        }
+        if (ms == 0) return dateTime.toString(":ss");
         return QString(".%1").arg(ms, 3, 10, QChar('0'));
     }
 }

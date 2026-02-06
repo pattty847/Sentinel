@@ -8,6 +8,7 @@
 #include <mutex>
 #include <thread>
 #include "../servermodel/ServerDataModel.hpp"
+#include "../config/ConfigTypes.hpp"
 
 class Authenticator;
 class CoinbaseRestClient;
@@ -20,6 +21,7 @@ class SentinelStreamServer : public QObject {
 public:
     explicit SentinelStreamServer(ServerDataModel& model,
                                   Authenticator& auth,
+                                  const ServerConfig& config,
                                   int port,
                                   QObject* parent = nullptr);
     ~SentinelStreamServer();
@@ -35,12 +37,14 @@ public:
     void notifyClientSubscribed(const std::string& symbol);
     void notifyClientUnsubscribed(const std::string& symbol);
     CoinbaseRestClient& restClient();
+    const ServerConfig& serverConfig() const { return m_serverConfig; }
 
 private:
     void doAccept();
     
     ServerDataModel& m_model;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
+    ServerConfig m_serverConfig;
     int m_port;
     
     net::io_context m_ioc;

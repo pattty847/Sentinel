@@ -19,10 +19,8 @@ QmlSceneController::QmlSceneController(QQuickView* qquickView)
 static void addSentinelChartsImportPath(QQmlEngine* engine) {
     if (!engine) return;
 
-    // Add QRC import path for embedded Sentinel.Charts module
     engine->addImportPath("qrc:/qt/qml");
 
-    // Fallback: add build directory path for development
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString candidate = QDir(appDir).absoluteFilePath("../../libs/gui");
     if (QFile::exists(QDir(candidate).filePath("qmldir"))) {
@@ -31,7 +29,6 @@ static void addSentinelChartsImportPath(QQmlEngine* engine) {
 }
 
 void QmlSceneController::loadQmlSource() {
-    // Configurable path (extract from config)
     QSettings config("config.ini", QSettings::IniFormat);
     QString qmlPath;
 #ifdef SENTINEL_SOURCE_DIR
@@ -43,7 +40,7 @@ void QmlSceneController::loadQmlSource() {
 #endif
     
     const QString qmlEnv = qEnvironmentVariable("SENTINEL_QML_PATH");
-    if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;  // Override
+    if (!qmlEnv.isEmpty()) qmlPath = qmlEnv;
 
     addSentinelChartsImportPath(m_qquickView->engine());
     
@@ -55,7 +52,6 @@ void QmlSceneController::loadQmlSource() {
     
     if (m_qquickView->status() == QQuickView::Error) {
         sLog_Error("QML FAILED TO LOAD! Errors: " << m_qquickView->errors());
-        // Note: QMessageBox requires parent widget, so we'll let MainWindowGPU handle this
     }
 }
 
@@ -79,6 +75,12 @@ void QmlSceneController::setThemeBridge(ThemeBridge* bridge) {
     if (!m_qquickView || !bridge) return;
     QQmlContext* context = m_qquickView->rootContext();
     context->setContextProperty("uiTheme", bridge);
+}
+
+void QmlSceneController::setDataSource(QObject* source) {
+    if (!m_qquickView || !source) return;
+    QQmlContext* context = m_qquickView->rootContext();
+    context->setContextProperty("dataSource", source);
 }
 
 void QmlSceneController::updateSymbolInContext(const QString& symbol) {

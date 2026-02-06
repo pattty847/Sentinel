@@ -86,41 +86,40 @@ GUI Client:
 
 ## Configuration
 
-Sentinel uses YAML configuration files for runtime settings. This is more convenient than setting dozens of environment variables.
+Sentinel uses separate YAML configs for server-authoritative settings and client-only UI preferences.
 
 **Setup:**
 
 ```bash
-# Copy the template to create your config
-cp sentinel.yaml.template sentinel.yaml
+# Server config (authoritative)
+cp config/server_config.yaml config/.server_config.yaml
 
-# (Optional) Create user-specific overrides not tracked in git
-cp sentinel.yaml.template .sentinel.yaml
+# Client config (local UI prefs)
+cp config/client_config.yaml config/.client_config.yaml
 ```
 
 **Config Priority:**
 
-1. CLI environment variables (highest)
-2. `.sentinel.yaml` (user overrides)
-3. `sentinel.yaml` (project defaults)
+1. `config/.server_config.yaml` overrides `config/server_config.yaml`
+2. `config/.client_config.yaml` overrides `config/client_config.yaml`
 
 **Common settings:**
 
 ```yaml
 heatmap:
-  timeframe: 1000      # communicates to client the timeframe
-  grid_width: 5120
-  grid_height: 2048
+  timeframe: 1000
+  grid_width: 2048
+  grid_height: 1024
 
 server:
-  default_symbols: BTC-USD,ETH-USD    # comma separated list
+  default_symbols: BTC-USD
 
 gui:
-  api_port: 17100      # Screenshot API endpoint
+  api_port: 17100
   screenshot_dir: ./screenshots
 ```
 
-See `sentinel.yaml.template` for all options or `docs/ENV_VARS.md` for complete reference.
+See `config/server_config.yaml` and `config/client_config.yaml` for all options.
 
 ---
 

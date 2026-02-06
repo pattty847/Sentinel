@@ -61,9 +61,39 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 * Use modern C++20: RAII, smart pointers, no naked new/delete.
 * Prefer explicit types for public APIs.
 * Use expressive names; comment only where intent is subtle.
+* **Comments:** Prefer code as documentation. When you do comment, explain *why* (decisions, invariants, protocol quirks), not *what* (the code already shows that). No COT, filler, or meta-commentary in the codebase. File headers: one short line (role/threading) if needed; no essays.
 * Separate concerns: logic in core, visuals in gui.
-* If you add an ENV VAR to the program, make sure to outline it to docs/ENV_VARS.md.
+* Prefer config files over new ENV VARs; only add env vars when truly necessary.
 * Qt resources: when adding SVGs/icons via CMake, use `QT_RESOURCE_ALIAS` (or explicit aliases) so runtime paths are stable (e.g., `:/icons/icon-*.svg`). Avoid absolute path aliases.
+* Backwards compatibility is optional unless explicitly required in this doc. If a simpler or faster design is better, propose it.
+* Performance invariants (GPU-first, `setViewport()`, minimal churn) matter more than preserving legacy patterns.
+
+# **3a. Planning Checklist (New Features & Refactors)**
+### **Musts**
+  - Before adding a feature or refactoring a file/module, answer these:
+
+  1. Purpose
+     What system capability does this enable? What breaks if it’s removed?
+  2. Invariant
+     “This file guarantees that ___ always ___, even when ___.”
+  3. Ownership
+     What it owns (time/state/GPU/threading/I/O/etc) and what it explicitly does not.
+  4. Contract
+     Inputs (trusted?) and outputs (guarantees?).
+  5. Dependency Direction
+     Who depends on it, and who it depends on. Any inversion/leak?
+  6. Design Choice
+     One plausible alternative + why this design wins.
+     If unclear: UNKNOWN — REVISIT.
+  7. Hot vs Cold
+     Identify hot path blocks vs setup/glue paths.
+  8. State Flow
+     Who mutates state, who observes it, where it is cached/derived/authoritative.
+  9. Smell Tags
+     Tag anything “sloppy poopy” as
+     SMELL — NEEDS CONTEXT or SMELL — PROBABLY WRONG.
+  10. Confidence
+     Can I explain it from memory? If not, list gaps.
 
 ### **Threading Rules**
 
@@ -90,7 +120,7 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 
 * Rebase feature onto dev frequently.
 * Don’t stack branches.
-* Commit as often as you want; clean history optional.
+* Commit groups of logical feats; clean history optional.
 
 If you can understand your commit messages tomorrow morning, they’re good.
 
@@ -148,7 +178,7 @@ Exposes a local HTTP endpoint for automated screenshots of the UI.
 
 * Server is the only producer of heatmap columns.
 * Client must not emit local LTSE columns in remote mode.
-* Timeframe is locked by `SENTINEL_HEATMAP_TF` (server + client).
+* Timeframe is locked by server_config (server authoritative).
 * Heatmap grid height and tick size are authoritative from server.
 * Client requires server connection (no local-only mode).
 
@@ -217,7 +247,7 @@ Single source of truth for open work. Read it at session start. Update it as you
 
 ### **Agent Rules**
 
-* At session start: read `docs/TODO.md`, identify active features relevant to current work.
+* If asked: read `docs/TODO.md`, identify active features relevant to current work.
 * When you finish a task: check the box `[x]`, move it to Done with today's date.
 * When pausing or ending a session: update the session log and set Updated date.
 * If the user pivots to a new feature: append a new `F<N>` block at the bottom.

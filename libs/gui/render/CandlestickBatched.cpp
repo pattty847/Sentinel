@@ -40,7 +40,6 @@ public:
         bodyNode->setFlag(QSGNode::OwnsGeometry, true);
         bodyNode->setFlag(QSGNode::OwnsMaterial, true);
 
-        // Wick first (behind), body on top
         appendChildNode(wickNode);
         appendChildNode(bodyNode);
     }
@@ -247,7 +246,6 @@ void CandlestickBatched::updatePriceRange() {
         m_priceMax = std::max(m_priceMax, c.high);
     }
 
-    // Add some padding
     double range = m_priceMax - m_priceMin;
     if (range < 0.01) range = 1.0;
     m_priceMin -= range * 0.05;
@@ -334,8 +332,6 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         return padding + static_cast<float>(1.0 - normalized) * chartHeight;
     };
 
-    // Allocate geometry: 6 vertices per quad (2 triangles)
-    // Each candle has 1 wick quad + 1 body quad
     root->wickGeometry->allocate(n * 6);
     root->bodyGeometry->allocate(n * 6);
 
@@ -355,7 +351,6 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         const float candleX = startX + static_cast<float>(i) * totalWidth;
         const float candleCenterX = candleX + m_candleWidth * 0.5f;
 
-        // Wick
         const float wickWidth = std::max(1.0f, m_candleWidth * 0.15f);
         const float wickX0 = candleCenterX - wickWidth * 0.5f;
         const float wickX1 = candleCenterX + wickWidth * 0.5f;
@@ -364,7 +359,6 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
         addQuad(wickVerts, wickX0, wickY0, wickX1, wickY1, wr, wg, wb, wa);
 
-        // Body
         const float bodyY0 = priceToY(std::max(c.open, c.close));
         const float bodyY1 = priceToY(std::min(c.open, c.close));
         const float bodyX0 = candleX;
@@ -372,7 +366,6 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
         QColor bodyColor = bullish ? m_bullishColor : m_bearishColor;
         if (hovered) {
-            // Brighten on hover
             bodyColor = bodyColor.lighter(130);
         }
 

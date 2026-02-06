@@ -12,7 +12,9 @@
 #include <QByteArray>
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
+#include "HeatmapSlice.hpp"
 #include "../marketdata/model/TradeData.h"
+#include "../config/ConfigTypes.hpp"
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -62,6 +64,7 @@ signals:
     void connected();
     void disconnected();
     void errorOccurred(const QString& error);
+    void serverConfigReceived(const ServerConfig& config);
     
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices
@@ -70,22 +73,7 @@ signals:
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     // Other signals as needed for aggregated slices
-    void heatmapSliceReceived(const QString& symbol,
-                              int64_t bucketStartMs,
-                              int64_t bucketEndMs,
-                              int64_t timeframeMs,
-                              int gridWidth,
-                              int gridHeight,
-                              double minPrice,
-                              double maxPrice,
-                              double tickSize,
-                              double midPrice,
-                              double lastTrade,
-                              const QString& format,
-                              const QByteArray& column,
-                              const QByteArray& liquidityColumn,
-                              double liquidityScale,
-                              bool reset);
+    void heatmapSliceReceived(const HeatmapSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,

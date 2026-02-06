@@ -1,4 +1,5 @@
 #include "SentinelStreamServer.hpp"
+#include "HeatmapSlice.hpp"
 #include "SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
@@ -27,76 +28,51 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
-struct CandleGateConfig {
-    double bpsFast = 0.00005;  // 0.5 bps
-    double bpsSlow = 0.0002;   // 2 bps
-    int tickMultFast = 1;
-    int tickMultSlow = 2;
-    int64_t silenceMsFast = 200;
-    int64_t silenceMsSlow = 1000;
-    double volumeFast = 0.0;
-    double volumeSlow = 0.0;
-    double tickSize = 0.0;
-};
 
-double envDouble(const char* name, double fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return std::stod(v);
-        } catch (...) {
-            return fallback;
-        }
+nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
+    nlohmann::json payload;
+    payload["type"] = "server_config";
+    payload["schema_version"] = 1;
+    payload["timeframes_ms"] = cfg.heatmap.timeframesMs;
+    payload["heatmap"] = {
+        {"grid_width", cfg.heatmap.gridWidth},
+        {"grid_height", cfg.heatmap.gridHeight},
+        {"tick_size", cfg.heatmap.tickSize},
+        {"recenter_delta", cfg.heatmap.recenterDelta},
+        {"band_fast", cfg.heatmap.bandFast},
+        {"band_medium", cfg.heatmap.bandMedium},
+        {"band_slow", cfg.heatmap.bandSlow},
+        {"intensity_mode", cfg.heatmap.intensityMode},
+        {"intensity_max_mode", cfg.heatmap.intensityMaxMode},
+        {"intensity_max_decay", cfg.heatmap.intensityMaxDecay},
+        {"intensity_log_scale", cfg.heatmap.intensityLogScale},
+        {"intensity_power", cfg.heatmap.intensityPower},
+        {"intensity_floor", cfg.heatmap.intensityFloor},
+        {"debug_slice_log", cfg.heatmap.debugSliceLog}
+    };
+    if (cfg.heatmap.activeTimeframeMs > 0) {
+        payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;
     }
-    return fallback;
-}
-
-int envInt(const char* name, int fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return std::stoi(v);
-        } catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-int64_t envInt64(const char* name, int64_t fallback) {
-    if (const char* v = std::getenv(name)) {
-        if (v[0] == '\0') return fallback;
-        try {
-            return static_cast<int64_t>(std::stoll(v));
-        } catch (...) {
-            return fallback;
-        }
-    }
-    return fallback;
-}
-
-const CandleGateConfig& candleGateConfig() {
-    static CandleGateConfig cfg = [] {
-        CandleGateConfig c;
-        c.bpsFast = envDouble("SENTINEL_CANDLE_UPDATE_BPS_FAST", c.bpsFast);
-        c.bpsSlow = envDouble("SENTINEL_CANDLE_UPDATE_BPS_SLOW", c.bpsSlow);
-        c.tickMultFast = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_FAST", c.tickMultFast);
-        c.tickMultSlow = envInt("SENTINEL_CANDLE_UPDATE_TICK_MULT_SLOW", c.tickMultSlow);
-        c.silenceMsFast = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_FAST", c.silenceMsFast);
-        c.silenceMsSlow = envInt64("SENTINEL_CANDLE_UPDATE_SILENCE_MS_SLOW", c.silenceMsSlow);
-        c.volumeFast = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_FAST", c.volumeFast);
-        c.volumeSlow = envDouble("SENTINEL_CANDLE_UPDATE_VOLUME_SLOW", c.volumeSlow);
-        c.tickSize = envDouble("SENTINEL_CANDLE_UPDATE_TICK_SIZE", c.tickSize);
-        if (c.tickSize <= 0.0) {
-            c.tickSize = envDouble("SENTINEL_ORDERBOOK_TICK_SIZE", 0.0);
-        }
-        return c;
-    }();
-    return cfg;
+    payload["orderbook"] = {
+        {"tick_size", cfg.orderbook.tickSize},
+        {"band_pct", cfg.orderbook.bandPct}
+    };
+    payload["candles"] = {
+        {"update_bps_fast", cfg.candles.bpsFast},
+        {"update_bps_slow", cfg.candles.bpsSlow},
+        {"update_tick_mult_fast", cfg.candles.tickMultFast},
+        {"update_tick_mult_slow", cfg.candles.tickMultSlow},
+        {"update_silence_ms_fast", cfg.candles.silenceMsFast},
+        {"update_silence_ms_slow", cfg.candles.silenceMsSlow},
+        {"update_volume_fast", cfg.candles.volumeFast},
+        {"update_volume_slow", cfg.candles.volumeSlow},
+        {"update_tick_size", cfg.candles.tickSize}
+    };
+    payload["default_symbols"] = cfg.defaultSymbols;
+    return payload;
 }
 }
 
-// Echoes back all received WebSocket messages
 class Session : public std::enable_shared_from_this<Session> {
     websocket::stream<beast::tcp_stream> ws_;
     beast::flat_buffer buffer_;
@@ -106,7 +82,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::vector<std::string> write_queue_;
     std::mutex queue_mutex_;
     
-    // Connection handles for signal disconnection (if needed)
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection heatmapConn_;
@@ -123,7 +98,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::mutex candle_mutex_;
 
 public:
-    // Take ownership of the socket
     explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
         : ws_(std::move(socket))
         , model_(model)
@@ -139,24 +113,18 @@ public:
         QObject::disconnect(barClosedConn_);
     }
 
-    // Get on the correct executor
     void run() {
-        // We need to be executing within a strand to perform async operations
-        // on the I/O objects in this session.
         net::dispatch(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_run,
                 shared_from_this()));
     }
 
-    // Start the asynchronous operation
     void on_run() {
-        // Set suggested timeout settings for the websocket
         ws_.set_option(
             websocket::stream_base::timeout::suggested(
                 beast::role_type::server));
 
-        // Set a decorator to change the Server of the handshake
         ws_.set_option(websocket::stream_base::decorator(
             [](websocket::response_type& res) {
                 res.set(http::field::server,
@@ -164,7 +132,6 @@ public:
                         " sentinel-server");
             }));
 
-        // Accept the websocket handshake
         ws_.async_accept(
             beast::bind_front_handler(
                 &Session::on_accept,
@@ -177,6 +144,11 @@ public:
 
         sLog_App("Sentinel client connected");
         auto self = shared_from_this();
+
+        if (owner_) {
+            auto configPayload = buildServerConfigPayload(owner_->serverConfig());
+            do_write(configPayload.dump());
+        }
         
         tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
             [self](const Trade& trade) {
@@ -189,25 +161,8 @@ public:
             });
 
         heatmapConn_ = QObject::connect(&model_, &ServerDataModel::heatmapSliceReady,
-            [self](const QString& symbol,
-                   int64_t bucketStartMs,
-                   int64_t bucketEndMs,
-                   int64_t timeframeMs,
-                   int gridWidth,
-                   int gridHeight,
-                   double minPrice,
-                   double maxPrice,
-                   double tickSize,
-                   double midPrice,
-                   double lastTrade,
-                   const QByteArray& column,
-                   const QByteArray& liquidityColumn,
-                   double liquidityScale,
-                   bool reset) {
-                self->on_heatmap_slice(symbol, bucketStartMs, bucketEndMs, timeframeMs,
-                                       gridWidth, gridHeight,
-                                       minPrice, maxPrice, tickSize, midPrice, lastTrade,
-                                       column, liquidityColumn, liquidityScale, reset);
+            [self](const HeatmapSlice& slice) {
+                self->on_heatmap_slice(slice);
             });
 
         barUpdatedConn_ = QObject::connect(&model_, &ServerDataModel::barUpdated,
@@ -224,7 +179,6 @@ public:
     }
 
     void do_read() {
-        // Read a message into our buffer
         ws_.async_read(
             buffer_,
             beast::bind_front_handler(
@@ -235,7 +189,6 @@ public:
     void on_read(beast::error_code ec, std::size_t bytes_transferred) {
         boost::ignore_unused(bytes_transferred);
 
-        // This indicates that the session was closed
         if(ec == websocket::error::closed) {
             sLog_App("Sentinel client disconnected");
             return;
@@ -244,14 +197,9 @@ public:
         if(ec)
             return fail(ec, "read");
 
-        // Handle message
         std::string msg = beast::buffers_to_string(buffer_.data());
         handle_message(msg);
-
-        // Clear the buffer
         buffer_.consume(buffer_.size());
-
-        // Do another read
         do_read();
     }
 
@@ -268,24 +216,12 @@ public:
                         owner_->notifyClientSubscribed(symbol);
                     }
                     
-                    // Send ACK
                     nlohmann::json ack;
                     ack["type"] = "ack";
                     ack["symbol"] = symbol;
                     do_write(ack.dump());
 
-                    // Send Initial Snapshot
                     auto& hotData = model_.ensureSymbol(symbol);
-                    // Use a helper to serialize the snapshot
-                    // We need to capture the dense book state
-                    
-                    // Capture dense view
-                    // auto view = hotData.liveBook.captureDenseSnapshot();
-                    // Or simpler: iterate non-zero levels
-                    // We can use getBids/getAsks which are dense vectors, but they are raw.
-                    // We need price/quantity pairs for the client (JSON format).
-                    // This is heavy for JSON, but okay for MVP.
-                    
                     nlohmann::json snapshot;
                     snapshot["type"] = "snapshot";
                     snapshot["symbol"] = symbol;
@@ -500,10 +436,6 @@ public:
         }
     }
     
-    // ------------------------------------------------------------------------
-    // DATA HANDLERS (Called from ServerDataModel thread)
-    // ------------------------------------------------------------------------
-    
     void on_trade(const Trade& trade) {
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
@@ -522,7 +454,6 @@ public:
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
         
-        // Retrieve price conversion helper from the model's SymbolHotData
         auto& symbolData = model_.ensureSymbol(pid);
         const auto& book = symbolData.liveBook;
 
@@ -544,46 +475,32 @@ public:
         do_write(j.dump());
     }
 
-    void on_heatmap_slice(const QString& symbol,
-                          int64_t bucketStartMs,
-                          int64_t bucketEndMs,
-                          int64_t timeframeMs,
-                          int gridWidth,
-                          int gridHeight,
-                          double minPrice,
-                          double maxPrice,
-                          double tickSize,
-                          double midPrice,
-                          double lastTrade,
-                          const QByteArray& column,
-                          const QByteArray& liquidityColumn,
-                          double liquidityScale,
-                          bool reset) {
-        const std::string sym = symbol.toStdString();
+    void on_heatmap_slice(const HeatmapSlice& slice) {
+        const std::string sym = slice.symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
         nlohmann::json j;
         j["type"] = "heatmap_slice";
         j["symbol"] = sym;
-        j["time_start"] = bucketStartMs;
-        j["time_end"] = bucketEndMs;
-        j["timeframe_ms"] = timeframeMs;
-        j["grid_width"] = gridWidth;
-        j["grid_height"] = gridHeight;
-        j["min_price"] = minPrice;
-        j["max_price"] = maxPrice;
-        j["tick_size"] = tickSize;
-        j["mid_price"] = midPrice;
-        j["last_trade"] = lastTrade;
-        j["reset"] = reset;
-        j["format"] = "u16";
+        j["time_start"] = slice.bucketStartMs;
+        j["time_end"] = slice.bucketEndMs;
+        j["timeframe_ms"] = slice.timeframeMs;
+        j["grid_width"] = slice.gridWidth;
+        j["grid_height"] = slice.gridHeight;
+        j["min_price"] = slice.minPrice;
+        j["max_price"] = slice.maxPrice;
+        j["tick_size"] = slice.tickSize;
+        j["mid_price"] = slice.midPrice;
+        j["last_trade"] = slice.lastTrade;
+        j["reset"] = slice.reset;
+        j["format"] = slice.format.toStdString();
         j["encoding"] = "base64";
-        j["column"] = column.toBase64().toStdString();
-        if (!liquidityColumn.isEmpty()) {
+        j["column"] = slice.column.toBase64().toStdString();
+        if (!slice.liquidityColumn.isEmpty()) {
             j["liquidity_format"] = "u16";
             j["liquidity_encoding"] = "base64";
-            j["liquidity_scale"] = liquidityScale;
-            j["liquidity_column"] = liquidityColumn.toBase64().toStdString();
+            j["liquidity_scale"] = slice.liquidityScale;
+            j["liquidity_column"] = slice.liquidityColumn.toBase64().toStdString();
         }
 
         do_write(j.dump());
@@ -591,19 +508,20 @@ public:
 
     static bool should_emit_update(const OHLCVBar& bar,
                                    const CandleStreamState& state,
+                                   const ServerCandleGateConfig& cfg,
+                                   const ServerOrderBookConfig& obConfig,
                                    int64_t tfSec,
                                    int64_t nowMs) {
         if (!state.hasLast) {
             return true;
         }
 
-        const CandleGateConfig& cfg = candleGateConfig();
         const OHLCVBar& last = state.lastBar;
         const bool highChanged = bar.high > last.high;
         const bool lowChanged = bar.low < last.low;
 
         const double closeDelta = std::abs(bar.close - last.close);
-        const double tickSize = cfg.tickSize;
+        const double tickSize = (cfg.tickSize > 0.0) ? cfg.tickSize : obConfig.tickSize;
         const int tickMultiplier = (tfSec <= 1) ? cfg.tickMultFast : cfg.tickMultSlow;
         const double bpsThreshold = (tfSec <= 1) ? cfg.bpsFast : cfg.bpsSlow;
         const double priceThreshold = std::max(tickSize * tickMultiplier,
@@ -629,12 +547,14 @@ public:
         const int64_t nowMs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
+        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
 
         CandleStreamState state;
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
-            if (!should_emit_update(bar, entry, tfSec, nowMs)) {
+            if (!should_emit_update(bar, entry, owner_->serverConfig().candles,
+                                    owner_->serverConfig().orderbook, tfSec, nowMs)) {
                 return;
             }
             entry.seq++;
@@ -642,6 +562,14 @@ public:
             entry.lastSentMs = nowMs;
             entry.hasLast = true;
             state = entry;
+        }
+        if (logBars) {
+            sLog_App("Candle bar update: symbol=" << symbol
+                                                  << " tfSec=" << tfSec
+                                                  << " start=" << bar.timestamp_ms
+                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                                                  << " now=" << nowMs
+                                                  << " closed=" << (bar.is_closed ? "true" : "false"));
         }
 
         nlohmann::json item;
@@ -672,6 +600,7 @@ public:
         const int64_t tfSec = static_cast<int64_t>(tf);
         const std::string key = sym + "|" + std::to_string(tfSec);
         CandleStreamState state;
+        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
@@ -682,6 +611,14 @@ public:
                     std::chrono::system_clock::now().time_since_epoch()).count());
             entry.hasLast = true;
             state = entry;
+        }
+        if (logBars) {
+            const int64_t nowMs = state.lastSentMs;
+            sLog_App("Candle bar closed: symbol=" << symbol
+                                                  << " tfSec=" << tfSec
+                                                  << " start=" << bar.timestamp_ms
+                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                                                  << " now=" << nowMs);
         }
 
         nlohmann::json item;
@@ -705,9 +642,7 @@ public:
         do_write(payload.dump());
     }
 
-    // Thread-safe write
     void do_write(std::string payload) {
-        // Post to the strand to ensure serialization
         net::post(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_write_post,
@@ -731,7 +666,6 @@ public:
         write_queue_.push_back(std::move(payload));
         
         if (write_queue_.size() > 1) {
-            // Write already in progress
             return;
         }
         
@@ -739,7 +673,6 @@ public:
     }
     
     void internal_async_write() {
-        // Assumes queue is not empty and we are on the strand
         ws_.async_write(
             net::buffer(write_queue_.front()),
             beast::bind_front_handler(
@@ -759,7 +692,6 @@ public:
     }
 
     void fail(beast::error_code ec, char const* what) {
-        // Don't log "End of file" or "Connection reset" as errors during shutdown
         if (ec != websocket::error::closed && ec != net::error::operation_aborted) {
              sLog_Error("Session error: " << what << ": " << ec.message().c_str());
         }
@@ -770,11 +702,16 @@ public:
 
 SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
                                            Authenticator& auth,
+                                           const ServerConfig& config,
                                            int port,
                                            QObject* parent)
     : QObject(parent)
     , m_model(model)
-    , m_restClient(std::make_unique<CoinbaseRestClient>(auth))
+    , m_restClient(std::make_unique<CoinbaseRestClient>(auth,
+                                                        "api.coinbase.com",
+                                                        "443",
+                                                        config.mdc.sslCaBundle))
+    , m_serverConfig(config)
     , m_port(port)
 {
 }
@@ -789,7 +726,6 @@ void SentinelStreamServer::start() {
     try {
         m_running = true;
         
-        // Setup acceptor
         tcp::endpoint endpoint(tcp::v4(), m_port);
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
@@ -836,8 +772,6 @@ void SentinelStreamServer::doAccept() {
             } else {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
-            
-            // Accept the next connection
             if (m_running) {
                 doAccept();
             }

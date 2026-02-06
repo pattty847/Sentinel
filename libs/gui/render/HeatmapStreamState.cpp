@@ -250,6 +250,11 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         m_writeColumn = writeColumn;
+        if (m_filledColumns < m_gridWidth) {
+            const int remaining = m_gridWidth - m_filledColumns;
+            const int addCount = std::min(remaining, step);
+            m_filledColumns += addCount;
+        }
         m_lastSliceStartMs = sliceStartMs;
         m_lastColumnData = intensityColumn;
         m_haveLastColumn = true;
@@ -302,6 +307,7 @@ HeatmapStreamState::Snapshot HeatmapStreamState::snapshot() const {
         snap.lastSliceStartMs = m_lastSliceStartMs;
         snap.timeOriginMs = m_timeOriginMs;
         snap.streamBaseMs = m_streamBaseMs;
+        snap.filledColumns = m_filledColumns;
         snap.minPrice = m_minPrice;
         snap.maxPrice = m_maxPrice;
         snap.tickSize = m_tickSize;
@@ -339,6 +345,7 @@ bool HeatmapStreamState::copyLabelSnapshot(LabelSnapshot& out) const {
         snap.lastSliceStartMs = m_lastSliceStartMs;
         snap.timeOriginMs = m_timeOriginMs;
         snap.streamBaseMs = m_streamBaseMs;
+        snap.filledColumns = m_filledColumns;
         snap.minPrice = m_minPrice;
         snap.maxPrice = m_maxPrice;
         snap.tickSize = m_tickSize;
@@ -383,6 +390,7 @@ void HeatmapStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_gridWidth = gridWidth;
     m_gridHeight = gridHeight;
     m_writeColumn = 0;
+    m_filledColumns = 0;
     m_lastAppendMs = 0;
     m_lastSliceStartMs = std::numeric_limits<int64_t>::min();
     m_timeOriginMs = 0;

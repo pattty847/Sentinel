@@ -1,14 +1,3 @@
-/*
-Sentinel — MainWindowGpu
-Role: Implements UI setup and the core data-to-rendering pipeline connection logic.
-Inputs/Outputs: Connects remote data source signals to UnifiedGridRenderer slots.
-Threading: Runs on the main GUI thread, using QueuedConnections for thread safety.
-Performance: Connection logic is part of the user-initiated subscription setup.
-Integration: Wires the remote data source to the QML renderer.
-Observability: Detailed logging of UI/QML initialization and data pipeline status via sLog_App/sLog_Data.
-Related: MainWindowGpu.h, UnifiedGridRenderer.h.
-Assumptions: Remote data source connects before subscribe() is called.
-*/
 #include <QQuickView>
 #include <QLabel>
 #include <QLineEdit>
@@ -49,6 +38,7 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
 #include <QQmlContext>
@@ -67,18 +57,41 @@ Assumptions: Remote data source connects before subscribe() is called.
 #include <QApplication>
 #include <QTabWidget>
 #include <QtGlobal>
+#include <unordered_map>
+
+namespace {
+int timeframeMsFromLabel(const QString& label) {
+    static const std::unordered_map<std::string, int> map{
+        {"1s", 1000},
+        {"1m", 60000},
+        {"5m", 300000},
+        {"15m", 900000},
+        {"1h", 3600000},
+        {"4h", 14400000},
+        {"1D", 86400000},
+    };
+    auto it = map.find(label.toStdString());
+    if (it == map.end()) {
+        return 0;
+    }
+    return it->second;
+}
+
+bool chartDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
+    return enabled;
+}
+}
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
-    // 1) Initialize data source (remote-only)
-    auto remote = std::make_unique<RemoteGridDataSource>("127.0.0.1", "8080");
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    auto remote = std::make_unique<RemoteGridDataSource>(
+        QString::fromStdString(clientConfig.server.host),
+        QString::fromStdString(clientConfig.server.port));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
-    
-    // 2) Create dock widgets via DockFactory
     setupUI();
-    
-    // 3) Initialize QML scene controller
     if (m_qquickView) {
         m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
     }
@@ -86,17 +99,38 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_themeBridge = new ThemeBridge(this);
         m_themeBridge->applyTheme(ThemeManager::instance().currentTheme());
         m_qmlController->setThemeBridge(m_themeBridge);
+        m_qmlController->setDataSource(m_dataSource.get());
         m_qmlController->loadQmlSource();
         m_qmlController->verifyGpuAcceleration();
     }
+
+    auto* configStore = &GuiConfigStore::instance();
+    connect(configStore, &GuiConfigStore::serverConfigUpdated, this, [this](const ServerConfig& config) {
+        if (m_qmlController) {
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->applyServerConfig(config);
+                if (m_heatmapDock && m_heatmapDock->toolbar()) {
+                    m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
+                }
+            }
+        }
+        if (!config.defaultSymbols.empty() && !m_userSubscribed) {
+            const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front());
+            if (m_symbolInput) {
+                m_symbolInput->setText(defaultSymbol);
+            }
+            if (m_qmlController) {
+                m_qmlController->updateSymbolInContext(defaultSymbol);
+            }
+            m_currentSymbol = defaultSymbol;
+        }
+    });
 
     // Attach PerformanceMonitor to QML window for FPS tracking
     if (m_qquickView) {
         PerformanceMonitor::instance().attachToWindow(m_qquickView);
         sLog_App("PerformanceMonitor attached to QML window");
     }
-
-    // Connect StatusBar to PerformanceMonitor signals
     if (m_statusBar) {
         auto& perfMon = PerformanceMonitor::instance();
         connect(&perfMon, &PerformanceMonitor::fpsChanged, m_statusBar, &StatusBar::setFps);
@@ -106,7 +140,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
     }
     
-    // Set up QML context properties
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
@@ -114,20 +147,14 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }
-    m_modeController->setMode(ChartMode::ORDER_BOOK_HEATMAP);
-    
-    // 4) Set up layout orchestrator
-    // NOTE: We defer arrangeDefaultLayout() until after window is shown and maximized,
-    // because resizeDocks() doesn't work correctly when window is at default 640x480 size.
+    m_modeController->setMode(ChartMode::HYBRID_CANDLES_TRADES);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
-    
-    // 5) Set up menu bar and shortcuts
+    // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
     m_shortcutBinder = std::make_unique<ShortcutBinder>(this);
     setupMenuBar();
     setupShortcuts();
     
-    // 6) Set up connections
     setupConnections();
     setWindowProperties();
     setupGuiApiServer();
@@ -142,14 +169,8 @@ MainWindowGPU::~MainWindowGPU() {
 }
 
 void MainWindowGPU::setupUI() {
-    
-    // Prevent repaint storms during setup
     setUpdatesEnabled(false);
-
-    // Ensure dock tabs are placed at the top for all areas.
     setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
-    
-    // Create docks via DockFactory
     DockFactory dockFactory(this);
     auto docks = dockFactory.createDocks();
     m_heatmapDock = docks.heatmapDock;
@@ -164,13 +185,10 @@ void MainWindowGPU::setupUI() {
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
     
-    // Get QML view references
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
     if (m_qquickView) {
     }
-    
-    // Get symbol controls
     auto symbolControls = dockFactory.getSymbolControls();
     m_symbolInput = symbolControls.symbolInput;
     m_subscribeButton = symbolControls.subscribeButton;
@@ -178,13 +196,7 @@ void MainWindowGPU::setupUI() {
     // Add status bar to main window
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
-
-    
-    // Connect symbol changes to docks
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
-
-
-    // Heatmap toolbar signals
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::chartModeSelected, this, [this](ChartMode mode) {
             if (m_modeController) {
@@ -219,18 +231,34 @@ void MainWindowGPU::setupUI() {
             m_heatmapSettingsDialog->raise();
             m_heatmapSettingsDialog->activateWindow();
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
+            if (!m_qmlController) {
+                return;
+            }
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (!renderer) {
+                return;
+            }
+            const int ms = timeframeMsFromLabel(label);
+            if (ms <= 0) {
+                return;
+            }
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Chart TF select: %1 -> %2ms").arg(label).arg(ms));
+            }
+            renderer->setTimeframe(ms);
+            if (m_connected && m_userSubscribed) {
+                requestHeatmapHistoryForSymbol(m_currentSymbol);
+                requestCandleHistoryForSymbol(m_currentSymbol);
+            }
+        });
     }
     
     setUpdatesEnabled(true);
 }
 
-// QML loading and GPU verification moved to QmlSceneController
-
-// Styles are now handled by individual dock widgets
-
 void MainWindowGPU::setWindowProperties() {
     setWindowTitle("Sentinel - GPU Trading Terminal");
-    // Set window state to maximized (will be applied when window is shown)
     setWindowState(Qt::WindowMaximized);
 }
 
@@ -249,7 +277,8 @@ void MainWindowGPU::setupConnections() {
 }
 
 void MainWindowGPU::setupGuiApiServer() {
-    const int defaultPort = 17100;
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    const int defaultPort = clientConfig.gui.apiPort;
     int port = defaultPort;
     if (qEnvironmentVariableIsSet("SENTINEL_GUI_API_PORT")) {
         bool ok = false;
@@ -262,7 +291,7 @@ void MainWindowGPU::setupGuiApiServer() {
     }
 
     if (port == 0) {
-        sLog_App("GUI API disabled (SENTINEL_GUI_API_PORT=0)");
+        sLog_App("GUI API disabled (api_port=0)");
         return;
     }
     if (port < 0 || port > 65535) {
@@ -270,7 +299,13 @@ void MainWindowGPU::setupGuiApiServer() {
         port = defaultPort;
     }
 
-    QString screenshotDir = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+    QString screenshotDir = QString::fromStdString(clientConfig.gui.screenshotDir);
+    if (qEnvironmentVariableIsSet("SENTINEL_GUI_SCREENSHOT_DIR")) {
+        const QString envDir = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+        if (!envDir.isEmpty()) {
+            screenshotDir = envDir;
+        }
+    }
     if (screenshotDir.isEmpty()) {
         screenshotDir = QDir::currentPath() + "/screenshots";
     }
@@ -291,6 +326,7 @@ void MainWindowGPU::onSubscribe() {
         return;
     }
 
+    m_userSubscribed = true;
     if (m_qmlController) {
         m_qmlController->updateSymbolInContext(symbol);
     }
@@ -300,6 +336,7 @@ void MainWindowGPU::onSubscribe() {
     }
     if (m_connected) {
         requestHeatmapHistoryForSymbol(symbol);
+        requestCandleHistoryForSymbol(symbol);
     }
 }
 
@@ -312,12 +349,105 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    const int64_t timeframeMs = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_TF");
-    const int requestCount = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
-    const int gridWidth = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_GRID_WIDTH");
+    int64_t timeframeMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->getCurrentTimeframe();
+        }
+    }
+    if (timeframeMs <= 0) {
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
+        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            timeframeMs = serverConfig.heatmap.timeframesMs.front();
+        }
+    }
+    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    const int requestCount = clientConfig.heatmap.clientCacheColumns;
+    const int gridWidth = serverConfig.heatmap.gridWidth;
     const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
-    const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+    if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+        tf = serverConfig.heatmap.timeframesMs.front();
+    }
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Heatmap history request: symbol=%1 tfMs=%2 count=%3")
+                   .arg(symbol)
+                   .arg(tf)
+                   .arg(count));
+    }
     m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+}
+
+void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeSec = 1;
+    int limit = 2000;
+    int64_t endTimeSec = 0;
+    qint64 viewStart = 0;
+    qint64 viewEnd = 0;
+    int64_t rendererTfMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            rendererTfMs = renderer->getCurrentTimeframe();
+            const int64_t timeframeMs = rendererTfMs;
+            timeframeSec = std::max<int64_t>(1, (timeframeMs + 999) / 1000);
+            viewStart = renderer->getVisibleTimeStart();
+            viewEnd = renderer->getVisibleTimeEnd();
+            if (viewEnd > viewStart) {
+                const int64_t spanSec = std::max<int64_t>(1, (viewEnd - viewStart) / 1000);
+                const int64_t spanBars = std::max<int64_t>(1, spanSec / timeframeSec);
+                const int64_t cap = (timeframeSec <= 1) ? 10000 : 350;
+                limit = static_cast<int>(std::min<int64_t>(cap, spanBars));
+                endTimeSec = viewEnd / 1000;
+            }
+        }
+    }
+    if (viewEnd <= viewStart) {
+        if (!m_qmlController) {
+            return;
+        }
+        auto* renderer = m_qmlController->getUnifiedGridRenderer();
+        if (!renderer) {
+            return;
+        }
+        if (!m_candleViewportConn) {
+            m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this, symbol]() {
+                if (!m_qmlController) {
+                    return;
+                }
+                auto* liveRenderer = m_qmlController->getUnifiedGridRenderer();
+                if (!liveRenderer) {
+                    return;
+                }
+                if (liveRenderer->getVisibleTimeEnd() <= liveRenderer->getVisibleTimeStart()) {
+                    return;
+                }
+                if (m_candleViewportConn) {
+                    disconnect(m_candleViewportConn);
+                    m_candleViewportConn = QMetaObject::Connection();
+                }
+                if (m_connected) {
+                    requestCandleHistoryForSymbol(symbol);
+                }
+            });
+        }
+        return;
+    }
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Candle history request: symbol=%1 tfMs=%2 tfSec=%3 limit=%4 endSec=%5 view=[%6..%7]")
+                   .arg(symbol)
+                   .arg(rendererTfMs)
+                   .arg(timeframeSec)
+                   .arg(limit)
+                   .arg(endTimeSec)
+                   .arg(viewStart)
+                   .arg(viewEnd));
+    }
+    m_dataSource->requestCandleHistory(symbol, timeframeSec, endTimeSec, limit);
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
@@ -331,8 +461,6 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
     if (m_firstShow) {
         m_firstShow = false;
 
-        // Force geometry to available screen size (excludes taskbars)
-        // This helps on WSL/X11 where showMaximized() can sometimes be flaky on startup.
         if (const auto screen = QApplication::primaryScreen()) {
             setGeometry(screen->availableGeometry());
         }
@@ -363,8 +491,6 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
-
-    // Set heatmap dock for debug menu access
     m_menuBuilder->setHeatmapDock(m_heatmapDock);
 
     m_menuBuilder->buildMenus(docks, callbacks);
@@ -383,7 +509,6 @@ void MainWindowGPU::setupShortcuts() {
     m_shortcutBinder->bindShortcuts(callbacks, docks);
 }
 
-// Symbol context updates moved to QmlSceneController
 
 void MainWindowGPU::connectMarketDataSignals() {
     if (!m_qmlController) {
@@ -394,6 +519,28 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (!m_dataSource || !unifiedGridRenderer) {
         sLog_Error("Cannot connect signals: Missing components");
         return;
+    }
+
+    if (m_heatmapDock && m_heatmapDock->toolbar()) {
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        int64_t tf = serverConfig.heatmap.activeTimeframeMs;
+        if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            tf = serverConfig.heatmap.timeframesMs.front();
+        }
+        if (tf > 0) {
+            unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
+        }
+        m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("Chart TF init: server=%1 renderer=%2")
+                       .arg(tf)
+                       .arg(unifiedGridRenderer->getCurrentTimeframe()));
+        }
+    }
+
+    unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
+    if (GuiConfigStore::instance().hasServerConfig()) {
+        unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
     }
     
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
@@ -410,29 +557,30 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
-
-    // Auto-request history after connect for the current symbol.
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, [this](bool connected) {
                 if (!connected || !m_dataSource) {
+                    return;
+                }
+                if (!m_userSubscribed) {
                     return;
                 }
                 const QString symbol = m_currentSymbol;
                 if (symbol.isEmpty()) {
                     return;
                 }
+                m_dataSource->subscribe(symbol);
                 requestHeatmapHistoryForSymbol(symbol);
+                requestCandleHistoryForSymbol(symbol);
             });
 
-    // Surface DataSource errors (e.g., WS/TLS/DNS issues) into the app log
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
                 sLog_Error("DataSource error: " << error);
             });
 }
 
-void MainWindowGPU::onConnectionStatusChanged(bool connected) {  // Extracted for clarity
-    // Update bottom status bar
+void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     if (m_statusBar) {
         m_statusBar->setConnectionStatus(connected);
     }
@@ -451,13 +599,10 @@ bool MainWindowGPU::validateComponents() {
     return true;
 }
 
-// Layout arrangement moved to LayoutOrchestrator
-
 void MainWindowGPU::resetLayoutToDefault() {
     m_layoutOrchestrator->resetLayoutToDefault(getDockWidgets());
 }
 
-// UnifiedGridRenderer access moved to QmlSceneController
 
 void MainWindowGPU::onSaveLayout() {
     bool ok;

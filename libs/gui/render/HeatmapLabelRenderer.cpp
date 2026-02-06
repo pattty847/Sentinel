@@ -19,19 +19,12 @@ bool useBlackLabel(uint16_t encoded) {
 }
 } // namespace
 
-void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& snapshot,
+void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
+                                           const HeatmapStreamState::Snapshot& snapshot,
                                            const MsdfAtlas& atlas,
                                            const std::vector<uint16_t>& liquidityRing,
                                            const std::vector<uint16_t>& intensityRing,
                                            const std::vector<double>& liquidityScales,
-                                           const QRectF& srcRect,
-                                           const QRectF& drawRect,
-                                           int startX,
-                                           int startY,
-                                           float fracX,
-                                           float fracY,
-                                           float cellW,
-                                           float cellH,
                                            float scale,
                                            bool dollars,
                                            std::vector<GlyphQuad>& whiteQuads,
@@ -40,7 +33,8 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     whiteQuads.clear();
     blackQuads.clear();
 
-    if (!atlas.isBuilt() || snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0 || snapshot.tickSize <= 0.0) {
+    if (!mapping.valid || !atlas.isBuilt() ||
+        snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0 || snapshot.tickSize <= 0.0) {
         return;
     }
 
@@ -53,8 +47,25 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
     const bool haveIntensity = (intensityRing.size() == expectedSize);
     const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridWidth));
 
+    // Derive iteration range from mapping srcRect (same as old code).
+    // timeOffset is used ONLY for ring data lookup, NOT for screen positioning.
+    const QRectF& srcRect = mapping.srcRect;
+    const QRectF& drawRect = mapping.drawRect;
+    const float cellW = static_cast<float>(mapping.cellW);
+    const float cellH = static_cast<float>(mapping.cellH);
+
     const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
+
+    // Ring offset: convert logical srcRect column to physical ring column.
+    // timeOffset represents the physical ring offset for the GPU shader.
+    const float baseX = static_cast<float>(srcRect.x()) + (mapping.timeOffset * gridWidth);
+    const int startX = static_cast<int>(std::floor(baseX));
+    const float fracX = baseX - static_cast<float>(startX);
+
+    const float baseY = static_cast<float>(srcRect.y());
+    const int startY = static_cast<int>(std::floor(baseY));
+    const float fracY = baseY - static_cast<float>(startY);
 
     int onlyTexX = -1;
     int onlyI = -1;
@@ -139,8 +150,11 @@ void HeatmapLabelRenderer::buildLabelQuads(const HeatmapStreamState::Snapshot& s
                 continue;
             }
 
-            const float centerX = drawRect.x() + (static_cast<float>(i) + 0.5f - fracX) * cellW;
-            const float centerY = drawRect.y() + (static_cast<float>(j) + 0.5f - fracY) * cellH;
+            // Screen positioning via TimeAxisMapping — no timeOffset in screen math.
+            // Cell center: world time for this texture column's center, and price for this row.
+            const double bucketTimeMs = mapping.dataStartMs + (static_cast<double>(texX) * mapping.appendMs) + (mapping.appendMs * 0.5);
+            const float centerX = static_cast<float>(mapping.timeToScreenX(bucketTimeMs));
+            const float centerY = static_cast<float>(mapping.priceToScreenY(price));
             const float originX = centerX - (minX + maxX) * 0.5f * scale;
             const float originY = centerY - (minY + maxY) * 0.5f * scale;
 

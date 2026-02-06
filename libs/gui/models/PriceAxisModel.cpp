@@ -156,25 +156,18 @@ void PriceAxisModel::calculateTicks() {
         }
     }
     
-    //qDebug() << "PriceAxisModel: Generated" << m_ticks.size() 
-    //         << "price ticks for range $" << priceMin << "-$" << priceMax 
-    //         << "step=$" << step;
 }
 
 QString PriceAxisModel::formatLabel(double value) const {
-    // Determine appropriate decimal places based on the price range
     double priceRange = m_effectiveViewportValid
         ? (m_effectiveMaxPrice - m_effectiveMinPrice)
         : (getViewportEnd() - getViewportStart());
     
     if (priceRange > 1000) {
-        // Large prices - no decimals
         return QString("$%1").arg(static_cast<int>(std::round(value)));
     } else if (priceRange > 100) {
-        // Medium prices - 1 decimal
         return QString("$%1").arg(value, 0, 'f', 1);
     } else {
-        // Small prices - 2 decimals
         return QString("$%1").arg(value, 0, 'f', 2);
     }
 }
@@ -223,11 +216,8 @@ double PriceAxisModel::valueToScreenPosition(double value) const {
     double priceMax = getViewportEnd();
     
     if (priceMax <= priceMin) return 0.0;
-    
-    // Price axis is vertical - higher prices at top
+
     double normalized = (value - priceMin) / (priceMax - priceMin);
-    
-    // Invert Y coordinate (0 at top, height at bottom)
     return getViewportHeight() * (1.0 - normalized);
 }
 
@@ -237,15 +227,13 @@ double PriceAxisModel::calculateNicePriceStep(double range, int targetTicks) con
     double rawStep = range / targetTicks;
     double magnitude = std::pow(10.0, std::floor(std::log10(rawStep)));
     double normalizedStep = rawStep / magnitude;
-    
-    // Price-specific nice step sizes
     double niceStep;
     if (normalizedStep <= 1.0) {
         niceStep = 1.0;
     } else if (normalizedStep <= 2.0) {
         niceStep = 2.0;
     } else if (normalizedStep <= 2.5) {
-        niceStep = 2.5;  // Common for prices
+        niceStep = 2.5;
     } else if (normalizedStep <= 5.0) {
         niceStep = 5.0;
     } else {
@@ -253,9 +241,6 @@ double PriceAxisModel::calculateNicePriceStep(double range, int targetTicks) con
     }
     
     double step = niceStep * magnitude;
-    
-    // Ensure minimum step for very small ranges
-    if (step < 0.01) step = 0.01;  // Minimum penny
-    
+    if (step < 0.01) step = 0.01;
     return step;
 }

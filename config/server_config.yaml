@@ -1,0 +1,23 @@
+schema_version: 1
+timeframes_ms: [1000, 60000, 3600000, 86400000]
+stream_port: 8080
+heatmap:
+  grid_width: 2048
+  grid_height: 1024
+  tick_size: 1
+  recenter_delta: 0.01
+  active_timeframe_ms: 1000
+orderbook:
+  tick_size: 0.1
+  band_pct: 0.3
+candles:
+  update_bps_fast: 5e-05
+  update_bps_slow: 0.0002
+  update_tick_mult_fast: 1
+  update_tick_mult_slow: 2
+  update_silence_ms_fast: 200
+  update_silence_ms_slow: 1000
+  update_volume_fast: 0
+  update_volume_slow: 0
+  update_tick_size: 0
+default_symbols: [BTC-USD]

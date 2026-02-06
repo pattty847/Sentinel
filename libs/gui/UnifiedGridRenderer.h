@@ -1,15 +1,3 @@
-// ======= libs/gui/UnifiedGridRenderer.h =======
-/*
-Sentinel — UnifiedGridRenderer
-Role: A QML scene item that renders the GPU-only heatmap path.
-Inputs/Outputs: Takes heatmap columns via DataProcessor; outputs a QSGNode for GPU rendering.
-Threading: Runs on the GUI thread; data is received via queued connections; rendering on render thread.
-Performance: Batches incoming data with a QTimer to throttle scene graph updates.
-Integration: Used in QML; receives data from MarketDataCoreQt and server heatmap stream.
-Observability: Logs key events like data reception and paint node updates via qDebug.
-Related: UnifiedGridRenderer.cpp, CoordinateSystem.h, MarketDataCoreQt.hpp.
-Assumptions: CoordinateSystem and ChartModeController properties are set from QML.
-*/
 #pragma once
 #include <QQuickItem>
 #include <QSGGeometryNode>
@@ -30,28 +18,24 @@ Assumptions: CoordinateSystem and ChartModeController properties are set from QM
 #include <atomic>
 #include <mutex>
 #include <limits>
+#include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
 #include "render/MsdfAtlas.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
+#include "render/TimeAxisMapping.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
 
-/**
- * ColorStop - Single color point in a gradient
- */
 struct ColorStop {
-    float position;  // 0.0 - 1.0
+    float position;
     QColor color;
 
     ColorStop(float pos, const QColor& col) : position(pos), color(col) {}
 };
 
-/**
- * ColorGradient - Multi-stop color gradient for heatmap palette
- */
 struct ColorGradient {
     std::vector<ColorStop> stops;
 
@@ -63,7 +47,6 @@ struct ColorGradient {
         if (stops.size() == 1 || t <= stops.front().position) return stops.front().color;
         if (t >= stops.back().position) return stops.back().color;
 
-        // Find surrounding stops
         for (size_t i = 0; i < stops.size() - 1; ++i) {
             if (t >= stops[i].position && t <= stops[i + 1].position) {
                 const float localT = (t - stops[i].position) / (stops[i + 1].position - stops[i].position);
@@ -80,12 +63,6 @@ struct ColorGradient {
     }
 };
 
-/**
- *  UNIFIED GRID RENDERER - SLIM QML ADAPTER
- * 
- * Slim QML adapter that delegates to the V2 modular architecture.
- * Maintains QML interface compatibility while using the new modular system.
- */
 class UnifiedGridRenderer : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
@@ -103,7 +80,6 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
     
-    // Debug Overlay Toggles
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
     Q_PROPERTY(bool showRenderStrategyOverlay READ showRenderStrategyOverlay WRITE setShowRenderStrategyOverlay NOTIFY showRenderStrategyOverlayChanged)
@@ -122,15 +98,14 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
+    Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
 
 private:
-    // Rendering configuration
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
-    double m_minVolumeFilter = 0.0;      // Volume filter
-    int64_t m_currentTimeframe_ms = 100;  // Default to 100ms for smooth updates
+    double m_minVolumeFilter = 0.0;
+    int64_t m_currentTimeframe_ms = 100;
     
-    // Debug overlay toggles
     bool m_showGpuStatsOverlay = false;
     bool m_showDataPipelineOverlay = false;
     bool m_showRenderStrategyOverlay = false;
@@ -141,12 +116,11 @@ private:
     double m_heatmapLiquidityThreshold = 0.0;
     double m_heatmapTickSize = 0.0;
 
-    bool m_manualTimeframeSet = false;  // Disable auto-suggestion when user manually sets timeframe
-    QElapsedTimer m_manualTimeframeTimer;  // Reset auto-suggestion after delay
+    bool m_manualTimeframeSet = false;
+    QElapsedTimer m_manualTimeframeTimer;
     
-    bool m_panSyncPending = false;  // hold visual pan until DP resync snapshot applied to avoid snap-back -- TODO: See if this is needed
+    bool m_panSyncPending = false;
 
-    // GPU heatmap path (single quad with streamed columns).
     bool m_useGpuHeatmap = false;
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;
@@ -164,13 +138,14 @@ private:
     QColor m_heatmapBackgroundColor = QColor(18, 20, 24);
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
-    double m_heatmapShaderFloor = 0.01;  // Lowered from 0.1 to allow true blacks
+    double m_heatmapShaderFloor = 0.01;
+    int m_heatmapLabelPx = 14;
 
-    // Palette color system
-    double m_heatmapPaletteGamma = 2.0;  // Raised from hardcoded 0.65 for dramatic contrast
+    double m_heatmapPaletteGamma = 2.0;
     ColorGradient m_bidGradient;
     ColorGradient m_askGradient;
     bool m_heatmapPaletteDirty = true;
+    TimeAxisMapping m_lastTimeAxisMapping;
 
     MsdfAtlas m_msdfAtlas;
     bool m_msdfAtlasBuilt = false;
@@ -184,24 +159,19 @@ private:
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
 
-    // FPS tracking (updated on render thread, read on GUI thread).
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
     std::atomic<double> m_currentFps{0.0};
 
-    // GPU upload bandwidth tracking
     QElapsedTimer m_uploadTimer;
     std::atomic<qint64> m_totalBytesUploaded{0};
     std::atomic<double> m_uploadBandwidthMBps{0.0};
     qint64 m_lastBandwidthUpdate = 0;
 
-    // V1 state (removed - now delegated to DataProcessor)
-
 public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
-    ~UnifiedGridRenderer(); // Custom destructor needed for unique_ptr with incomplete types
+    ~UnifiedGridRenderer();
     
-    // Property accessors
     double intensityScale() const { return m_intensityScale; }
     int maxCells() const { return m_maxCells; }
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
@@ -216,10 +186,9 @@ public:
     double heatmapContrast() const { return m_heatmapContrast; }
     double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
     
-    // GridViewState accessor (for axis models)
     GridViewState* getViewState() const { return m_viewState.get(); }
+    QObject* viewState() const { return m_viewState.get(); }
     
-    // Debug overlay accessors
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
     bool showRenderStrategyOverlay() const { return m_showRenderStrategyOverlay; }
@@ -227,28 +196,23 @@ public:
     bool showMemoryCacheOverlay() const { return m_showMemoryCacheOverlay; }
     bool showModeFlagsOverlay() const { return m_showModeFlagsOverlay; }
 
-    //  VIEWPORT BOUNDS: Getters for QML properties
     Q_INVOKABLE qint64 getVisibleTimeStart() const;
     Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
     Q_INVOKABLE double getMinPrice() const;
     Q_INVOKABLE double getMaxPrice() const;
     
-    //  OPTIMIZATION 4: QML-compatible timeframe getter (returns int for Q_PROPERTY)
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
-    //  VISUAL TRANSFORM: Getter for QML pan offset
     Q_INVOKABLE QPointF getPanVisualOffset() const;
     double heatmapTickSize() const { return m_heatmapTickSize; }
 
     bool heatmapDataPriceRange(double& outMin, double& outMax) const;
     bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
     
-    //  DATA INTERFACE
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     
-    //  GRID CONFIGURATION
     Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
@@ -260,38 +224,34 @@ public:
     };
     static GridResolution calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines = 10, int targetHorizontalLines = 15);
     
-    //  DEBUG: Check grid system state
     Q_INVOKABLE QString getGridDebugInfo() const;
-    
-    //  DEBUG: Detailed grid debug information
     Q_INVOKABLE QString getDetailedGridDebug() const;
     Q_INVOKABLE QString getViewportMathDebug() const;
     Q_INVOKABLE QString getDataPipelineDebug() const;
     
-    //  PERFORMANCE MONITORING API
     Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
     Q_INVOKABLE double getCurrentFPS() const;
     Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
 
-    //  GPU STATS DEBUG API
-    Q_INVOKABLE QString getTextureSize() const;          // e.g., "8192x8192"
-    Q_INVOKABLE QString getTextureMemory() const;        // e.g., "128 MB"
-    Q_INVOKABLE QString getTextureFormat() const;        // e.g., "RGBA8" or "R16"
-    Q_INVOKABLE double getUploadBandwidth() const;       // MB/s
-    Q_INVOKABLE QString getRingCursorInfo() const;       // e.g., "4256/8192"
-    Q_INVOKABLE int getDirtyRegionCount() const;         // Number of dirty tiles/regions
-    Q_INVOKABLE QString getLabelRingMemory() const;      // Label ring memory usage
-    Q_INVOKABLE QString getMsdfAtlasMemory() const;     // MSDF atlas memory usage
+    Q_INVOKABLE QString getTextureSize() const;
+    Q_INVOKABLE QString getTextureMemory() const;
+    Q_INVOKABLE QString getTextureFormat() const;
+    Q_INVOKABLE double getUploadBandwidth() const;
+    Q_INVOKABLE QString getRingCursorInfo() const;
+    Q_INVOKABLE int getDirtyRegionCount() const;
+    Q_INVOKABLE QString getLabelRingMemory() const;
+    Q_INVOKABLE QString getMsdfAtlasMemory() const;
+    TimeAxisMapping lastTimeAxisMapping() const { return m_lastTimeAxisMapping; }
+    void applyClientConfig(const ClientConfig& config);
+    void applyServerConfig(const ServerConfig& config);
 
-    //  GRID SYSTEM CONTROLS
     Q_INVOKABLE void setGridMode(int mode);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
     
-    //  PAN/ZOOM CONTROLS
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void resetZoom();
@@ -301,7 +261,6 @@ public:
     Q_INVOKABLE void panDown();
     Q_INVOKABLE void enableAutoScroll(bool enabled);
     
-    //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
     Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
@@ -312,11 +271,8 @@ public:
     void setHeatmapShaderFloor(double floor);
 
 public:
-    // Real-time data integration
     void onTradeReceived(const Trade& trade);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
-    
-    // Automatic price resolution adjustment on viewport changes
     void onViewportChanged();
 
 signals:
@@ -350,7 +306,6 @@ protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void componentComplete() override;
     
-    //  MOUSE INTERACTION EVENTS
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -365,7 +320,6 @@ private:
                            int gridHeight);
 
 private:
-    // Property setters
     void setIntensityScale(double scale);
     void setMaxCells(int max);
     void setMinVolumeFilter(double minVolume);

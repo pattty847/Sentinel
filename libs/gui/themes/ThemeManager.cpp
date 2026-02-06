@@ -42,12 +42,6 @@ QString ThemeManager::themeName(const QString& themeId) const {
 }
 
 void ThemeManager::initializeDefaults() {
-    // Register built-in themes
     registerTheme(std::make_unique<DarkTheme>());
-    
-    // Future themes can be added here:
-    // registerTheme(std::make_unique<LightTheme>());
-    // registerTheme(std::make_unique<HighContrastTheme>());
-    // registerTheme(std::make_unique<BlueTheme>());
 }
 

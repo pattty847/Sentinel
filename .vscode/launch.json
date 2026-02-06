@@ -1,0 +1,47 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Sentinel GUI",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/windows-msvc-vs/apps/sentinel_gui/Debug/sentinel_gui.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "preLaunchTask": "Build (VS)",
+            "detail": "Debug the Sentinel GUI with MSVC. Builds first, then launches under debugger."
+        },
+        {
+            "name": "Debug Sentinel Server",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/windows-msvc-vs/bin/Debug/sentinel-server.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "preLaunchTask": "Build (VS)",
+            "detail": "Debug the Sentinel server with MSVC. Builds first, then launches under debugger."
+        },
+        {
+            "name": "Debug Sentinel GUI (no build)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/windows-msvc-vs/apps/sentinel_gui/Debug/sentinel_gui.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "detail": "Debug the GUI without building first. Use when you already built."
+        },
+        {
+            "name": "Debug Sentinel Server (no build)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/windows-msvc-vs/bin/Debug/sentinel-server.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "detail": "Debug the server without building first. Use when you already built."
+        }
+    ]
+}

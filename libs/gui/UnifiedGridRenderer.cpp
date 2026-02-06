@@ -1,17 +1,6 @@
-/*
-Sentinel — UnifiedGridRenderer
-Role: Implements the data batching and rendering orchestration logic.
-Inputs/Outputs: Buffers incoming data; passes it to rendering strategies in updatePaintNode.
-Threading: Data receiving slots run on main thread; updatePaintNode runs on the render thread.
-Performance: Batches high-frequency data events into single, throttled screen updates via a QTimer.
-Integration: Defines the specific set of render strategies that compose the final chart.
-Observability: Traces the data flow from reception to rendering via qDebug.
-Related: UnifiedGridRenderer.h, HeatmapStrategy.h, TradeStrategy.h, CoordinateSystem.h.
-Assumptions: The render strategies are compatible and can be layered together.
-*/
+// Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
 #include "CoordinateSystem.h"
-#include "datasources/IGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <QSGGeometry>
 #include <QSGFlatColorMaterial>
@@ -24,8 +13,6 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
-
-// New modular architecture includes
 #include "render/GridViewState.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/MsdfAtlas.hpp"
@@ -34,6 +21,7 @@ Assumptions: The render strategies are compatible and can be layered together.
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
+#include "config/GuiConfigStore.hpp"
 
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem* parent)
     : QQuickItem(parent)
@@ -71,7 +59,6 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 
 void UnifiedGridRenderer::onTradeReceived(const Trade& trade) {
     Q_UNUSED(trade);
-    // TODO: Wire trades into candle/overlay pipeline.
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs, 
@@ -88,7 +75,6 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
 void UnifiedGridRenderer::onViewportChanged() {
     if (!m_viewState || !m_dataProcessor) return;
-    // Mark transform dirty for rendering update
     update();
 }
 
@@ -99,12 +85,9 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry, const QRectF
     if (newGeometry.size() != oldGeometry.size()) {
         sLog_Render("UNIFIED RENDERER GEOMETRY CHANGED: " << newGeometry.width() << "x" << newGeometry.height());
         
-        // Keep GridViewState in sync with the item size for accurate coord math
         if (m_viewState) {
             m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
         }
-
-        // Size change only affects transform, not geometry topology
         update();
     }
 }
@@ -213,8 +196,6 @@ void UnifiedGridRenderer::clearData() {
     if (m_viewState) {
         m_viewState->resetZoom();
     }
-
-    // Delegate to DataProcessor
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData, Qt::QueuedConnection);
     }
@@ -340,8 +321,6 @@ QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) co
     viewport.priceMax = m_viewState->getMaxPrice();
     viewport.width = width();
     viewport.height = height();
-    
-    // NO pan offset applied - that's handled by the node transform in updatePaintNode
     return CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
 }
 
@@ -355,8 +334,6 @@ QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const
     viewport.priceMax = m_viewState->getMaxPrice();
     viewport.width = width();
     viewport.height = height();
-    
-    // NO pan offset removed - node transform handles it
     return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
 }
 
@@ -364,37 +341,37 @@ void UnifiedGridRenderer::init() {
     m_useGpuHeatmap = true;
     m_heatmapClock.start();
 
-    bool ok = false;
-    const int envWidth = qgetenv("SENTINEL_HEATMAP_GRID_WIDTH").toInt(&ok);
-    if (ok && envWidth > 0) {
-        m_heatmapGridWidth = envWidth;
-    }
-    ok = false;
-    const int envHeight = qgetenv("SENTINEL_HEATMAP_GRID_HEIGHT").toInt(&ok);
-    if (ok && envHeight > 0) {
-        m_heatmapGridHeight = envHeight;
-    } else {
-        ok = false;
-        const int envHeightLegacy = qgetenv("SENTINEL_HEATMAP_GRID").toInt(&ok);
-        if (ok && envHeightLegacy > 0) {
-            m_heatmapGridHeight = envHeightLegacy;
+    const auto& store = GuiConfigStore::instance();
+    if (store.hasServerConfig()) {
+        const auto& server = store.serverConfig();
+        if (server.heatmap.gridWidth > 0) {
+            m_heatmapGridWidth = server.heatmap.gridWidth;
+        }
+        if (server.heatmap.gridHeight > 0) {
+            m_heatmapGridHeight = server.heatmap.gridHeight;
+        }
+        if (server.heatmap.activeTimeframeMs > 0) {
+            m_currentTimeframe_ms = server.heatmap.activeTimeframeMs;
         }
     }
-
-    // Register metatypes for cross-thread signal/slot connections
+    const auto& client = store.clientConfig();
+    m_heatmapGamma = client.heatmap.gamma;
+    m_heatmapContrast = client.heatmap.contrast;
+    m_heatmapShaderFloor = client.heatmap.shaderFloor;
+    if (client.heatmap.labelPx > 0) {
+        m_heatmapLabelPx = client.heatmap.labelPx;
+    }
     qRegisterMetaType<Trade>("Trade");
     
     m_viewState = std::make_unique<GridViewState>(this);
     m_heatmapStream = std::make_unique<HeatmapStreamState>();
     m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
-    m_heatmapStream->setAppendMs(100);
+    m_heatmapStream->setAppendMs(static_cast<int>(m_currentTimeframe_ms));
     m_heatmapStream->setIntensityBytesPerCell(m_intensityBytesPerCell);
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
-
-    // Initialize heatmap color gradients with vibrant "Sentinel" preset
     m_bidGradient = ColorGradient{
         {0.0f, QColor(10, 40, 0)},      // Almost black green
         {0.5f, QColor(60, 160, 30)},    // Medium green
@@ -406,37 +383,14 @@ void UnifiedGridRenderer::init() {
         {0.85f, QColor(255, 100, 30)},  // Bright red-orange
         {1.0f, QColor(255, 200, 50)}    // Hot orange/yellow
     };
-
-    // Create DataProcessor on worker thread for background processing
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
-    if (m_useGpuHeatmap) {
-        ok = false;
-        const double recenter = qgetenv("SENTINEL_HEATMAP_RECENTER").toDouble(&ok);
-        if (ok && recenter > 0.0) {
-            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
-                m_dataProcessor->setHeatmapRecenterFraction(recenter);
-            }, Qt::QueuedConnection);
-        }
-        ok = false;
-        const double gamma = qgetenv("SENTINEL_HEATMAP_GAMMA").toDouble(&ok);
-        if (ok && gamma > 0.0) {
-            m_heatmapGamma = gamma;
-        }
-        ok = false;
-        const double contrast = qgetenv("SENTINEL_HEATMAP_CONTRAST").toDouble(&ok);
-        if (ok && contrast > 0.0) {
-            m_heatmapContrast = contrast;
-        }
-        ok = false;
-        const double floorVal = qgetenv("SENTINEL_HEATMAP_SHADER_FLOOR").toDouble(&ok);
-        if (ok && floorVal >= 0.0 && floorVal <= 1.0) {
-            m_heatmapShaderFloor = floorVal;
-        }
+    applyClientConfig(store.clientConfig());
+    if (store.hasServerConfig()) {
+        applyServerConfig(store.serverConfig());
     }
     
-    // Connect signals with QueuedConnection for thread safety
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
             this,
             [this](int64_t sliceStartMs,
@@ -668,16 +622,10 @@ void UnifiedGridRenderer::init() {
                 update();
             },
             Qt::QueuedConnection);
-    
-    // Start the worker thread
     m_dataProcessorThread->start();
-    
-    // Initialize viewport size immediately to avoid 0x0 transforms
     if (width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
     }
-
-    // Set ViewState immediately as it's available
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
         m_dataProcessor->setGridViewState(m_viewState.get());
     }, Qt::QueuedConnection);
@@ -784,8 +732,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 m_heatmapTextureDirty = false;
             }
         }
-
-        // Palette-only update (colors/gamma changed but not grid size)
         if (m_heatmapPaletteDirty && !m_heatmapImage.isNull()) {
             m_heatmapPaletteImage = QImage();  // Force regeneration
             ensureHeatmapPaletteImage();
@@ -794,10 +740,35 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
         const QRectF bounds = boundingRect();
         QRectF drawRect = bounds;
+        QRectF srcRect(0, 0, gridWidth, gridHeight);
         texNode->setRect(drawRect);
         texNode->setGamma(static_cast<float>(m_heatmapGamma));
         texNode->setContrast(static_cast<float>(m_heatmapContrast));
         texNode->setShaderFloor(static_cast<float>(m_heatmapShaderFloor));
+        const int64_t lastSlice = snapshot.lastSliceStartMs;
+        double dataStart = 0.0;
+        double dataEnd = 0.0;
+        bool dataStartValid = false;
+        double actualDataStart = 0.0;
+        double actualDataEnd = 0.0;
+        if (snapshot.appendMs > 0 && gridWidth > 0) {
+            const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
+            dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
+                ? static_cast<double>(lastSlice + snapshot.appendMs)
+                : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
+            dataStart = dataEnd - static_cast<double>(bufferSpanMs);
+            dataStartValid = (dataEnd > dataStart);
+            if (snapshot.filledColumns > 0) {
+                const int64_t filledSpanMs = static_cast<int64_t>(snapshot.filledColumns) * snapshot.appendMs;
+                actualDataEnd = dataEnd;
+                actualDataStart = dataEnd - static_cast<double>(filledSpanMs);
+            }
+        }
+
+        double viewTimeStartF = 0.0;
+        double viewTimeEndF = 0.0;
+        double viewMinPriceF = 0.0;
+        double viewMaxPriceF = 0.0;
 
         if (m_viewState && m_viewState->isTimeWindowValid() &&
             snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
@@ -826,10 +797,16 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 maxPriceF += priceDelta;
             }
 
+            viewTimeStartF = timeStartF;
+            viewTimeEndF = timeEndF;
+            viewMinPriceF = minPriceF;
+            viewMaxPriceF = maxPriceF;
+
             if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
                 drawRect = bounds;
                 texNode->setRect(drawRect);
-                texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+                srcRect = QRectF(0, 0, gridWidth, gridHeight);
+                texNode->setSourceRect(srcRect);
                 texNode->setTimeOffset(0.0f);
             } else if (timeEndF > timeStartF && maxPriceF > minPriceF) {
                 const double maxCoordX = static_cast<double>(gridWidth);
@@ -839,14 +816,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 if (viewTimeSpan <= 0.0 || viewPriceSpan <= 0.0) {
                     drawRect = QRectF();
                     texNode->setRect(drawRect);
-                    texNode->setSourceRect(QRectF());
+                    srcRect = QRectF();
+                    texNode->setSourceRect(srcRect);
                 } else {
-                    const int64_t lastSlice = snapshot.lastSliceStartMs;
-                    const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
-                    double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
-                        ? static_cast<double>(lastSlice + snapshot.appendMs)
-                        : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
-                    double dataStart = dataEnd - static_cast<double>(bufferSpanMs);
                     const double dataMin = snapshot.minPrice;
                     const double dataMax = snapshot.maxPrice;
 
@@ -858,7 +830,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                     if (overlapEnd <= overlapStart || overlapMax <= overlapMin) {
                         drawRect = QRectF();
                         texNode->setRect(drawRect);
-                        texNode->setSourceRect(QRectF());
+                        srcRect = QRectF();
+                        texNode->setSourceRect(srcRect);
                     } else {
                         const double overlapTimeSpan = overlapEnd - overlapStart;
                         const double overlapPriceSpan = overlapMax - overlapMin;
@@ -881,24 +854,54 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                         double srcY = (snapshot.maxPrice - overlapMax) / snapshot.tickSize;
                         srcX = std::clamp(srcX, 0.0, maxCoordX - srcW);
                         srcY = std::clamp(srcY, 0.0, maxCoordY - srcH);
-                        texNode->setSourceRect(QRectF(srcX, srcY, srcW, srcH));
+                        srcRect = QRectF(srcX, srcY, srcW, srcH);
+                        texNode->setSourceRect(srcRect);
                     }
                 }
             } else {
                 drawRect = bounds;
                 texNode->setRect(drawRect);
-                texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+                srcRect = QRectF(0, 0, gridWidth, gridHeight);
+                texNode->setSourceRect(srcRect);
             }
         } else {
             drawRect = bounds;
             texNode->setRect(drawRect);
-            texNode->setSourceRect(QRectF(0, 0, gridWidth, gridHeight));
+            srcRect = QRectF(0, 0, gridWidth, gridHeight);
+            texNode->setSourceRect(srcRect);
         }
 
         const bool forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
         if (!forceFull) {
             texNode->setTimeOffset(snapshot.timeOffset);
         }
+        m_lastTimeAxisMapping.viewStartMs = viewTimeStartF;
+        m_lastTimeAxisMapping.viewEndMs = viewTimeEndF;
+        m_lastTimeAxisMapping.viewMinPrice = viewMinPriceF;
+        m_lastTimeAxisMapping.viewMaxPrice = viewMaxPriceF;
+        m_lastTimeAxisMapping.drawRect = drawRect;
+        m_lastTimeAxisMapping.srcRect = srcRect;
+        m_lastTimeAxisMapping.dataStartMs = dataStart;
+        m_lastTimeAxisMapping.dataEndMs = dataEnd;
+        m_lastTimeAxisMapping.actualDataStartMs = actualDataStart;
+        m_lastTimeAxisMapping.actualDataEndMs = actualDataEnd;
+        m_lastTimeAxisMapping.dataMinPrice = snapshot.minPrice;
+        m_lastTimeAxisMapping.dataMaxPrice = snapshot.maxPrice;
+        m_lastTimeAxisMapping.appendMs = static_cast<double>(snapshot.appendMs);
+        m_lastTimeAxisMapping.tickSize = snapshot.tickSize;
+        m_lastTimeAxisMapping.gridWidth = gridWidth;
+        m_lastTimeAxisMapping.gridHeight = gridHeight;
+        m_lastTimeAxisMapping.filledColumns = snapshot.filledColumns;
+        m_lastTimeAxisMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+        m_lastTimeAxisMapping.valid = (dataStartValid &&
+                               snapshot.timeOriginMs != 0 &&
+                               snapshot.appendMs > 0 &&
+                               gridWidth > 0 &&
+                               drawRect.width() > 0.0 &&
+                               srcRect.width() > 0.0);
+        m_lastTimeAxisMapping.cellW = m_lastTimeAxisMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
+        m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
+            ? (drawRect.height() / srcRect.height()) : 0.0;
 
         if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
             gridWidth > 0 && gridHeight > 0) {
@@ -917,35 +920,24 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
         }
 
-        const QRectF srcRect = texNode->getSourceRect();
+        const QRectF srcRectCurrent = texNode->getSourceRect();
         const bool labelVisible = (!drawRect.isEmpty() && !bounds.isEmpty() &&
-                                   srcRect.width() > 0.0 && srcRect.height() > 0.0 &&
+                                   srcRectCurrent.width() > 0.0 && srcRectCurrent.height() > 0.0 &&
                                    snapshot.liquidityAvailable &&
                                    m_labelRingGridWidth == gridWidth &&
                                    m_labelRingGridHeight == gridHeight);
-        const float cellW = (srcRect.width() > 0.0f)
-            ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRect.width())
+        const float cellW = (srcRectCurrent.width() > 0.0f)
+            ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRectCurrent.width())
             : 0.0f;
-        const float cellH = (srcRect.height() > 0.0f)
-            ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRect.height())
+        const float cellH = (srcRectCurrent.height() > 0.0f)
+            ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
             : 0.0f;
-        int labelPx = 14;
-        const int envLabelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
-        if (envLabelPx > 0) {
-            labelPx = envLabelPx;
-        }
+        const int labelPx = (m_heatmapLabelPx > 0) ? m_heatmapLabelPx : 14;
         const float labelThreshold = static_cast<float>(labelPx);
 
         if (labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window()) {
             const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
             const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
-            const float timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-            const float baseX = static_cast<float>(srcRect.x()) + (timeOffset * gridWidth);
-            const int startX = static_cast<int>(std::floor(baseX));
-            const float fracX = baseX - static_cast<float>(startX);
-            const float baseY = static_cast<float>(srcRect.y());
-            const int startY = static_cast<int>(std::floor(baseY));
-            const float fracY = baseY - static_cast<float>(startY);
 
             if (m_labelWhiteQuads.capacity() < 32000) {
                 m_labelWhiteQuads.reserve(32000);
@@ -955,19 +947,12 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
 
             const bool dollars = (m_liquidityLabelMode != 0);
-            HeatmapLabelRenderer::buildLabelQuads(snapshot,
+            HeatmapLabelRenderer::buildLabelQuads(m_lastTimeAxisMapping,
+                                                  snapshot,
                                                   m_msdfAtlas,
                                                   m_labelLiquidityRing,
                                                   m_labelIntensityRing,
                                                   m_labelLiquidityScales,
-                                                  srcRect,
-                                                  drawRect,
-                                                  startX,
-                                                  startY,
-                                                  fracX,
-                                                  fracY,
-                                                  cellW,
-                                                  cellH,
                                                   scale,
                                                   dollars,
                                                   m_labelWhiteQuads,
@@ -1056,7 +1041,6 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
 
     const int width = 512;
     const int height = 1;
-    // Use ARGB32 format which matches QRgb (0xAARRGGBB) layout
     m_heatmapPaletteImage = QImage(width, height, QImage::Format_ARGB32);
     if (m_heatmapPaletteImage.isNull()) {
         return;
@@ -1070,11 +1054,7 @@ void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
         const bool isAsk = (i >= width / 2);
         const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
         const float x = std::clamp(localT, 0.0f, 1.0f);
-
-        // Apply gamma curve for dramatic dark→bright progression
         const float curve = std::pow(x, gamma);
-
-        // Get color from gradient based on curved position
         const QColor color = isAsk ? m_askGradient.interpolate(curve) : m_bidGradient.interpolate(curve);
 
         row[i] = qRgba(color.red(), color.green(), color.blue(), 255);
@@ -1095,11 +1075,74 @@ void UnifiedGridRenderer::buildMsdfAtlas() {
     params.fontPx = 64;
     params.pxRange = 8.0f;
     params.charset = QStringLiteral("0123456789.kMB+-");
+    const QByteArray envFont = qgetenv("SENTINEL_MSDF_FONT");
+    if (!envFont.isEmpty()) {
+        params.fontPath = QString::fromUtf8(envFont);
+    } else {
+        const auto& client = GuiConfigStore::instance().clientConfig();
+        if (!client.gui.msdfFontPath.empty()) {
+            params.fontPath = QString::fromStdString(client.gui.msdfFontPath);
+        }
+    }
     if (m_msdfAtlas.build(params)) {
         if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
             m_msdfAtlas.image().save("/tmp/sentinel_msdf_atlas.png");
         }
         m_msdfAtlasBuilt = true;
+    }
+}
+
+void UnifiedGridRenderer::applyClientConfig(const ClientConfig& config) {
+    setHeatmapGamma(config.heatmap.gamma);
+    setHeatmapContrast(config.heatmap.contrast);
+    setHeatmapShaderFloor(config.heatmap.shaderFloor);
+    if (config.heatmap.labelPx > 0) {
+        m_heatmapLabelPx = config.heatmap.labelPx;
+    }
+    update();
+    if (m_dataProcessor && config.heatmap.clientCacheColumns > 0) {
+        const int capacity = config.heatmap.clientCacheColumns;
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, capacity]() {
+            m_dataProcessor->setCacheCapacityOverride(capacity);
+        }, Qt::QueuedConnection);
+    }
+}
+
+void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) {
+    bool gridChanged = false;
+    if (config.heatmap.gridWidth > 0 && config.heatmap.gridWidth != m_heatmapGridWidth) {
+        m_heatmapGridWidth = config.heatmap.gridWidth;
+        gridChanged = true;
+    }
+    if (config.heatmap.gridHeight > 0 && config.heatmap.gridHeight != m_heatmapGridHeight) {
+        m_heatmapGridHeight = config.heatmap.gridHeight;
+        gridChanged = true;
+    }
+    if (gridChanged) {
+        m_heatmapTextureDirty = true;
+        if (m_heatmapStream) {
+            m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
+        }
+    }
+
+    int64_t forcedTf = config.heatmap.activeTimeframeMs;
+    if (forcedTf <= 0 && !config.heatmap.timeframesMs.empty()) {
+        forcedTf = config.heatmap.timeframesMs.front();
+    }
+    if (forcedTf > 0) {
+        setTimeframe(static_cast<int>(forcedTf));
+        if (m_dataProcessor) {
+            QMetaObject::invokeMethod(m_dataProcessor.get(), [this, forcedTf]() {
+                m_dataProcessor->setServerTimeframe(forcedTf);
+            }, Qt::QueuedConnection);
+        }
+    }
+
+    if (m_dataProcessor && config.heatmap.recenterDelta > 0.0) {
+        const double recenter = config.heatmap.recenterDelta;
+        QMetaObject::invokeMethod(m_dataProcessor.get(), [this, recenter]() {
+            m_dataProcessor->setHeatmapRecenterFraction(recenter);
+        }, Qt::QueuedConnection);
     }
 }
 
@@ -1176,7 +1219,6 @@ void UnifiedGridRenderer::fitHeatmapToDataRange() {
     update();
 }
 
-// ===== GPU STATS DEBUG API =====
 QString UnifiedGridRenderer::getTextureSize() const {
     if (m_useGpuHeatmap && m_heatmapStream) {
         const auto snapshot = m_heatmapStream->snapshot();
@@ -1256,8 +1298,6 @@ int UnifiedGridRenderer::getDirtyRegionCount() const {
     return 0;
 }
 
-// ===== QT EVENT HANDLERS =====
-// Mouse and wheel event handling for user interaction
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
         m_viewState->handlePanStart(event->position()); 
@@ -1291,7 +1331,6 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
         if (m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController && !panAppliedToAuto) {
             m_autoScrollController->updateLagFromView(*m_viewState, *m_heatmapStream);
         }
-        // Keep visual pan until resync arrives to avoid snap-back
         if (autoScroll) {
             m_panSyncPending = true;
         }
@@ -1306,8 +1345,6 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) {
     } else event->ignore(); 
 }
 
-// ===== QML PROPERTY GETTERS =====
-// Read-only property access for QML bindings
 int UnifiedGridRenderer::getCurrentTimeResolution() const { return static_cast<int>(m_currentTimeframe_ms); }
 double UnifiedGridRenderer::getCurrentPriceResolution() const { return m_dataProcessor ? m_dataProcessor->getPriceResolution() : 1.0; }
 double UnifiedGridRenderer::getScreenWidth() const { return width(); }
@@ -1361,8 +1398,6 @@ bool UnifiedGridRenderer::heatmapDataTimeRange(qint64& outStart, qint64& outEnd)
     return true;
 }
 
-// ===== QML DEBUG API =====
-// Debug and monitoring methods for QML
 QString UnifiedGridRenderer::getGridDebugInfo() const { return QString("Size:%1x%2").arg(width()).arg(height()); }
 QString UnifiedGridRenderer::getDetailedGridDebug() const { return getGridDebugInfo() + QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO"); }
 QString UnifiedGridRenderer::getViewportMathDebug() const {
@@ -1549,15 +1584,11 @@ double UnifiedGridRenderer::getCurrentFPS() const { return m_currentFps.load(); 
 double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 
-// ===== QML DATA API =====
-// Methods for data input and manipulation from QML
 void UnifiedGridRenderer::addTrade(const Trade& trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) { onViewChanged(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) { setPriceResolution(priceRes); }
-void UnifiedGridRenderer::togglePerformanceOverlay() { /* No-op: SentinelMonitor removed */ }
+void UnifiedGridRenderer::togglePerformanceOverlay() { }
 
-// ===== QML PAN/ZOOM CONTROLS =====
-// Methods for pan and zoom control from QML
 void UnifiedGridRenderer::zoomIn() { if (m_viewState) { m_viewState->handleZoomWithViewport(0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::zoomOut() { if (m_viewState) { m_viewState->handleZoomWithViewport(-0.1, QPointF(width()/2, height()/2), QSizeF(width(), height())); update(); } }
 void UnifiedGridRenderer::resetZoom() { if (m_viewState) { m_viewState->resetZoom(); update(); } }

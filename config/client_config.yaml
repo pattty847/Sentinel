@@ -1,0 +1,24 @@
+# Client Configuration
+# Copy to config/client_config.yaml and customize your settings.
+# User-specific overrides go in config/.client_config.yaml (not tracked in git).
+
+heatmap:
+  # Visual settings (client only)
+  gamma: 1.05
+  contrast: 1.15
+  shader_floor: 0.01
+  label_px: 9999  # Disable labels
+  client_cache_columns: 0
+
+  # Initial viewport (client only)
+  initial_viewport_pct: 10
+  # initial_price_pct: auto
+
+gui:
+  api_port: 17100
+  screenshot_dir: ./screenshots
+  # msdf_font: resources/fonts/YourFont.ttf
+
+server:
+  host: 127.0.0.1
+  port: 8080

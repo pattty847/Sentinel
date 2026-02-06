@@ -13,12 +13,10 @@ OrderBookDock::OrderBookDock(QWidget* parent)
 
 void OrderBookDock::buildUi()
 {
-    // Main vertical layout
     auto* mainLayout = new QVBoxLayout(m_contentWidget);
     mainLayout->setContentsMargins(8, 8, 8, 8);
     mainLayout->setSpacing(4);
     
-    // Symbol header
     m_symbolLabel = new QLabel("No Symbol", m_contentWidget);
     m_symbolLabel->setAlignment(Qt::AlignCenter);
     m_symbolLabel->setStyleSheet("QLabel { font-weight: bold; font-size: 14px; color: #ffffff; padding: 4px; }");
@@ -28,12 +26,7 @@ void OrderBookDock::buildUi()
     setupSpreadLayout();
     mainLayout->addWidget(m_spreadFrame);
     
-    // Future: Order book table will go here
-    // mainLayout->addWidget(m_orderBookTable, 1);  // Takes remaining space
-    
-    mainLayout->addStretch();  // Push content to top
-    
-    // Connect to market data after UI is built
+    mainLayout->addStretch();
     connectToMarketData();
 }
 
@@ -47,7 +40,6 @@ void OrderBookDock::setupSpreadLayout()
     gridLayout->setContentsMargins(8, 8, 8, 8);
     gridLayout->setSpacing(4);
     
-    // Bid side (left column)
     m_bidFrame = new QFrame(m_spreadFrame);
     m_bidFrame->setStyleSheet("QFrame { background-color: #1a4d1a; border: 1px solid #2d7d32; border-radius: 4px; padding: 4px; }");
     auto* bidLayout = new QVBoxLayout(m_bidFrame);
@@ -69,7 +61,6 @@ void OrderBookDock::setupSpreadLayout()
     bidLayout->addWidget(m_bidPriceLabel);
     bidLayout->addWidget(m_bidSizeLabel);
     
-    // Center column (spread info)
     auto* centerLayout = new QVBoxLayout();
     
     m_spreadLabel = new QLabel("Spread: ---.--", m_spreadFrame);
@@ -83,7 +74,6 @@ void OrderBookDock::setupSpreadLayout()
     centerLayout->addWidget(m_spreadLabel);
     centerLayout->addWidget(m_midLabel);
     
-    // Ask side (right column)
     m_askFrame = new QFrame(m_spreadFrame);
     m_askFrame->setStyleSheet("QFrame { background-color: #4d1a1a; border: 1px solid #d32f2f; border-radius: 4px; padding: 4px; }");
     auto* askLayout = new QVBoxLayout(m_askFrame);
@@ -105,12 +95,11 @@ void OrderBookDock::setupSpreadLayout()
     askLayout->addWidget(m_askPriceLabel);
     askLayout->addWidget(m_askSizeLabel);
     
-    // Add to grid: bid | center | ask
     gridLayout->addWidget(m_bidFrame, 0, 0);
     gridLayout->addLayout(centerLayout, 0, 1);
     gridLayout->addWidget(m_askFrame, 0, 2);
     
-    gridLayout->setColumnStretch(0, 1);  // Equal columns
+    gridLayout->setColumnStretch(0, 1);
     gridLayout->setColumnStretch(1, 1);
     gridLayout->setColumnStretch(2, 1);
 }
@@ -196,7 +185,6 @@ void OrderBookDock::updateSpreadDisplay(double bidPrice, double bidSize, double 
         m_askSizeLabel->setText("(---)");
     }
     
-    // Calculate and show spread/mid
     if (bidPrice > 0.0 && askPrice > 0.0) {
         double spread = askPrice - bidPrice;
         double mid = (bidPrice + askPrice) / 2.0;

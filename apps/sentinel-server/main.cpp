@@ -1,17 +1,20 @@
 #include <QCoreApplication>
-#include <iostream>
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
+#include "ConfigLoader.hpp"
 
 int main(int argc, char *argv[]) {
     // Set up logging
     qSetMessagePattern("[%{time yyyy-MM-dd h:mm:ss.zzz}] %{type}: %{message}");
-    qputenv("SENTINEL_SERVER_MODE", "1");
     sLog_App("Starting Sentinel Server...");
 
     QCoreApplication app(argc, argv);
+
+    ServerConfig serverConfig;
+    ConfigLoader::loadServerConfig("config/server_config.yaml", &serverConfig);
+    ConfigLoader::loadServerConfig("config/.server_config.yaml", &serverConfig);
     
-    SentinelServerApp serverApp;
+    SentinelServerApp serverApp(serverConfig);
     if (!serverApp.initialize()) {
         sLog_Error("Failed to initialize server application");
         return 1;

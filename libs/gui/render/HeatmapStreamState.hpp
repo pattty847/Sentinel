@@ -34,6 +34,7 @@ public:
         int64_t lastSliceStartMs = std::numeric_limits<int64_t>::min();
         int64_t timeOriginMs = 0;
         int64_t streamBaseMs = std::numeric_limits<int64_t>::min();
+        int filledColumns = 0;
         double minPrice = 0.0;
         double maxPrice = 0.0;
         double tickSize = 0.0;
@@ -88,6 +89,7 @@ private:
     int m_gridHeight = 0;
     int m_appendMs = 0;
     int m_writeColumn = 0;
+    int m_filledColumns = 0;
     qint64 m_lastAppendMs = 0;
     int64_t m_lastSliceStartMs = std::numeric_limits<int64_t>::min();
     int64_t m_timeOriginMs = 0;

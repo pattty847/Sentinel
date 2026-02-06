@@ -27,10 +27,9 @@ PerformanceMonitor::PerformanceMonitor()
     initWindowsCounters();
 #endif
 
-    // Set up CPU/GPU monitoring timer
     m_cpuUpdateTimer = new QTimer(this);
     connect(m_cpuUpdateTimer, &QTimer::timeout, this, &PerformanceMonitor::updateCpuMetrics);
-    m_cpuUpdateTimer->start(2000);  // Update every 2 seconds
+    m_cpuUpdateTimer->start(2000);
 }
 
 PerformanceMonitor::~PerformanceMonitor() {
@@ -42,7 +41,6 @@ PerformanceMonitor::~PerformanceMonitor() {
 void PerformanceMonitor::attachToWindow(QQuickWindow* window) {
     if (!window) return;
 
-    // Connect to frameSwapped signal for accurate FPS tracking
     connect(window, &QQuickWindow::frameSwapped, this, &PerformanceMonitor::onFrameSwapped, Qt::UniqueConnection);
 
     m_fpsTimer.start();
@@ -50,7 +48,6 @@ void PerformanceMonitor::attachToWindow(QQuickWindow* window) {
 }
 
 void PerformanceMonitor::onFrameSwapped() {
-    // Track frame times
     const qint64 currentMs = m_fpsTimer.elapsed();
     static qint64 lastFrameMs = 0;
 
@@ -61,7 +58,6 @@ void PerformanceMonitor::onFrameSwapped() {
             m_frameTimesMs.pop_front();
         }
 
-        // Calculate average frame time
         if (!m_frameTimesMs.empty()) {
             const double avgMs = std::accumulate(m_frameTimesMs.begin(), m_frameTimesMs.end(), 0.0) / m_frameTimesMs.size();
             m_avgFrameTimeMs.store(avgMs);
@@ -69,7 +65,6 @@ void PerformanceMonitor::onFrameSwapped() {
     }
     lastFrameMs = currentMs;
 
-    // Update FPS counter every second
     ++m_frameCount;
     if (currentMs >= 1000) {
         const double fps = (static_cast<double>(m_frameCount) * 1000.0) / currentMs;
@@ -99,7 +94,6 @@ void PerformanceMonitor::updateLatency(int milliseconds) {
 
 void PerformanceMonitor::updateCpuMetrics() {
 #ifdef _WIN32
-    // Windows PDH API for CPU and GPU
     if (!m_pdhQuery) return;
 
     PDH_STATUS status = PdhCollectQueryData(static_cast<PDH_HQUERY>(m_pdhQuery));
@@ -107,7 +101,6 @@ void PerformanceMonitor::updateCpuMetrics() {
         return;
     }
 
-    // Query CPU usage
     if (m_cpuCounter) {
         PDH_FMT_COUNTERVALUE counterValue;
         status = PdhGetFormattedCounterValue(
@@ -122,7 +115,6 @@ void PerformanceMonitor::updateCpuMetrics() {
         }
     }
 
-    // Query GPU usage (Windows 10+, may fail on older systems)
     if (m_gpuCounter) {
         PDH_FMT_COUNTERVALUE counterValue;
         status = PdhGetFormattedCounterValue(
@@ -138,7 +130,6 @@ void PerformanceMonitor::updateCpuMetrics() {
     }
 
 #elif defined(__linux__)
-    // Linux /proc/stat CPU monitoring
     static QFile statFile("/proc/stat");
     static qint64 prevIdle = 0, prevTotal = 0;
 
@@ -175,7 +166,6 @@ void PerformanceMonitor::updateCpuMetrics() {
         }
     }
 #else
-    // macOS: TODO
     updateCpuUsage(0);
 #endif
 }
@@ -184,14 +174,12 @@ void PerformanceMonitor::updateCpuMetrics() {
 void PerformanceMonitor::initWindowsCounters() {
     PDH_STATUS status;
 
-    // Create PDH query
     status = PdhOpenQuery(nullptr, 0, reinterpret_cast<PDH_HQUERY*>(&m_pdhQuery));
     if (status != ERROR_SUCCESS) {
         sLog_Error("Failed to open PDH query for performance monitoring");
         return;
     }
 
-    // Add CPU counter: Total processor time
     status = PdhAddCounterW(
         static_cast<PDH_HQUERY>(m_pdhQuery),
         L"\\Processor(_Total)\\% Processor Time",
@@ -205,7 +193,6 @@ void PerformanceMonitor::initWindowsCounters() {
         sLog_App("Windows CPU monitoring initialized (PDH API)");
     }
 
-    // Add GPU counter: GPU Engine utilization (Windows 10+ only)
     status = PdhAddCounterW(
         static_cast<PDH_HQUERY>(m_pdhQuery),
         L"\\GPU Engine(*)\\Utilization Percentage",
@@ -213,14 +200,12 @@ void PerformanceMonitor::initWindowsCounters() {
         reinterpret_cast<PDH_HCOUNTER*>(&m_gpuCounter)
     );
     if (status != ERROR_SUCCESS) {
-        // GPU counter may fail on older Windows or systems without compatible GPU
         sLog_App("GPU monitoring not available (Windows 10+ required or no compatible GPU)");
         m_gpuCounter = nullptr;
     } else {
         sLog_App("Windows GPU monitoring initialized (PDH API)");
     }
 
-    // Initial query to prime the counters (first query returns 0)
     PdhCollectQueryData(static_cast<PDH_HQUERY>(m_pdhQuery));
 }
 
