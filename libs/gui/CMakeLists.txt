@@ -139,6 +139,7 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/search.svg"
     "${SENTINEL_SVG_DIR}/settings.svg"
     "${SENTINEL_SVG_DIR}/tpo_chart.svg"
+    "${SENTINEL_SVG_DIR}/footprint.svg"
 )
 
 set(SENTINEL_FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts/RobotoMono")
@@ -187,6 +188,7 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/reset_settings.svg" PROPERTIES 
 set_source_files_properties("${SENTINEL_SVG_DIR}/search.svg" PROPERTIES QT_RESOURCE_ALIAS "search.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/settings.svg" PROPERTIES QT_RESOURCE_ALIAS "settings.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/tpo_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "tpo_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/footprint.svg" PROPERTIES QT_RESOURCE_ALIAS "footprint.svg")
 
 qt_add_resources(sentinel_gui_lib sentinel_svg_resources
     PREFIX "/svg"

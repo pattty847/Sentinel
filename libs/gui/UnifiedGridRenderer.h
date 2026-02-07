@@ -79,6 +79,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
+    Q_PROPERTY(int primaryField READ primaryField WRITE setPrimaryField NOTIFY primaryFieldChanged)
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
@@ -140,6 +141,7 @@ private:
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
     int m_heatmapLabelPx = 14;
+    int m_primaryField = 0;
 
     double m_heatmapPaletteGamma = 2.0;
     ColorGradient m_bidGradient;
@@ -185,6 +187,7 @@ public:
     double heatmapGamma() const { return m_heatmapGamma; }
     double heatmapContrast() const { return m_heatmapContrast; }
     double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
+    int primaryField() const { return m_primaryField; }
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
@@ -247,7 +250,7 @@ public:
     void applyClientConfig(const ClientConfig& config);
     void applyServerConfig(const ServerConfig& config);
 
-    Q_INVOKABLE void setGridMode(int mode);
+    Q_INVOKABLE void setGridResolutionPreset(int preset);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
@@ -269,6 +272,7 @@ public:
     void setHeatmapGamma(double gamma);
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
+    void setPrimaryField(int field);
 
 public:
     void onTradeReceived(const Trade& trade);
@@ -296,6 +300,7 @@ signals:
     void heatmapGammaChanged();
     void heatmapContrastChanged();
     void heatmapShaderFloorChanged();
+    void primaryFieldChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();

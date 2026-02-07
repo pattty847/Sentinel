@@ -11,8 +11,10 @@ Rectangle {
     property bool stressTestMode: false
     property var chartModeController: null
     property bool gridModeEnabled: true
-    property bool showHeatmap: true
-    property bool showCandles: true
+    property int primaryField: chartModeController ? chartModeController.primaryField : 0
+    property bool candlesEnabled: chartModeController ? chartModeController.candlesEnabled : true
+    property bool showHeatmap: primaryField === 0
+    property bool showCandles: candlesEnabled
 
     property int currentActiveTimeframe: 100
 
@@ -35,24 +37,13 @@ Rectangle {
         function onPanVisualOffsetChanged() {}
     }
 
-    Connections {
-        target: chartModeController
-        function onComponentVisibilityChanged(component, visible) {
-            if (component === "candles") {
-                root.showCandles = visible
-            } else if (component === "orderBook") {
-                root.showHeatmap = visible
-            }
-        }
-    }
-    
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
         anchors.rightMargin: 70
         anchors.bottomMargin: 30
         color: root.color
-        visible: root.showHeatmap
+        visible: true
         z: 0
     }
 
@@ -62,7 +53,8 @@ Rectangle {
         anchors.fill: parent
         anchors.rightMargin: 70
         anchors.bottomMargin: 30
-        visible: root.showHeatmap
+        visible: true
+        primaryField: root.primaryField
         intensityScale: 1.0
         maxCells: 500000
         heatmapBackgroundColor: "black"

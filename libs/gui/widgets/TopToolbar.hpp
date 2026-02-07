@@ -3,7 +3,6 @@
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSlider>
-#include "ChartMode.h"
 
 class TopToolbar : public QToolBar {
     Q_OBJECT
@@ -18,7 +17,9 @@ public:
 
 signals:
     void subscribeRequested();
-    void chartModeSelected(ChartMode mode);
+    void primaryFieldRequested(int field);
+    void tpoToggled(bool enabled);
+    void candlesToggled(bool enabled);
     void timeframeSelected(const QString& timeframe);
     void chartTypeSelected(const QString& chartType);
     void indicatorsRequested();

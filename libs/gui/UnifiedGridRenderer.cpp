@@ -211,12 +211,12 @@ void UnifiedGridRenderer::setPriceResolution(double resolution) {
     }
 }
 
-void UnifiedGridRenderer::setGridMode(int mode) {
-    double priceRes[] = {2.5, 5.0, 10.0};
-    int timeRes[] = {50, 100, 250};
-    if (mode >= 0 && mode <= 2) {
-        setPriceResolution(priceRes[mode]);
-        setTimeframe(timeRes[mode]);
+void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
+    const double priceRes[] = {2.5, 5.0, 10.0};
+    const int timeRes[] = {50, 100, 250};
+    if (preset >= 0 && preset <= 2) {
+        setPriceResolution(priceRes[preset]);
+        setTimeframe(timeRes[preset]);
     }
 }
 
@@ -296,6 +296,15 @@ void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
     m_heatmapShaderFloor = clamped;
     update();
     emit heatmapShaderFloorChanged();
+}
+
+void UnifiedGridRenderer::setPrimaryField(int field) {
+    if (m_primaryField == field) {
+        return;
+    }
+    m_primaryField = field;
+    update();
+    emit primaryFieldChanged();
 }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
@@ -689,6 +698,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     if (m_useGpuHeatmap) {
         const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
+        const bool drawHeatmap = (m_primaryField == 0);
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
         const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
         if ((snapshot.gridWidth > 0 && snapshot.gridWidth != m_heatmapGridWidth) ||
@@ -902,6 +912,15 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_lastTimeAxisMapping.cellW = m_lastTimeAxisMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
         m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
+
+        if (!drawHeatmap) {
+            texNode->setRect(QRectF());
+            texNode->setSourceRect(QRectF());
+            texNode->setTimeOffset(0.0f);
+            m_whiteGlyphNode = nullptr;
+            m_blackGlyphNode = nullptr;
+            return texNode;
+        }
 
         if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
             gridWidth > 0 && gridHeight > 0) {

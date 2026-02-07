@@ -147,7 +147,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }
-    m_modeController->setMode(ChartMode::HYBRID_CANDLES_TRADES);
+    m_modeController->setPrimaryField(ChartModeController::PrimaryField::Heatmap);
+    m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -198,9 +199,14 @@ void MainWindowGPU::setupUI() {
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
-        connect(m_heatmapDock->toolbar(), &TopToolbar::chartModeSelected, this, [this](ChartMode mode) {
+        connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
             if (m_modeController) {
-                m_modeController->setMode(mode);
+                m_modeController->setPrimaryField(field);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::candlesToggled, this, [this](bool enabled) {
+            if (m_modeController) {
+                m_modeController->setCandlesEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityThresholdChanged, this, [this](double value) {

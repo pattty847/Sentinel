@@ -1,32 +1,38 @@
 /*
 Sentinel — ChartModeController
-Role: A QML-compatible controller for managing the chart's display mode and UI settings.
-Inputs/Outputs: Takes user settings from QML; emits signals when properties change.
+Role: QML-compatible controller for primary field selection and overlay toggles.
 Threading: Lives and operates on the main GUI thread.
-Performance: All methods are simple setters/getters and are not performance-critical.
-Integration: Exposed to QML; its properties control the behavior of UnifiedGridRenderer.
-Observability: No internal logging.
-Related: ChartModeController.cpp, UnifiedGridRenderer.h, MainWindowGpu.h.
-Assumptions: A QML UI will connect to its signals and call its methods to drive changes.
+Integration: Exposed to QML; its properties gate layer visibility.
+Related: ChartModeController.cpp, MainWindowGpu.h.
 */
 #pragma once
 #include <QObject>
-#include "ChartMode.h"
-
 class ChartModeController : public QObject {
     Q_OBJECT
+    Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
+    Q_PROPERTY(bool candlesEnabled READ candlesEnabled NOTIFY candlesEnabledChanged)
 public:
+    enum class PrimaryField {
+        Heatmap = 0,
+        FootprintCells = 1
+    };
+    Q_ENUM(PrimaryField)
+
     explicit ChartModeController(QObject* parent = nullptr) : QObject(parent) {}
 
-    void setMode(ChartMode mode);
-    ChartMode getCurrentMode() const { return m_currentMode; }
+    int primaryField() const;
+    bool candlesEnabled() const { return m_candlesEnabled; }
+
+    void setPrimaryField(PrimaryField field);
+    Q_INVOKABLE void setPrimaryField(int field);
+    Q_INVOKABLE void setCandlesEnabled(bool enabled);
 
 signals:
-    void modeChanged(ChartMode newMode);
-    void componentVisibilityChanged(const QString& component, bool visible);
+    void primaryFieldChanged(int field);
+    void candlesEnabledChanged(bool enabled);
 
 private:
-    ChartMode m_currentMode{ChartMode::TRADE_SCATTER};
-    void updateComponentVisibility();
+    PrimaryField m_primaryField{PrimaryField::Heatmap};
+    bool m_candlesEnabled = true;
 };
 

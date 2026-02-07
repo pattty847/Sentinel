@@ -1,5 +1,6 @@
 #include "TopToolbar.hpp"
 #include <QAction>
+#include <QActionGroup>
 #include <QToolButton>
 #include <QWidget>
 #include <QHBoxLayout>
@@ -48,18 +49,31 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     addSeparator();
 
-    // Chart mode toggles (all independent, can combine)
+    // Layer toggles: one primary field + independent overlays.
     auto* candleAction = addAction(QIcon(":/svg/candlestick_chart.svg"), "Candles");
     candleAction->setCheckable(true);
+    candleAction->setChecked(true);
+
+    auto* primaryGroup = new QActionGroup(this);
+    primaryGroup->setExclusive(true);
+
     auto* heatmapAction = addAction(QIcon(":/svg/grid_view.svg"), "Heatmap");
     heatmapAction->setCheckable(true);
     heatmapAction->setChecked(true);
+    heatmapAction->setActionGroup(primaryGroup);
+
+    auto* footprintAction = addAction(QIcon(":/svg/footprint.svg"), "Footprint");
+    footprintAction->setCheckable(true);
+    footprintAction->setActionGroup(primaryGroup);
+
     auto* tpoAction = addAction(QIcon(":/svg/tpo_chart.svg"), "TPO");
     tpoAction->setCheckable(true);
+    tpoAction->setEnabled(false);
 
-    connect(candleAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::TRADITIONAL_CANDLES); });
-    connect(heatmapAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::ORDER_BOOK_HEATMAP); });
-    connect(tpoAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::HYBRID_CANDLES_TRADES); });
+    connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
+    connect(heatmapAction, &QAction::triggered, this, [this]() { emit primaryFieldRequested(0); });
+    connect(footprintAction, &QAction::triggered, this, [this]() { emit primaryFieldRequested(1); });
+    connect(tpoAction, &QAction::toggled, this, [this](bool enabled) { emit tpoToggled(enabled); });
 
     addSeparator();
 
