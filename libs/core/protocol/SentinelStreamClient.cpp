@@ -1,7 +1,147 @@
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
+#include "ProtocolValidation.hpp"
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <array>
+
+namespace {
+
+constexpr qint64 kSchemaLogThrottleMs = 2000;
+
+enum class DropReason : int {
+    ServerSchema = 0,
+    HeatmapSchema,
+    CandleSchema,
+    HeatmapGridHeight,
+    HeatmapPayloadEstimate,
+    HeatmapPayloadDecoded,
+    HeatmapBase64Decode,
+    HeatmapHistoryGridHeight,
+    HeatmapHistoryPayloadEstimate,
+    HeatmapHistoryPayloadDecoded,
+    HeatmapHistoryBase64Decode,
+    Count
+};
+
+struct DropLogBucket {
+    QElapsedTimer timer;
+    bool started = false;
+};
+
+bool shouldLogDrop(DropReason reason) {
+    static std::array<DropLogBucket, static_cast<size_t>(DropReason::Count)> buckets;
+    auto& bucket = buckets[static_cast<size_t>(reason)];
+    if (!bucket.started) {
+        bucket.timer.start();
+        bucket.started = true;
+        return true;
+    }
+    if (bucket.timer.elapsed() >= kSchemaLogThrottleMs) {
+        bucket.timer.restart();
+        return true;
+    }
+    return false;
+}
+
+void logDroppedMessage(DropReason reason, const QString& msg) {
+    if (shouldLogDrop(reason)) {
+        sLog_Warning(msg);
+    }
+}
+
+bool validateFamilySchema(const nlohmann::json& msg,
+                          const char* family,
+                          int supportedVersion,
+                          DropReason reason) {
+    const int ver = protocol::validation::extractSchemaVersion(msg);
+    if (ver < 0) {
+        logDroppedMessage(reason,
+                          QString("Dropping %1 message: missing or invalid schema_version")
+                              .arg(QString::fromUtf8(family)));
+        return false;
+    }
+    if (ver != supportedVersion) {
+        logDroppedMessage(reason,
+                          QString("Dropping %1 message: unsupported schema_version=%2 (supported=%3)")
+                              .arg(QString::fromUtf8(family))
+                              .arg(ver)
+                              .arg(supportedVersion));
+        return false;
+    }
+    return true;
+}
+
+bool validateGridHeight(const char* messageType, int gridHeight, DropReason reason) {
+    if (!protocol::validation::isGridHeightValid(gridHeight)) {
+        logDroppedMessage(reason,
+                          QString("Dropping %1: grid_height=%2 out of bounds (max=%3)")
+                              .arg(QString::fromUtf8(messageType))
+                              .arg(gridHeight)
+                              .arg(protocol::SentinelProtocol::kMaxGridHeight));
+        return false;
+    }
+    return true;
+}
+
+size_t estimateBase64DecodedBytes(const std::string& encoded) {
+    return protocol::validation::estimateBase64DecodedBytes(encoded);
+}
+
+bool validateEncodedPayloadEstimate(const char* messageType,
+                                    const char* fieldName,
+                                    const std::string& encoded,
+                                    DropReason reason) {
+    const size_t estimated = estimateBase64DecodedBytes(encoded);
+    if (!protocol::validation::isPayloadSizeValid(estimated)) {
+        logDroppedMessage(reason,
+                          QString("Dropping %1: %2 estimated decode bytes=%3 exceeds max=%4")
+                              .arg(QString::fromUtf8(messageType))
+                              .arg(QString::fromUtf8(fieldName))
+                              .arg(static_cast<qulonglong>(estimated))
+                              .arg(protocol::SentinelProtocol::kMaxPayloadBytes));
+        return false;
+    }
+    return true;
+}
+
+bool decodeBase64WithGuardrails(const char* messageType,
+                                const char* fieldName,
+                                const std::string& encoded,
+                                DropReason estimateReason,
+                                DropReason decodeReason,
+                                DropReason payloadReason,
+                                QByteArray& out) {
+    out.clear();
+    if (encoded.empty()) {
+        return true;
+    }
+    if (!validateEncodedPayloadEstimate(messageType, fieldName, encoded, estimateReason)) {
+        return false;
+    }
+    const QByteArray decoded = QByteArray::fromBase64(QByteArray::fromStdString(encoded),
+                                                      QByteArray::AbortOnBase64DecodingErrors);
+    if (decoded.isEmpty()) {
+        logDroppedMessage(decodeReason,
+                          QString("Dropping %1: %2 failed base64 decode")
+                              .arg(QString::fromUtf8(messageType))
+                              .arg(QString::fromUtf8(fieldName)));
+        return false;
+    }
+    if (decoded.size() > protocol::SentinelProtocol::kMaxPayloadBytes) {
+        logDroppedMessage(payloadReason,
+                          QString("Dropping %1: %2 decoded bytes=%3 exceeds max=%4")
+                              .arg(QString::fromUtf8(messageType))
+                              .arg(QString::fromUtf8(fieldName))
+                              .arg(decoded.size())
+                              .arg(protocol::SentinelProtocol::kMaxPayloadBytes));
+        return false;
+    }
+    out = decoded;
+    return true;
+}
+
+} // namespace
 
 SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
     : QObject(parent)
@@ -221,11 +361,13 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
         std::string type = msg.value("type", "unknown");
 
         if (type == "server_config") {
-            ServerConfig cfg;
-            const int schema = msg.value("schema_version", 0);
-            if (schema != 1) {
-                sLog_Warning("server_config schema version unsupported: " << schema);
+            if (!validateFamilySchema(msg,
+                                      "server_config",
+                                      protocol::SentinelProtocol::kServerConfigSchemaVersion,
+                                      DropReason::ServerSchema)) {
+                return;
             }
+            ServerConfig cfg;
             if (msg.contains("timeframes_ms") && msg["timeframes_ms"].is_array()) {
                 cfg.heatmap.timeframesMs.clear();
                 for (const auto& item : msg["timeframes_ms"]) {
@@ -331,6 +473,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              
              emit tradeReceived(t);
         } else if (type == "heatmap_slice") {
+             if (!validateFamilySchema(msg,
+                                       "heatmap",
+                                       protocol::SentinelProtocol::kHeatmapSchemaVersion,
+                                       DropReason::HeatmapSchema)) {
+                 return;
+             }
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;
 
@@ -350,13 +498,29 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              const std::string liquidityEncoded = msg.value("liquidity_column", "");
              const double liquidityScale = msg.value("liquidity_scale", 1.0);
 
+             if (!validateGridHeight("heatmap_slice", gridHeight, DropReason::HeatmapGridHeight)) {
+                 return;
+             }
+
              QByteArray column;
-             if (!encoded.empty()) {
-                 column = QByteArray::fromBase64(QByteArray::fromStdString(encoded));
+             if (!decodeBase64WithGuardrails("heatmap_slice",
+                                             "column",
+                                             encoded,
+                                             DropReason::HeatmapPayloadEstimate,
+                                             DropReason::HeatmapBase64Decode,
+                                             DropReason::HeatmapPayloadDecoded,
+                                             column)) {
+                 return;
              }
              QByteArray liquidityColumn;
-             if (!liquidityEncoded.empty()) {
-                 liquidityColumn = QByteArray::fromBase64(QByteArray::fromStdString(liquidityEncoded));
+             if (!decodeBase64WithGuardrails("heatmap_slice",
+                                             "liquidity_column",
+                                             liquidityEncoded,
+                                             DropReason::HeatmapPayloadEstimate,
+                                             DropReason::HeatmapBase64Decode,
+                                             DropReason::HeatmapPayloadDecoded,
+                                             liquidityColumn)) {
+                 return;
              }
 
              if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
@@ -397,6 +561,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              slice.reset = reset;
              emit heatmapSliceReceived(slice);
         } else if (type == "heatmap_history_chunk") {
+             if (!validateFamilySchema(msg,
+                                       "heatmap",
+                                       protocol::SentinelProtocol::kHeatmapSchemaVersion,
+                                       DropReason::HeatmapSchema)) {
+                 return;
+             }
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;
              const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
@@ -405,6 +575,10 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              const std::string encoding = msg.value("encoding", "base64");
              const std::string liquidityEncoding = msg.value("liquidity_encoding", "base64");
              const auto columns = msg.value("columns", nlohmann::json::array());
+
+             if (!validateGridHeight("heatmap_history_chunk", gridHeight, DropReason::HeatmapHistoryGridHeight)) {
+                 return;
+             }
 
              QVector<HeatmapHistoryColumn> out;
              if (columns.is_array()) {
@@ -418,11 +592,27 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                      col.tickSize = item.value("tick_size", 0.0);
                      const std::string encoded = item.value("column", "");
                      if (!encoded.empty() && encoding == "base64") {
-                         col.intensity = QByteArray::fromBase64(QByteArray::fromStdString(encoded));
+                         if (!decodeBase64WithGuardrails("heatmap_history_chunk",
+                                                         "column",
+                                                         encoded,
+                                                         DropReason::HeatmapHistoryPayloadEstimate,
+                                                         DropReason::HeatmapHistoryBase64Decode,
+                                                         DropReason::HeatmapHistoryPayloadDecoded,
+                                                         col.intensity)) {
+                             return;
+                         }
                      }
                      const std::string liqEncoded = item.value("liquidity_column", "");
                      if (!liqEncoded.empty() && liquidityEncoding == "base64") {
-                         col.liquidity = QByteArray::fromBase64(QByteArray::fromStdString(liqEncoded));
+                         if (!decodeBase64WithGuardrails("heatmap_history_chunk",
+                                                         "liquidity_column",
+                                                         liqEncoded,
+                                                         DropReason::HeatmapHistoryPayloadEstimate,
+                                                         DropReason::HeatmapHistoryBase64Decode,
+                                                         DropReason::HeatmapHistoryPayloadDecoded,
+                                                         col.liquidity)) {
+                             return;
+                         }
                      }
                      col.liquidityScale = item.value("liquidity_scale", 1.0);
                      out.push_back(std::move(col));
@@ -447,6 +637,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                          gridHeight,
                                          out);
         } else if (type == "candle_history_chunk") {
+             if (!validateFamilySchema(msg,
+                                       "candle",
+                                       protocol::SentinelProtocol::kCandleSchemaVersion,
+                                       DropReason::CandleSchema)) {
+                 return;
+             }
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;
              const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));
@@ -491,6 +687,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                                         endTimeSec,
                                         out);
         } else if (type == "candle_bar_update" || type == "candle_bar_closed") {
+             if (!validateFamilySchema(msg,
+                                       "candle",
+                                       protocol::SentinelProtocol::kCandleSchemaVersion,
+                                       DropReason::CandleSchema)) {
+                 return;
+             }
              std::string symbol = msg.value("symbol", "");
              if (symbol.empty()) return;
              const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));

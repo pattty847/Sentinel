@@ -6,6 +6,15 @@
 // V0 JSON Protocol
 namespace protocol {
 
+namespace SentinelProtocol {
+constexpr int kServerConfigSchemaVersion = 1;
+constexpr int kHeatmapSchemaVersion = 1;
+constexpr int kCandleSchemaVersion = 1;
+constexpr int kFootprintSchemaVersion = 1;
+constexpr int kMaxGridHeight = 65536;
+constexpr int kMaxPayloadBytes = 262144; // 256 KiB
+}
+
 enum class MessageType {
     Subscribe,
     Unsubscribe,
