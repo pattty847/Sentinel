@@ -18,6 +18,7 @@
 #include "render/MsdfAtlas.hpp"
 #include "render/MsdfGlyphNode.hpp"
 #include "render/HeatmapIntensityNode.hpp"
+#include "render/FootprintIntensityNode.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
@@ -699,6 +700,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     if (m_useGpuHeatmap) {
         const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
         const bool drawHeatmap = (m_primaryField == 0);
+        const bool drawFootprint = (m_primaryField == 1);
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
         const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
         if ((snapshot.gridWidth > 0 && snapshot.gridWidth != m_heatmapGridWidth) ||
@@ -719,6 +721,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_heatmapTextureDirty = true;
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
+            m_footprintNode = nullptr;
         }
 
         if (m_heatmapTextureDirty) {
@@ -912,6 +915,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_lastTimeAxisMapping.cellW = m_lastTimeAxisMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
         m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
+
+        if (drawFootprint) {
+            if (!m_footprintNode) {
+                m_footprintNode = new FootprintIntensityNode();
+                texNode->appendChildNode(m_footprintNode);
+            }
+            m_footprintNode->setRect(drawRect);
+            m_footprintNode->setColor(QColor(58, 70, 86, 140));
+        } else if (m_footprintNode) {
+            m_footprintNode->setRect(QRectF());
+        }
 
         if (!drawHeatmap) {
             texNode->setRect(QRectF());

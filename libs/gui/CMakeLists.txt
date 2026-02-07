@@ -69,6 +69,8 @@ set(GRID_CORE_SOURCES
     render/LabTextItem.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
+    render/FootprintIntensityNode.hpp
+    render/FootprintIntensityNode.cpp
     widgets/LabDock.hpp
     widgets/LabDock.cpp
 )
@@ -217,6 +219,8 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_intensity.frag
         render/shaders/heatmap_msdf.vert
         render/shaders/heatmap_msdf.frag
+        render/shaders/footprint_intensity.vert
+        render/shaders/footprint_intensity.frag
 )
 
 target_include_directories(sentinel_gui_lib 

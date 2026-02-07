@@ -28,6 +28,7 @@
 
 class DataProcessor;
 class MsdfGlyphNode;
+class FootprintIntensityNode;
 
 struct ColorStop {
     float position;
@@ -160,6 +161,7 @@ private:
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
+    class FootprintIntensityNode* m_footprintNode = nullptr;
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
