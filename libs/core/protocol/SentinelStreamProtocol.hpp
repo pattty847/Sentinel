@@ -28,6 +28,10 @@ enum class MessageType {
     CandleHistoryChunk,
     CandleBarUpdate,
     CandleBarClosed,
+    FootprintConfig,
+    FootprintSlice,
+    FootprintHistoryRequest,
+    FootprintHistoryChunk,
     TickDelta, // Maybe for later
     Error,
     Unknown
@@ -47,6 +51,10 @@ inline std::string toString(MessageType t) {
         case MessageType::CandleHistoryChunk: return "candle_history_chunk";
         case MessageType::CandleBarUpdate: return "candle_bar_update";
         case MessageType::CandleBarClosed: return "candle_bar_closed";
+        case MessageType::FootprintConfig: return "footprint_config";
+        case MessageType::FootprintSlice: return "footprint_slice";
+        case MessageType::FootprintHistoryRequest: return "footprint_history_request";
+        case MessageType::FootprintHistoryChunk: return "footprint_history_chunk";
         case MessageType::Error: return "error";
         default: return "unknown";
     }
@@ -65,6 +73,10 @@ inline MessageType fromString(const std::string& s) {
     if (s == "candle_history_chunk") return MessageType::CandleHistoryChunk;
     if (s == "candle_bar_update") return MessageType::CandleBarUpdate;
     if (s == "candle_bar_closed") return MessageType::CandleBarClosed;
+    if (s == "footprint_config") return MessageType::FootprintConfig;
+    if (s == "footprint_slice") return MessageType::FootprintSlice;
+    if (s == "footprint_history_request") return MessageType::FootprintHistoryRequest;
+    if (s == "footprint_history_chunk") return MessageType::FootprintHistoryChunk;
     if (s == "error") return MessageType::Error;
     return MessageType::Unknown;
 }

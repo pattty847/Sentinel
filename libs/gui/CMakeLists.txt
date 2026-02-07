@@ -50,6 +50,8 @@ set(GRID_CORE_SOURCES
     render/DataProcessor.cpp
     render/HeatmapStreamState.hpp
     render/HeatmapStreamState.cpp
+    render/FootprintStreamState.hpp
+    render/FootprintStreamState.cpp
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
     render/ViewportAutoScrollController.hpp

@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <array>
+#include <cstdint>
 
 namespace {
 
@@ -13,6 +14,7 @@ enum class DropReason : int {
     ServerSchema = 0,
     HeatmapSchema,
     CandleSchema,
+    FootprintSchema,
     HeatmapGridHeight,
     HeatmapPayloadEstimate,
     HeatmapPayloadDecoded,
@@ -21,6 +23,12 @@ enum class DropReason : int {
     HeatmapHistoryPayloadEstimate,
     HeatmapHistoryPayloadDecoded,
     HeatmapHistoryBase64Decode,
+    FootprintGridHeight,
+    FootprintPayloadEstimate,
+    FootprintPayloadDecoded,
+    FootprintBase64Decode,
+    FootprintSliceMeta,
+    FootprintPayloadShape,
     Count
 };
 
@@ -156,6 +164,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
+    qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
     qRegisterMetaType<ServerConfig>("ServerConfig");
@@ -716,6 +725,95 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              } else {
                  emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
              }
+        } else if (type == "footprint_config") {
+             if (!validateFamilySchema(msg,
+                                       "footprint",
+                                       protocol::SentinelProtocol::kFootprintSchemaVersion,
+                                       DropReason::FootprintSchema)) {
+                 return;
+             }
+             return;
+        } else if (type == "footprint_slice") {
+             if (!validateFamilySchema(msg,
+                                       "footprint",
+                                       protocol::SentinelProtocol::kFootprintSchemaVersion,
+                                       DropReason::FootprintSchema)) {
+                 return;
+             }
+             std::string symbol = msg.value("symbol", "");
+             if (symbol.empty()) return;
+
+             const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
+             const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
+             const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+             const int gridWidth = msg.value("grid_width", 0);
+             const int gridHeight = msg.value("grid_height", 0);
+             const double minPrice = msg.value("min_price", 0.0);
+             const double maxPrice = msg.value("max_price", 0.0);
+             const double tickSize = msg.value("tick_size", 0.0);
+             const double quantScale = msg.value("quant_scale", 1.0);
+             const std::string format = msg.value("format", "q16_delta");
+             const std::string encoded = msg.value("delta_levels_q16", "");
+
+             if (!validateGridHeight("footprint_slice", gridHeight, DropReason::FootprintGridHeight)) {
+                 return;
+             }
+
+             if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 ||
+                 tickSize <= 0.0 || maxPrice <= minPrice || quantScale <= 0.0) {
+                 logDroppedMessage(DropReason::FootprintSliceMeta,
+                                   QString("Dropping footprint_slice: invalid metadata (start=%1 end=%2 tf=%3 tick=%4 range=[%5,%6] quant=%7)")
+                                       .arg(startMs)
+                                       .arg(endMs)
+                                       .arg(timeframeMs)
+                                       .arg(tickSize, 0, 'g', 8)
+                                       .arg(minPrice, 0, 'g', 8)
+                                       .arg(maxPrice, 0, 'g', 8)
+                                       .arg(quantScale, 0, 'g', 8));
+                 return;
+             }
+
+             QByteArray deltaLevelsQ16;
+             if (!decodeBase64WithGuardrails("footprint_slice",
+                                             "delta_levels_q16",
+                                             encoded,
+                                             DropReason::FootprintPayloadEstimate,
+                                             DropReason::FootprintBase64Decode,
+                                             DropReason::FootprintPayloadDecoded,
+                                             deltaLevelsQ16)) {
+                 return;
+             }
+             const int expectedBytes = gridHeight * static_cast<int>(sizeof(int16_t));
+             if (deltaLevelsQ16.size() != expectedBytes) {
+                 logDroppedMessage(DropReason::FootprintPayloadShape,
+                                   QString("Dropping footprint_slice: delta_levels_q16 bytes=%1 expected=%2")
+                                       .arg(deltaLevelsQ16.size())
+                                       .arg(expectedBytes));
+                 return;
+             }
+
+             FootprintSlice slice;
+             slice.symbol = QString::fromStdString(symbol);
+             slice.bucketStartMs = startMs;
+             slice.bucketEndMs = endMs;
+             slice.timeframeMs = timeframeMs;
+             slice.gridWidth = gridWidth;
+             slice.gridHeight = gridHeight;
+             slice.minPrice = minPrice;
+             slice.maxPrice = maxPrice;
+             slice.tickSize = tickSize;
+             slice.quantScale = quantScale;
+             slice.format = QString::fromStdString(format);
+             slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
+             emit footprintSliceReceived(slice);
+        } else if (type == "footprint_history_chunk") {
+             if (!validateFamilySchema(msg,
+                                       "footprint",
+                                       protocol::SentinelProtocol::kFootprintSchemaVersion,
+                                       DropReason::FootprintSchema)) {
+                 return;
+             }
+             return;
         }
 
     } catch (const std::exception& e) {

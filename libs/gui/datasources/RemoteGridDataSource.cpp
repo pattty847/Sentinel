@@ -63,6 +63,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
+    qRegisterMetaType<FootprintSlice>("FootprintSlice");
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
@@ -72,6 +73,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onL2UpdateReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapSliceReceived,
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
+            this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
@@ -199,6 +202,10 @@ void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const st
 
 void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     emit heatmapSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice) {
+    emit footprintSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,

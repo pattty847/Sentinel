@@ -13,6 +13,7 @@
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
 #include "HeatmapSlice.hpp"
+#include "FootprintSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
 
@@ -74,6 +75,7 @@ signals:
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
+    void footprintSliceReceived(const FootprintSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,

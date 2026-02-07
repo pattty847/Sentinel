@@ -553,6 +553,8 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,
+                dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }

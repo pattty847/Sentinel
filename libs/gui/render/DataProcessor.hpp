@@ -5,12 +5,14 @@
 #include <QVector>
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
 
 class GridViewState;
+class FootprintStreamState;
 
 class DataProcessor : public QObject {
     Q_OBJECT
@@ -21,6 +23,7 @@ public:
 
 public slots:
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
+    void onFootprintSliceReceived(const FootprintSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
                                   int gridWidth,
@@ -114,5 +117,8 @@ private:
 
     std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;
     int m_cacheCapacityOverride = 0;
+    int m_footprintGridWidth = 5120;
+    int m_footprintGridHeight = 2048;
+    std::unique_ptr<FootprintStreamState> m_footprintStream;
 
 };

@@ -29,6 +29,7 @@ private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
+    void onFootprintSliceReceived(const FootprintSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
                                   int gridWidth,

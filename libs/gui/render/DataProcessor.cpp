@@ -10,6 +10,7 @@ Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
+#include "FootprintStreamState.hpp"
 #include "GridViewState.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -20,6 +21,8 @@ Assumptions: Server is authoritative for heatmap columns.
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
+    m_footprintStream = std::make_unique<FootprintStreamState>();
+    m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
 }
 
 DataProcessor::~DataProcessor() {
@@ -45,6 +48,9 @@ void DataProcessor::clearData() {
     m_heatmapHasLastColumn = false;
     m_heatmapLastColumn.clear();
     m_heatmapCache.clear();
+    if (m_footprintStream) {
+        m_footprintStream->clear();
+    }
 }
 
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
@@ -173,6 +179,40 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     entry.liquidityScale = slice.liquidityScale;
     cache.push(std::move(entry));
     m_heatmapLastSliceStart = slice.bucketStartMs;
+}
+
+void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_footprintStream) {
+        return;
+    }
+    if (slice.deltaLevelsQ16.isEmpty()) {
+        return;
+    }
+
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_footprintGridWidth;
+    const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_footprintGridHeight;
+    if (resolvedWidth <= 0 || resolvedHeight <= 0) {
+        return;
+    }
+
+    if (resolvedWidth != m_footprintGridWidth || resolvedHeight != m_footprintGridHeight) {
+        m_footprintGridWidth = resolvedWidth;
+        m_footprintGridHeight = resolvedHeight;
+        m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
+    }
+
+    m_footprintStream->ingestSlice(slice.bucketStartMs,
+                                   slice.bucketEndMs,
+                                   slice.timeframeMs,
+                                   m_footprintGridWidth,
+                                   m_footprintGridHeight,
+                                   slice.minPrice,
+                                   slice.maxPrice,
+                                   slice.tickSize,
+                                   slice.deltaLevelsQ16);
 }
 
 void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
