@@ -191,6 +191,9 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
     if (slice.deltaLevelsQ16.isEmpty()) {
         return;
     }
+    if (slice.format.trimmed().compare(QStringLiteral("q16_delta"), Qt::CaseInsensitive) != 0) {
+        return;
+    }
 
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_footprintGridWidth;
     const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_footprintGridHeight;
@@ -204,15 +207,25 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
         m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
     }
 
-    m_footprintStream->ingestSlice(slice.bucketStartMs,
-                                   slice.bucketEndMs,
-                                   slice.timeframeMs,
-                                   m_footprintGridWidth,
-                                   m_footprintGridHeight,
-                                   slice.minPrice,
-                                   slice.maxPrice,
-                                   slice.tickSize,
-                                   slice.deltaLevelsQ16);
+    const bool ok = m_footprintStream->ingestSlice(slice.bucketStartMs,
+                                                   slice.bucketEndMs,
+                                                   slice.timeframeMs,
+                                                   m_footprintGridWidth,
+                                                   m_footprintGridHeight,
+                                                   slice.minPrice,
+                                                   slice.maxPrice,
+                                                   slice.tickSize,
+                                                   slice.deltaLevelsQ16);
+    if (!ok && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Footprint slice dropped at staging: symbol=%1 start=%2 end=%3 tfMs=%4 grid=%5x%6 bytes=%7")
+                       .arg(slice.symbol)
+                       .arg(slice.bucketStartMs)
+                       .arg(slice.bucketEndMs)
+                       .arg(slice.timeframeMs)
+                       .arg(m_footprintGridWidth)
+                       .arg(m_footprintGridHeight)
+                       .arg(slice.deltaLevelsQ16.size()));
+    }
 }
 
 void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,

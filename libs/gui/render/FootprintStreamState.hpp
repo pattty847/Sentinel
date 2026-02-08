@@ -16,8 +16,14 @@ public:
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;
         int64_t timeframeMs = 0;
-        std::vector<int16_t> deltaQ16;
+        std::vector<uint16_t> deltaQ16;
         bool valid = false;
+    };
+
+    struct PendingUpload {
+        int x = 0;
+        int64_t bucketStartMs = 0;
+        int64_t bucketEndMs = 0;
     };
 
     struct Snapshot {
@@ -31,9 +37,12 @@ public:
         double tickSize = 0.0;
         bool rangeValid = false;
         uint64_t resetGeneration = 0;
+        int pendingUploads = 0;
     };
 
     FootprintStreamState() = default;
+
+    static int expectedBytesForGridHeight(int gridHeight);
 
     void setGridDimensions(int gridWidth, int gridHeight);
     void updateRange(double minPrice, double maxPrice, double tickSize);
@@ -50,11 +59,15 @@ public:
                      const QByteArray& deltaLevelsQ16);
 
     Snapshot snapshot() const;
+    int pendingUploadCount() const;
+    void takePendingUploads(std::vector<PendingUpload>& out);
+    bool copyColumnForUpload(int x, QByteArray& out) const;
 
 private:
     void resetLocked(int gridWidth, int gridHeight);
 
     mutable std::mutex m_stateMutex;
+    mutable std::mutex m_uploadMutex;
     int m_gridWidth = 0;
     int m_gridHeight = 0;
     int m_writeColumn = 0;
@@ -66,4 +79,5 @@ private:
     bool m_rangeValid = false;
     uint64_t m_resetGeneration = 0;
     std::vector<ColumnSlot> m_columns;
+    std::vector<PendingUpload> m_pendingUploads;
 };
