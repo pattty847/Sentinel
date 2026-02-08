@@ -366,7 +366,7 @@ _(no entries yet)_
 ### F10: Coinbase REST Candle History
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-02-08
 
 #### Now
 - [x] Serve 1s candles from live trade aggregation (no REST history)
@@ -396,6 +396,7 @@ _(no entries yet)_
 - **2026-02-02** — Added live candle WS updates with seq per (symbol, tf); gating next.
 - **2026-02-02** — Added basic gating on candle updates (high/low, close move, silence).
 - **2026-02-02** — Deferred robust candle test harness; add script later with auto-run + manual fallback.
+- **2026-02-08** — Explored toolbar timeframe/candle path; found protocol schema gating mismatch and mapping-timeframe coupling blocking reliable TF switching.
 
 ---
 
@@ -440,7 +441,7 @@ _(no entries yet)_
 
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-02-08
 
 #### Now (current sprint — do these first)
 
@@ -497,6 +498,7 @@ _(no entries yet)_
 
 - **2026-02-02** — Inventoried all toolbar controls; identified wiring gaps for timeframe/liquidity/actions.
 - **2026-02-02** — Toolbar is visually complete but many buttons emit signals without backend implementation.
+- **2026-02-08** — Verified toolbar signals are wired in MainWindowGPU; timeframe emits history requests, but end-to-end behavior is blocked by protocol/schema and renderer timeframe coupling issues.
 
 ---
 

@@ -47,6 +47,11 @@ This folder is gitignored by default.
 * Before coding, state potential per‑frame costs: allocations, object creation, signal emissions, binding re‑evals.
 * If uncertain, treat it as a risk and reduce scope or add guardrails.
 
+**Context Hygiene (exploration first)**
+* Start with `rg -n` / `rg --files` to narrow scope before opening full files.
+* Prefer targeted line windows over full-file reads for large sources.
+* If unsure whether deep read is needed, check file size/LOC first and inspect only the relevant sections.
+
 **System Context (Sentinel)**
 * Goal: GPU‑first, deterministic, zero‑lag trading terminal (ExoCharts + TradingView + SierraCharts + Bookmap + TradingLite vibes).
 * Future: AI commentary (CopeNet), equity/crypto data (including free sources like yfinance), and richer overlays.

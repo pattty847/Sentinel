@@ -10,30 +10,34 @@ using namespace protocol::validation;
 // =============================================================================
 
 TEST(ProtocolValidation, SchemaMatchAccepted) {
-    nlohmann::json msg = {{"type", "heatmap_slice"}, {"schema_version", 1}};
-    EXPECT_TRUE(isSchemaCompatible(msg, 1));
+    const int kVer = protocol::SentinelProtocol::kHeatmapSchemaVersion;
+    nlohmann::json msg = {{"type", "heatmap_slice"}, {"schema_version", kVer}};
+    EXPECT_TRUE(isSchemaCompatible(msg, kVer));
 }
 
 TEST(ProtocolValidation, SchemaMismatchRejected) {
-    nlohmann::json msg = {{"type", "heatmap_slice"}, {"schema_version", 99}};
-    EXPECT_FALSE(isSchemaCompatible(msg, 1));
+    const int kVer = protocol::SentinelProtocol::kHeatmapSchemaVersion;
+    nlohmann::json msg = {{"type", "heatmap_slice"}, {"schema_version", kVer + 99}};
+    EXPECT_FALSE(isSchemaCompatible(msg, kVer));
 }
 
 TEST(ProtocolValidation, SchemaMissingRejected) {
+    const int kVer = protocol::SentinelProtocol::kHeatmapSchemaVersion;
     nlohmann::json msg = {{"type", "heatmap_slice"}};
-    EXPECT_FALSE(isSchemaCompatible(msg, 1));
+    EXPECT_FALSE(isSchemaCompatible(msg, kVer));
     EXPECT_EQ(extractSchemaVersion(msg), -1);
 }
 
 TEST(ProtocolValidation, SchemaNonIntegerRejected) {
+    const int kVer = protocol::SentinelProtocol::kHeatmapSchemaVersion;
     nlohmann::json msg = {{"type", "heatmap_slice"}, {"schema_version", "one"}};
-    EXPECT_FALSE(isSchemaCompatible(msg, 1));
+    EXPECT_FALSE(isSchemaCompatible(msg, kVer));
 
     nlohmann::json msg2 = {{"type", "heatmap_slice"}, {"schema_version", 1.5}};
-    EXPECT_FALSE(isSchemaCompatible(msg2, 1));
+    EXPECT_FALSE(isSchemaCompatible(msg2, kVer));
 
     nlohmann::json msg3 = {{"type", "heatmap_slice"}, {"schema_version", nullptr}};
-    EXPECT_FALSE(isSchemaCompatible(msg3, 1));
+    EXPECT_FALSE(isSchemaCompatible(msg3, kVer));
 }
 
 // =============================================================================
@@ -120,4 +124,44 @@ TEST(ProtocolValidation, FootprintQ16PayloadShape) {
 
     // Absurd grid_height that exceeds bounds
     EXPECT_FALSE(isGridHeightValid(protocol::SentinelProtocol::kMaxGridHeight + 1));
+}
+
+// =============================================================================
+// Heatmap Family Schema Gating (INV-020, FM-017)
+// =============================================================================
+
+TEST(ProtocolValidation, HeatmapFamilySchemaGating) {
+    const int kVer = protocol::SentinelProtocol::kHeatmapSchemaVersion;
+
+    for (const char* type : {"heatmap_slice", "heatmap_history_chunk"}) {
+        SCOPED_TRACE(type);
+        nlohmann::json good = {{"type", type}, {"schema_version", kVer}};
+        EXPECT_TRUE(isSchemaCompatible(good, kVer));
+
+        nlohmann::json wrong = {{"type", type}, {"schema_version", kVer + 1}};
+        EXPECT_FALSE(isSchemaCompatible(wrong, kVer));
+
+        nlohmann::json missing = {{"type", type}};
+        EXPECT_FALSE(isSchemaCompatible(missing, kVer));
+    }
+}
+
+// =============================================================================
+// Candle Family Schema Gating (INV-020, FM-017)
+// =============================================================================
+
+TEST(ProtocolValidation, CandleFamilySchemaGating) {
+    const int kVer = protocol::SentinelProtocol::kCandleSchemaVersion;
+
+    for (const char* type : {"candle_history_chunk", "candle_bar_update", "candle_bar_closed"}) {
+        SCOPED_TRACE(type);
+        nlohmann::json good = {{"type", type}, {"schema_version", kVer}};
+        EXPECT_TRUE(isSchemaCompatible(good, kVer));
+
+        nlohmann::json wrong = {{"type", type}, {"schema_version", kVer + 1}};
+        EXPECT_FALSE(isSchemaCompatible(wrong, kVer));
+
+        nlohmann::json missing = {{"type", type}};
+        EXPECT_FALSE(isSchemaCompatible(missing, kVer));
+    }
 }

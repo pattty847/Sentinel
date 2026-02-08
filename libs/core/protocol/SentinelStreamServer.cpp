@@ -1,5 +1,6 @@
 #include "SentinelStreamServer.hpp"
 #include "HeatmapSlice.hpp"
+#include "SentinelStreamProtocol.hpp"
 #include "SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
@@ -32,7 +33,7 @@ namespace {
 nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     nlohmann::json payload;
     payload["type"] = "server_config";
-    payload["schema_version"] = 1;
+    payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
     payload["timeframes_ms"] = cfg.heatmap.timeframesMs;
     payload["heatmap"] = {
         {"grid_width", cfg.heatmap.gridWidth},
@@ -266,6 +267,7 @@ public:
                                                             gridWidth, gridHeight, columns);
                     nlohmann::json payload;
                     payload["type"] = "heatmap_history_chunk";
+                    payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
                     payload["symbol"] = symbol;
                     payload["timeframe_ms"] = timeframeMs;
                     payload["grid_width"] = gridWidth;
@@ -344,6 +346,7 @@ public:
 
                     nlohmann::json payload;
                     payload["type"] = "candle_history_chunk";
+                    payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
                     payload["symbol"] = symbol;
                     payload["timeframe_sec"] = timeframeSec;
                     payload["start_time_sec"] = startTimeSec;
@@ -402,6 +405,7 @@ public:
 
                     nlohmann::json payload;
                     payload["type"] = "candle_history_chunk";
+                    payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
                     payload["symbol"] = symbol;
                     payload["timeframe_sec"] = timeframeSec;
                     payload["start_time_sec"] = startTimeSec;
@@ -481,6 +485,7 @@ public:
 
         nlohmann::json j;
         j["type"] = "heatmap_slice";
+        j["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
         j["symbol"] = sym;
         j["time_start"] = slice.bucketStartMs;
         j["time_end"] = slice.bucketEndMs;
@@ -584,6 +589,7 @@ public:
 
         nlohmann::json payload;
         payload["type"] = "candle_bar_update";
+        payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
         payload["symbol"] = sym;
         payload["timeframe_sec"] = tfSec;
         payload["bucket_start_ms"] = bar.timestamp_ms;
@@ -633,6 +639,7 @@ public:
 
         nlohmann::json payload;
         payload["type"] = "candle_bar_closed";
+        payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
         payload["symbol"] = sym;
         payload["timeframe_sec"] = tfSec;
         payload["bucket_start_ms"] = bar.timestamp_ms;
