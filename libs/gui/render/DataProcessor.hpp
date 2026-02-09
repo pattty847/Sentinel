@@ -61,6 +61,11 @@ signals:
                             const QByteArray& liquidityColumn,
                             double liquidityScale,
                             int intensityBytesPerCell);
+    void heatmapHistoryBatchReady(int64_t timeframeMs,
+                                  int gridWidth,
+                                  int gridHeight,
+                                  const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
+                                  int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
     void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
 

@@ -20,6 +20,8 @@ Assumptions: Server is authoritative for heatmap columns.
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
+    qRegisterMetaType<IGridDataSource::HeatmapHistoryColumn>("IGridDataSource::HeatmapHistoryColumn");
+    qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
     m_footprintStream = std::make_unique<FootprintStreamState>();
     m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
 }
@@ -270,19 +272,8 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
         : 1;
 
     emit heatmapRangeReset(first.minPrice, first.maxPrice, first.tickSize, gridWidth, gridHeight);
-
-    for (const auto& col : columns) {
-        emit heatmapColumnReady(col.bucketStartMs,
-                                col.bucketEndMs,
-                                timeframeMs,
-                                col.minPrice,
-                                col.maxPrice,
-                                col.tickSize,
-                                col.intensity,
-                                col.liquidity,
-                                col.liquidityScale,
-                                bytesPerCell);
-    }
+    // Week 0: batch history handoff to avoid queuing one cross-thread signal per column.
+    emit heatmapHistoryBatchReady(timeframeMs, gridWidth, gridHeight, columns, bytesPerCell);
 }
 
 size_t DataProcessor::HeatmapGridKeyHash::operator()(const HeatmapGridKey& key) const noexcept {
