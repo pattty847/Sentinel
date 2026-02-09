@@ -5,7 +5,6 @@ GPU-batched candlestick overlay (demo data only).
 #include "CandlestickOverlayItem.hpp"
 #include "GridViewState.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
-#include "../UnifiedGridRenderer.h"
 #include "SentinelLogging.hpp"
 
 #include <QSGGeometryNode>
@@ -104,8 +103,8 @@ QObject* CandlestickOverlayItem::candleBuffer() const {
     return static_cast<QObject*>(m_candleBuffer.data());
 }
 
-QObject* CandlestickOverlayItem::heatmapRenderer() const {
-    return static_cast<QObject*>(m_heatmapRenderer.data());
+QObject* CandlestickOverlayItem::mappingProvider() const {
+    return m_mappingProviderObject.data();
 }
 
 void CandlestickOverlayItem::setViewState(QObject* viewState) {
@@ -130,27 +129,30 @@ void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
     emit candleBufferChanged();
 }
 
-void CandlestickOverlayItem::setHeatmapRenderer(QObject* renderer) {
-    if (m_heatmapRenderer == renderer) {
+void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
+    if (m_mappingProviderObject == provider) {
         return;
     }
-    if (m_rendererViewportConn) {
-        disconnect(m_rendererViewportConn);
+    if (m_mappingViewportConn) {
+        disconnect(m_mappingViewportConn);
     }
-    if (m_rendererTimeframeConn) {
-        disconnect(m_rendererTimeframeConn);
+    if (m_mappingTimeframeConn) {
+        disconnect(m_mappingTimeframeConn);
     }
-    m_heatmapRenderer = qobject_cast<UnifiedGridRenderer*>(renderer);
-    if (m_heatmapRenderer) {
-        m_rendererViewportConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
-            markGeometryDirty();
-        });
-        m_rendererTimeframeConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
-            markGeometryDirty();
-        });
+    m_mappingProviderObject = provider;
+    m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
+    if (m_mappingProviderObject) {
+        m_mappingViewportConn = QObject::connect(m_mappingProviderObject.data(),
+                                                 SIGNAL(viewportChanged()),
+                                                 this,
+                                                 SLOT(update()));
+        m_mappingTimeframeConn = QObject::connect(m_mappingProviderObject.data(),
+                                                  SIGNAL(timeframeChanged()),
+                                                  this,
+                                                  SLOT(update()));
     }
     markGeometryDirty();
-    emit heatmapRendererChanged();
+    emit mappingProviderChanged();
 }
 
 void CandlestickOverlayItem::setSymbol(const QString& symbol) {
@@ -241,7 +243,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_viewState || !m_viewState->isTimeWindowValid() || !m_heatmapRenderer) {
+    if (!m_viewState || !m_viewState->isTimeWindowValid() || !m_mappingProvider) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -249,7 +251,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const TimeAxisMapping mapping = m_heatmapRenderer->lastTimeAxisMapping();
+    const TimeAxisMapping mapping = m_mappingProvider->currentTimeAxisMapping();
     if (mappingChanged(mapping, m_lastMapping)) {
         m_lastMapping = mapping;
         m_geometryDirty = true;

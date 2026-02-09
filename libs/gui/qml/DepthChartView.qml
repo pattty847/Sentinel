@@ -11,9 +11,7 @@ Rectangle {
     property bool stressTestMode: false
     property var chartModeController: null
     property bool gridModeEnabled: true
-    property int primaryField: chartModeController ? chartModeController.primaryField : 0
     property bool candlesEnabled: chartModeController ? chartModeController.candlesEnabled : true
-    property bool showHeatmap: primaryField === 0
     property bool showCandles: candlesEnabled
 
     property int currentActiveTimeframe: 100
@@ -54,7 +52,6 @@ Rectangle {
         anchors.rightMargin: 70
         anchors.bottomMargin: 30
         visible: true
-        primaryField: root.primaryField
         intensityScale: 1.0
         maxCells: 500000
         heatmapBackgroundColor: "black"
@@ -75,7 +72,7 @@ Rectangle {
         anchors.fill: unifiedGridRenderer
         visible: root.showCandles
         viewState: unifiedGridRenderer.viewState
-        heatmapRenderer: unifiedGridRenderer
+        mappingProvider: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
         timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))

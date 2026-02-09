@@ -206,6 +206,8 @@ void UnifiedGridRenderer::clearData() {
     }
     m_footprintImage = QImage();
     m_footprintTextureDirty.store(true, std::memory_order_release);
+    m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
+    m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
     update();
 }
 
@@ -604,6 +606,7 @@ void UnifiedGridRenderer::init() {
                 }
             }
         }
+        m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
         return true;
     };
 
@@ -679,6 +682,7 @@ void UnifiedGridRenderer::init() {
                     m_heatmapGridHeight = gridHeight;
                 }
                 m_heatmapTextureDirty.store(true, std::memory_order_release);
+                m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
                 if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
                     m_heatmapTickSize = tickSize;
                     emit heatmapTickSizeChanged();
@@ -727,6 +731,7 @@ void UnifiedGridRenderer::init() {
                         FootprintPendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
                     pendingCount = static_cast<int>(m_pendingFootprintUploads.size());
                 }
+                m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
                 if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
                     sLog_Debug(QString("Footprint queued for render: x=%1 grid=%2x%3 pending=%4")
                                    .arg(x)
@@ -800,9 +805,31 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     }
 
     if (m_useGpuHeatmap) {
-        const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
-        const bool drawHeatmap = (m_primaryField == 0);
-        const bool drawFootprint = (m_primaryField == 1);
+        // FrameContext is immutable for this updatePaintNode pass; overlays consume this snapshot only.
+        FrameContext frame;
+        frame.surfaceBounds = boundingRect();
+        frame.surfaceDpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+        frame.presentationTimeMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
+        frame.heatmapSnapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
+        frame.drawHeatmap = (m_primaryField == 0);
+        frame.drawFootprint = (m_primaryField == 1);
+        frame.forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
+        frame.streamGenerations.heatmap = m_heatmapStreamGeneration.load(std::memory_order_acquire);
+        frame.streamGenerations.footprint = m_footprintStreamGeneration.load(std::memory_order_acquire);
+        frame.streamGenerations.candle = m_candleStreamGeneration.load(std::memory_order_acquire);
+        if (m_viewState && m_viewState->isTimeWindowValid()) {
+            frame.viewport.valid = true;
+            frame.viewport.timeStart = m_viewState->getVisibleTimeStart();
+            frame.viewport.timeEnd = m_viewState->getVisibleTimeEnd();
+            frame.viewport.minPrice = m_viewState->getMinPrice();
+            frame.viewport.maxPrice = m_viewState->getMaxPrice();
+            frame.viewport.panVisualOffset = m_viewState->getPanVisualOffset();
+            frame.viewport.dragging = m_viewState->isDragging();
+            frame.viewport.autoScrollEnabled = m_viewState->isAutoScrollEnabled();
+        }
+        const auto& snapshot = frame.heatmapSnapshot;
+        const bool drawHeatmap = frame.drawHeatmap;
+        const bool drawFootprint = frame.drawFootprint;
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
         const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
         auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
@@ -842,7 +869,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_heatmapTextureDirty.store(true, std::memory_order_release);  // Trigger full texture update
         }
 
-        const QRectF bounds = boundingRect();
+        const QRectF bounds = frame.surfaceBounds;
         QRectF drawRect = bounds;
         QRectF srcRect(0, 0, gridWidth, gridHeight);
         texNode->setRect(drawRect);
@@ -874,23 +901,23 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         double viewMinPriceF = 0.0;
         double viewMaxPriceF = 0.0;
 
-        if (m_viewState && m_viewState->isTimeWindowValid() &&
+        if (frame.viewport.valid &&
             snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
-            const qint64 timeStart = m_viewState->getVisibleTimeStart();
-            const qint64 timeEnd = m_viewState->getVisibleTimeEnd();
-            const double minPrice = m_viewState->getMinPrice();
-            const double maxPrice = m_viewState->getMaxPrice();
+            const qint64 timeStart = frame.viewport.timeStart;
+            const qint64 timeEnd = frame.viewport.timeEnd;
+            const double minPrice = frame.viewport.minPrice;
+            const double maxPrice = frame.viewport.maxPrice;
 
             double timeStartF = static_cast<double>(timeStart);
             double timeEndF = static_cast<double>(timeEnd);
             double minPriceF = minPrice;
             double maxPriceF = maxPrice;
 
-            const QPointF pan = m_viewState->getPanVisualOffset();
+            const QPointF pan = frame.viewport.panVisualOffset;
             const double timeRange = static_cast<double>(timeEnd - timeStart);
             const double priceRange = maxPrice - minPrice;
             if (!pan.isNull() && bounds.width() > 0.0 && bounds.height() > 0.0 &&
-                timeRange > 0.0 && priceRange > 0.0 && m_viewState->isDragging()) {
+                timeRange > 0.0 && priceRange > 0.0 && frame.viewport.dragging) {
                 const double timePixelsToUnits = timeRange / bounds.width();
                 const double pricePixelsToUnits = priceRange / bounds.height();
                 const double timeDelta = -pan.x() * timePixelsToUnits;
@@ -975,37 +1002,38 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             texNode->setSourceRect(srcRect);
         }
 
-        const bool forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
+        const bool forceFull = frame.forceFull;
         if (!forceFull) {
             texNode->setTimeOffset(snapshot.timeOffset);
         }
-        m_lastTimeAxisMapping.viewStartMs = viewTimeStartF;
-        m_lastTimeAxisMapping.viewEndMs = viewTimeEndF;
-        m_lastTimeAxisMapping.viewMinPrice = viewMinPriceF;
-        m_lastTimeAxisMapping.viewMaxPrice = viewMaxPriceF;
-        m_lastTimeAxisMapping.drawRect = drawRect;
-        m_lastTimeAxisMapping.srcRect = srcRect;
-        m_lastTimeAxisMapping.dataStartMs = dataStart;
-        m_lastTimeAxisMapping.dataEndMs = dataEnd;
-        m_lastTimeAxisMapping.actualDataStartMs = actualDataStart;
-        m_lastTimeAxisMapping.actualDataEndMs = actualDataEnd;
-        m_lastTimeAxisMapping.dataMinPrice = snapshot.minPrice;
-        m_lastTimeAxisMapping.dataMaxPrice = snapshot.maxPrice;
-        m_lastTimeAxisMapping.appendMs = static_cast<double>(snapshot.appendMs);
-        m_lastTimeAxisMapping.tickSize = snapshot.tickSize;
-        m_lastTimeAxisMapping.gridWidth = gridWidth;
-        m_lastTimeAxisMapping.gridHeight = gridHeight;
-        m_lastTimeAxisMapping.filledColumns = snapshot.filledColumns;
-        m_lastTimeAxisMapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
-        m_lastTimeAxisMapping.valid = (dataStartValid &&
+        frame.mapping.viewStartMs = viewTimeStartF;
+        frame.mapping.viewEndMs = viewTimeEndF;
+        frame.mapping.viewMinPrice = viewMinPriceF;
+        frame.mapping.viewMaxPrice = viewMaxPriceF;
+        frame.mapping.drawRect = drawRect;
+        frame.mapping.srcRect = srcRect;
+        frame.mapping.dataStartMs = dataStart;
+        frame.mapping.dataEndMs = dataEnd;
+        frame.mapping.actualDataStartMs = actualDataStart;
+        frame.mapping.actualDataEndMs = actualDataEnd;
+        frame.mapping.dataMinPrice = snapshot.minPrice;
+        frame.mapping.dataMaxPrice = snapshot.maxPrice;
+        frame.mapping.appendMs = static_cast<double>(snapshot.appendMs);
+        frame.mapping.tickSize = snapshot.tickSize;
+        frame.mapping.gridWidth = gridWidth;
+        frame.mapping.gridHeight = gridHeight;
+        frame.mapping.filledColumns = snapshot.filledColumns;
+        frame.mapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
+        frame.mapping.valid = (dataStartValid &&
                                snapshot.timeOriginMs != 0 &&
                                snapshot.appendMs > 0 &&
                                gridWidth > 0 &&
                                drawRect.width() > 0.0 &&
                                srcRect.width() > 0.0);
-        m_lastTimeAxisMapping.cellW = m_lastTimeAxisMapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
-        m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
+        frame.mapping.cellW = frame.mapping.valid ? (drawRect.width() / srcRect.width()) : 0.0;
+        frame.mapping.cellH = frame.mapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
+        m_lastTimeAxisMapping = frame.mapping;
 
         std::vector<FootprintPendingUpload> framePendingFootprintUploads;
         {
@@ -1133,7 +1161,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
 
             const bool dollars = (m_liquidityLabelMode != 0);
-            HeatmapLabelRenderer::buildLabelQuads(m_lastTimeAxisMapping,
+            HeatmapLabelRenderer::buildLabelQuads(frame.mapping,
                                                   snapshot,
                                                   m_msdfAtlas,
                                                   m_labelLiquidityRing,

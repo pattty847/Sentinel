@@ -2,7 +2,7 @@
 
 > Personal feature tracker. Append new features, check off tasks, keep moving.
 
-## Format guide (for agents & future-me)
+### Format guide (for agents & future-me)
 
 Each feature is a self-contained block. Use this template:
 
@@ -557,3 +557,31 @@ _(empty)_
 
 #### Session log
 - **2026-02-06** — Created `_agent` notes system and seeded initial content; documented format and rules in AGENTS.md.
+
+---
+
+### F15: GUI Architecture Refactor (RendererHost + Overlays)
+**Status:** active
+**Created:** 2026-02-09
+**Updated:** 2026-02-09
+
+#### Now (current sprint � do these first)
+- [x] Phase 1: MappingProvider seam for candles (remove direct CandlestickOverlayItem -> UnifiedGridRenderer mapping dependency)
+- [x] Phase 1: Remove QML write path for renderer `primaryField`; route mode authority from ChartModeController
+- [ ] Phase 1: Introduce FrameContext construction in updatePaintNode with immutable snapshots and generation counters
+- [ ] Phase 2: Start overlay extraction with candle path first
+
+#### Next (queued � pick up when Now is clear)
+- [ ] Extract Footprint overlay module behind host orchestration
+- [ ] Extract Heatmap overlay module behind host orchestration
+- [ ] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
+
+#### Later (ideas / low-priority)
+- [ ] Full folder reorg after boundaries stabilize
+- [ ] Add diagnostics overlay and per-phase perf gates dashboard
+
+#### Done
+- [x] Week 0 stabilization fixes completed (2026-02-09)
+
+#### Session log
+- **2026-02-09** � Started Phase 1 implementation: added `ITimeAxisMappingProvider`, switched candles to provider contract, and moved renderer primary field control to ChartModeController-driven flow. Next: FrameContext + generation counters.

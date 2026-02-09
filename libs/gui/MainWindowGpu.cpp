@@ -547,6 +547,15 @@ void MainWindowGPU::connectMarketDataSignals() {
         }
     }
 
+    if (m_modeController) {
+        connect(m_modeController,
+                &ChartModeController::primaryFieldChanged,
+                unifiedGridRenderer,
+                &UnifiedGridRenderer::setPrimaryField,
+                Qt::QueuedConnection);
+        unifiedGridRenderer->setPrimaryField(m_modeController->primaryField());
+    }
+
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {
         unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());

@@ -25,6 +25,7 @@
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
+#include "render/ITimeAxisMappingProvider.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
@@ -64,8 +65,9 @@ struct ColorGradient {
     }
 };
 
-class UnifiedGridRenderer : public QQuickItem {
+class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_OBJECT
+    Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
     
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
@@ -80,7 +82,7 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
-    Q_PROPERTY(int primaryField READ primaryField WRITE setPrimaryField NOTIFY primaryFieldChanged)
+    Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
@@ -103,6 +105,36 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
 
 private:
+    struct FrameViewportSnapshot {
+        bool valid = false;
+        qint64 timeStart = 0;
+        qint64 timeEnd = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        QPointF panVisualOffset;
+        bool dragging = false;
+        bool autoScrollEnabled = false;
+    };
+
+    struct FrameStreamGenerations {
+        uint64_t heatmap = 0;
+        uint64_t footprint = 0;
+        uint64_t candle = 0;
+    };
+
+    struct FrameContext {
+        QRectF surfaceBounds;
+        double surfaceDpr = 1.0;
+        qint64 presentationTimeMs = 0;
+        FrameViewportSnapshot viewport;
+        HeatmapStreamState::Snapshot heatmapSnapshot;
+        FrameStreamGenerations streamGenerations;
+        bool drawHeatmap = false;
+        bool drawFootprint = false;
+        bool forceFull = false;
+        TimeAxisMapping mapping;
+    };
+
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
     double m_minVolumeFilter = 0.0;
@@ -186,6 +218,9 @@ private:
     std::atomic<qint64> m_totalBytesUploaded{0};
     std::atomic<double> m_uploadBandwidthMBps{0.0};
     qint64 m_lastBandwidthUpdate = 0;
+    std::atomic<uint64_t> m_heatmapStreamGeneration{0};
+    std::atomic<uint64_t> m_footprintStreamGeneration{0};
+    std::atomic<uint64_t> m_candleStreamGeneration{0};
 
 public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
@@ -264,6 +299,7 @@ public:
     Q_INVOKABLE QString getLabelRingMemory() const;
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
     TimeAxisMapping lastTimeAxisMapping() const { return m_lastTimeAxisMapping; }
+    TimeAxisMapping currentTimeAxisMapping() const override { return m_lastTimeAxisMapping; }
     void applyClientConfig(const ClientConfig& config);
     void applyServerConfig(const ServerConfig& config);
 

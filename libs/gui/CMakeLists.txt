@@ -54,6 +54,7 @@ set(GRID_CORE_SOURCES
     render/FootprintStreamState.cpp
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
+    render/ITimeAxisMappingProvider.hpp
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
     render/TimeAxisMapping.hpp
