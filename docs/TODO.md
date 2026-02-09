@@ -173,7 +173,7 @@ _(no entries yet)_
 
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-02-08
 
 #### Now (current sprint — do these first)
 
@@ -200,6 +200,7 @@ _(no entries yet)_
 #### Session log
 
 * **2026-02-02** — Footprint UI exists; logic depth now the bottleneck, not rendering.
+* **2026-02-08** - Switched server footprint_slice from synthetic heatmap-derived values to trade-side delta ladder per bucket with q16 quant+quant_scale; next verify visual semantics vs target clustered footprint.
 
 ---
 

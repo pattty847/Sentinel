@@ -11,6 +11,7 @@
 #include <QWidget>
 #include <QQmlEngine>
 #include <QCoreApplication>
+#include <QVariant>
 
 QmlSceneController::QmlSceneController(QQuickView* qquickView) 
     : m_qquickView(qquickView) {
@@ -53,6 +54,8 @@ void QmlSceneController::loadQmlSource() {
     if (m_qquickView->status() == QQuickView::Error) {
         sLog_Error("QML FAILED TO LOAD! Errors: " << m_qquickView->errors());
     }
+
+    applyChartModeControllerToRoot();
 }
 
 void QmlSceneController::verifyGpuAcceleration() {
@@ -66,9 +69,11 @@ void QmlSceneController::verifyGpuAcceleration() {
 
 void QmlSceneController::setChartModeController(ChartModeController* controller) {
     if (!m_qquickView || !controller) return;
+    m_chartModeController = controller;
     
     QQmlContext* context = m_qquickView->rootContext();
     context->setContextProperty("chartModeController", controller);
+    applyChartModeControllerToRoot();
 }
 
 void QmlSceneController::setThemeBridge(ThemeBridge* bridge) {
@@ -97,6 +102,14 @@ UnifiedGridRenderer* QmlSceneController::getUnifiedGridRenderer() const {
 
 bool QmlSceneController::isValid() const {
     return m_qquickView && m_qquickView->status() == QQuickView::Ready;
+}
+
+void QmlSceneController::applyChartModeControllerToRoot() {
+    if (!m_qquickView || !m_chartModeController || !m_qquickView->rootObject()) {
+        return;
+    }
+    m_qquickView->rootObject()->setProperty("chartModeController",
+                                            QVariant::fromValue(static_cast<QObject*>(m_chartModeController)));
 }
 
 QString QmlSceneController::graphicsApiName(QSGRendererInterface::GraphicsApi api) const {

@@ -15,7 +15,7 @@ target_link_libraries(sentinel_server
 
 # Standardize output
 set_target_properties(sentinel_server PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps/sentinel-server/$<CONFIG>"
     OUTPUT_NAME "sentinel-server"
 )
 

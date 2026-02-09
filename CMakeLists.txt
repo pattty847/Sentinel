@@ -106,7 +106,7 @@ endif()
 # ────────────────────────────────────────────────────────────────
 add_subdirectory(libs/core)
 add_subdirectory(libs/gui)
-add_subdirectory(apps/sentinel_gui)
+add_subdirectory(apps/sentinel_gui apps/sentinel-gui)
 add_subdirectory(apps/sentinel-server)
 enable_testing()
 add_subdirectory(tests/marketdata)

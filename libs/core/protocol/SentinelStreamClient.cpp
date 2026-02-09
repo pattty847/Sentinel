@@ -805,6 +805,16 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
              slice.quantScale = quantScale;
              slice.format = QString::fromStdString(format);
              slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
+             if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                 sLog_Debug(QString("Footprint recv: symbol=%1 t=[%2..%3] tfMs=%4 grid=%5x%6 bytes=%7")
+                                .arg(slice.symbol)
+                                .arg(slice.bucketStartMs)
+                                .arg(slice.bucketEndMs)
+                                .arg(slice.timeframeMs)
+                                .arg(slice.gridWidth)
+                                .arg(slice.gridHeight)
+                                .arg(slice.deltaLevelsQ16.size()));
+             }
              emit footprintSliceReceived(slice);
         } else if (type == "footprint_history_chunk") {
              if (!validateFamilySchema(msg,

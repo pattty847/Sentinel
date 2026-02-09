@@ -35,6 +35,30 @@ std::vector<std::string> parseSymbolList(const std::string& spec) {
     return out;
 }
 
+std::vector<std::string> parseSymbolList(const YAML::Node& node) {
+    std::vector<std::string> out;
+    if (!node) {
+        return out;
+    }
+    if (node.IsSequence()) {
+        out.reserve(node.size());
+        for (const auto& item : node) {
+            if (!item.IsScalar()) {
+                continue;
+            }
+            const auto symbol = item.as<std::string>();
+            if (!symbol.empty()) {
+                out.push_back(symbol);
+            }
+        }
+        return out;
+    }
+    if (node.IsScalar()) {
+        return parseSymbolList(node.as<std::string>());
+    }
+    return out;
+}
+
 std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
     std::vector<int64_t> out;
     if (!node) {
@@ -100,7 +124,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     if (serverRoot) {
         readScalar(serverRoot, "stream_port", cfg.streamPort);
         if (serverRoot["default_symbols"]) {
-            const auto symbols = parseSymbolList(serverRoot["default_symbols"].as<std::string>());
+            const auto symbols = parseSymbolList(serverRoot["default_symbols"]);
             if (!symbols.empty()) {
                 cfg.defaultSymbols = symbols;
             }

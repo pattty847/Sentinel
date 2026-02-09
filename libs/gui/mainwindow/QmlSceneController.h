@@ -34,8 +34,10 @@ public:
     bool isValid() const;
     
 private:
+    void applyChartModeControllerToRoot();
     QString graphicsApiName(QSGRendererInterface::GraphicsApi api) const;
     
     QQuickView* m_qquickView = nullptr;
+    ChartModeController* m_chartModeController = nullptr;
 };
 

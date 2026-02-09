@@ -200,6 +200,9 @@ void UnifiedGridRenderer::clearData() {
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData, Qt::QueuedConnection);
     }
+    m_pendingFootprintUploads.clear();
+    m_footprintImage = QImage();
+    m_footprintTextureDirty = true;
     update();
 }
 
@@ -304,6 +307,9 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
         return;
     }
     m_primaryField = field;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Render("PrimaryField set to " << m_primaryField);
+    }
     update();
     emit primaryFieldChanged();
 }
@@ -383,18 +389,18 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
     m_bidGradient = ColorGradient{
-        {0.0f, QColor(10, 40, 0)},      // Almost black green
-        {0.5f, QColor(60, 160, 30)},    // Medium green
-        {1.0f, QColor(100, 255, 50)}    // Electric neon green
+        {0.0f, QColor(10, 40, 0)},
+        {0.5f, QColor(60, 160, 30)},
+        {1.0f, QColor(100, 255, 50)}
     };
     m_askGradient = ColorGradient{
-        {0.0f, QColor(40, 0, 0)},       // Dark red (almost black)
-        {0.5f, QColor(180, 40, 20)},    // Medium red
-        {0.85f, QColor(255, 100, 30)},  // Bright red-orange
-        {1.0f, QColor(255, 200, 50)}    // Hot orange/yellow
+        {0.0f, QColor(40, 0, 0)},
+        {0.5f, QColor(180, 40, 20)},
+        {0.85f, QColor(255, 100, 30)},
+        {1.0f, QColor(255, 200, 50)}
     };
     m_dataProcessorThread = std::make_unique<QThread>();
-    m_dataProcessor = std::make_unique<DataProcessor>();  // No parent - will be moved to thread
+    m_dataProcessor = std::make_unique<DataProcessor>();
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
     applyClientConfig(store.clientConfig());
     if (store.hasServerConfig()) {
@@ -632,13 +638,49 @@ void UnifiedGridRenderer::init() {
                 update();
             },
             Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::footprintColumnReady,
+            this,
+            [this](int x, int gridWidth, int gridHeight, QByteArray columnQ16) {
+                if (!m_useGpuHeatmap) {
+                    m_useGpuHeatmap = true;
+                    m_heatmapClock.start();
+                }
+                if (gridWidth <= 0 || gridHeight <= 0) {
+                    return;
+                }
+                if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) {
+                    return;
+                }
+                const int expectedBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
+                if (columnQ16.size() != expectedBytes) {
+                    return;
+                }
+                if (x < 0 || x >= gridWidth) {
+                    return;
+                }
+
+                if (m_footprintGridWidth != gridWidth || m_footprintGridHeight != gridHeight) {
+                    m_footprintGridWidth = gridWidth;
+                    m_footprintGridHeight = gridHeight;
+                    m_footprintTextureDirty = true;
+                    m_pendingFootprintUploads.clear();
+                    m_pendingFootprintUploads.reserve(static_cast<size_t>(gridWidth));
+                }
+                m_pendingFootprintUploads.push_back(FootprintPendingUpload{x, std::move(columnQ16)});
+                if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                    sLog_Debug(QString("Footprint queued for render: x=%1 grid=%2x%3 pending=%4")
+                                   .arg(x)
+                                   .arg(gridWidth)
+                                   .arg(gridHeight)
+                                   .arg(static_cast<int>(m_pendingFootprintUploads.size())));
+                }
+                update();
+            },
+            Qt::QueuedConnection);
     m_dataProcessorThread->start();
     if (width() > 0 && height() > 0) {
         m_viewState->setViewportSize(width(), height());
     }
-    QMetaObject::invokeMethod(m_dataProcessor.get(), [this]() {
-        m_dataProcessor->setGridViewState(m_viewState.get());
-    }, Qt::QueuedConnection);
     
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
@@ -719,6 +761,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (!texNode) {
             texNode = new HeatmapIntensityNode();
             m_heatmapTextureDirty = true;
+            m_footprintTextureDirty = true;
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
             m_footprintNode = nullptr;
@@ -916,13 +959,53 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
 
-        if (drawFootprint) {
+        const bool hasFootprintPending = !m_pendingFootprintUploads.empty();
+        if (drawFootprint || hasFootprintPending) {
             if (!m_footprintNode) {
                 m_footprintNode = new FootprintIntensityNode();
                 texNode->appendChildNode(m_footprintNode);
             }
-            m_footprintNode->setRect(drawRect);
-            m_footprintNode->setColor(QColor(58, 70, 86, 140));
+            if (m_footprintTextureDirty && m_footprintGridWidth > 0 && m_footprintGridHeight > 0) {
+                ensureFootprintImage();
+                auto* footprintTexture = window()->createTextureFromImage(m_footprintImage);
+                if (!footprintTexture) {
+                    const QImage fallback = m_footprintImage.convertToFormat(QImage::Format_Grayscale16);
+                    footprintTexture = window()->createTextureFromImage(fallback);
+                }
+                if (footprintTexture) {
+                    footprintTexture->setFiltering(QSGTexture::Nearest);
+                    m_footprintNode->setTexture(footprintTexture);
+                    m_footprintTextureDirty = false;
+                } else {
+                    m_footprintTextureDirty = true;
+                }
+            }
+
+            QRectF footprintSrcRect(0, 0, m_footprintGridWidth, m_footprintGridHeight);
+            if (m_footprintGridWidth == gridWidth && m_footprintGridHeight == gridHeight) {
+                footprintSrcRect = srcRect;
+            }
+
+            m_footprintNode->setColor(QColor(42, 50, 60, 180));
+            m_footprintNode->setBidColor(QColor(46, 182, 230, 255));
+            m_footprintNode->setAskColor(QColor(235, 92, 52, 255));
+            m_footprintNode->setNeutralFloor(0.08f);
+            m_footprintNode->setMagnitudeScale(20.0f);
+            m_footprintNode->setMagnitudeGamma(0.75f);
+            m_footprintNode->setTimeOffset(forceFull ? 0.0f : snapshot.timeOffset);
+            if (drawFootprint) {
+                m_footprintNode->setRect(drawRect);
+                m_footprintNode->setSourceRect(footprintSrcRect);
+            } else {
+                m_footprintNode->setRect(QRectF());
+            }
+
+            if (hasFootprintPending) {
+                for (auto& upload : m_pendingFootprintUploads) {
+                    m_footprintNode->enqueueColumn(upload.x, std::move(upload.data));
+                }
+                m_pendingFootprintUploads.clear();
+            }
         } else if (m_footprintNode) {
             m_footprintNode->setRect(QRectF());
         }
@@ -1065,6 +1148,28 @@ void UnifiedGridRenderer::ensureHeatmapImage() {
         return;
     }
     m_heatmapImage.fill(m_heatmapBackgroundColor);
+}
+
+void UnifiedGridRenderer::ensureFootprintImage() {
+    if (!m_footprintImage.isNull() &&
+        m_footprintImage.width() == m_footprintGridWidth &&
+        m_footprintImage.height() == m_footprintGridHeight &&
+        m_footprintImage.format() == QImage::Format_Grayscale16) {
+        return;
+    }
+
+    m_footprintImage = QImage(m_footprintGridWidth, m_footprintGridHeight, QImage::Format_Grayscale16);
+    if (m_footprintImage.isNull()) {
+        return;
+    }
+
+    constexpr uint16_t kNeutralDelta = 0x8000u;
+    for (int y = 0; y < m_footprintImage.height(); ++y) {
+        auto* row = reinterpret_cast<uint16_t*>(m_footprintImage.scanLine(y));
+        for (int x = 0; x < m_footprintImage.width(); ++x) {
+            row[x] = qToLittleEndian<uint16_t>(kNeutralDelta);
+        }
+    }
 }
 
 void UnifiedGridRenderer::ensureHeatmapPaletteImage() {

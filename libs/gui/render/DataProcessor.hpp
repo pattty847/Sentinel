@@ -11,7 +11,6 @@
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
 
-class GridViewState;
 class FootprintStreamState;
 
 class DataProcessor : public QObject {
@@ -31,8 +30,6 @@ public slots:
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     
 public:
-    void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
-    
     void clearData();
     void startProcessing();
     void stopProcessing();
@@ -65,6 +62,7 @@ signals:
                             double liquidityScale,
                             int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
+    void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
 
 private:
     struct HeatmapGridKey {
@@ -94,8 +92,6 @@ private:
         void reset(int newCapacity);
         void push(IGridDataSource::HeatmapHistoryColumn column);
     };
-    
-    GridViewState* m_viewState = nullptr;
     
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;

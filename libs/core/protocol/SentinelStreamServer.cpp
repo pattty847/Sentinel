@@ -7,9 +7,12 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/strand.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <deque>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -17,6 +20,7 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
+#include <QtEndian>
 #include "../marketdata/auth/Authenticator.hpp"
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
@@ -29,6 +33,11 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
+
+int64_t tradeTimestampMs(const Trade& trade) {
+    return static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
+}
 
 nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     nlohmann::json payload;
@@ -82,6 +91,17 @@ class Session : public std::enable_shared_from_this<Session> {
     std::unordered_set<std::string> subscriptions_;
     std::vector<std::string> write_queue_;
     std::mutex queue_mutex_;
+    QByteArray footprintDeltaScratch_;
+    std::vector<double> footprintRowDeltaScratch_;
+    std::mutex footprint_mutex_;
+
+    struct FootprintTradeSample {
+        int64_t timestampMs = 0;
+        double price = 0.0;
+        double size = 0.0;
+        AggressorSide side = AggressorSide::Unknown;
+    };
+    std::unordered_map<std::string, std::deque<FootprintTradeSample>> footprintTrades_;
     
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
@@ -97,6 +117,98 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
+
+    int64_t footprintRetentionMs(int64_t timeframeMs) const {
+        const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
+        return std::max<int64_t>(60'000, tf * 8);
+    }
+
+    void recordFootprintTrade(const Trade& trade) {
+        const std::string& sym = trade.product_id;
+        if (subscriptions_.find(sym) == subscriptions_.end()) {
+            return;
+        }
+        const int64_t tsMs = tradeTimestampMs(trade);
+        if (tsMs <= 0 || trade.price <= 0.0 || trade.size <= 0.0) {
+            return;
+        }
+        const int64_t cutoff = tsMs - footprintRetentionMs(owner_ ? owner_->serverConfig().heatmap.activeTimeframeMs : 1000);
+        std::lock_guard<std::mutex> lock(footprint_mutex_);
+        auto& trades = footprintTrades_[sym];
+        while (!trades.empty() && trades.front().timestampMs < cutoff) {
+            trades.pop_front();
+        }
+        trades.push_back(FootprintTradeSample{tsMs, trade.price, trade.size, trade.side});
+    }
+
+    bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
+        if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
+            return false;
+        }
+
+        const int gridHeight = slice.gridHeight;
+        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) {
+            return false;
+        }
+
+        if (footprintRowDeltaScratch_.size() != static_cast<size_t>(gridHeight)) {
+            footprintRowDeltaScratch_.assign(static_cast<size_t>(gridHeight), 0.0);
+        } else {
+            std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
+        }
+
+        const std::string sym = slice.symbol.toStdString();
+        {
+            std::lock_guard<std::mutex> lock(footprint_mutex_);
+            auto it = footprintTrades_.find(sym);
+            if (it != footprintTrades_.end()) {
+                auto& trades = it->second;
+                const int64_t cutoff = slice.bucketStartMs - footprintRetentionMs(slice.timeframeMs);
+                while (!trades.empty() && trades.front().timestampMs < cutoff) {
+                    trades.pop_front();
+                }
+
+                for (const auto& sample : trades) {
+                    if (sample.timestampMs < slice.bucketStartMs || sample.timestampMs >= slice.bucketEndMs) {
+                        continue;
+                    }
+                    const int row = static_cast<int>(std::floor((slice.maxPrice - sample.price) / slice.tickSize));
+                    if (row < 0 || row >= gridHeight) {
+                        continue;
+                    }
+                    if (sample.side == AggressorSide::Buy) {
+                        footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
+                    } else if (sample.side == AggressorSide::Sell) {
+                        footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
+                    }
+                }
+
+                while (!trades.empty() && trades.front().timestampMs < slice.bucketEndMs) {
+                    trades.pop_front();
+                }
+            }
+        }
+
+        double maxAbs = 0.0;
+        for (double v : footprintRowDeltaScratch_) {
+            const double av = std::abs(v);
+            if (av > maxAbs) {
+                maxAbs = av;
+            }
+        }
+        outQuantScale = (maxAbs > 0.0) ? std::max(1e-9, maxAbs / 32767.0) : 1.0;
+
+        out.resize(gridHeight * static_cast<int>(sizeof(uint16_t)));
+        auto* dst = reinterpret_cast<uchar*>(out.data());
+        for (int y = 0; y < gridHeight; ++y) {
+            const double delta = footprintRowDeltaScratch_[static_cast<size_t>(y)];
+            const double q = std::round(delta / outQuantScale);
+            const int32_t q16 = static_cast<int32_t>(std::clamp(q, -32768.0, 32767.0));
+            const uint16_t biased = static_cast<uint16_t>(q16 + 32768);
+            qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
+        }
+        return true;
+    }
 
 public:
     explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
@@ -452,6 +564,7 @@ public:
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
         
         do_write(j.dump());
+        recordFootprintTrade(trade);
     }
     
     void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas) {
@@ -509,6 +622,42 @@ public:
         }
 
         do_write(j.dump());
+
+        double quantScale = 1.0;
+        if (!buildFootprintDeltaColumn(slice, footprintDeltaScratch_, quantScale)) {
+            return;
+        }
+
+        nlohmann::json footprint;
+        footprint["type"] = "footprint_slice";
+        footprint["schema_version"] = protocol::SentinelProtocol::kFootprintSchemaVersion;
+        footprint["symbol"] = sym;
+        footprint["time_start"] = slice.bucketStartMs;
+        footprint["time_end"] = slice.bucketEndMs;
+        footprint["timeframe_ms"] = slice.timeframeMs;
+        footprint["grid_width"] = slice.gridWidth;
+        footprint["grid_height"] = slice.gridHeight;
+        footprint["min_price"] = slice.minPrice;
+        footprint["max_price"] = slice.maxPrice;
+        footprint["tick_size"] = slice.tickSize;
+        footprint["quant_scale"] = quantScale;
+        footprint["format"] = "q16_delta";
+        footprint["encoding"] = "base64";
+        footprint["delta_levels_q16"] = footprintDeltaScratch_.toBase64().toStdString();
+
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug(QString("Footprint emit: symbol=%1 t=[%2..%3] tfMs=%4 grid=%5x%6 bytes=%7 q=%8")
+                           .arg(QString::fromStdString(sym))
+                           .arg(slice.bucketStartMs)
+                           .arg(slice.bucketEndMs)
+                           .arg(slice.timeframeMs)
+                           .arg(slice.gridWidth)
+                           .arg(slice.gridHeight)
+                           .arg(footprintDeltaScratch_.size())
+                           .arg(quantScale, 0, 'g', 8));
+        }
+
+        do_write(footprint.dump());
     }
 
     static bool should_emit_update(const OHLCVBar& bar,

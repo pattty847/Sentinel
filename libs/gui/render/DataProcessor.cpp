@@ -11,7 +11,6 @@ Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
 #include "FootprintStreamState.hpp"
-#include "GridViewState.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <QtGlobal>
@@ -225,6 +224,38 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
                        .arg(m_footprintGridWidth)
                        .arg(m_footprintGridHeight)
                        .arg(slice.deltaLevelsQ16.size()));
+        return;
+    }
+    if (!ok) {
+        return;
+    }
+
+    std::vector<FootprintStreamState::PendingUpload> pendingUploads;
+    m_footprintStream->takePendingUploads(pendingUploads);
+    if (pendingUploads.empty()) {
+        return;
+    }
+
+    const auto snap = m_footprintStream->snapshot();
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Footprint staged: pending=%1 grid=%2x%3 write=%4 filled=%5")
+                       .arg(static_cast<int>(pendingUploads.size()))
+                       .arg(snap.gridWidth)
+                       .arg(snap.gridHeight)
+                       .arg(snap.writeColumn)
+                       .arg(snap.filledColumns));
+    }
+    for (const auto& upload : pendingUploads) {
+        QByteArray columnQ16;
+        if (!m_footprintStream->copyColumnForUpload(upload.x, columnQ16)) {
+            continue;
+        }
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug(QString("Footprint upload ready: x=%1 bytes=%2")
+                           .arg(upload.x)
+                           .arg(columnQ16.size()));
+        }
+        emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16));
     }
 }
 

@@ -200,6 +200,9 @@ void MainWindowGPU::setupUI() {
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Primary field request: %1").arg(field));
+            }
             if (m_modeController) {
                 m_modeController->setPrimaryField(field);
             }

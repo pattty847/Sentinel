@@ -162,6 +162,15 @@ private:
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
     class FootprintIntensityNode* m_footprintNode = nullptr;
+    int m_footprintGridWidth = 5120;
+    int m_footprintGridHeight = 2048;
+    bool m_footprintTextureDirty = true;
+    QImage m_footprintImage;
+    struct FootprintPendingUpload {
+        int x = 0;
+        QByteArray data;
+    };
+    std::vector<FootprintPendingUpload> m_pendingFootprintUploads;
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
@@ -320,6 +329,7 @@ protected:
 
 private:
     void ensureHeatmapImage();
+    void ensureFootprintImage();
     void ensureHeatmapPaletteImage();
     void buildMsdfAtlas();
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
