@@ -126,7 +126,8 @@ private:
     bool m_useGpuHeatmap = false;
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;
-    bool m_heatmapTextureDirty = true;
+    // Cross-thread flag: set on main thread, consumed/reset on render thread.
+    std::atomic<bool> m_heatmapTextureDirty{true};
     QImage m_heatmapImage;
     QImage m_heatmapPaletteImage;
     QTimer* m_heatmapRenderTimer = nullptr;
@@ -164,12 +165,17 @@ private:
     class FootprintIntensityNode* m_footprintNode = nullptr;
     int m_footprintGridWidth = 5120;
     int m_footprintGridHeight = 2048;
-    bool m_footprintTextureDirty = true;
+    // Cross-thread flag: set on main thread, consumed/reset on render thread.
+    std::atomic<bool> m_footprintTextureDirty{true};
     QImage m_footprintImage;
     struct FootprintPendingUpload {
         int x = 0;
+        int gridWidth = 0;
+        int gridHeight = 0;
         QByteArray data;
     };
+    // Main thread enqueues pending uploads; render thread swaps to local frame snapshot.
+    mutable std::mutex m_footprintPendingMutex;
     std::vector<FootprintPendingUpload> m_pendingFootprintUploads;
 
     QElapsedTimer m_fpsTimer;

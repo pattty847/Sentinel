@@ -200,9 +200,12 @@ void UnifiedGridRenderer::clearData() {
     if (m_dataProcessor) {
         QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData, Qt::QueuedConnection);
     }
-    m_pendingFootprintUploads.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
+        m_pendingFootprintUploads.clear();
+    }
     m_footprintImage = QImage();
-    m_footprintTextureDirty = true;
+    m_footprintTextureDirty.store(true, std::memory_order_release);
     update();
 }
 
@@ -268,7 +271,7 @@ void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor& color) {
         return;
     }
     m_heatmapBackgroundColor = color;
-    m_heatmapTextureDirty = true;
+    m_heatmapTextureDirty.store(true, std::memory_order_release);
     emit heatmapBackgroundColorChanged();
 }
 
@@ -407,203 +410,258 @@ void UnifiedGridRenderer::init() {
         applyServerConfig(store.serverConfig());
     }
     
+    auto applyHeatmapColumn = [this](int64_t sliceStartMs,
+                                     int64_t sliceEndMs,
+                                     int64_t timeframeMs,
+                                     double minPrice,
+                                     double maxPrice,
+                                     double tickSize,
+                                     const QByteArray& column,
+                                     const QByteArray& liquidityColumn,
+                                     double liquidityScale,
+                                     int intensityBytesPerCell) -> bool {
+        Q_UNUSED(sliceEndMs);
+        const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+        if (!m_useGpuHeatmap) {
+            m_useGpuHeatmap = true;
+            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_heatmapClock.start();
+        }
+        if (column.isEmpty()) {
+            if (debug) {
+                sLog_Render("GPU HEATMAP DROP: enabled=" << m_useGpuHeatmap
+                            << " grid=" << m_heatmapGridWidth << "x" << m_heatmapGridHeight
+                            << " bytes=" << column.size());
+            }
+            return false;
+        }
+        const int bytesPerCell = (intensityBytesPerCell > 0) ? intensityBytesPerCell : 1;
+        if (bytesPerCell != m_intensityBytesPerCell) {
+            m_intensityBytesPerCell = bytesPerCell;
+            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            if (m_heatmapStream) {
+                m_heatmapStream->setIntensityBytesPerCell(bytesPerCell);
+            }
+        }
+        if ((column.size() % bytesPerCell) != 0) {
+            return false;
+        }
+        const int columnHeight = column.size() / bytesPerCell;
+        if (columnHeight <= 0) {
+            return false;
+        }
+        if (columnHeight != m_heatmapGridHeight) {
+            m_heatmapGridHeight = columnHeight;
+            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            if (m_heatmapStream) {
+                m_heatmapStream->reset(m_heatmapGridWidth, m_heatmapGridHeight,
+                                       minPrice, maxPrice, tickSize);
+            }
+            m_heatmapViewportInitialized = false;
+        }
+
+        if (debug) {
+            static int debugCount = 0;
+            ++debugCount;
+            if (debugCount <= 5 || debugCount % 50 == 0) {
+                int bidCount = 0;
+                int askCount = 0;
+                uint16_t minValue = std::numeric_limits<uint16_t>::max();
+                uint16_t maxValue = 0;
+                if (bytesPerCell == 1) {
+                    const auto* bytes = reinterpret_cast<const uint8_t*>(column.constData());
+                    for (int i = 0; i < column.size(); ++i) {
+                        const uint8_t v = bytes[i];
+                        if (v == 0) {
+                            continue;
+                        }
+                        minValue = std::min<uint16_t>(minValue, static_cast<uint16_t>(v) * 257);
+                        maxValue = std::max<uint16_t>(maxValue, static_cast<uint16_t>(v) * 257);
+                        if (v >= 128) {
+                            ++askCount;
+                        } else {
+                            ++bidCount;
+                        }
+                    }
+                } else if (bytesPerCell == 2) {
+                    const auto* values = reinterpret_cast<const uint16_t*>(column.constData());
+                    for (int i = 0; i < columnHeight; ++i) {
+                        const uint16_t v = qFromLittleEndian(values[i]);
+                        if (v == 0) {
+                            continue;
+                        }
+                        minValue = std::min(minValue, v);
+                        maxValue = std::max(maxValue, v);
+                        if (v >= 0x8000u) {
+                            ++askCount;
+                        } else {
+                            ++bidCount;
+                        }
+                    }
+                }
+                sLog_Render("GPU HEATMAP BYTES: bids=" << bidCount
+                            << " asks=" << askCount
+                            << " min=" << minValue
+                            << " max=" << maxValue
+                            << " bpp=" << bytesPerCell);
+            }
+        }
+
+        if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
+            m_heatmapTickSize = tickSize;
+            emit heatmapTickSizeChanged();
+        }
+        if (m_heatmapStream) {
+            m_heatmapStream->updateRange(minPrice, maxPrice, tickSize);
+            if (timeframeMs > 0) {
+                m_heatmapStream->setAppendMs(static_cast<int>(timeframeMs));
+            }
+        }
+
+        const int expectedLiquidityBytes = m_heatmapGridHeight * static_cast<int>(sizeof(uint16_t));
+        const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
+        QByteArray intensityColumn = column;
+        if (m_heatmapLiquidityThreshold > 0.0 && haveLiquidityColumn && liquidityScale > 0.0 &&
+            intensityColumn.size() == m_heatmapGridHeight * bytesPerCell) {
+            const auto* raw = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
+            const double threshold = m_heatmapLiquidityThreshold;
+            if (bytesPerCell == 1) {
+                auto* dst = reinterpret_cast<uint8_t*>(intensityColumn.data());
+                for (int y = 0; y < m_heatmapGridHeight; ++y) {
+                    const uint16_t packed = qFromLittleEndian(raw[y]);
+                    if (packed == 0) {
+                        dst[y] = 0;
+                        continue;
+                    }
+                    double value = static_cast<double>(packed) * liquidityScale;
+                    if (m_liquidityLabelMode != 0) {
+                        const double price = maxPrice - (static_cast<double>(y) * tickSize);
+                        value *= price;
+                    }
+                    if (value < threshold) {
+                        dst[y] = 0;
+                    }
+                }
+            } else if (bytesPerCell == 2) {
+                auto* dst = reinterpret_cast<uint16_t*>(intensityColumn.data());
+                for (int y = 0; y < m_heatmapGridHeight; ++y) {
+                    const uint16_t packed = qFromLittleEndian(raw[y]);
+                    if (packed == 0) {
+                        dst[y] = 0;
+                        continue;
+                    }
+                    double value = static_cast<double>(packed) * liquidityScale;
+                    if (m_liquidityLabelMode != 0) {
+                        const double price = maxPrice - (static_cast<double>(y) * tickSize);
+                        value *= price;
+                    }
+                    if (value < threshold) {
+                        dst[y] = 0;
+                    }
+                }
+            }
+        }
+        if (m_heatmapStream) {
+            const qint64 nowMs = m_heatmapClock.elapsed();
+            m_heatmapStream->ingestSlice(sliceStartMs,
+                                         static_cast<int>(timeframeMs),
+                                         intensityColumn,
+                                         liquidityColumn,
+                                         liquidityScale,
+                                         nowMs);
+            m_heatmapStream->updateTimeOffset(0.0f);
+        }
+        if (debug) {
+            const int writeColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : 0;
+            sLog_Render("GPU HEATMAP ENQUEUE: col=" << writeColumn
+                        << " tf=" << timeframeMs
+                        << " range=$" << minPrice << "-$" << maxPrice);
+        }
+        if (!m_heatmapViewportInitialized && m_viewState && m_heatmapStream && m_autoScrollController) {
+            if (m_autoScrollController->initializeViewport(*m_viewState,
+                                                           *m_heatmapStream,
+                                                           sliceStartMs,
+                                                           static_cast<int>(timeframeMs))) {
+                m_heatmapViewportInitialized = true;
+                if (debug) {
+                    const auto snapshot = m_heatmapStream->snapshot();
+                    sLog_Render("GPU HEATMAP VIEWPORT INIT: [" << m_viewState->getVisibleTimeStart()
+                                << "-" << m_viewState->getVisibleTimeEnd()
+                                << "] $" << snapshot.minPrice << "-$" << snapshot.maxPrice);
+                }
+            }
+        }
+
+        if (m_viewState && m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController) {
+            if (!m_autoScrollController->smoothEnabled()) {
+                const bool applied = m_autoScrollController->applySliceAutoScroll(*m_viewState,
+                                                                                  *m_heatmapStream,
+                                                                                  sliceStartMs,
+                                                                                  static_cast<int>(timeframeMs));
+                if (applied && m_panSyncPending) {
+                    m_viewState->clearPanVisualOffset();
+                    m_panSyncPending = false;
+                }
+            }
+        }
+        return true;
+    };
+
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
             this,
-            [this](int64_t sliceStartMs,
-                   int64_t sliceEndMs,
-                   int64_t timeframeMs,
-                   double minPrice,
-                   double maxPrice,
-                   double tickSize,
-                   const QByteArray& column,
-                   const QByteArray& liquidityColumn,
-                   double liquidityScale,
-                   int intensityBytesPerCell) {
-                Q_UNUSED(sliceEndMs);
-                const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
-                if (!m_useGpuHeatmap) {
-                    m_useGpuHeatmap = true;
-                    m_heatmapTextureDirty = true;
-                    m_heatmapClock.start();
+            [this, applyHeatmapColumn](int64_t sliceStartMs,
+                                       int64_t sliceEndMs,
+                                       int64_t timeframeMs,
+                                       double minPrice,
+                                       double maxPrice,
+                                       double tickSize,
+                                       const QByteArray& column,
+                                       const QByteArray& liquidityColumn,
+                                       double liquidityScale,
+                                       int intensityBytesPerCell) {
+                if (applyHeatmapColumn(sliceStartMs,
+                                       sliceEndMs,
+                                       timeframeMs,
+                                       minPrice,
+                                       maxPrice,
+                                       tickSize,
+                                       column,
+                                       liquidityColumn,
+                                       liquidityScale,
+                                       intensityBytesPerCell)) {
+                    update();
                 }
-                if (column.isEmpty()) {
-                    if (debug) {
-                        sLog_Render("GPU HEATMAP DROP: enabled=" << m_useGpuHeatmap
-                                    << " grid=" << m_heatmapGridWidth << "x" << m_heatmapGridHeight
-                                    << " bytes=" << column.size());
-                    }
-                    return;
+            },
+            Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapHistoryBatchReady,
+            this,
+            [this, applyHeatmapColumn](int64_t timeframeMs,
+                                       int gridWidth,
+                                       int gridHeight,
+                                       const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
+                                       int intensityBytesPerCell) {
+                Q_UNUSED(gridWidth);
+                Q_UNUSED(gridHeight);
+                bool anyApplied = false;
+                for (const auto& col : columns) {
+                    anyApplied = applyHeatmapColumn(col.bucketStartMs,
+                                                    col.bucketEndMs,
+                                                    timeframeMs,
+                                                    col.minPrice,
+                                                    col.maxPrice,
+                                                    col.tickSize,
+                                                    col.intensity,
+                                                    col.liquidity,
+                                                    col.liquidityScale,
+                                                    intensityBytesPerCell) || anyApplied;
                 }
-                const int bytesPerCell = (intensityBytesPerCell > 0) ? intensityBytesPerCell : 1;
-                if (bytesPerCell != m_intensityBytesPerCell) {
-                    m_intensityBytesPerCell = bytesPerCell;
-                    m_heatmapTextureDirty = true;
-                    if (m_heatmapStream) {
-                        m_heatmapStream->setIntensityBytesPerCell(bytesPerCell);
-                    }
+                if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+                    sLog_Debug(QString("Heatmap history batch ingested: columns=%1 queued_signals=1")
+                                   .arg(columns.size()));
                 }
-                if ((column.size() % bytesPerCell) != 0) {
-                    return;
+                if (anyApplied) {
+                    update();
                 }
-                const int columnHeight = column.size() / bytesPerCell;
-                if (columnHeight <= 0) {
-                    return;
-                }
-                if (columnHeight != m_heatmapGridHeight) {
-                    m_heatmapGridHeight = columnHeight;
-                    m_heatmapTextureDirty = true;
-                    if (m_heatmapStream) {
-                        m_heatmapStream->reset(m_heatmapGridWidth, m_heatmapGridHeight,
-                                               minPrice, maxPrice, tickSize);
-                    }
-                    m_heatmapViewportInitialized = false;
-                }
-
-                if (debug) {
-                    static int debugCount = 0;
-                    ++debugCount;
-                    if (debugCount <= 5 || debugCount % 50 == 0) {
-                        int bidCount = 0;
-                        int askCount = 0;
-                        uint16_t minValue = std::numeric_limits<uint16_t>::max();
-                        uint16_t maxValue = 0;
-                        if (bytesPerCell == 1) {
-                            const auto* bytes = reinterpret_cast<const uint8_t*>(column.constData());
-                            for (int i = 0; i < column.size(); ++i) {
-                                const uint8_t v = bytes[i];
-                                if (v == 0) {
-                                    continue;
-                                }
-                                minValue = std::min<uint16_t>(minValue, static_cast<uint16_t>(v) * 257);
-                                maxValue = std::max<uint16_t>(maxValue, static_cast<uint16_t>(v) * 257);
-                                if (v >= 128) {
-                                    ++askCount;
-                                } else {
-                                    ++bidCount;
-                                }
-                            }
-                        } else if (bytesPerCell == 2) {
-                            const auto* values = reinterpret_cast<const uint16_t*>(column.constData());
-                            for (int i = 0; i < columnHeight; ++i) {
-                                const uint16_t v = qFromLittleEndian(values[i]);
-                                if (v == 0) {
-                                    continue;
-                                }
-                                minValue = std::min(minValue, v);
-                                maxValue = std::max(maxValue, v);
-                                if (v >= 0x8000u) {
-                                    ++askCount;
-                                } else {
-                                    ++bidCount;
-                                }
-                            }
-                        }
-                        sLog_Render("GPU HEATMAP BYTES: bids=" << bidCount
-                                    << " asks=" << askCount
-                                    << " min=" << minValue
-                                    << " max=" << maxValue
-                                    << " bpp=" << bytesPerCell);
-                    }
-                }
-
-                if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
-                    m_heatmapTickSize = tickSize;
-                    emit heatmapTickSizeChanged();
-                }
-                if (m_heatmapStream) {
-                    m_heatmapStream->updateRange(minPrice, maxPrice, tickSize);
-                    if (timeframeMs > 0) {
-                        m_heatmapStream->setAppendMs(static_cast<int>(timeframeMs));
-                    }
-                }
-
-                const int expectedLiquidityBytes = m_heatmapGridHeight * static_cast<int>(sizeof(uint16_t));
-                const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
-                QByteArray intensityColumn = column;
-                if (m_heatmapLiquidityThreshold > 0.0 && haveLiquidityColumn && liquidityScale > 0.0 &&
-                    intensityColumn.size() == m_heatmapGridHeight * bytesPerCell) {
-                    const auto* raw = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
-                    const double threshold = m_heatmapLiquidityThreshold;
-                    if (bytesPerCell == 1) {
-                        auto* dst = reinterpret_cast<uint8_t*>(intensityColumn.data());
-                        for (int y = 0; y < m_heatmapGridHeight; ++y) {
-                            const uint16_t packed = qFromLittleEndian(raw[y]);
-                            if (packed == 0) {
-                                dst[y] = 0;
-                                continue;
-                            }
-                            double value = static_cast<double>(packed) * liquidityScale;
-                            if (m_liquidityLabelMode != 0) {
-                                const double price = maxPrice - (static_cast<double>(y) * tickSize);
-                                value *= price;
-                            }
-                            if (value < threshold) {
-                                dst[y] = 0;
-                            }
-                        }
-                    } else if (bytesPerCell == 2) {
-                        auto* dst = reinterpret_cast<uint16_t*>(intensityColumn.data());
-                        for (int y = 0; y < m_heatmapGridHeight; ++y) {
-                            const uint16_t packed = qFromLittleEndian(raw[y]);
-                            if (packed == 0) {
-                                dst[y] = 0;
-                                continue;
-                            }
-                            double value = static_cast<double>(packed) * liquidityScale;
-                            if (m_liquidityLabelMode != 0) {
-                                const double price = maxPrice - (static_cast<double>(y) * tickSize);
-                                value *= price;
-                            }
-                            if (value < threshold) {
-                                dst[y] = 0;
-                            }
-                        }
-                    }
-                }
-                if (m_heatmapStream) {
-                    const qint64 nowMs = m_heatmapClock.elapsed();
-                    m_heatmapStream->ingestSlice(sliceStartMs,
-                                                 static_cast<int>(timeframeMs),
-                                                 intensityColumn,
-                                                 liquidityColumn,
-                                                 liquidityScale,
-                                                 nowMs);
-                    m_heatmapStream->updateTimeOffset(0.0f);
-                }
-                if (debug) {
-                    const int writeColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : 0;
-                    sLog_Render("GPU HEATMAP ENQUEUE: col=" << writeColumn
-                                << " tf=" << timeframeMs
-                                << " range=$" << minPrice << "-$" << maxPrice);
-                }
-                if (!m_heatmapViewportInitialized && m_viewState && m_heatmapStream && m_autoScrollController) {
-                    if (m_autoScrollController->initializeViewport(*m_viewState,
-                                                                   *m_heatmapStream,
-                                                                   sliceStartMs,
-                                                                   static_cast<int>(timeframeMs))) {
-                        m_heatmapViewportInitialized = true;
-                        if (debug) {
-                            const auto snapshot = m_heatmapStream->snapshot();
-                            sLog_Render("GPU HEATMAP VIEWPORT INIT: [" << m_viewState->getVisibleTimeStart()
-                                        << "-" << m_viewState->getVisibleTimeEnd()
-                                        << "] $" << snapshot.minPrice << "-$" << snapshot.maxPrice);
-                        }
-                    }
-                }
-
-                if (m_viewState && m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController) {
-                    if (!m_autoScrollController->smoothEnabled()) {
-                        const bool applied = m_autoScrollController->applySliceAutoScroll(*m_viewState,
-                                                                                          *m_heatmapStream,
-                                                                                          sliceStartMs,
-                                                                                          static_cast<int>(timeframeMs));
-                        if (applied && m_panSyncPending) {
-                            m_viewState->clearPanVisualOffset();
-                            m_panSyncPending = false;
-                        }
-                    }
-                }
-                update();
             },
             Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::heatmapRangeReset,
@@ -611,7 +669,7 @@ void UnifiedGridRenderer::init() {
             [this](double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight) {
                 if (!m_useGpuHeatmap) {
                     m_useGpuHeatmap = true;
-                    m_heatmapTextureDirty = true;
+                    m_heatmapTextureDirty.store(true, std::memory_order_release);
                     m_heatmapClock.start();
                 }
                 if (gridWidth > 0) {
@@ -620,7 +678,7 @@ void UnifiedGridRenderer::init() {
                 if (gridHeight > 0) {
                     m_heatmapGridHeight = gridHeight;
                 }
-                m_heatmapTextureDirty = true;
+                m_heatmapTextureDirty.store(true, std::memory_order_release);
                 if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
                     m_heatmapTickSize = tickSize;
                     emit heatmapTickSizeChanged();
@@ -659,20 +717,22 @@ void UnifiedGridRenderer::init() {
                     return;
                 }
 
-                if (m_footprintGridWidth != gridWidth || m_footprintGridHeight != gridHeight) {
-                    m_footprintGridWidth = gridWidth;
-                    m_footprintGridHeight = gridHeight;
-                    m_footprintTextureDirty = true;
-                    m_pendingFootprintUploads.clear();
-                    m_pendingFootprintUploads.reserve(static_cast<size_t>(gridWidth));
+                int pendingCount = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
+                    if (m_pendingFootprintUploads.capacity() < static_cast<size_t>(gridWidth)) {
+                        m_pendingFootprintUploads.reserve(static_cast<size_t>(gridWidth));
+                    }
+                    m_pendingFootprintUploads.push_back(
+                        FootprintPendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
+                    pendingCount = static_cast<int>(m_pendingFootprintUploads.size());
                 }
-                m_pendingFootprintUploads.push_back(FootprintPendingUpload{x, std::move(columnQ16)});
                 if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
                     sLog_Debug(QString("Footprint queued for render: x=%1 grid=%2x%3 pending=%4")
                                    .arg(x)
                                    .arg(gridWidth)
                                    .arg(gridHeight)
-                                   .arg(static_cast<int>(m_pendingFootprintUploads.size())));
+                                   .arg(pendingCount));
                 }
                 update();
             },
@@ -745,29 +805,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         const bool drawFootprint = (m_primaryField == 1);
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
         const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
-        if ((snapshot.gridWidth > 0 && snapshot.gridWidth != m_heatmapGridWidth) ||
-            (snapshot.gridHeight > 0 && snapshot.gridHeight != m_heatmapGridHeight)) {
-            if (snapshot.gridWidth > 0) {
-                m_heatmapGridWidth = snapshot.gridWidth;
-            }
-            if (snapshot.gridHeight > 0) {
-                m_heatmapGridHeight = snapshot.gridHeight;
-            }
-            m_heatmapTextureDirty = true;
-            sLog_Render("GPU HEATMAP GRID SIZE: " << m_heatmapGridWidth << "x"
-                        << m_heatmapGridHeight << " (server authoritative)");
-        }
         auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
         if (!texNode) {
             texNode = new HeatmapIntensityNode();
-            m_heatmapTextureDirty = true;
-            m_footprintTextureDirty = true;
+            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_footprintTextureDirty.store(true, std::memory_order_release);
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
             m_footprintNode = nullptr;
         }
 
-        if (m_heatmapTextureDirty) {
+        if (m_heatmapTextureDirty.load(std::memory_order_acquire)) {
             ensureHeatmapImage();
             ensureHeatmapPaletteImage();
             auto* intensityTexture = window()->createTextureFromImage(m_heatmapImage);
@@ -785,13 +833,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 intensityTexture->setFiltering(QSGTexture::Nearest);
                 paletteTexture->setFiltering(QSGTexture::Linear);
                 texNode->setTextures(intensityTexture, paletteTexture);
-                m_heatmapTextureDirty = false;
+                m_heatmapTextureDirty.store(false, std::memory_order_release);
             }
         }
         if (m_heatmapPaletteDirty && !m_heatmapImage.isNull()) {
             m_heatmapPaletteImage = QImage();  // Force regeneration
             ensureHeatmapPaletteImage();
-            m_heatmapTextureDirty = true;  // Trigger full texture update
+            m_heatmapTextureDirty.store(true, std::memory_order_release);  // Trigger full texture update
         }
 
         const QRectF bounds = boundingRect();
@@ -959,13 +1007,33 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_lastTimeAxisMapping.cellH = m_lastTimeAxisMapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
 
-        const bool hasFootprintPending = !m_pendingFootprintUploads.empty();
+        std::vector<FootprintPendingUpload> framePendingFootprintUploads;
+        {
+            std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
+            if (!m_pendingFootprintUploads.empty()) {
+                framePendingFootprintUploads.swap(m_pendingFootprintUploads);
+            }
+        }
+        const bool hasFootprintPending = !framePendingFootprintUploads.empty();
         if (drawFootprint || hasFootprintPending) {
+            if (hasFootprintPending) {
+                for (auto it = framePendingFootprintUploads.rbegin(); it != framePendingFootprintUploads.rend(); ++it) {
+                    if (it->gridWidth > 0 && it->gridHeight > 0) {
+                        if (m_footprintGridWidth != it->gridWidth || m_footprintGridHeight != it->gridHeight) {
+                            m_footprintGridWidth = it->gridWidth;
+                            m_footprintGridHeight = it->gridHeight;
+                            m_footprintTextureDirty.store(true, std::memory_order_release);
+                        }
+                        break;
+                    }
+                }
+            }
             if (!m_footprintNode) {
                 m_footprintNode = new FootprintIntensityNode();
                 texNode->appendChildNode(m_footprintNode);
             }
-            if (m_footprintTextureDirty && m_footprintGridWidth > 0 && m_footprintGridHeight > 0) {
+            if (m_footprintTextureDirty.load(std::memory_order_acquire) &&
+                m_footprintGridWidth > 0 && m_footprintGridHeight > 0) {
                 ensureFootprintImage();
                 auto* footprintTexture = window()->createTextureFromImage(m_footprintImage);
                 if (!footprintTexture) {
@@ -975,9 +1043,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 if (footprintTexture) {
                     footprintTexture->setFiltering(QSGTexture::Nearest);
                     m_footprintNode->setTexture(footprintTexture);
-                    m_footprintTextureDirty = false;
+                    m_footprintTextureDirty.store(false, std::memory_order_release);
                 } else {
-                    m_footprintTextureDirty = true;
+                    m_footprintTextureDirty.store(true, std::memory_order_release);
                 }
             }
 
@@ -1001,10 +1069,12 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
 
             if (hasFootprintPending) {
-                for (auto& upload : m_pendingFootprintUploads) {
+                for (auto& upload : framePendingFootprintUploads) {
+                    if (upload.gridWidth != m_footprintGridWidth || upload.gridHeight != m_footprintGridHeight) {
+                        continue;
+                    }
                     m_footprintNode->enqueueColumn(upload.x, std::move(upload.data));
                 }
-                m_pendingFootprintUploads.clear();
             }
         } else if (m_footprintNode) {
             m_footprintNode->setRect(QRectF());
@@ -1257,7 +1327,7 @@ void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) {
         gridChanged = true;
     }
     if (gridChanged) {
-        m_heatmapTextureDirty = true;
+        m_heatmapTextureDirty.store(true, std::memory_order_release);
         if (m_heatmapStream) {
             m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
         }
