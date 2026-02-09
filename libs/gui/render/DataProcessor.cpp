@@ -153,30 +153,9 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
                             slice.liquidityScale,
                             bytesPerCell);
 
-    HeatmapGridKey key;
-    key.symbol = slice.symbol.toStdString();
-    key.gridWidth = m_heatmapGridWidth;
-    key.gridHeight = m_heatmapGridHeight;
-    key.timeframeMs = slice.timeframeMs;
-    key.minPrice = slice.minPrice;
-    key.maxPrice = slice.maxPrice;
-    key.tickSize = effectiveTick;
-
-    auto& cache = m_heatmapCache[key];
-    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : m_heatmapGridWidth;
-    if (cache.capacity != capacity) {
-        cache.reset(capacity);
-    }
-    IGridDataSource::HeatmapHistoryColumn entry;
-    entry.bucketStartMs = slice.bucketStartMs;
-    entry.bucketEndMs = slice.bucketEndMs;
-    entry.minPrice = slice.minPrice;
-    entry.maxPrice = slice.maxPrice;
-    entry.tickSize = effectiveTick;
-    entry.intensity = expanded;
-    entry.liquidity = slice.liquidityColumn;
-    entry.liquidityScale = slice.liquidityScale;
-    cache.push(std::move(entry));
+    // Week 0 guardrail: client-side heatmap cache writes are disabled.
+    // This map is currently unused by any read path and can grow unbounded under live flow.
+    // Long-term caching should live in server-side chunk/history serving, not ad-hoc client accumulation.
     m_heatmapLastSliceStart = slice.bucketStartMs;
 }
 
@@ -264,6 +243,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int gridWidth,
                                              int gridHeight,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
+    Q_UNUSED(symbol);
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
                     << " grid=" << gridWidth << "x" << gridHeight
@@ -289,26 +269,9 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
         ? bytesPerCellGuess
         : 1;
 
-    HeatmapGridKey key;
-    key.symbol = symbol.toStdString();
-    key.gridWidth = gridWidth;
-    key.gridHeight = gridHeight;
-    key.timeframeMs = timeframeMs;
-    key.minPrice = first.minPrice;
-    key.maxPrice = first.maxPrice;
-    key.tickSize = first.tickSize;
-
-    auto& cache = m_heatmapCache[key];
-    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : gridWidth;
-    if (cache.capacity != capacity) {
-        cache.reset(capacity);
-    }
-
     emit heatmapRangeReset(first.minPrice, first.maxPrice, first.tickSize, gridWidth, gridHeight);
 
     for (const auto& col : columns) {
-        IGridDataSource::HeatmapHistoryColumn entry = col;
-        cache.push(entry);
         emit heatmapColumnReady(col.bucketStartMs,
                                 col.bucketEndMs,
                                 timeframeMs,

@@ -111,6 +111,7 @@ private:
     bool m_heatmapHasLastColumn = false;
     std::atomic<bool> m_shuttingDown{false};
 
+    // Week 0: writes disabled to prevent unbounded client growth; reserved for future bounded cache design.
     std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;
     int m_cacheCapacityOverride = 0;
     int m_footprintGridWidth = 5120;
