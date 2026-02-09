@@ -3,7 +3,6 @@ Sentinel — CandlestickOverlayItem
 GPU-batched candlestick overlay (demo data only).
 */
 #include "CandlestickOverlayItem.hpp"
-#include "GridViewState.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
 #include "SentinelLogging.hpp"
 
@@ -95,27 +94,12 @@ CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
     setFlag(ItemHasContents, true);
 }
 
-QObject* CandlestickOverlayItem::viewState() const {
-    return static_cast<QObject*>(m_viewState.data());
-}
-
 QObject* CandlestickOverlayItem::candleBuffer() const {
     return static_cast<QObject*>(m_candleBuffer.data());
 }
 
 QObject* CandlestickOverlayItem::mappingProvider() const {
     return m_mappingProviderObject.data();
-}
-
-void CandlestickOverlayItem::setViewState(QObject* viewState) {
-    if (m_viewState == viewState) {
-        return;
-    }
-    disconnectViewStateSignals();
-    m_viewState = qobject_cast<GridViewState*>(viewState);
-    connectViewStateSignals();
-    markGeometryDirty();
-    emit viewStateChanged();
 }
 
 void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
@@ -171,27 +155,6 @@ void CandlestickOverlayItem::setTimeframeSec(int sec) {
     m_timeframeSec = sec;
     markGeometryDirty();
     emit timeframeSecChanged();
-}
-
-void CandlestickOverlayItem::connectViewStateSignals() {
-    if (!m_viewState) {
-        return;
-    }
-    m_viewportChangedConn = connect(m_viewState, &GridViewState::viewportChanged, this, [this]() {
-        markGeometryDirty();
-    });
-    m_panChangedConn = connect(m_viewState, &GridViewState::panVisualOffsetChanged, this, [this]() {
-        markGeometryDirty();
-    });
-}
-
-void CandlestickOverlayItem::disconnectViewStateSignals() {
-    if (m_viewportChangedConn) {
-        disconnect(m_viewportChangedConn);
-    }
-    if (m_panChangedConn) {
-        disconnect(m_panChangedConn);
-    }
 }
 
 void CandlestickOverlayItem::connectCandleSignals() {
@@ -348,11 +311,11 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         if (timer.elapsed() > 1000) {
             const double spanMs = static_cast<double>(timeEnd - timeStart);
             const double msPerPixel = (width() > 0.0) ? (spanMs / width()) : 0.0;
-            const QPointF pan = m_viewState ? m_viewState->getPanVisualOffset() : QPointF();
-            const bool dragging = m_viewState ? m_viewState->isDragging() : false;
+            const QPointF pan = frame.viewportPanVisualOffset;
+            const bool dragging = frame.viewportDragging;
             const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
-            const bool autoScroll = m_viewState ? m_viewState->isAutoScrollEnabled() : false;
+            const bool autoScroll = frame.viewportAutoScrollEnabled;
             sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
                        .arg(m_symbol)
                        .arg(m_timeframeSec)

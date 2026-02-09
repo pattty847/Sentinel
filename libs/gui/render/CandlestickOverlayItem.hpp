@@ -13,7 +13,6 @@ Threading: Update on GUI thread; rendering on render thread.
 #include "TimeAxisMapping.hpp"
 #include "ITimeAxisMappingProvider.hpp"
 
-class GridViewState;
 class CandleSeriesBuffer;
 
 struct CandleOverlayBar {
@@ -29,7 +28,6 @@ class CandlestickOverlayItem : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
 
-    Q_PROPERTY(QObject* viewState READ viewState WRITE setViewState NOTIFY viewStateChanged)
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
     Q_PROPERTY(QString symbol READ symbol WRITE setSymbol NOTIFY symbolChanged)
@@ -38,8 +36,6 @@ class CandlestickOverlayItem : public QQuickItem {
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
 
-    QObject* viewState() const;
-    void setViewState(QObject* viewState);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
     QObject* mappingProvider() const;
@@ -50,7 +46,6 @@ public:
     void setTimeframeSec(int sec);
 
 signals:
-    void viewStateChanged();
     void candleBufferChanged();
     void mappingProviderChanged();
     void symbolChanged();
@@ -61,18 +56,13 @@ protected:
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
-    void connectViewStateSignals();
-    void disconnectViewStateSignals();
     void connectCandleSignals();
     void disconnectCandleSignals();
     void markGeometryDirty();
 
-    QPointer<GridViewState> m_viewState;
     QPointer<CandleSeriesBuffer> m_candleBuffer;
     QPointer<QObject> m_mappingProviderObject;
     ITimeAxisMappingProvider* m_mappingProvider = nullptr;
-    QMetaObject::Connection m_viewportChangedConn;
-    QMetaObject::Connection m_panChangedConn;
     QMetaObject::Connection m_mappingViewportConn;
     QMetaObject::Connection m_mappingTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;

@@ -71,7 +71,6 @@ Rectangle {
         id: candleOverlay
         anchors.fill: unifiedGridRenderer
         visible: root.showCandles
-        viewState: unifiedGridRenderer.viewState
         mappingProvider: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol

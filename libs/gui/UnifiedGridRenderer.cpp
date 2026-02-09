@@ -18,7 +18,6 @@
 #include "render/MsdfAtlas.hpp"
 #include "render/MsdfGlyphNode.hpp"
 #include "render/HeatmapIntensityNode.hpp"
-#include "render/FootprintIntensityNode.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/ViewportAutoScrollController.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
@@ -204,8 +203,7 @@ void UnifiedGridRenderer::clearData() {
         std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
         m_pendingFootprintUploads.clear();
     }
-    m_footprintImage = QImage();
-    m_footprintTextureDirty.store(true, std::memory_order_release);
+    m_footprintOverlay.requestNeutralReset();
     m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
     update();
@@ -728,7 +726,7 @@ void UnifiedGridRenderer::init() {
                         m_pendingFootprintUploads.reserve(static_cast<size_t>(gridWidth));
                     }
                     m_pendingFootprintUploads.push_back(
-                        FootprintPendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
+                        FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
                     pendingCount = static_cast<int>(m_pendingFootprintUploads.size());
                 }
                 m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
@@ -836,10 +834,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         if (!texNode) {
             texNode = new HeatmapIntensityNode();
             m_heatmapTextureDirty.store(true, std::memory_order_release);
-            m_footprintTextureDirty.store(true, std::memory_order_release);
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
-            m_footprintNode = nullptr;
+            m_footprintOverlay.onRootRebuilt();
         }
 
         if (m_heatmapTextureDirty.load(std::memory_order_acquire)) {
@@ -1055,78 +1052,23 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             m_lastFrameContext = published;
         }
 
-        std::vector<FootprintPendingUpload> framePendingFootprintUploads;
+        std::vector<FootprintOverlayRenderer::PendingUpload> framePendingFootprintUploads;
         {
             std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
             if (!m_pendingFootprintUploads.empty()) {
                 framePendingFootprintUploads.swap(m_pendingFootprintUploads);
             }
         }
-        const bool hasFootprintPending = !framePendingFootprintUploads.empty();
-        if (drawFootprint || hasFootprintPending) {
-            if (hasFootprintPending) {
-                for (auto it = framePendingFootprintUploads.rbegin(); it != framePendingFootprintUploads.rend(); ++it) {
-                    if (it->gridWidth > 0 && it->gridHeight > 0) {
-                        if (m_footprintGridWidth != it->gridWidth || m_footprintGridHeight != it->gridHeight) {
-                            m_footprintGridWidth = it->gridWidth;
-                            m_footprintGridHeight = it->gridHeight;
-                            m_footprintTextureDirty.store(true, std::memory_order_release);
-                        }
-                        break;
-                    }
-                }
-            }
-            if (!m_footprintNode) {
-                m_footprintNode = new FootprintIntensityNode();
-                texNode->appendChildNode(m_footprintNode);
-            }
-            if (m_footprintTextureDirty.load(std::memory_order_acquire) &&
-                m_footprintGridWidth > 0 && m_footprintGridHeight > 0) {
-                ensureFootprintImage();
-                auto* footprintTexture = window()->createTextureFromImage(m_footprintImage);
-                if (!footprintTexture) {
-                    const QImage fallback = m_footprintImage.convertToFormat(QImage::Format_Grayscale16);
-                    footprintTexture = window()->createTextureFromImage(fallback);
-                }
-                if (footprintTexture) {
-                    footprintTexture->setFiltering(QSGTexture::Nearest);
-                    m_footprintNode->setTexture(footprintTexture);
-                    m_footprintTextureDirty.store(false, std::memory_order_release);
-                } else {
-                    m_footprintTextureDirty.store(true, std::memory_order_release);
-                }
-            }
-
-            QRectF footprintSrcRect(0, 0, m_footprintGridWidth, m_footprintGridHeight);
-            if (m_footprintGridWidth == gridWidth && m_footprintGridHeight == gridHeight) {
-                footprintSrcRect = srcRect;
-            }
-
-            m_footprintNode->setColor(QColor(42, 50, 60, 180));
-            m_footprintNode->setBidColor(QColor(46, 182, 230, 255));
-            m_footprintNode->setAskColor(QColor(235, 92, 52, 255));
-            m_footprintNode->setNeutralFloor(0.08f);
-            m_footprintNode->setMagnitudeScale(20.0f);
-            m_footprintNode->setMagnitudeGamma(0.75f);
-            m_footprintNode->setTimeOffset(forceFull ? 0.0f : snapshot.timeOffset);
-            if (drawFootprint) {
-                m_footprintNode->setRect(drawRect);
-                m_footprintNode->setSourceRect(footprintSrcRect);
-            } else {
-                m_footprintNode->setRect(QRectF());
-            }
-
-            if (hasFootprintPending) {
-                for (auto& upload : framePendingFootprintUploads) {
-                    if (upload.gridWidth != m_footprintGridWidth || upload.gridHeight != m_footprintGridHeight) {
-                        continue;
-                    }
-                    m_footprintNode->enqueueColumn(upload.x, std::move(upload.data));
-                }
-            }
-        } else if (m_footprintNode) {
-            m_footprintNode->setRect(QRectF());
-        }
+        m_footprintOverlay.render(window(),
+                                  texNode,
+                                  drawFootprint,
+                                  forceFull,
+                                  snapshot.timeOffset,
+                                  drawRect,
+                                  srcRect,
+                                  gridWidth,
+                                  gridHeight,
+                                  framePendingFootprintUploads);
 
         if (!drawHeatmap) {
             texNode->setRect(QRectF());
@@ -1266,28 +1208,6 @@ void UnifiedGridRenderer::ensureHeatmapImage() {
         return;
     }
     m_heatmapImage.fill(m_heatmapBackgroundColor);
-}
-
-void UnifiedGridRenderer::ensureFootprintImage() {
-    if (!m_footprintImage.isNull() &&
-        m_footprintImage.width() == m_footprintGridWidth &&
-        m_footprintImage.height() == m_footprintGridHeight &&
-        m_footprintImage.format() == QImage::Format_Grayscale16) {
-        return;
-    }
-
-    m_footprintImage = QImage(m_footprintGridWidth, m_footprintGridHeight, QImage::Format_Grayscale16);
-    if (m_footprintImage.isNull()) {
-        return;
-    }
-
-    constexpr uint16_t kNeutralDelta = 0x8000u;
-    for (int y = 0; y < m_footprintImage.height(); ++y) {
-        auto* row = reinterpret_cast<uint16_t*>(m_footprintImage.scanLine(y));
-        for (int x = 0; x < m_footprintImage.width(); ++x) {
-            row[x] = qToLittleEndian<uint16_t>(kNeutralDelta);
-        }
-    }
 }
 
 void UnifiedGridRenderer::ensureHeatmapPaletteImage() {

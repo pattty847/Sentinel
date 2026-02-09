@@ -26,10 +26,10 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
+#include "render/FootprintOverlayRenderer.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
-class FootprintIntensityNode;
 
 struct ColorStop {
     float position;
@@ -199,21 +199,10 @@ private:
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
-    class FootprintIntensityNode* m_footprintNode = nullptr;
-    int m_footprintGridWidth = 5120;
-    int m_footprintGridHeight = 2048;
-    // Cross-thread flag: set on main thread, consumed/reset on render thread.
-    std::atomic<bool> m_footprintTextureDirty{true};
-    QImage m_footprintImage;
-    struct FootprintPendingUpload {
-        int x = 0;
-        int gridWidth = 0;
-        int gridHeight = 0;
-        QByteArray data;
-    };
+    FootprintOverlayRenderer m_footprintOverlay;
     // Main thread enqueues pending uploads; render thread swaps to local frame snapshot.
     mutable std::mutex m_footprintPendingMutex;
-    std::vector<FootprintPendingUpload> m_pendingFootprintUploads;
+    std::vector<FootprintOverlayRenderer::PendingUpload> m_pendingFootprintUploads;
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
@@ -377,7 +366,6 @@ protected:
 
 private:
     void ensureHeatmapImage();
-    void ensureFootprintImage();
     void ensureHeatmapPaletteImage();
     void buildMsdfAtlas();
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
