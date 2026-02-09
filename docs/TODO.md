@@ -568,7 +568,7 @@ _(empty)_
 #### Now (current sprint � do these first)
 - [x] Phase 1: MappingProvider seam for candles (remove direct CandlestickOverlayItem -> UnifiedGridRenderer mapping dependency)
 - [x] Phase 1: Remove QML write path for renderer `primaryField`; route mode authority from ChartModeController
-- [ ] Phase 1: Introduce FrameContext construction in updatePaintNode with immutable snapshots and generation counters
+- [x] Phase 1: Introduce FrameContext construction in updatePaintNode with immutable snapshots and generation counters
 - [ ] Phase 2: Start overlay extraction with candle path first
 
 #### Next (queued � pick up when Now is clear)
@@ -585,3 +585,5 @@ _(empty)_
 
 #### Session log
 - **2026-02-09** � Started Phase 1 implementation: added `ITimeAxisMappingProvider`, switched candles to provider contract, and moved renderer primary field control to ChartModeController-driven flow. Next: FrameContext + generation counters.
+- **2026-02-09** - Completed Phase 1 FrameContext snapshot plumbing: provider now exposes `MappingFrameContext`; candlestick overlay consumes immutable frame snapshots and generation counters.
+

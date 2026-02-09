@@ -77,7 +77,7 @@ private:
     QMetaObject::Connection m_mappingTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;
 
-    uint64_t m_lastViewportVersion = 0;
+    uint64_t m_lastCandleGeneration = 0;
     QSizeF m_lastSize;
     bool m_geometryDirty = true;
     TimeAxisMapping m_lastMapping;

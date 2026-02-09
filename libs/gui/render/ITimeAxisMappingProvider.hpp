@@ -2,11 +2,36 @@
 #pragma once
 
 #include "TimeAxisMapping.hpp"
+#include <QPointF>
+#include <QRectF>
 #include <QtPlugin>
+#include <cstdint>
+
+struct MappingFrameContext {
+    QRectF surfaceBounds;
+    double surfaceDpr = 1.0;
+    qint64 presentationTimeMs = 0;
+
+    bool viewportValid = false;
+    qint64 viewportTimeStart = 0;
+    qint64 viewportTimeEnd = 0;
+    double viewportMinPrice = 0.0;
+    double viewportMaxPrice = 0.0;
+    QPointF viewportPanVisualOffset;
+    bool viewportDragging = false;
+    bool viewportAutoScrollEnabled = false;
+
+    uint64_t heatmapGeneration = 0;
+    uint64_t footprintGeneration = 0;
+    uint64_t candleGeneration = 0;
+
+    TimeAxisMapping mapping;
+};
 
 class ITimeAxisMappingProvider {
 public:
     virtual ~ITimeAxisMappingProvider() = default;
+    virtual MappingFrameContext currentFrameContext() const = 0;
     virtual TimeAxisMapping currentTimeAxisMapping() const = 0;
 };
 

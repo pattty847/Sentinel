@@ -123,14 +123,17 @@ private:
     };
 
     struct FrameContext {
+        struct OverlayActivationSet {
+            bool heatmap = false;
+            bool footprint = false;
+        };
         QRectF surfaceBounds;
         double surfaceDpr = 1.0;
         qint64 presentationTimeMs = 0;
         FrameViewportSnapshot viewport;
         HeatmapStreamState::Snapshot heatmapSnapshot;
         FrameStreamGenerations streamGenerations;
-        bool drawHeatmap = false;
-        bool drawFootprint = false;
+        OverlayActivationSet overlays;
         bool forceFull = false;
         TimeAxisMapping mapping;
     };
@@ -182,6 +185,8 @@ private:
     ColorGradient m_askGradient;
     bool m_heatmapPaletteDirty = true;
     TimeAxisMapping m_lastTimeAxisMapping;
+    mutable std::mutex m_frameContextMutex;
+    MappingFrameContext m_lastFrameContext;
 
     MsdfAtlas m_msdfAtlas;
     bool m_msdfAtlasBuilt = false;
@@ -298,8 +303,9 @@ public:
     Q_INVOKABLE int getDirtyRegionCount() const;
     Q_INVOKABLE QString getLabelRingMemory() const;
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
-    TimeAxisMapping lastTimeAxisMapping() const { return m_lastTimeAxisMapping; }
-    TimeAxisMapping currentTimeAxisMapping() const override { return m_lastTimeAxisMapping; }
+    TimeAxisMapping lastTimeAxisMapping() const { return currentTimeAxisMapping(); }
+    MappingFrameContext currentFrameContext() const override;
+    TimeAxisMapping currentTimeAxisMapping() const override;
     void applyClientConfig(const ClientConfig& config);
     void applyServerConfig(const ServerConfig& config);
 

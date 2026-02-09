@@ -207,11 +207,15 @@ void CandlestickOverlayItem::connectCandleSignals() {
                                     if (symbol != m_symbol || timeframeSec != m_timeframeSec) {
                                         return;
                                     }
-                                    if (!m_viewState || !m_viewState->isTimeWindowValid()) {
+                                    if (!m_mappingProvider) {
                                         return;
                                     }
-                                    const qint64 viewStart = m_viewState->getVisibleTimeStart();
-                                    const qint64 viewEnd = m_viewState->getVisibleTimeEnd();
+                                    const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
+                                    if (!frame.viewportValid) {
+                                        return;
+                                    }
+                                    const qint64 viewStart = frame.viewportTimeStart;
+                                    const qint64 viewEnd = frame.viewportTimeEnd;
                                     if (dirtyEndMs < viewStart || dirtyStartMs > viewEnd) {
                                         return;
                                     }
@@ -243,7 +247,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_viewState || !m_viewState->isTimeWindowValid() || !m_mappingProvider) {
+    if (!m_mappingProvider) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -251,12 +255,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const TimeAxisMapping mapping = m_mappingProvider->currentTimeAxisMapping();
+    const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
+    const TimeAxisMapping mapping = frame.mapping;
     if (mappingChanged(mapping, m_lastMapping)) {
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
-    if (!mapping.valid) {
+    if (!mapping.valid || !frame.viewportValid) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -265,17 +270,17 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     }
 
     const QSizeF currentSize(width(), height());
-    const uint64_t viewportVersion = m_viewState->getViewportVersion();
-    if (!m_geometryDirty && m_lastViewportVersion == viewportVersion && m_lastSize == currentSize) {
+    const uint64_t candleGeneration = frame.candleGeneration;
+    if (!m_geometryDirty && m_lastCandleGeneration == candleGeneration && m_lastSize == currentSize) {
         return root;
     }
 
-    m_lastViewportVersion = viewportVersion;
+    m_lastCandleGeneration = candleGeneration;
     m_lastSize = currentSize;
     m_geometryDirty = false;
 
-    const qint64 timeStart = m_viewState->getVisibleTimeStart();
-    const qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+    const qint64 timeStart = frame.viewportTimeStart;
+    const qint64 timeEnd = frame.viewportTimeEnd;
     if (timeEnd <= timeStart) {
         return root;
     }

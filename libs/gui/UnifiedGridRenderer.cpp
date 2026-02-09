@@ -811,8 +811,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.surfaceDpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
         frame.presentationTimeMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
         frame.heatmapSnapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
-        frame.drawHeatmap = (m_primaryField == 0);
-        frame.drawFootprint = (m_primaryField == 1);
+        frame.overlays.heatmap = (m_primaryField == 0);
+        frame.overlays.footprint = (m_primaryField == 1);
         frame.forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
         frame.streamGenerations.heatmap = m_heatmapStreamGeneration.load(std::memory_order_acquire);
         frame.streamGenerations.footprint = m_footprintStreamGeneration.load(std::memory_order_acquire);
@@ -828,8 +828,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             frame.viewport.autoScrollEnabled = m_viewState->isAutoScrollEnabled();
         }
         const auto& snapshot = frame.heatmapSnapshot;
-        const bool drawHeatmap = frame.drawHeatmap;
-        const bool drawFootprint = frame.drawFootprint;
+        const bool drawHeatmap = frame.overlays.heatmap;
+        const bool drawFootprint = frame.overlays.footprint;
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
         const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
         auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
@@ -1034,6 +1034,26 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.mapping.cellH = frame.mapping.valid && srcRect.height() > 0.0
             ? (drawRect.height() / srcRect.height()) : 0.0;
         m_lastTimeAxisMapping = frame.mapping;
+        {
+            MappingFrameContext published;
+            published.surfaceBounds = frame.surfaceBounds;
+            published.surfaceDpr = frame.surfaceDpr;
+            published.presentationTimeMs = frame.presentationTimeMs;
+            published.viewportValid = frame.viewport.valid;
+            published.viewportTimeStart = frame.viewport.timeStart;
+            published.viewportTimeEnd = frame.viewport.timeEnd;
+            published.viewportMinPrice = frame.viewport.minPrice;
+            published.viewportMaxPrice = frame.viewport.maxPrice;
+            published.viewportPanVisualOffset = frame.viewport.panVisualOffset;
+            published.viewportDragging = frame.viewport.dragging;
+            published.viewportAutoScrollEnabled = frame.viewport.autoScrollEnabled;
+            published.heatmapGeneration = frame.streamGenerations.heatmap;
+            published.footprintGeneration = frame.streamGenerations.footprint;
+            published.candleGeneration = frame.streamGenerations.candle;
+            published.mapping = frame.mapping;
+            std::lock_guard<std::mutex> lock(m_frameContextMutex);
+            m_lastFrameContext = published;
+        }
 
         std::vector<FootprintPendingUpload> framePendingFootprintUploads;
         {
@@ -1591,6 +1611,15 @@ qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return m_viewState ? m_v
 double UnifiedGridRenderer::getMinPrice() const { return m_viewState ? m_viewState->getMinPrice() : 0.0; }
 double UnifiedGridRenderer::getMaxPrice() const { return m_viewState ? m_viewState->getMaxPrice() : 0.0; }
 QPointF UnifiedGridRenderer::getPanVisualOffset() const { return m_viewState ? m_viewState->getPanVisualOffset() : QPointF(0, 0); }
+
+MappingFrameContext UnifiedGridRenderer::currentFrameContext() const {
+    std::lock_guard<std::mutex> lock(m_frameContextMutex);
+    return m_lastFrameContext;
+}
+
+TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const {
+    return currentFrameContext().mapping;
+}
 
 bool UnifiedGridRenderer::heatmapDataPriceRange(double& outMin, double& outMax) const {
     if (!m_heatmapStream) {
