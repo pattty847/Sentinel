@@ -71,6 +71,8 @@ bool candleDebugEnabled() {
 }
 
 bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
+    // INV-005: timeOffset is shader-only ring wrap for heatmap sampling.
+    // Candle geometry uses mapping helpers (world->screen), so timeOffset must not drive dirty.
     return a.valid != b.valid ||
         a.drawRect != b.drawRect ||
         a.srcRect != b.srcRect ||
@@ -80,7 +82,6 @@ bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
         a.appendMs != b.appendMs ||
         a.gridWidth != b.gridWidth ||
         a.filledColumns != b.filledColumns ||
-        a.timeOffset != b.timeOffset ||
         a.cellW != b.cellW ||
         a.viewStartMs != b.viewStartMs ||
         a.viewEndMs != b.viewEndMs ||
