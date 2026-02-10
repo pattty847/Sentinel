@@ -594,4 +594,5 @@ _(empty)_
 - **2026-02-10** - Extended published `MappingFrameContext` with explicit time snapshot fields (`activeTimeframeMs`, `nowEventTimeMs`, `hasEventTime`) to keep overlay consumption immutable and host-independent.
 - **2026-02-10** - Added boundary progression metadata to `TimeAuthority` snapshot (`currentBoundaryStartMs`, `nextBoundaryStartMs`, `boundarySequence`) and published it via `MappingFrameContext` for future empty-bar/slice overlay behavior.
 - **2026-02-10** - Candlestick overlay now treats `boundarySequence` (when cadence matches timeframe) as a geometry dirty trigger, enabling deterministic cadence-driven updates beyond payload-only generation bumps.
+- **2026-02-10** - Added bounded synthetic candle continuity in CandlestickOverlayItem to fill sparse gaps and extend to current authority boundary when cadence/timeframe match.
 

@@ -68,6 +68,64 @@ bool candleDebugEnabled() {
     return enabled;
 }
 
+std::vector<CandleOverlayBar> buildContinuousBars(const std::vector<CandleOverlayBar>& source,
+                                                  int64_t timeframeMs,
+                                                  qint64 boundaryStartMs,
+                                                  int maxColumns) {
+    if (source.empty() || timeframeMs <= 0 || maxColumns <= 0) {
+        return source;
+    }
+
+    std::vector<CandleOverlayBar> out;
+    out.reserve(static_cast<size_t>(maxColumns));
+
+    int syntheticBudget = std::max(0, maxColumns - static_cast<int>(source.size()));
+    auto pushBar = [&out, maxColumns](const CandleOverlayBar& bar) {
+        if (static_cast<int>(out.size()) < maxColumns) {
+            out.push_back(bar);
+        }
+    };
+
+    pushBar(source.front());
+    for (size_t i = 1; i < source.size() && static_cast<int>(out.size()) < maxColumns; ++i) {
+        const CandleOverlayBar& prev = source[i - 1];
+        const CandleOverlayBar& cur = source[i];
+        for (qint64 t = prev.timeStartMs + timeframeMs;
+             t < cur.timeStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
+             t += timeframeMs) {
+            CandleOverlayBar synthetic;
+            synthetic.timeStartMs = t;
+            synthetic.timeEndMs = t + timeframeMs;
+            synthetic.open = prev.close;
+            synthetic.high = prev.close;
+            synthetic.low = prev.close;
+            synthetic.close = prev.close;
+            out.push_back(synthetic);
+            --syntheticBudget;
+        }
+        pushBar(cur);
+    }
+
+    if (boundaryStartMs > 0 && !out.empty() && syntheticBudget > 0) {
+        const CandleOverlayBar anchor = out.back();
+        for (qint64 t = anchor.timeStartMs + timeframeMs;
+             t <= boundaryStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
+             t += timeframeMs) {
+            CandleOverlayBar synthetic;
+            synthetic.timeStartMs = t;
+            synthetic.timeEndMs = t + timeframeMs;
+            synthetic.open = anchor.close;
+            synthetic.high = anchor.close;
+            synthetic.low = anchor.close;
+            synthetic.close = anchor.close;
+            out.push_back(synthetic);
+            --syntheticBudget;
+        }
+    }
+
+    return out;
+}
+
 bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
     // INV-005: timeOffset is shader-only ring wrap for heatmap sampling.
     // Candle geometry uses mapping helpers (world->screen), so timeOffset must not drive dirty.
@@ -310,6 +368,11 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             continue;
         }
         filtered.push_back(c);
+    }
+    const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
+    const int maxColumns = std::max(0, mapping.gridWidth);
+    if (cadenceMatches && tfMs > 0 && maxColumns > 0) {
+        filtered = buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns);
     }
     const int visibleCount = static_cast<int>(filtered.size());
 
