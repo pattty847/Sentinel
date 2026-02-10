@@ -56,6 +56,9 @@ protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
+private slots:
+    void onPanVisualOffsetChanged();
+
 private:
     void connectCandleSignals();
     void disconnectCandleSignals();
@@ -65,6 +68,7 @@ private:
     QPointer<QObject> m_mappingProviderObject;
     ITimeAxisMappingProvider* m_mappingProvider = nullptr;
     QMetaObject::Connection m_mappingViewportConn;
+    QMetaObject::Connection m_mappingPanConn;
     QMetaObject::Connection m_mappingTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;
 

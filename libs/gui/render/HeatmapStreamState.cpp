@@ -57,6 +57,7 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
     int appendMs = 0;
     int bytesPerCell = 1;
     int step = 1;
+    bool sameBucketUpdate = false;
     bool haveLastColumn = false;
     bool haveLastLiquidity = false;
     QByteArray lastColumnData;
@@ -79,9 +80,11 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
 
         lastSliceStartMs = m_lastSliceStartMs;
         if (lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
-            sliceStartMs <= lastSliceStartMs) {
+            sliceStartMs < lastSliceStartMs) {
             return;
         }
+        sameBucketUpdate = (lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
+                            sliceStartMs == lastSliceStartMs);
 
         if (m_timeOriginMs == 0) {
             m_timeOriginMs = sliceStartMs;
@@ -98,7 +101,9 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
             }
         }
 
-        if (lastSliceStartMs != std::numeric_limits<int64_t>::min() && appendMs > 0) {
+        if (!sameBucketUpdate &&
+            lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
+            appendMs > 0) {
             const int64_t dt = sliceStartMs - lastSliceStartMs;
             if (dt > 0) {
                 const int64_t rawStep = dt / appendMs;
@@ -134,43 +139,81 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
         fillLiquidityColumn = lastLiquidityColumn;
     }
 
-    {
+    auto upsertPendingColumn = [](std::vector<PendingColumn>& uploads, int x, const QByteArray& data) {
+        for (auto& pending : uploads) {
+            if (pending.x == x) {
+                pending.data = data;
+                return;
+            }
+        }
+        uploads.push_back({x, data});
+    };
+    auto upsertPendingLabelColumn = [](std::vector<PendingLabelColumn>& uploads,
+                                       int x,
+                                       const QByteArray& intensity,
+                                       const QByteArray& liquidity,
+                                       double scale,
+                                       bool haveLiquidity) {
+        for (auto& pending : uploads) {
+            if (pending.x == x) {
+                pending.intensity = intensity;
+                pending.liquidity = liquidity;
+                pending.liquidityScale = scale;
+                pending.haveLiquidity = haveLiquidity;
+                return;
+            }
+        }
+        PendingLabelColumn pending;
+        pending.x = x;
+        pending.intensity = intensity;
+        pending.liquidity = liquidity;
+        pending.liquidityScale = scale;
+        pending.haveLiquidity = haveLiquidity;
+        uploads.push_back(std::move(pending));
+    };
+
+    if (!sameBucketUpdate) {
         std::lock_guard<std::mutex> lock(m_uploadMutex);
         for (int i = 0; i < step - 1; ++i) {
             writeColumn = (writeColumn + 1) % gridWidth;
-            m_pendingUploads.push_back({writeColumn, fillColumn});
+            upsertPendingColumn(m_pendingUploads, writeColumn, fillColumn);
         }
 
         writeColumn = (writeColumn + 1) % gridWidth;
-        m_pendingUploads.push_back({writeColumn, intensityColumn});
+        upsertPendingColumn(m_pendingUploads, writeColumn, intensityColumn);
+    } else {
+        std::lock_guard<std::mutex> lock(m_uploadMutex);
+        upsertPendingColumn(m_pendingUploads, writeColumn, intensityColumn);
     }
 
     {
         std::lock_guard<std::mutex> lock(m_labelUploadMutex);
-        for (int i = 0; i < step - 1; ++i) {
-            const int columnIndex = (writeColumn - (step - 1 - i) + gridWidth) % gridWidth;
-            PendingLabelColumn pending;
-            pending.x = columnIndex;
-            pending.intensity = fillColumn;
-            pending.liquidity = fillLiquidityColumn;
-            pending.liquidityScale = fillLiquidityScale;
-            pending.haveLiquidity = (fillLiquidityColumn.size() == expectedLiquidityBytes);
-            m_pendingLabelUploads.push_back(std::move(pending));
+        if (!sameBucketUpdate) {
+            for (int i = 0; i < step - 1; ++i) {
+                const int columnIndex = (writeColumn - (step - 1 - i) + gridWidth) % gridWidth;
+                upsertPendingLabelColumn(m_pendingLabelUploads,
+                                         columnIndex,
+                                         fillColumn,
+                                         fillLiquidityColumn,
+                                         fillLiquidityScale,
+                                         fillLiquidityColumn.size() == expectedLiquidityBytes);
+            }
         }
 
-        PendingLabelColumn pending;
-        pending.x = writeColumn;
-        pending.intensity = intensityColumn;
+        QByteArray labelLiquidity = fillLiquidityColumn;
+        double labelLiquidityScale = fillLiquidityScale;
+        bool labelHaveLiquidity = false;
         if (haveLiquidityColumn) {
-            pending.liquidity = liquidityColumn;
-            pending.liquidityScale = (liquidityScale > 0.0) ? liquidityScale : 1.0;
-            pending.haveLiquidity = true;
-        } else {
-            pending.liquidity = fillLiquidityColumn;
-            pending.liquidityScale = fillLiquidityScale;
-            pending.haveLiquidity = false;
+            labelLiquidity = liquidityColumn;
+            labelLiquidityScale = (liquidityScale > 0.0) ? liquidityScale : 1.0;
+            labelHaveLiquidity = true;
         }
-        m_pendingLabelUploads.push_back(std::move(pending));
+        upsertPendingLabelColumn(m_pendingLabelUploads,
+                                 writeColumn,
+                                 intensityColumn,
+                                 labelLiquidity,
+                                 labelLiquidityScale,
+                                 labelHaveLiquidity);
     }
 
     {
@@ -250,7 +293,7 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         m_writeColumn = writeColumn;
-        if (m_filledColumns < m_gridWidth) {
+        if (!sameBucketUpdate && m_filledColumns < m_gridWidth) {
             const int remaining = m_gridWidth - m_filledColumns;
             const int addCount = std::min(remaining, step);
             m_filledColumns += addCount;

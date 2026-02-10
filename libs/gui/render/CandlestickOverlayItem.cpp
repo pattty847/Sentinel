@@ -178,6 +178,9 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
     if (m_mappingViewportConn) {
         disconnect(m_mappingViewportConn);
     }
+    if (m_mappingPanConn) {
+        disconnect(m_mappingPanConn);
+    }
     if (m_mappingTimeframeConn) {
         disconnect(m_mappingTimeframeConn);
     }
@@ -189,6 +192,10 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
                                                  SIGNAL(viewportChanged()),
                                                  this,
                                                  SLOT(update()));
+        m_mappingPanConn = QObject::connect(m_mappingProviderObject.data(),
+                                            SIGNAL(panVisualOffsetChanged()),
+                                            this,
+                                            SLOT(onPanVisualOffsetChanged()));
         m_mappingTimeframeConn = QObject::connect(m_mappingProviderObject.data(),
                                                   SIGNAL(timeframeChanged()),
                                                   this,
@@ -262,6 +269,10 @@ void CandlestickOverlayItem::geometryChange(const QRectF& newGeometry, const QRe
 void CandlestickOverlayItem::markGeometryDirty() {
     m_geometryDirty = true;
     update();
+}
+
+void CandlestickOverlayItem::onPanVisualOffsetChanged() {
+    markGeometryDirty();
 }
 
 QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
@@ -369,12 +380,14 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
         filtered.push_back(c);
     }
+    const int baseVisibleCount = static_cast<int>(filtered.size());
     const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
     const int maxColumns = std::max(0, mapping.gridWidth);
     if (cadenceMatches && tfMs > 0 && maxColumns > 0) {
         filtered = buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns);
     }
     const int visibleCount = static_cast<int>(filtered.size());
+    const int syntheticCount = std::max(0, visibleCount - baseVisibleCount);
 
     if (candleDebugEnabled()) {
         static QElapsedTimer timer;
@@ -391,13 +404,18 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
             const bool autoScroll = frame.viewportAutoScrollEnabled;
-            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
+            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
                        .arg(m_symbol)
                        .arg(m_timeframeSec)
                        .arg(timeStart)
                        .arg(timeEnd)
                        .arg(visibleCount)
-                       .arg(hasData ? "live" : "none"));
+                       .arg(baseVisibleCount)
+                       .arg(syntheticCount)
+                       .arg(hasData ? "live" : "none")
+                       .arg(cadenceMatches ? "true" : "false")
+                       .arg(frame.boundarySequence)
+                       .arg(frame.currentBoundaryStartMs));
             sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 srcX=%4 srcW=%5 drawX=%6 drawW=%7")
                        .arg(static_cast<qint64>(mapping.dataStartMs))
                        .arg(static_cast<qint64>(mapping.appendMs))
@@ -468,8 +486,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const float yLowF  = static_cast<float>(mapping.priceToScreenY(c.low));
         const float yOpenF = static_cast<float>(mapping.priceToScreenY(c.open));
         const float yCloseF = static_cast<float>(mapping.priceToScreenY(c.close));
-        const float bodyY0 = std::min(yOpenF, yCloseF);
-        const float bodyY1 = std::max(yOpenF, yCloseF);
+        float bodyY0 = std::min(yOpenF, yCloseF);
+        float bodyY1 = std::max(yOpenF, yCloseF);
+        if ((bodyY1 - bodyY0) < 1.5f) {
+            const float mid = 0.5f * (bodyY0 + bodyY1);
+            bodyY0 = mid - 0.75f;
+            bodyY1 = mid + 0.75f;
+        }
 
         addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
         if (bullish) {

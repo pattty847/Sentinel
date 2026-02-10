@@ -595,4 +595,7 @@ _(empty)_
 - **2026-02-10** - Added boundary progression metadata to `TimeAuthority` snapshot (`currentBoundaryStartMs`, `nextBoundaryStartMs`, `boundarySequence`) and published it via `MappingFrameContext` for future empty-bar/slice overlay behavior.
 - **2026-02-10** - Candlestick overlay now treats `boundarySequence` (when cadence matches timeframe) as a geometry dirty trigger, enabling deterministic cadence-driven updates beyond payload-only generation bumps.
 - **2026-02-10** - Added bounded synthetic candle continuity in CandlestickOverlayItem to fill sparse gaps and extend to current authority boundary when cadence/timeframe match.
+- **2026-02-10** - Added candle debug counters for sparse-session validation (`base_visible`, `synthetic`, cadence/boundary fields) under `SENTINEL_CHART_DEBUG`.
+- **2026-02-10** - Candle visibility polish: enforce minimum candle body height for flat/empty bars and force candle geometry dirty on `panVisualOffsetChanged` for live drag updates.
+- **2026-02-10** - Heatmap/candle cadence sync pass: server now emits forming heatmap updates each 50ms sampler tick and client heatmap ingest treats same-bucket slices as in-place column refresh (no reset/extra append).
 

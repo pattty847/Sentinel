@@ -100,6 +100,11 @@ private:
                         TimeframeState& frame,
                         double lastTrade,
                         double midPrice);
+    void emitFormingBucket(const std::string& symbol,
+                           SymbolState& state,
+                           const TimeframeState& frame,
+                           int64_t nowMs,
+                           double lastTrade);
     void storeHistory(SymbolState& state,
                       int64_t timeframeMs,
                       const QByteArray& column,
@@ -112,7 +117,8 @@ private:
                       int64_t bucketEndMs);
     QByteArray toIntensityColumnSigned(SymbolState& state,
                                        const std::vector<double>& bidValues,
-                                       const std::vector<double>& askValues);
+                                       const std::vector<double>& askValues,
+                                       bool updateRunningMax = true);
     QByteArray toLiquidityColumn(const std::vector<double>& bidValues,
                                  const std::vector<double>& askValues,
                                  double& outScale) const;

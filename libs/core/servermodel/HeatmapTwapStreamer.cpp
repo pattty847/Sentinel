@@ -301,6 +301,8 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
                 std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
             }
         }
+
+        emitFormingBucket(symbol, state, frame, nowMs, lastTrade);
     }
 
     state.lastSampleMs = nowMs;
@@ -336,7 +338,7 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         twapAsk[i] = (denom > 0.0) ? (frame.accumAsk[i] / denom) : 0.0;
     }
 
-    const QByteArray column = toIntensityColumnSigned(state, twapBid, twapAsk);
+    const QByteArray column = toIntensityColumnSigned(state, twapBid, twapAsk, true);
     double liquidityScale = 1.0;
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
 
@@ -380,6 +382,58 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         slice.reset = reset;
         emit heatmapSliceReady(slice);
     }
+}
+
+void HeatmapTwapStreamer::emitFormingBucket(const std::string& symbol,
+                                            SymbolState& state,
+                                            const TimeframeState& frame,
+                                            int64_t nowMs,
+                                            double lastTrade) {
+    if (frame.timeframeMs <= 0) {
+        return;
+    }
+    if (m_activeTimeframeMs > 0 && frame.timeframeMs != m_activeTimeframeMs) {
+        return;
+    }
+    if (frame.bucketStartMs <= 0 || frame.bucketEndMs <= frame.bucketStartMs) {
+        return;
+    }
+
+    const int64_t elapsedMs = std::clamp(nowMs - frame.bucketStartMs, int64_t{1}, frame.timeframeMs);
+    if (elapsedMs <= 0) {
+        return;
+    }
+
+    std::vector<double> twapBid(frame.accumBid.size(), 0.0);
+    std::vector<double> twapAsk(frame.accumAsk.size(), 0.0);
+    const double denom = static_cast<double>(elapsedMs);
+    for (size_t i = 0; i < frame.accumBid.size(); ++i) {
+        twapBid[i] = frame.accumBid[i] / denom;
+        twapAsk[i] = frame.accumAsk[i] / denom;
+    }
+
+    const QByteArray column = toIntensityColumnSigned(state, twapBid, twapAsk, false);
+    double liquidityScale = 1.0;
+    const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
+
+    HeatmapSlice slice;
+    slice.symbol = QString::fromStdString(symbol);
+    slice.bucketStartMs = frame.bucketStartMs;
+    slice.bucketEndMs = frame.bucketEndMs;
+    slice.timeframeMs = frame.timeframeMs;
+    slice.gridWidth = m_defaultWidth;
+    slice.gridHeight = state.height;
+    slice.minPrice = state.minPrice;
+    slice.maxPrice = state.maxPrice;
+    slice.tickSize = state.tickSize;
+    slice.midPrice = state.lastMidPrice;
+    slice.lastTrade = lastTrade;
+    slice.format = QStringLiteral("u16");
+    slice.column = column;
+    slice.liquidityColumn = liquidityColumn;
+    slice.liquidityScale = liquidityScale;
+    slice.reset = false;
+    emit heatmapSliceReady(slice);
 }
 
 void HeatmapTwapStreamer::storeHistory(SymbolState& state,
@@ -478,7 +532,8 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
 
 QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
                                                         const std::vector<double>& bidValues,
-                                                        const std::vector<double>& askValues) {
+                                                        const std::vector<double>& askValues,
+                                                        bool updateRunningMax) {
     if (bidValues.empty() || askValues.empty()) {
         return {};
     }
@@ -503,7 +558,7 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
             }
         }
     }
-    if (cfg.useRunningMax) {
+    if (cfg.useRunningMax && updateRunningMax) {
         if (state.runningMaxBid <= 0.0) {
             state.runningMaxBid = maxBid;
         } else {
@@ -516,8 +571,8 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
         }
     }
 
-    const double denomBid = (cfg.useRunningMax ? state.runningMaxBid : maxBid);
-    const double denomAsk = (cfg.useRunningMax ? state.runningMaxAsk : maxAsk);
+    const double denomBid = (cfg.useRunningMax ? std::max(state.runningMaxBid, maxBid) : maxBid);
+    const double denomAsk = (cfg.useRunningMax ? std::max(state.runningMaxAsk, maxAsk) : maxAsk);
     const double safeDenomBid = (denomBid > 0.0) ? denomBid : 1.0;
     const double safeDenomAsk = (denomAsk > 0.0) ? denomAsk : 1.0;
 

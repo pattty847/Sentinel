@@ -121,7 +121,8 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     m_heatmapGridHeight = height;
     const double effectiveTick = slice.tickSize;
     if (lastSliceStart != std::numeric_limits<int64_t>::min()) {
-        if (slice.bucketStartMs <= lastSliceStart) {
+        // Same bucket start means an in-progress update for the active bucket; allow in-place refresh.
+        if (slice.bucketStartMs < lastSliceStart) {
             forceReset = true;
         } else if (slice.timeframeMs > 0 && resolvedWidth > 0) {
             const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * slice.timeframeMs;

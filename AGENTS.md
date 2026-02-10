@@ -18,6 +18,8 @@ This folder is gitignored by default.
 * Update notes at session end if a new invariant, guardrail, or decision was discovered.
 * Keep entries one line; no paragraphs; ASCII only.
 * Do not add new files unless explicitly requested.
+* **DECISIONS.md pruning:** When a feature ships, condense its phase/step decisions into 1-3 surviving principles. Delete entries that are now just "how the code works" with no plausible alternative.
+* The human has backlogs in notes if we need them.
 
 **Files + expected format**
 * File: `_agent/INVARIANTS.md` | Format: `- INV-### | <statement>`
@@ -51,6 +53,8 @@ This folder is gitignored by default.
 * Start with `rg -n` / `rg --files` to narrow scope before opening full files.
 * Prefer targeted line windows over full-file reads for large sources.
 * If unsure whether deep read is needed, check file size/LOC first and inspect only the relevant sections.
+* Qdrant indexing for this refactor must be directory-targeted only: index `libs/` and `docs/` (and optional specific source dirs), never repo root.
+* Do not index `build/` artifacts (including Qt Creator multi-kit outputs, moc/autogen, and preset-specific build trees).
 
 **System Context (Sentinel)**
 * Goal: GPU‑first, deterministic, zero‑lag trading terminal (ExoCharts + TradingView + SierraCharts + Bookmap + TradingLite vibes).
