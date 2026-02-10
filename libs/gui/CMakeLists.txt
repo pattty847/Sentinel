@@ -57,6 +57,8 @@ set(GRID_CORE_SOURCES
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
     render/ITimeAxisMappingProvider.hpp
+    render/TimeAuthority.hpp
+    render/TimeAuthority.cpp
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
     render/TimeAxisMapping.hpp

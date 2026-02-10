@@ -19,6 +19,7 @@ public:
 
     void resetSpan();
     void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream);
+    void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream, int64_t timeframeMs);
     bool initializeViewport(GridViewState& view,
                             const HeatmapStreamState& stream,
                             int64_t sliceStartMs,
@@ -29,7 +30,8 @@ public:
                               int timeframeMs);
     bool applySmoothAutoScroll(GridViewState& view,
                                const HeatmapStreamState& stream,
-                               int64_t nowMs);
+                               int64_t nowMs,
+                               int64_t timeframeMs);
     bool applyPanToAutoScroll(GridViewState& view,
                               double viewportWidth,
                               double viewportHeight);

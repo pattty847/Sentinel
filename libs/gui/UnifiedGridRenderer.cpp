@@ -230,6 +230,7 @@ void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     if (m_currentTimeframe_ms != timeframe_ms) {
         m_currentTimeframe_ms = timeframe_ms;
+        m_timeAuthority.setActiveTimeframeMs(static_cast<int64_t>(timeframe_ms));
         if (m_useGpuHeatmap && timeframe_ms > 0) {
             if (m_heatmapStream) {
                 m_heatmapStream->setAppendMs(timeframe_ms);
@@ -324,7 +325,9 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
         emit autoScrollEnabledChanged();
         sLog_Render("Auto-scroll: "<< (enabled ? "ENABLED" : "DISABLED"));
         if (enabled && m_viewState->isTimeWindowValid() && m_heatmapStream && m_autoScrollController) {
-            m_autoScrollController->updateLagFromView(*m_viewState, *m_heatmapStream);
+            m_autoScrollController->updateLagFromView(*m_viewState,
+                                                      *m_heatmapStream,
+                                                      m_timeAuthority.activeTimeframeMs());
         }
     }
 }
@@ -384,6 +387,7 @@ void UnifiedGridRenderer::init() {
     
     m_viewState = std::make_unique<GridViewState>(this);
     m_heatmapStream = std::make_unique<HeatmapStreamState>();
+    m_timeAuthority.setActiveTimeframeMs(m_currentTimeframe_ms);
     m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
     m_heatmapStream->setAppendMs(static_cast<int>(m_currentTimeframe_ms));
     m_heatmapStream->setIntensityBytesPerCell(m_intensityBytesPerCell);
@@ -503,10 +507,15 @@ void UnifiedGridRenderer::init() {
             m_heatmapTickSize = tickSize;
             emit heatmapTickSizeChanged();
         }
+        int64_t cadenceMs = m_timeAuthority.activeTimeframeMs();
+        if (cadenceMs <= 0) {
+            cadenceMs = (timeframeMs > 0) ? timeframeMs : m_currentTimeframe_ms;
+            m_timeAuthority.setActiveTimeframeMs(cadenceMs);
+        }
         if (m_heatmapStream) {
             m_heatmapStream->updateRange(minPrice, maxPrice, tickSize);
-            if (timeframeMs > 0) {
-                m_heatmapStream->setAppendMs(static_cast<int>(timeframeMs));
+            if (cadenceMs > 0) {
+                m_heatmapStream->setAppendMs(static_cast<int>(cadenceMs));
             }
         }
 
@@ -556,12 +565,15 @@ void UnifiedGridRenderer::init() {
         if (m_heatmapStream) {
             const qint64 nowMs = m_heatmapClock.elapsed();
             m_heatmapStream->ingestSlice(sliceStartMs,
-                                         static_cast<int>(timeframeMs),
+                                         static_cast<int>(cadenceMs),
                                          intensityColumn,
                                          liquidityColumn,
                                          liquidityScale,
                                          nowMs);
             m_heatmapStream->updateTimeOffset(0.0f);
+            m_timeAuthority.observeEventTime(
+                (sliceEndMs > sliceStartMs) ? sliceEndMs : (sliceStartMs + cadenceMs),
+                nowMs);
         }
         if (debug) {
             const int writeColumn = m_heatmapStream ? m_heatmapStream->writeColumn() : 0;
@@ -573,7 +585,7 @@ void UnifiedGridRenderer::init() {
             if (m_autoScrollController->initializeViewport(*m_viewState,
                                                            *m_heatmapStream,
                                                            sliceStartMs,
-                                                           static_cast<int>(timeframeMs))) {
+                                                           static_cast<int>(cadenceMs))) {
                 m_heatmapViewportInitialized = true;
                 if (debug) {
                     const auto snapshot = m_heatmapStream->snapshot();
@@ -589,7 +601,7 @@ void UnifiedGridRenderer::init() {
                 const bool applied = m_autoScrollController->applySliceAutoScroll(*m_viewState,
                                                                                   *m_heatmapStream,
                                                                                   sliceStartMs,
-                                                                                  static_cast<int>(timeframeMs));
+                                                                                  static_cast<int>(cadenceMs));
                 if (applied && m_panSyncPending) {
                     m_viewState->clearPanVisualOffset();
                     m_panSyncPending = false;
@@ -757,18 +769,22 @@ void UnifiedGridRenderer::init() {
         m_heatmapRenderTimer = new QTimer(this);
         connect(m_heatmapRenderTimer, &QTimer::timeout, this, [this]() {
             const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
+            const qint64 nowMs = m_heatmapClock.elapsed();
+            const auto timeSnapshot = m_timeAuthority.snapshot(nowMs);
+            const int64_t cadenceMs = (timeSnapshot.activeTimeframeMs > 0)
+                ? timeSnapshot.activeTimeframeMs
+                : static_cast<int64_t>(snapshot.appendMs);
             if (!m_useGpuHeatmap || snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0 ||
-                snapshot.appendMs <= 0) {
+                cadenceMs <= 0) {
                 return;
             }
             const bool dragging = (m_viewState && m_viewState->isDragging());
-            const qint64 nowMs = m_heatmapClock.elapsed();
             const qint64 lastAppendMs = m_heatmapStream ? m_heatmapStream->lastAppendMs() : 0;
             const qint64 delta = nowMs - lastAppendMs;
             const bool useFractionalOffset = (m_viewState && m_viewState->isAutoScrollEnabled() &&
                                               m_autoScrollController && !m_autoScrollController->smoothEnabled());
             const float frac = useFractionalOffset
-                ? std::clamp(static_cast<float>(delta) / static_cast<float>(snapshot.appendMs), 0.0f, 1.0f)
+                ? std::clamp(static_cast<float>(delta) / static_cast<float>(cadenceMs), 0.0f, 1.0f)
                 : 0.0f;
             if (m_heatmapStream) {
                 m_heatmapStream->updateTimeOffset(frac);
@@ -777,7 +793,8 @@ void UnifiedGridRenderer::init() {
                 m_viewState && m_viewState->isAutoScrollEnabled() && m_heatmapStream) {
                 const bool applied = m_autoScrollController->applySmoothAutoScroll(*m_viewState,
                                                                                    *m_heatmapStream,
-                                                                                   nowMs);
+                                                                                   nowMs,
+                                                                                   cadenceMs);
                 if (applied && m_panSyncPending) {
                     m_viewState->clearPanVisualOffset();
                     m_panSyncPending = false;
@@ -800,7 +817,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         FrameContext frame;
         frame.surfaceBounds = boundingRect();
         frame.surfaceDpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-        frame.presentationTimeMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
+        const qint64 steadyNowMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
+        frame.time = m_timeAuthority.snapshot(steadyNowMs);
+        frame.presentationTimeMs = frame.time.nowPresentationMs;
         frame.heatmapSnapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
         frame.overlays.heatmap = (m_primaryField == 0);
         frame.overlays.footprint = (m_primaryField == 1);
@@ -981,7 +1000,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.mapping.actualDataEndMs = actualDataEnd;
         frame.mapping.dataMinPrice = snapshot.minPrice;
         frame.mapping.dataMaxPrice = snapshot.maxPrice;
-        frame.mapping.appendMs = static_cast<double>(snapshot.appendMs);
+        const int64_t mappingCadenceMs = (frame.time.activeTimeframeMs > 0)
+            ? frame.time.activeTimeframeMs
+            : static_cast<int64_t>(snapshot.appendMs);
+        frame.mapping.appendMs = static_cast<double>(mappingCadenceMs);
         frame.mapping.tickSize = snapshot.tickSize;
         frame.mapping.gridWidth = gridWidth;
         frame.mapping.gridHeight = gridHeight;
@@ -989,7 +1011,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.mapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
         frame.mapping.valid = (dataStartValid &&
                                snapshot.timeOriginMs != 0 &&
-                               snapshot.appendMs > 0 &&
+                               mappingCadenceMs > 0 &&
                                gridWidth > 0 &&
                                drawRect.width() > 0.0 &&
                                srcRect.width() > 0.0);
@@ -1430,7 +1452,9 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
         }
         event->accept();
         if (m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController && !panAppliedToAuto) {
-            m_autoScrollController->updateLagFromView(*m_viewState, *m_heatmapStream);
+            m_autoScrollController->updateLagFromView(*m_viewState,
+                                                      *m_heatmapStream,
+                                                      m_timeAuthority.activeTimeframeMs());
         }
         if (autoScroll) {
             m_panSyncPending = true;

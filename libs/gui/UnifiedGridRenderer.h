@@ -26,6 +26,7 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
+#include "render/TimeAuthority.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 
@@ -94,6 +95,7 @@ private:
             bool heatmap = false;
             bool footprint = false;
         };
+        TimeAuthority::Snapshot time;
         QRectF surfaceBounds;
         double surfaceDpr = 1.0;
         qint64 presentationTimeMs = 0;
@@ -134,6 +136,7 @@ private:
     int m_intensityBytesPerCell = 1;
     QElapsedTimer m_heatmapClock;
     std::unique_ptr<class HeatmapStreamState> m_heatmapStream;
+    TimeAuthority m_timeAuthority;
     std::unique_ptr<class ViewportAutoScrollController> m_autoScrollController;
     double m_autoScrollPaddingFrac = 0.08;
     bool m_smoothAutoScrollEnabled = true;

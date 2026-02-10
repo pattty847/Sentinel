@@ -563,7 +563,7 @@ _(empty)_
 ### F15: GUI Architecture Refactor (RendererHost + Overlays)
 **Status:** active
 **Created:** 2026-02-09
-**Updated:** 2026-02-09
+**Updated:** 2026-02-10
 
 #### Now (current sprint � do these first)
 - [x] Phase 1: MappingProvider seam for candles (remove direct CandlestickOverlayItem -> UnifiedGridRenderer mapping dependency)
@@ -574,7 +574,7 @@ _(empty)_
 #### Next (queued � pick up when Now is clear)
 - [x] Extract Footprint overlay module behind host orchestration
 - [x] Extract Heatmap overlay module behind host orchestration
-- [ ] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
+- [x] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
 
 #### Later (ideas / low-priority)
 - [ ] Full folder reorg after boundaries stabilize
@@ -589,4 +589,5 @@ _(empty)_
 - **2026-02-09** - Phase 2 started with candle path: CandlestickOverlayItem no longer depends on GridViewState and now consumes MappingFrameContext only via mappingProvider.
 - **2026-02-09** - Extracted footprint overlay module: `FootprintOverlayRenderer` now owns footprint node/image/texture lifecycle while UnifiedGridRenderer orchestrates snapshots and upload queue handoff.
 - **2026-02-09** - Extracted heatmap overlay module: `HeatmapOverlayRenderer` now owns heatmap node texture/palette lifecycle and upload application while UGR retains frame mapping and label orchestration.
+- **2026-02-10** - Added `TimeAuthority` seed and switched render cadence consumers (timer fractional offset, mapping cadence, auto-scroll lag/smooth) to explicit authority timeframe.
 
