@@ -573,7 +573,7 @@ _(empty)_
 
 #### Next (queued � pick up when Now is clear)
 - [x] Extract Footprint overlay module behind host orchestration
-- [ ] Extract Heatmap overlay module behind host orchestration
+- [x] Extract Heatmap overlay module behind host orchestration
 - [ ] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
 
 #### Later (ideas / low-priority)
@@ -588,4 +588,5 @@ _(empty)_
 - **2026-02-09** - Completed Phase 1 FrameContext snapshot plumbing: provider now exposes `MappingFrameContext`; candlestick overlay consumes immutable frame snapshots and generation counters.
 - **2026-02-09** - Phase 2 started with candle path: CandlestickOverlayItem no longer depends on GridViewState and now consumes MappingFrameContext only via mappingProvider.
 - **2026-02-09** - Extracted footprint overlay module: `FootprintOverlayRenderer` now owns footprint node/image/texture lifecycle while UnifiedGridRenderer orchestrates snapshots and upload queue handoff.
+- **2026-02-09** - Extracted heatmap overlay module: `HeatmapOverlayRenderer` now owns heatmap node texture/palette lifecycle and upload application while UGR retains frame mapping and label orchestration.
 

@@ -26,44 +26,11 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
+#include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
-
-struct ColorStop {
-    float position;
-    QColor color;
-
-    ColorStop(float pos, const QColor& col) : position(pos), color(col) {}
-};
-
-struct ColorGradient {
-    std::vector<ColorStop> stops;
-
-    ColorGradient() = default;
-    ColorGradient(std::initializer_list<ColorStop> stopList) : stops(stopList) {}
-
-    QColor interpolate(float t) const {
-        if (stops.empty()) return QColor(0, 0, 0);
-        if (stops.size() == 1 || t <= stops.front().position) return stops.front().color;
-        if (t >= stops.back().position) return stops.back().color;
-
-        for (size_t i = 0; i < stops.size() - 1; ++i) {
-            if (t >= stops[i].position && t <= stops[i + 1].position) {
-                const float localT = (t - stops[i].position) / (stops[i + 1].position - stops[i].position);
-                const QColor& c0 = stops[i].color;
-                const QColor& c1 = stops[i + 1].color;
-                return QColor(
-                    c0.red() + (c1.red() - c0.red()) * localT,
-                    c0.green() + (c1.green() - c0.green()) * localT,
-                    c0.blue() + (c1.blue() - c0.blue()) * localT
-                );
-            }
-        }
-        return stops.back().color;
-    }
-};
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_OBJECT
@@ -161,10 +128,7 @@ private:
     bool m_useGpuHeatmap = false;
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;
-    // Cross-thread flag: set on main thread, consumed/reset on render thread.
-    std::atomic<bool> m_heatmapTextureDirty{true};
-    QImage m_heatmapImage;
-    QImage m_heatmapPaletteImage;
+    HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
     bool m_heatmapViewportInitialized = false;
     int m_intensityBytesPerCell = 1;
@@ -180,10 +144,6 @@ private:
     int m_heatmapLabelPx = 14;
     int m_primaryField = 0;
 
-    double m_heatmapPaletteGamma = 2.0;
-    ColorGradient m_bidGradient;
-    ColorGradient m_askGradient;
-    bool m_heatmapPaletteDirty = true;
     TimeAxisMapping m_lastTimeAxisMapping;
     mutable std::mutex m_frameContextMutex;
     MappingFrameContext m_lastFrameContext;
@@ -365,8 +325,6 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
-    void ensureHeatmapImage();
-    void ensureHeatmapPaletteImage();
     void buildMsdfAtlas();
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
                            int gridWidth,

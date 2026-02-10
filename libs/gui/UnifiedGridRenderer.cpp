@@ -271,7 +271,7 @@ void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor& color) {
         return;
     }
     m_heatmapBackgroundColor = color;
-    m_heatmapTextureDirty.store(true, std::memory_order_release);
+    m_heatmapOverlay.setBackgroundColor(color);
     emit heatmapBackgroundColorChanged();
 }
 
@@ -387,21 +387,13 @@ void UnifiedGridRenderer::init() {
     m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
     m_heatmapStream->setAppendMs(static_cast<int>(m_currentTimeframe_ms));
     m_heatmapStream->setIntensityBytesPerCell(m_intensityBytesPerCell);
+    m_heatmapOverlay.setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
+    m_heatmapOverlay.setIntensityBytesPerCell(m_intensityBytesPerCell);
+    m_heatmapOverlay.setBackgroundColor(m_heatmapBackgroundColor);
     m_autoScrollController = std::make_unique<ViewportAutoScrollController>();
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
-    m_bidGradient = ColorGradient{
-        {0.0f, QColor(10, 40, 0)},
-        {0.5f, QColor(60, 160, 30)},
-        {1.0f, QColor(100, 255, 50)}
-    };
-    m_askGradient = ColorGradient{
-        {0.0f, QColor(40, 0, 0)},
-        {0.5f, QColor(180, 40, 20)},
-        {0.85f, QColor(255, 100, 30)},
-        {1.0f, QColor(255, 200, 50)}
-    };
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
@@ -424,7 +416,7 @@ void UnifiedGridRenderer::init() {
         const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
         if (!m_useGpuHeatmap) {
             m_useGpuHeatmap = true;
-            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_heatmapOverlay.requestFullTextureRebuild();
             m_heatmapClock.start();
         }
         if (column.isEmpty()) {
@@ -438,7 +430,7 @@ void UnifiedGridRenderer::init() {
         const int bytesPerCell = (intensityBytesPerCell > 0) ? intensityBytesPerCell : 1;
         if (bytesPerCell != m_intensityBytesPerCell) {
             m_intensityBytesPerCell = bytesPerCell;
-            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_heatmapOverlay.setIntensityBytesPerCell(bytesPerCell);
             if (m_heatmapStream) {
                 m_heatmapStream->setIntensityBytesPerCell(bytesPerCell);
             }
@@ -452,7 +444,7 @@ void UnifiedGridRenderer::init() {
         }
         if (columnHeight != m_heatmapGridHeight) {
             m_heatmapGridHeight = columnHeight;
-            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_heatmapOverlay.setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
             if (m_heatmapStream) {
                 m_heatmapStream->reset(m_heatmapGridWidth, m_heatmapGridHeight,
                                        minPrice, maxPrice, tickSize);
@@ -670,7 +662,7 @@ void UnifiedGridRenderer::init() {
             [this](double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight) {
                 if (!m_useGpuHeatmap) {
                     m_useGpuHeatmap = true;
-                    m_heatmapTextureDirty.store(true, std::memory_order_release);
+                    m_heatmapOverlay.requestFullTextureRebuild();
                     m_heatmapClock.start();
                 }
                 if (gridWidth > 0) {
@@ -679,7 +671,8 @@ void UnifiedGridRenderer::init() {
                 if (gridHeight > 0) {
                     m_heatmapGridHeight = gridHeight;
                 }
-                m_heatmapTextureDirty.store(true, std::memory_order_release);
+                m_heatmapOverlay.setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
+                m_heatmapOverlay.requestFullTextureRebuild();
                 m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
                 if (tickSize > 0.0 && tickSize != m_heatmapTickSize) {
                     m_heatmapTickSize = tickSize;
@@ -833,46 +826,19 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
         if (!texNode) {
             texNode = new HeatmapIntensityNode();
-            m_heatmapTextureDirty.store(true, std::memory_order_release);
+            m_heatmapOverlay.onRootRebuilt();
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
             m_footprintOverlay.onRootRebuilt();
         }
-
-        if (m_heatmapTextureDirty.load(std::memory_order_acquire)) {
-            ensureHeatmapImage();
-            ensureHeatmapPaletteImage();
-            auto* intensityTexture = window()->createTextureFromImage(m_heatmapImage);
-            if (!intensityTexture) {
-                const QImage::Format fallbackFormat =
-                    (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
-                QImage fallback = m_heatmapImage.convertToFormat(fallbackFormat);
-                intensityTexture = window()->createTextureFromImage(fallback);
-            }
-            auto* paletteTexture = window()->createTextureFromImage(m_heatmapPaletteImage);
-            if (!intensityTexture || !paletteTexture) {
-                delete intensityTexture;
-                delete paletteTexture;
-            } else {
-                intensityTexture->setFiltering(QSGTexture::Nearest);
-                paletteTexture->setFiltering(QSGTexture::Linear);
-                texNode->setTextures(intensityTexture, paletteTexture);
-                m_heatmapTextureDirty.store(false, std::memory_order_release);
-            }
-        }
-        if (m_heatmapPaletteDirty && !m_heatmapImage.isNull()) {
-            m_heatmapPaletteImage = QImage();  // Force regeneration
-            ensureHeatmapPaletteImage();
-            m_heatmapTextureDirty.store(true, std::memory_order_release);  // Trigger full texture update
-        }
+        m_heatmapOverlay.setGridDimensions(gridWidth, gridHeight);
+        m_heatmapOverlay.setIntensityBytesPerCell(m_intensityBytesPerCell);
+        m_heatmapOverlay.setBackgroundColor(m_heatmapBackgroundColor);
 
         const QRectF bounds = frame.surfaceBounds;
         QRectF drawRect = bounds;
         QRectF srcRect(0, 0, gridWidth, gridHeight);
         texNode->setRect(drawRect);
-        texNode->setGamma(static_cast<float>(m_heatmapGamma));
-        texNode->setContrast(static_cast<float>(m_heatmapContrast));
-        texNode->setShaderFloor(static_cast<float>(m_heatmapShaderFloor));
         const int64_t lastSlice = snapshot.lastSliceStartMs;
         double dataStart = 0.0;
         double dataEnd = 0.0;
@@ -1059,6 +1025,26 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                 framePendingFootprintUploads.swap(m_pendingFootprintUploads);
             }
         }
+        std::vector<HeatmapOverlayRenderer::PendingUpload> framePendingHeatmapUploads;
+        if (m_heatmapStream) {
+            std::vector<HeatmapStreamState::PendingColumn> pendingUploads;
+            m_heatmapStream->takePendingUploads(pendingUploads);
+            framePendingHeatmapUploads.reserve(pendingUploads.size());
+            for (auto& upload : pendingUploads) {
+                framePendingHeatmapUploads.push_back({upload.x, std::move(upload.data)});
+            }
+        }
+        m_heatmapOverlay.applyToNode(window(),
+                                     texNode,
+                                     drawHeatmap,
+                                     static_cast<float>(m_heatmapGamma),
+                                     static_cast<float>(m_heatmapContrast),
+                                     static_cast<float>(m_heatmapShaderFloor),
+                                     forceFull,
+                                     snapshot.timeOffset,
+                                     drawRect,
+                                     srcRect,
+                                     framePendingHeatmapUploads);
         m_footprintOverlay.render(window(),
                                   texNode,
                                   drawFootprint,
@@ -1071,9 +1057,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                                   framePendingFootprintUploads);
 
         if (!drawHeatmap) {
-            texNode->setRect(QRectF());
-            texNode->setSourceRect(QRectF());
-            texNode->setTimeOffset(0.0f);
             m_whiteGlyphNode = nullptr;
             m_blackGlyphNode = nullptr;
             return texNode;
@@ -1164,14 +1147,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             }
         }
 
-        std::vector<HeatmapStreamState::PendingColumn> pendingUploads;
-        if (m_heatmapStream) {
-            m_heatmapStream->takePendingUploads(pendingUploads);
-        }
-        for (auto& upload : pendingUploads) {
-            texNode->enqueueColumn(upload.x, std::move(upload.data));
-        }
-
         if (!m_fpsTimer.isValid()) {
             m_fpsTimer.start();
             m_fpsFrameCount = 0;
@@ -1189,57 +1164,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     }
 
     return oldNode;
-}
-
-void UnifiedGridRenderer::ensureHeatmapImage() {
-    if (!m_heatmapImage.isNull() && m_heatmapImage.width() == m_heatmapGridWidth &&
-        m_heatmapImage.height() == m_heatmapGridHeight) {
-        const QImage::Format expectedFormat =
-            (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
-        if (m_heatmapImage.format() == expectedFormat) {
-            return;
-        }
-    }
-
-    const QImage::Format format =
-        (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
-    m_heatmapImage = QImage(m_heatmapGridWidth, m_heatmapGridHeight, format);
-    if (m_heatmapImage.isNull()) {
-        return;
-    }
-    m_heatmapImage.fill(m_heatmapBackgroundColor);
-}
-
-void UnifiedGridRenderer::ensureHeatmapPaletteImage() {
-    if (!m_heatmapPaletteImage.isNull() && !m_heatmapPaletteDirty) {
-        return;
-    }
-
-    const int width = 512;
-    const int height = 1;
-    m_heatmapPaletteImage = QImage(width, height, QImage::Format_ARGB32);
-    if (m_heatmapPaletteImage.isNull()) {
-        return;
-    }
-
-    auto* row = reinterpret_cast<QRgb*>(m_heatmapPaletteImage.scanLine(0));
-    const float gamma = static_cast<float>(m_heatmapPaletteGamma);
-
-    for (int i = 0; i < width; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(width - 1);
-        const bool isAsk = (i >= width / 2);
-        const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
-        const float x = std::clamp(localT, 0.0f, 1.0f);
-        const float curve = std::pow(x, gamma);
-        const QColor color = isAsk ? m_askGradient.interpolate(curve) : m_bidGradient.interpolate(curve);
-
-        row[i] = qRgba(color.red(), color.green(), color.blue(), 255);
-    }
-
-    m_heatmapPaletteDirty = false;
-    sLog_Render("Heatmap palette regenerated with gamma=" << gamma
-                << " bid_stops=" << m_bidGradient.stops.size()
-                << " ask_stops=" << m_askGradient.stops.size());
 }
 
 void UnifiedGridRenderer::buildMsdfAtlas() {
@@ -1295,7 +1219,8 @@ void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) {
         gridChanged = true;
     }
     if (gridChanged) {
-        m_heatmapTextureDirty.store(true, std::memory_order_release);
+        m_heatmapOverlay.setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
+        m_heatmapOverlay.requestFullTextureRebuild();
         if (m_heatmapStream) {
             m_heatmapStream->setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
         }

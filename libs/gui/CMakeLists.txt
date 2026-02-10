@@ -62,6 +62,8 @@ set(GRID_CORE_SOURCES
     render/TimeAxisMapping.hpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
+    render/HeatmapOverlayRenderer.hpp
+    render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp
     render/CandlestickBatched.cpp
     render/MsdfAtlas.hpp
