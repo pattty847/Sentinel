@@ -593,4 +593,5 @@ _(empty)_
 - **2026-02-10** - Removed remaining implicit `snapshot.appendMs` ownership in UGR helper/mapping/debug paths; these now resolve cadence from `TimeAuthority` with stream snapshot only as fallback.
 - **2026-02-10** - Extended published `MappingFrameContext` with explicit time snapshot fields (`activeTimeframeMs`, `nowEventTimeMs`, `hasEventTime`) to keep overlay consumption immutable and host-independent.
 - **2026-02-10** - Added boundary progression metadata to `TimeAuthority` snapshot (`currentBoundaryStartMs`, `nextBoundaryStartMs`, `boundarySequence`) and published it via `MappingFrameContext` for future empty-bar/slice overlay behavior.
+- **2026-02-10** - Candlestick overlay now treats `boundarySequence` (when cadence matches timeframe) as a geometry dirty trigger, enabling deterministic cadence-driven updates beyond payload-only generation bumps.
 

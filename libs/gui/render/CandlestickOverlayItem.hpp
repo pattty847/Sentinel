@@ -9,6 +9,7 @@ Threading: Update on GUI thread; rendering on render thread.
 #include <QPointer>
 #include <vector>
 #include <cstdint>
+#include <limits>
 #include <QtQml/qqmlregistration.h>
 #include "TimeAxisMapping.hpp"
 #include "ITimeAxisMappingProvider.hpp"
@@ -68,6 +69,7 @@ private:
     QMetaObject::Connection m_candleDirtyConn;
 
     uint64_t m_lastCandleGeneration = 0;
+    qint64 m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     QSizeF m_lastSize;
     bool m_geometryDirty = true;
     TimeAxisMapping m_lastMapping;

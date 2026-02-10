@@ -125,6 +125,7 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
     }
     m_mappingProviderObject = provider;
     m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
+    m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     if (m_mappingProviderObject) {
         m_mappingViewportConn = QObject::connect(m_mappingProviderObject.data(),
                                                  SIGNAL(viewportChanged()),
@@ -153,6 +154,7 @@ void CandlestickOverlayItem::setTimeframeSec(int sec) {
         return;
     }
     m_timeframeSec = sec;
+    m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     markGeometryDirty();
     emit timeframeSecChanged();
 }
@@ -234,6 +236,16 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     const QSizeF currentSize(width(), height());
     const uint64_t candleGeneration = frame.candleGeneration;
+    const qint64 expectedTfMs = static_cast<qint64>(m_timeframeSec) * 1000;
+    const bool cadenceMatches = (expectedTfMs > 0 && frame.activeTimeframeMs == expectedTfMs);
+    if (cadenceMatches && frame.boundarySequence != m_lastBoundarySequence) {
+        // Boundary progression comes from TimeAuthority and may advance with sparse/no-event windows.
+        // Treat it as a geometry-affecting trigger for candle cadence continuity.
+        m_geometryDirty = true;
+    }
+    if (cadenceMatches) {
+        m_lastBoundarySequence = frame.boundarySequence;
+    }
     if (!m_geometryDirty && m_lastCandleGeneration == candleGeneration && m_lastSize == currentSize) {
         return root;
     }
