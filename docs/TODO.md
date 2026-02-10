@@ -590,4 +590,6 @@ _(empty)_
 - **2026-02-09** - Extracted footprint overlay module: `FootprintOverlayRenderer` now owns footprint node/image/texture lifecycle while UnifiedGridRenderer orchestrates snapshots and upload queue handoff.
 - **2026-02-09** - Extracted heatmap overlay module: `HeatmapOverlayRenderer` now owns heatmap node texture/palette lifecycle and upload application while UGR retains frame mapping and label orchestration.
 - **2026-02-10** - Added `TimeAuthority` seed and switched render cadence consumers (timer fractional offset, mapping cadence, auto-scroll lag/smooth) to explicit authority timeframe.
+- **2026-02-10** - Removed remaining implicit `snapshot.appendMs` ownership in UGR helper/mapping/debug paths; these now resolve cadence from `TimeAuthority` with stream snapshot only as fallback.
+- **2026-02-10** - Extended published `MappingFrameContext` with explicit time snapshot fields (`activeTimeframeMs`, `nowEventTimeMs`, `hasEventTime`) to keep overlay consumption immutable and host-independent.
 

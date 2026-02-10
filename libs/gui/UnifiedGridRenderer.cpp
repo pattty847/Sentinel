@@ -838,6 +838,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             frame.viewport.autoScrollEnabled = m_viewState->isAutoScrollEnabled();
         }
         const auto& snapshot = frame.heatmapSnapshot;
+        const int64_t cadenceMs = (frame.time.activeTimeframeMs > 0)
+            ? frame.time.activeTimeframeMs
+            : static_cast<int64_t>(snapshot.appendMs);
         const bool drawHeatmap = frame.overlays.heatmap;
         const bool drawFootprint = frame.overlays.footprint;
         const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
@@ -864,15 +867,15 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         bool dataStartValid = false;
         double actualDataStart = 0.0;
         double actualDataEnd = 0.0;
-        if (snapshot.appendMs > 0 && gridWidth > 0) {
-            const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
+        if (cadenceMs > 0 && gridWidth > 0) {
+            const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * cadenceMs;
             dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
-                ? static_cast<double>(lastSlice + snapshot.appendMs)
+                ? static_cast<double>(lastSlice + cadenceMs)
                 : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
             dataStart = dataEnd - static_cast<double>(bufferSpanMs);
             dataStartValid = (dataEnd > dataStart);
             if (snapshot.filledColumns > 0) {
-                const int64_t filledSpanMs = static_cast<int64_t>(snapshot.filledColumns) * snapshot.appendMs;
+                const int64_t filledSpanMs = static_cast<int64_t>(snapshot.filledColumns) * cadenceMs;
                 actualDataEnd = dataEnd;
                 actualDataStart = dataEnd - static_cast<double>(filledSpanMs);
             }
@@ -884,7 +887,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         double viewMaxPriceF = 0.0;
 
         if (frame.viewport.valid &&
-            snapshot.appendMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
+            cadenceMs > 0 && snapshot.tickSize > 0.0 && snapshot.timeOriginMs != 0) {
             const qint64 timeStart = frame.viewport.timeStart;
             const qint64 timeEnd = frame.viewport.timeEnd;
             const double minPrice = frame.viewport.minPrice;
@@ -961,9 +964,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                             bounds.height() * (priceRatioBottom - priceRatioTop));
                         texNode->setRect(drawRect);
 
-                        const double srcW = std::clamp(overlapTimeSpan / snapshot.appendMs, 1.0, maxCoordX);
+                        const double srcW = std::clamp(overlapTimeSpan / cadenceMs, 1.0, maxCoordX);
                         const double srcH = std::clamp(overlapPriceSpan / snapshot.tickSize, 1.0, maxCoordY);
-                        double srcX = (overlapStart - dataStart) / snapshot.appendMs;
+                        double srcX = (overlapStart - dataStart) / cadenceMs;
                         double srcY = (snapshot.maxPrice - overlapMax) / snapshot.tickSize;
                         srcX = std::clamp(srcX, 0.0, maxCoordX - srcW);
                         srcY = std::clamp(srcY, 0.0, maxCoordY - srcH);
@@ -1000,10 +1003,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.mapping.actualDataEndMs = actualDataEnd;
         frame.mapping.dataMinPrice = snapshot.minPrice;
         frame.mapping.dataMaxPrice = snapshot.maxPrice;
-        const int64_t mappingCadenceMs = (frame.time.activeTimeframeMs > 0)
-            ? frame.time.activeTimeframeMs
-            : static_cast<int64_t>(snapshot.appendMs);
-        frame.mapping.appendMs = static_cast<double>(mappingCadenceMs);
+        frame.mapping.appendMs = static_cast<double>(cadenceMs);
         frame.mapping.tickSize = snapshot.tickSize;
         frame.mapping.gridWidth = gridWidth;
         frame.mapping.gridHeight = gridHeight;
@@ -1011,7 +1011,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         frame.mapping.timeOffset = forceFull ? 0.0f : snapshot.timeOffset;
         frame.mapping.valid = (dataStartValid &&
                                snapshot.timeOriginMs != 0 &&
-                               mappingCadenceMs > 0 &&
+                               cadenceMs > 0 &&
                                gridWidth > 0 &&
                                drawRect.width() > 0.0 &&
                                srcRect.width() > 0.0);
@@ -1024,6 +1024,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             published.surfaceBounds = frame.surfaceBounds;
             published.surfaceDpr = frame.surfaceDpr;
             published.presentationTimeMs = frame.presentationTimeMs;
+            published.activeTimeframeMs = frame.time.activeTimeframeMs;
+            published.nowEventTimeMs = frame.time.nowEventMs;
+            published.hasEventTime = frame.time.hasEvent;
             published.viewportValid = frame.viewport.valid;
             published.viewportTimeStart = frame.viewport.timeStart;
             published.viewportTimeEnd = frame.viewport.timeEnd;
@@ -1322,15 +1325,18 @@ void UnifiedGridRenderer::applyLabelUploads(
 
 void UnifiedGridRenderer::fitHeatmapToDataRange() {
     const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
-    if (!m_viewState || snapshot.appendMs <= 0 || snapshot.gridWidth <= 0) {
+    const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
+        ? m_timeAuthority.activeTimeframeMs()
+        : static_cast<int64_t>(snapshot.appendMs);
+    if (!m_viewState || cadenceMs <= 0 || snapshot.gridWidth <= 0) {
         return;
     }
     if (snapshot.lastSliceStartMs == std::numeric_limits<int64_t>::min()) {
         return;
     }
     const int64_t bufferSpanMs = std::max<int64_t>(
-        1, static_cast<int64_t>(snapshot.gridWidth) * snapshot.appendMs);
-    const int64_t dataEnd = snapshot.lastSliceStartMs + snapshot.appendMs;
+        1, static_cast<int64_t>(snapshot.gridWidth) * cadenceMs);
+    const int64_t dataEnd = snapshot.lastSliceStartMs + cadenceMs;
     const int64_t dataStart = dataEnd - bufferSpanMs;
     if (dataEnd <= dataStart) {
         return;
@@ -1508,16 +1514,19 @@ bool UnifiedGridRenderer::heatmapDataTimeRange(qint64& outStart, qint64& outEnd)
         return false;
     }
     const auto snapshot = m_heatmapStream->snapshot();
-    if (snapshot.appendMs <= 0 || snapshot.gridWidth <= 0) {
+    const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
+        ? m_timeAuthority.activeTimeframeMs()
+        : static_cast<int64_t>(snapshot.appendMs);
+    if (cadenceMs <= 0 || snapshot.gridWidth <= 0) {
         return false;
     }
-    const int64_t bufferSpanMs = static_cast<int64_t>(snapshot.gridWidth) * snapshot.appendMs;
+    const int64_t bufferSpanMs = static_cast<int64_t>(snapshot.gridWidth) * cadenceMs;
     if (bufferSpanMs <= 0) {
         return false;
     }
     int64_t dataEnd = 0;
     if (snapshot.lastSliceStartMs != std::numeric_limits<int64_t>::min()) {
-        dataEnd = snapshot.lastSliceStartMs + snapshot.appendMs;
+        dataEnd = snapshot.lastSliceStartMs + cadenceMs;
     } else if (snapshot.timeOriginMs != 0) {
         dataEnd = snapshot.timeOriginMs + bufferSpanMs;
     } else {
@@ -1571,6 +1580,9 @@ QString UnifiedGridRenderer::getViewportMathDebug() const {
     const bool forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
     const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
     const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
+    const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
+        ? m_timeAuthority.activeTimeframeMs()
+        : static_cast<int64_t>(snapshot.appendMs);
     const double viewTimeSpan = timeEndF - timeStartF;
     const double viewPriceSpan = maxPriceF - minPriceF;
 
@@ -1588,14 +1600,14 @@ QString UnifiedGridRenderer::getViewportMathDebug() const {
                  .arg(snapshot.tickSize, 0, 'f', 6)
                  .arg(gridWidth)
                  .arg(gridHeight)
-                 .arg(snapshot.appendMs);
+                 .arg(cadenceMs);
 
-    if (snapshot.appendMs > 0 && snapshot.tickSize > 0.0 &&
+    if (cadenceMs > 0 && snapshot.tickSize > 0.0 &&
         snapshot.timeOriginMs != 0 && viewTimeSpan > 0.0 && viewPriceSpan > 0.0) {
-        const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * snapshot.appendMs;
+        const int64_t bufferSpanMs = static_cast<int64_t>(gridWidth) * cadenceMs;
         const int64_t lastSlice = snapshot.lastSliceStartMs;
         double dataEnd = (lastSlice != std::numeric_limits<int64_t>::min() && bufferSpanMs > 0)
-            ? static_cast<double>(lastSlice + snapshot.appendMs)
+            ? static_cast<double>(lastSlice + cadenceMs)
             : static_cast<double>(snapshot.timeOriginMs + bufferSpanMs);
         double dataStart = dataEnd - static_cast<double>(bufferSpanMs);
         const double dataMin = snapshot.minPrice;
@@ -1635,9 +1647,9 @@ QString UnifiedGridRenderer::getViewportMathDebug() const {
 
             const double maxCoordX = static_cast<double>(gridWidth);
             const double maxCoordY = static_cast<double>(gridHeight);
-            const double srcW = std::clamp(overlapTimeSpan / snapshot.appendMs, 1.0, maxCoordX);
+            const double srcW = std::clamp(overlapTimeSpan / cadenceMs, 1.0, maxCoordX);
             const double srcH = std::clamp(overlapPriceSpan / snapshot.tickSize, 1.0, maxCoordY);
-            double srcX = (overlapStart - dataStart) / snapshot.appendMs;
+            double srcX = (overlapStart - dataStart) / cadenceMs;
             double srcY = (snapshot.maxPrice - overlapMax) / snapshot.tickSize;
             srcX = std::clamp(srcX, 0.0, maxCoordX - srcW);
             srcY = std::clamp(srcY, 0.0, maxCoordY - srcH);
@@ -1682,6 +1694,9 @@ QString UnifiedGridRenderer::getDataPipelineDebug() const {
     const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
     const int pendingUploads = m_heatmapStream->pendingUploadCount();
     const int writeColumn = m_heatmapStream->writeColumn();
+    const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
+        ? m_timeAuthority.activeTimeframeMs()
+        : static_cast<int64_t>(snapshot.appendMs);
     const qint64 lastAppendMs = m_heatmapStream->lastAppendMs();
     const qint64 nowMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
     const qint64 ageMs = (lastAppendMs > 0 && nowMs >= lastAppendMs) ? (nowMs - lastAppendMs) : -1;
@@ -1689,7 +1704,7 @@ QString UnifiedGridRenderer::getDataPipelineDebug() const {
     lines << QString("grid: %1x%2  append: %3 ms")
                  .arg(gridWidth)
                  .arg(gridHeight)
-                 .arg(snapshot.appendMs)
+                 .arg(cadenceMs)
           << QString("tick: %1  range: %2 → %3")
                  .arg(snapshot.tickSize, 0, 'f', 6)
                  .arg(snapshot.minPrice, 0, 'f', 4)

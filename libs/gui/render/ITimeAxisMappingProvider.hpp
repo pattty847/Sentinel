@@ -11,6 +11,9 @@ struct MappingFrameContext {
     QRectF surfaceBounds;
     double surfaceDpr = 1.0;
     qint64 presentationTimeMs = 0;
+    qint64 activeTimeframeMs = 0;
+    qint64 nowEventTimeMs = 0;
+    bool hasEventTime = false;
 
     bool viewportValid = false;
     qint64 viewportTimeStart = 0;
