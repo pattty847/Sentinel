@@ -1026,6 +1026,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             published.presentationTimeMs = frame.presentationTimeMs;
             published.activeTimeframeMs = frame.time.activeTimeframeMs;
             published.nowEventTimeMs = frame.time.nowEventMs;
+            published.currentBoundaryStartMs = frame.time.currentBoundaryStartMs;
+            published.nextBoundaryStartMs = frame.time.nextBoundaryStartMs;
+            published.boundarySequence = frame.time.boundarySequence;
             published.hasEventTime = frame.time.hasEvent;
             published.viewportValid = frame.viewport.valid;
             published.viewportTimeStart = frame.viewport.timeStart;

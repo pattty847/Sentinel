@@ -13,6 +13,9 @@ struct MappingFrameContext {
     qint64 presentationTimeMs = 0;
     qint64 activeTimeframeMs = 0;
     qint64 nowEventTimeMs = 0;
+    qint64 currentBoundaryStartMs = 0;
+    qint64 nextBoundaryStartMs = 0;
+    qint64 boundarySequence = 0;
     bool hasEventTime = false;
 
     bool viewportValid = false;

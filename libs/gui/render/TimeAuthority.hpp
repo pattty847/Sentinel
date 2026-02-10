@@ -12,6 +12,9 @@ public:
         int64_t lastEventTimeMs = 0;
         int64_t nowEventMs = 0;
         int64_t nowPresentationMs = 0;
+        int64_t currentBoundaryStartMs = 0;
+        int64_t nextBoundaryStartMs = 0;
+        int64_t boundarySequence = 0;
         bool hasEvent = false;
     };
 

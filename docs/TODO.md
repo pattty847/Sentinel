@@ -592,4 +592,5 @@ _(empty)_
 - **2026-02-10** - Added `TimeAuthority` seed and switched render cadence consumers (timer fractional offset, mapping cadence, auto-scroll lag/smooth) to explicit authority timeframe.
 - **2026-02-10** - Removed remaining implicit `snapshot.appendMs` ownership in UGR helper/mapping/debug paths; these now resolve cadence from `TimeAuthority` with stream snapshot only as fallback.
 - **2026-02-10** - Extended published `MappingFrameContext` with explicit time snapshot fields (`activeTimeframeMs`, `nowEventTimeMs`, `hasEventTime`) to keep overlay consumption immutable and host-independent.
+- **2026-02-10** - Added boundary progression metadata to `TimeAuthority` snapshot (`currentBoundaryStartMs`, `nextBoundaryStartMs`, `boundarySequence`) and published it via `MappingFrameContext` for future empty-bar/slice overlay behavior.
 
