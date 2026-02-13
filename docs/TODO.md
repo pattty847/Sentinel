@@ -599,3 +599,40 @@ _(empty)_
 - **2026-02-10** - Candle visibility polish: enforce minimum candle body height for flat/empty bars and force candle geometry dirty on `panVisualOffsetChanged` for live drag updates.
 - **2026-02-10** - Heatmap/candle cadence sync pass: server now emits forming heatmap updates each 50ms sampler tick and client heatmap ingest treats same-bucket slices as in-place column refresh (no reset/extra append).
 
+---
+
+### F16: Screener Dock + Lab Candle Viewer
+**Status:** active
+**Created:** 2026-02-11
+**Updated:** 2026-02-13
+
+> Full plan: `docs/private/plans/SCREENER_AND_LAB.md`
+
+#### Now
+- [ ] Wire crypto row click → heatmap symbol subscription in MainWindowGPU
+- [ ] Start screener_server.py on app launch (QProcess) or document manual start
+- [ ] Lab → pure candle viewer (wire CandlestickBatched to live data, drop demo scaffolding)
+
+#### Next
+- [ ] Field picker UI in ScreenerDock (select which indicators to show)
+- [ ] yfinance candle backend for stocks in Lab viewer
+- [ ] Add ScreenerDock to LayoutOrchestrator default layout
+
+#### Later
+- [ ] Persist screener filter config (selected fields, thresholds) via LayoutManager/QSettings
+- [ ] Alert on screener condition (e.g. RSI crosses threshold)
+- [ ] Multi-symbol watchlist sync between screener and heatmap
+
+#### Done
+- [x] `scripts/screener/screener_server.py` — persistent aiohttp/WebSocket server (2026-02-13)
+- [x] `scripts/screener/screener_fetch.py` — one-shot CLI query (2026-02-13)
+- [x] `scripts/screener/screener_core.py` — shared field resolution + serialization (2026-02-13)
+- [x] `scripts/screener/test_screener.py` — 3 tests all green (2026-02-13)
+- [x] `ScreenerDock` — new dock, QTableView, WebSocket client, crypto+stocks, interval slider (2026-02-13)
+- [x] Wired into DockFactory, MenuBuilder, LayoutOrchestrator, MainWindowGpu (2026-02-13)
+- [x] Qt6::WebSockets added to CMakeLists — clean build (2026-02-13)
+
+#### Session log
+- **2026-02-11** — Explored tvscreener library, defined architecture. Python server pattern mirrors SEC backend. Lab repurposed as candle viewer. Routing: crypto→heatmap+Lab, stocks→Lab only.
+- **2026-02-13** — Built full Python screener backend (server+fetch+core+tests, all passing). Built ScreenerDock C++ widget with WebSocket client, table, interval slider, asset toggle. Wired into all plumbing. Clean build. Next: wire row click → heatmap, launch server from app.
+

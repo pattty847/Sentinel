@@ -21,6 +21,7 @@ class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
+class ScreenerDock;
 
 class LayoutOrchestrator {
 public:
@@ -31,6 +32,7 @@ public:
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
+        ScreenerDock* screenerDock = nullptr;
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);

@@ -5,6 +5,7 @@
 #include "../widgets/AICommentaryFeedDock.hpp"
 #include "../widgets/LabDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
+#include "../widgets/ScreenerDock.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QInputDialog>
 #include <QLineEdit>
@@ -43,6 +44,9 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     }
     if (docks.labDock) {
         m_viewMenu->addAction(docks.labDock->toggleViewAction());
+    }
+    if (docks.screenerDock) {
+        m_viewMenu->addAction(docks.screenerDock->toggleViewAction());
     }
 }
 

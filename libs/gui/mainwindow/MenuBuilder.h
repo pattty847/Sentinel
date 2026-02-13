@@ -23,6 +23,7 @@ class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
+class ScreenerDock;
 
 class MenuBuilder {
 public:
@@ -33,6 +34,7 @@ public:
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
+        ScreenerDock* screenerDock = nullptr;
     };
 
     struct Callbacks {

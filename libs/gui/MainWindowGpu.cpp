@@ -22,6 +22,7 @@
 #include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
+#include "widgets/ScreenerDock.hpp"
 #include "widgets/CopenetFeedDock.hpp"
 #include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
@@ -185,6 +186,8 @@ void MainWindowGPU::setupUI() {
     m_aiCommentaryDock = docks.aiCommentaryDock;
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
+    m_screenerDock = docks.screenerDock;
+    // ScreenerDock: crypto row click -> heatmap symbol (wired when Lab routing is ready)
     
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
@@ -493,7 +496,8 @@ void MainWindowGPU::setupMenuBar() {
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
-    
+    docks.screenerDock = m_screenerDock;
+
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
@@ -681,5 +685,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.labDock = m_labDock;
     docks.watchlistDock = m_watchlistDock;
     docks.watchlistDock = m_watchlistDock;
+    docks.screenerDock = m_screenerDock;
     return docks;
 }

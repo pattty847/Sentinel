@@ -26,6 +26,7 @@ class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
+class ScreenerDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
@@ -89,6 +90,7 @@ private:
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
     LabDock* m_labDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
+    ScreenerDock* m_screenerDock = nullptr;
     
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;

@@ -94,6 +94,7 @@ set(WIDGET_SOURCES
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"
+    "widgets/ScreenerDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
     "widgets/HeatmapSettingsDialog.cpp"
@@ -246,6 +247,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Widgets
         Qt6::Charts
         Qt6::Network
+        Qt6::WebSockets
         Qt6::Quick
         Qt6::Qml
         Qt6::QuickControls2

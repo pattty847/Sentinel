@@ -86,7 +86,7 @@ endif()
 FetchContent_MakeAvailable(googletest)
 
 # Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets QuickControls2 ShaderTools Svg Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network WebSockets Quick Qml QuickWidgets QuickControls2 ShaderTools Svg Test)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
