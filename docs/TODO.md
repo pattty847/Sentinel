@@ -130,7 +130,7 @@ _(no entries yet)_
 
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-03
+**Updated:** 2026-02-14
 
 #### Now (current sprint — do these first)
 
@@ -166,6 +166,8 @@ _(no entries yet)_
 * **2026-02-03** - Wire toolbar timeframe to renderer/candles and add 1s option.
 * **2026-02-03** - Add SENTINEL_CHART_DEBUG logging for timeframe + candle overlay diagnostics.
 * **2026-02-03** - Apply panVisualOffset in viewport transform to prevent candle snap.
+* **2026-02-14** - Refactored UnifiedGridRenderer hotspots: extracted heatmap ingest/timer helpers, moved label-ring ownership to HeatmapStreamState, and shared viewport/render-rect math via UgrFrameMath.
+* **2026-02-14** - Decomposed updatePaintNode into frame-build/publish/upload-drain/overlay/label/FPS helpers; updatePaintNode now acts as orchestration-only hot-path entry.
 
 ---
 

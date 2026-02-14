@@ -32,6 +32,7 @@
 
 class DataProcessor;
 class MsdfGlyphNode;
+class HeatmapIntensityNode;
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_OBJECT
@@ -153,11 +154,6 @@ private:
 
     MsdfAtlas m_msdfAtlas;
     bool m_msdfAtlasBuilt = false;
-    int m_labelRingGridWidth = 0;
-    int m_labelRingGridHeight = 0;
-    std::vector<uint16_t> m_labelLiquidityRing;
-    std::vector<uint16_t> m_labelIntensityRing;
-    std::vector<double> m_labelLiquidityScales;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
@@ -328,10 +324,48 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
+    struct HeatmapColumnEvent {
+        int64_t sliceStartMs = 0;
+        int64_t sliceEndMs = 0;
+        int64_t timeframeMs = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+        QByteArray column;
+        QByteArray liquidityColumn;
+        double liquidityScale = 1.0;
+        int intensityBytesPerCell = 1;
+    };
+
     void buildMsdfAtlas();
-    void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
-                           int gridWidth,
-                           int gridHeight);
+    bool ingestHeatmapColumnEvent(const HeatmapColumnEvent& event);
+    void connectDataProcessorSignals();
+    void startHeatmapRenderLoop();
+    FrameContext buildFrameContext() const;
+    HeatmapIntensityNode* ensureHeatmapRootNode(QSGNode* oldNode);
+    void computeAndApplyFrameMapping(FrameContext& frame,
+                                     HeatmapIntensityNode* texNode,
+                                     int64_t cadenceMs,
+                                     int gridWidth,
+                                     int gridHeight);
+    void publishFrameContext(const FrameContext& frame);
+    void drainFrameUploads(std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
+    void renderOverlays(HeatmapIntensityNode* texNode,
+                        const FrameContext& frame,
+                        bool drawHeatmap,
+                        bool drawFootprint,
+                        int gridWidth,
+                        int gridHeight,
+                        std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
+    void updateLabelGeometry(HeatmapIntensityNode* texNode,
+                             const FrameContext& frame,
+                             const HeatmapStreamState::Snapshot& snapshot,
+                             int gridWidth,
+                             int gridHeight);
+    void clearLabelGeometry();
+    void updateFpsEstimate();
 
 private:
     void setIntensityScale(double scale);

@@ -62,6 +62,8 @@ set(GRID_CORE_SOURCES
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
     render/TimeAxisMapping.hpp
+    render/UgrFrameMath.hpp
+    render/UgrFrameMath.cpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
     render/HeatmapOverlayRenderer.hpp
