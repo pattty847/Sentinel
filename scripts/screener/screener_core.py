@@ -11,19 +11,25 @@ from tvscreener import CryptoField, StockField
 CRYPTO_BASE_FIELDS = [
     CryptoField.NAME,
     CryptoField.PRICE,
-    CryptoField.CHANGE,           # absolute change (default tf)
-    CryptoField.CHANGE_PERCENT,   # % change (default tf)
+    CryptoField.CHANGE_PERCENT,
     CryptoField.VOLUME,
+    CryptoField.RELATIVE_VOLUME,
+    CryptoField.MARKET_CAP,
+    CryptoField.CRYPTO_CATEGORIES,
+    CryptoField.SECTOR,
     CryptoField.EXCHANGE,
 ]
 
 STOCK_BASE_FIELDS = [
     StockField.NAME,
     StockField.PRICE,
-    StockField.CHANGE,
     StockField.CHANGE_PERCENT,
     StockField.VOLUME,
+    StockField.RELATIVE_VOLUME,
     StockField.MARKET_CAPITALIZATION,
+    StockField.PRICE_TO_EARNINGS_RATIO_TTM,
+    StockField.DIVIDENDS_YIELD_CURRENT,
+    StockField.SECTOR,
     StockField.EXCHANGE,
 ]
 
@@ -39,6 +45,10 @@ _CRYPTO_FIELD_ALIASES: dict[str, str] = {
     "CHANGE_1D":        "CHANGE_1W",        # no explicit 1D on crypto; 1W closest HTF
     "VOLUME":           "VOLUME",
     "VOLUME_24H_USD":   "VOLUME_24H_IN_USD",
+    "RELATIVE_VOLUME":  "RELATIVE_VOLUME",
+    "MARKET_CAP":       "MARKET_CAP",
+    "CATEGORY":         "CRYPTO_CATEGORIES",
+    "SECTOR":           "SECTOR",
     # RSI variants
     "RSI":              "RSI_240",           # default = 4h
     "RSI_1H":           "RSI_60",
@@ -60,7 +70,11 @@ _STOCK_FIELD_ALIASES: dict[str, str] = {
     "CHANGE":           "CHANGE",
     "CHANGE_PERCENT":   "CHANGE_PERCENT",
     "VOLUME":           "VOLUME",
+    "RELATIVE_VOLUME":  "RELATIVE_VOLUME",
     "MARKET_CAP":       "MARKET_CAPITALIZATION",
+    "PE":               "PRICE_TO_EARNINGS_RATIO_TTM",
+    "DIV_YIELD":        "DIVIDENDS_YIELD_CURRENT",
+    "SECTOR":           "SECTOR",
     "RSI":              "RELATIVE_STRENGTH_INDEX_14",
     "RSI_4H":           "RELATIVE_STRENGTH_INDEX_14",
     "RSI_1D":           "RELATIVE_STRENGTH_INDEX_14",

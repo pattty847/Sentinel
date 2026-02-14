@@ -5,6 +5,7 @@
 #include "../widgets/AICommentaryFeedDock.hpp"
 #include "../widgets/LabDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
+#include "../widgets/ScreenerDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
@@ -100,6 +101,17 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
             m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.labDock);
         } else {
             m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
+        }
+    }
+    if (docks.screenerDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.screenerDock);
+        // Tab with the right-side group — screener sits alongside watchlist/SEC/lab
+        if (docks.labDock) {
+            m_mainWindow->tabifyDockWidget(docks.labDock, docks.screenerDock);
+        } else if (docks.watchlistDock) {
+            m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.screenerDock);
+        } else {
+            m_mainWindow->tabifyDockWidget(docks.secDock, docks.screenerDock);
         }
     }
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);

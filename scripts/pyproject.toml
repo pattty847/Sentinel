@@ -9,3 +9,8 @@ dependencies = [
     "tvscreener>=0.2.0",
     # "yfinance>=0.2.0",  # uncomment when Lab candle viewer is wired
 ]
+
+[dependency-groups]
+dev = [
+    "lizard>=1.21.0",
+]

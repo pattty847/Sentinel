@@ -8,22 +8,28 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QLabel>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QSlider>
-#include <QPushButton>
+#include <QToolButton>
+#include <QIcon>
 #include <QTableView>
 #include <QTimer>
 #include <QUrl>
 #include <QAbstractSocket>
 
-static constexpr int kColSymbol   = 0;
-static constexpr int kColName     = 1;
-static constexpr int kColPrice    = 2;
-static constexpr int kColChange   = 3;
-static constexpr int kColChangePct= 4;
-static constexpr int kColVolume   = 5;
-static constexpr int kColExchange = 6;
-static constexpr int kColCount    = 7;
+static constexpr int kColSymbol    = 0;
+static constexpr int kColName      = 1;
+static constexpr int kColPrice     = 2;
+static constexpr int kColChangePct = 3;
+static constexpr int kColVolume    = 4;
+static constexpr int kColRelVol    = 5;
+static constexpr int kColMktCap    = 6;
+static constexpr int kColExtra1    = 7;   // P/E (stocks) | Category (crypto)
+static constexpr int kColExtra2    = 8;   // Div Yield% (stocks) | Sector (crypto)
+static constexpr int kColSector    = 9;   // Sector (stocks) | Exchange (crypto)
+static constexpr int kColExchange  = 10;
+static constexpr int kColCount     = 11;
 
 ScreenerDock::ScreenerDock(QWidget* parent)
     : DockablePanel("ScreenerDock", "Screener", parent)
@@ -31,7 +37,8 @@ ScreenerDock::ScreenerDock(QWidget* parent)
     , m_reconnectTimer(new QTimer(this))
     , m_model(new QStandardItemModel(0, kColCount, this))
 {
-    m_model->setHorizontalHeaderLabels({"Symbol", "Name", "Price", "Change", "Change %", "Volume", "Exchange"});
+    m_model->setHorizontalHeaderLabels({"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap", "Category", "Sector", "—", "Exchange"});
+    m_model->setSortRole(Qt::UserRole + 1);  // numeric sort role for all columns
 
     m_reconnectTimer->setInterval(kReconnectMs);
     m_reconnectTimer->setSingleShot(true);
@@ -44,7 +51,7 @@ ScreenerDock::ScreenerDock(QWidget* parent)
             this, &ScreenerDock::onSocketError);
 
     buildUi();
-    connectToServer();
+    connectToServer();  // connect to server on launch, but fetch nothing until user acts
 }
 
 ScreenerDock::~ScreenerDock() {
@@ -80,9 +87,17 @@ void ScreenerDock::buildUi() {
     m_intervalLabel->setFixedWidth(36);
     toolbar->addWidget(m_intervalLabel);
 
-    m_refreshBtn = new QPushButton("Refresh", m_contentWidget);
-    m_refreshBtn->setFixedWidth(64);
-    toolbar->addWidget(m_refreshBtn);
+    m_autoCheck = new QCheckBox("Auto", m_contentWidget);
+    m_autoCheck->setChecked(false);
+    m_autoCheck->setIcon(QIcon(":/svg/auto-refresh.svg"));
+    m_autoCheck->setToolTip("Automatically refresh at the set interval");
+    toolbar->addWidget(m_autoCheck);
+
+    m_runBtn = new QToolButton(m_contentWidget);
+    m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
+    m_runBtn->setToolTip("Fetch screener data once");
+    m_runBtn->setFixedSize(28, 28);
+    toolbar->addWidget(m_runBtn);
 
     toolbar->addStretch();
     layout->addLayout(toolbar);
@@ -96,13 +111,10 @@ void ScreenerDock::buildUi() {
     m_table->setAlternatingRowColors(true);
     m_table->setSortingEnabled(true);
     m_table->verticalHeader()->hide();
+    // All columns Interactive — Qt never auto-measures on scroll (eliminates lag).
+    // resizeColumnsToContents() is called once after first data load, then widths are locked.
+    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->horizontalHeader()->setSectionResizeMode(kColName,     QHeaderView::Interactive);
-    m_table->horizontalHeader()->setSectionResizeMode(kColSymbol,   QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(kColPrice,    QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(kColChange,   QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(kColChangePct,QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(kColVolume,   QHeaderView::ResizeToContents);
     m_table->setStyleSheet(
         "QTableView { background:#1a1a1a; color:#e0e0e0; gridline-color:#2a2a2a; }"
         "QTableView::item:selected { background:#2d5a8e; }"
@@ -118,13 +130,15 @@ void ScreenerDock::buildUi() {
     m_contentWidget->setLayout(layout);
 
     // Signals
-    connect(m_assetCombo,    QOverload<int>::of(&QComboBox::currentIndexChanged),
+    connect(m_assetCombo,     QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScreenerDock::onAssetChanged);
     connect(m_intervalSlider, &QSlider::valueChanged,
             this, &ScreenerDock::onIntervalChanged);
-    connect(m_refreshBtn, &QPushButton::clicked,
-            this, &ScreenerDock::onRefreshClicked);
-    connect(m_table, &QTableView::clicked,
+    connect(m_autoCheck,      &QCheckBox::toggled,
+            this, &ScreenerDock::onAutoToggled);
+    connect(m_runBtn,         &QToolButton::clicked,
+            this, &ScreenerDock::onRunClicked);
+    connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
 }
 
@@ -139,8 +153,8 @@ void ScreenerDock::connectToServer() {
 
 void ScreenerDock::onConnected() {
     m_connected = true;
-    setStatus("Connected");
-    sendConfig();
+    setStatus("Ready — press Run or enable Auto");
+    // Intentionally no fetch here — user must act first
 }
 
 void ScreenerDock::onDisconnected() {
@@ -150,17 +164,19 @@ void ScreenerDock::onDisconnected() {
 }
 
 void ScreenerDock::onSocketError(QAbstractSocket::SocketError /*error*/) {
-    setStatus(QString("Server unavailable — start screener_server.py"), true);
+    setStatus("Server unavailable — start screener_server.py", true);
     if (!m_reconnectTimer->isActive())
         m_reconnectTimer->start();
 }
 
 void ScreenerDock::sendConfig() {
+    // Sends configuration to the server.
+    // interval_sec is only meaningful when auto mode is active on the server side.
     if (!m_connected) return;
     QJsonObject msg;
     msg["type"]         = "set_config";
     msg["asset"]        = m_currentAsset;
-    msg["interval_sec"] = m_intervalSec;
+    msg["interval_sec"] = m_autoEnabled ? m_intervalSec : 99999; // large interval = effectively paused
     msg["limit"]        = 100;
     msg["min_volume"]   = 500000.0;
     m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
@@ -184,79 +200,154 @@ void ScreenerDock::onMessageReceived(const QString& message) {
     }
 }
 
+// Creates an item that displays as text but sorts numerically.
+static QStandardItem* numItem(const QString& display, double sortVal) {
+    auto* item = new QStandardItem(display);
+    item->setData(sortVal, Qt::UserRole + 1);
+    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    return item;
+}
+
+// Creates a text item that sorts lexicographically (stores display text as sort key too).
+static QStandardItem* strItem(const QString& text) {
+    auto* item = new QStandardItem(text);
+    item->setData(text, Qt::UserRole + 1);
+    return item;
+}
+
+static QString fmtPrice(double v) {
+    // Use fewer decimals for large prices, more for small
+    if (v >= 1000.0)  return QString::number(v, 'f', 2);
+    if (v >= 1.0)     return QString::number(v, 'f', 4);
+    return QString::number(v, 'f', 6);
+}
+
+static QString fmtVolume(double v) {
+    if (v >= 1e9) return QString::number(v / 1e9, 'f', 2) + "B";
+    if (v >= 1e6) return QString::number(v / 1e6, 'f', 2) + "M";
+    if (v >= 1e3) return QString::number(v / 1e3, 'f', 1) + "K";
+    return QString::number(static_cast<qint64>(v));
+}
+
 void ScreenerDock::applyRows(const QJsonArray& rows) {
-    // Rebuild model — rows count typically ~100-150, not a hot path
+    const bool isCrypto = (m_currentAsset == "crypto");
+
+    // Update headers per asset type
+    QStringList headers = {"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap"};
+    if (isCrypto)
+        headers << "Category" << "Sector" << "—" << "Exchange";
+    else
+        headers << "P/E" << "Div Yield%" << "Sector" << "Exchange";
+    m_model->setHorizontalHeaderLabels(headers);
+
+    // Disable sort while populating — re-enable after to avoid mid-insert resorting
+    m_table->setSortingEnabled(false);
     m_model->removeRows(0, m_model->rowCount());
+
+    const QColor upColor(47, 221, 122);
+    const QColor downColor(239, 92, 85);
 
     for (const QJsonValue& val : rows) {
         const QJsonObject row = val.toObject();
 
-        auto* symItem  = new QStandardItem(row["symbol"].toString());
-        auto* nameItem = new QStandardItem(row["Name"].toString());
-
         const double price     = row["Price"].toDouble();
-        const double change    = row["Change"].toDouble();
         const double changePct = row["Change %"].toDouble();
         const double volume    = row["Volume"].toDouble();
-        const QString exchange = row["Exchange"].toString();
+        const double relVol    = row["Relative Volume"].toDouble();
+        const double mktCap    = isCrypto
+                                   ? row["Market Cap"].toDouble()
+                                   : row["Market Capitalization"].toDouble();
 
-        auto* priceItem  = new QStandardItem(QString::number(price, 'f', 4));
-        auto* changeItem = new QStandardItem(QString::number(change, 'f', 4));
-        auto* pctItem    = new QStandardItem(QString::number(changePct, 'f', 2) + "%");
-        auto* volItem    = new QStandardItem(QString::number(static_cast<qint64>(volume)));
-        auto* exchItem   = new QStandardItem(exchange);
+        auto* symItem  = strItem(row["symbol"].toString());
+        auto* nameItem = strItem(row["Name"].toString());
+        symItem->setData(m_currentAsset, Qt::UserRole);  // preserve asset routing
 
-        // Color-code change columns
-        const QColor upColor(47, 221, 122);    // #2fdd7a
-        const QColor downColor(239, 92, 85);   // #ef5c55
-        const QColor changeColor = changePct >= 0 ? upColor : downColor;
-        changeItem->setForeground(changeColor);
-        pctItem->setForeground(changeColor);
+        auto* priceItem  = numItem(fmtPrice(price),                       price);
+        auto* pctItem    = numItem(QString::number(changePct, 'f', 2)+"%", changePct);
+        auto* volItem    = numItem(fmtVolume(volume),                      volume);
+        auto* relVolItem = numItem(QString::number(relVol, 'f', 2),        relVol);
+        auto* mktCapItem = numItem(fmtVolume(mktCap),                      mktCap);
 
-        // Store asset type in symbol item for routing on click
-        symItem->setData(m_currentAsset, Qt::UserRole);
+        pctItem->setForeground(changePct >= 0 ? upColor : downColor);
 
-        // Right-align numeric columns
-        for (auto* item : {priceItem, changeItem, pctItem, volItem}) {
-            item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        QStandardItem *extra1, *extra2, *extra3;
+        if (isCrypto) {
+            extra1 = strItem(row["Crypto Categories"].toString());
+            extra2 = strItem(row["Sector"].toString());
+            extra3 = strItem(QString());
+        } else {
+            const double pe  = row["Price to Earnings Ratio (TTM)"].toDouble();
+            const double div = row["Dividend Yield % (Current)"].toDouble();
+            extra1 = numItem(pe  > 0 ? QString::number(pe,  'f', 1)       : "—", pe);
+            extra2 = numItem(div > 0 ? QString::number(div, 'f', 2) + "%" : "—", div);
+            extra3 = strItem(row["Sector"].toString());
         }
 
-        m_model->appendRow({symItem, nameItem, priceItem, changeItem, pctItem, volItem, exchItem});
+        auto* exchItem = strItem(row["Exchange"].toString());
+
+        m_model->appendRow({symItem, nameItem, priceItem, pctItem, volItem,
+                            relVolItem, mktCapItem, extra1, extra2, extra3, exchItem});
+    }
+
+    // Re-enable sorting and default to Mkt Cap descending on first load
+    m_table->setSortingEnabled(true);
+    if (m_table->horizontalHeader()->sortIndicatorSection() < 0)
+        m_table->sortByColumn(kColMktCap, Qt::DescendingOrder);
+
+    // Measure column widths exactly once after first data load, then lock — no per-scroll overhead
+    if (!m_columnsResized) {
+        m_table->resizeColumnsToContents();
+        m_columnsResized = true;
     }
 }
 
 // ── UI slots ──────────────────────────────────────────────────────────────────
 
-void ScreenerDock::onRefreshClicked() {
+void ScreenerDock::onRunClicked() {
     if (!m_connected) {
         connectToServer();
         return;
     }
+    // One-shot: send config first (in case asset/interval changed), then trigger fetch
+    sendConfig();
     QJsonObject msg;
     msg["type"] = "refresh";
     m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 }
 
+void ScreenerDock::onAutoToggled(bool checked) {
+    m_autoEnabled = checked;
+    if (!m_connected) return;
+    sendConfig();  // pushes new interval_sec (real value or 99999 sentinel)
+    if (checked) {
+        // Kick off an immediate fetch so the table populates right away
+        QJsonObject msg;
+        msg["type"] = "refresh";
+        m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+    }
+}
+
 void ScreenerDock::onAssetChanged(int index) {
     m_currentAsset = m_assetCombo->itemData(index).toString();
-    if (m_connected) sendConfig();
+    m_columnsResized = false;  // new asset type = new column set, re-measure on next load
+    if (m_connected && m_autoEnabled) sendConfig();
 }
 
 void ScreenerDock::onIntervalChanged(int value) {
     m_intervalSec = value;
     m_intervalLabel->setText(QString("%1s").arg(value));
-    if (m_connected) sendConfig();
+    if (m_connected && m_autoEnabled) sendConfig();
 }
 
 void ScreenerDock::onRowClicked(const QModelIndex& index) {
-    const int row = index.row();
+    const int     row       = index.row();
     const QString symbol    = m_model->item(row, kColSymbol)->text();
     const QString assetType = m_model->item(row, kColSymbol)->data(Qt::UserRole).toString();
     emit rowSelected(symbol, assetType);
 }
 
 void ScreenerDock::onSymbolChanged(const QString& /*symbol*/) {
-    // Screener doesn't filter by heatmap symbol — it shows the full market
+    // Screener shows the full market — doesn't filter by heatmap symbol
 }
 
 void ScreenerDock::setStatus(const QString& text, bool error) {

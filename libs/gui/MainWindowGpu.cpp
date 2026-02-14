@@ -187,7 +187,15 @@ void MainWindowGPU::setupUI() {
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
     m_screenerDock = docks.screenerDock;
-    // ScreenerDock: crypto row click -> heatmap symbol (wired when Lab routing is ready)
+    if (m_screenerDock) {
+        connect(m_screenerDock, &ScreenerDock::rowSelected, this, [this](const QString& symbol, const QString& assetType) {
+            if (assetType == "crypto" && m_symbolInput) {
+                m_symbolInput->setText(symbol);
+                onSubscribe();
+            }
+            // Lab candle routing goes here when Lab viewer is wired
+        });
+    }
     
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
