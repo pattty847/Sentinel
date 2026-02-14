@@ -30,6 +30,8 @@ set(GRID_CORE_SOURCES
     datasources/CandleSeriesBuffer.hpp
     datasources/CandleSeriesBuffer.cpp
     UnifiedGridRenderer.cpp
+    UnifiedGridRenderer.Init.cpp
+    UnifiedGridRenderer.Render.cpp
     UnifiedGridRenderer.h
     CoordinateSystem.cpp
     CoordinateSystem.h

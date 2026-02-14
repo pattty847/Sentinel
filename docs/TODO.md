@@ -168,6 +168,7 @@ _(no entries yet)_
 * **2026-02-03** - Apply panVisualOffset in viewport transform to prevent candle snap.
 * **2026-02-14** - Refactored UnifiedGridRenderer hotspots: extracted heatmap ingest/timer helpers, moved label-ring ownership to HeatmapStreamState, and shared viewport/render-rect math via UgrFrameMath.
 * **2026-02-14** - Decomposed updatePaintNode into frame-build/publish/upload-drain/overlay/label/FPS helpers; updatePaintNode now acts as orchestration-only hot-path entry.
+* **2026-02-14** - Split UnifiedGridRenderer implementation into UnifiedGridRenderer.cpp (core API), UnifiedGridRenderer.Init.cpp (init/ingest/wiring), and UnifiedGridRenderer.Render.cpp (render-thread hot path).
 
 ---
 
