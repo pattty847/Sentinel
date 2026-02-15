@@ -556,6 +556,9 @@ int UnifiedGridRenderer::getDirtyRegionCount() const {
 
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { 
     if (m_viewState && isVisible() && event->button() == Qt::LeftButton) { 
+        if (m_viewState->isAutoScrollEnabled()) {
+            m_viewState->enableAutoScroll(false);
+        }
         m_viewState->handlePanStart(event->position()); 
         event->accept(); 
     } else event->ignore(); 
@@ -571,27 +574,9 @@ void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) {
 
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) {
     if (m_viewState) {
-        const QPointF pan = m_viewState->getPanVisualOffset();
-        const bool autoScroll = m_viewState->isAutoScrollEnabled();
-        bool panAppliedToAuto = false;
-        if (autoScroll && !pan.isNull() && width() > 0.0 && height() > 0.0 &&
-            m_viewState->isTimeWindowValid() && m_autoScrollController) {
-            panAppliedToAuto = m_autoScrollController->applyPanToAutoScroll(*m_viewState, width(), height());
-            m_viewState->handlePanEnd(false);
-            m_panSyncPending = true;
-            update();
-        } else {
-            m_viewState->handlePanEnd(true);
-        }
+        m_viewState->handlePanEnd(true);
         event->accept();
-        if (m_viewState->isAutoScrollEnabled() && m_heatmapStream && m_autoScrollController && !panAppliedToAuto) {
-            m_autoScrollController->updateLagFromView(*m_viewState,
-                                                      *m_heatmapStream,
-                                                      m_timeAuthority.activeTimeframeMs());
-        }
-        if (autoScroll) {
-            m_panSyncPending = true;
-        }
+        m_panSyncPending = false;
         update();
     }
 }

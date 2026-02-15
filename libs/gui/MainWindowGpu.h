@@ -27,6 +27,7 @@ class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
 class ScreenerDock;
+class StockChartDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
@@ -91,6 +92,7 @@ private:
     LabDock* m_labDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
     ScreenerDock* m_screenerDock = nullptr;
+    StockChartDock* m_stockChartDock = nullptr;
     
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;

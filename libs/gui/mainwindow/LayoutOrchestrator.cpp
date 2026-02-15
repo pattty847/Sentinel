@@ -6,6 +6,7 @@
 #include "../widgets/LabDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
+#include "../widgets/StockChartDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
@@ -83,6 +84,10 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.watchlistDock);
         docks.watchlistDock->setFloating(false);
     }
+    if (docks.stockChartDock && docks.stockChartDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.stockChartDock);
+        docks.stockChartDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
@@ -112,6 +117,17 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
             m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.screenerDock);
         } else {
             m_mainWindow->tabifyDockWidget(docks.secDock, docks.screenerDock);
+        }
+    }
+    if (docks.stockChartDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.stockChartDock);
+        // Tab alongside screener/lab/watchlist on the right
+        if (docks.screenerDock) {
+            m_mainWindow->tabifyDockWidget(docks.screenerDock, docks.stockChartDock);
+        } else if (docks.labDock) {
+            m_mainWindow->tabifyDockWidget(docks.labDock, docks.stockChartDock);
+        } else {
+            m_mainWindow->tabifyDockWidget(docks.secDock, docks.stockChartDock);
         }
     }
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
@@ -169,5 +185,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.aiCommentaryDock) docks.aiCommentaryDock->show();
     if (docks.labDock) docks.labDock->show();
     if (docks.watchlistDock) docks.watchlistDock->show();
+    if (docks.stockChartDock) docks.stockChartDock->show();
 }
 

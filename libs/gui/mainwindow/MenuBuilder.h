@@ -24,6 +24,7 @@ class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
 class ScreenerDock;
+class StockChartDock;
 
 class MenuBuilder {
 public:
@@ -35,6 +36,7 @@ public:
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
         ScreenerDock* screenerDock = nullptr;
+        StockChartDock* stockChartDock = nullptr;
     };
 
     struct Callbacks {

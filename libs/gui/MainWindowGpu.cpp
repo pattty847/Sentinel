@@ -28,6 +28,7 @@
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/WatchlistDock.hpp"
+#include "widgets/StockChartDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
@@ -187,13 +188,17 @@ void MainWindowGPU::setupUI() {
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
     m_screenerDock = docks.screenerDock;
+    m_stockChartDock = docks.stockChartDock;
     if (m_screenerDock) {
         connect(m_screenerDock, &ScreenerDock::rowSelected, this, [this](const QString& symbol, const QString& assetType) {
             if (assetType == "crypto" && m_symbolInput) {
                 m_symbolInput->setText(symbol);
                 onSubscribe();
+            } else if (assetType == "stock" && m_stockChartDock) {
+                m_stockChartDock->show();
+                m_stockChartDock->raise();
+                m_stockChartDock->loadSymbol(symbol);
             }
-            // Lab candle routing goes here when Lab viewer is wired
         });
     }
     
@@ -505,6 +510,7 @@ void MainWindowGPU::setupMenuBar() {
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
     docks.screenerDock = m_screenerDock;
+    docks.stockChartDock = m_stockChartDock;
 
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
@@ -692,7 +698,7 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
     docks.watchlistDock = m_watchlistDock;
-    docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
+    docks.stockChartDock = m_stockChartDock;
     return docks;
 }

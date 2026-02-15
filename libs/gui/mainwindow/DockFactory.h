@@ -23,6 +23,7 @@ class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
 class ScreenerDock;
+class StockChartDock;
 
 class DockFactory {
 public:
@@ -34,7 +35,8 @@ public:
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
-        ScreenerDock* screenerDock = nullptr;
+        ScreenerDock*    screenerDock    = nullptr;
+        StockChartDock*  stockChartDock  = nullptr;
     };
 
     struct SymbolControls {

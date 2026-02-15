@@ -106,9 +106,7 @@ void AxisModel::onViewportChanged() {
 }
 
 void AxisModel::onPanVisualOffsetChanged() {
-    if (m_viewState && m_viewState->isDragging()) {
-        updateTicksAndNotify();
-    }
+    Q_UNUSED(m_viewState);
 }
 
 double AxisModel::calculateNiceStep(double range, int targetTicks) const {

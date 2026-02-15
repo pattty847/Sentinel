@@ -108,6 +108,17 @@ private:
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
     
     void handleMessage(const std::string& msg);
+    void handleServerConfigMessage(const nlohmann::json& msg);
+    void handleSnapshotMessage(const nlohmann::json& msg);
+    void handleL2UpdateMessage(const nlohmann::json& msg);
+    void handleTradeMessage(const nlohmann::json& msg);
+    void handleHeatmapSliceMessage(const nlohmann::json& msg);
+    void handleHeatmapHistoryChunkMessage(const nlohmann::json& msg);
+    void handleCandleHistoryChunkMessage(const nlohmann::json& msg);
+    void handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg);
+    void handleFootprintConfigMessage(const nlohmann::json& msg);
+    void handleFootprintSliceMessage(const nlohmann::json& msg);
+    void handleFootprintHistoryChunkMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;

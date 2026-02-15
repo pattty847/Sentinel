@@ -22,6 +22,7 @@ class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
 class ScreenerDock;
+class StockChartDock;
 
 class LayoutOrchestrator {
 public:
@@ -33,6 +34,7 @@ public:
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
         ScreenerDock* screenerDock = nullptr;
+        StockChartDock* stockChartDock = nullptr;
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);

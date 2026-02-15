@@ -156,6 +156,9 @@ private:
     bool m_msdfAtlasBuilt = false;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
+    HeatmapStreamState::LabelSnapshot m_cachedLabelSnapshot;
+    uint64_t m_cachedLabelSnapshotGeneration = 0;
+    bool m_cachedLabelSnapshotValid = false;
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
     FootprintOverlayRenderer m_footprintOverlay;

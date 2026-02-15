@@ -104,6 +104,7 @@ set(WIDGET_SOURCES
     "widgets/HeatmapSettingsDialog.cpp"
     "widgets/TopToolbar.cpp"
     "widgets/WatchlistDock.cpp"
+    "widgets/StockChartDock.cpp"
 )
 
 set(THEME_SOURCES
@@ -138,6 +139,7 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/controls/NavigationControls.qml
         qml/controls/LiquidityThresholdFilter.qml
         qml/controls/ChartToolRail.qml
+        qml/StockChartView.qml
 )
 
 set(SENTINEL_SVG_DIR "${CMAKE_SOURCE_DIR}/resources/svg")

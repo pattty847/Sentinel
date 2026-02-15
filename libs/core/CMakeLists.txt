@@ -33,6 +33,8 @@ add_library(sentinel_core
     protocol/SentinelStreamServer.cpp
     protocol/SentinelStreamClient.hpp
     protocol/SentinelStreamClient.cpp
+    protocol/SentinelStreamClientParseHelpers.hpp
+    protocol/SentinelStreamClientParseHelpers.cpp
 )
 
 # Find required packages

@@ -54,7 +54,6 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
                 replaySubscriptionsOnConnect();
             });
             startHeartbeatWatchdog();
-            sendHeartbeatSubscribe();
         } else {
             emitError("Transport down");
         }
@@ -508,29 +507,3 @@ void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     });
 }
 
-void MarketDataCoreEngine::sendHeartbeatSubscribe() {
-    net::post(m_strand, [this]() {
-        if (!m_connected.load() || !m_transport) return;
-        try {
-            nlohmann::json msg;
-            msg["type"] = "subscribe";
-            msg["channel"] = ch::kHeartbeats;
-            if (m_useJwt) {
-                msg["jwt"] = m_auth.createJwt();
-            }
-            const std::string payload = msg.dump();
-            if (m_useJwt) {
-                nlohmann::json redacted = msg;
-                if (redacted.contains("jwt")) {
-                    redacted["jwt"] = "<redacted>";
-                }
-                sLog_DataN(1, std::string("WS subscribe frame: ") + redacted.dump());
-            } else {
-                sLog_DataN(1, std::string("WS subscribe frame: ") + payload);
-            }
-            m_transport->send(payload);
-        } catch (const std::exception& e) {
-            sLog_Error(std::string("sendHeartbeatSubscribe failed: ") + e.what());
-        }
-    });
-}

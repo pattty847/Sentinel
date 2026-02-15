@@ -169,6 +169,9 @@ _(no entries yet)_
 * **2026-02-14** - Refactored UnifiedGridRenderer hotspots: extracted heatmap ingest/timer helpers, moved label-ring ownership to HeatmapStreamState, and shared viewport/render-rect math via UgrFrameMath.
 * **2026-02-14** - Decomposed updatePaintNode into frame-build/publish/upload-drain/overlay/label/FPS helpers; updatePaintNode now acts as orchestration-only hot-path entry.
 * **2026-02-14** - Split UnifiedGridRenderer implementation into UnifiedGridRenderer.cpp (core API), UnifiedGridRenderer.Init.cpp (init/ingest/wiring), and UnifiedGridRenderer.Render.cpp (render-thread hot path).
+* **2026-02-15** - Axis perf guardrail: during drag, AxisModel now updates positions-only (PositionRole) instead of full tick/label recalculation to reduce QML label binding churn.
+* **2026-02-15** - Fixed likely FPS regression source in UGR: label snapshot/ring data is now cached and only refreshed when heatmap generation changes (removed per-frame full snapshot copies).
+* **2026-02-15** - Pan interaction now forces manual mode immediately (disable auto-scroll on pan start; remove pan-to-auto handoff on release) to prevent hidden continuous viewport churn.
 
 ---
 
@@ -639,3 +642,29 @@ _(empty)_
 - **2026-02-11** — Explored tvscreener library, defined architecture. Python server pattern mirrors SEC backend. Lab repurposed as candle viewer. Routing: crypto→heatmap+Lab, stocks→Lab only.
 - **2026-02-13** — Built full Python screener backend (server+fetch+core+tests, all passing). Built ScreenerDock C++ widget with WebSocket client, table, interval slider, asset toggle. Wired into all plumbing. Clean build. Next: wire row click → heatmap, launch server from app.
 
+
+---
+
+### F17: SentinelStreamClient Message Router Refactor
+**Status:** done
+**Created:** 2026-02-14
+**Updated:** 2026-02-14
+
+#### Now
+_(empty)_
+
+#### Next
+_(empty)_
+
+#### Later
+_(empty)_
+
+#### Done
+- [x] Split `SentinelStreamClient::handleMessage` into per-family handlers with `MessageType` dispatch (2026-02-14)
+- [x] Added internal parse helper seam (`SentinelStreamClientParseHelpers`) for server config/candle/orderbook mapping reuse (2026-02-14)
+- [x] Added targeted helper tests (`test_sentinel_stream_client_parse_helpers`) and wired CMake target (2026-02-14)
+- [x] Windows preset build green after refactor (`cmake --build --preset windows-msvc-vs`) (2026-02-14)
+
+#### Session log
+- **2026-02-14** - Refactored protocol message handling to reduce complexity while preserving schema/payload guardrails and existing signal semantics; added focused helper tests, build is green, helper test binary passes when launched with Qt/build DLL PATH.
+- **2026-02-14** - Fixed Coinbase heartbeat subscription policy: removed duplicate standalone heartbeat subscribe and made heartbeat frames symbol-scoped via SubscriptionManager product_ids; SubscriptionManagerTests passing.

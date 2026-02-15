@@ -205,8 +205,20 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
                                               const HeatmapStreamState::Snapshot& snapshot,
                                               int gridWidth,
                                               int gridHeight) {
-    HeatmapStreamState::LabelSnapshot labelSnapshot;
-    const bool haveLabelSnapshot = m_heatmapStream && m_heatmapStream->copyLabelSnapshot(labelSnapshot);
+    if (!m_cachedLabelSnapshotValid ||
+        m_cachedLabelSnapshotGeneration != frame.streamGenerations.heatmap) {
+        HeatmapStreamState::LabelSnapshot nextSnapshot;
+        if (m_heatmapStream && m_heatmapStream->copyLabelSnapshot(nextSnapshot)) {
+            m_cachedLabelSnapshot = std::move(nextSnapshot);
+            m_cachedLabelSnapshotGeneration = frame.streamGenerations.heatmap;
+            m_cachedLabelSnapshotValid = true;
+        } else {
+            m_cachedLabelSnapshotValid = false;
+        }
+    }
+
+    const auto& labelSnapshot = m_cachedLabelSnapshot;
+    const bool haveLabelSnapshot = m_cachedLabelSnapshotValid;
     const bool labelGridMatches = haveLabelSnapshot &&
                                   labelSnapshot.snapshot.gridWidth == gridWidth &&
                                   labelSnapshot.snapshot.gridHeight == gridHeight;
