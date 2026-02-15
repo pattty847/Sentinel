@@ -156,9 +156,11 @@ private:
     bool m_msdfAtlasBuilt = false;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
     std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
-    HeatmapStreamState::LabelSnapshot m_cachedLabelSnapshot;
-    uint64_t m_cachedLabelSnapshotGeneration = 0;
-    bool m_cachedLabelSnapshotValid = false;
+    int m_labelRingGridWidth = 0;
+    int m_labelRingGridHeight = 0;
+    std::vector<uint16_t> m_labelLiquidityRing;
+    std::vector<uint16_t> m_labelIntensityRing;
+    std::vector<double> m_labelLiquidityScales;
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
     FootprintOverlayRenderer m_footprintOverlay;
@@ -367,6 +369,9 @@ private:
                              const HeatmapStreamState::Snapshot& snapshot,
                              int gridWidth,
                              int gridHeight);
+    void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+                           int gridWidth,
+                           int gridHeight);
     void clearLabelGeometry();
     void updateFpsEstimate();
 

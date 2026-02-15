@@ -156,11 +156,10 @@ Rectangle {
         Item {
             id: priceAxisLabels
             anchors.fill: parent
-            y: unifiedGridRenderer.panVisualOffset.y
-            
+
             Repeater {
                 model: priceAxisModel
-                
+
                 Item {
                     width: priceAxis.width
                     height: 16
@@ -204,11 +203,10 @@ Rectangle {
         Item {
             id: timeAxisLabels
             anchors.fill: parent
-            x: unifiedGridRenderer.panVisualOffset.x
-            
+
             Repeater {
                 model: timeAxisModel
-                
+
                 Item {
                     width: 80
                     height: timeAxis.height

@@ -5,6 +5,7 @@
 #include "render/MsdfGlyphNode.hpp"
 #include "render/UgrFrameMath.hpp"
 
+#include <QtEndian>
 #include <algorithm>
 UnifiedGridRenderer::FrameContext UnifiedGridRenderer::buildFrameContext() const {
     FrameContext frame;
@@ -205,29 +206,30 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
                                               const HeatmapStreamState::Snapshot& snapshot,
                                               int gridWidth,
                                               int gridHeight) {
-    if (!m_cachedLabelSnapshotValid ||
-        m_cachedLabelSnapshotGeneration != frame.streamGenerations.heatmap) {
-        HeatmapStreamState::LabelSnapshot nextSnapshot;
-        if (m_heatmapStream && m_heatmapStream->copyLabelSnapshot(nextSnapshot)) {
-            m_cachedLabelSnapshot = std::move(nextSnapshot);
-            m_cachedLabelSnapshotGeneration = frame.streamGenerations.heatmap;
-            m_cachedLabelSnapshotValid = true;
-        } else {
-            m_cachedLabelSnapshotValid = false;
-        }
+    if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
+        gridWidth > 0 && gridHeight > 0) {
+        m_labelRingGridWidth = gridWidth;
+        m_labelRingGridHeight = gridHeight;
+        m_labelLiquidityRing.assign(static_cast<size_t>(gridWidth) * gridHeight, 0);
+        m_labelIntensityRing.assign(static_cast<size_t>(gridWidth) * gridHeight, 0);
+        m_labelLiquidityScales.assign(gridWidth, 1.0);
     }
 
-    const auto& labelSnapshot = m_cachedLabelSnapshot;
-    const bool haveLabelSnapshot = m_cachedLabelSnapshotValid;
-    const bool labelGridMatches = haveLabelSnapshot &&
-                                  labelSnapshot.snapshot.gridWidth == gridWidth &&
-                                  labelSnapshot.snapshot.gridHeight == gridHeight;
+    if (m_heatmapStream) {
+        std::vector<HeatmapStreamState::PendingLabelColumn> pendingLabelUploads;
+        m_heatmapStream->takePendingLabelUploads(pendingLabelUploads);
+        if (!pendingLabelUploads.empty()) {
+            applyLabelUploads(pendingLabelUploads, gridWidth, gridHeight);
+        }
+    }
 
     const QRectF drawRect = frame.mapping.drawRect;
     const QRectF srcRectCurrent = texNode->getSourceRect();
     const bool labelVisible = (!drawRect.isEmpty() && !frame.surfaceBounds.isEmpty() &&
                                srcRectCurrent.width() > 0.0 && srcRectCurrent.height() > 0.0 &&
-                               labelGridMatches);
+                               snapshot.liquidityAvailable &&
+                               m_labelRingGridWidth == gridWidth &&
+                               m_labelRingGridHeight == gridHeight);
     const float cellH = (srcRectCurrent.height() > 0.0f)
         ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
         : 0.0f;
@@ -253,9 +255,9 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
     HeatmapLabelRenderer::buildLabelQuads(frame.mapping,
                                           snapshot,
                                           m_msdfAtlas,
-                                          labelSnapshot.liquidityRing,
-                                          labelSnapshot.intensityRing,
-                                          labelSnapshot.liquidityScales,
+                                          m_labelLiquidityRing,
+                                          m_labelIntensityRing,
+                                          m_labelLiquidityScales,
                                           scale,
                                           dollars,
                                           m_labelWhiteQuads,
@@ -280,6 +282,57 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
     m_blackGlyphNode->setPxRange(m_msdfAtlas.pxRange());
     m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
     m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
+}
+
+void UnifiedGridRenderer::applyLabelUploads(
+    const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+    int gridWidth,
+    int gridHeight) {
+    if (gridWidth <= 0 || gridHeight <= 0 || uploads.empty()) {
+        return;
+    }
+    const size_t expectedSize = static_cast<size_t>(gridWidth) * gridHeight;
+    if (m_labelLiquidityRing.size() != expectedSize) {
+        m_labelLiquidityRing.assign(expectedSize, 0);
+    }
+    if (m_labelIntensityRing.size() != expectedSize) {
+        m_labelIntensityRing.assign(expectedSize, 0);
+    }
+    if (m_labelLiquidityScales.size() != static_cast<size_t>(gridWidth)) {
+        m_labelLiquidityScales.assign(gridWidth, 1.0);
+    }
+
+    const int expectedLiquidityBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
+    const int expectedIntensityBytes = gridHeight * m_intensityBytesPerCell;
+    for (const auto& upload : uploads) {
+        const int column = upload.x;
+        if (column < 0 || column >= gridWidth) {
+            continue;
+        }
+        if (upload.intensity.size() == expectedIntensityBytes) {
+            if (m_intensityBytesPerCell == 1) {
+                const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridHeight; ++y) {
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridWidth + column] =
+                        static_cast<uint16_t>(src[y]) * 257;
+                }
+            } else if (m_intensityBytesPerCell == 2) {
+                const auto* src = reinterpret_cast<const uint16_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridHeight; ++y) {
+                    const uint16_t raw = qFromLittleEndian(src[y]);
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridWidth + column] = raw;
+                }
+            }
+        }
+        if (upload.liquidity.size() == expectedLiquidityBytes) {
+            const auto* src = reinterpret_cast<const uint16_t*>(upload.liquidity.constData());
+            for (int y = 0; y < gridHeight; ++y) {
+                const uint16_t raw = qFromLittleEndian(src[y]);
+                m_labelLiquidityRing[static_cast<size_t>(y) * gridWidth + column] = raw;
+            }
+            m_labelLiquidityScales[column] = upload.liquidityScale;
+        }
+    }
 }
 
 void UnifiedGridRenderer::clearLabelGeometry() {

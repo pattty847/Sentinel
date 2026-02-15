@@ -1,4 +1,4 @@
-## **AGENTS.md — Sentinel Unified Assistant Prompt (v5.2)**
+﻿## **AGENTS.md â€” Sentinel Unified Assistant Prompt (v5.3)**
 
 **Source of truth for all AI assistants working on Sentinel.**
 Claude, Gemini, Cursor, ChatGPT must follow this file.
@@ -8,58 +8,76 @@ Build: cmake --build --preset windows-msvc-vs
 
 ---
 
-# **0. Agent Notes (Local Memory)**
+# **0. Agent Memory & Workflow**
 
-Path: `_agent/` (AI-only scratchpad; keep short and standardized).
-This folder is gitignored by default.
+Path: `_agent/` (AI-only scratchpad; gitignored; concise and standardized).
 
-**Rules**
-* Read `_agent/INVARIANTS.md` and `_agent/FAILURE_MODES.md` at session start.
-* Update notes at session end if a new invariant, guardrail, or decision was discovered.
-* Keep entries one line; no paragraphs; ASCII only.
-* Do not add new files unless explicitly requested.
-* **DECISIONS.md pruning:** When a feature ships, condense its phase/step decisions into 1-3 surviving principles. Delete entries that are now just "how the code works" with no plausible alternative.
-* The human has backlogs in notes if we need them.
+**Core loop (non-trivial sessions)**
+* Check-in by mode (load minimum context first):
+  * Lite mode (questions, tooling, docs-only, no code edits): do not preload `_agent/` or `docs/TODO.md`.
+  * CodeChange mode (about to implement/refactor): read `_agent/INVARIANTS.md` only.
+  * Debug/Perf/Regression mode: read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`.
+* Debugging: assume known failure mode first; scan `_agent/FAILURE_MODES.md` before inventing new theories.
+* Design/perf tripwire: state per-frame risk (allocations, object creation, signal emissions, binding re-evals); if uncertain, reduce scope or add guardrails.
+* Context hygiene: start with `rg -n` / `rg --files`; prefer targeted line windows; avoid deep reads unless needed.
+* Context budget: before first concrete action, read at most ~200 lines total unless the user asks for deep review.
+* Escalation rule: if the request is ambiguous, start in Lite mode and only escalate context when needed.
+* Check-out: if new invariant/failure mode/decision was discovered, update `_agent/` before stopping.
 
-**Files + expected format**
-* File: `_agent/INVARIANTS.md` | Format: `- INV-### | <statement>`
-* File: `_agent/FAILURE_MODES.md` | Format: `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
-* File: `_agent/REPO_MAP.md` | Format: `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
-* File: `_agent/DECISIONS.md` | Format: `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
+**Behavior constraints**
+* Follow this file strictly; keep code clear, modern, and idiomatic.
+* Do not introduce unnecessary abstractions or over-engineered patterns.
+* Use the real architecture; never hallucinate systems or invent fake CI/CD workflows.
+* Do not escalate rules beyond this file or enforce pointless process constraints.
+
+**_agent files + format**
+* `_agent/INVARIANTS.md`: `- INV-### | <statement>`
+* `_agent/FAILURE_MODES.md`: `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
+* `_agent/REPO_MAP.md`: `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
+* `_agent/DECISIONS.md`: `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
+
+**_agent rules**
+* Keep entries one line, ASCII only; do not add new files unless asked.
+* Decision pruning: when a feature ships, condense phase decisions to 1-3 durable principles.
+* Qdrant indexing must be directory-targeted only (`libs/`, `docs/`, optional specific source dirs), never repo root; never index `build/` artifacts.
+* Human-owned backlogs may live in notes; use them when needed.
+
+**System context**
+* Goal: GPU-first, deterministic, zero-lag trading terminal.
+* Future: AI commentary (CopeNet), equity/crypto data (including yfinance), richer overlays.
+* Keep prompts/notes short and enforceable; do not derail for token usage.
 
 ---
 
-# **0a. Mandatory Agent Behaviors (Low-Ceremony)**
+# **0b. Obsidian Vault (Long-Form Shared Memory)**
 
-**Invariant Check‑In (start of non‑trivial sessions)**
-* Read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`.
-* State which invariants this task relies on and which might be at risk.
+Path: `C:\Users\Pepe\Documents\Programming\Sentinel Archive\Sentinel-Vault`
+README: `C:\Users\Pepe\Documents\Programming\Sentinel Archive\Sentinel-Vault\README.md`
 
-**Invariant Check‑Out (end of session)**
-* Did we discover a new invariant, failure mode, or decision? If yes, update `_agent/` before stopping.
+Use this vault for long-form memory shared by human + agent: brain dumps, postmortems, bug/fix writeups, refactor blueprints, and session narratives.
 
-**Failure‑Mode‑First Debugging**
-* Assume the bug is a known failure mode until falsified.
-* Scan `_agent/FAILURE_MODES.md` before inventing new theories.
+**Division of responsibility**
+* `_agent/` stays concise and operational (one-line invariants/failure modes/decisions).
+* Vault notes hold detailed context, rationale, repros, fixes, tradeoffs, and follow-up ideas.
+* If both are updated, write vault first (full detail), then distill durable guardrails into `_agent/`.
 
-**Decision Crystallization Trigger**
-* Log in `_agent/DECISIONS.md` when we choose X over Y, reject a tempting alternative, or freeze a previously flexible choice.
+**When to write to the vault**
+* After debugging a non-trivial issue (especially when repro/fix steps matter).
+* When creating or revising plans/refactor blueprints.
+* When a decision needs deeper rationale than `_agent/DECISIONS.md` can hold.
+* When the user runs a dedicated archive command/prompt (for example from `.cursor/commands`).
 
-**Performance Tripwire (hot paths)**
-* Before coding, state potential per‑frame costs: allocations, object creation, signal emissions, binding re‑evals.
-* If uncertain, treat it as a risk and reduce scope or add guardrails.
+**Vault note conventions (from vault README)**
+* Use Obsidian wikilinks for cross-references.
+* Keep tags small/consistent; prefer links over tag sprawl.
+* Follow naming patterns for Sessions/Decisions/Invariants/Pitfalls.
+* Use YAML frontmatter (`type`, `project`, `created`, `updated`, `tags`) for discoverability.
+* Every session note should link at least one DEC/PIT/INV note when relevant.
 
-**Context Hygiene (exploration first)**
-* Start with `rg -n` / `rg --files` to narrow scope before opening full files.
-* Prefer targeted line windows over full-file reads for large sources.
-* If unsure whether deep read is needed, check file size/LOC first and inspect only the relevant sections.
-* Qdrant indexing for this refactor must be directory-targeted only: index `libs/` and `docs/` (and optional specific source dirs), never repo root.
-* Do not index `build/` artifacts (including Qt Creator multi-kit outputs, moc/autogen, and preset-specific build trees).
-
-**System Context (Sentinel)**
-* Goal: GPU‑first, deterministic, zero‑lag trading terminal (ExoCharts + TradingView + SierraCharts + Bookmap + TradingLite vibes).
-* Future: AI commentary (CopeNet), equity/crypto data (including free sources like yfinance), and richer overlays.
-* Constraint: do not derail for token usage; keep prompts and notes short and enforceable.
+**Agent behavior**
+* Do not replace `_agent/` workflow; extend it with vault long-form memory.
+* Keep vault entries readable, concrete, and solution-oriented (enough detail to reverse steps later).
+* Avoid storing secrets/credentials in vault notes.
 
 ---
 
@@ -95,17 +113,17 @@ Everything the AI does must protect those three truths.
 ### **Render Path**
 
 ```
-Server: Transport → Dispatch → MarketDataCoreEngine → ServerDataModel → HeatmapTwapStreamer
-        → SentinelStreamServer → WebSocket
-Client: SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer
-        → HeatmapIntensityNode + MsdfGlyphNode → GPU
+Server: Transport â†’ Dispatch â†’ MarketDataCoreEngine â†’ ServerDataModel â†’ HeatmapTwapStreamer
+        â†’ SentinelStreamServer â†’ WebSocket
+Client: SentinelStreamClient â†’ RemoteGridDataSource â†’ DataProcessor â†’ UnifiedGridRenderer
+        â†’ HeatmapIntensityNode + MsdfGlyphNode â†’ GPU
 ```
 
 ### **Invariant**
 
 **Zoom/pan must always update via `setViewport()` so viewportVersion increments.**
 Never mutate viewport fields directly.
-If viewportVersion doesn’t change, the grid won’t rebuild.
+If viewportVersion doesnâ€™t change, the grid wonâ€™t rebuild.
 
 ---
 
@@ -128,9 +146,9 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
   - Before adding a feature or refactoring a file/module, answer these:
 
   1. Purpose
-     What system capability does this enable? What breaks if it’s removed?
+     What system capability does this enable? What breaks if itâ€™s removed?
   2. Invariant
-     “This file guarantees that ___ always ___, even when ___.”
+     â€œThis file guarantees that ___ always ___, even when ___.â€
   3. Ownership
      What it owns (time/state/GPU/threading/I/O/etc) and what it explicitly does not.
   4. Contract
@@ -139,14 +157,14 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
      Who depends on it, and who it depends on. Any inversion/leak?
   6. Design Choice
      One plausible alternative + why this design wins.
-     If unclear: UNKNOWN — REVISIT.
+     If unclear: UNKNOWN â€” REVISIT.
   7. Hot vs Cold
      Identify hot path blocks vs setup/glue paths.
   8. State Flow
      Who mutates state, who observes it, where it is cached/derived/authoritative.
   9. Smell Tags
-     Tag anything “sloppy poopy” as
-     SMELL — NEEDS CONTEXT or SMELL — PROBABLY WRONG.
+     Tag anything â€œsloppy poopyâ€ as
+     SMELL â€” NEEDS CONTEXT or SMELL â€” PROBABLY WRONG.
   10. Confidence
      Can I explain it from memory? If not, list gaps.
 
@@ -159,7 +177,7 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 ### **File Size**
 
 * No arbitrary LOC limit.
-* If file feels unwieldy, split when *you* feel it’s time.
+* If file feels unwieldy, split when *you* feel itâ€™s time.
 
 ---
 
@@ -167,24 +185,24 @@ If viewportVersion doesn’t change, the grid won’t rebuild.
 
 ### **Branches**
 
-* `main` — stable, demo-ready.
-* `dev` — messy high-velocity work.
-* `feature/<name>` — only for large refactors.
+* `main` â€” stable, demo-ready.
+* `dev` â€” messy high-velocity work.
+* `feature/<name>` â€” only for large refactors.
 
 ### **Rules**
 
 * Rebase feature onto dev frequently.
-* Don’t stack branches.
+* Donâ€™t stack branches.
 * Commit groups of logical feats; clean history optional.
 
-If you can understand your commit messages tomorrow morning, they’re good.
+If you can understand your commit messages tomorrow morning, theyâ€™re good.
 
 **GUI Screenshot API**  
 Exposes a local HTTP endpoint for automated screenshots of the UI.
 
 - **Endpoint:** `GET http://127.0.0.1:<PORT>/screenshot`
 - **Params:**
-    - `target`: What to capture—`main` (default), `heatmap`, or `lab`
+    - `target`: What to captureâ€”`main` (default), `heatmap`, or `lab`
     - `name`: (Optional) Filename override
 - **Env Vars:**
     - `SENTINEL_GUI_API_PORT` (default: 17100)
@@ -195,7 +213,7 @@ Exposes a local HTTP endpoint for automated screenshots of the UI.
     - Heatmap only:  
       `curl "http://127.0.0.1:17100/screenshot?target=heatmap"`
 - **Flow:**  
-  Run app → modify UI → call screenshot API → PNG saved → review.
+  Run app â†’ modify UI â†’ call screenshot API â†’ PNG saved â†’ review.
 
 ---
 
@@ -241,7 +259,7 @@ Exposes a local HTTP endpoint for automated screenshots of the UI.
 
 # **6. Rendering Strategies (You Only Need These Laws)**
 
-* Runs on render thread → never touch GUI QObjects.
+* Runs on render thread â†’ never touch GUI QObjects.
 * Preallocate QSGGeometry; reuse nodes.
 * Validate inputs; skip NaNs/infinite.
 * Respect viewportVersion for rebuild logic.
@@ -271,43 +289,35 @@ These matter. Everything else is negotiable.
 
 # **8. AI Assistant Behavior**
 
-### **Assistants MUST:**
-
-* Follow these rules strictly.
-* Keep code clear, modern, and idiomatic.
-* Not introduce unnecessary abstractions or enterprise patterns.
-* Use your real architecture — never hallucinate systems.
-
-### **Assistants MUST NOT:**
-
-* Generate over-engineered patterns.
-* Escalate rules beyond what’s in THIS file.
-* Invent fake CI/CD steps or workflows you do not have.
-* Enforce pointless constraints (LOC ceilings, verbose PR formats).
-
-Your speed > their bureaucracy.
+Primary behavior rules are defined in **Section 0 (Agent Memory & Workflow)**.
+Act fast, stay practical, and protect Sentinel invariants over process ceremony.
 
 ---
 
 # **9. Task Tracking (`docs/TODO.md`)**
 
-Single source of truth for open work. Read it at session start. Update it as you go.
+Single source of truth for open work. Read it when task tracking is relevant, then update it as you go.
 
 ### **Structure**
 
 * Each feature is a block: `### F<N>: <Name>` with Status, Created, Updated fields.
 * Tasks are tiered: **Now** (active focus), **Next** (queued), **Later** (backlog).
 * **Done** section holds completed tasks with dates. Never delete finished tasks.
-* **Session log** is append-only — one line per session with what happened and what's next.
+* **Session log** is append-only â€” one line per session with what happened and what's next.
 
 ### **Agent Rules**
 
-* If asked: read `docs/TODO.md`, identify active features relevant to current work.
+* Read `docs/TODO.md` only when one of these is true:
+  * the user asks for TODO/feature/session-log updates
+  * the task changes feature scope/priorities
+  * the session is ending and task/session log updates are needed
+* If read: use targeted section reads (`rg -n "### F<id>|Status|Now|Next|Later|Done|Session log"`), not full-file dumps.
+* If asked: identify active features relevant to current work.
 * When you finish a task: check the box `[x]`, move it to Done with today's date.
 * When pausing or ending a session: update the session log and set Updated date.
 * If the user pivots to a new feature: append a new `F<N>` block at the bottom.
 * Do NOT reorder, renumber, or restructure existing feature blocks.
-* Keep Now short (3–5 items). Promote from Next when Now is clear.
+* Keep Now short (3â€“5 items). Promote from Next when Now is clear.
 * If a feature is fully complete, set its Status to `done`.
 
 ---
@@ -324,10 +334,10 @@ Single source of truth for open work. Read it at session start. Update it as you
 
 ### **Never Again**
 
-* Don’t `beginResetModel()` during pan/zoom for QML Repeaters.
-* Don’t tie label density directly to data tick size.
-* Don’t assume GPU bottleneck when QML churn is present.
-* Don’t bind per-label pan offsets in QML; move the math to the model.
+* Donâ€™t `beginResetModel()` during pan/zoom for QML Repeaters.
+* Donâ€™t tie label density directly to data tick size.
+* Donâ€™t assume GPU bottleneck when QML churn is present.
+* Donâ€™t bind per-label pan offsets in QML; move the math to the model.
 
 ---
 
@@ -350,3 +360,5 @@ Single source of truth for open work. Read it at session start. Update it as you
 ---
 
 # **End of AGENTS.md**
+
+

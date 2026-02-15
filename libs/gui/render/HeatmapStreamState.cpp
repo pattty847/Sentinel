@@ -148,6 +148,30 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
         }
         uploads.push_back({x, data});
     };
+    auto upsertPendingLabelColumn = [](std::vector<PendingLabelColumn>& uploads,
+                                       int x,
+                                       const QByteArray& intensity,
+                                       const QByteArray& liquidity,
+                                       double scale,
+                                       bool haveLiquidity) {
+        for (auto& pending : uploads) {
+            if (pending.x == x) {
+                pending.intensity = intensity;
+                pending.liquidity = liquidity;
+                pending.liquidityScale = scale;
+                pending.haveLiquidity = haveLiquidity;
+                return;
+            }
+        }
+        PendingLabelColumn pending;
+        pending.x = x;
+        pending.intensity = intensity;
+        pending.liquidity = liquidity;
+        pending.liquidityScale = scale;
+        pending.haveLiquidity = haveLiquidity;
+        uploads.push_back(std::move(pending));
+    };
+
     if (!sameBucketUpdate) {
         std::lock_guard<std::mutex> lock(m_uploadMutex);
         for (int i = 0; i < step - 1; ++i) {
@@ -160,6 +184,36 @@ void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
     } else {
         std::lock_guard<std::mutex> lock(m_uploadMutex);
         upsertPendingColumn(m_pendingUploads, writeColumn, intensityColumn);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_labelUploadMutex);
+        if (!sameBucketUpdate) {
+            for (int i = 0; i < step - 1; ++i) {
+                const int columnIndex = (writeColumn - (step - 1 - i) + gridWidth) % gridWidth;
+                upsertPendingLabelColumn(m_pendingLabelUploads,
+                                         columnIndex,
+                                         fillColumn,
+                                         fillLiquidityColumn,
+                                         fillLiquidityScale,
+                                         fillLiquidityColumn.size() == expectedLiquidityBytes);
+            }
+        }
+
+        QByteArray labelLiquidity = fillLiquidityColumn;
+        double labelLiquidityScale = fillLiquidityScale;
+        bool labelHaveLiquidity = false;
+        if (haveLiquidityColumn) {
+            labelLiquidity = liquidityColumn;
+            labelLiquidityScale = (liquidityScale > 0.0) ? liquidityScale : 1.0;
+            labelHaveLiquidity = true;
+        }
+        upsertPendingLabelColumn(m_pendingLabelUploads,
+                                 writeColumn,
+                                 intensityColumn,
+                                 labelLiquidity,
+                                 labelLiquidityScale,
+                                 labelHaveLiquidity);
     }
 
     {
@@ -357,6 +411,13 @@ void HeatmapStreamState::takePendingUploads(std::vector<PendingColumn>& out) {
     }
 }
 
+void HeatmapStreamState::takePendingLabelUploads(std::vector<PendingLabelColumn>& out) {
+    std::lock_guard<std::mutex> lock(m_labelUploadMutex);
+    if (!m_pendingLabelUploads.empty()) {
+        out.swap(m_pendingLabelUploads);
+    }
+}
+
 void HeatmapStreamState::copyLiquiditySnapshot(std::vector<uint16_t>& liquidityRing,
                                                std::vector<uint16_t>& intensityRing,
                                                std::vector<double>& liquidityScales,
@@ -389,6 +450,10 @@ void HeatmapStreamState::resetLocked(int gridWidth, int gridHeight) {
     {
         std::lock_guard<std::mutex> lock(m_uploadMutex);
         m_pendingUploads.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_labelUploadMutex);
+        m_pendingLabelUploads.clear();
     }
     {
         std::lock_guard<std::mutex> lock(m_ringMutex);
