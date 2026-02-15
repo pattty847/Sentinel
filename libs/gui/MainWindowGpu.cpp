@@ -190,6 +190,9 @@ void MainWindowGPU::setupUI() {
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
     if (m_screenerDock) {
+        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
+            m_screenerDock->setStreamClient(remote->streamClient());
+        }
         connect(m_screenerDock, &ScreenerDock::rowSelected, this, [this](const QString& symbol, const QString& assetType) {
             if (assetType == "crypto" && m_symbolInput) {
                 m_symbolInput->setText(symbol);

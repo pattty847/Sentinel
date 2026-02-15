@@ -1,6 +1,8 @@
 // Sentinel — ScreenerDock
 #include "ScreenerDock.hpp"
 
+#include "../../core/protocol/SentinelStreamClient.hpp"
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -15,8 +17,6 @@
 #include <QIcon>
 #include <QTableView>
 #include <QTimer>
-#include <QUrl>
-#include <QAbstractSocket>
 
 static constexpr int kColSymbol    = 0;
 static constexpr int kColName      = 1;
@@ -27,35 +27,40 @@ static constexpr int kColRelVol    = 5;
 static constexpr int kColMktCap    = 6;
 static constexpr int kColExtra1    = 7;   // P/E (stocks) | Category (crypto)
 static constexpr int kColExtra2    = 8;   // Div Yield% (stocks) | Sector (crypto)
-static constexpr int kColSector    = 9;   // Sector (stocks) | Exchange (crypto)
+static constexpr int kColSector    = 9;   // Sector (stocks) | — (crypto)
 static constexpr int kColExchange  = 10;
 static constexpr int kColCount     = 11;
 
 ScreenerDock::ScreenerDock(QWidget* parent)
     : DockablePanel("ScreenerDock", "Screener", parent)
-    , m_ws(new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this))
-    , m_reconnectTimer(new QTimer(this))
+    , m_autoTimer(new QTimer(this))
     , m_model(new QStandardItemModel(0, kColCount, this))
 {
     m_model->setHorizontalHeaderLabels({"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap", "Category", "Sector", "—", "Exchange"});
-    m_model->setSortRole(Qt::UserRole + 1);  // numeric sort role for all columns
+    m_model->setSortRole(Qt::UserRole + 1);
 
-    m_reconnectTimer->setInterval(kReconnectMs);
-    m_reconnectTimer->setSingleShot(true);
-    connect(m_reconnectTimer, &QTimer::timeout, this, &ScreenerDock::connectToServer);
-
-    connect(m_ws, &QWebSocket::connected,    this, &ScreenerDock::onConnected);
-    connect(m_ws, &QWebSocket::disconnected, this, &ScreenerDock::onDisconnected);
-    connect(m_ws, &QWebSocket::textMessageReceived, this, &ScreenerDock::onMessageReceived);
-    connect(m_ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::errorOccurred),
-            this, &ScreenerDock::onSocketError);
+    m_autoTimer->setSingleShot(false);
+    connect(m_autoTimer, &QTimer::timeout, this, &ScreenerDock::onAutoTimer);
 
     buildUi();
-    connectToServer();  // connect to server on launch, but fetch nothing until user acts
 }
 
-ScreenerDock::~ScreenerDock() {
-    m_ws->close();
+ScreenerDock::~ScreenerDock() = default;
+
+void ScreenerDock::setStreamClient(SentinelStreamClient* client) {
+    if (m_client == client) return;
+    if (m_client) {
+        disconnect(m_client, &SentinelStreamClient::screenerUpdateReceived,
+                   this, &ScreenerDock::onScreenerUpdate);
+    }
+    m_client = client;
+    if (m_client) {
+        connect(m_client, &SentinelStreamClient::screenerUpdateReceived,
+                this, &ScreenerDock::onScreenerUpdate, Qt::QueuedConnection);
+        setStatus("Connected — press Run or enable Auto");
+    } else {
+        setStatus("No stream client", true);
+    }
 }
 
 void ScreenerDock::buildUi() {
@@ -111,8 +116,6 @@ void ScreenerDock::buildUi() {
     m_table->setAlternatingRowColors(true);
     m_table->setSortingEnabled(true);
     m_table->verticalHeader()->hide();
-    // All columns Interactive — Qt never auto-measures on scroll (eliminates lag).
-    // resizeColumnsToContents() is called once after first data load, then widths are locked.
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setStyleSheet(
@@ -123,7 +126,7 @@ void ScreenerDock::buildUi() {
     layout->addWidget(m_table, 1);
 
     // ── Status bar ───────────────────────────────────────────────────────────
-    m_statusLabel = new QLabel("Connecting...", m_contentWidget);
+    m_statusLabel = new QLabel("Waiting for stream client...", m_contentWidget);
     m_statusLabel->setStyleSheet("color:#888; font-size:11px;");
     layout->addWidget(m_statusLabel);
 
@@ -142,65 +145,30 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRowClicked);
 }
 
-// ── Connection ────────────────────────────────────────────────────────────────
+// ── Fetch ──────────────────────────────────────────────────────────────────────
 
-void ScreenerDock::connectToServer() {
-    if (m_ws->state() != QAbstractSocket::UnconnectedState)
+void ScreenerDock::requestFetch() {
+    if (!m_client) {
+        setStatus("No stream client — is the server running?", true);
         return;
-    const QUrl url(QString("ws://127.0.0.1:%1/screener").arg(kDefaultPort));
-    m_ws->open(url);
-}
-
-void ScreenerDock::onConnected() {
-    m_connected = true;
-    setStatus("Ready — press Run or enable Auto");
-    // Intentionally no fetch here — user must act first
-}
-
-void ScreenerDock::onDisconnected() {
-    m_connected = false;
-    setStatus("Disconnected — retrying...", true);
-    m_reconnectTimer->start();
-}
-
-void ScreenerDock::onSocketError(QAbstractSocket::SocketError /*error*/) {
-    setStatus("Server unavailable — start screener_server.py", true);
-    if (!m_reconnectTimer->isActive())
-        m_reconnectTimer->start();
-}
-
-void ScreenerDock::sendConfig() {
-    // Sends configuration to the server.
-    // interval_sec is only meaningful when auto mode is active on the server side.
-    if (!m_connected) return;
-    QJsonObject msg;
-    msg["type"]         = "set_config";
-    msg["asset"]        = m_currentAsset;
-    msg["interval_sec"] = m_autoEnabled ? m_intervalSec : 99999; // large interval = effectively paused
-    msg["limit"]        = 100;
-    msg["min_volume"]   = 500000.0;
-    m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+    }
+    setStatus(QString("Fetching %1...").arg(m_currentAsset));
+    m_client->requestScreenerData(m_currentAsset.toStdString(), 100, 500000.0);
 }
 
 // ── Incoming messages ─────────────────────────────────────────────────────────
 
-void ScreenerDock::onMessageReceived(const QString& message) {
-    const QJsonObject obj = QJsonDocument::fromJson(message.toUtf8()).object();
-    const QString type = obj["type"].toString();
+void ScreenerDock::onScreenerUpdate(const QString& asset, int rowCount, const QByteArray& rowsJson) {
+    // Only apply if it matches current asset (may lag if user switched mid-fetch)
+    if (asset != m_currentAsset) return;
 
-    if (type == "screener_update") {
-        applyRows(obj["rows"].toArray());
-        setStatus(QString("Updated — %1 rows (%2)")
-                  .arg(obj["row_count"].toInt())
-                  .arg(obj["asset"].toString()));
-    } else if (type == "status") {
-        setStatus(obj["message"].toString());
-    } else if (type == "error") {
-        setStatus(obj["message"].toString(), true);
-    }
+    const QJsonArray rows = QJsonDocument::fromJson(rowsJson).array();
+    applyRows(rows);
+    setStatus(QString("Updated — %1 rows (%2)").arg(rowCount).arg(asset));
 }
 
-// Creates an item that displays as text but sorts numerically.
+// ── Row display ───────────────────────────────────────────────────────────────
+
 static QStandardItem* numItem(const QString& display, double sortVal) {
     auto* item = new QStandardItem(display);
     item->setData(sortVal, Qt::UserRole + 1);
@@ -208,7 +176,6 @@ static QStandardItem* numItem(const QString& display, double sortVal) {
     return item;
 }
 
-// Creates a text item that sorts lexicographically (stores display text as sort key too).
 static QStandardItem* strItem(const QString& text) {
     auto* item = new QStandardItem(text);
     item->setData(text, Qt::UserRole + 1);
@@ -216,9 +183,8 @@ static QStandardItem* strItem(const QString& text) {
 }
 
 static QString fmtPrice(double v) {
-    // Use fewer decimals for large prices, more for small
-    if (v >= 1000.0)  return QString::number(v, 'f', 2);
-    if (v >= 1.0)     return QString::number(v, 'f', 4);
+    if (v >= 1000.0) return QString::number(v, 'f', 2);
+    if (v >= 1.0)    return QString::number(v, 'f', 4);
     return QString::number(v, 'f', 6);
 }
 
@@ -232,7 +198,6 @@ static QString fmtVolume(double v) {
 void ScreenerDock::applyRows(const QJsonArray& rows) {
     const bool isCrypto = (m_currentAsset == "crypto");
 
-    // Update headers per asset type
     QStringList headers = {"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap"};
     if (isCrypto)
         headers << "Category" << "Sector" << "—" << "Exchange";
@@ -240,7 +205,6 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
         headers << "P/E" << "Div Yield%" << "Sector" << "Exchange";
     m_model->setHorizontalHeaderLabels(headers);
 
-    // Disable sort while populating — re-enable after to avoid mid-insert resorting
     m_table->setSortingEnabled(false);
     m_model->removeRows(0, m_model->rowCount());
 
@@ -260,7 +224,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
 
         auto* symItem  = strItem(row["symbol"].toString());
         auto* nameItem = strItem(row["Name"].toString());
-        symItem->setData(m_currentAsset, Qt::UserRole);  // preserve asset routing
+        symItem->setData(m_currentAsset, Qt::UserRole);
 
         auto* priceItem  = numItem(fmtPrice(price),                       price);
         auto* pctItem    = numItem(QString::number(changePct, 'f', 2)+"%", changePct);
@@ -289,12 +253,10 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
                             relVolItem, mktCapItem, extra1, extra2, extra3, exchItem});
     }
 
-    // Re-enable sorting and default to Mkt Cap descending on first load
     m_table->setSortingEnabled(true);
     if (m_table->horizontalHeader()->sortIndicatorSection() < 0)
         m_table->sortByColumn(kColMktCap, Qt::DescendingOrder);
 
-    // Measure column widths exactly once after first data load, then lock — no per-scroll overhead
     if (!m_columnsResized) {
         m_table->resizeColumnsToContents();
         m_columnsResized = true;
@@ -304,39 +266,36 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
 // ── UI slots ──────────────────────────────────────────────────────────────────
 
 void ScreenerDock::onRunClicked() {
-    if (!m_connected) {
-        connectToServer();
-        return;
-    }
-    // One-shot: send config first (in case asset/interval changed), then trigger fetch
-    sendConfig();
-    QJsonObject msg;
-    msg["type"] = "refresh";
-    m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+    requestFetch();
 }
 
 void ScreenerDock::onAutoToggled(bool checked) {
     m_autoEnabled = checked;
-    if (!m_connected) return;
-    sendConfig();  // pushes new interval_sec (real value or 99999 sentinel)
     if (checked) {
-        // Kick off an immediate fetch so the table populates right away
-        QJsonObject msg;
-        msg["type"] = "refresh";
-        m_ws->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+        m_autoTimer->setInterval(m_intervalSec * 1000);
+        m_autoTimer->start();
+        requestFetch();  // immediate fetch on enable
+    } else {
+        m_autoTimer->stop();
     }
+}
+
+void ScreenerDock::onAutoTimer() {
+    requestFetch();
 }
 
 void ScreenerDock::onAssetChanged(int index) {
     m_currentAsset = m_assetCombo->itemData(index).toString();
-    m_columnsResized = false;  // new asset type = new column set, re-measure on next load
-    if (m_connected && m_autoEnabled) sendConfig();
+    m_columnsResized = false;
+    if (m_autoEnabled) requestFetch();
 }
 
 void ScreenerDock::onIntervalChanged(int value) {
     m_intervalSec = value;
     m_intervalLabel->setText(QString("%1s").arg(value));
-    if (m_connected && m_autoEnabled) sendConfig();
+    if (m_autoEnabled) {
+        m_autoTimer->setInterval(value * 1000);
+    }
 }
 
 void ScreenerDock::onRowClicked(const QModelIndex& index) {

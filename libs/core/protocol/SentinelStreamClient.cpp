@@ -295,6 +295,24 @@ void SentinelStreamClient::requestCandleHistory(const std::string& symbol,
     });
 }
 
+void SentinelStreamClient::requestScreenerData(const std::string& asset,
+                                               int limit,
+                                               double minVolume) {
+    nlohmann::json msg = {
+        {"type",       "screener_request"},
+        {"asset",      asset.empty() ? "crypto" : asset},
+        {"limit",      limit > 0 ? limit : 50},
+        {"min_volume", minVolume},
+    };
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
         sLog_Error("Connect failed: " << ec.message());
@@ -399,6 +417,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::FootprintHistoryChunk:
                 handleFootprintHistoryChunkMessage(msg);
+                return;
+            case protocol::MessageType::ScreenerUpdate:
+                handleScreenerUpdateMessage(msg);
                 return;
             case protocol::MessageType::Unknown:
                 break;
@@ -794,4 +815,12 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
                               DropReason::FootprintSchema)) {
         return;
     }
+}
+
+void SentinelStreamClient::handleScreenerUpdateMessage(const nlohmann::json& msg) {
+    const std::string asset = msg.value("asset", "crypto");
+    const int rowCount = msg.value("row_count", 0);
+    const auto& rows = msg.contains("rows") ? msg["rows"] : nlohmann::json::array();
+    const QByteArray rowsJson = QByteArray::fromStdString(rows.dump());
+    emit screenerUpdateReceived(QString::fromStdString(asset), rowCount, rowsJson);
 }

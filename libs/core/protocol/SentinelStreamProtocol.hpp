@@ -33,6 +33,8 @@ enum class MessageType {
     FootprintHistoryRequest,
     FootprintHistoryChunk,
     TickDelta, // Maybe for later
+    ScreenerRequest,
+    ScreenerUpdate,
     Error,
     Unknown
 };
@@ -55,6 +57,8 @@ inline std::string toString(MessageType t) {
         case MessageType::FootprintSlice: return "footprint_slice";
         case MessageType::FootprintHistoryRequest: return "footprint_history_request";
         case MessageType::FootprintHistoryChunk: return "footprint_history_chunk";
+        case MessageType::ScreenerRequest: return "screener_request";
+        case MessageType::ScreenerUpdate:  return "screener_update";
         case MessageType::Error: return "error";
         default: return "unknown";
     }
@@ -77,6 +81,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "footprint_slice") return MessageType::FootprintSlice;
     if (s == "footprint_history_request") return MessageType::FootprintHistoryRequest;
     if (s == "footprint_history_chunk") return MessageType::FootprintHistoryChunk;
+    if (s == "screener_request") return MessageType::ScreenerRequest;
+    if (s == "screener_update")  return MessageType::ScreenerUpdate;
     if (s == "error") return MessageType::Error;
     return MessageType::Unknown;
 }

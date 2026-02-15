@@ -234,12 +234,14 @@ void StockChartDock::startFetch() {
         m_process->waitForFinished(500);
     }
 
-    // Locate the script relative to the app or source dir
+    // Locate the script relative to the app or source dir.
+    // Binary is at build/windows-msvc-vs/apps/sentinel-gui/Debug/ — 5 levels up = repo root.
     QString scriptPath;
     const QString appDir = QCoreApplication::applicationDirPath();
     const QStringList candidates = {
-        QDir(appDir).absoluteFilePath("../../../scripts/stocks/fetch_daily_ohlcv.py"),
-        QDir(appDir).absoluteFilePath("../../scripts/stocks/fetch_daily_ohlcv.py"),
+        QDir(appDir).absoluteFilePath("../../../../../scripts/stocks/fetch_daily_ohlcv.py"), // Debug build (5 up)
+        QDir(appDir).absoluteFilePath("../../../../scripts/stocks/fetch_daily_ohlcv.py"),    // Release/flat (4 up)
+        QDir(appDir).absoluteFilePath("../../../scripts/stocks/fetch_daily_ohlcv.py"),       // 3 up fallback
 #ifdef SENTINEL_SOURCE_DIR
         QDir(QString::fromUtf8(SENTINEL_SOURCE_DIR)).filePath("scripts/stocks/fetch_daily_ohlcv.py"),
 #endif
@@ -259,8 +261,10 @@ void StockChartDock::startFetch() {
         root->setProperty("statusMsg", QString("Loading %1…").arg(m_currentTicker));
     }
 
-    // Run via uv so the venv is activated automatically
-    const QString scriptsDir = QFileInfo(scriptPath).absolutePath() + "/../..";  // scripts/
+    // Run via uv so the venv is activated automatically.
+    // scriptPath = .../scripts/stocks/fetch_daily_ohlcv.py
+    // absolutePath() = .../scripts/stocks/ → one level up = scripts/ where pyproject.toml lives
+    const QString scriptsDir = QFileInfo(scriptPath).absolutePath() + "/..";
     m_process->setWorkingDirectory(QDir(scriptsDir).absolutePath());
     m_process->start("uv", {"run", "python", scriptPath, m_currentTicker, m_currentPeriod});
 }

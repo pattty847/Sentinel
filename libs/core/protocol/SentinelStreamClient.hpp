@@ -60,6 +60,9 @@ public:
                               int64_t timeframeSec,
                               int64_t endTimeSec,
                               int limit);
+    void requestScreenerData(const std::string& asset,
+                             int limit = 50,
+                             double minVolume = 0.0);
 
 signals:
     void connected();
@@ -96,6 +99,9 @@ signals:
                                  int64_t bucketStartMs,
                                  int64_t seq,
                                  const CandleBar& candle);
+    // Emitted when the server returns a screener_update in response to screener_request.
+    // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
+    void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
 
 private:
     void run();
@@ -119,6 +125,7 @@ private:
     void handleFootprintConfigMessage(const nlohmann::json& msg);
     void handleFootprintSliceMessage(const nlohmann::json& msg);
     void handleFootprintHistoryChunkMessage(const nlohmann::json& msg);
+    void handleScreenerUpdateMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;

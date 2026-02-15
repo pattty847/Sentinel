@@ -24,6 +24,7 @@ public:
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
     QObject* candleBuffer() const { return m_candleBuffer.get(); }
+    SentinelStreamClient* streamClient() { return &m_client; }
 
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);

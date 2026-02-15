@@ -20,7 +20,11 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QtEndian>
+#include <cstdio>
 #include "../marketdata/auth/Authenticator.hpp"
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
@@ -546,6 +550,105 @@ public:
                  if (!symbol.empty() && owner_) {
                      owner_->notifyClientUnsubscribed(symbol);
                  }
+            } else if (type == "screener_request") {
+                const std::string asset   = j.value("asset", "crypto");
+                const int         limit   = j.value("limit", 50);
+                const double      minVol  = j.value("min_volume", 0.0);
+
+                auto self = shared_from_this();
+                std::thread([self, asset, limit, minVol]() {
+                    // Locate scripts/ dir relative to the server binary.
+                    // Binary is at <repo>/build/<preset>/apps/sentinel-server/Debug/
+                    // scripts/ is at <repo>/scripts/  (5 levels up)
+                    const QString appDir = QCoreApplication::applicationDirPath();
+                    QString scriptsDir;
+                    const QStringList dirCandidates = {
+                        QDir(appDir).absoluteFilePath("../../../../../scripts"),
+                        QDir(appDir).absoluteFilePath("../../../../scripts"),
+                        QDir(appDir).absoluteFilePath("../../../scripts"),
+                        QDir(appDir).absoluteFilePath("../../scripts"),
+                        QDir(appDir).absoluteFilePath("../scripts"),
+                        QDir(appDir).absoluteFilePath("scripts"),
+                    };
+                    for (const auto& c : dirCandidates) {
+                        if (QFileInfo::exists(QDir(c).absoluteFilePath("screener/screener_fetch.py"))) {
+                            scriptsDir = QDir(c).absolutePath();
+                            break;
+                        }
+                    }
+
+                    if (scriptsDir.isEmpty()) {
+                        sLog_Error("Screener: could not locate scripts/ dir from appDir=" << appDir);
+                        self->send_error("screener_request", "", "scripts/ dir not found (checked relative to server binary)");
+                        return;
+                    }
+
+                    const QString scriptPath = QDir(scriptsDir).absoluteFilePath("screener/screener_fetch.py");
+                    sLog_App("Screener: running " << scriptPath << " asset=" << QString::fromStdString(asset));
+
+                    // Build command: uv run python <script> --asset <x> --limit <n> --min-volume <v>
+                    // Use popen — QProcess requires a Qt event loop and cannot be used in std::thread.
+                    const std::string cmd =
+                        "cd \"" + scriptsDir.toStdString() + "\" && "
+                        "uv run python \"" + scriptPath.toStdString() + "\""
+                        " --asset "      + asset +
+                        " --limit "      + std::to_string(limit) +
+                        " --min-volume " + std::to_string(minVol) +
+                        " 2>&1";
+
+#ifdef _WIN32
+                    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
+                    FILE* pipe = popen(cmd.c_str(), "r");
+#endif
+                    if (!pipe) {
+                        self->send_error("screener_request", "", "failed to launch screener_fetch.py");
+                        return;
+                    }
+
+                    std::string output;
+                    char buf[4096];
+                    while (fgets(buf, sizeof(buf), pipe)) {
+                        output += buf;
+                    }
+#ifdef _WIN32
+                    _pclose(pipe);
+#else
+                    pclose(pipe);
+#endif
+
+                    sLog_App("Screener: output length=" << output.size());
+
+                    const std::string marker = "SCREENER_DATA:";
+                    const auto idx = output.find(marker);
+                    if (idx == std::string::npos) {
+                        sLog_Error("Screener: no SCREENER_DATA marker. Output: " << QString::fromStdString(output.substr(0, 500)));
+                        self->send_error("screener_request", "",
+                                         "no SCREENER_DATA in output: " + output.substr(0, 200));
+                        return;
+                    }
+
+                    // Trim to just the JSON after the marker
+                    std::string dataStr = output.substr(idx + marker.size());
+                    // Strip trailing whitespace/newlines
+                    while (!dataStr.empty() && (dataStr.back() == '\n' || dataStr.back() == '\r' || dataStr.back() == ' '))
+                        dataStr.pop_back();
+
+                    nlohmann::json data = nlohmann::json::parse(dataStr, nullptr, false);
+                    if (data.is_discarded()) {
+                        sLog_Error("Screener: JSON parse failed. Raw: " << QString::fromStdString(dataStr.substr(0, 200)));
+                        self->send_error("screener_request", "", "failed to parse screener JSON");
+                        return;
+                    }
+
+                    nlohmann::json response;
+                    response["type"]      = "screener_update";
+                    response["asset"]     = data.value("asset", asset);
+                    response["rows"]      = data.value("rows", nlohmann::json::array());
+                    response["row_count"] = static_cast<int>(response["rows"].size());
+                    sLog_App("Screener: sending " << response["row_count"].get<int>() << " rows to client");
+                    self->do_write(response.dump());
+                }).detach();
             }
         } catch (const std::exception& e) {
             sLog_Error("Server message parse error: " << e.what());

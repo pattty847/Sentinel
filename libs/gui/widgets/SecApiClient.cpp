@@ -9,10 +9,9 @@
 SecApiClient::SecApiClient(QObject* parent)
     : QObject(parent)
     , m_pythonProcess(nullptr)
-    , m_pythonReady(false)
-    , m_initTimer(new QTimer(this))
+    , m_pythonReady(true)   // uv handles venv activation — no init probe needed
 {
-    initializePython();
+    emit statusUpdate("SEC API ready");
 }
 
 SecApiClient::~SecApiClient() {
@@ -22,18 +21,6 @@ SecApiClient::~SecApiClient() {
     }
 }
 
-void SecApiClient::initializePython() {
-    emit statusUpdate("Initializing SEC API...");
-    QString testCommand = QString(
-        "import sys; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "print('SEC_API_READY')"
-    ).arg(getSecModulePath());
-    
-    m_currentOperation = "init";
-    executePythonCommand(testCommand, "init");
-}
 
 void SecApiClient::fetchFilings(const QString& ticker, const QString& formType) {
     if (!m_pythonReady) {
@@ -80,28 +67,6 @@ void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     runSecScript("sec/sec_fetch_financials.py", args, "financials");
 }
 
-void SecApiClient::executePythonCommand(const QString& command, const QString& operation) {
-    if (m_pythonProcess && m_pythonProcess->state() != QProcess::NotRunning) {
-        m_pythonProcess->kill();
-        m_pythonProcess->waitForFinished(1000);
-    }
-    
-    if (m_pythonProcess) {
-        m_pythonProcess->deleteLater();
-    }
-    
-    m_pythonProcess = new QProcess(this);
-    connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &SecApiClient::onPythonFinished);
-    connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
-    
-    QStringList args;
-    args << "-c" << command;
-
-    QString pythonExe = getPythonExecutable();
-    m_pythonProcess->start(pythonExe, args);
-}
-
 void SecApiClient::runSecScript(const QString& scriptName,
                                 const QStringList& args,
                                 const QString& operation) {
@@ -109,7 +74,6 @@ void SecApiClient::runSecScript(const QString& scriptName,
         m_pythonProcess->kill();
         m_pythonProcess->waitForFinished(1000);
     }
-
     if (m_pythonProcess) {
         m_pythonProcess->deleteLater();
     }
@@ -119,16 +83,16 @@ void SecApiClient::runSecScript(const QString& scriptName,
             this, &SecApiClient::onPythonFinished);
     connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
 
-    QString pythonExe = getPythonExecutable();
-    QString scriptsPath = getScriptsPath();
-    QString scriptPath = QDir(scriptsPath).absoluteFilePath(scriptName);
+    const QString scriptsPath = getScriptsPath();
+    const QString scriptPath  = QDir(scriptsPath).absoluteFilePath(scriptName);
 
-    QStringList fullArgs;
-    fullArgs << scriptPath;
+    // uv run activates the venv from pyproject.toml automatically
+    QStringList fullArgs = {"run", "python", scriptPath};
     fullArgs << args;
 
     m_currentOperation = operation;
-    m_pythonProcess->start(pythonExe, fullArgs);
+    m_pythonProcess->setWorkingDirectory(scriptsPath);
+    m_pythonProcess->start("uv", fullArgs);
 }
 
 void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus) {
@@ -141,16 +105,6 @@ void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatu
     }
 
     QString output = m_pythonProcess->readAllStandardOutput();
-    
-    if (m_currentOperation == "init") {
-        if (output.contains("SEC_API_READY")) {
-            m_pythonReady = true;
-            emit statusUpdate("SEC API ready");
-        } else {
-            emit apiError("Failed to initialize SEC API: " + output);
-        }
-        return;
-    }
     
     // Parse data outputs
     if (output.contains("FILINGS_DATA:")) {
@@ -175,26 +129,6 @@ void SecApiClient::onPythonError(QProcess::ProcessError error) {
                          .arg(error)
                          .arg(m_pythonProcess->errorString());
     emit apiError(errorString);
-}
-
-QString SecApiClient::getPythonExecutable() const {
-    QDir currentDir = QDir::current();
-    QString venvPython = currentDir.absoluteFilePath(".venv/Scripts/python.exe");
-    
-    if (QFileInfo::exists(venvPython)) {
-        return venvPython;
-    }
-    
-    // Fallback to system python
-    #ifdef Q_OS_WIN
-    return "python";
-    #else
-    return "python3";
-    #endif
-}
-
-QString SecApiClient::getSecModulePath() const {
-    return getScriptsPath();
 }
 
 QString SecApiClient::getScriptsPath() const {
