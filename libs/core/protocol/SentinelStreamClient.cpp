@@ -30,6 +30,11 @@ enum class DropReason : int {
     FootprintBase64Decode,
     FootprintSliceMeta,
     FootprintPayloadShape,
+    TpoSchema,
+    TpoGridHeight,
+    TpoPayloadEstimate,
+    TpoPayloadDecoded,
+    TpoBase64Decode,
     Count
 };
 
@@ -166,6 +171,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
+    qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
     qRegisterMetaType<ServerConfig>("ServerConfig");
@@ -286,6 +292,29 @@ void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
         {"count", count}
     };
 
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
+void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
+                                             int64_t timeframeMs,
+                                             int64_t endTimeMs,
+                                             int count) {
+    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        return;
+    }
+    nlohmann::json msg = {
+        {"type", "tpo_history_request"},
+        {"symbol", symbol},
+        {"timeframe_ms", timeframeMs},
+        {"end_time", endTimeMs},
+        {"count", count}
+    };
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -441,6 +470,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::FootprintHistoryChunk:
                 handleFootprintHistoryChunkMessage(msg);
+                return;
+            case protocol::MessageType::TpoSlice:
+                handleTpoSliceMessage(msg);
+                return;
+            case protocol::MessageType::TpoHistoryChunk:
+                handleTpoHistoryChunkMessage(msg);
                 return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
@@ -921,4 +956,128 @@ void SentinelStreamClient::handleScreenerUpdateMessage(const nlohmann::json& msg
     const auto& rows = msg.contains("rows") ? msg["rows"] : nlohmann::json::array();
     const QByteArray rowsJson = QByteArray::fromStdString(rows.dump());
     emit screenerUpdateReceived(QString::fromStdString(asset), rowCount, rowsJson);
+}
+
+void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
+    if (!validateFamilySchema(msg,
+                              "tpo",
+                              protocol::SentinelProtocol::kTpoSchemaVersion,
+                              DropReason::TpoSchema)) {
+        return;
+    }
+    const std::string symbol = msg.value("symbol", "");
+    if (symbol.empty()) {
+        return;
+    }
+    const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
+    const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
+    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int gridWidth = msg.value("grid_width", 0);
+    const int gridHeight = msg.value("grid_height", 0);
+    const double minPrice = msg.value("min_price", 0.0);
+    const double maxPrice = msg.value("max_price", 0.0);
+    const double tickSize = msg.value("tick_size", 0.0);
+    const std::string format = msg.value("format", "tpo_ascii");
+    const std::string encoded = msg.value("letters", "");
+
+    if (!validateGridHeight("tpo_slice", gridHeight, DropReason::TpoGridHeight)) {
+        return;
+    }
+    if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 || maxPrice <= minPrice || tickSize <= 0.0) {
+        return;
+    }
+
+    QByteArray letters;
+    if (!decodeBase64WithGuardrails("tpo_slice",
+                                    "letters",
+                                    encoded,
+                                    DropReason::TpoPayloadEstimate,
+                                    DropReason::TpoBase64Decode,
+                                    DropReason::TpoPayloadDecoded,
+                                    letters)) {
+        return;
+    }
+    if (letters.size() != gridHeight) {
+        return;
+    }
+
+    TpoSlice slice;
+    slice.symbol = QString::fromStdString(symbol);
+    slice.bucketStartMs = startMs;
+    slice.bucketEndMs = endMs;
+    slice.timeframeMs = timeframeMs;
+    slice.gridWidth = gridWidth;
+    slice.gridHeight = gridHeight;
+    slice.minPrice = minPrice;
+    slice.maxPrice = maxPrice;
+    slice.tickSize = tickSize;
+    slice.format = QString::fromStdString(format);
+    slice.letters = std::move(letters);
+    emit tpoSliceReceived(slice);
+}
+
+void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& msg) {
+    if (!validateFamilySchema(msg,
+                              "tpo",
+                              protocol::SentinelProtocol::kTpoSchemaVersion,
+                              DropReason::TpoSchema)) {
+        return;
+    }
+    const std::string symbol = msg.value("symbol", "");
+    if (symbol.empty()) {
+        return;
+    }
+    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int gridWidth = msg.value("grid_width", 0);
+    const int gridHeight = msg.value("grid_height", 0);
+    const std::string encoding = msg.value("encoding", "base64");
+    const auto columns = msg.value("columns", nlohmann::json::array());
+
+    if (!validateGridHeight("tpo_history_chunk", gridHeight, DropReason::TpoGridHeight)) {
+        return;
+    }
+    if (!columns.is_array()) {
+        return;
+    }
+
+    for (const auto& item : columns) {
+        const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
+        const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
+        const double minPrice = item.value("min_price", 0.0);
+        const double maxPrice = item.value("max_price", 0.0);
+        const double tickSize = item.value("tick_size", 0.0);
+        const std::string format = item.value("format", "tpo_ascii");
+        const std::string encoded = item.value("letters", "");
+        if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 || maxPrice <= minPrice || tickSize <= 0.0) {
+            continue;
+        }
+        QByteArray letters;
+        if (!encoded.empty() && encoding == "base64") {
+            if (!decodeBase64WithGuardrails("tpo_history_chunk",
+                                            "letters",
+                                            encoded,
+                                            DropReason::TpoPayloadEstimate,
+                                            DropReason::TpoBase64Decode,
+                                            DropReason::TpoPayloadDecoded,
+                                            letters)) {
+                return;
+            }
+        }
+        if (letters.size() != gridHeight) {
+            continue;
+        }
+        TpoSlice slice;
+        slice.symbol = QString::fromStdString(symbol);
+        slice.bucketStartMs = startMs;
+        slice.bucketEndMs = endMs;
+        slice.timeframeMs = timeframeMs;
+        slice.gridWidth = gridWidth;
+        slice.gridHeight = gridHeight;
+        slice.minPrice = minPrice;
+        slice.maxPrice = maxPrice;
+        slice.tickSize = tickSize;
+        slice.format = QString::fromStdString(format);
+        slice.letters = std::move(letters);
+        emit tpoSliceReceived(slice);
+    }
 }

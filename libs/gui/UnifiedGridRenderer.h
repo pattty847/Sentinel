@@ -190,6 +190,7 @@ private:
     std::atomic<uint64_t> m_heatmapStreamGeneration{0};
     std::atomic<uint64_t> m_footprintStreamGeneration{0};
     std::atomic<uint64_t> m_candleStreamGeneration{0};
+    std::atomic<int64_t> m_lastIncomingHeatmapSliceTimeframeMs{0};
 
 public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);

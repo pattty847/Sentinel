@@ -8,6 +8,7 @@
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/protocol/HeatmapSlice.hpp"
 #include "../../core/protocol/FootprintSlice.hpp"
+#include "../../core/protocol/TpoSlice.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -37,6 +38,10 @@ public:
                                          int64_t timeframeMs,
                                          int64_t endTimeMs,
                                          int count) = 0;
+    virtual void requestTpoHistory(const QString& symbol,
+                                   int64_t timeframeMs,
+                                   int64_t endTimeMs,
+                                   int count) = 0;
     virtual void requestCandleHistory(const QString& symbol,
                                       int64_t timeframeSec,
                                       int64_t endTimeSec,
@@ -52,6 +57,7 @@ signals:
     void orderBookUpdated(std::shared_ptr<const OrderBook> book);
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
+    void tpoSliceReceived(const TpoSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,

@@ -12,6 +12,7 @@
 #include "../datasources/IGridDataSource.hpp"
 
 class FootprintStreamState;
+class TpoStreamState;
 
 class DataProcessor : public QObject {
     Q_OBJECT
@@ -23,6 +24,7 @@ public:
 public slots:
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
+    void onTpoSliceReceived(const TpoSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
                                   int gridWidth,
@@ -68,6 +70,7 @@ signals:
                                   int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
     void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
+    void tpoColumnReady(int x, int gridWidth, int gridHeight, QByteArray letters);
 
 private:
     struct HeatmapGridKey {
@@ -122,5 +125,8 @@ private:
     int m_footprintGridWidth = 5120;
     int m_footprintGridHeight = 2048;
     std::unique_ptr<FootprintStreamState> m_footprintStream;
+    int m_tpoGridWidth = 5120;
+    int m_tpoGridHeight = 2048;
+    std::unique_ptr<TpoStreamState> m_tpoStream;
 
 };

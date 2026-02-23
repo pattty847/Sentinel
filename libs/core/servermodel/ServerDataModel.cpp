@@ -92,6 +92,15 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
+    int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
+    for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
+        if (tf > maxTfMs) {
+            maxTfMs = tf;
+        }
+    }
+    const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.heatmap.gridWidth);
+    m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
+
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -165,6 +174,32 @@ bool ServerDataModel::getHeatmapHistory(const std::string& symbol,
                                            outGridWidth, outGridHeight, out);
 }
 
+bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
+                                             int64_t startTimeMs,
+                                             int64_t endTimeMs,
+                                             std::vector<FootprintTradeSample>& out) const {
+    out.clear();
+    if (symbol.empty() || endTimeMs <= startTimeMs) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
+    auto it = m_recentFootprintTrades.find(symbol);
+    if (it == m_recentFootprintTrades.end()) {
+        return false;
+    }
+    const auto& trades = it->second;
+    for (const auto& sample : trades) {
+        if (sample.timestampMs < startTimeMs) {
+            continue;
+        }
+        if (sample.timestampMs >= endTimeMs) {
+            break;
+        }
+        out.push_back(sample);
+    }
+    return !out.empty();
+}
+
 void ServerDataModel::onTrade(const Trade& trade) {
     if (m_logger) {
         m_logger->logTrade(trade);
@@ -180,6 +215,16 @@ void ServerDataModel::onTrade(const Trade& trade) {
     
     auto& data = ensureSymbol(trade.product_id);
     data.lastTradePrice = trade.price;
+
+    if (exchangeMs > 0 && trade.price > 0.0 && trade.size > 0.0) {
+        std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
+        auto& trades = m_recentFootprintTrades[trade.product_id];
+        const int64_t cutoff = exchangeMs - m_footprintTradeRetentionMs;
+        while (!trades.empty() && trades.front().timestampMs < cutoff) {
+            trades.pop_front();
+        }
+        trades.push_back(FootprintTradeSample{exchangeMs, trade.price, trade.size, trade.side});
+    }
     
     emit tradeBroadcast(trade);
 }

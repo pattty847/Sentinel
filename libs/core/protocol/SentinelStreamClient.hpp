@@ -14,6 +14,7 @@
 #include "SentinelStreamProtocol.hpp"
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
+#include "TpoSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
 
@@ -60,6 +61,10 @@ public:
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
                                  int count);
+    void requestTpoHistory(const std::string& symbol,
+                           int64_t timeframeMs,
+                           int64_t endTimeMs,
+                           int count);
     void requestCandleHistory(const std::string& symbol,
                               int64_t timeframeSec,
                               int64_t endTimeSec,
@@ -83,6 +88,7 @@ signals:
     // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
+    void tpoSliceReceived(const TpoSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,
@@ -129,6 +135,8 @@ private:
     void handleFootprintConfigMessage(const nlohmann::json& msg);
     void handleFootprintSliceMessage(const nlohmann::json& msg);
     void handleFootprintHistoryChunkMessage(const nlohmann::json& msg);
+    void handleTpoSliceMessage(const nlohmann::json& msg);
+    void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
 
     std::string m_host;

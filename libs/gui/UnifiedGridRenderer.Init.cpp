@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include <QMetaObject>
 #include <QMetaType>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QtEndian>
 #include <algorithm>
@@ -86,6 +87,7 @@ void UnifiedGridRenderer::init() {
 
 bool UnifiedGridRenderer::ingestHeatmapColumnEvent(const HeatmapColumnEvent& event) {
     const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+    m_lastIncomingHeatmapSliceTimeframeMs.store(event.timeframeMs, std::memory_order_relaxed);
     if (!m_useGpuHeatmap) {
         m_useGpuHeatmap = true;
         m_heatmapOverlay.requestFullTextureRebuild();
@@ -181,6 +183,27 @@ bool UnifiedGridRenderer::ingestHeatmapColumnEvent(const HeatmapColumnEvent& eve
     if (cadenceMs <= 0) {
         cadenceMs = (event.timeframeMs > 0) ? event.timeframeMs : m_currentTimeframe_ms;
         m_timeAuthority.setActiveTimeframeMs(cadenceMs);
+    }
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        static QElapsedTimer cadenceTimer;
+        static bool cadenceTimerStarted = false;
+        if (!cadenceTimerStarted) {
+            cadenceTimer.start();
+            cadenceTimerStarted = true;
+        }
+        if (cadenceTimer.elapsed() > 1000 &&
+            event.timeframeMs > 0 &&
+            cadenceMs > 0 &&
+            event.timeframeMs != cadenceMs) {
+            sLog_Debug(QString("Cadence mismatch: incoming_slice_tf=%1ms active_mapping_tf=%2ms renderer_tf=%3ms overlays[h=%4 fp=%5 tpo=%6]")
+                           .arg(event.timeframeMs)
+                           .arg(cadenceMs)
+                           .arg(m_currentTimeframe_ms)
+                           .arg(m_heatmapLayerEnabled ? 1 : 0)
+                           .arg(m_footprintLayerEnabled ? 1 : 0)
+                           .arg(m_tpoLayerEnabled ? 1 : 0));
+            cadenceTimer.restart();
+        }
     }
     if (m_heatmapStream) {
         m_heatmapStream->updateRange(event.minPrice, event.maxPrice, event.tickSize);
@@ -424,6 +447,27 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                                    .arg(gridWidth)
                                    .arg(gridHeight)
                                    .arg(pendingCount));
+                }
+                update();
+            },
+            Qt::QueuedConnection);
+
+    connect(m_dataProcessor.get(), &DataProcessor::tpoColumnReady,
+            this,
+            [this](int x, int gridWidth, int gridHeight, QByteArray letters) {
+                if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth) {
+                    return;
+                }
+                if (letters.size() != gridHeight) {
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+                    if (m_pendingTpoUploads.capacity() < static_cast<size_t>(gridWidth)) {
+                        m_pendingTpoUploads.reserve(static_cast<size_t>(gridWidth));
+                    }
+                    m_pendingTpoUploads.push_back(
+                        TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters)});
                 }
                 update();
             },

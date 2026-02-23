@@ -1,10 +1,12 @@
 // UnifiedGridRenderer render-thread hot path split from main TU.
 #include "UnifiedGridRenderer.h"
 
+#include "SentinelLogging.hpp"
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/MsdfGlyphNode.hpp"
 #include "render/UgrFrameMath.hpp"
 
+#include <QElapsedTimer>
 #include <QtEndian>
 #include <algorithm>
 UnifiedGridRenderer::FrameContext UnifiedGridRenderer::buildFrameContext() const {
@@ -213,8 +215,12 @@ void UnifiedGridRenderer::renderOverlays(
     m_tpoOverlay.render(window(),
                         texNode,
                         drawTpo,
+                        frame.forceFull,
+                        snapshot.timeOffset,
                         drawRect,
                         srcRect,
+                        gridWidth,
+                        gridHeight,
                         tpoUploads);
 }
 
@@ -394,6 +400,28 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     const bool drawTpo = frame.overlays.tpo;
     const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
     const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        static QElapsedTimer renderDebugTimer;
+        static bool renderDebugTimerStarted = false;
+        if (!renderDebugTimerStarted) {
+            renderDebugTimer.start();
+            renderDebugTimerStarted = true;
+        }
+        if (renderDebugTimer.elapsed() > 1000) {
+            const int64_t incomingTfMs = m_lastIncomingHeatmapSliceTimeframeMs.load(std::memory_order_relaxed);
+            sLog_Debug(QString("Render frame: overlays[h=%1 fp=%2 tpo=%3] primary=%4 active_tf=%5ms incoming_slice_tf=%6ms append=%7ms grid=%8x%9")
+                           .arg(drawHeatmap ? 1 : 0)
+                           .arg(drawFootprint ? 1 : 0)
+                           .arg(drawTpo ? 1 : 0)
+                           .arg(m_primaryField)
+                           .arg(cadenceMs)
+                           .arg(incomingTfMs)
+                           .arg(snapshot.appendMs)
+                           .arg(gridWidth)
+                           .arg(gridHeight));
+            renderDebugTimer.restart();
+        }
+    }
 
     auto* texNode = ensureHeatmapRootNode(oldNode);
     computeAndApplyFrameMapping(frame, texNode, cadenceMs, gridWidth, gridHeight);

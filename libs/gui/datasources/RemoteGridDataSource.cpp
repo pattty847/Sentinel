@@ -64,6 +64,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
+    qRegisterMetaType<TpoSlice>("TpoSlice");
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
@@ -75,6 +76,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
             this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
+            this, &RemoteGridDataSource::onTpoSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
@@ -136,6 +139,13 @@ void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
                                                 int64_t endTimeSec,
                                                 int limit) {
     m_client.requestCandleHistory(symbol.toStdString(), timeframeSec, endTimeSec, limit);
+}
+
+void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
+                                             int64_t timeframeMs,
+                                             int64_t endTimeMs,
+                                             int count) {
+    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
@@ -213,6 +223,10 @@ void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
 
 void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice) {
     emit footprintSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onTpoSliceReceived(const TpoSlice& slice) {
+    emit tpoSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,

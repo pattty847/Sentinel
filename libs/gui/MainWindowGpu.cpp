@@ -252,6 +252,15 @@ void MainWindowGPU::setupUI() {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setTpoLayerEnabled(enabled);
+                if (enabled && renderer->getCurrentTimeframe() != 900000) {
+                    renderer->setTimeframe(900000);
+                    if (m_heatmapDock && m_heatmapDock->toolbar()) {
+                        m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
+                    }
+                }
+            }
+            if (enabled && m_connected && m_userSubscribed) {
+                requestTpoHistoryForSymbol(m_currentSymbol);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::candlesToggled, this, [this](bool enabled) {
@@ -308,6 +317,8 @@ void MainWindowGPU::setupUI() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
                 if (m_modeController && m_modeController->primaryField() == 1) {
                     requestFootprintHistoryForSymbol(m_currentSymbol);
+                } else if (m_modeController && m_modeController->primaryField() == 2) {
+                    requestTpoHistoryForSymbol(m_currentSymbol);
                 }
             }
         });
@@ -396,6 +407,7 @@ void MainWindowGPU::onSubscribe() {
     if (m_connected) {
         requestHeatmapHistoryForSymbol(symbol);
         requestFootprintHistoryForSymbol(symbol);
+        requestTpoHistoryForSymbol(symbol);
         requestCandleHistoryForSymbol(symbol);
     }
 }
@@ -470,6 +482,34 @@ void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
                    .arg(count));
     }
     m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);
+}
+
+void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeMs = 900000;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->getCurrentTimeframe();
+        }
+    }
+    if (timeframeMs <= 0) {
+        timeframeMs = 900000;
+    }
+    if (timeframeMs != 900000) {
+        timeframeMs = 900000;
+    }
+    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+    const int gridWidth = serverConfig.heatmap.gridWidth;
+    const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 count=%3")
+                   .arg(symbol)
+                   .arg(timeframeMs)
+                   .arg(count));
+    }
+    m_dataSource->requestTpoHistory(symbol, timeframeMs, 0, count);
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -630,6 +670,19 @@ void MainWindowGPU::connectMarketDataSignals() {
                        .arg(tf)
                        .arg(unifiedGridRenderer->getCurrentTimeframe()));
         }
+        auto* toolbar = m_heatmapDock->toolbar();
+        toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
+                                      unifiedGridRenderer->footprintLayerEnabled(),
+                                      unifiedGridRenderer->tpoLayerEnabled());
+        connect(unifiedGridRenderer,
+                &UnifiedGridRenderer::layerVisibilityChanged,
+                this,
+                [toolbar, unifiedGridRenderer]() {
+                    toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
+                                                  unifiedGridRenderer->footprintLayerEnabled(),
+                                                  unifiedGridRenderer->tpoLayerEnabled());
+                },
+                Qt::QueuedConnection);
     }
 
     if (m_modeController) {
@@ -652,6 +705,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,
                 dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived,
+                dataProcessor, &DataProcessor::onTpoSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }
@@ -677,6 +732,7 @@ void MainWindowGPU::connectMarketDataSignals() {
                 m_dataSource->subscribe(symbol);
                 requestHeatmapHistoryForSymbol(symbol);
                 requestFootprintHistoryForSymbol(symbol);
+                requestTpoHistoryForSymbol(symbol);
                 requestCandleHistoryForSymbol(symbol);
             });
 

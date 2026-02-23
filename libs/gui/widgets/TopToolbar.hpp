@@ -15,6 +15,7 @@ public:
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
+    void setLayerToggleStates(bool heatmapEnabled, bool footprintEnabled, bool tpoEnabled);
 
 signals:
     void subscribeRequested();

@@ -97,15 +97,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::mutex queue_mutex_;
     QByteArray footprintDeltaScratch_;
     std::vector<double> footprintRowDeltaScratch_;
-    std::mutex footprint_mutex_;
-
-    struct FootprintTradeSample {
-        int64_t timestampMs = 0;
-        double price = 0.0;
-        double size = 0.0;
-        AggressorSide side = AggressorSide::Unknown;
-    };
-    std::unordered_map<std::string, std::deque<FootprintTradeSample>> footprintTrades_;
     
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
@@ -121,29 +112,6 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
-
-    int64_t footprintRetentionMs(int64_t timeframeMs) const {
-        const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
-        return std::max<int64_t>(300'000, tf * 2048);
-    }
-
-    void recordFootprintTrade(const Trade& trade) {
-        const std::string& sym = trade.product_id;
-        if (subscriptions_.find(sym) == subscriptions_.end()) {
-            return;
-        }
-        const int64_t tsMs = tradeTimestampMs(trade);
-        if (tsMs <= 0 || trade.price <= 0.0 || trade.size <= 0.0) {
-            return;
-        }
-        const int64_t cutoff = tsMs - footprintRetentionMs(owner_ ? owner_->serverConfig().heatmap.activeTimeframeMs : 1000);
-        std::lock_guard<std::mutex> lock(footprint_mutex_);
-        auto& trades = footprintTrades_[sym];
-        while (!trades.empty() && trades.front().timestampMs < cutoff) {
-            trades.pop_front();
-        }
-        trades.push_back(FootprintTradeSample{tsMs, trade.price, trade.size, trade.side});
-    }
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -161,31 +129,20 @@ class Session : public std::enable_shared_from_this<Session> {
             std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
         }
 
-        const std::string sym = slice.symbol.toStdString();
-        {
-            std::lock_guard<std::mutex> lock(footprint_mutex_);
-            auto it = footprintTrades_.find(sym);
-            if (it != footprintTrades_.end()) {
-                auto& trades = it->second;
-                const int64_t cutoff = slice.bucketStartMs - footprintRetentionMs(slice.timeframeMs);
-                while (!trades.empty() && trades.front().timestampMs < cutoff) {
-                    trades.pop_front();
-                }
-
-                for (const auto& sample : trades) {
-                    if (sample.timestampMs < slice.bucketStartMs || sample.timestampMs >= slice.bucketEndMs) {
-                        continue;
-                    }
-                    const int row = static_cast<int>(std::floor((slice.maxPrice - sample.price) / slice.tickSize));
-                    if (row < 0 || row >= gridHeight) {
-                        continue;
-                    }
-                    if (sample.side == AggressorSide::Buy) {
-                        footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
-                    } else if (sample.side == AggressorSide::Sell) {
-                        footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
-                    }
-                }
+        std::vector<ServerDataModel::FootprintTradeSample> trades;
+        model_.collectFootprintTrades(slice.symbol.toStdString(),
+                                      slice.bucketStartMs,
+                                      slice.bucketEndMs,
+                                      trades);
+        for (const auto& sample : trades) {
+            const int row = static_cast<int>(std::floor((slice.maxPrice - sample.price) / slice.tickSize));
+            if (row < 0 || row >= gridHeight) {
+                continue;
+            }
+            if (sample.side == AggressorSide::Buy) {
+                footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
+            } else if (sample.side == AggressorSide::Sell) {
+                footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
             }
         }
 
@@ -237,12 +194,13 @@ class Session : public std::enable_shared_from_this<Session> {
         outMaxPrice = book.getMaxPrice();
         if (!(outMaxPrice > outMinPrice)) {
             double anchorPrice = 0.0;
-            {
-                std::lock_guard<std::mutex> lock(footprint_mutex_);
-                auto it = footprintTrades_.find(symbol);
-                if (it != footprintTrades_.end() && !it->second.empty()) {
-                    anchorPrice = it->second.back().price;
-                }
+            std::vector<ServerDataModel::FootprintTradeSample> recentTrades;
+            const int64_t nowMs = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            if (model_.collectFootprintTrades(symbol, nowMs - 60'000, nowMs + 1, recentTrades) &&
+                !recentTrades.empty()) {
+                anchorPrice = recentTrades.back().price;
             }
             if (anchorPrice <= 0.0) {
                 anchorPrice = outTickSize * static_cast<double>(outGridHeight);
@@ -277,29 +235,17 @@ class Session : public std::enable_shared_from_this<Session> {
             std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
         }
 
-        {
-            std::lock_guard<std::mutex> lock(footprint_mutex_);
-            auto it = footprintTrades_.find(symbol);
-            if (it != footprintTrades_.end()) {
-                auto& trades = it->second;
-                const int64_t cutoff = bucketStartMs - footprintRetentionMs(timeframeMs);
-                while (!trades.empty() && trades.front().timestampMs < cutoff) {
-                    trades.pop_front();
-                }
-                for (const auto& sample : trades) {
-                    if (sample.timestampMs < bucketStartMs || sample.timestampMs >= bucketEndMs) {
-                        continue;
-                    }
-                    const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
-                    if (row < 0 || row >= gridHeight) {
-                        continue;
-                    }
-                    if (sample.side == AggressorSide::Buy) {
-                        footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
-                    } else if (sample.side == AggressorSide::Sell) {
-                        footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
-                    }
-                }
+        std::vector<ServerDataModel::FootprintTradeSample> trades;
+        model_.collectFootprintTrades(symbol, bucketStartMs, bucketEndMs, trades);
+        for (const auto& sample : trades) {
+            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
+            if (row < 0 || row >= gridHeight) {
+                continue;
+            }
+            if (sample.side == AggressorSide::Buy) {
+                footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
+            } else if (sample.side == AggressorSide::Sell) {
+                footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
             }
         }
 
@@ -319,6 +265,41 @@ class Session : public std::enable_shared_from_this<Session> {
             const int32_t q16 = static_cast<int32_t>(std::clamp(q, -32768.0, 32767.0));
             const uint16_t biased = static_cast<uint16_t>(q16 + 32768);
             qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
+        }
+        return true;
+    }
+
+    static char tpoLetterForBucket(int64_t bucketStartMs, int64_t timeframeMs) {
+        if (timeframeMs <= 0) {
+            return 'A';
+        }
+        const int64_t sequence = bucketStartMs / timeframeMs;
+        const int letterIndex = static_cast<int>(sequence % 26);
+        return static_cast<char>('A' + ((letterIndex + 26) % 26));
+    }
+
+    bool buildTpoColumnWindow(const std::string& symbol,
+                              int64_t bucketStartMs,
+                              int64_t bucketEndMs,
+                              int64_t timeframeMs,
+                              int gridHeight,
+                              double maxPrice,
+                              double tickSize,
+                              QByteArray& out) {
+        if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
+            gridHeight <= 0 || tickSize <= 0.0) {
+            return false;
+        }
+        out = QByteArray(gridHeight, '\0');
+        std::vector<ServerDataModel::FootprintTradeSample> trades;
+        model_.collectFootprintTrades(symbol, bucketStartMs, bucketEndMs, trades);
+        const char letter = tpoLetterForBucket(bucketStartMs, timeframeMs);
+        for (const auto& sample : trades) {
+            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
+            if (row < 0 || row >= gridHeight) {
+                continue;
+            }
+            out[row] = letter;
         }
         return true;
     }
@@ -389,6 +370,74 @@ class Session : public std::enable_shared_from_this<Session> {
             item["quant_scale"] = quantScale;
             item["format"] = "q16_delta";
             item["delta_levels_q16"] = deltaLevelsQ16.toBase64().toStdString();
+            columns.push_back(std::move(item));
+        }
+        payload["columns"] = std::move(columns);
+        do_write(payload.dump());
+    }
+
+    void streamTpoHistory(const std::string& symbol,
+                          int64_t timeframeMs,
+                          int64_t endTimeMs,
+                          int count) {
+        if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+            return;
+        }
+        int gridWidth = 0;
+        int gridHeight = 0;
+        double tickSize = 0.0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        if (!resolveFootprintGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
+            return;
+        }
+
+        int effectiveCount = std::max(1, std::min(count, std::max(1, gridWidth)));
+        effectiveCount = std::min(effectiveCount, 512);
+        int64_t effectiveEnd = endTimeMs;
+        if (effectiveEnd <= 0) {
+            effectiveEnd = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+        }
+        effectiveEnd = (effectiveEnd / timeframeMs) * timeframeMs;
+        if (effectiveEnd <= 0) {
+            return;
+        }
+        const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
+
+        nlohmann::json payload;
+        payload["type"] = "tpo_history_chunk";
+        payload["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
+        payload["symbol"] = symbol;
+        payload["timeframe_ms"] = timeframeMs;
+        payload["grid_width"] = gridWidth;
+        payload["grid_height"] = gridHeight;
+        payload["format"] = "tpo_ascii";
+        payload["encoding"] = "base64";
+        auto columns = nlohmann::json::array();
+        for (int i = 0; i < effectiveCount; ++i) {
+            const int64_t bucketStart = firstStart + static_cast<int64_t>(i) * timeframeMs;
+            const int64_t bucketEnd = bucketStart + timeframeMs;
+            QByteArray letters;
+            if (!buildTpoColumnWindow(symbol,
+                                      bucketStart,
+                                      bucketEnd,
+                                      timeframeMs,
+                                      gridHeight,
+                                      maxPrice,
+                                      tickSize,
+                                      letters)) {
+                continue;
+            }
+            nlohmann::json item;
+            item["time_start"] = bucketStart;
+            item["time_end"] = bucketEnd;
+            item["min_price"] = minPrice;
+            item["max_price"] = maxPrice;
+            item["tick_size"] = tickSize;
+            item["format"] = "tpo_ascii";
+            item["letters"] = letters.toBase64().toStdString();
             columns.push_back(std::move(item));
         }
         payload["columns"] = std::move(columns);
@@ -600,6 +649,14 @@ public:
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
                     streamFootprintHistory(symbol, timeframeMs, endTimeMs, count);
+                }
+            } else if (type == "tpo_history_request") {
+                std::string symbol = j.value("symbol", "");
+                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
+                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
+                const int count = j.value("count", 0);
+                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
+                    streamTpoHistory(symbol, timeframeMs, endTimeMs, count);
                 }
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -856,7 +913,6 @@ public:
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
         
         do_write(j.dump());
-        recordFootprintTrade(trade);
     }
     
     void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas) {
@@ -950,6 +1006,35 @@ public:
         }
 
         do_write(footprint.dump());
+
+        QByteArray tpoLetters;
+        if (!buildTpoColumnWindow(sym,
+                                  slice.bucketStartMs,
+                                  slice.bucketEndMs,
+                                  slice.timeframeMs,
+                                  slice.gridHeight,
+                                  slice.maxPrice,
+                                  slice.tickSize,
+                                  tpoLetters)) {
+            return;
+        }
+
+        nlohmann::json tpo;
+        tpo["type"] = "tpo_slice";
+        tpo["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
+        tpo["symbol"] = sym;
+        tpo["time_start"] = slice.bucketStartMs;
+        tpo["time_end"] = slice.bucketEndMs;
+        tpo["timeframe_ms"] = slice.timeframeMs;
+        tpo["grid_width"] = slice.gridWidth;
+        tpo["grid_height"] = slice.gridHeight;
+        tpo["min_price"] = slice.minPrice;
+        tpo["max_price"] = slice.maxPrice;
+        tpo["tick_size"] = slice.tickSize;
+        tpo["format"] = "tpo_ascii";
+        tpo["encoding"] = "base64";
+        tpo["letters"] = tpoLetters.toBase64().toStdString();
+        do_write(tpo.dump());
     }
 
     static bool should_emit_update(const OHLCVBar& bar,

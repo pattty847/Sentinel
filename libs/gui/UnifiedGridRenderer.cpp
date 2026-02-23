@@ -314,10 +314,14 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
     m_primaryField = field;
     if (field == 0) {
         m_heatmapLayerEnabled = true;
+        m_tpoLayerEnabled = false;
     } else if (field == 1) {
         m_footprintLayerEnabled = true;
+        m_tpoLayerEnabled = false;
     } else if (field == 2) {
         m_tpoLayerEnabled = true;
+        m_heatmapLayerEnabled = false;
+        m_footprintLayerEnabled = false;
     }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("PrimaryField set to " << m_primaryField);
@@ -328,10 +332,24 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
 }
 
 void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
-    if (m_heatmapLayerEnabled == enabled) {
+    const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("setHeatmapLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
+                       .arg(enabled ? 1 : 0)
+                       .arg(m_heatmapLayerEnabled ? 1 : 0)
+                       .arg(m_footprintLayerEnabled ? 1 : 0)
+                       .arg(m_tpoLayerEnabled ? 1 : 0));
+    }
+    if (m_heatmapLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled) {
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug("setHeatmapLayerEnabled no-op");
+        }
         return;
     }
     m_heatmapLayerEnabled = enabled;
+    if (enabled) {
+        m_tpoLayerEnabled = false;
+    }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("Heatmap layer " << (enabled ? "enabled" : "disabled"));
     }
@@ -340,10 +358,24 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
 }
 
 void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
-    if (m_footprintLayerEnabled == enabled) {
+    const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("setFootprintLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
+                       .arg(enabled ? 1 : 0)
+                       .arg(m_heatmapLayerEnabled ? 1 : 0)
+                       .arg(m_footprintLayerEnabled ? 1 : 0)
+                       .arg(m_tpoLayerEnabled ? 1 : 0));
+    }
+    if (m_footprintLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled) {
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug("setFootprintLayerEnabled no-op");
+        }
         return;
     }
     m_footprintLayerEnabled = enabled;
+    if (enabled) {
+        m_tpoLayerEnabled = false;
+    }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("Footprint layer " << (enabled ? "enabled" : "disabled"));
     }
@@ -352,10 +384,28 @@ void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
 }
 
 void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
-    if (m_tpoLayerEnabled == enabled) {
+    const bool newHeatmapEnabled = enabled ? false : m_heatmapLayerEnabled;
+    const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("setTpoLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
+                       .arg(enabled ? 1 : 0)
+                       .arg(m_heatmapLayerEnabled ? 1 : 0)
+                       .arg(m_footprintLayerEnabled ? 1 : 0)
+                       .arg(m_tpoLayerEnabled ? 1 : 0));
+    }
+    if (m_tpoLayerEnabled == enabled &&
+        m_heatmapLayerEnabled == newHeatmapEnabled &&
+        m_footprintLayerEnabled == newFootprintEnabled) {
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug("setTpoLayerEnabled no-op");
+        }
         return;
     }
     m_tpoLayerEnabled = enabled;
+    if (enabled) {
+        m_heatmapLayerEnabled = false;
+        m_footprintLayerEnabled = false;
+    }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("TPO layer " << (enabled ? "enabled" : "disabled"));
     }

@@ -11,6 +11,7 @@ Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
 #include "FootprintStreamState.hpp"
+#include "TpoStreamState.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <QtGlobal>
@@ -24,6 +25,8 @@ DataProcessor::DataProcessor(QObject* parent)
     qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
     m_footprintStream = std::make_unique<FootprintStreamState>();
     m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
+    m_tpoStream = std::make_unique<TpoStreamState>();
+    m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
 }
 
 DataProcessor::~DataProcessor() {
@@ -51,6 +54,9 @@ void DataProcessor::clearData() {
     m_heatmapCache.clear();
     if (m_footprintStream) {
         m_footprintStream->clear();
+    }
+    if (m_tpoStream) {
+        m_tpoStream->clear();
     }
 }
 
@@ -238,6 +244,54 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
                            .arg(columnQ16.size()));
         }
         emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16));
+    }
+}
+
+void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_tpoStream || slice.letters.isEmpty()) {
+        return;
+    }
+
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_tpoGridWidth;
+    const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_tpoGridHeight;
+    if (resolvedWidth <= 0 || resolvedHeight <= 0 || slice.letters.size() != resolvedHeight) {
+        return;
+    }
+    if (slice.bucketStartMs <= 0 || slice.bucketEndMs <= slice.bucketStartMs || slice.timeframeMs <= 0) {
+        return;
+    }
+    if (slice.format.trimmed().compare(QStringLiteral("tpo_ascii"), Qt::CaseInsensitive) != 0) {
+        return;
+    }
+
+    if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
+        m_tpoGridWidth = resolvedWidth;
+        m_tpoGridHeight = resolvedHeight;
+        m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
+    }
+
+    const bool ok = m_tpoStream->ingestSlice(slice.bucketStartMs,
+                                             slice.bucketEndMs,
+                                             slice.timeframeMs,
+                                             m_tpoGridWidth,
+                                             m_tpoGridHeight,
+                                             slice.letters);
+    if (!ok) {
+        return;
+    }
+
+    std::vector<TpoStreamState::PendingUpload> pendingUploads;
+    m_tpoStream->takePendingUploads(pendingUploads);
+    if (pendingUploads.empty()) {
+        return;
+    }
+
+    const auto snap = m_tpoStream->snapshot();
+    for (auto& upload : pendingUploads) {
+        emit tpoColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(upload.data));
     }
 }
 

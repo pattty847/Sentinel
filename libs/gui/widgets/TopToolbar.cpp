@@ -1,4 +1,5 @@
 #include "TopToolbar.hpp"
+#include "SentinelLogging.hpp"
 #include <QAction>
 #include <QToolButton>
 #include <QWidget>
@@ -6,8 +7,14 @@
 #include <QLabel>
 #include <QIcon>
 #include <QSlider>
+#include <QSignalBlocker>
 
 namespace {
+bool chartDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
+    return enabled;
+}
+
 const char* labelForTimeframeMs(int64_t ms) {
     switch (ms) {
         case 1000: return "1s";
@@ -68,18 +75,27 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
     connect(m_heatmapButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled heatmap=%1").arg(enabled ? 1 : 0));
+        }
         emit heatmapToggled(enabled);
         if (enabled) {
             emit primaryFieldRequested(0);
         }
     });
     connect(m_footprintButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled footprint=%1").arg(enabled ? 1 : 0));
+        }
         emit footprintToggled(enabled);
         if (enabled) {
             emit primaryFieldRequested(1);
         }
     });
     connect(m_tpoButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled tpo=%1").arg(enabled ? 1 : 0));
+        }
         emit tpoToggled(enabled);
         if (enabled) {
             emit primaryFieldRequested(2);
@@ -172,5 +188,26 @@ void TopToolbar::setTimeframeMs(int64_t ms) {
         if (idx >= 0 && idx != m_timeframeCombo->currentIndex()) {
             m_timeframeCombo->setCurrentIndex(idx);
         }
+    }
+}
+
+void TopToolbar::setLayerToggleStates(bool heatmapEnabled, bool footprintEnabled, bool tpoEnabled) {
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("TopToolbar sync states hm=%1 fp=%2 tpo=%3")
+                       .arg(heatmapEnabled ? 1 : 0)
+                       .arg(footprintEnabled ? 1 : 0)
+                       .arg(tpoEnabled ? 1 : 0));
+    }
+    if (m_heatmapButton) {
+        const QSignalBlocker blocker(*m_heatmapButton);
+        m_heatmapButton->setChecked(heatmapEnabled);
+    }
+    if (m_footprintButton) {
+        const QSignalBlocker blocker(*m_footprintButton);
+        m_footprintButton->setChecked(footprintEnabled);
+    }
+    if (m_tpoButton) {
+        const QSignalBlocker blocker(*m_tpoButton);
+        m_tpoButton->setChecked(tpoEnabled);
     }
 }
