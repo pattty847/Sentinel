@@ -109,7 +109,7 @@ std::vector<CandleOverlayBar> buildContinuousBars(const std::vector<CandleOverla
     if (boundaryStartMs > 0 && !out.empty() && syntheticBudget > 0) {
         const CandleOverlayBar anchor = out.back();
         for (qint64 t = anchor.timeStartMs + timeframeMs;
-             t <= boundaryStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
+             t < boundaryStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
              t += timeframeMs) {
             CandleOverlayBar synthetic;
             synthetic.timeStartMs = t;

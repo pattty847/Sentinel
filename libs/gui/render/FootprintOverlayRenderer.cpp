@@ -4,11 +4,15 @@
 
 #include <QColor>
 #include <QSGNode>
+#include <QSGRendererInterface>
 #include <QSGTexture>
 #include <QtEndian>
+#include <cmath>
+#include <cstring>
 
 void FootprintOverlayRenderer::onRootRebuilt() {
     m_node = nullptr;
+    m_lastWriteColumn = -1;
     m_textureDirty = true;
 }
 
@@ -29,6 +33,9 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
     if (!window || !parentNode) {
         return;
     }
+    const auto* rendererInterface = window->rendererInterface();
+    const bool useIncrementalGlUploads = rendererInterface &&
+        rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
     if (m_resetPending.exchange(false, std::memory_order_acq_rel)) {
         m_image = QImage();
@@ -50,6 +57,18 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
                 break;
             }
         }
+        for (const auto& upload : pendingUploads) {
+            if (upload.gridWidth == m_gridWidth && upload.gridHeight == m_gridHeight &&
+                upload.x >= 0 && upload.x < m_gridWidth) {
+                m_lastWriteColumn = upload.x;
+            }
+        }
+    }
+
+    if ((m_gridWidth <= 0 || m_gridHeight <= 0) && sharedGridWidth > 0 && sharedGridHeight > 0) {
+        m_gridWidth = sharedGridWidth;
+        m_gridHeight = sharedGridHeight;
+        m_textureDirty = true;
     }
 
     if (!drawFootprint && !hasPending) {
@@ -65,17 +84,45 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
         m_textureDirty = true;
     }
 
-    if (m_textureDirty && m_gridWidth > 0 && m_gridHeight > 0) {
+    if (!useIncrementalGlUploads && hasPending && m_gridWidth > 0 && m_gridHeight > 0) {
         ensureImage();
-        auto* footprintTexture = window->createTextureFromImage(m_image);
-        if (!footprintTexture) {
-            const QImage fallback = m_image.convertToFormat(QImage::Format_Grayscale16);
-            footprintTexture = window->createTextureFromImage(fallback);
+        if (!m_image.isNull()) {
+            const int expectedBytes = m_gridHeight * static_cast<int>(sizeof(uint16_t));
+            for (const auto& upload : pendingUploads) {
+                if (upload.gridWidth != m_gridWidth || upload.gridHeight != m_gridHeight) {
+                    continue;
+                }
+                if (upload.x < 0 || upload.x >= m_gridWidth || upload.data.size() != expectedBytes) {
+                    continue;
+                }
+                const auto* src = reinterpret_cast<const uint8_t*>(upload.data.constData());
+                for (int y = 0; y < m_gridHeight; ++y) {
+                    auto* row = m_image.scanLine(y);
+                    std::memcpy(row + upload.x * 2, src + y * 2, 2);
+                }
+            }
+            m_textureDirty = true;
         }
-        if (footprintTexture) {
-            footprintTexture->setFiltering(QSGTexture::Nearest);
-            m_node->setTexture(footprintTexture);
-            m_textureDirty = false;
+    }
+
+    const bool textureMissing = !m_node->hasTexture() || m_node->textureSize().isEmpty();
+    const bool needTextureRefresh = m_textureDirty || (drawFootprint && textureMissing);
+
+    if (needTextureRefresh && m_gridWidth > 0 && m_gridHeight > 0) {
+        ensureImage();
+        if (!m_image.isNull()) {
+            auto* footprintTexture = window->createTextureFromImage(m_image);
+            if (!footprintTexture) {
+                const QImage fallback = m_image.convertToFormat(QImage::Format_Grayscale16);
+                footprintTexture = window->createTextureFromImage(fallback);
+            }
+            if (footprintTexture) {
+                footprintTexture->setFiltering(QSGTexture::Nearest);
+                m_node->setTexture(footprintTexture);
+                m_textureDirty = false;
+            } else {
+                m_textureDirty = true;
+            }
         } else {
             m_textureDirty = true;
         }
@@ -92,7 +139,15 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
     m_node->setNeutralFloor(0.08f);
     m_node->setMagnitudeScale(20.0f);
     m_node->setMagnitudeGamma(0.75f);
-    m_node->setTimeOffset(forceFull ? 0.0f : timeOffset);
+    float footprintTimeOffset = 0.0f;
+    if (!forceFull && m_gridWidth > 0 && m_lastWriteColumn >= 0 && m_lastWriteColumn < m_gridWidth) {
+        const float wrapped = timeOffset * static_cast<float>(m_gridWidth);
+        const float fractional = wrapped - std::floor(wrapped);
+        const int oldestColumn = (m_lastWriteColumn + 1) % m_gridWidth;
+        footprintTimeOffset = (static_cast<float>(oldestColumn) + fractional) /
+                              static_cast<float>(m_gridWidth);
+    }
+    m_node->setTimeOffset(footprintTimeOffset);
     if (drawFootprint) {
         m_node->setRect(drawRect);
         m_node->setSourceRect(footprintSrcRect);
@@ -100,7 +155,7 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
         m_node->setRect(QRectF());
     }
 
-    if (hasPending) {
+    if (useIncrementalGlUploads && hasPending) {
         for (auto& upload : pendingUploads) {
             if (upload.gridWidth != m_gridWidth || upload.gridHeight != m_gridHeight) {
                 continue;

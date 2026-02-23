@@ -18,7 +18,7 @@ void main() {
     float encoded = texture(dataTex, uv).r;
     float signedDelta = (encoded - 0.5) * 2.0;
     float magnitudeRaw = abs(signedDelta);
-    if (magnitudeRaw <= (1.0 / 65535.0)) {
+    if (magnitudeRaw <= max(tuning.x, 1.0 / 65535.0)) {
         fragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
@@ -26,6 +26,6 @@ void main() {
     float shaped = pow(magnitude, max(tuning.z, 0.001));
     vec3 polarity = mix(bidColor.rgb, askColor.rgb, step(0.0, signedDelta));
     vec3 mapped = mix(neutralColor.rgb, polarity, shaped);
-    float intensity = clamp(tuning.x + shaped, 0.0, 1.0);
+    float intensity = clamp(shaped, 0.0, 1.0);
     fragColor = vec4(mapped, neutralColor.a * intensity);
 }

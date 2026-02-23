@@ -120,6 +120,44 @@ Rectangle {
                 }
             }
 
+            // ── Pan (drag) ────────────────────────────────────────────────────
+            MouseArea {
+                anchors.fill:    candleChart
+                acceptedButtons: Qt.LeftButton
+                cursorShape:     containsPress ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+
+                property real lastX: 0
+
+                onPressed:  function(e) { lastX = e.x }
+                onPositionChanged: function(e) {
+                    if (!pressed) return
+                    const dx = e.x - lastX
+                    lastX = e.x
+                    candleChart.viewOffset = candleChart.viewOffset + dx
+                }
+            }
+
+            // ── Wheel zoom (zoom toward cursor) ───────────────────────────────
+            WheelHandler {
+                target:          null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+                onWheel: function(e) {
+                    const zoomFactor = e.angleDelta.y > 0 ? 1.12 : (1.0 / 1.12)
+                    const oldScale   = candleChart.zoomScale
+                    const newScale   = Math.max(0.2, Math.min(10.0, oldScale * zoomFactor))
+
+                    // Keep the candle under the cursor stationary:
+                    // cursorOffset = distance from right edge to cursor in old scale
+                    // after scale change, shift viewOffset to preserve that distance
+                    const cursorFromRight = candleChart.width - e.x
+                    const offsetDelta     = cursorFromRight * (newScale / oldScale - 1.0)
+
+                    candleChart.zoomScale  = newScale
+                    candleChart.viewOffset = candleChart.viewOffset + offsetDelta
+                }
+            }
+
             // Hover OHLCV overlay
             Rectangle {
                 visible:         root.hoveredIndex >= 0

@@ -128,10 +128,12 @@ CLAUDE.md
 # AGENTS.md
 GEMINI.md
 _agent/
+.cursor/
 
 # Documentation subdirectories (keep only base docs/)
 /docs/private/
 /docs/TODO.md
+/_agent/
 
 data/
 /screenshots/

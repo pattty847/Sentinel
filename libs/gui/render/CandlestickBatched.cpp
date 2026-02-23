@@ -105,6 +105,21 @@ void CandlestickBatched::setMaxCandles(int maxCandles) {
     emit maxCandlesChanged();
 }
 
+void CandlestickBatched::setViewOffset(float offset) {
+    if (qFuzzyCompare(m_viewOffset, offset)) return;
+    m_viewOffset = offset;
+    markDirty();
+    emit viewOffsetChanged();
+}
+
+void CandlestickBatched::setZoomScale(float scale) {
+    scale = std::clamp(scale, 0.2f, 10.0f);
+    if (qFuzzyCompare(m_zoomScale, scale)) return;
+    m_zoomScale = scale;
+    markDirty();
+    emit zoomScaleChanged();
+}
+
 void CandlestickBatched::clearCandles() {
     m_candles.clear();
     m_hoveredCandle = -1;
@@ -129,6 +144,7 @@ void CandlestickBatched::setCandles(const QVariantList& candles) {
         m_candles.push_back(c);
     }
 
+    m_viewOffset = 0.0f;  // reset pan to show most-recent candles on load
     updatePriceRange();
     emit candleCountChanged(static_cast<int>(m_candles.size()));
     markDirty();
@@ -255,22 +271,21 @@ void CandlestickBatched::updatePriceRange() {
 int CandlestickBatched::candleAtX(float x) const {
     if (m_candles.empty()) return -1;
 
-    const float totalWidth = m_candleWidth + m_candleSpacing;
+    const float totalWidth = (m_candleWidth + m_candleSpacing) * m_zoomScale;
     const float chartWidth = static_cast<float>(width());
-    const float totalCandlesWidth = static_cast<float>(m_candles.size()) * totalWidth;
-    const float startX = (chartWidth - totalCandlesWidth) * 0.5f;
+    // Rightmost candle's right edge sits at chartWidth; pan shifts everything left
+    const float startX = chartWidth - static_cast<float>(m_candles.size()) * totalWidth + m_viewOffset;
 
-    if (x < startX) return -1;
+    const float xInChart = x - startX;
+    if (xInChart < 0.0f) return -1;
 
-    int index = static_cast<int>((x - startX) / totalWidth);
+    int index = static_cast<int>(xInChart / totalWidth);
     if (index < 0 || index >= static_cast<int>(m_candles.size())) return -1;
 
-    // Check if actually over the candle body (not in spacing)
-    float candleStartX = startX + index * totalWidth;
-    float candleEndX = candleStartX + m_candleWidth;
-    if (x >= candleStartX && x <= candleEndX) {
+    const float candleStartX = startX + static_cast<float>(index) * totalWidth;
+    const float candleEndX   = candleStartX + m_candleWidth * m_zoomScale;
+    if (x >= candleStartX && x <= candleEndX)
         return index;
-    }
 
     return -1;
 }
@@ -319,21 +334,49 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     }
 
     const int n = static_cast<int>(m_candles.size());
-    const float totalWidth = m_candleWidth + m_candleSpacing;
-    const float totalCandlesWidth = static_cast<float>(n) * totalWidth;
-    const float startX = (w - totalCandlesWidth) * 0.5f;
+    const float totalWidth  = (m_candleWidth + m_candleSpacing) * m_zoomScale;
+    const float scaledBody  = m_candleWidth * m_zoomScale;
+    // Anchor right: most recent candle flush with right edge, pan shifts left
+    const float startX = w - static_cast<float>(n) * totalWidth + m_viewOffset;
 
-    const double priceRange = m_priceMax - m_priceMin;
-    const float padding = h * 0.05f;
+    // Visible range — only allocate and draw candles on screen
+    const int firstVisible = std::max(0, static_cast<int>(std::floor((-startX) / totalWidth)));
+    const int lastVisible  = std::min(n - 1, static_cast<int>(std::floor((w - startX) / totalWidth)));
+    const int visCount     = std::max(0, lastVisible - firstVisible + 1);
+
+    // If no candles are visible (fully panned into empty space), nothing to draw
+    if (visCount == 0) {
+        root->wickGeometry->allocate(0);
+        root->bodyGeometry->allocate(0);
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
+
+    // Price range over visible candles only (feels more natural while panning)
+    double visMin = m_candles[firstVisible].low;
+    double visMax = m_candles[firstVisible].high;
+    for (int i = firstVisible; i <= lastVisible; ++i) {
+        visMin = std::min(visMin, m_candles[i].low);
+        visMax = std::max(visMax, m_candles[i].high);
+    }
+    double visRange = visMax - visMin;
+    if (visRange < 0.01) visRange = 1.0;
+    const double padFrac = 0.05;
+    visMin -= visRange * padFrac;
+    visMax += visRange * padFrac;
+    visRange = visMax - visMin;
+
+    const float padding     = h * 0.05f;
     const float chartHeight = h - 2.0f * padding;
 
     auto priceToY = [&](double price) -> float {
-        double normalized = (price - m_priceMin) / priceRange;
+        double normalized = (price - visMin) / visRange;
         return padding + static_cast<float>(1.0 - normalized) * chartHeight;
     };
 
-    root->wickGeometry->allocate(n * 6);
-    root->bodyGeometry->allocate(n * 6);
+    root->wickGeometry->allocate(visCount * 6);
+    root->bodyGeometry->allocate(visCount * 6);
 
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
@@ -343,38 +386,33 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     const uchar wb = static_cast<uchar>(m_wickColor.blue());
     const uchar wa = static_cast<uchar>(m_wickColor.alpha());
 
-    for (int i = 0; i < n; ++i) {
+    for (int i = firstVisible; i <= lastVisible; ++i) {
         const auto& c = m_candles[i];
         const bool bullish = c.close >= c.open;
         const bool hovered = (i == m_hoveredCandle);
 
-        const float candleX = startX + static_cast<float>(i) * totalWidth;
-        const float candleCenterX = candleX + m_candleWidth * 0.5f;
+        const float candleX       = startX + static_cast<float>(i) * totalWidth;
+        const float candleCenterX = candleX + scaledBody * 0.5f;
 
-        const float wickWidth = std::max(1.0f, m_candleWidth * 0.15f);
-        const float wickX0 = candleCenterX - wickWidth * 0.5f;
-        const float wickX1 = candleCenterX + wickWidth * 0.5f;
-        const float wickY0 = priceToY(c.high);
-        const float wickY1 = priceToY(c.low);
+        const float wickWidth = std::max(1.0f, scaledBody * 0.15f);
+        const float wickX0    = candleCenterX - wickWidth * 0.5f;
+        const float wickX1    = candleCenterX + wickWidth * 0.5f;
 
-        addQuad(wickVerts, wickX0, wickY0, wickX1, wickY1, wr, wg, wb, wa);
+        addQuad(wickVerts, wickX0, priceToY(c.high), wickX1, priceToY(c.low), wr, wg, wb, wa);
 
         const float bodyY0 = priceToY(std::max(c.open, c.close));
         const float bodyY1 = priceToY(std::min(c.open, c.close));
-        const float bodyX0 = candleX;
-        const float bodyX1 = candleX + m_candleWidth;
 
         QColor bodyColor = bullish ? m_bullishColor : m_bearishColor;
-        if (hovered) {
-            bodyColor = bodyColor.lighter(130);
-        }
+        if (hovered) bodyColor = bodyColor.lighter(130);
 
-        const uchar br = static_cast<uchar>(bodyColor.red());
-        const uchar bg = static_cast<uchar>(bodyColor.green());
-        const uchar bb = static_cast<uchar>(bodyColor.blue());
-        const uchar ba = static_cast<uchar>(bodyColor.alpha());
-
-        addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
+        addQuad(bodyVerts,
+                candleX,          bodyY0,
+                candleX + scaledBody, bodyY1,
+                static_cast<uchar>(bodyColor.red()),
+                static_cast<uchar>(bodyColor.green()),
+                static_cast<uchar>(bodyColor.blue()),
+                static_cast<uchar>(bodyColor.alpha()));
     }
 
     root->wickNode->markDirty(QSGNode::DirtyGeometry);

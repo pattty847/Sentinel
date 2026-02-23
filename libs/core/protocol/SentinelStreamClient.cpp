@@ -271,6 +271,30 @@ void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
     });
 }
 
+void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
+                                                   int64_t timeframeMs,
+                                                   int64_t endTimeMs,
+                                                   int count) {
+    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        return;
+    }
+    nlohmann::json msg = {
+        {"type", "footprint_history_request"},
+        {"symbol", symbol},
+        {"timeframe_ms", timeframeMs},
+        {"end_time", endTimeMs},
+        {"count", count}
+    };
+
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
 void SentinelStreamClient::requestCandleHistory(const std::string& symbol,
                                                 int64_t timeframeSec,
                                                 int64_t endTimeSec,
@@ -814,6 +838,80 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
                               protocol::SentinelProtocol::kFootprintSchemaVersion,
                               DropReason::FootprintSchema)) {
         return;
+    }
+    const std::string symbol = msg.value("symbol", "");
+    if (symbol.empty()) {
+        return;
+    }
+    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int gridWidth = msg.value("grid_width", 0);
+    const int gridHeight = msg.value("grid_height", 0);
+    const std::string encoding = msg.value("encoding", "base64");
+    const auto columns = msg.value("columns", nlohmann::json::array());
+
+    if (!validateGridHeight("footprint_history_chunk", gridHeight, DropReason::FootprintGridHeight)) {
+        return;
+    }
+
+    if (!columns.is_array()) {
+        return;
+    }
+
+    int emitted = 0;
+    for (const auto& item : columns) {
+        const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
+        const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
+        const double minPrice = item.value("min_price", 0.0);
+        const double maxPrice = item.value("max_price", 0.0);
+        const double tickSize = item.value("tick_size", 0.0);
+        const double quantScale = item.value("quant_scale", 1.0);
+        const std::string format = item.value("format", "q16_delta");
+        const std::string encoded = item.value("delta_levels_q16", "");
+
+        if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 ||
+            tickSize <= 0.0 || maxPrice <= minPrice || quantScale <= 0.0) {
+            continue;
+        }
+
+        QByteArray deltaLevelsQ16;
+        if (!encoded.empty() && encoding == "base64") {
+            if (!decodeBase64WithGuardrails("footprint_history_chunk",
+                                            "delta_levels_q16",
+                                            encoded,
+                                            DropReason::FootprintPayloadEstimate,
+                                            DropReason::FootprintBase64Decode,
+                                            DropReason::FootprintPayloadDecoded,
+                                            deltaLevelsQ16)) {
+                return;
+            }
+        }
+        const int expectedBytes = gridHeight * static_cast<int>(sizeof(int16_t));
+        if (deltaLevelsQ16.size() != expectedBytes) {
+            continue;
+        }
+
+        FootprintSlice slice;
+        slice.symbol = QString::fromStdString(symbol);
+        slice.bucketStartMs = startMs;
+        slice.bucketEndMs = endMs;
+        slice.timeframeMs = timeframeMs;
+        slice.gridWidth = gridWidth;
+        slice.gridHeight = gridHeight;
+        slice.minPrice = minPrice;
+        slice.maxPrice = maxPrice;
+        slice.tickSize = tickSize;
+        slice.quantScale = quantScale;
+        slice.format = QString::fromStdString(format);
+        slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
+        emit footprintSliceReceived(slice);
+        ++emitted;
+    }
+
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Footprint history recv: symbol=%1 tfMs=%2 count=%3")
+                       .arg(QString::fromStdString(symbol))
+                       .arg(timeframeMs)
+                       .arg(emitted));
     }
 }
 

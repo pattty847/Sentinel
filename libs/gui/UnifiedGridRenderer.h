@@ -29,6 +29,7 @@
 #include "render/TimeAuthority.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
+#include "render/TpoOverlayRenderer.hpp"
 
 class DataProcessor;
 class MsdfGlyphNode;
@@ -52,6 +53,9 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
+    Q_PROPERTY(bool heatmapLayerEnabled READ heatmapLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintLayerEnabled READ footprintLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool tpoLayerEnabled READ tpoLayerEnabled NOTIFY layerVisibilityChanged)
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
@@ -95,6 +99,7 @@ private:
         struct OverlayActivationSet {
             bool heatmap = false;
             bool footprint = false;
+            bool tpo = false;
         };
         TimeAuthority::Snapshot time;
         QRectF surfaceBounds;
@@ -147,6 +152,9 @@ private:
     double m_heatmapShaderFloor = 0.01;
     int m_heatmapLabelPx = 14;
     int m_primaryField = 0;
+    bool m_heatmapLayerEnabled = true;
+    bool m_footprintLayerEnabled = false;
+    bool m_tpoLayerEnabled = false;
 
     TimeAxisMapping m_lastTimeAxisMapping;
     mutable std::mutex m_frameContextMutex;
@@ -164,9 +172,12 @@ private:
     class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
     class MsdfGlyphNode* m_blackGlyphNode = nullptr;
     FootprintOverlayRenderer m_footprintOverlay;
+    TpoOverlayRenderer m_tpoOverlay;
     // Main thread enqueues pending uploads; render thread swaps to local frame snapshot.
     mutable std::mutex m_footprintPendingMutex;
     std::vector<FootprintOverlayRenderer::PendingUpload> m_pendingFootprintUploads;
+    mutable std::mutex m_tpoPendingMutex;
+    std::vector<TpoOverlayRenderer::PendingUpload> m_pendingTpoUploads;
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
@@ -198,6 +209,9 @@ public:
     double heatmapContrast() const { return m_heatmapContrast; }
     double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
     int primaryField() const { return m_primaryField; }
+    bool heatmapLayerEnabled() const { return m_heatmapLayerEnabled; }
+    bool footprintLayerEnabled() const { return m_footprintLayerEnabled; }
+    bool tpoLayerEnabled() const { return m_tpoLayerEnabled; }
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
@@ -285,6 +299,9 @@ public:
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
     void setPrimaryField(int field);
+    Q_INVOKABLE void setHeatmapLayerEnabled(bool enabled);
+    Q_INVOKABLE void setFootprintLayerEnabled(bool enabled);
+    Q_INVOKABLE void setTpoLayerEnabled(bool enabled);
 
 public:
     void onTradeReceived(const Trade& trade);
@@ -313,6 +330,7 @@ signals:
     void heatmapContrastChanged();
     void heatmapShaderFloorChanged();
     void primaryFieldChanged();
+    void layerVisibilityChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
@@ -355,15 +373,18 @@ private:
                                      int gridHeight);
     void publishFrameContext(const FrameContext& frame);
     void drainFrameUploads(std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
+                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+                           std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
     void renderOverlays(HeatmapIntensityNode* texNode,
                         const FrameContext& frame,
                         bool drawHeatmap,
                         bool drawFootprint,
+                        bool drawTpo,
                         int gridWidth,
                         int gridHeight,
                         std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
+                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+                        std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
     void updateLabelGeometry(HeatmapIntensityNode* texNode,
                              const FrameContext& frame,
                              const HeatmapStreamState::Snapshot& snapshot,

@@ -244,7 +244,7 @@ void FootprintIntensityNode::setTexture(QSGTexture* texture) {
     m_textureSize = texture ? texture->textureSize() : QSize();
     if (m_textureSize.isEmpty()) {
         m_sourceRect = QRectF();
-    } else if (m_sourceRect.isNull()) {
+    } else if (m_sourceRect.isNull() || m_sourceRect.isEmpty()) {
         m_sourceRect = QRectF(0.0, 0.0, m_textureSize.width(), m_textureSize.height());
     }
     markDirty(QSGNode::DirtyMaterial);

@@ -56,6 +56,10 @@ public:
                                int64_t timeframeMs,
                                int64_t endTimeMs,
                                int count);
+    void requestFootprintHistory(const std::string& symbol,
+                                 int64_t timeframeMs,
+                                 int64_t endTimeMs,
+                                 int count);
     void requestCandleHistory(const std::string& symbol,
                               int64_t timeframeSec,
                               int64_t endTimeSec,

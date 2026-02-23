@@ -78,12 +78,13 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
         resetLocked(gridWidth, gridHeight);
     }
 
-    const bool hasPrevious = (m_filledColumns > 0);
+    const bool hasPrevious = (m_filledColumns > 0 && m_writeColumn >= 0);
+    const bool sameBucketUpdate = hasPrevious && (bucketStartMs == m_lastSliceStartMs);
     bool shouldReset = !m_rangeValid;
-    if (hasPrevious && bucketStartMs <= m_lastSliceStartMs) {
+    if (hasPrevious && bucketStartMs < m_lastSliceStartMs) {
         shouldReset = true;
     }
-    if (hasPrevious) {
+    if (hasPrevious && !sameBucketUpdate) {
         const int64_t maxGapMs = static_cast<int64_t>(m_gridWidth) * timeframeMs;
         if (maxGapMs > 0 && (bucketStartMs - m_lastSliceStartMs) > maxGapMs) {
             shouldReset = true;
@@ -98,9 +99,11 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
     m_tickSize = tickSize;
     m_rangeValid = true;
 
-    m_writeColumn = (m_writeColumn + 1) % m_gridWidth;
-    if (m_filledColumns < m_gridWidth) {
-        ++m_filledColumns;
+    if (!sameBucketUpdate || m_writeColumn < 0) {
+        m_writeColumn = (m_writeColumn + 1) % m_gridWidth;
+        if (m_filledColumns < m_gridWidth) {
+            ++m_filledColumns;
+        }
     }
 
     auto& slot = m_columns[static_cast<size_t>(m_writeColumn)];
@@ -187,7 +190,7 @@ bool FootprintStreamState::copyColumnForUpload(int x, QByteArray& out) const {
 void FootprintStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_gridWidth = gridWidth;
     m_gridHeight = gridHeight;
-    m_writeColumn = 0;
+    m_writeColumn = -1;
     m_filledColumns = 0;
     m_lastSliceStartMs = 0;
     m_minPrice = 0.0;

@@ -19,16 +19,16 @@
 #include <QTimer>
 
 static constexpr int kColSymbol    = 0;
-static constexpr int kColName      = 1;
-static constexpr int kColPrice     = 2;
-static constexpr int kColChangePct = 3;
-static constexpr int kColVolume    = 4;
-static constexpr int kColRelVol    = 5;
+[[maybe_unused]] static constexpr int kColName      = 1;
+[[maybe_unused]] static constexpr int kColPrice     = 2;
+[[maybe_unused]] static constexpr int kColChangePct = 3;
+[[maybe_unused]] static constexpr int kColVolume    = 4;
+[[maybe_unused]] static constexpr int kColRelVol    = 5;
 static constexpr int kColMktCap    = 6;
-static constexpr int kColExtra1    = 7;   // P/E (stocks) | Category (crypto)
-static constexpr int kColExtra2    = 8;   // Div Yield% (stocks) | Sector (crypto)
-static constexpr int kColSector    = 9;   // Sector (stocks) | — (crypto)
-static constexpr int kColExchange  = 10;
+[[maybe_unused]] static constexpr int kColExtra1    = 7;   // P/E (stocks) | Category (crypto)
+[[maybe_unused]] static constexpr int kColExtra2    = 8;   // Div Yield% (stocks) | Sector (crypto)
+[[maybe_unused]] static constexpr int kColSector    = 9;   // Sector (stocks) | — (crypto)
+[[maybe_unused]] static constexpr int kColExchange  = 10;
 static constexpr int kColCount     = 11;
 
 ScreenerDock::ScreenerDock(QWidget* parent)

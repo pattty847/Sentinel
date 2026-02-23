@@ -50,9 +50,9 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
     // Derive iteration range from mapping srcRect (same as old code).
     // timeOffset is used ONLY for ring data lookup, NOT for screen positioning.
     const QRectF& srcRect = mapping.srcRect;
-    const QRectF& drawRect = mapping.drawRect;
-    const float cellW = static_cast<float>(mapping.cellW);
-    const float cellH = static_cast<float>(mapping.cellH);
+    [[maybe_unused]] const QRectF& drawRect = mapping.drawRect;
+    [[maybe_unused]] const float cellW = static_cast<float>(mapping.cellW);
+    [[maybe_unused]] const float cellH = static_cast<float>(mapping.cellH);
 
     const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
@@ -61,11 +61,11 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
     // timeOffset represents the physical ring offset for the GPU shader.
     const float baseX = static_cast<float>(srcRect.x()) + (mapping.timeOffset * gridWidth);
     const int startX = static_cast<int>(std::floor(baseX));
-    const float fracX = baseX - static_cast<float>(startX);
+    [[maybe_unused]] const float fracX = baseX - static_cast<float>(startX);
 
     const float baseY = static_cast<float>(srcRect.y());
     const int startY = static_cast<int>(std::floor(baseY));
-    const float fracY = baseY - static_cast<float>(startY);
+    [[maybe_unused]] const float fracY = baseY - static_cast<float>(startY);
 
     int onlyTexX = -1;
     int onlyI = -1;

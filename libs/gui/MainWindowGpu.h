@@ -72,6 +72,7 @@ private:
     void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
     void requestHeatmapHistoryForSymbol(const QString& symbol);
+    void requestFootprintHistoryForSymbol(const QString& symbol);
     void requestCandleHistoryForSymbol(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;

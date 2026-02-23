@@ -124,7 +124,7 @@ class Session : public std::enable_shared_from_this<Session> {
 
     int64_t footprintRetentionMs(int64_t timeframeMs) const {
         const int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
-        return std::max<int64_t>(60'000, tf * 8);
+        return std::max<int64_t>(300'000, tf * 2048);
     }
 
     void recordFootprintTrade(const Trade& trade) {
@@ -186,10 +186,6 @@ class Session : public std::enable_shared_from_this<Session> {
                         footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
                     }
                 }
-
-                while (!trades.empty() && trades.front().timestampMs < slice.bucketEndMs) {
-                    trades.pop_front();
-                }
             }
         }
 
@@ -212,6 +208,191 @@ class Session : public std::enable_shared_from_this<Session> {
             qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
         }
         return true;
+    }
+
+    bool resolveFootprintGridAndRange(const std::string& symbol,
+                                      int& outGridWidth,
+                                      int& outGridHeight,
+                                      double& outTickSize,
+                                      double& outMinPrice,
+                                      double& outMaxPrice) {
+        if (!owner_) {
+            return false;
+        }
+        const auto& cfg = owner_->serverConfig();
+        outGridWidth = std::max(1, cfg.heatmap.gridWidth);
+        outGridHeight = std::max(1, cfg.heatmap.gridHeight);
+        outTickSize = (cfg.heatmap.tickSize > 0.0) ? cfg.heatmap.tickSize : cfg.orderbook.tickSize;
+        if (outTickSize <= 0.0) {
+            outTickSize = 0.01;
+        }
+
+        const auto& hotData = model_.ensureSymbol(symbol);
+        const auto& book = hotData.liveBook;
+        if (book.getTickSize() > 0.0) {
+            outTickSize = book.getTickSize();
+        }
+
+        outMinPrice = book.getMinPrice();
+        outMaxPrice = book.getMaxPrice();
+        if (!(outMaxPrice > outMinPrice)) {
+            double anchorPrice = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(footprint_mutex_);
+                auto it = footprintTrades_.find(symbol);
+                if (it != footprintTrades_.end() && !it->second.empty()) {
+                    anchorPrice = it->second.back().price;
+                }
+            }
+            if (anchorPrice <= 0.0) {
+                anchorPrice = outTickSize * static_cast<double>(outGridHeight);
+            }
+            const double span = outTickSize * static_cast<double>(outGridHeight);
+            outMinPrice = std::max(0.0, anchorPrice - (span * 0.5));
+            outMaxPrice = outMinPrice + span;
+        }
+        return outMaxPrice > outMinPrice && outTickSize > 0.0;
+    }
+
+    bool buildFootprintDeltaWindow(const std::string& symbol,
+                                   int64_t bucketStartMs,
+                                   int64_t bucketEndMs,
+                                   int64_t timeframeMs,
+                                   int gridHeight,
+                                   double minPrice,
+                                   double maxPrice,
+                                   double tickSize,
+                                   QByteArray& out,
+                                   double& outQuantScale) {
+        if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
+            gridHeight <= 0 || tickSize <= 0.0 || maxPrice <= minPrice) {
+            return false;
+        }
+        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) {
+            return false;
+        }
+        if (footprintRowDeltaScratch_.size() != static_cast<size_t>(gridHeight)) {
+            footprintRowDeltaScratch_.assign(static_cast<size_t>(gridHeight), 0.0);
+        } else {
+            std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(footprint_mutex_);
+            auto it = footprintTrades_.find(symbol);
+            if (it != footprintTrades_.end()) {
+                auto& trades = it->second;
+                const int64_t cutoff = bucketStartMs - footprintRetentionMs(timeframeMs);
+                while (!trades.empty() && trades.front().timestampMs < cutoff) {
+                    trades.pop_front();
+                }
+                for (const auto& sample : trades) {
+                    if (sample.timestampMs < bucketStartMs || sample.timestampMs >= bucketEndMs) {
+                        continue;
+                    }
+                    const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
+                    if (row < 0 || row >= gridHeight) {
+                        continue;
+                    }
+                    if (sample.side == AggressorSide::Buy) {
+                        footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
+                    } else if (sample.side == AggressorSide::Sell) {
+                        footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
+                    }
+                }
+            }
+        }
+
+        double maxAbs = 0.0;
+        for (double v : footprintRowDeltaScratch_) {
+            const double av = std::abs(v);
+            if (av > maxAbs) {
+                maxAbs = av;
+            }
+        }
+        outQuantScale = (maxAbs > 0.0) ? std::max(1e-9, maxAbs / 32767.0) : 1.0;
+        out.resize(gridHeight * static_cast<int>(sizeof(uint16_t)));
+        auto* dst = reinterpret_cast<uchar*>(out.data());
+        for (int y = 0; y < gridHeight; ++y) {
+            const double delta = footprintRowDeltaScratch_[static_cast<size_t>(y)];
+            const double q = std::round(delta / outQuantScale);
+            const int32_t q16 = static_cast<int32_t>(std::clamp(q, -32768.0, 32767.0));
+            const uint16_t biased = static_cast<uint16_t>(q16 + 32768);
+            qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
+        }
+        return true;
+    }
+
+    void streamFootprintHistory(const std::string& symbol,
+                                int64_t timeframeMs,
+                                int64_t endTimeMs,
+                                int count) {
+        if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+            return;
+        }
+        int gridWidth = 0;
+        int gridHeight = 0;
+        double tickSize = 0.0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        if (!resolveFootprintGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
+            return;
+        }
+
+        int effectiveCount = std::max(1, std::min(count, std::max(1, gridWidth)));
+        effectiveCount = std::min(effectiveCount, 512);
+        int64_t effectiveEnd = endTimeMs;
+        if (effectiveEnd <= 0) {
+            effectiveEnd = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+        }
+        effectiveEnd = (effectiveEnd / timeframeMs) * timeframeMs;
+        if (effectiveEnd <= 0) {
+            return;
+        }
+        const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
+
+        nlohmann::json payload;
+        payload["type"] = "footprint_history_chunk";
+        payload["schema_version"] = protocol::SentinelProtocol::kFootprintSchemaVersion;
+        payload["symbol"] = symbol;
+        payload["timeframe_ms"] = timeframeMs;
+        payload["grid_width"] = gridWidth;
+        payload["grid_height"] = gridHeight;
+        payload["format"] = "q16_delta";
+        payload["encoding"] = "base64";
+        auto columns = nlohmann::json::array();
+        for (int i = 0; i < effectiveCount; ++i) {
+            const int64_t bucketStart = firstStart + static_cast<int64_t>(i) * timeframeMs;
+            const int64_t bucketEnd = bucketStart + timeframeMs;
+            QByteArray deltaLevelsQ16;
+            double quantScale = 1.0;
+            if (!buildFootprintDeltaWindow(symbol,
+                                           bucketStart,
+                                           bucketEnd,
+                                           timeframeMs,
+                                           gridHeight,
+                                           minPrice,
+                                           maxPrice,
+                                           tickSize,
+                                           deltaLevelsQ16,
+                                           quantScale)) {
+                continue;
+            }
+            nlohmann::json item;
+            item["time_start"] = bucketStart;
+            item["time_end"] = bucketEnd;
+            item["min_price"] = minPrice;
+            item["max_price"] = maxPrice;
+            item["tick_size"] = tickSize;
+            item["quant_scale"] = quantScale;
+            item["format"] = "q16_delta";
+            item["delta_levels_q16"] = deltaLevelsQ16.toBase64().toStdString();
+            columns.push_back(std::move(item));
+        }
+        payload["columns"] = std::move(columns);
+        do_write(payload.dump());
     }
 
 public:
@@ -411,6 +592,14 @@ public:
                     }
                     payload["columns"] = std::move(arr);
                     do_write(payload.dump());
+                }
+            } else if (type == "footprint_history_request") {
+                std::string symbol = j.value("symbol", "");
+                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
+                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
+                const int count = j.value("count", 0);
+                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
+                    streamFootprintHistory(symbol, timeframeMs, endTimeMs, count);
                 }
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");

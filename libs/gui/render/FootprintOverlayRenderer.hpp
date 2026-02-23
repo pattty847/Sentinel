@@ -40,6 +40,7 @@ private:
     FootprintIntensityNode* m_node = nullptr;
     int m_gridWidth = 5120;
     int m_gridHeight = 2048;
+    int m_lastWriteColumn = -1;
     bool m_textureDirty = true;
     QImage m_image;
     std::atomic<bool> m_resetPending{false};

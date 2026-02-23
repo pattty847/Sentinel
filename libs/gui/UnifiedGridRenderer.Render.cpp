@@ -15,8 +15,9 @@ UnifiedGridRenderer::FrameContext UnifiedGridRenderer::buildFrameContext() const
     frame.time = m_timeAuthority.snapshot(steadyNowMs);
     frame.presentationTimeMs = frame.time.nowPresentationMs;
     frame.heatmapSnapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
-    frame.overlays.heatmap = (m_primaryField == 0);
-    frame.overlays.footprint = (m_primaryField == 1);
+    frame.overlays.heatmap = m_heatmapLayerEnabled;
+    frame.overlays.footprint = m_footprintLayerEnabled;
+    frame.overlays.tpo = m_tpoLayerEnabled;
     frame.forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
     frame.streamGenerations.heatmap = m_heatmapStreamGeneration.load(std::memory_order_acquire);
     frame.streamGenerations.footprint = m_footprintStreamGeneration.load(std::memory_order_acquire);
@@ -42,6 +43,7 @@ HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNod
         m_whiteGlyphNode = nullptr;
         m_blackGlyphNode = nullptr;
         m_footprintOverlay.onRootRebuilt();
+        m_tpoOverlay.onRootRebuilt();
     }
     return texNode;
 }
@@ -147,11 +149,18 @@ void UnifiedGridRenderer::publishFrameContext(const FrameContext& frame) {
 
 void UnifiedGridRenderer::drainFrameUploads(
     std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads) {
+    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+    std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads) {
     {
         std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
         if (!m_pendingFootprintUploads.empty()) {
             footprintUploads.swap(m_pendingFootprintUploads);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+        if (!m_pendingTpoUploads.empty()) {
+            tpoUploads.swap(m_pendingTpoUploads);
         }
     }
 
@@ -171,10 +180,12 @@ void UnifiedGridRenderer::renderOverlays(
     const FrameContext& frame,
     bool drawHeatmap,
     bool drawFootprint,
+    bool drawTpo,
     int gridWidth,
     int gridHeight,
     std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads) {
+    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+    std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads) {
     const auto& snapshot = frame.heatmapSnapshot;
     const QRectF drawRect = frame.mapping.drawRect;
     const QRectF srcRect = frame.mapping.srcRect;
@@ -199,6 +210,12 @@ void UnifiedGridRenderer::renderOverlays(
                               gridWidth,
                               gridHeight,
                               footprintUploads);
+    m_tpoOverlay.render(window(),
+                        texNode,
+                        drawTpo,
+                        drawRect,
+                        srcRect,
+                        tpoUploads);
 }
 
 void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
@@ -374,6 +391,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         : static_cast<int64_t>(snapshot.appendMs);
     const bool drawHeatmap = frame.overlays.heatmap;
     const bool drawFootprint = frame.overlays.footprint;
+    const bool drawTpo = frame.overlays.tpo;
     const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
     const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
 
@@ -383,15 +401,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     std::vector<HeatmapOverlayRenderer::PendingUpload> framePendingHeatmapUploads;
     std::vector<FootprintOverlayRenderer::PendingUpload> framePendingFootprintUploads;
-    drainFrameUploads(framePendingHeatmapUploads, framePendingFootprintUploads);
+    std::vector<TpoOverlayRenderer::PendingUpload> framePendingTpoUploads;
+    drainFrameUploads(framePendingHeatmapUploads,
+                      framePendingFootprintUploads,
+                      framePendingTpoUploads);
     renderOverlays(texNode,
                    frame,
                    drawHeatmap,
                    drawFootprint,
+                   drawTpo,
                    gridWidth,
                    gridHeight,
                    framePendingHeatmapUploads,
-                   framePendingFootprintUploads);
+                   framePendingFootprintUploads,
+                   framePendingTpoUploads);
 
     if (!drawHeatmap) {
         m_whiteGlyphNode = nullptr;

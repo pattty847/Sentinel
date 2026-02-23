@@ -3,9 +3,11 @@
 #include "HeatmapIntensityNode.hpp"
 #include "SentinelLogging.hpp"
 
+#include <QSGRendererInterface>
 #include <QSGTexture>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 QColor HeatmapOverlayRenderer::ColorGradient::interpolate(float t) const {
     if (stops.empty()) {
@@ -84,6 +86,9 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
     if (!window || !node) {
         return;
     }
+    const auto* rendererInterface = window->rendererInterface();
+    const bool useIncrementalGlUploads = rendererInterface &&
+        rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
     if (m_bidGradient.stops.empty()) {
         m_bidGradient.stops = {
@@ -106,6 +111,34 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         m_paletteImage = QImage();
         m_textureDirty = true;
         m_paletteDirty = true;
+    }
+
+    if (!useIncrementalGlUploads && !pendingUploads.empty()) {
+        ensureHeatmapImage();
+        if (!m_heatmapImage.isNull()) {
+            const int width = m_heatmapImage.width();
+            const int height = m_heatmapImage.height();
+            const int bytesPerCell = m_intensityBytesPerCell;
+            for (const auto& upload : pendingUploads) {
+                if (upload.x < 0 || upload.x >= width || upload.data.size() != height * bytesPerCell) {
+                    continue;
+                }
+                if (bytesPerCell == 1) {
+                    const auto* src = reinterpret_cast<const uint8_t*>(upload.data.constData());
+                    for (int y = 0; y < height; ++y) {
+                        auto* row = m_heatmapImage.scanLine(y);
+                        row[upload.x] = src[y];
+                    }
+                } else if (bytesPerCell == 2) {
+                    const auto* src = reinterpret_cast<const uint8_t*>(upload.data.constData());
+                    for (int y = 0; y < height; ++y) {
+                        auto* row = m_heatmapImage.scanLine(y);
+                        std::memcpy(row + upload.x * 2, src + y * 2, 2);
+                    }
+                }
+            }
+            m_textureDirty = true;
+        }
     }
 
     if (m_textureDirty) {
@@ -142,8 +175,10 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         node->setSourceRect(QRectF());
     }
 
-    for (auto& upload : pendingUploads) {
-        node->enqueueColumn(upload.x, std::move(upload.data));
+    if (useIncrementalGlUploads) {
+        for (auto& upload : pendingUploads) {
+            node->enqueueColumn(upload.x, std::move(upload.data));
+        }
     }
 
 }

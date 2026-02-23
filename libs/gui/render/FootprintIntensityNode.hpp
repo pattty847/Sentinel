@@ -69,6 +69,8 @@ public:
     void setTimeOffset(float offset);
     void setTexture(QSGTexture* texture);
     void enqueueColumn(int x, QByteArray data);
+    bool hasTexture() const { return m_material.texture() != nullptr; }
+    QSize textureSize() const { return m_textureSize; }
 
 private:
     void updateGeometry();

@@ -11,6 +11,7 @@ constexpr int kServerConfigSchemaVersion = 1;
 constexpr int kHeatmapSchemaVersion = 1;
 constexpr int kCandleSchemaVersion = 1;
 constexpr int kFootprintSchemaVersion = 1;
+constexpr int kTpoSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
 }
@@ -32,6 +33,9 @@ enum class MessageType {
     FootprintSlice,
     FootprintHistoryRequest,
     FootprintHistoryChunk,
+    TpoSlice,
+    TpoHistoryRequest,
+    TpoHistoryChunk,
     TickDelta, // Maybe for later
     ScreenerRequest,
     ScreenerUpdate,
@@ -57,6 +61,9 @@ inline std::string toString(MessageType t) {
         case MessageType::FootprintSlice: return "footprint_slice";
         case MessageType::FootprintHistoryRequest: return "footprint_history_request";
         case MessageType::FootprintHistoryChunk: return "footprint_history_chunk";
+        case MessageType::TpoSlice: return "tpo_slice";
+        case MessageType::TpoHistoryRequest: return "tpo_history_request";
+        case MessageType::TpoHistoryChunk: return "tpo_history_chunk";
         case MessageType::ScreenerRequest: return "screener_request";
         case MessageType::ScreenerUpdate:  return "screener_update";
         case MessageType::Error: return "error";
@@ -81,6 +88,9 @@ inline MessageType fromString(const std::string& s) {
     if (s == "footprint_slice") return MessageType::FootprintSlice;
     if (s == "footprint_history_request") return MessageType::FootprintHistoryRequest;
     if (s == "footprint_history_chunk") return MessageType::FootprintHistoryChunk;
+    if (s == "tpo_slice") return MessageType::TpoSlice;
+    if (s == "tpo_history_request") return MessageType::TpoHistoryRequest;
+    if (s == "tpo_history_chunk") return MessageType::TpoHistoryChunk;
     if (s == "screener_request") return MessageType::ScreenerRequest;
     if (s == "screener_update")  return MessageType::ScreenerUpdate;
     if (s == "error") return MessageType::Error;

@@ -14,7 +14,8 @@ class ChartModeController : public QObject {
 public:
     enum class PrimaryField {
         Heatmap = 0,
-        FootprintCells = 1
+        FootprintCells = 1,
+        TpoProfile = 2
     };
     Q_ENUM(PrimaryField)
 

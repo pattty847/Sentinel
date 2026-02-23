@@ -54,8 +54,12 @@ set(GRID_CORE_SOURCES
     render/HeatmapStreamState.cpp
     render/FootprintStreamState.hpp
     render/FootprintStreamState.cpp
+    render/TpoStreamState.hpp
+    render/TpoStreamState.cpp
     render/FootprintOverlayRenderer.hpp
     render/FootprintOverlayRenderer.cpp
+    render/TpoOverlayRenderer.hpp
+    render/TpoOverlayRenderer.cpp
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
     render/ITimeAxisMappingProvider.hpp

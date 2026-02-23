@@ -312,11 +312,55 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
         return;
     }
     m_primaryField = field;
+    if (field == 0) {
+        m_heatmapLayerEnabled = true;
+    } else if (field == 1) {
+        m_footprintLayerEnabled = true;
+    } else if (field == 2) {
+        m_tpoLayerEnabled = true;
+    }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("PrimaryField set to " << m_primaryField);
     }
     update();
     emit primaryFieldChanged();
+    emit layerVisibilityChanged();
+}
+
+void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
+    if (m_heatmapLayerEnabled == enabled) {
+        return;
+    }
+    m_heatmapLayerEnabled = enabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Render("Heatmap layer " << (enabled ? "enabled" : "disabled"));
+    }
+    update();
+    emit layerVisibilityChanged();
+}
+
+void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
+    if (m_footprintLayerEnabled == enabled) {
+        return;
+    }
+    m_footprintLayerEnabled = enabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Render("Footprint layer " << (enabled ? "enabled" : "disabled"));
+    }
+    update();
+    emit layerVisibilityChanged();
+}
+
+void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
+    if (m_tpoLayerEnabled == enabled) {
+        return;
+    }
+    m_tpoLayerEnabled = enabled;
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Render("TPO layer " << (enabled ? "enabled" : "disabled"));
+    }
+    update();
+    emit layerVisibilityChanged();
 }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {

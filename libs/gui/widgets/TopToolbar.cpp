@@ -1,6 +1,5 @@
 #include "TopToolbar.hpp"
 #include <QAction>
-#include <QActionGroup>
 #include <QToolButton>
 #include <QWidget>
 #include <QHBoxLayout>
@@ -54,26 +53,38 @@ TopToolbar::TopToolbar(QWidget* parent)
     candleAction->setCheckable(true);
     candleAction->setChecked(true);
 
-    auto* primaryGroup = new QActionGroup(this);
-    primaryGroup->setExclusive(true);
+    m_heatmapButton = addIconButton(":/svg/grid_view.svg", "Heatmap");
+    m_heatmapButton->setCheckable(true);
+    m_heatmapButton->setChecked(true);
+    m_heatmapButton->setAutoExclusive(false);
 
-    auto* heatmapAction = addAction(QIcon(":/svg/grid_view.svg"), "Heatmap");
-    heatmapAction->setCheckable(true);
-    heatmapAction->setChecked(true);
-    heatmapAction->setActionGroup(primaryGroup);
+    m_footprintButton = addIconButton(":/svg/footprint.svg", "Footprint");
+    m_footprintButton->setCheckable(true);
+    m_footprintButton->setAutoExclusive(false);
 
-    auto* footprintAction = addAction(QIcon(":/svg/footprint.svg"), "Footprint");
-    footprintAction->setCheckable(true);
-    footprintAction->setActionGroup(primaryGroup);
-
-    auto* tpoAction = addAction(QIcon(":/svg/tpo_chart.svg"), "TPO");
-    tpoAction->setCheckable(true);
-    tpoAction->setEnabled(false);
+    m_tpoButton = addIconButton(":/svg/tpo_chart.svg", "TPO");
+    m_tpoButton->setCheckable(true);
+    m_tpoButton->setAutoExclusive(false);
 
     connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
-    connect(heatmapAction, &QAction::triggered, this, [this]() { emit primaryFieldRequested(0); });
-    connect(footprintAction, &QAction::triggered, this, [this]() { emit primaryFieldRequested(1); });
-    connect(tpoAction, &QAction::toggled, this, [this](bool enabled) { emit tpoToggled(enabled); });
+    connect(m_heatmapButton, &QToolButton::toggled, this, [this](bool enabled) {
+        emit heatmapToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(0);
+        }
+    });
+    connect(m_footprintButton, &QToolButton::toggled, this, [this](bool enabled) {
+        emit footprintToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(1);
+        }
+    });
+    connect(m_tpoButton, &QToolButton::toggled, this, [this](bool enabled) {
+        emit tpoToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(2);
+        }
+    });
 
     addSeparator();
 

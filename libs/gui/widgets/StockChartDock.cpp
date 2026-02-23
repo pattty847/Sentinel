@@ -35,8 +35,8 @@ static QToolButton* makePeriodBtn(const QString& label, QWidget* parent) {
 
 StockChartDock::StockChartDock(QWidget* parent)
     : DockablePanel("StockChartDock", "Stock Chart", parent)
-    , m_process(new QProcess(this))
     , m_periodGroup(new QButtonGroup(this))
+    , m_process(new QProcess(this))
 {
     connect(m_process, &QProcess::finished,        this, &StockChartDock::onProcessFinished);
     connect(m_process, &QProcess::errorOccurred,   this, &StockChartDock::onProcessError);

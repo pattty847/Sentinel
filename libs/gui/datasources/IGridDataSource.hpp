@@ -33,6 +33,10 @@ public:
                                        int64_t timeframeMs,
                                        int64_t endTimeMs,
                                        int count) = 0;
+    virtual void requestFootprintHistory(const QString& symbol,
+                                         int64_t timeframeMs,
+                                         int64_t endTimeMs,
+                                         int count) = 0;
     virtual void requestCandleHistory(const QString& symbol,
                                       int64_t timeframeSec,
                                       int64_t endTimeSec,

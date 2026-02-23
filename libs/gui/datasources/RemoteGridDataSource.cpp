@@ -124,6 +124,13 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
+void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
+                                                   int64_t timeframeMs,
+                                                   int64_t endTimeMs,
+                                                   int count) {
+    m_client.requestFootprintHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
 void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
                                                 int64_t timeframeSec,
                                                 int64_t endTimeSec,

@@ -1,5 +1,6 @@
 #pragma once
 #include <QToolBar>
+#include <QToolButton>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSlider>
@@ -18,6 +19,8 @@ public:
 signals:
     void subscribeRequested();
     void primaryFieldRequested(int field);
+    void heatmapToggled(bool enabled);
+    void footprintToggled(bool enabled);
     void tpoToggled(bool enabled);
     void candlesToggled(bool enabled);
     void timeframeSelected(const QString& timeframe);
@@ -41,4 +44,7 @@ private:
     QSlider* m_liquiditySlider = nullptr;
     QComboBox* m_liquidityModeCombo = nullptr;
     QToolButton* m_subscribeButton = nullptr;
+    QToolButton* m_heatmapButton = nullptr;
+    QToolButton* m_footprintButton = nullptr;
+    QToolButton* m_tpoButton = nullptr;
 };

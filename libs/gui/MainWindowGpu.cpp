@@ -59,6 +59,7 @@
 #include <QApplication>
 #include <QTabWidget>
 #include <QtGlobal>
+#include <algorithm>
 #include <unordered_map>
 
 namespace {
@@ -226,6 +227,33 @@ void MainWindowGPU::setupUI() {
                 m_modeController->setPrimaryField(field);
             }
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::heatmapToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar heatmap toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setHeatmapLayerEnabled(enabled);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::footprintToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar footprint toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setFootprintLayerEnabled(enabled);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::tpoToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar TPO toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setTpoLayerEnabled(enabled);
+            }
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::candlesToggled, this, [this](bool enabled) {
             if (m_modeController) {
                 m_modeController->setCandlesEnabled(enabled);
@@ -278,6 +306,9 @@ void MainWindowGPU::setupUI() {
             if (m_connected && m_userSubscribed) {
                 requestHeatmapHistoryForSymbol(m_currentSymbol);
                 requestCandleHistoryForSymbol(m_currentSymbol);
+                if (m_modeController && m_modeController->primaryField() == 1) {
+                    requestFootprintHistoryForSymbol(m_currentSymbol);
+                }
             }
         });
     }
@@ -364,6 +395,7 @@ void MainWindowGPU::onSubscribe() {
     }
     if (m_connected) {
         requestHeatmapHistoryForSymbol(symbol);
+        requestFootprintHistoryForSymbol(symbol);
         requestCandleHistoryForSymbol(symbol);
     }
 }
@@ -406,6 +438,38 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
                    .arg(count));
     }
     m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+}
+
+void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->getCurrentTimeframe();
+        }
+    }
+    if (timeframeMs <= 0) {
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
+        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            timeframeMs = serverConfig.heatmap.timeframesMs.front();
+        }
+    }
+    if (timeframeMs <= 0) {
+        timeframeMs = 1000;
+    }
+    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+    const int gridWidth = serverConfig.heatmap.gridWidth;
+    const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Footprint history request: symbol=%1 tfMs=%2 count=%3")
+                   .arg(symbol)
+                   .arg(timeframeMs)
+                   .arg(count));
+    }
+    m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -612,6 +676,7 @@ void MainWindowGPU::connectMarketDataSignals() {
                 }
                 m_dataSource->subscribe(symbol);
                 requestHeatmapHistoryForSymbol(symbol);
+                requestFootprintHistoryForSymbol(symbol);
                 requestCandleHistoryForSymbol(symbol);
             });
 

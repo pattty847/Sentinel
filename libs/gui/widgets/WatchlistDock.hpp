@@ -10,7 +10,7 @@ public:
     QSize minimumSizeHint() const override;
 
 private:
-    void buildUi();
+    void buildUi() override;
     void populatePlaceholderData();
 
     QTreeView* m_tree = nullptr;
