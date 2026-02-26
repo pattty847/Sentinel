@@ -9,6 +9,7 @@
 #include "../../core/protocol/HeatmapSlice.hpp"
 #include "../../core/protocol/FootprintSlice.hpp"
 #include "../../core/protocol/TpoSlice.hpp"
+#include "../../core/protocol/VolumeProfileSlice.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -58,6 +59,7 @@ signals:
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,

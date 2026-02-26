@@ -2,6 +2,7 @@
 #include "HeatmapSlice.hpp"
 #include "SentinelStreamProtocol.hpp"
 #include "SentinelLogging.hpp"
+#include "../servermodel/SessionManager.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/dispatch.hpp>
@@ -302,6 +303,95 @@ class Session : public std::enable_shared_from_this<Session> {
                 continue;
             }
             out[row] = letter;
+        }
+        return true;
+    }
+
+    // ── Volume Profile builder ──────────────────────────────────────────────
+    // Aggregates total trade volume (buy + sell) per price bin for
+    // [sessionStartMs, sessionEndMs).  Computes POC and 70 % value area
+    // (Steidlmayer methodology) in-place before emitting to the client.
+    //
+    // Output: volumeBinsF32 – float32 LE, one value per grid row (top→bottom),
+    //         same row convention as HeatmapSlice / FootprintSlice.
+    bool buildVolumeProfileWindow(const std::string& symbol,
+                                  int64_t sessionStartMs,
+                                  int64_t sessionEndMs,
+                                  int gridHeight,
+                                  double maxPrice,
+                                  double tickSize,
+                                  QByteArray& outBinsF32,
+                                  double& outTotalVolume,
+                                  int& outPocRow,
+                                  double& outPocPrice,
+                                  double& outVahPrice,
+                                  double& outValPrice) {
+        if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs ||
+            gridHeight <= 0 || gridHeight > protocol::SentinelProtocol::kMaxGridHeight ||
+            tickSize <= 0.0) {
+            return false;
+        }
+        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(float)))) {
+            return false;
+        }
+
+        // Reuse scratch vector: one float per price bin.
+        std::vector<float> bins(static_cast<size_t>(gridHeight), 0.0f);
+
+        std::vector<ServerDataModel::FootprintTradeSample> trades;
+        model_.collectFootprintTrades(symbol, sessionStartMs, sessionEndMs, trades);
+
+        for (const auto& sample : trades) {
+            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
+            if (row < 0 || row >= gridHeight) {
+                continue;
+            }
+            // Volume Profile aggregates absolute volume regardless of direction.
+            bins[static_cast<size_t>(row)] += static_cast<float>(sample.size);
+        }
+
+        // ── Steidlmayer 70 % Value-Area ─────────────────────────────────────
+        double total = 0.0;
+        outPocRow    = 0;
+        float  pocVol = bins[0];
+        for (int i = 0; i < gridHeight; ++i) {
+            total += static_cast<double>(bins[static_cast<size_t>(i)]);
+            if (bins[static_cast<size_t>(i)] > pocVol) {
+                pocVol    = bins[static_cast<size_t>(i)];
+                outPocRow = i;
+            }
+        }
+        outTotalVolume = total;
+        outPocPrice    = maxPrice - (static_cast<double>(outPocRow) + 0.5) * tickSize;
+
+        // Expand VA from POC.
+        const double vaTarget = 0.70 * total;
+        double cumVol = static_cast<double>(bins[static_cast<size_t>(outPocRow)]);
+        int hi = outPocRow;
+        int lo = outPocRow;
+        while (cumVol < vaTarget) {
+            const int nextLo = lo - 1;
+            const int nextHi = hi + 1;
+            const float volAbove = (nextLo >= 0)       ? bins[static_cast<size_t>(nextLo)] : -1.0f;
+            const float volBelow = (nextHi < gridHeight) ? bins[static_cast<size_t>(nextHi)] : -1.0f;
+            if (volAbove < 0.0f && volBelow < 0.0f) break;
+            if (volAbove >= volBelow) {
+                lo = nextLo;
+                cumVol += static_cast<double>(volAbove);
+            } else {
+                hi = nextHi;
+                cumVol += static_cast<double>(volBelow);
+            }
+        }
+        outVahPrice = maxPrice - static_cast<double>(lo) * tickSize;       // top of lowest row index
+        outValPrice = maxPrice - static_cast<double>(hi + 1) * tickSize;   // bottom of highest row index
+
+        // Pack bins as little-endian float32.
+        outBinsF32.resize(gridHeight * static_cast<int>(sizeof(float)));
+        auto* dst = reinterpret_cast<uchar*>(outBinsF32.data());
+        for (int i = 0; i < gridHeight; ++i) {
+            const float v = bins[static_cast<size_t>(i)];
+            std::memcpy(dst + (static_cast<size_t>(i) * sizeof(float)), &v, sizeof(float));
         }
         return true;
     }
@@ -1047,6 +1137,52 @@ public:
         tpo["encoding"] = "base64";
         tpo["letters"] = tpoLetters.toBase64().toStdString();
         do_write(tpo.dump());
+
+        // ── Mode A: Volume Profile slice (session-scoped) ───────────────────
+        // Use SessionManager to determine the current session boundary so that
+        // the profile always covers exactly one full session window.
+        const auto sessionBoundary =
+            SessionManager::sessionContaining(slice.bucketStartMs,
+                                              SessionManager::SessionType::H24);
+        QByteArray vpBinsF32;
+        double vpTotalVolume = 0.0;
+        int    vpPocRow      = 0;
+        double vpPocPrice    = 0.0;
+        double vpVahPrice    = 0.0;
+        double vpValPrice    = 0.0;
+        if (sessionBoundary.valid &&
+            buildVolumeProfileWindow(sym,
+                                     sessionBoundary.startMs,
+                                     sessionBoundary.endMs,
+                                     slice.gridHeight,
+                                     slice.maxPrice,
+                                     slice.tickSize,
+                                     vpBinsF32,
+                                     vpTotalVolume,
+                                     vpPocRow,
+                                     vpPocPrice,
+                                     vpVahPrice,
+                                     vpValPrice)) {
+            nlohmann::json vp;
+            vp["type"]           = "volume_profile_slice";
+            vp["schema_version"] = protocol::SentinelProtocol::kVolumeProfileSchemaVersion;
+            vp["symbol"]         = sym;
+            vp["session_start"]  = sessionBoundary.startMs;
+            vp["session_end"]    = sessionBoundary.endMs;
+            vp["session_type"]   = static_cast<int>(SessionManager::SessionType::H24);
+            vp["grid_height"]    = slice.gridHeight;
+            vp["min_price"]      = slice.minPrice;
+            vp["max_price"]      = slice.maxPrice;
+            vp["tick_size"]      = slice.tickSize;
+            vp["total_volume"]   = vpTotalVolume;
+            vp["poc_price"]      = vpPocPrice;
+            vp["vah_price"]      = vpVahPrice;
+            vp["val_price"]      = vpValPrice;
+            vp["format"]         = "vp_f32";
+            vp["encoding"]       = "base64";
+            vp["volume_bins"]    = vpBinsF32.toBase64().toStdString();
+            do_write(vp.dump());
+        }
     }
 
     static bool should_emit_update(const OHLCVBar& bar,

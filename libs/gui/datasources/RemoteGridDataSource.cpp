@@ -78,6 +78,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
             this, &RemoteGridDataSource::onTpoSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::volumeProfileSliceReceived,
+            this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
@@ -227,6 +229,10 @@ void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice)
 
 void RemoteGridDataSource::onTpoSliceReceived(const TpoSlice& slice) {
     emit tpoSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
+    emit volumeProfileSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,

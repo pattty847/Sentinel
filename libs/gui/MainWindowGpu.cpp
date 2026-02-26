@@ -700,6 +700,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                 dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived,
                 dataProcessor, &DataProcessor::onTpoSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::volumeProfileSliceReceived,
+                dataProcessor, &DataProcessor::onVolumeProfileSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }

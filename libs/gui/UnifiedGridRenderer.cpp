@@ -204,9 +204,29 @@ void UnifiedGridRenderer::clearData() {
         std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
         m_pendingFootprintUploads.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(m_vpMutex);
+        m_vpBins.clear();
+        m_vpSnap  = {};
+        m_vpDirty = false;
+    }
     m_footprintOverlay.requestNeutralReset();
     m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
+    update();
+}
+
+void UnifiedGridRenderer::setTpoDisplayMode(int mode) {
+    // mode 0 = VerticalTimeline (Mode B letters), mode 1 = VolumeProfile (Mode A)
+    if (m_tpoDisplayMode == mode) {
+        return;
+    }
+    m_tpoDisplayMode = mode;
+    const auto streamMode = (mode == 0)
+        ? TpoStreamState::DisplayMode::VerticalTimeline
+        : TpoStreamState::DisplayMode::HorizontalProfile;
+    m_tpoOverlay.setDisplayMode(streamMode);
+    emit tpoDisplayModeChanged();
     update();
 }
 

@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include "ProtocolValidation.hpp"
 #include "SentinelStreamClientParseHelpers.hpp"
+#include "VolumeProfileSlice.hpp"
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <array>
@@ -35,6 +36,11 @@ enum class DropReason : int {
     TpoPayloadEstimate,
     TpoPayloadDecoded,
     TpoBase64Decode,
+    VolumeProfileSchema,
+    VolumeProfileGridHeight,
+    VolumeProfilePayloadEstimate,
+    VolumeProfilePayloadDecoded,
+    VolumeProfileBase64Decode,
     Count
 };
 
@@ -479,6 +485,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
+                return;
+            case protocol::MessageType::VolumeProfileSlice:
+                handleVolumeProfileSliceMessage(msg);
                 return;
             case protocol::MessageType::Unknown:
                 break;
@@ -1080,4 +1089,74 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.letters = std::move(letters);
         emit tpoSliceReceived(slice);
     }
+}
+
+void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json& msg) {
+    if (!validateFamilySchema(msg,
+                              "volume_profile",
+                              protocol::SentinelProtocol::kVolumeProfileSchemaVersion,
+                              DropReason::VolumeProfileSchema)) {
+        return;
+    }
+    const std::string symbol = msg.value("symbol", "");
+    if (symbol.empty()) {
+        return;
+    }
+    const int64_t sessionStartMs = msg.value("session_start_ms", static_cast<int64_t>(0));
+    const int64_t sessionEndMs   = msg.value("session_end_ms",   static_cast<int64_t>(0));
+    const int     sessionType    = msg.value("session_type",     4);
+    const double  minPrice       = msg.value("min_price",        0.0);
+    const double  maxPrice       = msg.value("max_price",        0.0);
+    const double  tickSize       = msg.value("tick_size",        0.0);
+    const int     gridHeight     = msg.value("grid_height",      0);
+    const double  totalVolume    = msg.value("total_volume",     0.0);
+    const double  pocPrice       = msg.value("poc_price",        0.0);
+    const double  vahPrice       = msg.value("vah_price",        0.0);
+    const double  valPrice       = msg.value("val_price",        0.0);
+    const std::string encoded    = msg.value("volume_bins",      "");
+
+    if (!validateGridHeight("volume_profile_slice", gridHeight, DropReason::VolumeProfileGridHeight)) {
+        return;
+    }
+    if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs || maxPrice <= minPrice || tickSize <= 0.0) {
+        return;
+    }
+
+    QByteArray bins;
+    if (!encoded.empty()) {
+        if (!decodeBase64WithGuardrails("volume_profile_slice",
+                                        "volume_bins",
+                                        encoded,
+                                        DropReason::VolumeProfilePayloadEstimate,
+                                        DropReason::VolumeProfileBase64Decode,
+                                        DropReason::VolumeProfilePayloadDecoded,
+                                        bins)) {
+            return;
+        }
+    }
+
+    const int expectedBytes = gridHeight * static_cast<int>(sizeof(float));
+    if (!bins.isEmpty() && bins.size() != expectedBytes) {
+        logDroppedMessage(DropReason::VolumeProfilePayloadDecoded,
+                          QString("Dropping volume_profile_slice: bins bytes=%1 expected=%2")
+                              .arg(bins.size())
+                              .arg(expectedBytes));
+        return;
+    }
+
+    VolumeProfileSlice slice;
+    slice.symbol         = QString::fromStdString(symbol);
+    slice.sessionStartMs = sessionStartMs;
+    slice.sessionEndMs   = sessionEndMs;
+    slice.sessionType    = sessionType;
+    slice.minPrice       = minPrice;
+    slice.maxPrice       = maxPrice;
+    slice.tickSize       = tickSize;
+    slice.gridHeight     = gridHeight;
+    slice.totalVolume    = totalVolume;
+    slice.pocPrice       = pocPrice;
+    slice.vahPrice       = vahPrice;
+    slice.valPrice       = valPrice;
+    slice.volumeBinsF32  = std::move(bins);
+    emit volumeProfileSliceReceived(slice);
 }

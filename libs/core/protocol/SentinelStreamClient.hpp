@@ -15,6 +15,7 @@
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
+#include "VolumeProfileSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
 
@@ -89,6 +90,7 @@ signals:
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,
@@ -138,6 +140,7 @@ private:
     void handleTpoSliceMessage(const nlohmann::json& msg);
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
+    void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;

@@ -12,6 +12,7 @@
 
 #include "render/DataProcessor.hpp"
 #include "render/ViewportAutoScrollController.hpp"
+#include "render/VolumeProfileState.hpp"
 #include "config/GuiConfigStore.hpp"
 void UnifiedGridRenderer::init() {
     m_useGpuHeatmap = true;
@@ -468,6 +469,25 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     }
                     m_pendingTpoUploads.push_back(
                         TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters)});
+                }
+                update();
+            },
+            Qt::QueuedConnection);
+
+    // ── Volume Profile (Mode A) ─────────────────────────────────────────────
+    // volumeProfileReady is emitted on the DataProcessor thread; we capture
+    // the bins and snapshot under a mutex then schedule a repaint.
+    connect(m_dataProcessor.get(), &DataProcessor::volumeProfileReady,
+            this,
+            [this](std::vector<float> bins, VolumeProfileState::Snapshot snap) {
+                if (bins.empty()) {
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_vpMutex);
+                    m_vpBins  = std::move(bins);
+                    m_vpSnap  = std::move(snap);
+                    m_vpDirty = true;
                 }
                 update();
             },

@@ -60,6 +60,10 @@ set(GRID_CORE_SOURCES
     render/FootprintOverlayRenderer.cpp
     render/TpoOverlayRenderer.hpp
     render/TpoOverlayRenderer.cpp
+    render/VolumeProfileState.hpp
+    render/VolumeProfileState.cpp
+    render/VolumeProfileRenderer.hpp
+    render/VolumeProfileRenderer.cpp
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
     render/ITimeAxisMappingProvider.hpp
