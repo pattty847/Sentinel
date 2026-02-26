@@ -9,7 +9,6 @@
 #include <QProcess>
 #include <QToolButton>
 #include <QLineEdit>
-#include <QLabel>
 #include <QButtonGroup>
 
 class StockChartDock : public DockablePanel {
@@ -40,7 +39,6 @@ private:
     // UI
     QLineEdit*    m_tickerInput  = nullptr;
     QToolButton*  m_fetchBtn     = nullptr;
-    QLabel*       m_statusLabel  = nullptr;
     QWidget*      m_qmlContainer = nullptr;
     QQuickView*   m_quickView    = nullptr;
 

@@ -1,5 +1,9 @@
 #include "TpoStreamState.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
+
 void TpoStreamState::clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_gridWidth <= 0 || m_gridHeight <= 0) {
@@ -29,39 +33,75 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         return false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_gridWidth != gridWidth || m_gridHeight != gridHeight) {
-        resetLocked(gridWidth, gridHeight);
+
+    const int64_t sessionMs = std::max<int64_t>(m_sessionMs, timeframeMs);
+    const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
+    if (sessionPeriods <= 0) {
+        return false;
+    }
+    if (m_gridWidth != sessionPeriods || m_gridHeight != gridHeight) {
+        resetLocked(sessionPeriods, gridHeight);
     }
 
-    const bool hasPrevious = (m_filledColumns > 0 && m_writeColumn >= 0);
-    const bool sameBucketUpdate = hasPrevious && (bucketStartMs == m_lastSliceStartMs);
-    bool shouldReset = false;
-    if (hasPrevious && bucketStartMs < m_lastSliceStartMs) {
-        shouldReset = true;
+    const int64_t sessionStartMs = (bucketStartMs / sessionMs) * sessionMs;
+    if (m_sessionStartMs <= 0) {
+        m_sessionStartMs = sessionStartMs;
     }
-    if (hasPrevious && !sameBucketUpdate) {
-        const int64_t maxGapMs = static_cast<int64_t>(m_gridWidth) * timeframeMs;
-        if (maxGapMs > 0 && (bucketStartMs - m_lastSliceStartMs) > maxGapMs) {
-            shouldReset = true;
+    if (sessionStartMs != m_sessionStartMs) {
+        resetLocked(sessionPeriods, gridHeight);
+        m_sessionStartMs = sessionStartMs;
+    }
+
+    const int periodIdx = static_cast<int>((bucketStartMs - m_sessionStartMs) / timeframeMs);
+    if (periodIdx < 0) {
+        return false;
+    }
+    // Clamp period index to visible session width.
+    const int boundedPeriod = std::min(periodIdx, m_gridWidth - 1);
+
+    std::unordered_set<int> touchedColumns;
+    touchedColumns.reserve(static_cast<size_t>(std::min(gridHeight, 256)));
+    for (int row = 0; row < gridHeight; ++row) {
+        if (data.at(row) == '\0') {
+            continue;
+        }
+        const int64_t tickKey = static_cast<int64_t>(row);
+        auto& level = m_levelsByTick[tickKey];
+        level.row = row;
+        if (!level.periodIndices.empty() && level.periodIndices.back() == periodIdx) {
+            continue;
+        }
+        level.periodIndices.push_back(periodIdx);
+        const int rank = static_cast<int>(level.periodIndices.size()) - 1;
+        if (rank < 0 || rank >= m_gridWidth) {
+            continue;
+        }
+        QByteArray& column = m_columns[static_cast<size_t>(rank)];
+        if (column.size() != m_gridHeight) {
+            column = QByteArray(m_gridHeight, '\0');
+        }
+        if (row >= 0 && row < column.size()) {
+            column[row] = static_cast<char>(0x7F);
+            touchedColumns.insert(rank);
         }
     }
-    if (shouldReset) {
-        resetLocked(m_gridWidth, m_gridHeight);
+
+    // Keep write column for debug/snapshots aligned to latest period slot.
+    m_writeColumn = boundedPeriod;
+    if (m_filledColumns < m_gridWidth) {
+        m_filledColumns = std::max(m_filledColumns, boundedPeriod + 1);
     }
 
-    if (!sameBucketUpdate || m_writeColumn < 0) {
-        m_writeColumn = (m_writeColumn + 1) % m_gridWidth;
-        if (m_filledColumns < m_gridWidth) {
-            ++m_filledColumns;
-        }
-    }
-
-    m_columns[static_cast<size_t>(m_writeColumn)] = data;
     m_timeframeMs = timeframeMs;
     m_lastSliceStartMs = bucketStartMs;
     {
         std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-        m_pending.push_back(PendingUpload{m_writeColumn, bucketStartMs, bucketEndMs, data});
+        for (const int col : touchedColumns) {
+            if (col < 0 || col >= m_gridWidth) {
+                continue;
+            }
+            m_pending.push_back(PendingUpload{col, bucketStartMs, bucketEndMs, m_columns[static_cast<size_t>(col)]});
+        }
     }
     return true;
 }
@@ -94,9 +134,11 @@ void TpoStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_gridHeight = gridHeight;
     m_filledColumns = 0;
     m_writeColumn = -1;
+    m_sessionStartMs = 0;
     m_lastSliceStartMs = 0;
     m_timeframeMs = 0;
     m_columns.assign(static_cast<size_t>(gridWidth), QByteArray(gridHeight, '\0'));
+    m_levelsByTick.clear();
     {
         std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
         m_pending.clear();

@@ -47,8 +47,9 @@ Rectangle {
                 anchors.margins: 10
                 spacing:         14
 
+                // TICKER | TIMEFRAME — single source of truth for symbol and range
                 Text {
-                    text:                root.ticker.length > 0 ? root.ticker : "—"
+                    text:                (root.ticker.length > 0 ? root.ticker : "—") + " | " + root.period
                     color:               "#e0e6ed"
                     font.pixelSize:      14
                     font.bold:           true
@@ -63,8 +64,9 @@ Rectangle {
                     visible:             root.company.length > 0
                 }
 
-                Rectangle { width: 1; height: 18; color: "#2a3440"; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle { width: 1; height: 18; color: "#2a3440"; anchors.verticalCenter: parent.verticalCenter; visible: candleChart.candleCount > 0 }
 
+                // Candle count for screenshots / context only (no duplication with footer)
                 Text {
                     text:                candleChart.candleCount + " candles"
                     color:               "#4a5a6a"
@@ -223,7 +225,7 @@ Rectangle {
             }
         }
 
-        // ── Footer status bar ─────────────────────────────────────────────────
+        // ── Footer: no duplicate ticker/range/candles; right side only ─────────
         Rectangle {
             id:     footer
             width:  parent.width
@@ -231,19 +233,10 @@ Rectangle {
             color:  "#0d1115"
 
             Text {
-                anchors.left:           parent.left
-                anchors.leftMargin:     10
-                anchors.verticalCenter: parent.verticalCenter
-                text:                   root.statusMsg
-                color:                  "#3d5060"
-                font.pixelSize:         11
-            }
-
-            Text {
                 anchors.right:           parent.right
-                anchors.rightMargin:     10
+                anchors.rightMargin:    10
                 anchors.verticalCenter:  parent.verticalCenter
-                text:                    "Daily · " + root.period + " · Stocks only"
+                text:                    "Stocks only"
                 color:                   "#2a3a4a"
                 font.pixelSize:          10
             }

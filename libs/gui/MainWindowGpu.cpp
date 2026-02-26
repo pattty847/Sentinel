@@ -252,12 +252,6 @@ void MainWindowGPU::setupUI() {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setTpoLayerEnabled(enabled);
-                if (enabled && renderer->getCurrentTimeframe() != 900000) {
-                    renderer->setTimeframe(900000);
-                    if (m_heatmapDock && m_heatmapDock->toolbar()) {
-                        m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
-                    }
-                }
             }
             if (enabled && m_connected && m_userSubscribed) {
                 requestTpoHistoryForSymbol(m_currentSymbol);
@@ -488,21 +482,20 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    int64_t timeframeMs = 900000;
+    // MVP override: 1m TPO period buckets inside a 1h session profile.
+    int64_t timeframeMs = 60000;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             timeframeMs = renderer->getCurrentTimeframe();
         }
     }
     if (timeframeMs <= 0) {
-        timeframeMs = 900000;
+        timeframeMs = 60000;
     }
-    if (timeframeMs != 900000) {
-        timeframeMs = 900000;
-    }
+    timeframeMs = 60000;
     const auto& serverConfig = GuiConfigStore::instance().serverConfig();
     const int gridWidth = serverConfig.heatmap.gridWidth;
-    const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
+    const int count = (gridWidth > 0) ? std::min(gridWidth, 60) : 60;
     if (chartDebugEnabled()) {
         sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 count=%3")
                    .arg(symbol)

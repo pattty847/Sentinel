@@ -219,7 +219,13 @@ void HeatmapIntensityNode::enqueueColumn(int x, QByteArray data) {
 }
 
 void HeatmapIntensityNode::updateGeometry() {
-    if (m_rect.isNull() || m_textureSize.isEmpty()) {
+    auto* vertices = m_geometry.vertexDataAsTexturedPoint2D();
+    if (m_rect.isNull() || m_rect.isEmpty() || m_textureSize.isEmpty() || m_sourceRect.isEmpty()) {
+        vertices[0].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[1].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[2].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[3].set(0.0f, 0.0f, 0.0f, 0.0f);
+        markDirty(QSGNode::DirtyGeometry);
         return;
     }
 
@@ -234,7 +240,6 @@ void HeatmapIntensityNode::updateGeometry() {
     const float u1 = static_cast<float>(m_sourceRect.x() + m_sourceRect.width()) / texW;
     const float v1 = static_cast<float>(m_sourceRect.y() + m_sourceRect.height()) / texH;
 
-    auto* vertices = m_geometry.vertexDataAsTexturedPoint2D();
     vertices[0].set(m_rect.left(), m_rect.top(), u0, v0);
     vertices[1].set(m_rect.left(), m_rect.bottom(), u0, v1);
     vertices[2].set(m_rect.right(), m_rect.top(), u1, v0);

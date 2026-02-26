@@ -142,9 +142,14 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         }
     }
 
+    // MVP TPO behavior: keep profile anchored in place (x starts at 0), while
+    // preserving the active Y-range mapping from the chart viewport.
     QRectF tpoSrcRect(0, 0, m_gridWidth, m_gridHeight);
-    if (m_gridWidth == sharedGridWidth && m_gridHeight == sharedGridHeight) {
-        tpoSrcRect = sourceRect;
+    if (sourceRect.width() > 0.0 && sourceRect.height() > 0.0) {
+        const qreal srcW = std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth));
+        const qreal srcY = std::clamp(sourceRect.y(), 0.0, static_cast<qreal>(m_gridHeight - 1));
+        const qreal srcH = std::clamp(sourceRect.height(), 1.0, static_cast<qreal>(m_gridHeight) - srcY);
+        tpoSrcRect = QRectF(0.0, srcY, srcW, srcH);
     }
 
     m_node->setColor(QColor(42, 50, 60, 180));
@@ -154,21 +159,16 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     m_node->setMagnitudeScale(1.0f);
     m_node->setMagnitudeGamma(0.65f);
 
-    float tpoTimeOffset = 0.0f;
-    if (!forceFull && m_gridWidth > 0 && m_lastWriteColumn >= 0 && m_lastWriteColumn < m_gridWidth) {
-        const float wrapped = timeOffset * static_cast<float>(m_gridWidth);
-        const float fractional = wrapped - std::floor(wrapped);
-        const int oldestColumn = (m_lastWriteColumn + 1) % m_gridWidth;
-        tpoTimeOffset = (static_cast<float>(oldestColumn) + fractional) /
-                        static_cast<float>(m_gridWidth);
-    }
-    m_node->setTimeOffset(tpoTimeOffset);
+    Q_UNUSED(forceFull);
+    Q_UNUSED(timeOffset);
+    m_node->setTimeOffset(0.0f);
 
     if (drawTpo) {
         m_node->setRect(drawRect);
         m_node->setSourceRect(tpoSrcRect);
     } else {
         m_node->setRect(QRectF());
+        m_node->setSourceRect(QRectF());
     }
 
     if (useIncrementalGlUploads && hasPending) {

@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 class TpoStreamState {
@@ -36,6 +37,11 @@ public:
     Snapshot snapshot() const;
 
 private:
+    struct LevelState {
+        int row = -1;
+        std::vector<int> periodIndices;
+    };
+
     void resetLocked(int gridWidth, int gridHeight);
 
     mutable std::mutex m_mutex;
@@ -44,9 +50,12 @@ private:
     int m_gridHeight = 0;
     int m_filledColumns = 0;
     int m_writeColumn = -1;
+    int64_t m_sessionStartMs = 0;
+    int64_t m_sessionMs = 3'600'000;
     int64_t m_lastSliceStartMs = 0;
     int64_t m_timeframeMs = 0;
     std::vector<QByteArray> m_columns;
+    std::unordered_map<int64_t, LevelState> m_levelsByTick;
     std::vector<PendingUpload> m_pending;
 };
 

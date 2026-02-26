@@ -112,6 +112,8 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
+    int64_t tpoBucketMs_ = 60000;
+    int64_t tpoSessionMs_ = 3'600'000;
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -320,6 +322,8 @@ class Session : public std::enable_shared_from_this<Session> {
             return;
         }
 
+        const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, tpoSessionMs_ / timeframeMs));
+        gridWidth = std::max(1, std::min(gridWidth, sessionPeriods));
         int effectiveCount = std::max(1, std::min(count, std::max(1, gridWidth)));
         effectiveCount = std::min(effectiveCount, 512);
         int64_t effectiveEnd = endTimeMs;
@@ -656,6 +660,7 @@ public:
                 const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
+                    tpoBucketMs_ = timeframeMs;
                     streamTpoHistory(symbol, timeframeMs, endTimeMs, count);
                 }
             } else if (type == "candle_history_request") {
@@ -1007,11 +1012,18 @@ public:
 
         do_write(footprint.dump());
 
+        const int64_t tpoTimeframeMs = (tpoBucketMs_ > 0) ? tpoBucketMs_ : 60000;
+        const int64_t tpoBucketStart = (slice.bucketStartMs / tpoTimeframeMs) * tpoTimeframeMs;
+        const int64_t tpoBucketEnd = tpoBucketStart + tpoTimeframeMs;
+        const int tpoSessionPeriods =
+            static_cast<int>(std::max<int64_t>(1, tpoSessionMs_ / tpoTimeframeMs));
+        const int tpoGridWidth = std::max(1, std::min(slice.gridWidth, tpoSessionPeriods));
+
         QByteArray tpoLetters;
         if (!buildTpoColumnWindow(sym,
-                                  slice.bucketStartMs,
-                                  slice.bucketEndMs,
-                                  slice.timeframeMs,
+                                  tpoBucketStart,
+                                  tpoBucketEnd,
+                                  tpoTimeframeMs,
                                   slice.gridHeight,
                                   slice.maxPrice,
                                   slice.tickSize,
@@ -1023,10 +1035,10 @@ public:
         tpo["type"] = "tpo_slice";
         tpo["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
         tpo["symbol"] = sym;
-        tpo["time_start"] = slice.bucketStartMs;
-        tpo["time_end"] = slice.bucketEndMs;
-        tpo["timeframe_ms"] = slice.timeframeMs;
-        tpo["grid_width"] = slice.gridWidth;
+        tpo["time_start"] = tpoBucketStart;
+        tpo["time_end"] = tpoBucketEnd;
+        tpo["timeframe_ms"] = tpoTimeframeMs;
+        tpo["grid_width"] = tpoGridWidth;
         tpo["grid_height"] = slice.gridHeight;
         tpo["min_price"] = slice.minPrice;
         tpo["max_price"] = slice.maxPrice;

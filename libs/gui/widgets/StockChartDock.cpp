@@ -120,11 +120,6 @@ void StockChartDock::buildUi() {
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     layout->addWidget(m_qmlContainer, 1);
 
-    // ── Status label ──────────────────────────────────────────────────────────
-    m_statusLabel = new QLabel("Select a stock from the Screener", m_contentWidget);
-    m_statusLabel->setStyleSheet("color:#3d5060; font-size:11px; padding:2px 4px;");
-    layout->addWidget(m_statusLabel);
-
     m_contentWidget->setLayout(layout);
 
     // Signals
@@ -205,9 +200,8 @@ void StockChartDock::onProcessFinished(int exitCode, QProcess::ExitStatus /*stat
 
         if (auto* root = qmlRoot()) {
             QMetaObject::invokeMethod(root, "setCandles", Q_ARG(QVariant, QVariant::fromValue(list)));
+            root->setProperty("statusMsg", "");  // Clear; ticker/period/candles live in header only
         }
-
-        setStatus(QString("%1 · %2 · %3 candles").arg(m_currentTicker, m_currentPeriod).arg(count));
     } else if (errIdx != -1) {
         const QByteArray json = output.mid(errIdx + 11).trimmed().toUtf8();
         const QJsonObject obj = QJsonDocument::fromJson(json).object();
@@ -274,11 +268,7 @@ QObject* StockChartDock::qmlRoot() const {
 }
 
 void StockChartDock::setStatus(const QString& msg, bool error) {
-    if (!m_statusLabel) return;
-    m_statusLabel->setText(msg);
-    m_statusLabel->setStyleSheet(error
-        ? "color:#ef5c55; font-size:11px; padding:2px 4px;"
-        : "color:#3d5060; font-size:11px; padding:2px 4px;");
     if (auto* root = qmlRoot())
         root->setProperty("statusMsg", msg);
+    Q_UNUSED(error);  // QML empty state shows statusMsg; styling can be extended there if needed
 }
