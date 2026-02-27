@@ -29,6 +29,8 @@
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "Cpp20Utils.hpp"
+#include "../trading/TradingEngine.hpp"
+#include "../trading/TradingTypes.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -97,12 +99,14 @@ class Session : public std::enable_shared_from_this<Session> {
     std::mutex queue_mutex_;
     QByteArray footprintDeltaScratch_;
     std::vector<double> footprintRowDeltaScratch_;
-    
+
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection heatmapConn_;
     QMetaObject::Connection barUpdatedConn_;
     QMetaObject::Connection barClosedConn_;
+    QMetaObject::Connection orderConn_;
+    QMetaObject::Connection positionConn_;
 
     struct CandleStreamState {
         int64_t seq = 0;
@@ -462,6 +466,8 @@ public:
         QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
+        QObject::disconnect(orderConn_);
+        QObject::disconnect(positionConn_);
     }
 
     void run() {
@@ -500,12 +506,12 @@ public:
             auto configPayload = buildServerConfigPayload(owner_->serverConfig());
             do_write(configPayload.dump());
         }
-        
-        tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
+
+        tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast,
             [self](const Trade& trade) {
                 self->on_trade(trade);
             });
-            
+
         bookConn_ = QObject::connect(&model_, &ServerDataModel::bookUpdateBroadcast,
             [self](const QString& productId, const std::vector<BookDelta>& deltas) {
                 self->on_book_update(productId, deltas);
@@ -525,7 +531,41 @@ public:
             [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
                 self->on_bar_closed(symbol, tf, bar);
             });
-            
+        if (owner_) {
+            orderConn_ = QObject::connect(owner_, &SentinelStreamServer::orderUpdateBroadcast,
+                [self](const trading::OrderUpdate& update) {
+                    if (!self->subscriptions_.empty() && self->subscriptions_.count(update.symbol) == 0) {
+                        return;
+                    }
+                    nlohmann::json msg{
+                        {"type", "order_update"},
+                        {"order_id", update.orderId},
+                        {"symbol", update.symbol},
+                        {"status", trading::toString(update.status)},
+                        {"side", trading::toString(update.side)},
+                        {"qty", update.qty},
+                        {"filled_qty", update.filledQty},
+                        {"remaining_qty", update.remainingQty},
+                        {"avg_price", update.avgPrice}
+                    };
+                    self->do_write(msg.dump());
+                });
+            positionConn_ = QObject::connect(owner_, &SentinelStreamServer::positionUpdateBroadcast,
+                [self](const trading::PositionUpdate& update) {
+                    if (!self->subscriptions_.empty() && self->subscriptions_.count(update.symbol) == 0) {
+                        return;
+                    }
+                    nlohmann::json msg{
+                        {"type", "position_update"},
+                        {"symbol", update.symbol},
+                        {"position_qty", update.positionQty},
+                        {"avg_price", update.avgPrice},
+                        {"unrealized_pnl", update.unrealizedPnl}
+                    };
+                    self->do_write(msg.dump());
+                });
+        }
+
         do_read();
     }
 
@@ -558,7 +598,7 @@ public:
         try {
             auto j = nlohmann::json::parse(msg);
             std::string type = j.value("type", "");
-            
+
             if (type == "subscribe") {
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
@@ -566,7 +606,7 @@ public:
                     if (owner_) {
                         owner_->notifyClientSubscribed(symbol);
                     }
-                    
+
                     nlohmann::json ack;
                     ack["type"] = "ack";
                     ack["symbol"] = symbol;
@@ -576,7 +616,7 @@ public:
                     nlohmann::json snapshot;
                     snapshot["type"] = "snapshot";
                     snapshot["symbol"] = symbol;
-                    
+
                     std::vector<nlohmann::json> bidsJson;
                     const auto& bids = hotData.liveBook.getBids();
                     for (size_t i = 0; i < bids.size(); ++i) {
@@ -600,9 +640,9 @@ public:
                         }
                     }
                     snapshot["asks"] = asksJson;
-                    
+
                     do_write(snapshot.dump());
-                    
+
                 }
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -795,6 +835,21 @@ public:
 
                     self->do_write(payload.dump());
                 }).detach();
+            } else if (type == "trade_command") {
+                if (!owner_) {
+                    send_error("trade_command", "", "server unavailable");
+                    return;
+                }
+                try {
+                    trading::TradeCommand command = trading::parseTradeCommandJson(msg);
+                    if (command.action == trading::TradeAction::Unknown) {
+                        send_error("trade_command", command.symbol, "unknown action");
+                        return;
+                    }
+                    owner_->processTradeCommand(command);
+                } catch (const std::exception& ex) {
+                    send_error("trade_command", "", ex.what());
+                }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
@@ -905,10 +960,10 @@ public:
             sLog_Error("Server message parse error: " << e.what());
         }
     }
-    
+
     void on_trade(const Trade& trade) {
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
-        
+
         nlohmann::json j;
         j["type"] = "trade";
         j["product_id"] = trade.product_id;
@@ -916,21 +971,21 @@ public:
         j["size"] = trade.size;
         j["side"] = (trade.side == AggressorSide::Buy) ? "buy" : "sell";
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
-        
+
         do_write(j.dump());
     }
-    
+
     void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas) {
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
-        
+
         auto& symbolData = model_.ensureSymbol(pid);
         const auto& book = symbolData.liveBook;
 
         nlohmann::json j;
         j["type"] = "l2update";
         j["product_id"] = pid;
-        
+
         std::vector<nlohmann::json> deltaJson;
         deltaJson.reserve(deltas.size());
         for (const auto& d : deltas) {
@@ -941,7 +996,7 @@ public:
             });
         }
         j["deltas"] = deltaJson;
-        
+
         do_write(j.dump());
     }
 
@@ -1205,18 +1260,18 @@ public:
         err["message"] = message;
         do_write(err.dump());
     }
-    
+
     void on_write_post(std::string payload) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         write_queue_.push_back(std::move(payload));
-        
+
         if (write_queue_.size() > 1) {
             return;
         }
-        
+
         internal_async_write();
     }
-    
+
     void internal_async_write() {
         ws_.async_write(
             net::buffer(write_queue_.front()),
@@ -1224,13 +1279,13 @@ public:
                 &Session::on_write_complete,
                 shared_from_this()));
     }
-    
+
     void on_write_complete(beast::error_code ec, std::size_t) {
         if (ec) return fail(ec, "write");
-        
+
         std::lock_guard<std::mutex> lock(queue_mutex_);
         write_queue_.erase(write_queue_.begin());
-        
+
         if (!write_queue_.empty()) {
             internal_async_write();
         }
@@ -1259,6 +1314,11 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
     , m_serverConfig(config)
     , m_port(port)
 {
+    m_tradingEngine = std::make_unique<trading::TradingEngine>(
+        [this](const std::string& symbol) {
+            return m_model.ensureSymbol(symbol).lastTradePrice;
+        },
+        m_serverConfig.trading.slippageBps);
 }
 
 SentinelStreamServer::~SentinelStreamServer() {
@@ -1267,10 +1327,10 @@ SentinelStreamServer::~SentinelStreamServer() {
 
 void SentinelStreamServer::start() {
     if (m_running) return;
-    
+
     try {
         m_running = true;
-        
+
         tcp::endpoint endpoint(tcp::v4(), m_port);
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
@@ -1279,7 +1339,7 @@ void SentinelStreamServer::start() {
         m_acceptor->listen();
 
         doAccept();
-        
+
         m_thread = std::thread([this] {
             while (m_running) {
                 try {
@@ -1290,7 +1350,7 @@ void SentinelStreamServer::start() {
                 }
             }
         });
-        
+
     } catch (const std::exception& e) {
         sLog_Error("SentinelStreamServer start failed: " << e.what());
         m_running = false;
@@ -1333,4 +1393,18 @@ void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {
     return *m_restClient;
+}
+
+void SentinelStreamServer::processTradeCommand(const trading::TradeCommand& command) {
+    if (!m_tradingEngine) {
+        return;
+    }
+    sLog_App("TradeCommand: action=" << trading::toString(command.action) << " symbol=" << command.symbol.c_str() << " qty=" << command.qty);
+    const auto result = m_tradingEngine->onCommand(command);
+    for (const auto& update : result.orderUpdates) {
+        emit orderUpdateBroadcast(update);
+    }
+    for (const auto& update : result.positionUpdates) {
+        emit positionUpdateBroadcast(update);
+    }
 }

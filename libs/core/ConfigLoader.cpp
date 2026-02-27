@@ -146,6 +146,11 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
             readScalar(candles, "update_tick_size", cfg.candles.tickSize);
         }
+        if (serverRoot["trading"]) {
+            auto trading = serverRoot["trading"];
+            readScalar(trading, "mode", cfg.trading.mode);
+            readScalar(trading, "slippage_bps", cfg.trading.slippageBps);
+        }
     }
 
     if (serverRoot && serverRoot["mdc"]) {

@@ -49,11 +49,17 @@ struct ServerMdcConfig {
     std::string sslCaBundle;
 };
 
+struct ServerTradingConfig {
+    std::string mode = "paper";
+    double slippageBps = 2.0;
+};
+
 struct ServerConfig {
     ServerHeatmapConfig heatmap;
     ServerOrderBookConfig orderbook;
     ServerCandleGateConfig candles;
     ServerMdcConfig mdc;
+    ServerTradingConfig trading;
     uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };

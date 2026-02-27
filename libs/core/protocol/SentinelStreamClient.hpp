@@ -17,6 +17,7 @@
 #include "TpoSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
+#include "../trading/TradingTypes.hpp"
 
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
@@ -50,7 +51,7 @@ public:
 
     void connectToServer();
     void disconnectFromServer();
-    
+
     void subscribe(const std::string& symbol);
     void unsubscribe(const std::string& symbol);
     void requestHeatmapHistory(const std::string& symbol,
@@ -72,17 +73,18 @@ public:
     void requestScreenerData(const std::string& asset,
                              int limit = 50,
                              double minVolume = 0.0);
+    void sendTradeCommand(const trading::TradeCommand& command);
 
 signals:
     void connected();
     void disconnected();
     void errorOccurred(const QString& error);
     void serverConfigReceived(const ServerConfig& config);
-    
+
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices
     void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
-    
+
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
     // Other signals as needed for aggregated slices
@@ -112,6 +114,8 @@ signals:
     // Emitted when the server returns a screener_update in response to screener_request.
     // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
+    void orderUpdated(const trading::OrderUpdate& update);
+    void positionUpdated(const trading::PositionUpdate& update);
 
 private:
     void run();
@@ -122,7 +126,7 @@ private:
     void onRead(boost::beast::error_code ec, std::size_t bytes_transferred);
     void doWrite();
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
-    
+
     void handleMessage(const std::string& msg);
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
@@ -138,20 +142,22 @@ private:
     void handleTpoSliceMessage(const nlohmann::json& msg);
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
+    void handleOrderUpdateMessage(const nlohmann::json& msg);
+    void handlePositionUpdateMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;
-    
+
     net::io_context m_ioc;
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
-    
+
     boost::beast::websocket::stream<boost::beast::tcp_stream> m_ws;
     boost::beast::flat_buffer m_buffer;
-    
+
     std::deque<std::string> m_writeQueue;
-    
+
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
 };

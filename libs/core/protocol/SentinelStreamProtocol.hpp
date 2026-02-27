@@ -39,6 +39,9 @@ enum class MessageType {
     TickDelta, // Maybe for later
     ScreenerRequest,
     ScreenerUpdate,
+    TradeCommand,
+    OrderUpdate,
+    PositionUpdate,
     Error,
     Unknown
 };
@@ -66,6 +69,9 @@ inline std::string toString(MessageType t) {
         case MessageType::TpoHistoryChunk: return "tpo_history_chunk";
         case MessageType::ScreenerRequest: return "screener_request";
         case MessageType::ScreenerUpdate:  return "screener_update";
+        case MessageType::TradeCommand: return "trade_command";
+        case MessageType::OrderUpdate: return "order_update";
+        case MessageType::PositionUpdate: return "position_update";
         case MessageType::Error: return "error";
         default: return "unknown";
     }
@@ -93,6 +99,9 @@ inline MessageType fromString(const std::string& s) {
     if (s == "tpo_history_chunk") return MessageType::TpoHistoryChunk;
     if (s == "screener_request") return MessageType::ScreenerRequest;
     if (s == "screener_update")  return MessageType::ScreenerUpdate;
+    if (s == "trade_command") return MessageType::TradeCommand;
+    if (s == "order_update") return MessageType::OrderUpdate;
+    if (s == "position_update") return MessageType::PositionUpdate;
     if (s == "error") return MessageType::Error;
     return MessageType::Unknown;
 }

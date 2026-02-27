@@ -19,3 +19,7 @@ candles:
   update_volume_slow: 0
   update_tick_size: 0
 default_symbols: [BTC-USD]
+
+trading:
+  mode: "paper"
+  slippage_bps: 2

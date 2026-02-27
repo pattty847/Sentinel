@@ -9,6 +9,9 @@
 #include <thread>
 #include "../servermodel/ServerDataModel.hpp"
 #include "../config/ConfigTypes.hpp"
+#include "../trading/TradingTypes.hpp"
+
+namespace trading { class TradingEngine; }
 
 class Authenticator;
 class CoinbaseRestClient;
@@ -32,24 +35,28 @@ public:
 signals:
     void clientSubscribed(const QString& symbol);
     void clientUnsubscribed(const QString& symbol);
+    void orderUpdateBroadcast(const trading::OrderUpdate& update);
+    void positionUpdateBroadcast(const trading::PositionUpdate& update);
 
 public:
     void notifyClientSubscribed(const std::string& symbol);
     void notifyClientUnsubscribed(const std::string& symbol);
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
+    void processTradeCommand(const trading::TradeCommand& command);
 
 private:
     void doAccept();
-    
+
     ServerDataModel& m_model;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
     ServerConfig m_serverConfig;
     int m_port;
-    
+
     net::io_context m_ioc;
     std::unique_ptr<tcp::acceptor> m_acceptor;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
+    std::unique_ptr<trading::TradingEngine> m_tradingEngine;
 };
 
