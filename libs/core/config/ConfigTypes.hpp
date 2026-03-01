@@ -65,9 +65,9 @@ struct ServerConfig {
 };
 
 struct ClientHeatmapConfig {
-    double gamma = 1.05;
-    double contrast = 1.15;
-    double shaderFloor = 0.01;
+    double gamma = 0.85;
+    double contrast = 1.6;
+    double shaderFloor = 0.0;
     int labelPx = 14;
     int clientCacheColumns = 0;
 };

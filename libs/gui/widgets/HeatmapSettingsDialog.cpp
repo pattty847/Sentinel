@@ -64,15 +64,15 @@ void HeatmapSettingsDialog::buildUi() {
     form->setHorizontalSpacing(12);
     form->setVerticalSpacing(12);
 
-    // Gamma: 0.1-5.0, step 0.05, default 1.05
-    auto [gammaSlider, gammaLabel] = makeSlider(this, 10, 500, 105);
+    // Gamma: 0.1-5.0, step 0.01, default 0.85
+    auto [gammaSlider, gammaLabel] = makeSlider(this, 10, 500, 85);
     m_gammaSlider = gammaSlider;
     m_gammaLabel = gammaLabel;
     auto* gammaRow = new QHBoxLayout();
     gammaRow->addWidget(m_gammaSlider);
     gammaRow->addWidget(m_gammaLabel);
     form->addRow("Gamma", gammaRow);
-    auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 115);
+    auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 160);
     m_contrastSlider = contrastSlider;
     m_contrastLabel = contrastLabel;
     auto* contrastRow = new QHBoxLayout();
@@ -80,8 +80,8 @@ void HeatmapSettingsDialog::buildUi() {
     contrastRow->addWidget(m_contrastLabel);
     form->addRow("Contrast", contrastRow);
 
-    // Floor: 0.0-0.5, step 0.01, default 0.01
-    auto [floorSlider, floorLabel] = makeSlider(this, 0, 50, 1);
+    // Floor: 0.0-0.5, step 0.01, default 0.005 (shown as 0)
+    auto [floorSlider, floorLabel] = makeSlider(this, 0, 50, 0);
     m_floorSlider = floorSlider;
     m_floorLabel = floorLabel;
     auto* floorRow = new QHBoxLayout();
