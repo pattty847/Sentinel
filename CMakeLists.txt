@@ -36,7 +36,7 @@ if (MSVC)
     add_compile_options(/EHsc /bigobj)
 
     # Release flags
-    # (/O2 /GL /DNDEBUG) sets MSVC release optimizations: /O2 enables maximum optimization, /GL enables whole-program optimization, 
+    # (/O2 /GL /DNDEBUG) sets MSVC release optimizations: /O2 enables maximum optimization, /GL enables whole-program optimization,
     # and /DNDEBUG disables debug code to produce efficient release binaries.
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL /DNDEBUG")
 endif()
@@ -111,6 +111,7 @@ add_subdirectory(apps/sentinel-server)
 enable_testing()
 add_subdirectory(tests/marketdata)
 add_subdirectory(tests/render)
+add_subdirectory(tests/trading)
 
 # ────────────────────────────────────────────────────────────────
 # LOG

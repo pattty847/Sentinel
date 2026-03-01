@@ -146,6 +146,11 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
             readScalar(candles, "update_tick_size", cfg.candles.tickSize);
         }
+        if (serverRoot["trading"]) {
+            auto trading = serverRoot["trading"];
+            readScalar(trading, "mode", cfg.trading.mode);
+            readScalar(trading, "slippage_bps", cfg.trading.slippageBps);
+        }
     }
 
     if (serverRoot && serverRoot["mdc"]) {
@@ -193,6 +198,7 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(guiNode, "api_port", cfg.gui.apiPort);
         readScalar(guiNode, "screenshot_dir", cfg.gui.screenshotDir);
         readScalar(guiNode, "msdf_font", cfg.gui.msdfFontPath);
+        readScalar(guiNode, "default_order_qty", cfg.gui.defaultOrderQty);
     }
 
     if (clientNode && clientNode["server"]) {

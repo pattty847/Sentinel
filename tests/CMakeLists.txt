@@ -14,3 +14,6 @@ add_subdirectory(render)
 
 message(STATUS "Marketdata tests configured (3 test suites)")
 message(STATUS "Render tests configured (2 test suites)")
+
+add_subdirectory(trading)
+message(STATUS "Trading tests configured")

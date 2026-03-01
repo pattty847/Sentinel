@@ -40,6 +40,8 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "TradeInputManager.hpp"
+#include "widgets/TradeBlotterDock.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
@@ -58,6 +60,7 @@
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
+#include <QDoubleSpinBox>
 #include <QtGlobal>
 #include <algorithm>
 #include <unordered_map>
@@ -142,7 +145,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
         sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
     }
-    
+
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
@@ -158,11 +161,11 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_shortcutBinder = std::make_unique<ShortcutBinder>(this);
     setupMenuBar();
     setupShortcuts();
-    
+
     setupConnections();
     setWindowProperties();
     setupGuiApiServer();
-    
+
     if (!validateComponents()) {
         sLog_Error("Component validation failed - app may not function correctly");
         QMessageBox::critical(this, "Initialization Error", "Failed to initialize core components. Check logs.");
@@ -205,7 +208,7 @@ void MainWindowGPU::setupUI() {
             }
         });
     }
-    
+
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
     if (m_qquickView) {
@@ -213,10 +216,27 @@ void MainWindowGPU::setupUI() {
     auto symbolControls = dockFactory.getSymbolControls();
     m_symbolInput = symbolControls.symbolInput;
     m_subscribeButton = symbolControls.subscribeButton;
-    
+
     // Add status bar to main window
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
+    m_orderQtyInput = new QDoubleSpinBox(this);
+    m_orderQtyInput->setDecimals(4);
+    m_orderQtyInput->setRange(0.0001, 1'000'000.0);
+    m_orderQtyInput->setSingleStep(0.1);
+    m_orderQtyInput->setValue(std::max(0.0001, GuiConfigStore::instance().clientConfig().gui.defaultOrderQty));
+    m_orderQtyInput->setPrefix("Qty ");
+    m_orderQtyInput->setToolTip("Default paper order quantity");
+    statusBar()->addPermanentWidget(m_orderQtyInput);
+
+    m_tradeBlotterDock = new TradeBlotterDock(this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_tradeBlotterDock);
+
+    m_positionOverlayLabel = new QLabel(m_qmlContainer);
+    m_positionOverlayLabel->setStyleSheet("QLabel { color: #ffffff; background: rgba(0,0,0,140); padding: 4px; border: 1px solid #444; }");
+    m_positionOverlayLabel->setText("Pos: 0.0000 Avg: 0.00 UPNL: 0.00");
+    m_positionOverlayLabel->move(12, 12);
+    m_positionOverlayLabel->show();
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
@@ -317,7 +337,7 @@ void MainWindowGPU::setupUI() {
             }
         });
     }
-    
+
     setUpdatesEnabled(true);
 }
 
@@ -338,6 +358,13 @@ void MainWindowGPU::setupConnections() {
         });
     }
     connectMarketDataSignals();
+    const double fallbackQty = std::max(0.0001, GuiConfigStore::instance().clientConfig().gui.defaultOrderQty);
+    m_tradeInputManager = std::make_unique<TradeInputManager>(
+        m_dataSource.get(),
+        this,
+        [this]() -> double { return m_orderQtyInput ? m_orderQtyInput->value() : 0.0; },
+        fallbackQty,
+        this);
 }
 
 void MainWindowGPU::setupGuiApiServer() {
@@ -408,6 +435,9 @@ void MainWindowGPU::onSubscribe() {
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     m_currentSymbol = symbol;
+    if (m_tradeInputManager) {
+        m_tradeInputManager->setSymbol(symbol);
+    }
     emit symbolChanged(symbol);
 }
 
@@ -628,11 +658,11 @@ void MainWindowGPU::setupShortcuts() {
     callbacks.saveLayout = [this]() { onSaveLayout(); };
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
     callbacks.resetLayout = [this]() { onResetLayout(); };
-    
+
     ShortcutBinder::DockWidgets docks;
     docks.heatmapDock = m_heatmapDock;
     docks.secDock = m_secDock;
-    
+
     m_shortcutBinder->bindShortcuts(callbacks, docks);
 }
 
@@ -691,7 +721,7 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (GuiConfigStore::instance().hasServerConfig()) {
         unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
     }
-    
+
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
@@ -703,11 +733,11 @@ void MainWindowGPU::connectMarketDataSignals() {
         connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }
-    
+
     // Trade connection (simplified, assume UnifiedGridRenderer has a slot)
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
-    
+
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
@@ -733,6 +763,24 @@ void MainWindowGPU::connectMarketDataSignals() {
             this, [](const QString& error) {
                 sLog_Error("DataSource error: " << error);
             });
+
+    connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+            this, [this](const trading::OrderUpdate& update) {
+                if (m_tradeBlotterDock) {
+                    m_tradeBlotterDock->onOrderUpdated(update);
+                }
+            }, Qt::QueuedConnection);
+
+    connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+            this, [this](const trading::PositionUpdate& update) {
+                if (m_positionOverlayLabel && update.symbol == m_currentSymbol.toStdString()) {
+                    m_positionOverlayLabel->setText(
+                        QString("Pos: %1 Avg: %2 UPNL: %3")
+                            .arg(update.positionQty, 0, 'f', 4)
+                            .arg(update.avgPrice, 0, 'f', 2)
+                            .arg(update.unrealizedPnl, 0, 'f', 2));
+                }
+            }, Qt::QueuedConnection);
 }
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {

@@ -28,7 +28,8 @@ public:
                               int64_t timeframeSec,
                               int64_t endTimeSec,
                               int limit) override;
-    
+    void sendTradeCommand(const trading::TradeCommand& command) override;
+
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
     QObject* candleBuffer() const { return m_candleBuffer.get(); }
@@ -66,10 +67,10 @@ private:
     SentinelStreamClient m_client;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
-    // Or we might change the interface to not return references? 
+    // Or we might change the interface to not return references?
     // IGridDataSource::getDirectLiveOrderBook returns const ref.
     // So RemoteGridDataSource MUST maintain a local replica.
-    
+
     mutable std::unordered_map<std::string, std::unique_ptr<LiveOrderBook>> m_replicaBooks;
     ServerConfig m_serverConfig;
 };

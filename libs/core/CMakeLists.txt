@@ -35,6 +35,16 @@ add_library(sentinel_core
     protocol/SentinelStreamClient.cpp
     protocol/SentinelStreamClientParseHelpers.hpp
     protocol/SentinelStreamClientParseHelpers.cpp
+    trading/TradingTypes.hpp
+    trading/TradingTypes.cpp
+    trading/OrderStore.hpp
+    trading/OrderStore.cpp
+    trading/PositionManager.hpp
+    trading/PositionManager.cpp
+    trading/PaperExecutionAdapter.hpp
+    trading/PaperExecutionAdapter.cpp
+    trading/TradingEngine.hpp
+    trading/TradingEngine.cpp
 )
 
 # Find required packages
@@ -82,4 +92,4 @@ endif()
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON) 
+set(CMAKE_AUTORCC ON)

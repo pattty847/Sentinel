@@ -189,18 +189,18 @@ void SentinelStreamClient::connectToServer() {
 
     m_running = true;
     m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
-    
+
     m_thread = std::thread([this] {
         try {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
-            
+
             auto& stream = m_ws.next_layer();
             stream.async_connect(
                 results,
                 [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
-            
+
             m_ioc.run();
         } catch (const std::exception& e) {
             sLog_Error("Client thread exception: " << e.what());
@@ -212,7 +212,7 @@ void SentinelStreamClient::connectToServer() {
 void SentinelStreamClient::disconnectFromServer() {
     m_running = false;
     if (m_work) m_work->reset();
-    
+
     if (m_isConnected) {
         // Close websocket gracefully... or just stop ioc
     }
@@ -228,7 +228,7 @@ void SentinelStreamClient::subscribe(const std::string& symbol) {
         {"type", "subscribe"},
         {"symbol", symbol}
     };
-    
+
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -243,7 +243,7 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
         {"type", "unsubscribe"},
         {"symbol", symbol}
     };
-    
+
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -366,13 +366,38 @@ void SentinelStreamClient::requestScreenerData(const std::string& asset,
     });
 }
 
+
+void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command) {
+    nlohmann::json msg = {
+        {"type", "trade_command"},
+        {"command_id", command.commandId},
+        {"action", trading::toString(command.action)},
+        {"symbol", command.symbol},
+        {"side", trading::toString(command.side)},
+        {"order_type", trading::toString(command.orderType)},
+        {"qty", command.qty},
+        {"timestamp", command.timestamp}
+    };
+    msg["price"] = command.hasPrice ? nlohmann::json(command.price) : nlohmann::json(nullptr);
+    if (!command.targetOrderId.empty()) {
+        msg["order_id"] = command.targetOrderId;
+    }
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
         sLog_Error("Connect failed: " << ec.message());
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
-    
+
     m_ws.async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 
@@ -382,10 +407,10 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
-    
+
     m_isConnected = true;
     emit connected();
-    
+
     doRead();
 
     net::post(m_strand, [this]() {
@@ -406,12 +431,12 @@ void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes
         emit disconnected();
         return;
     }
-    
+
     std::string msg = boost::beast::buffers_to_string(m_buffer.data());
     m_buffer.consume(bytes_transferred);
-    
+
     handleMessage(msg);
-    
+
     doRead();
 }
 
@@ -428,9 +453,9 @@ void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t byte
         sLog_Error("Write failed: " << ec.message());
         return;
     }
-    
+
     m_writeQueue.pop_front();
-    
+
     if (!m_writeQueue.empty()) {
         doWrite();
     }
@@ -479,6 +504,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
+                return;
+            case protocol::MessageType::OrderUpdate:
+                handleOrderUpdateMessage(msg);
+                return;
+            case protocol::MessageType::PositionUpdate:
+                handlePositionUpdateMessage(msg);
                 return;
             case protocol::MessageType::Unknown:
                 break;
@@ -947,6 +978,32 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
                        .arg(QString::fromStdString(symbol))
                        .arg(timeframeMs)
                        .arg(emitted));
+    }
+}
+
+void SentinelStreamClient::handleOrderUpdateMessage(const nlohmann::json& msg) {
+    trading::OrderUpdate update;
+    update.orderId = msg.value("order_id", "");
+    update.symbol = msg.value("symbol", "");
+    update.status = trading::orderStatusFromString(msg.value("status", "REJECTED"));
+    update.side = trading::orderSideFromString(msg.value("side", "UNKNOWN"));
+    update.qty = msg.value("qty", 0.0);
+    update.filledQty = msg.value("filled_qty", 0.0);
+    update.remainingQty = msg.value("remaining_qty", 0.0);
+    update.avgPrice = msg.value("avg_price", 0.0);
+    if (!update.orderId.empty()) {
+        emit orderUpdated(update);
+    }
+}
+
+void SentinelStreamClient::handlePositionUpdateMessage(const nlohmann::json& msg) {
+    trading::PositionUpdate update;
+    update.symbol = msg.value("symbol", "");
+    update.positionQty = msg.value("position_qty", 0.0);
+    update.avgPrice = msg.value("avg_price", 0.0);
+    update.unrealizedPnl = msg.value("unrealized_pnl", 0.0);
+    if (!update.symbol.empty()) {
+        emit positionUpdated(update);
     }
 }
 

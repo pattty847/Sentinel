@@ -6,6 +6,8 @@ set(GRID_CORE_SOURCES
     ChartModeController.h
     PerformanceMonitor.cpp
     PerformanceMonitor.hpp
+    TradeInputManager.hpp
+    TradeInputManager.cpp
     config/GuiConfigStore.cpp
     config/GuiConfigStore.hpp
 
@@ -22,7 +24,7 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     mainwindow/GuiApiServer.cpp
     mainwindow/GuiApiServer.h
-    
+
     # Grid system components
     datasources/IGridDataSource.hpp
     datasources/RemoteGridDataSource.hpp
@@ -36,7 +38,7 @@ set(GRID_CORE_SOURCES
     CoordinateSystem.cpp
     CoordinateSystem.h
     ChartMode.h
-    
+
     # Axis models for QML integration
     models/AxisModel.hpp
     models/AxisModel.cpp
@@ -44,7 +46,7 @@ set(GRID_CORE_SOURCES
     models/TimeAxisModel.cpp
     models/PriceAxisModel.hpp
     models/PriceAxisModel.cpp
-    
+
     # New modular render architecture (V2)
     render/GridViewState.hpp
     render/GridViewState.cpp
@@ -109,6 +111,8 @@ set(WIDGET_SOURCES
     "widgets/TopToolbar.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
+    "widgets/TradeBlotterDock.cpp"
+    "widgets/TradeBlotterDock.hpp"
 )
 
 set(THEME_SOURCES
@@ -245,7 +249,7 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/footprint_intensity.frag
 )
 
-target_include_directories(sentinel_gui_lib 
+target_include_directories(sentinel_gui_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/render
 )

@@ -31,6 +31,7 @@ Server-authoritative (client cannot override):
 - Candle gating
 - Market data connection + TLS
 - Default symbols
+- Trading mode + paper slippage
 
 Client-only:
 - Visual tuning (gamma/contrast/labels/colors)
@@ -68,4 +69,12 @@ heatmap:
 gui:
   api_port: 17100
   screenshot_dir: ./screenshots
+  default_order_qty: 1.0
+```
+
+Trading config (server):
+```yaml
+trading:
+  mode: paper
+  slippage_bps: 2
 ```

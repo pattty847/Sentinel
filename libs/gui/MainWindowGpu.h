@@ -15,6 +15,7 @@
 #include <memory>
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
+#include "../core/trading/TradingTypes.hpp"
 
 // Forward declarations
 class ChartModeController;
@@ -31,6 +32,8 @@ class StockChartDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
+class TradeInputManager;
+class TradeBlotterDock;
 
 class DockFactory;
 class QmlSceneController;
@@ -38,6 +41,7 @@ class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
+class QDoubleSpinBox;
 
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
@@ -77,7 +81,7 @@ private:
     void requestCandleHistoryForSymbol(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;
-    
+
     // Callbacks for modular components
     void onSaveLayout();
     void onRestoreLayout();
@@ -95,7 +99,7 @@ private:
     WatchlistDock* m_watchlistDock = nullptr;
     ScreenerDock* m_screenerDock = nullptr;
     StockChartDock* m_stockChartDock = nullptr;
-    
+
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;
     QToolButton* m_subscribeButton = nullptr;
@@ -104,7 +108,7 @@ private:
     bool m_userSubscribed = false;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
-    
+
     // Controllers
     ChartModeController* m_modeController = nullptr;
     ThemeBridge* m_themeBridge = nullptr;
@@ -116,6 +120,10 @@ private:
     QPointer<class FontSettingsDialog> m_fontDialog;
     QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
     QMetaObject::Connection m_candleViewportConn;
+    std::unique_ptr<TradeInputManager> m_tradeInputManager;
+    TradeBlotterDock* m_tradeBlotterDock = nullptr;
+    QLabel* m_positionOverlayLabel = nullptr;
+    QDoubleSpinBox* m_orderQtyInput = nullptr;
 
     bool m_firstShow = true;
 };
