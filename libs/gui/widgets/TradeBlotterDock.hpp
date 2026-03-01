@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDockWidget>
+#include <QHash>
 
 #include "../../core/trading/TradingTypes.hpp"
 
@@ -16,4 +17,5 @@ public slots:
 
 private:
     QTableWidget* m_table = nullptr;
+    QHash<QString, int> m_orderIdToRow;
 };

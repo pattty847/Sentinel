@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,10 @@ public:
     TradingEngine(PriceResolver resolver, double slippageBps);
 
     TradingResult onCommand(const TradeCommand& command);
+    TradingResult onExternalFill(const std::string& orderId,
+                                 double cumulativeFilledQty,
+                                 double fillPrice);
+    std::optional<Order> findOrder(const std::string& orderId) const;
 
 private:
     TradingResult handlePlaceOrder(const TradeCommand& command);

@@ -69,6 +69,7 @@ heatmap:
 gui:
   api_port: 17100
   screenshot_dir: ./screenshots
+  default_order_qty: 1.0
 ```
 
 Trading config (server):

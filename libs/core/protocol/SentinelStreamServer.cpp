@@ -534,35 +534,11 @@ public:
         if (owner_) {
             orderConn_ = QObject::connect(owner_, &SentinelStreamServer::orderUpdateBroadcast,
                 [self](const trading::OrderUpdate& update) {
-                    if (!self->subscriptions_.empty() && self->subscriptions_.count(update.symbol) == 0) {
-                        return;
-                    }
-                    nlohmann::json msg{
-                        {"type", "order_update"},
-                        {"order_id", update.orderId},
-                        {"symbol", update.symbol},
-                        {"status", trading::toString(update.status)},
-                        {"side", trading::toString(update.side)},
-                        {"qty", update.qty},
-                        {"filled_qty", update.filledQty},
-                        {"remaining_qty", update.remainingQty},
-                        {"avg_price", update.avgPrice}
-                    };
-                    self->do_write(msg.dump());
+                    self->on_order_update(update);
                 });
             positionConn_ = QObject::connect(owner_, &SentinelStreamServer::positionUpdateBroadcast,
                 [self](const trading::PositionUpdate& update) {
-                    if (!self->subscriptions_.empty() && self->subscriptions_.count(update.symbol) == 0) {
-                        return;
-                    }
-                    nlohmann::json msg{
-                        {"type", "position_update"},
-                        {"symbol", update.symbol},
-                        {"position_qty", update.positionQty},
-                        {"avg_price", update.avgPrice},
-                        {"unrealized_pnl", update.unrealizedPnl}
-                    };
-                    self->do_write(msg.dump());
+                    self->on_position_update(update);
                 });
         }
 
@@ -959,6 +935,39 @@ public:
         } catch (const std::exception& e) {
             sLog_Error("Server message parse error: " << e.what());
         }
+    }
+
+
+    void on_order_update(const trading::OrderUpdate& update) {
+        if (!subscriptions_.empty() && subscriptions_.count(update.symbol) == 0) {
+            return;
+        }
+        nlohmann::json msg{
+            {"type", "order_update"},
+            {"order_id", update.orderId},
+            {"symbol", update.symbol},
+            {"status", trading::toString(update.status)},
+            {"side", trading::toString(update.side)},
+            {"qty", update.qty},
+            {"filled_qty", update.filledQty},
+            {"remaining_qty", update.remainingQty},
+            {"avg_price", update.avgPrice}
+        };
+        do_write(msg.dump());
+    }
+
+    void on_position_update(const trading::PositionUpdate& update) {
+        if (!subscriptions_.empty() && subscriptions_.count(update.symbol) == 0) {
+            return;
+        }
+        nlohmann::json msg{
+            {"type", "position_update"},
+            {"symbol", update.symbol},
+            {"position_qty", update.positionQty},
+            {"avg_price", update.avgPrice},
+            {"unrealized_pnl", update.unrealizedPnl}
+        };
+        do_write(msg.dump());
     }
 
     void on_trade(const Trade& trade) {

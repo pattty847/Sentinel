@@ -60,6 +60,7 @@
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
+#include <QDoubleSpinBox>
 #include <QtGlobal>
 #include <algorithm>
 #include <unordered_map>
@@ -219,6 +220,14 @@ void MainWindowGPU::setupUI() {
     // Add status bar to main window
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
+    m_orderQtyInput = new QDoubleSpinBox(this);
+    m_orderQtyInput->setDecimals(4);
+    m_orderQtyInput->setRange(0.0001, 1'000'000.0);
+    m_orderQtyInput->setSingleStep(0.1);
+    m_orderQtyInput->setValue(std::max(0.0001, GuiConfigStore::instance().clientConfig().gui.defaultOrderQty));
+    m_orderQtyInput->setPrefix("Qty ");
+    m_orderQtyInput->setToolTip("Default paper order quantity");
+    statusBar()->addPermanentWidget(m_orderQtyInput);
 
     m_tradeBlotterDock = new TradeBlotterDock(this);
     addDockWidget(Qt::BottomDockWidgetArea, m_tradeBlotterDock);
@@ -349,7 +358,13 @@ void MainWindowGPU::setupConnections() {
         });
     }
     connectMarketDataSignals();
-    m_tradeInputManager = std::make_unique<TradeInputManager>(m_dataSource.get(), this, this);
+    const double fallbackQty = std::max(0.0001, GuiConfigStore::instance().clientConfig().gui.defaultOrderQty);
+    m_tradeInputManager = std::make_unique<TradeInputManager>(
+        m_dataSource.get(),
+        this,
+        [this]() -> double { return m_orderQtyInput ? m_orderQtyInput->value() : 0.0; },
+        fallbackQty,
+        this);
 }
 
 void MainWindowGPU::setupGuiApiServer() {
@@ -748,8 +763,6 @@ void MainWindowGPU::connectMarketDataSignals() {
             this, [](const QString& error) {
                 sLog_Error("DataSource error: " << error);
             });
-}
-
 
     connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
             this, [this](const trading::OrderUpdate& update) {
@@ -768,6 +781,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                             .arg(update.unrealizedPnl, 0, 'f', 2));
                 }
             }, Qt::QueuedConnection);
+}
+
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     if (m_statusBar) {
         m_statusBar->setConnectionStatus(connected);

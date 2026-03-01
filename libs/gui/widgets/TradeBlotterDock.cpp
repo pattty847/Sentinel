@@ -10,21 +10,18 @@ TradeBlotterDock::TradeBlotterDock(QWidget* parent)
     m_table->setHorizontalHeaderLabels({QStringLiteral("ID"), QStringLiteral("Side"), QStringLiteral("Qty"), QStringLiteral("Filled"), QStringLiteral("Status")});
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->verticalHeader()->setVisible(false);
+    // Row index cache is valid because this table is append-only and unsorted.
     setWidget(m_table);
 }
 
 void TradeBlotterDock::onOrderUpdated(const trading::OrderUpdate& update) {
-    int row = -1;
-    for (int i = 0; i < m_table->rowCount(); ++i) {
-        if (m_table->item(i, 0) && m_table->item(i, 0)->text() == QString::fromStdString(update.orderId)) {
-            row = i;
-            break;
-        }
-    }
+    const QString orderIdStr = QString::fromStdString(update.orderId);
+    int row = m_orderIdToRow.value(orderIdStr, -1);
     if (row < 0) {
         row = m_table->rowCount();
         m_table->insertRow(row);
-        m_table->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(update.orderId)));
+        m_table->setItem(row, 0, new QTableWidgetItem(orderIdStr));
+        m_orderIdToRow.insert(orderIdStr, row);
         m_table->setItem(row, 1, new QTableWidgetItem(QString()));
         m_table->setItem(row, 2, new QTableWidgetItem(QString()));
         m_table->setItem(row, 3, new QTableWidgetItem(QString()));

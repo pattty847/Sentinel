@@ -41,6 +41,7 @@ class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
+class QDoubleSpinBox;
 
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
@@ -122,6 +123,7 @@ private:
     std::unique_ptr<TradeInputManager> m_tradeInputManager;
     TradeBlotterDock* m_tradeBlotterDock = nullptr;
     QLabel* m_positionOverlayLabel = nullptr;
+    QDoubleSpinBox* m_orderQtyInput = nullptr;
 
     bool m_firstShow = true;
 };

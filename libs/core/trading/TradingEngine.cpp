@@ -3,12 +3,59 @@
 #include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <optional>
 
 namespace trading {
 
 TradingEngine::TradingEngine(PriceResolver resolver, double slippageBps)
     : m_priceResolver(std::move(resolver))
     , m_execution(slippageBps) {}
+
+
+std::optional<Order> TradingEngine::findOrder(const std::string& orderId) const {
+    return m_orders.get(orderId);
+}
+
+TradingResult TradingEngine::onExternalFill(const std::string& orderId,
+                                            double cumulativeFilledQty,
+                                            double fillPrice) {
+    TradingResult out;
+    auto existing = m_orders.get(orderId);
+    if (!existing.has_value()) {
+        return out;
+    }
+    if (cumulativeFilledQty < 0.0 || fillPrice <= 0.0) {
+        return out;
+    }
+
+    Order order = *existing;
+    if (order.status == OrderStatus::Canceled || order.status == OrderStatus::Filled) {
+        return out;
+    }
+    if (cumulativeFilledQty < order.filledQty) {
+        return out;
+    }
+
+    const double cappedFilledQty = std::min(cumulativeFilledQty, order.qty);
+    const double deltaFillQty = cappedFilledQty - order.filledQty;
+    if (deltaFillQty <= 0.0) {
+        return out;
+    }
+
+    const double priorNotional = order.avgPrice * order.filledQty;
+    const double newNotional = fillPrice * deltaFillQty;
+    order.filledQty = cappedFilledQty;
+    order.avgPrice = (priorNotional + newNotional) / order.filledQty;
+    order.status = (order.filledQty >= order.qty) ? OrderStatus::Filled : OrderStatus::Partial;
+    m_orders.upsert(order);
+
+    Position position = m_positions.applyFill(order.symbol, order.side, deltaFillQty, fillPrice, fillPrice);
+
+    out.orderUpdates.push_back(OrderUpdate{order.id, order.symbol, order.status, order.side, order.qty,
+                                           order.filledQty, order.qty - order.filledQty, order.avgPrice});
+    out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice, position.unrealizedPnl});
+    return out;
+}
 
 TradingResult TradingEngine::onCommand(const TradeCommand& command) {
     switch (command.action) {
@@ -38,15 +85,17 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     order.side = command.side;
     order.orderType = command.orderType;
     order.qty = command.qty;
-    order.filledQty = command.qty;
-    order.avgPrice = fillPrice;
-    order.status = OrderStatus::Filled;
+    order.filledQty = 0.0;
+    order.avgPrice = 0.0;
+    order.status = OrderStatus::New;
     m_orders.upsert(order);
+    out.orderUpdates.push_back(OrderUpdate{order.id, order.symbol, order.status, order.side, order.qty, 0.0, order.qty, 0.0});
 
-    Position position = m_positions.applyFill(command.symbol, command.side, command.qty, fillPrice, fillPrice);
-
-    out.orderUpdates.push_back(OrderUpdate{order.id, order.symbol, order.status, order.side, order.qty, order.filledQty, 0.0, order.avgPrice});
-    out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice, position.unrealizedPnl});
+    if (command.orderType == OrderType::Market) {
+        auto fillResult = onExternalFill(order.id, command.qty, fillPrice);
+        out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
+        out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
+    }
     return out;
 }
 
