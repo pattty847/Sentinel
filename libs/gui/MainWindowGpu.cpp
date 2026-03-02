@@ -130,6 +130,16 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 m_qmlController->updateSymbolInContext(defaultSymbol);
             }
             m_currentSymbol = defaultSymbol;
+            // Auto-subscribe to the server's default symbol so the user doesn't
+            // have to manually click Subscribe on every launch.
+            m_userSubscribed = true;
+            if (m_dataSource) {
+                m_dataSource->subscribe(defaultSymbol);
+            }
+            requestHeatmapHistoryForSymbol(defaultSymbol);
+            requestFootprintHistoryForSymbol(defaultSymbol);
+            requestTpoHistoryForSymbol(defaultSymbol);
+            requestCandleHistoryForSymbol(defaultSymbol);
         }
     });
 
