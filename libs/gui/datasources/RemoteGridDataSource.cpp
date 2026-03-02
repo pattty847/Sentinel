@@ -56,9 +56,10 @@ std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bi
 }
 }
 
-RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& port, QObject* parent)
+RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& port,
+                                           const QString& caFile, QObject* parent)
     : IGridDataSource(parent)
-    , m_client(host.toStdString(), port.toStdString())
+    , m_client(host.toStdString(), port.toStdString(), caFile.toStdString())
 {
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");

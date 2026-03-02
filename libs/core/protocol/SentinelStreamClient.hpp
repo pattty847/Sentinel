@@ -1,8 +1,11 @@
 #pragma once
 #include <QObject>
 #include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
 #include <memory>
 #include <thread>
@@ -20,6 +23,7 @@
 #include "../trading/TradingTypes.hpp"
 
 namespace net = boost::asio;
+namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
@@ -46,7 +50,8 @@ public:
         bool isClosed = false;
     };
 
-    explicit SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent = nullptr);
+    explicit SentinelStreamClient(const std::string& host, const std::string& port,
+                                  const std::string& caFile = "", QObject* parent = nullptr);
     ~SentinelStreamClient();
 
     void connectToServer();
@@ -87,7 +92,6 @@ signals:
 
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
-    // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
@@ -121,6 +125,7 @@ private:
     void run();
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
     void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
+    void onSslHandshake(boost::beast::error_code ec);   // NEW: between TCP connect and WS upgrade
     void onHandshake(boost::beast::error_code ec);
     void doRead();
     void onRead(boost::beast::error_code ec, std::size_t bytes_transferred);
@@ -153,7 +158,10 @@ private:
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
 
-    boost::beast::websocket::stream<boost::beast::tcp_stream> m_ws;
+    // m_sslCtx must be declared before m_ws (initialisation order).
+    ssl::context m_sslCtx{ssl::context::tlsv13_client};
+    boost::beast::websocket::stream<
+        boost::beast::ssl_stream<boost::beast::tcp_stream>> m_ws{m_strand, m_sslCtx};
     boost::beast::flat_buffer m_buffer;
 
     std::deque<std::string> m_writeQueue;

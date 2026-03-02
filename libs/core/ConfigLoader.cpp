@@ -151,6 +151,11 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(trading, "mode", cfg.trading.mode);
             readScalar(trading, "slippage_bps", cfg.trading.slippageBps);
         }
+        if (serverRoot["tls"]) {
+            auto tls = serverRoot["tls"];
+            readScalar(tls, "cert_file", cfg.tls.certFile);
+            readScalar(tls, "key_file",  cfg.tls.keyFile);
+        }
     }
 
     if (serverRoot && serverRoot["mdc"]) {
@@ -203,8 +208,9 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
 
     if (clientNode && clientNode["server"]) {
         auto server = clientNode["server"];
-        readScalar(server, "host", cfg.server.host);
-        readScalar(server, "port", cfg.server.port);
+        readScalar(server, "host",    cfg.server.host);
+        readScalar(server, "port",    cfg.server.port);
+        readScalar(server, "ca_file", cfg.server.caFile);
     }
 }
 }

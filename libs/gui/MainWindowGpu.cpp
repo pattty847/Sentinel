@@ -93,7 +93,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     const auto& clientConfig = GuiConfigStore::instance().clientConfig();
     auto remote = std::make_unique<RemoteGridDataSource>(
         QString::fromStdString(clientConfig.server.host),
-        QString::fromStdString(clientConfig.server.port));
+        QString::fromStdString(clientConfig.server.port),
+        QString::fromStdString(clientConfig.server.caFile));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());

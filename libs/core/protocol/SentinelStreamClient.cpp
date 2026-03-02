@@ -157,12 +157,30 @@ bool decodeBase64WithGuardrails(const char* messageType,
 
 } // namespace
 
-SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
+SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port,
+                                           const std::string& caFile, QObject* parent)
     : QObject(parent)
     , m_host(host)
     , m_port(port)
-    , m_ws(m_ioc)
 {
+    // Configure TLS peer verification using the server's self-signed cert as the trusted CA.
+    if (!caFile.empty()) {
+        boost::system::error_code sslEc;
+        m_sslCtx.load_verify_file(caFile, sslEc);
+        if (sslEc) {
+            sLog_Warning("SentinelStreamClient: could not load CA cert '"
+                         << caFile << "': " << sslEc.message()
+                         << " — TLS peer verification disabled (dev mode)");
+            m_sslCtx.set_verify_mode(ssl::verify_none);
+        } else {
+            m_sslCtx.set_verify_mode(ssl::verify_peer);
+        }
+    } else {
+        // No CA file — skip verification. Only acceptable on localhost/dev.
+        sLog_Warning("SentinelStreamClient: no ca_file configured — TLS peer verification disabled");
+        m_sslCtx.set_verify_mode(ssl::verify_none);
+    }
+
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
@@ -195,8 +213,7 @@ void SentinelStreamClient::connectToServer() {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
 
-            auto& stream = m_ws.next_layer();
-            stream.async_connect(
+            beast::get_lowest_layer(m_ws).async_connect(
                 results,
                 [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
@@ -397,7 +414,19 @@ void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint)
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
+    // TCP connected — now negotiate TLS before upgrading to WebSocket.
+    m_ws.next_layer().async_handshake(
+        ssl::stream_base::client,
+        [this](auto ec) { onSslHandshake(ec); });
+}
 
+void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
+    if (ec) {
+        sLog_Error("SSL handshake failed: " << ec.message());
+        emit errorOccurred(QString::fromStdString("SSL: " + ec.message()));
+        return;
+    }
+    // TLS layer is up — upgrade to WebSocket.
     m_ws.async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 

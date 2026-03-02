@@ -8,7 +8,8 @@ class RemoteGridDataSource : public IGridDataSource {
     Q_OBJECT
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer CONSTANT)
 public:
-    explicit RemoteGridDataSource(const QString& host, const QString& port, QObject* parent = nullptr);
+    explicit RemoteGridDataSource(const QString& host, const QString& port,
+                                  const QString& caFile = {}, QObject* parent = nullptr);
 
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
