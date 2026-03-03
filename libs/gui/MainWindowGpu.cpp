@@ -93,7 +93,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     const auto& clientConfig = GuiConfigStore::instance().clientConfig();
     auto remote = std::make_unique<RemoteGridDataSource>(
         QString::fromStdString(clientConfig.server.host),
-        QString::fromStdString(clientConfig.server.port));
+        QString::fromStdString(clientConfig.server.port),
+        QString::fromStdString(clientConfig.server.caFile));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
@@ -129,6 +130,16 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 m_qmlController->updateSymbolInContext(defaultSymbol);
             }
             m_currentSymbol = defaultSymbol;
+            // Auto-subscribe to the server's default symbol so the user doesn't
+            // have to manually click Subscribe on every launch.
+            m_userSubscribed = true;
+            if (m_dataSource) {
+                m_dataSource->subscribe(defaultSymbol);
+            }
+            requestHeatmapHistoryForSymbol(defaultSymbol);
+            requestFootprintHistoryForSymbol(defaultSymbol);
+            requestTpoHistoryForSymbol(defaultSymbol);
+            requestCandleHistoryForSymbol(defaultSymbol);
         }
     });
 

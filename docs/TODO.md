@@ -410,23 +410,15 @@ _(no entries yet)_
 ### F11: Heatmap Color System Overhaul
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-01
 
 #### Now
-- [ ] Fix hardcoded palette in `ensureHeatmapPaletteImage()` - make it dynamic
-- [ ] Implement multi-stop gradient system (3-5 color stops per side)
-- [ ] Create vibrant "Sentinel" preset (dark→bright with full saturation)
-  - Bids: (0,30,30) → (0,120,100) → (0,255,200) electric cyan
-  - Asks: (40,0,0) → (180,40,20) → (255,100,30) → (255,200,50) hot orange
-- [ ] Fix palette gamma (change 0.65 → 2.0+ for dramatic contrast)
-- [ ] Lower shader floor to 0.0-0.01 (allow true blacks for low liquidity)
-- [ ] Add palette regeneration trigger when color settings change
+- [ ] Add palette regeneration trigger when color settings change (expose gradient setters + dirty flag)
 
 #### Next
 - [ ] Add preset system: Classic, Fire, Ocean, Monochrome, Matrix
-- [ ] Replace number spinboxes with QSliders in HeatmapSettingsDialog
 - [ ] Add color picker widgets for custom bid/ask colors
-- [ ] Add "Intensity Curve" slider (replaces hardcoded 0.65 gamma)
+- [ ] Add "Intensity Curve" slider (replaces hardcoded palette gamma)
 - [ ] Add live preview in settings dialog
 
 #### Later
@@ -438,9 +430,16 @@ _(no entries yet)_
 #### Done
 - [x] Identified hardcoded palette as root cause of bland colors (2026-02-02)
 - [x] Analyzed reference heatmap (Binance-style) for color strategy (2026-02-02)
+- [x] Multi-stop gradient system implemented in HeatmapOverlayRenderer (2026-02-02)
+- [x] Palette gamma fixed to 2.0 for dramatic dark→bright progression (2026-02-02)
+- [x] Bid gradient → electric cyan: dark teal → mid cyan → bright cyan → white-hot (2026-03-01)
+- [x] Ask gradient → hot orange: dark red → orange-red → hot orange → white-hot (2026-03-01)
+- [x] Shader floor lowered to 0.0 for true blacks on low-liquidity cells (2026-03-01)
+- [x] Default shader gamma 1.05→0.85, contrast 1.15→1.6 for more punch (2026-03-01)
 
 #### Session log
 - **2026-02-02** — Discovered hardcoded RGB values and backwards gamma (0.65) in palette generation. Settings dialog was wired correctly but palette never regenerated! Solution: dynamic multi-stop gradients with high gamma (2.0+) and near-zero floor for dramatic dark→bright progression.
+- **2026-03-01** — Replaced bland green bid gradient with electric cyan (teal→cyan→white-hot). Punched up ask gradient with more stops and white-hot top. Dropped shader gamma to 0.85 and raised contrast to 1.6 for sharper hot-spot falloff. Floor set to 0.0 for true blacks.
 
 ---
 

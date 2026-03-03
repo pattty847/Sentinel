@@ -91,18 +91,22 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
     if (m_bidGradient.stops.empty()) {
+        // Electric cyan — dark teal → mid cyan → bright cyan → white-hot
         m_bidGradient.stops = {
-            {0.0f, QColor(10, 40, 0)},
-            {0.5f, QColor(60, 160, 30)},
-            {1.0f, QColor(100, 255, 50)}
+            {0.00f, QColor(  0,  20,  25)},
+            {0.35f, QColor(  0, 110, 130)},
+            {0.70f, QColor(  0, 210, 220)},
+            {1.00f, QColor(160, 255, 248)},
         };
     }
     if (m_askGradient.stops.empty()) {
+        // Hot orange — dark red → orange-red → hot orange → white-hot
         m_askGradient.stops = {
-            {0.0f, QColor(40, 0, 0)},
-            {0.5f, QColor(180, 40, 20)},
-            {0.85f, QColor(255, 100, 30)},
-            {1.0f, QColor(255, 200, 50)}
+            {0.00f, QColor( 35,   5,   0)},
+            {0.30f, QColor(160,  30,  10)},
+            {0.60f, QColor(230,  80,   0)},
+            {0.85f, QColor(255, 160,  30)},
+            {1.00f, QColor(255, 230,  80)},
         };
     }
 

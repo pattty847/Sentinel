@@ -1,8 +1,10 @@
 #pragma once
 #include <QObject>
 #include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/context.hpp>
 #include <memory>
 #include <unordered_set>
 #include <mutex>
@@ -17,6 +19,7 @@ class Authenticator;
 class CoinbaseRestClient;
 
 namespace net = boost::asio;
+namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamServer : public QObject {
@@ -54,9 +57,11 @@ private:
     int m_port;
 
     net::io_context m_ioc;
+    ssl::context m_sslCtx{ssl::context::tlsv13_server};
     std::unique_ptr<tcp::acceptor> m_acceptor;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::unique_ptr<trading::TradingEngine> m_tradingEngine;
 };
+
 

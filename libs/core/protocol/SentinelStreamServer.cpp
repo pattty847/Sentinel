@@ -3,8 +3,11 @@
 #include "SentinelStreamProtocol.hpp"
 #include "SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/strand.hpp>
 #include <algorithm>
 #include <cmath>
@@ -90,7 +93,7 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
 }
 
 class Session : public std::enable_shared_from_this<Session> {
-    websocket::stream<beast::tcp_stream> ws_;
+    websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
     SentinelStreamServer* owner_ = nullptr;
@@ -453,8 +456,9 @@ class Session : public std::enable_shared_from_this<Session> {
     }
 
 public:
-    explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
-        : ws_(std::move(socket))
+    explicit Session(tcp::socket&& socket, ssl::context& ctx,
+                     ServerDataModel& model, SentinelStreamServer* owner)
+        : ws_(std::move(socket), ctx)
         , model_(model)
         , owner_(owner)
     {
@@ -478,6 +482,20 @@ public:
     }
 
     void on_run() {
+        // TLS handshake first, then WebSocket upgrade.
+        beast::get_lowest_layer(ws_).expires_after(std::chrono::seconds(30));
+        ws_.next_layer().async_handshake(
+            ssl::stream_base::server,
+            beast::bind_front_handler(
+                &Session::on_ssl_handshake,
+                shared_from_this()));
+    }
+
+    void on_ssl_handshake(beast::error_code ec) {
+        if (ec)
+            return fail(ec, "ssl_handshake");
+
+        beast::get_lowest_layer(ws_).expires_never();
         ws_.set_option(
             websocket::stream_base::timeout::suggested(
                 beast::role_type::server));
@@ -1340,6 +1358,11 @@ void SentinelStreamServer::start() {
     try {
         m_running = true;
 
+        // Load TLS certificate and private key.
+        const auto& tls = m_serverConfig.tls;
+        m_sslCtx.use_certificate_chain_file(tls.certFile);
+        m_sslCtx.use_private_key_file(tls.keyFile, ssl::context::pem);
+
         tcp::endpoint endpoint(tcp::v4(), m_port);
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
@@ -1382,7 +1405,7 @@ void SentinelStreamServer::doAccept() {
         net::make_strand(m_ioc),
         [this](beast::error_code ec, tcp::socket socket) {
             if (!ec) {
-                std::make_shared<Session>(std::move(socket), m_model, this)->run();
+                std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this)->run();
             } else {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }

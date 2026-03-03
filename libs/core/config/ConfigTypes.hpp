@@ -54,20 +54,28 @@ struct ServerTradingConfig {
     double slippageBps = 2.0;
 };
 
+struct ServerTlsConfig {
+    // PEM cert chain and private key for the internal WSS stream server.
+    // Generate with: scripts/certs/gen-certs.ps1 (Windows) or gen-certs.sh (Linux/Mac).
+    std::string certFile = "certs/sentinel-server.crt";
+    std::string keyFile  = "certs/sentinel-server.key";
+};
+
 struct ServerConfig {
     ServerHeatmapConfig heatmap;
     ServerOrderBookConfig orderbook;
     ServerCandleGateConfig candles;
     ServerMdcConfig mdc;
     ServerTradingConfig trading;
+    ServerTlsConfig tls;
     uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };
 
 struct ClientHeatmapConfig {
-    double gamma = 1.05;
-    double contrast = 1.15;
-    double shaderFloor = 0.01;
+    double gamma = 0.85;
+    double contrast = 1.6;
+    double shaderFloor = 0.0;
     int labelPx = 14;
     int clientCacheColumns = 0;
 };
@@ -82,6 +90,9 @@ struct ClientGuiConfig {
 struct ClientServerConfig {
     std::string host = "127.0.0.1";
     std::string port = "8080";
+    // Path to the server's self-signed cert to use as a trusted CA.
+    // Set to empty string to disable cert verification (insecure, for dev only).
+    std::string caFile = "certs/sentinel-server.crt";
 };
 
 struct ClientConfig {

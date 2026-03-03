@@ -260,6 +260,91 @@ The refactored market data architecture achieves:
 
 
 
+## Transport Security (TLS / WSS)
+
+### Why TLS on a local server?
+
+The internal stream server (`SentinelStreamServer`) listens on `ws://127.0.0.1:8080` by default. Without TLS, everything that crosses that socket is plaintext — market data, order-book snapshots, server config, and (once live trading is enabled) trade commands and position updates. Even on localhost this matters: any local process, browser extension, or proxying tool can inspect or inject frames. On a LAN or VPN it is a straightforward MITM target.
+
+Adding TLS upgrades the connection to `wss://` so all stream data is encrypted and the client can verify it is talking to the real Sentinel server.
+
+### What is encrypted
+
+| Data | Direction |
+|---|---|
+| `server_config` — heatmap grid dims, intensity params, tick sizes | Server → Client |
+| `heatmap_slice` — raw bid/ask intensity bytes (bulk of traffic) | Server → Client |
+| `l2_data` snapshot & incremental order-book deltas | Server → Client |
+| `market_trades` tick stream | Server → Client |
+| `candle_bar_update` / `candle_history_chunk` | Server → Client |
+| `footprint_history_chunk`, `tpo_history_chunk` | Server → Client |
+| `trade_command` — `PLACE_ORDER`, `CANCEL_ORDER`, `FLATTEN` | **Client → Server** |
+| `order_update`, `position_update` | Server → Client |
+| `subscribe` / `screener_request` control messages | Client → Server |
+
+### Handshake flow
+
+```
+Client                              Server
+  │── TCP connect ───────────────────>│
+  │<─ TCP accept ─────────────────────│
+  │── TLS ClientHello (TLSv1.3) ────>│
+  │<─ TLS ServerHello + Cert ─────────│  (self-signed EC, SAN=localhost/127.0.0.1)
+  │── TLS Finished ──────────────────>│
+  │<─ TLS Finished ───────────────────│
+  │        [ all traffic encrypted ]  │
+  │── HTTP GET / Upgrade: websocket ->│
+  │<─ 101 Switching Protocols ────────│
+  │── {"type":"subscribe",...} ──────>│
+  │<─ {"type":"server_config",...} ───│
+  │<─ {"type":"heatmap_slice",...} ───│  (live stream)
+```
+
+### Certificate setup
+
+The server uses a self-signed EC cert (prime256v1) with SANs for `localhost` and `127.0.0.1`. The client loads this cert as its only trusted CA for full peer verification without a public CA.
+
+**Generate once (run from repo root):**
+
+```powershell
+# Windows — requires OpenSSL (ships with Git for Windows)
+.\certs\gen-certs.ps1
+```
+```bash
+# Linux / macOS
+bash certs/gen-certs.sh
+```
+
+Outputs `certs/sentinel-server.crt` + `certs/sentinel-server.key`. Both are gitignored.
+
+**`server_config.yaml`:**
+```yaml
+tls:
+  cert_file: certs/sentinel-server.crt
+  key_file:  certs/sentinel-server.key
+```
+
+**`client_config.yaml`:**
+```yaml
+server:
+  host: 127.0.0.1
+  port: "8080"
+  ca_file: certs/sentinel-server.crt
+```
+
+If `ca_file` is missing or fails to load, the client falls back to `verify_none` with a log warning. Acceptable on localhost dev; not for network-exposed deployments.
+
+### Future: live trading auth
+
+TLS encrypts the channel. For real order execution, the channel also needs **client authentication** so a rogue local process cannot send `trade_command` frames:
+
+- After WSS handshake, client sends `{"type":"auth","token":"<HMAC-SHA256 of server nonce>"}`.
+- Server generates the nonce at startup and makes it available via a local IPC file (e.g. `sentinel.nonce`).
+- The existing ES256 `Authenticator` in `libs/core/marketdata/auth/` is a natural fit for signing the token.
+- Auth gate goes in `on_ssl_handshake` / `on_accept` — contained to the `Session` class, no changes to data model or hot paths.
+
+---
+
 ## Trading stream additions (paper mode)
 
 The stream protocol now includes a minimal paper-trading vertical slice:

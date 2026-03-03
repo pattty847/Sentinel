@@ -44,6 +44,9 @@ config.json
 *.pem
 *.p12
 *.pfx
+# Generated TLS certs (use certs/gen-certs.ps1 or gen-certs.sh to recreate)
+certs/*.crt
+certs/*.key
 .env
 .env.local
 .env.*.local
