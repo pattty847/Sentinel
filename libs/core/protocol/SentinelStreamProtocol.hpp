@@ -12,6 +12,7 @@ constexpr int kHeatmapSchemaVersion = 1;
 constexpr int kCandleSchemaVersion = 1;
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
+constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
 }
@@ -36,6 +37,7 @@ enum class MessageType {
     TpoSlice,
     TpoHistoryRequest,
     TpoHistoryChunk,
+    VolumeProfileSlice,
     TickDelta, // Maybe for later
     ScreenerRequest,
     ScreenerUpdate,
@@ -67,6 +69,7 @@ inline std::string toString(MessageType t) {
         case MessageType::TpoSlice: return "tpo_slice";
         case MessageType::TpoHistoryRequest: return "tpo_history_request";
         case MessageType::TpoHistoryChunk: return "tpo_history_chunk";
+        case MessageType::VolumeProfileSlice: return "volume_profile_slice";
         case MessageType::ScreenerRequest: return "screener_request";
         case MessageType::ScreenerUpdate:  return "screener_update";
         case MessageType::TradeCommand: return "trade_command";
@@ -97,6 +100,7 @@ inline MessageType fromString(const std::string& s) {
     if (s == "tpo_slice") return MessageType::TpoSlice;
     if (s == "tpo_history_request") return MessageType::TpoHistoryRequest;
     if (s == "tpo_history_chunk") return MessageType::TpoHistoryChunk;
+    if (s == "volume_profile_slice") return MessageType::VolumeProfileSlice;
     if (s == "screener_request") return MessageType::ScreenerRequest;
     if (s == "screener_update")  return MessageType::ScreenerUpdate;
     if (s == "trade_command") return MessageType::TradeCommand;

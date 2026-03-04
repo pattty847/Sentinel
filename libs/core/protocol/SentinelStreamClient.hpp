@@ -1,11 +1,8 @@
 #pragma once
 #include <QObject>
 #include <boost/beast/core.hpp>
-#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
-#include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
 #include <memory>
 #include <thread>
@@ -18,12 +15,11 @@
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
+#include "VolumeProfileSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
-#include "../trading/TradingTypes.hpp"
 
 namespace net = boost::asio;
-namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
@@ -50,13 +46,12 @@ public:
         bool isClosed = false;
     };
 
-    explicit SentinelStreamClient(const std::string& host, const std::string& port,
-                                  const std::string& caFile = "", QObject* parent = nullptr);
+    explicit SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent = nullptr);
     ~SentinelStreamClient();
 
     void connectToServer();
     void disconnectFromServer();
-
+    
     void subscribe(const std::string& symbol);
     void unsubscribe(const std::string& symbol);
     void requestHeatmapHistory(const std::string& symbol,
@@ -78,23 +73,24 @@ public:
     void requestScreenerData(const std::string& asset,
                              int limit = 50,
                              double minVolume = 0.0);
-    void sendTradeCommand(const trading::TradeCommand& command);
 
 signals:
     void connected();
     void disconnected();
     void errorOccurred(const QString& error);
     void serverConfigReceived(const ServerConfig& config);
-
+    
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices
     void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
-
+    
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
+    // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,
@@ -118,20 +114,17 @@ signals:
     // Emitted when the server returns a screener_update in response to screener_request.
     // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
-    void orderUpdated(const trading::OrderUpdate& update);
-    void positionUpdated(const trading::PositionUpdate& update);
 
 private:
     void run();
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
     void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
-    void onSslHandshake(boost::beast::error_code ec);   // NEW: between TCP connect and WS upgrade
     void onHandshake(boost::beast::error_code ec);
     void doRead();
     void onRead(boost::beast::error_code ec, std::size_t bytes_transferred);
     void doWrite();
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
-
+    
     void handleMessage(const std::string& msg);
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
@@ -147,25 +140,21 @@ private:
     void handleTpoSliceMessage(const nlohmann::json& msg);
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
-    void handleOrderUpdateMessage(const nlohmann::json& msg);
-    void handlePositionUpdateMessage(const nlohmann::json& msg);
+    void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;
-
+    
     net::io_context m_ioc;
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
-
-    // m_sslCtx must be declared before m_ws (initialisation order).
-    ssl::context m_sslCtx{ssl::context::tlsv13_client};
-    boost::beast::websocket::stream<
-        boost::beast::ssl_stream<boost::beast::tcp_stream>> m_ws{m_strand, m_sslCtx};
+    
+    boost::beast::websocket::stream<boost::beast::tcp_stream> m_ws;
     boost::beast::flat_buffer m_buffer;
-
+    
     std::deque<std::string> m_writeQueue;
-
+    
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
 };

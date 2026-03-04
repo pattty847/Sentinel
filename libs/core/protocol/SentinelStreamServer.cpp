@@ -2,12 +2,10 @@
 #include "HeatmapSlice.hpp"
 #include "SentinelStreamProtocol.hpp"
 #include "SentinelLogging.hpp"
+#include "../servermodel/SessionManager.hpp"
 #include <boost/beast/core.hpp>
-#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
-#include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/dispatch.hpp>
-#include <boost/asio/ssl.hpp>
 #include <boost/asio/strand.hpp>
 #include <algorithm>
 #include <cmath>
@@ -32,8 +30,6 @@
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "Cpp20Utils.hpp"
-#include "../trading/TradingEngine.hpp"
-#include "../trading/TradingTypes.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -93,7 +89,7 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
 }
 
 class Session : public std::enable_shared_from_this<Session> {
-    websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
+    websocket::stream<beast::tcp_stream> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
     SentinelStreamServer* owner_ = nullptr;
@@ -102,14 +98,12 @@ class Session : public std::enable_shared_from_this<Session> {
     std::mutex queue_mutex_;
     QByteArray footprintDeltaScratch_;
     std::vector<double> footprintRowDeltaScratch_;
-
+    
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection heatmapConn_;
     QMetaObject::Connection barUpdatedConn_;
     QMetaObject::Connection barClosedConn_;
-    QMetaObject::Connection orderConn_;
-    QMetaObject::Connection positionConn_;
 
     struct CandleStreamState {
         int64_t seq = 0;
@@ -313,6 +307,95 @@ class Session : public std::enable_shared_from_this<Session> {
         return true;
     }
 
+    // ── Volume Profile builder ──────────────────────────────────────────────
+    // Aggregates total trade volume (buy + sell) per price bin for
+    // [sessionStartMs, sessionEndMs).  Computes POC and 70 % value area
+    // (Steidlmayer methodology) in-place before emitting to the client.
+    //
+    // Output: volumeBinsF32 – float32 LE, one value per grid row (top→bottom),
+    //         same row convention as HeatmapSlice / FootprintSlice.
+    bool buildVolumeProfileWindow(const std::string& symbol,
+                                  int64_t sessionStartMs,
+                                  int64_t sessionEndMs,
+                                  int gridHeight,
+                                  double maxPrice,
+                                  double tickSize,
+                                  QByteArray& outBinsF32,
+                                  double& outTotalVolume,
+                                  int& outPocRow,
+                                  double& outPocPrice,
+                                  double& outVahPrice,
+                                  double& outValPrice) {
+        if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs ||
+            gridHeight <= 0 || gridHeight > protocol::SentinelProtocol::kMaxGridHeight ||
+            tickSize <= 0.0) {
+            return false;
+        }
+        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(float)))) {
+            return false;
+        }
+
+        // Reuse scratch vector: one float per price bin.
+        std::vector<float> bins(static_cast<size_t>(gridHeight), 0.0f);
+
+        std::vector<ServerDataModel::FootprintTradeSample> trades;
+        model_.collectFootprintTrades(symbol, sessionStartMs, sessionEndMs, trades);
+
+        for (const auto& sample : trades) {
+            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
+            if (row < 0 || row >= gridHeight) {
+                continue;
+            }
+            // Volume Profile aggregates absolute volume regardless of direction.
+            bins[static_cast<size_t>(row)] += static_cast<float>(sample.size);
+        }
+
+        // ── Steidlmayer 70 % Value-Area ─────────────────────────────────────
+        double total = 0.0;
+        outPocRow    = 0;
+        float  pocVol = bins[0];
+        for (int i = 0; i < gridHeight; ++i) {
+            total += static_cast<double>(bins[static_cast<size_t>(i)]);
+            if (bins[static_cast<size_t>(i)] > pocVol) {
+                pocVol    = bins[static_cast<size_t>(i)];
+                outPocRow = i;
+            }
+        }
+        outTotalVolume = total;
+        outPocPrice    = maxPrice - (static_cast<double>(outPocRow) + 0.5) * tickSize;
+
+        // Expand VA from POC.
+        const double vaTarget = 0.70 * total;
+        double cumVol = static_cast<double>(bins[static_cast<size_t>(outPocRow)]);
+        int hi = outPocRow;
+        int lo = outPocRow;
+        while (cumVol < vaTarget) {
+            const int nextLo = lo - 1;
+            const int nextHi = hi + 1;
+            const float volAbove = (nextLo >= 0)       ? bins[static_cast<size_t>(nextLo)] : -1.0f;
+            const float volBelow = (nextHi < gridHeight) ? bins[static_cast<size_t>(nextHi)] : -1.0f;
+            if (volAbove < 0.0f && volBelow < 0.0f) break;
+            if (volAbove >= volBelow) {
+                lo = nextLo;
+                cumVol += static_cast<double>(volAbove);
+            } else {
+                hi = nextHi;
+                cumVol += static_cast<double>(volBelow);
+            }
+        }
+        outVahPrice = maxPrice - static_cast<double>(lo) * tickSize;       // top of lowest row index
+        outValPrice = maxPrice - static_cast<double>(hi + 1) * tickSize;   // bottom of highest row index
+
+        // Pack bins as little-endian float32.
+        outBinsF32.resize(gridHeight * static_cast<int>(sizeof(float)));
+        auto* dst = reinterpret_cast<uchar*>(outBinsF32.data());
+        for (int i = 0; i < gridHeight; ++i) {
+            const float v = bins[static_cast<size_t>(i)];
+            std::memcpy(dst + (static_cast<size_t>(i) * sizeof(float)), &v, sizeof(float));
+        }
+        return true;
+    }
+
     void streamFootprintHistory(const std::string& symbol,
                                 int64_t timeframeMs,
                                 int64_t endTimeMs,
@@ -456,9 +539,8 @@ class Session : public std::enable_shared_from_this<Session> {
     }
 
 public:
-    explicit Session(tcp::socket&& socket, ssl::context& ctx,
-                     ServerDataModel& model, SentinelStreamServer* owner)
-        : ws_(std::move(socket), ctx)
+    explicit Session(tcp::socket&& socket, ServerDataModel& model, SentinelStreamServer* owner)
+        : ws_(std::move(socket))
         , model_(model)
         , owner_(owner)
     {
@@ -470,8 +552,6 @@ public:
         QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
-        QObject::disconnect(orderConn_);
-        QObject::disconnect(positionConn_);
     }
 
     void run() {
@@ -482,20 +562,6 @@ public:
     }
 
     void on_run() {
-        // TLS handshake first, then WebSocket upgrade.
-        beast::get_lowest_layer(ws_).expires_after(std::chrono::seconds(30));
-        ws_.next_layer().async_handshake(
-            ssl::stream_base::server,
-            beast::bind_front_handler(
-                &Session::on_ssl_handshake,
-                shared_from_this()));
-    }
-
-    void on_ssl_handshake(beast::error_code ec) {
-        if (ec)
-            return fail(ec, "ssl_handshake");
-
-        beast::get_lowest_layer(ws_).expires_never();
         ws_.set_option(
             websocket::stream_base::timeout::suggested(
                 beast::role_type::server));
@@ -524,12 +590,12 @@ public:
             auto configPayload = buildServerConfigPayload(owner_->serverConfig());
             do_write(configPayload.dump());
         }
-
-        tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast,
+        
+        tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
             [self](const Trade& trade) {
                 self->on_trade(trade);
             });
-
+            
         bookConn_ = QObject::connect(&model_, &ServerDataModel::bookUpdateBroadcast,
             [self](const QString& productId, const std::vector<BookDelta>& deltas) {
                 self->on_book_update(productId, deltas);
@@ -549,17 +615,7 @@ public:
             [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
                 self->on_bar_closed(symbol, tf, bar);
             });
-        if (owner_) {
-            orderConn_ = QObject::connect(owner_, &SentinelStreamServer::orderUpdateBroadcast,
-                [self](const trading::OrderUpdate& update) {
-                    self->on_order_update(update);
-                });
-            positionConn_ = QObject::connect(owner_, &SentinelStreamServer::positionUpdateBroadcast,
-                [self](const trading::PositionUpdate& update) {
-                    self->on_position_update(update);
-                });
-        }
-
+            
         do_read();
     }
 
@@ -592,7 +648,7 @@ public:
         try {
             auto j = nlohmann::json::parse(msg);
             std::string type = j.value("type", "");
-
+            
             if (type == "subscribe") {
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
@@ -600,7 +656,7 @@ public:
                     if (owner_) {
                         owner_->notifyClientSubscribed(symbol);
                     }
-
+                    
                     nlohmann::json ack;
                     ack["type"] = "ack";
                     ack["symbol"] = symbol;
@@ -610,7 +666,7 @@ public:
                     nlohmann::json snapshot;
                     snapshot["type"] = "snapshot";
                     snapshot["symbol"] = symbol;
-
+                    
                     std::vector<nlohmann::json> bidsJson;
                     const auto& bids = hotData.liveBook.getBids();
                     for (size_t i = 0; i < bids.size(); ++i) {
@@ -634,9 +690,9 @@ public:
                         }
                     }
                     snapshot["asks"] = asksJson;
-
+                    
                     do_write(snapshot.dump());
-
+                    
                 }
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -829,21 +885,6 @@ public:
 
                     self->do_write(payload.dump());
                 }).detach();
-            } else if (type == "trade_command") {
-                if (!owner_) {
-                    send_error("trade_command", "", "server unavailable");
-                    return;
-                }
-                try {
-                    trading::TradeCommand command = trading::parseTradeCommandJson(msg);
-                    if (command.action == trading::TradeAction::Unknown) {
-                        send_error("trade_command", command.symbol, "unknown action");
-                        return;
-                    }
-                    owner_->processTradeCommand(command);
-                } catch (const std::exception& ex) {
-                    send_error("trade_command", "", ex.what());
-                }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
@@ -954,43 +995,10 @@ public:
             sLog_Error("Server message parse error: " << e.what());
         }
     }
-
-
-    void on_order_update(const trading::OrderUpdate& update) {
-        if (!subscriptions_.empty() && subscriptions_.count(update.symbol) == 0) {
-            return;
-        }
-        nlohmann::json msg{
-            {"type", "order_update"},
-            {"order_id", update.orderId},
-            {"symbol", update.symbol},
-            {"status", trading::toString(update.status)},
-            {"side", trading::toString(update.side)},
-            {"qty", update.qty},
-            {"filled_qty", update.filledQty},
-            {"remaining_qty", update.remainingQty},
-            {"avg_price", update.avgPrice}
-        };
-        do_write(msg.dump());
-    }
-
-    void on_position_update(const trading::PositionUpdate& update) {
-        if (!subscriptions_.empty() && subscriptions_.count(update.symbol) == 0) {
-            return;
-        }
-        nlohmann::json msg{
-            {"type", "position_update"},
-            {"symbol", update.symbol},
-            {"position_qty", update.positionQty},
-            {"avg_price", update.avgPrice},
-            {"unrealized_pnl", update.unrealizedPnl}
-        };
-        do_write(msg.dump());
-    }
-
+    
     void on_trade(const Trade& trade) {
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
-
+        
         nlohmann::json j;
         j["type"] = "trade";
         j["product_id"] = trade.product_id;
@@ -998,21 +1006,21 @@ public:
         j["size"] = trade.size;
         j["side"] = (trade.side == AggressorSide::Buy) ? "buy" : "sell";
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
-
+        
         do_write(j.dump());
     }
-
+    
     void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas) {
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
-
+        
         auto& symbolData = model_.ensureSymbol(pid);
         const auto& book = symbolData.liveBook;
 
         nlohmann::json j;
         j["type"] = "l2update";
         j["product_id"] = pid;
-
+        
         std::vector<nlohmann::json> deltaJson;
         deltaJson.reserve(deltas.size());
         for (const auto& d : deltas) {
@@ -1023,7 +1031,7 @@ public:
             });
         }
         j["deltas"] = deltaJson;
-
+        
         do_write(j.dump());
     }
 
@@ -1129,6 +1137,52 @@ public:
         tpo["encoding"] = "base64";
         tpo["letters"] = tpoLetters.toBase64().toStdString();
         do_write(tpo.dump());
+
+        // ── Mode A: Volume Profile slice (session-scoped) ───────────────────
+        // Use SessionManager to determine the current session boundary so that
+        // the profile always covers exactly one full session window.
+        const auto sessionBoundary =
+            SessionManager::sessionContaining(slice.bucketStartMs,
+                                              SessionManager::SessionType::H24);
+        QByteArray vpBinsF32;
+        double vpTotalVolume = 0.0;
+        int    vpPocRow      = 0;
+        double vpPocPrice    = 0.0;
+        double vpVahPrice    = 0.0;
+        double vpValPrice    = 0.0;
+        if (sessionBoundary.valid &&
+            buildVolumeProfileWindow(sym,
+                                     sessionBoundary.startMs,
+                                     sessionBoundary.endMs,
+                                     slice.gridHeight,
+                                     slice.maxPrice,
+                                     slice.tickSize,
+                                     vpBinsF32,
+                                     vpTotalVolume,
+                                     vpPocRow,
+                                     vpPocPrice,
+                                     vpVahPrice,
+                                     vpValPrice)) {
+            nlohmann::json vp;
+            vp["type"]           = "volume_profile_slice";
+            vp["schema_version"] = protocol::SentinelProtocol::kVolumeProfileSchemaVersion;
+            vp["symbol"]         = sym;
+            vp["session_start"]  = sessionBoundary.startMs;
+            vp["session_end"]    = sessionBoundary.endMs;
+            vp["session_type"]   = static_cast<int>(SessionManager::SessionType::H24);
+            vp["grid_height"]    = slice.gridHeight;
+            vp["min_price"]      = slice.minPrice;
+            vp["max_price"]      = slice.maxPrice;
+            vp["tick_size"]      = slice.tickSize;
+            vp["total_volume"]   = vpTotalVolume;
+            vp["poc_price"]      = vpPocPrice;
+            vp["vah_price"]      = vpVahPrice;
+            vp["val_price"]      = vpValPrice;
+            vp["format"]         = "vp_f32";
+            vp["encoding"]       = "base64";
+            vp["volume_bins"]    = vpBinsF32.toBase64().toStdString();
+            do_write(vp.dump());
+        }
     }
 
     static bool should_emit_update(const OHLCVBar& bar,
@@ -1287,18 +1341,18 @@ public:
         err["message"] = message;
         do_write(err.dump());
     }
-
+    
     void on_write_post(std::string payload) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         write_queue_.push_back(std::move(payload));
-
+        
         if (write_queue_.size() > 1) {
             return;
         }
-
+        
         internal_async_write();
     }
-
+    
     void internal_async_write() {
         ws_.async_write(
             net::buffer(write_queue_.front()),
@@ -1306,13 +1360,13 @@ public:
                 &Session::on_write_complete,
                 shared_from_this()));
     }
-
+    
     void on_write_complete(beast::error_code ec, std::size_t) {
         if (ec) return fail(ec, "write");
-
+        
         std::lock_guard<std::mutex> lock(queue_mutex_);
         write_queue_.erase(write_queue_.begin());
-
+        
         if (!write_queue_.empty()) {
             internal_async_write();
         }
@@ -1341,11 +1395,6 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
     , m_serverConfig(config)
     , m_port(port)
 {
-    m_tradingEngine = std::make_unique<trading::TradingEngine>(
-        [this](const std::string& symbol) {
-            return m_model.ensureSymbol(symbol).lastTradePrice;
-        },
-        m_serverConfig.trading.slippageBps);
 }
 
 SentinelStreamServer::~SentinelStreamServer() {
@@ -1354,15 +1403,10 @@ SentinelStreamServer::~SentinelStreamServer() {
 
 void SentinelStreamServer::start() {
     if (m_running) return;
-
+    
     try {
         m_running = true;
-
-        // Load TLS certificate and private key.
-        const auto& tls = m_serverConfig.tls;
-        m_sslCtx.use_certificate_chain_file(tls.certFile);
-        m_sslCtx.use_private_key_file(tls.keyFile, ssl::context::pem);
-
+        
         tcp::endpoint endpoint(tcp::v4(), m_port);
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
@@ -1371,7 +1415,7 @@ void SentinelStreamServer::start() {
         m_acceptor->listen();
 
         doAccept();
-
+        
         m_thread = std::thread([this] {
             while (m_running) {
                 try {
@@ -1382,7 +1426,7 @@ void SentinelStreamServer::start() {
                 }
             }
         });
-
+        
     } catch (const std::exception& e) {
         sLog_Error("SentinelStreamServer start failed: " << e.what());
         m_running = false;
@@ -1405,7 +1449,7 @@ void SentinelStreamServer::doAccept() {
         net::make_strand(m_ioc),
         [this](beast::error_code ec, tcp::socket socket) {
             if (!ec) {
-                std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this)->run();
+                std::make_shared<Session>(std::move(socket), m_model, this)->run();
             } else {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
@@ -1425,18 +1469,4 @@ void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {
     return *m_restClient;
-}
-
-void SentinelStreamServer::processTradeCommand(const trading::TradeCommand& command) {
-    if (!m_tradingEngine) {
-        return;
-    }
-    sLog_App("TradeCommand: action=" << trading::toString(command.action) << " symbol=" << command.symbol.c_str() << " qty=" << command.qty);
-    const auto result = m_tradingEngine->onCommand(command);
-    for (const auto& update : result.orderUpdates) {
-        emit orderUpdateBroadcast(update);
-    }
-    for (const auto& update : result.positionUpdates) {
-        emit positionUpdateBroadcast(update);
-    }
 }

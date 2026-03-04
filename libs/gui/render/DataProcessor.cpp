@@ -12,7 +12,9 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "DataProcessor.hpp"
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
+#include "VolumeProfileState.hpp"
 #include "SentinelLogging.hpp"
+#include "../../core/protocol/VolumeProfileSlice.hpp"
 #include <algorithm>
 #include <QtGlobal>
 #include <limits>
@@ -27,6 +29,7 @@ DataProcessor::DataProcessor(QObject* parent)
     m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
     m_tpoStream = std::make_unique<TpoStreamState>();
     m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
+    m_vpStream = std::make_unique<VolumeProfileState>();
 }
 
 DataProcessor::~DataProcessor() {
@@ -57,6 +60,9 @@ void DataProcessor::clearData() {
     }
     if (m_tpoStream) {
         m_tpoStream->clear();
+    }
+    if (m_vpStream) {
+        m_vpStream->clear();
     }
 }
 
@@ -373,6 +379,24 @@ void DataProcessor::HeatmapColumnCache::push(IGridDataSource::HeatmapHistoryColu
     columns[static_cast<size_t>(writeIndex)] = std::move(column);
     writeIndex = (writeIndex + 1) % capacity;
     count = std::min(count + 1, capacity);
+}
+
+void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_vpStream) {
+        return;
+    }
+    if (!m_vpStream->ingestSlice(slice)) {
+        return;
+    }
+    std::vector<float> bins;
+    VolumeProfileState::Snapshot snap;
+    if (!m_vpStream->takePendingBins(bins, snap)) {
+        return;
+    }
+    emit volumeProfileReady(std::move(bins), std::move(snap));
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {

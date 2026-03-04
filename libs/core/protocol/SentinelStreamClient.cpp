@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include "ProtocolValidation.hpp"
 #include "SentinelStreamClientParseHelpers.hpp"
+#include "VolumeProfileSlice.hpp"
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <array>
@@ -35,6 +36,11 @@ enum class DropReason : int {
     TpoPayloadEstimate,
     TpoPayloadDecoded,
     TpoBase64Decode,
+    VolumeProfileSchema,
+    VolumeProfileGridHeight,
+    VolumeProfilePayloadEstimate,
+    VolumeProfilePayloadDecoded,
+    VolumeProfileBase64Decode,
     Count
 };
 
@@ -157,30 +163,12 @@ bool decodeBase64WithGuardrails(const char* messageType,
 
 } // namespace
 
-SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port,
-                                           const std::string& caFile, QObject* parent)
+SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
     : QObject(parent)
     , m_host(host)
     , m_port(port)
+    , m_ws(m_ioc)
 {
-    // Configure TLS peer verification using the server's self-signed cert as the trusted CA.
-    if (!caFile.empty()) {
-        boost::system::error_code sslEc;
-        m_sslCtx.load_verify_file(caFile, sslEc);
-        if (sslEc) {
-            sLog_Warning("SentinelStreamClient: could not load CA cert '"
-                         << caFile << "': " << sslEc.message()
-                         << " — TLS peer verification disabled (dev mode)");
-            m_sslCtx.set_verify_mode(ssl::verify_none);
-        } else {
-            m_sslCtx.set_verify_mode(ssl::verify_peer);
-        }
-    } else {
-        // No CA file — skip verification. Only acceptable on localhost/dev.
-        sLog_Warning("SentinelStreamClient: no ca_file configured — TLS peer verification disabled");
-        m_sslCtx.set_verify_mode(ssl::verify_none);
-    }
-
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
@@ -207,17 +195,18 @@ void SentinelStreamClient::connectToServer() {
 
     m_running = true;
     m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
-
+    
     m_thread = std::thread([this] {
         try {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
-
-            beast::get_lowest_layer(m_ws).async_connect(
+            
+            auto& stream = m_ws.next_layer();
+            stream.async_connect(
                 results,
                 [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
-
+            
             m_ioc.run();
         } catch (const std::exception& e) {
             sLog_Error("Client thread exception: " << e.what());
@@ -229,7 +218,7 @@ void SentinelStreamClient::connectToServer() {
 void SentinelStreamClient::disconnectFromServer() {
     m_running = false;
     if (m_work) m_work->reset();
-
+    
     if (m_isConnected) {
         // Close websocket gracefully... or just stop ioc
     }
@@ -245,7 +234,7 @@ void SentinelStreamClient::subscribe(const std::string& symbol) {
         {"type", "subscribe"},
         {"symbol", symbol}
     };
-
+    
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -260,7 +249,7 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
         {"type", "unsubscribe"},
         {"symbol", symbol}
     };
-
+    
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
         m_writeQueue.push_back(std::move(payload));
@@ -383,50 +372,13 @@ void SentinelStreamClient::requestScreenerData(const std::string& asset,
     });
 }
 
-
-void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command) {
-    nlohmann::json msg = {
-        {"type", "trade_command"},
-        {"command_id", command.commandId},
-        {"action", trading::toString(command.action)},
-        {"symbol", command.symbol},
-        {"side", trading::toString(command.side)},
-        {"order_type", trading::toString(command.orderType)},
-        {"qty", command.qty},
-        {"timestamp", command.timestamp}
-    };
-    msg["price"] = command.hasPrice ? nlohmann::json(command.price) : nlohmann::json(nullptr);
-    if (!command.targetOrderId.empty()) {
-        msg["order_id"] = command.targetOrderId;
-    }
-    std::string str = msg.dump();
-    net::post(m_strand, [this, payload = std::move(str)]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) {
-            doWrite();
-        }
-    });
-}
-
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
         sLog_Error("Connect failed: " << ec.message());
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
-    // TCP connected — now negotiate TLS before upgrading to WebSocket.
-    m_ws.next_layer().async_handshake(
-        ssl::stream_base::client,
-        [this](auto ec) { onSslHandshake(ec); });
-}
-
-void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
-    if (ec) {
-        sLog_Error("SSL handshake failed: " << ec.message());
-        emit errorOccurred(QString::fromStdString("SSL: " + ec.message()));
-        return;
-    }
-    // TLS layer is up — upgrade to WebSocket.
+    
     m_ws.async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 
@@ -436,10 +388,10 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
-
+    
     m_isConnected = true;
     emit connected();
-
+    
     doRead();
 
     net::post(m_strand, [this]() {
@@ -460,12 +412,12 @@ void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes
         emit disconnected();
         return;
     }
-
+    
     std::string msg = boost::beast::buffers_to_string(m_buffer.data());
     m_buffer.consume(bytes_transferred);
-
+    
     handleMessage(msg);
-
+    
     doRead();
 }
 
@@ -482,9 +434,9 @@ void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t byte
         sLog_Error("Write failed: " << ec.message());
         return;
     }
-
+    
     m_writeQueue.pop_front();
-
+    
     if (!m_writeQueue.empty()) {
         doWrite();
     }
@@ -534,11 +486,8 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
                 return;
-            case protocol::MessageType::OrderUpdate:
-                handleOrderUpdateMessage(msg);
-                return;
-            case protocol::MessageType::PositionUpdate:
-                handlePositionUpdateMessage(msg);
+            case protocol::MessageType::VolumeProfileSlice:
+                handleVolumeProfileSliceMessage(msg);
                 return;
             case protocol::MessageType::Unknown:
                 break;
@@ -1010,32 +959,6 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
     }
 }
 
-void SentinelStreamClient::handleOrderUpdateMessage(const nlohmann::json& msg) {
-    trading::OrderUpdate update;
-    update.orderId = msg.value("order_id", "");
-    update.symbol = msg.value("symbol", "");
-    update.status = trading::orderStatusFromString(msg.value("status", "REJECTED"));
-    update.side = trading::orderSideFromString(msg.value("side", "UNKNOWN"));
-    update.qty = msg.value("qty", 0.0);
-    update.filledQty = msg.value("filled_qty", 0.0);
-    update.remainingQty = msg.value("remaining_qty", 0.0);
-    update.avgPrice = msg.value("avg_price", 0.0);
-    if (!update.orderId.empty()) {
-        emit orderUpdated(update);
-    }
-}
-
-void SentinelStreamClient::handlePositionUpdateMessage(const nlohmann::json& msg) {
-    trading::PositionUpdate update;
-    update.symbol = msg.value("symbol", "");
-    update.positionQty = msg.value("position_qty", 0.0);
-    update.avgPrice = msg.value("avg_price", 0.0);
-    update.unrealizedPnl = msg.value("unrealized_pnl", 0.0);
-    if (!update.symbol.empty()) {
-        emit positionUpdated(update);
-    }
-}
-
 void SentinelStreamClient::handleScreenerUpdateMessage(const nlohmann::json& msg) {
     const std::string asset = msg.value("asset", "crypto");
     const int rowCount = msg.value("row_count", 0);
@@ -1166,4 +1089,74 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.letters = std::move(letters);
         emit tpoSliceReceived(slice);
     }
+}
+
+void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json& msg) {
+    if (!validateFamilySchema(msg,
+                              "volume_profile",
+                              protocol::SentinelProtocol::kVolumeProfileSchemaVersion,
+                              DropReason::VolumeProfileSchema)) {
+        return;
+    }
+    const std::string symbol = msg.value("symbol", "");
+    if (symbol.empty()) {
+        return;
+    }
+    const int64_t sessionStartMs = msg.value("session_start_ms", static_cast<int64_t>(0));
+    const int64_t sessionEndMs   = msg.value("session_end_ms",   static_cast<int64_t>(0));
+    const int     sessionType    = msg.value("session_type",     4);
+    const double  minPrice       = msg.value("min_price",        0.0);
+    const double  maxPrice       = msg.value("max_price",        0.0);
+    const double  tickSize       = msg.value("tick_size",        0.0);
+    const int     gridHeight     = msg.value("grid_height",      0);
+    const double  totalVolume    = msg.value("total_volume",     0.0);
+    const double  pocPrice       = msg.value("poc_price",        0.0);
+    const double  vahPrice       = msg.value("vah_price",        0.0);
+    const double  valPrice       = msg.value("val_price",        0.0);
+    const std::string encoded    = msg.value("volume_bins",      "");
+
+    if (!validateGridHeight("volume_profile_slice", gridHeight, DropReason::VolumeProfileGridHeight)) {
+        return;
+    }
+    if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs || maxPrice <= minPrice || tickSize <= 0.0) {
+        return;
+    }
+
+    QByteArray bins;
+    if (!encoded.empty()) {
+        if (!decodeBase64WithGuardrails("volume_profile_slice",
+                                        "volume_bins",
+                                        encoded,
+                                        DropReason::VolumeProfilePayloadEstimate,
+                                        DropReason::VolumeProfileBase64Decode,
+                                        DropReason::VolumeProfilePayloadDecoded,
+                                        bins)) {
+            return;
+        }
+    }
+
+    const int expectedBytes = gridHeight * static_cast<int>(sizeof(float));
+    if (!bins.isEmpty() && bins.size() != expectedBytes) {
+        logDroppedMessage(DropReason::VolumeProfilePayloadDecoded,
+                          QString("Dropping volume_profile_slice: bins bytes=%1 expected=%2")
+                              .arg(bins.size())
+                              .arg(expectedBytes));
+        return;
+    }
+
+    VolumeProfileSlice slice;
+    slice.symbol         = QString::fromStdString(symbol);
+    slice.sessionStartMs = sessionStartMs;
+    slice.sessionEndMs   = sessionEndMs;
+    slice.sessionType    = sessionType;
+    slice.minPrice       = minPrice;
+    slice.maxPrice       = maxPrice;
+    slice.tickSize       = tickSize;
+    slice.gridHeight     = gridHeight;
+    slice.totalVolume    = totalVolume;
+    slice.pocPrice       = pocPrice;
+    slice.vahPrice       = vahPrice;
+    slice.valPrice       = valPrice;
+    slice.volumeBinsF32  = std::move(bins);
+    emit volumeProfileSliceReceived(slice);
 }

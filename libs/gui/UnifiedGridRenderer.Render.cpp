@@ -5,6 +5,7 @@
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/MsdfGlyphNode.hpp"
 #include "render/UgrFrameMath.hpp"
+#include "render/VolumeProfileState.hpp"
 
 #include <QElapsedTimer>
 #include <QtEndian>
@@ -46,6 +47,7 @@ HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNod
         m_blackGlyphNode = nullptr;
         m_footprintOverlay.onRootRebuilt();
         m_tpoOverlay.onRootRebuilt();
+        m_vpRenderer.onRootRebuilt();
     }
     return texNode;
 }
@@ -212,16 +214,55 @@ void UnifiedGridRenderer::renderOverlays(
                               gridWidth,
                               gridHeight,
                               footprintUploads);
-    m_tpoOverlay.render(window(),
-                        texNode,
-                        drawTpo,
-                        frame.forceFull,
-                        snapshot.timeOffset,
-                        drawRect,
-                        srcRect,
-                        gridWidth,
-                        gridHeight,
-                        tpoUploads);
+    // ── TPO / VP dispatch ──────────────────────────────────────────────────
+    // mode 0 = VerticalTimeline letters, mode 1 = Volume Profile histogram.
+    if (m_tpoDisplayMode == 1) {
+        // Mode A: Volume Profile (right-wall histogram via VolumeProfileRenderer).
+        std::vector<float> localBins;
+        VolumeProfileState::Snapshot localSnap;
+        {
+            std::lock_guard<std::mutex> lock(m_vpMutex);
+            if (m_vpDirty || !m_vpBins.empty()) {
+                localBins = m_vpBins;
+                localSnap = m_vpSnap;
+                m_vpDirty = false;
+            }
+        }
+        // VP renderer is additive — always pass the latest bins even if not dirty.
+        m_vpRenderer.render(texNode,
+                            drawTpo && !localBins.empty(),
+                            drawRect,
+                            frame.viewport.minPrice,
+                            frame.viewport.maxPrice,
+                            localBins,
+                            localSnap);
+        // Hide the TPO texture overlay in this mode.
+        m_tpoOverlay.render(window(), texNode, false,
+                            frame.forceFull, snapshot.timeOffset,
+                            drawRect, srcRect, gridWidth, gridHeight, tpoUploads);
+    } else {
+        // Mode B: TPO Letter Distribution (time-aligned vertical profile).
+        const int64_t tpoSessionStart = frame.mapping.dataStartMs;
+        const int64_t tpoSessionEnd   = frame.mapping.dataEndMs;
+        m_tpoOverlay.render(window(),
+                            texNode,
+                            drawTpo,
+                            frame.forceFull,
+                            snapshot.timeOffset,
+                            drawRect,
+                            srcRect,
+                            gridWidth,
+                            gridHeight,
+                            tpoUploads,
+                            tpoSessionStart,
+                            tpoSessionEnd,
+                            frame.mapping.viewStartMs,
+                            frame.mapping.viewEndMs);
+        // VP renderer is hidden in this mode.
+        m_vpRenderer.render(texNode, false, drawRect,
+                            frame.viewport.minPrice, frame.viewport.maxPrice,
+                            {}, {});
+    }
 }
 
 void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
