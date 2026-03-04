@@ -10,6 +10,7 @@
 #include "../../core/protocol/FootprintSlice.hpp"
 #include "../../core/protocol/TpoSlice.hpp"
 #include "../../core/protocol/VolumeProfileSlice.hpp"
+#include "../../core/trading/TradingTypes.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -47,6 +48,7 @@ public:
                                       int64_t timeframeSec,
                                       int64_t endTimeSec,
                                       int limit) = 0;
+    virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
 
     // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
@@ -68,8 +70,12 @@ signals:
     
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
+    void orderUpdated(const trading::OrderUpdate& update);
+    void positionUpdated(const trading::PositionUpdate& update);
 };
 
 Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
 Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
+Q_DECLARE_METATYPE(trading::OrderUpdate)
+Q_DECLARE_METATYPE(trading::PositionUpdate)
 

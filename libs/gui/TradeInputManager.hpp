@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "datasources/IGridDataSource.hpp"
+#include "../core/trading/TradingTypes.hpp"
 
 class QWidget;
 

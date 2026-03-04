@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# gen-certs.sh — Generate a self-signed TLS cert for the Sentinel stream server.
+# gen-certs.sh - Generate a self-signed TLS cert for the Sentinel stream server.
 # Run once from the repo root:  bash certs/gen-certs.sh
 # Requires OpenSSL 1.1+ on PATH.
 #
 # Output:
-#   certs/sentinel-server.key   — EC private key (prime256v1)
-#   certs/sentinel-server.crt   — self-signed X.509 cert (1 year, SAN=localhost/127.0.0.1)
+#   certs/sentinel-server.key   - EC private key (prime256v1)
+#   certs/sentinel-server.crt   - self-signed X.509 cert (1 year, SAN=localhost/127.0.0.1)
 #
-# Both files are in .gitignore — never commit them.
+# Both files are in .gitignore - never commit them.
 
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <string_view>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "../dispatch/Channels.hpp"
@@ -24,12 +25,14 @@ private:
     std::vector<std::string> buildMsgs(const std::string& type, const std::string& jwt) const {
         std::vector<std::string> out;
         if (m_desired.empty()) return out;
-        // level2 + market_trades + heartbeats (all symbol-scoped)
         for (const char* channel : {ch::kL2Subscribe, ch::kTrades, ch::kHeartbeats}) {
             nlohmann::json msg;
             msg["type"] = type;
             msg["channel"] = channel;
-            msg["product_ids"] = m_desired;
+            // Coinbase heartbeats are connection-scoped; product_ids can suppress heartbeats.
+            if (std::string_view(channel) != ch::kHeartbeats) {
+                msg["product_ids"] = m_desired;
+            }
             if (!jwt.empty()) {
                 msg["jwt"] = jwt;
             }

@@ -7,6 +7,7 @@
 *~
 
 # Build artifacts and directories
+vcpkg/
 vcpkg_installed/
 build/
 build-windows/

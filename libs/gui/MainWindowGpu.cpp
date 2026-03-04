@@ -40,6 +40,7 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "TradeInputManager.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
@@ -90,7 +91,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     const auto& clientConfig = GuiConfigStore::instance().clientConfig();
     auto remote = std::make_unique<RemoteGridDataSource>(
         QString::fromStdString(clientConfig.server.host),
-        QString::fromStdString(clientConfig.server.port));
+        QString::fromStdString(clientConfig.server.port),
+        QString::fromStdString(clientConfig.server.caFile));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());

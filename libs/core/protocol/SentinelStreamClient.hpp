@@ -1,8 +1,11 @@
 #pragma once
 #include <QObject>
 #include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
 #include <memory>
 #include <thread>
@@ -18,8 +21,10 @@
 #include "VolumeProfileSlice.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
+#include "../trading/TradingTypes.hpp"
 
 namespace net = boost::asio;
+namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
@@ -46,7 +51,8 @@ public:
         bool isClosed = false;
     };
 
-    explicit SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent = nullptr);
+    explicit SentinelStreamClient(const std::string& host, const std::string& port,
+                                  const std::string& caFile = "", QObject* parent = nullptr);
     ~SentinelStreamClient();
 
     void connectToServer();
@@ -73,6 +79,7 @@ public:
     void requestScreenerData(const std::string& asset,
                              int limit = 50,
                              double minVolume = 0.0);
+    void sendTradeCommand(const trading::TradeCommand& command);
 
 signals:
     void connected();
@@ -114,11 +121,14 @@ signals:
     // Emitted when the server returns a screener_update in response to screener_request.
     // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
+    void orderUpdated(const trading::OrderUpdate& update);
+    void positionUpdated(const trading::PositionUpdate& update);
 
 private:
     void run();
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
     void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
+    void onSslHandshake(boost::beast::error_code ec);
     void onHandshake(boost::beast::error_code ec);
     void doRead();
     void onRead(boost::beast::error_code ec, std::size_t bytes_transferred);
@@ -139,6 +149,8 @@ private:
     void handleFootprintHistoryChunkMessage(const nlohmann::json& msg);
     void handleTpoSliceMessage(const nlohmann::json& msg);
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
+    void handleOrderUpdateMessage(const nlohmann::json& msg);
+    void handlePositionUpdateMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
     void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
 
@@ -150,7 +162,9 @@ private:
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
     
-    boost::beast::websocket::stream<boost::beast::tcp_stream> m_ws;
+    ssl::context m_sslCtx{ssl::context::tlsv13_client};
+    boost::beast::websocket::stream<
+        boost::beast::ssl_stream<boost::beast::tcp_stream>> m_ws{m_strand, m_sslCtx};
     boost::beast::flat_buffer m_buffer;
     
     std::deque<std::string> m_writeQueue;

@@ -14,7 +14,7 @@
 class FootprintStreamState;
 class TpoStreamState;
 #include "VolumeProfileState.hpp"   // for VolumeProfileState::Snapshot in signal
-class VolumeProfileSlice;
+struct VolumeProfileSlice;
 
 class DataProcessor : public QObject {
     Q_OBJECT

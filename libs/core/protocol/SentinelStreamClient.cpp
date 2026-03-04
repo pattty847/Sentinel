@@ -163,12 +163,28 @@ bool decodeBase64WithGuardrails(const char* messageType,
 
 } // namespace
 
-SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port, QObject* parent)
+SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::string& port,
+                                           const std::string& caFile, QObject* parent)
     : QObject(parent)
     , m_host(host)
     , m_port(port)
-    , m_ws(m_ioc)
 {
+    if (!caFile.empty()) {
+        boost::system::error_code sslEc;
+        m_sslCtx.load_verify_file(caFile, sslEc);
+        if (sslEc) {
+            sLog_Warning("SentinelStreamClient: could not load CA cert '"
+                         << caFile << "': " << sslEc.message()
+                         << " - TLS peer verification disabled (dev mode)");
+            m_sslCtx.set_verify_mode(ssl::verify_none);
+        } else {
+            m_sslCtx.set_verify_mode(ssl::verify_peer);
+        }
+    } else {
+        sLog_Warning("SentinelStreamClient: no ca_file configured - TLS peer verification disabled");
+        m_sslCtx.set_verify_mode(ssl::verify_none);
+    }
+
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
@@ -201,8 +217,7 @@ void SentinelStreamClient::connectToServer() {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
             
-            auto& stream = m_ws.next_layer();
-            stream.async_connect(
+            boost::beast::get_lowest_layer(m_ws).async_connect(
                 results,
                 [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
@@ -372,6 +387,31 @@ void SentinelStreamClient::requestScreenerData(const std::string& asset,
     });
 }
 
+void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command) {
+    nlohmann::json msg = {
+        {"type", "trade_command"},
+        {"command_id", command.commandId},
+        {"action", trading::toString(command.action)},
+        {"symbol", command.symbol},
+        {"side", trading::toString(command.side)},
+        {"order_type", trading::toString(command.orderType)},
+        {"qty", command.qty},
+        {"timestamp", command.timestamp}
+    };
+    msg["price"] = command.hasPrice ? nlohmann::json(command.price) : nlohmann::json(nullptr);
+    if (!command.targetOrderId.empty()) {
+        msg["order_id"] = command.targetOrderId;
+    }
+
+    std::string str = msg.dump();
+    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
         sLog_Error("Connect failed: " << ec.message());
@@ -379,6 +419,18 @@ void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint)
         return;
     }
     
+    m_ws.next_layer().async_handshake(
+        ssl::stream_base::client,
+        [this](auto ec) { onSslHandshake(ec); });
+}
+
+void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
+    if (ec) {
+        sLog_Error("SSL handshake failed: " << ec.message());
+        emit errorOccurred(QString::fromStdString("SSL: " + ec.message()));
+        return;
+    }
+
     m_ws.async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 
@@ -482,6 +534,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::TpoHistoryChunk:
                 handleTpoHistoryChunkMessage(msg);
+                return;
+            case protocol::MessageType::OrderUpdate:
+                handleOrderUpdateMessage(msg);
+                return;
+            case protocol::MessageType::PositionUpdate:
+                handlePositionUpdateMessage(msg);
                 return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
@@ -956,6 +1014,32 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
                        .arg(QString::fromStdString(symbol))
                        .arg(timeframeMs)
                        .arg(emitted));
+    }
+}
+
+void SentinelStreamClient::handleOrderUpdateMessage(const nlohmann::json& msg) {
+    trading::OrderUpdate update;
+    update.orderId = msg.value("order_id", "");
+    update.symbol = msg.value("symbol", "");
+    update.status = trading::orderStatusFromString(msg.value("status", "REJECTED"));
+    update.side = trading::orderSideFromString(msg.value("side", "UNKNOWN"));
+    update.qty = msg.value("qty", 0.0);
+    update.filledQty = msg.value("filled_qty", 0.0);
+    update.remainingQty = msg.value("remaining_qty", 0.0);
+    update.avgPrice = msg.value("avg_price", 0.0);
+    if (!update.orderId.empty()) {
+        emit orderUpdated(update);
+    }
+}
+
+void SentinelStreamClient::handlePositionUpdateMessage(const nlohmann::json& msg) {
+    trading::PositionUpdate update;
+    update.symbol = msg.value("symbol", "");
+    update.positionQty = msg.value("position_qty", 0.0);
+    update.avgPrice = msg.value("avg_price", 0.0);
+    update.unrealizedPnl = msg.value("unrealized_pnl", 0.0);
+    if (!update.symbol.empty()) {
+        emit positionUpdated(update);
     }
 }
 
