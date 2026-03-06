@@ -15,7 +15,10 @@ public:
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
-    void setLayerToggleStates(bool heatmapEnabled, bool footprintEnabled, bool tpoEnabled);
+    void setLayerToggleStates(bool heatmapEnabled,
+                              bool footprintEnabled,
+                              bool tpoEnabled,
+                              bool volumeProfileEnabled = false);
 
 signals:
     void subscribeRequested();
@@ -23,6 +26,7 @@ signals:
     void heatmapToggled(bool enabled);
     void footprintToggled(bool enabled);
     void tpoToggled(bool enabled);
+    void volumeProfileToggled(bool enabled);
     void candlesToggled(bool enabled);
     void timeframeSelected(const QString& timeframe);
     void chartTypeSelected(const QString& chartType);
@@ -48,4 +52,5 @@ private:
     QToolButton* m_heatmapButton = nullptr;
     QToolButton* m_footprintButton = nullptr;
     QToolButton* m_tpoButton = nullptr;
+    QToolButton* m_volumeProfileButton = nullptr;
 };

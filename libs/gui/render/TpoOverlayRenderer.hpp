@@ -78,6 +78,5 @@ private:
     bool m_textureDirty = true;
     QImage m_image;
     TpoStreamState::DisplayMode m_displayMode =
-        TpoStreamState::DisplayMode::HorizontalProfile;
+        TpoStreamState::DisplayMode::VerticalTimeline;
 };
-

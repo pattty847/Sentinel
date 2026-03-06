@@ -254,11 +254,13 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     // ── Source rect (Y range always from shared viewport) ──────────────────
     QRectF tpoSrcRect(0, 0, m_gridWidth, m_gridHeight);
     if (sourceRect.width() > 0.0 && sourceRect.height() > 0.0) {
-        const qreal srcW = std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth));
+        const qreal srcX = std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
+        const qreal srcW = std::clamp(sourceRect.width(), 1.0,
+                                      static_cast<qreal>(m_gridWidth) - srcX);
         const qreal srcY = std::clamp(sourceRect.y(), 0.0, static_cast<qreal>(m_gridHeight - 1));
         const qreal srcH = std::clamp(sourceRect.height(), 1.0,
                                       static_cast<qreal>(m_gridHeight) - srcY);
-        tpoSrcRect = QRectF(0.0, srcY, srcW, srcH);
+        tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
     }
 
     // ── Draw rect: mode-specific positioning ────────────────────────────────

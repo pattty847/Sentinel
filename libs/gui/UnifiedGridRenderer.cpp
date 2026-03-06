@@ -216,18 +216,42 @@ void UnifiedGridRenderer::clearData() {
     update();
 }
 
-void UnifiedGridRenderer::setTpoDisplayMode(int mode) {
-    // mode 0 = VerticalTimeline (Mode B letters), mode 1 = VolumeProfile (Mode A)
-    if (m_tpoDisplayMode == mode) {
+void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
+    const int clamped = (timeframeMs == 1800000) ? 1800000 : 900000;
+    if (m_tpoTimeframeMs == clamped) {
         return;
     }
-    m_tpoDisplayMode = mode;
-    const auto streamMode = (mode == 0)
-        ? TpoStreamState::DisplayMode::VerticalTimeline
-        : TpoStreamState::DisplayMode::HorizontalProfile;
-    m_tpoOverlay.setDisplayMode(streamMode);
-    emit tpoDisplayModeChanged();
+    m_tpoTimeframeMs = clamped;
+    emit tpoConfigChanged();
+}
+
+void UnifiedGridRenderer::setTpoSessionType(int sessionType) {
+    const int clamped = (sessionType == 5) ? 5 : 4;
+    if (m_tpoSessionType == clamped) {
+        return;
+    }
+    m_tpoSessionType = clamped;
+    emit tpoConfigChanged();
+}
+
+void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
+    const bool newHeatmapEnabled = enabled ? false : m_heatmapLayerEnabled;
+    const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
+    const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
+    if (m_volumeProfileLayerEnabled == enabled &&
+        m_heatmapLayerEnabled == newHeatmapEnabled &&
+        m_footprintLayerEnabled == newFootprintEnabled &&
+        m_tpoLayerEnabled == newTpoEnabled) {
+        return;
+    }
+    m_volumeProfileLayerEnabled = enabled;
+    if (enabled) {
+        m_heatmapLayerEnabled = false;
+        m_footprintLayerEnabled = false;
+        m_tpoLayerEnabled = false;
+    }
     update();
+    emit layerVisibilityChanged();
 }
 
 void UnifiedGridRenderer::setPriceResolution(double resolution) {
@@ -335,11 +359,19 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
     if (field == 0) {
         m_heatmapLayerEnabled = true;
         m_tpoLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
     } else if (field == 1) {
         m_footprintLayerEnabled = true;
         m_tpoLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
     } else if (field == 2) {
         m_tpoLayerEnabled = true;
+        m_heatmapLayerEnabled = false;
+        m_footprintLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
+    } else if (field == 3) {
+        m_volumeProfileLayerEnabled = true;
+        m_tpoLayerEnabled = false;
         m_heatmapLayerEnabled = false;
         m_footprintLayerEnabled = false;
     }
@@ -353,6 +385,7 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
 
 void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
     const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
+    const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Debug(QString("setHeatmapLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
                        .arg(enabled ? 1 : 0)
@@ -360,7 +393,9 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
                        .arg(m_footprintLayerEnabled ? 1 : 0)
                        .arg(m_tpoLayerEnabled ? 1 : 0));
     }
-    if (m_heatmapLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled) {
+    if (m_heatmapLayerEnabled == enabled &&
+        m_tpoLayerEnabled == newTpoEnabled &&
+        m_volumeProfileLayerEnabled == newVpEnabled) {
         if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
             sLog_Debug("setHeatmapLayerEnabled no-op");
         }
@@ -369,6 +404,7 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
     m_heatmapLayerEnabled = enabled;
     if (enabled) {
         m_tpoLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
     }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("Heatmap layer " << (enabled ? "enabled" : "disabled"));
@@ -379,6 +415,7 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
 
 void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
     const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
+    const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Debug(QString("setFootprintLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
                        .arg(enabled ? 1 : 0)
@@ -386,7 +423,9 @@ void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
                        .arg(m_footprintLayerEnabled ? 1 : 0)
                        .arg(m_tpoLayerEnabled ? 1 : 0));
     }
-    if (m_footprintLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled) {
+    if (m_footprintLayerEnabled == enabled &&
+        m_tpoLayerEnabled == newTpoEnabled &&
+        m_volumeProfileLayerEnabled == newVpEnabled) {
         if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
             sLog_Debug("setFootprintLayerEnabled no-op");
         }
@@ -395,6 +434,7 @@ void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
     m_footprintLayerEnabled = enabled;
     if (enabled) {
         m_tpoLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
     }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("Footprint layer " << (enabled ? "enabled" : "disabled"));
@@ -406,6 +446,7 @@ void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
 void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
     const bool newHeatmapEnabled = enabled ? false : m_heatmapLayerEnabled;
     const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
+    const bool newVolumeProfileEnabled = enabled ? false : m_volumeProfileLayerEnabled;
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Debug(QString("setTpoLayerEnabled request: enabled=%1 current_hm=%2 current_fp=%3 current_tpo=%4")
                        .arg(enabled ? 1 : 0)
@@ -415,7 +456,8 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
     }
     if (m_tpoLayerEnabled == enabled &&
         m_heatmapLayerEnabled == newHeatmapEnabled &&
-        m_footprintLayerEnabled == newFootprintEnabled) {
+        m_footprintLayerEnabled == newFootprintEnabled &&
+        m_volumeProfileLayerEnabled == newVolumeProfileEnabled) {
         if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
             sLog_Debug("setTpoLayerEnabled no-op");
         }
@@ -425,6 +467,7 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
     if (enabled) {
         m_heatmapLayerEnabled = false;
         m_footprintLayerEnabled = false;
+        m_volumeProfileLayerEnabled = false;
     }
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Render("TPO layer " << (enabled ? "enabled" : "disabled"));

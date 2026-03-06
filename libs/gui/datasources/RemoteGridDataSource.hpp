@@ -23,6 +23,7 @@ public:
                                  int count) override;
     void requestTpoHistory(const QString& symbol,
                            int64_t timeframeMs,
+                           int sessionType,
                            int64_t endTimeMs,
                            int count) override;
     void requestCandleHistory(const QString& symbol,

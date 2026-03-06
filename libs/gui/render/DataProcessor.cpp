@@ -273,6 +273,8 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
         return;
     }
 
+    m_tpoStream->setSessionType(slice.sessionType);
+
     if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
         m_tpoGridWidth = resolvedWidth;
         m_tpoGridHeight = resolvedHeight;
@@ -297,7 +299,13 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
 
     const auto snap = m_tpoStream->snapshot();
     for (auto& upload : pendingUploads) {
-        emit tpoColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(upload.data));
+        emit tpoColumnReady(upload.x,
+                            snap.gridWidth,
+                            snap.gridHeight,
+                            std::move(upload.data),
+                            snap.sessionStartMs,
+                            snap.sessionEndMs,
+                            snap.timeframeMs);
     }
 }
 

@@ -324,6 +324,7 @@ void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
 
 void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
                                              int64_t timeframeMs,
+                                             int sessionType,
                                              int64_t endTimeMs,
                                              int count) {
     if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
@@ -333,6 +334,7 @@ void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
         {"type", "tpo_history_request"},
         {"symbol", symbol},
         {"timeframe_ms", timeframeMs},
+        {"session_type", sessionType},
         {"end_time", endTimeMs},
         {"count", count}
     };
@@ -1065,6 +1067,7 @@ void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
     const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
     const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
     const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int sessionType = msg.value("session_type", 4);
     const int gridWidth = msg.value("grid_width", 0);
     const int gridHeight = msg.value("grid_height", 0);
     const double minPrice = msg.value("min_price", 0.0);
@@ -1099,6 +1102,7 @@ void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
     slice.bucketStartMs = startMs;
     slice.bucketEndMs = endMs;
     slice.timeframeMs = timeframeMs;
+    slice.sessionType = sessionType;
     slice.gridWidth = gridWidth;
     slice.gridHeight = gridHeight;
     slice.minPrice = minPrice;
@@ -1121,6 +1125,7 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         return;
     }
     const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int sessionType = msg.value("session_type", 4);
     const int gridWidth = msg.value("grid_width", 0);
     const int gridHeight = msg.value("grid_height", 0);
     const std::string encoding = msg.value("encoding", "base64");
@@ -1164,6 +1169,7 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.bucketStartMs = startMs;
         slice.bucketEndMs = endMs;
         slice.timeframeMs = timeframeMs;
+        slice.sessionType = sessionType;
         slice.gridWidth = gridWidth;
         slice.gridHeight = gridHeight;
         slice.minPrice = minPrice;

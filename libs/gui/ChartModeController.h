@@ -15,7 +15,8 @@ public:
     enum class PrimaryField {
         Heatmap = 0,
         FootprintCells = 1,
-        TpoProfile = 2
+        TpoProfile = 2,
+        VolumeProfile = 3
     };
     Q_ENUM(PrimaryField)
 

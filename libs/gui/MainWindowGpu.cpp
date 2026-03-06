@@ -259,6 +259,18 @@ void MainWindowGPU::setupUI() {
                 requestTpoHistoryForSymbol(m_currentSymbol);
             }
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::volumeProfileToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar volume profile toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setVolumeProfileLayerEnabled(enabled);
+            }
+            if (enabled && m_connected && m_userSubscribed) {
+                requestTpoHistoryForSymbol(m_currentSymbol);
+            }
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::candlesToggled, this, [this](bool enabled) {
             if (m_modeController) {
                 m_modeController->setCandlesEnabled(enabled);
@@ -313,7 +325,8 @@ void MainWindowGPU::setupUI() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
                 if (m_modeController && m_modeController->primaryField() == 1) {
                     requestFootprintHistoryForSymbol(m_currentSymbol);
-                } else if (m_modeController && m_modeController->primaryField() == 2) {
+                } else if (m_modeController && (m_modeController->primaryField() == 2 ||
+                                                m_modeController->primaryField() == 3)) {
                     requestTpoHistoryForSymbol(m_currentSymbol);
                 }
             }
@@ -484,27 +497,30 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    // MVP override: 1m TPO period buckets inside a 1h session profile.
-    int64_t timeframeMs = 60000;
+    int64_t timeframeMs = 900000;
+    int sessionType = 4;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            timeframeMs = renderer->getCurrentTimeframe();
+            timeframeMs = renderer->tpoTimeframeMs();
+            sessionType = renderer->tpoSessionType();
         }
     }
-    if (timeframeMs <= 0) {
-        timeframeMs = 60000;
+    if (timeframeMs != 900000 && timeframeMs != 1800000) {
+        timeframeMs = 900000;
     }
-    timeframeMs = 60000;
-    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-    const int gridWidth = serverConfig.heatmap.gridWidth;
-    const int count = (gridWidth > 0) ? std::min(gridWidth, 60) : 60;
+    if (sessionType != 4 && sessionType != 5) {
+        sessionType = 4;
+    }
+    const int64_t sessionMs = (sessionType == 5) ? (5LL * 86400000LL) : 86400000LL;
+    const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
     if (chartDebugEnabled()) {
-        sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 count=%3")
+        sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 sessionType=%3 count=%4")
                    .arg(symbol)
                    .arg(timeframeMs)
+                   .arg(sessionType)
                    .arg(count));
     }
-    m_dataSource->requestTpoHistory(symbol, timeframeMs, 0, count);
+    m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, 0, count);
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -668,14 +684,16 @@ void MainWindowGPU::connectMarketDataSignals() {
         auto* toolbar = m_heatmapDock->toolbar();
         toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
                                       unifiedGridRenderer->footprintLayerEnabled(),
-                                      unifiedGridRenderer->tpoLayerEnabled());
+                                      unifiedGridRenderer->tpoLayerEnabled(),
+                                      unifiedGridRenderer->volumeProfileLayerEnabled());
         connect(unifiedGridRenderer,
                 &UnifiedGridRenderer::layerVisibilityChanged,
                 this,
                 [toolbar, unifiedGridRenderer]() {
                     toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
                                                   unifiedGridRenderer->footprintLayerEnabled(),
-                                                  unifiedGridRenderer->tpoLayerEnabled());
+                                                  unifiedGridRenderer->tpoLayerEnabled(),
+                                                  unifiedGridRenderer->volumeProfileLayerEnabled());
                 },
                 Qt::QueuedConnection);
     }
@@ -688,6 +706,20 @@ void MainWindowGPU::connectMarketDataSignals() {
                 Qt::QueuedConnection);
         unifiedGridRenderer->setPrimaryField(m_modeController->primaryField());
     }
+
+    connect(unifiedGridRenderer,
+            &UnifiedGridRenderer::tpoConfigChanged,
+            this,
+            [this]() {
+                if (!m_connected || !m_userSubscribed) {
+                    return;
+                }
+                if (m_currentSymbol.isEmpty()) {
+                    return;
+                }
+                requestTpoHistoryForSymbol(m_currentSymbol);
+            },
+            Qt::QueuedConnection);
 
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {

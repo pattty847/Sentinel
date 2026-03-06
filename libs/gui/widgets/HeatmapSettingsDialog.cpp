@@ -7,6 +7,7 @@
 #include <QSlider>
 #include <QLabel>
 #include <QPushButton>
+#include <QComboBox>
 #include <QDialogButtonBox>
 
 namespace {
@@ -89,6 +90,16 @@ void HeatmapSettingsDialog::buildUi() {
     floorRow->addWidget(m_floorLabel);
     form->addRow("Shader Floor", floorRow);
 
+    m_tpoTimeframeCombo = new QComboBox(this);
+    m_tpoTimeframeCombo->addItem("15m", 900000);
+    m_tpoTimeframeCombo->addItem("30m", 1800000);
+    form->addRow("TPO Bracket", m_tpoTimeframeCombo);
+
+    m_tpoSessionCombo = new QComboBox(this);
+    m_tpoSessionCombo->addItem("24H", 4);
+    m_tpoSessionCombo->addItem("1W", 5);
+    form->addRow("TPO Session", m_tpoSessionCombo);
+
     layout->addLayout(form);
 
     auto* buttons = new QDialogButtonBox(this);
@@ -104,6 +115,24 @@ void HeatmapSettingsDialog::buildUi() {
     connect(m_gammaSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyGamma);
     connect(m_contrastSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyContrast);
     connect(m_floorSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyShaderFloor);
+    connect(m_tpoTimeframeCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+                if (!m_renderer || idx < 0) {
+                    return;
+                }
+                m_renderer->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
+            });
+    connect(m_tpoSessionCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+                if (!m_renderer || idx < 0) {
+                    return;
+                }
+                m_renderer->setTpoSessionType(m_tpoSessionCombo->itemData(idx).toInt());
+            });
     connect(m_logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
@@ -122,6 +151,18 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
     m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
     m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
+    if (m_tpoTimeframeCombo) {
+        const int tfIdx = m_tpoTimeframeCombo->findData(m_renderer->tpoTimeframeMs());
+        if (tfIdx >= 0) {
+            m_tpoTimeframeCombo->setCurrentIndex(tfIdx);
+        }
+    }
+    if (m_tpoSessionCombo) {
+        const int sessionIdx = m_tpoSessionCombo->findData(m_renderer->tpoSessionType());
+        if (sessionIdx >= 0) {
+            m_tpoSessionCombo->setCurrentIndex(sessionIdx);
+        }
+    }
 }
 
 void HeatmapSettingsDialog::applyGamma(int sliderValue) {

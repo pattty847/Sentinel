@@ -21,7 +21,7 @@ void ChartModeController::setPrimaryField(PrimaryField field) {
 
 void ChartModeController::setPrimaryField(int field) {
     if (field < static_cast<int>(PrimaryField::Heatmap) ||
-        field > static_cast<int>(PrimaryField::TpoProfile)) {
+        field > static_cast<int>(PrimaryField::VolumeProfile)) {
         return;
     }
     setPrimaryField(static_cast<PrimaryField>(field));

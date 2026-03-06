@@ -455,7 +455,13 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 
     connect(m_dataProcessor.get(), &DataProcessor::tpoColumnReady,
             this,
-            [this](int x, int gridWidth, int gridHeight, QByteArray letters) {
+            [this](int x,
+                   int gridWidth,
+                   int gridHeight,
+                   QByteArray letters,
+                   int64_t sessionStartMs,
+                   int64_t sessionEndMs,
+                   int64_t timeframeMs) {
                 if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth) {
                     return;
                 }
@@ -469,6 +475,10 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     }
                     m_pendingTpoUploads.push_back(
                         TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters)});
+                    m_tpoSessionStartMs = sessionStartMs;
+                    m_tpoSessionEndMs = sessionEndMs;
+                    m_tpoBracketMs = timeframeMs;
+                    m_tpoSessionColumns = gridWidth;
                 }
                 update();
             },

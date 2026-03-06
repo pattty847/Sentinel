@@ -7,6 +7,7 @@
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QtEndian>
 #include <algorithm>
@@ -215,54 +216,74 @@ void UnifiedGridRenderer::renderOverlays(
                               gridHeight,
                               footprintUploads);
     // ── TPO / VP dispatch ──────────────────────────────────────────────────
-    // mode 0 = VerticalTimeline letters, mode 1 = Volume Profile histogram.
-    if (m_tpoDisplayMode == 1) {
-        // Mode A: Volume Profile (right-wall histogram via VolumeProfileRenderer).
-        std::vector<float> localBins;
-        VolumeProfileState::Snapshot localSnap;
-        {
-            std::lock_guard<std::mutex> lock(m_vpMutex);
-            if (m_vpDirty || !m_vpBins.empty()) {
-                localBins = m_vpBins;
-                localSnap = m_vpSnap;
-                m_vpDirty = false;
-            }
+    std::vector<float> localBins;
+    VolumeProfileState::Snapshot localSnap;
+    {
+        std::lock_guard<std::mutex> lock(m_vpMutex);
+        if (m_vpDirty || !m_vpBins.empty()) {
+            localBins = m_vpBins;
+            localSnap = m_vpSnap;
+            m_vpDirty = false;
         }
-        // VP renderer is additive — always pass the latest bins even if not dirty.
-        m_vpRenderer.render(texNode,
-                            drawTpo && !localBins.empty(),
-                            drawRect,
-                            frame.viewport.minPrice,
-                            frame.viewport.maxPrice,
-                            localBins,
-                            localSnap);
-        // Hide the TPO texture overlay in this mode.
-        m_tpoOverlay.render(window(), texNode, false,
-                            frame.forceFull, snapshot.timeOffset,
-                            drawRect, srcRect, gridWidth, gridHeight, tpoUploads);
-    } else {
-        // Mode B: TPO Letter Distribution (time-aligned vertical profile).
-        const int64_t tpoSessionStart = frame.mapping.dataStartMs;
-        const int64_t tpoSessionEnd   = frame.mapping.dataEndMs;
-        m_tpoOverlay.render(window(),
-                            texNode,
-                            drawTpo,
-                            frame.forceFull,
-                            snapshot.timeOffset,
-                            drawRect,
-                            srcRect,
-                            gridWidth,
-                            gridHeight,
-                            tpoUploads,
-                            tpoSessionStart,
-                            tpoSessionEnd,
-                            frame.mapping.viewStartMs,
-                            frame.mapping.viewEndMs);
-        // VP renderer is hidden in this mode.
-        m_vpRenderer.render(texNode, false, drawRect,
-                            frame.viewport.minPrice, frame.viewport.maxPrice,
-                            {}, {});
     }
+
+    m_vpRenderer.render(texNode,
+                        m_volumeProfileLayerEnabled && !localBins.empty(),
+                        drawRect,
+                        frame.viewport.minPrice,
+                        frame.viewport.maxPrice,
+                        localBins,
+                        localSnap);
+
+    int64_t tpoSessionStart = 0;
+    int64_t tpoSessionEnd = 0;
+    int64_t tpoBracketMs = 0;
+    int tpoSessionColumns = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+        tpoSessionStart = m_tpoSessionStartMs;
+        tpoSessionEnd = m_tpoSessionEndMs;
+        tpoBracketMs = m_tpoBracketMs;
+        tpoSessionColumns = m_tpoSessionColumns;
+    }
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG") &&
+        drawTpo &&
+        tpoSessionStart > 0 &&
+        tpoSessionEnd > tpoSessionStart &&
+        tpoBracketMs > 0) {
+        static QElapsedTimer tpoSessionLogTimer;
+        static bool tpoSessionLogTimerStarted = false;
+        if (!tpoSessionLogTimerStarted) {
+            tpoSessionLogTimer.start();
+            tpoSessionLogTimerStarted = true;
+        }
+        if (tpoSessionLogTimer.elapsed() > 1000) {
+            const int computedColumns = static_cast<int>(
+                std::max<int64_t>(1, (tpoSessionEnd - tpoSessionStart) / tpoBracketMs));
+            const QDateTime startDt = QDateTime::fromMSecsSinceEpoch(tpoSessionStart, Qt::UTC);
+            const QDateTime endDt = QDateTime::fromMSecsSinceEpoch(tpoSessionEnd, Qt::UTC);
+            sLog_Debug(QString("TPO session: %1-%2 UTC | Bracket: %3m | Columns: %4")
+                           .arg(startDt.toString(QStringLiteral("HH:mm")))
+                           .arg(endDt.toString(QStringLiteral("HH:mm")))
+                           .arg(tpoBracketMs / 60000)
+                           .arg((tpoSessionColumns > 0) ? tpoSessionColumns : computedColumns));
+            tpoSessionLogTimer.restart();
+        }
+    }
+    m_tpoOverlay.render(window(),
+                        texNode,
+                        drawTpo,
+                        frame.forceFull,
+                        snapshot.timeOffset,
+                        drawRect,
+                        srcRect,
+                        gridWidth,
+                        gridHeight,
+                        tpoUploads,
+                        tpoSessionStart,
+                        tpoSessionEnd,
+                        frame.mapping.viewStartMs,
+                        frame.mapping.viewEndMs);
 }
 
 void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,

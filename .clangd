@@ -1,5 +1,7 @@
 # Force C++20 for clangd so std::span, std::filesystem, and dependency headers parse correctly.
 # compile_commands.json from CMake+MSVC uses /std:c++20; clangd doesn't always apply it to every TU.
+# To get Qt and vcpkg includes: configure with your preset then symlink compile_commands.json from
+# the build dir to project root (e.g. ln -sf build/mac-clang/compile_commands.json .)
 CompileFlags:
   Add:
     - -std=c++20

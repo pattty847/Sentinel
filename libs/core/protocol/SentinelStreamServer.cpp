@@ -117,8 +117,9 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
-    int64_t tpoBucketMs_ = 60000;
-    int64_t tpoSessionMs_ = 3'600'000;
+    int64_t tpoBucketMs_ = 900'000;
+    SessionManager::SessionType tpoSessionType_ = SessionManager::SessionType::H24;
+    int64_t tpoSessionMs_ = SessionManager::sessionDurationMs(SessionManager::SessionType::H24);
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -437,6 +438,7 @@ class Session : public std::enable_shared_from_this<Session> {
         payload["schema_version"] = protocol::SentinelProtocol::kFootprintSchemaVersion;
         payload["symbol"] = symbol;
         payload["timeframe_ms"] = timeframeMs;
+        payload["session_type"] = static_cast<int>(tpoSessionType_);
         payload["grid_width"] = gridWidth;
         payload["grid_height"] = gridHeight;
         payload["format"] = "q16_delta";
@@ -509,6 +511,7 @@ class Session : public std::enable_shared_from_this<Session> {
         payload["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
         payload["symbol"] = symbol;
         payload["timeframe_ms"] = timeframeMs;
+        payload["session_type"] = static_cast<int>(tpoSessionType_);
         payload["grid_width"] = gridWidth;
         payload["grid_height"] = gridHeight;
         payload["format"] = "tpo_ascii";
@@ -766,10 +769,23 @@ public:
             } else if (type == "tpo_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
+                const int sessionType = j.value("session_type", static_cast<int>(SessionManager::SessionType::H24));
                 const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
+                    switch (sessionType) {
+                        case static_cast<int>(SessionManager::SessionType::H24):
+                            tpoSessionType_ = SessionManager::SessionType::H24;
+                            break;
+                        case static_cast<int>(SessionManager::SessionType::W1):
+                            tpoSessionType_ = SessionManager::SessionType::W1;
+                            break;
+                        default:
+                            tpoSessionType_ = SessionManager::SessionType::H24;
+                            break;
+                    }
                     tpoBucketMs_ = timeframeMs;
+                    tpoSessionMs_ = SessionManager::sessionDurationMs(tpoSessionType_);
                     streamTpoHistory(symbol, timeframeMs, endTimeMs, count);
                 }
             } else if (type == "candle_history_request") {
@@ -1147,6 +1163,7 @@ public:
         tpo["time_start"] = tpoBucketStart;
         tpo["time_end"] = tpoBucketEnd;
         tpo["timeframe_ms"] = tpoTimeframeMs;
+        tpo["session_type"] = static_cast<int>(tpoSessionType_);
         tpo["grid_width"] = tpoGridWidth;
         tpo["grid_height"] = slice.gridHeight;
         tpo["min_price"] = slice.minPrice;
@@ -1161,8 +1178,7 @@ public:
         // Use SessionManager to determine the current session boundary so that
         // the profile always covers exactly one full session window.
         const auto sessionBoundary =
-            SessionManager::sessionContaining(slice.bucketStartMs,
-                                              SessionManager::SessionType::H24);
+            SessionManager::sessionContaining(slice.bucketStartMs, tpoSessionType_);
         QByteArray vpBinsF32;
         double vpTotalVolume = 0.0;
         int    vpPocRow      = 0;
@@ -1188,7 +1204,7 @@ public:
             vp["symbol"]         = sym;
             vp["session_start"]  = sessionBoundary.startMs;
             vp["session_end"]    = sessionBoundary.endMs;
-            vp["session_type"]   = static_cast<int>(SessionManager::SessionType::H24);
+            vp["session_type"]   = static_cast<int>(tpoSessionType_);
             vp["grid_height"]    = slice.gridHeight;
             vp["min_price"]      = slice.minPrice;
             vp["max_price"]      = slice.maxPrice;

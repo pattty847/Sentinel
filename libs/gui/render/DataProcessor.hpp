@@ -73,7 +73,13 @@ signals:
                                   int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
     void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
-    void tpoColumnReady(int x, int gridWidth, int gridHeight, QByteArray letters);
+    void tpoColumnReady(int x,
+                        int gridWidth,
+                        int gridHeight,
+                        QByteArray letters,
+                        int64_t sessionStartMs,
+                        int64_t sessionEndMs,
+                        int64_t timeframeMs);
     void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:

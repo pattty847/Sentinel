@@ -152,9 +152,10 @@ void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
 
 void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
                                              int64_t timeframeMs,
+                                             int sessionType,
                                              int64_t endTimeMs,
                                              int count) {
-    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, sessionType, endTimeMs, count);
 }
 
 

@@ -42,6 +42,7 @@ public:
                                          int count) = 0;
     virtual void requestTpoHistory(const QString& symbol,
                                    int64_t timeframeMs,
+                                   int sessionType,
                                    int64_t endTimeMs,
                                    int count) = 0;
     virtual void requestCandleHistory(const QString& symbol,

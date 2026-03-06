@@ -58,9 +58,9 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapLayerEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintLayerEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool tpoLayerEnabled READ tpoLayerEnabled NOTIFY layerVisibilityChanged)
-    // 0 = Mode B: TPO Letter Distribution (Vertical)
-    // 1 = Mode A: Session Volume Profile (Horizontal, right-wall)
-    Q_PROPERTY(int tpoDisplayMode READ tpoDisplayMode WRITE setTpoDisplayMode NOTIFY tpoDisplayModeChanged)
+    Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(int tpoTimeframeMs READ tpoTimeframeMs WRITE setTpoTimeframeMs NOTIFY tpoConfigChanged)
+    Q_PROPERTY(int tpoSessionType READ tpoSessionType WRITE setTpoSessionType NOTIFY tpoConfigChanged)
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
@@ -160,6 +160,7 @@ private:
     bool m_heatmapLayerEnabled = true;
     bool m_footprintLayerEnabled = false;
     bool m_tpoLayerEnabled = false;
+    bool m_volumeProfileLayerEnabled = false;
 
     TimeAxisMapping m_lastTimeAxisMapping;
     mutable std::mutex m_frameContextMutex;
@@ -184,12 +185,17 @@ private:
     std::vector<FootprintOverlayRenderer::PendingUpload> m_pendingFootprintUploads;
     mutable std::mutex m_tpoPendingMutex;
     std::vector<TpoOverlayRenderer::PendingUpload> m_pendingTpoUploads;
+    int64_t m_tpoSessionStartMs = 0;
+    int64_t m_tpoSessionEndMs = 0;
+    int64_t m_tpoBracketMs = 0;
+    int m_tpoSessionColumns = 0;
     // VP data protected by mutex; written on data thread, read on render thread.
     mutable std::mutex m_vpMutex;
     std::vector<float> m_vpBins;              // most-recent bins for render
     VolumeProfileState::Snapshot m_vpSnap;    // most-recent snapshot for render
     bool m_vpDirty = false;
-    int m_tpoDisplayMode = 0;                 // 0=VerticalTimeline, 1=VolumeProfile
+    int m_tpoTimeframeMs = 900000;            // standard 15m
+    int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
@@ -225,8 +231,12 @@ public:
     bool heatmapLayerEnabled() const { return m_heatmapLayerEnabled; }
     bool footprintLayerEnabled() const { return m_footprintLayerEnabled; }
     bool tpoLayerEnabled() const { return m_tpoLayerEnabled; }
-    int tpoDisplayMode() const { return m_tpoDisplayMode; }
-    Q_INVOKABLE void setTpoDisplayMode(int mode);
+    bool volumeProfileLayerEnabled() const { return m_volumeProfileLayerEnabled; }
+    int tpoTimeframeMs() const { return m_tpoTimeframeMs; }
+    int tpoSessionType() const { return m_tpoSessionType; }
+    Q_INVOKABLE void setVolumeProfileLayerEnabled(bool enabled);
+    Q_INVOKABLE void setTpoTimeframeMs(int timeframeMs);
+    Q_INVOKABLE void setTpoSessionType(int sessionType);
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
@@ -346,7 +356,7 @@ signals:
     void heatmapShaderFloorChanged();
     void primaryFieldChanged();
     void layerVisibilityChanged();
-    void tpoDisplayModeChanged();
+    void tpoConfigChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();

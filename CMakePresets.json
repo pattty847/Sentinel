@@ -38,6 +38,20 @@
           "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
         }
       },
+      {
+        "name": "mac-clang-release",
+        "displayName": "macOS - Clang Release",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/mac-clang-release",
+        "cacheVariables": {
+          "CMAKE_C_COMPILER": "clang",
+          "CMAKE_CXX_COMPILER": "clang++",
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_PREFIX_PATH": "$env{QT_MAC}",
+          "CMAKE_BUILD_TYPE": "Release",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
+      },
   
       {
         "name": "linux-gcc",
@@ -67,6 +81,7 @@
       },
       { "name": "windows-msvc-ninja",  "configurePreset": "windows-msvc-ninja" },
       { "name": "mac-clang",    "configurePreset": "mac-clang" },
+      { "name": "mac-clang-release", "configurePreset": "mac-clang-release" },
       { "name": "linux-gcc",    "configurePreset": "linux-gcc" }
     ],
 

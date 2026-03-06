@@ -73,6 +73,10 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoButton->setCheckable(true);
     m_tpoButton->setAutoExclusive(false);
 
+    m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Volume Profile");
+    m_volumeProfileButton->setCheckable(true);
+    m_volumeProfileButton->setAutoExclusive(false);
+
     connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
     connect(m_heatmapButton, &QToolButton::toggled, this, [this](bool enabled) {
         if (chartDebugEnabled()) {
@@ -99,6 +103,15 @@ TopToolbar::TopToolbar(QWidget* parent)
         emit tpoToggled(enabled);
         if (enabled) {
             emit primaryFieldRequested(2);
+        }
+    });
+    connect(m_volumeProfileButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled volume_profile=%1").arg(enabled ? 1 : 0));
+        }
+        emit volumeProfileToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(3);
         }
     });
 
@@ -191,12 +204,16 @@ void TopToolbar::setTimeframeMs(int64_t ms) {
     }
 }
 
-void TopToolbar::setLayerToggleStates(bool heatmapEnabled, bool footprintEnabled, bool tpoEnabled) {
+void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
+                                      bool footprintEnabled,
+                                      bool tpoEnabled,
+                                      bool volumeProfileEnabled) {
     if (chartDebugEnabled()) {
-        sLog_Debug(QString("TopToolbar sync states hm=%1 fp=%2 tpo=%3")
+        sLog_Debug(QString("TopToolbar sync states hm=%1 fp=%2 tpo=%3 vp=%4")
                        .arg(heatmapEnabled ? 1 : 0)
                        .arg(footprintEnabled ? 1 : 0)
-                       .arg(tpoEnabled ? 1 : 0));
+                       .arg(tpoEnabled ? 1 : 0)
+                       .arg(volumeProfileEnabled ? 1 : 0));
     }
     if (m_heatmapButton) {
         const QSignalBlocker blocker(*m_heatmapButton);
@@ -209,5 +226,9 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled, bool footprintEnabled
     if (m_tpoButton) {
         const QSignalBlocker blocker(*m_tpoButton);
         m_tpoButton->setChecked(tpoEnabled);
+    }
+    if (m_volumeProfileButton) {
+        const QSignalBlocker blocker(*m_volumeProfileButton);
+        m_volumeProfileButton->setChecked(volumeProfileEnabled);
     }
 }

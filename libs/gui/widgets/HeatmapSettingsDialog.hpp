@@ -8,6 +8,7 @@ class QDoubleSpinBox;
 class QPushButton;
 class QSlider;
 class QLabel;
+class QComboBox;
 
 class HeatmapSettingsDialog : public QDialog {
     Q_OBJECT
@@ -31,5 +32,7 @@ private:
     QLabel* m_contrastLabel = nullptr;
     QSlider* m_floorSlider = nullptr;
     QLabel* m_floorLabel = nullptr;
+    QComboBox* m_tpoTimeframeCombo = nullptr;
+    QComboBox* m_tpoSessionCombo = nullptr;
     QPushButton* m_logButton = nullptr;
 };

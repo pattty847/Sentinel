@@ -11,7 +11,7 @@ namespace SessionManager { enum class SessionType : int; }
 
 class TpoStreamState {
 public:
-    // Display mode controls how m_columns are indexed and what the renderer does.
+    // Display mode controls how m_columns are indexed.
     enum class DisplayMode : int {
         // Horizontal Market Profile: column[rank] holds all price levels visited
         // at least (rank+1) times within the session.  The horizontal width of
@@ -40,7 +40,7 @@ public:
         int64_t sessionStartMs = 0;
         int64_t sessionEndMs = 0;
         int64_t timeframeMs = 0;
-        DisplayMode displayMode = DisplayMode::HorizontalProfile;
+        DisplayMode displayMode = DisplayMode::VerticalTimeline;
         int pendingUploads = 0;
     };
 
@@ -86,12 +86,11 @@ private:
     int m_writeColumn = -1;
     int64_t m_sessionStartMs = 0;
     int64_t m_sessionEndMs   = 0;
-    int64_t m_sessionMs = 3'600'000;   // default 1-hour session
+    int64_t m_sessionMs = 86'400'000;  // default H24 session fallback
     int64_t m_lastSliceStartMs = 0;
     int64_t m_timeframeMs = 0;
-    DisplayMode m_displayMode = DisplayMode::HorizontalProfile;
+    DisplayMode m_displayMode = DisplayMode::VerticalTimeline;
     std::vector<QByteArray> m_columns;
     std::unordered_map<int64_t, LevelState> m_levelsByTick;
     std::vector<PendingUpload> m_pending;
 };
-
