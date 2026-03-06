@@ -11,6 +11,9 @@ public:
                                             const std::string& host,
                                             const std::string& path) const;
 
+    /// True if key file was loaded and key/secret are non-empty. Public channels (level2, market_trades, etc.) do not require auth.
+    [[nodiscard]] bool hasCredentials() const { return !m_keyId.empty() && !m_privateKey.empty(); }
+
     Authenticator(const Authenticator&)            = delete;
     Authenticator& operator=(const Authenticator&) = delete;
     Authenticator(Authenticator&&)                 = default;

@@ -77,9 +77,8 @@ The engine is now stateless regarding historical data. Consumers of the engine a
 ### 2. Authentication Layer (`auth/`)
 
 #### **Authenticator**
-- **Purpose**: Creates signed JSON Web Tokens (JWTs) for the Coinbase Advanced Trade API using the ES256 algorithm.
-- **Thread Safety**: `createJwt()` is stateless and thread-safe.
-- **Error Handling**: JWT creation is wrapped in `try/catch` blocks to prevent exceptions from crashing the I/O thread, a critical resilience improvement.
+- **Purpose**: Optionally loads CDP API keys from `key.json` and creates signed JWTs (ES256) for authenticated Coinbase channels. **Public channels** (level2, market_trades, heartbeats, candles, etc.) do not require auth; subscribe messages are sent without a `jwt` field when no key is present. Only the `user` and `futures_balance_summary` channels require authentication.
+- **Thread Safety**: `createJwt()` is stateless and thread-safe. Use `hasCredentials()` before calling it when keys are optional.
 
 ### 3. Dispatch Layer (`dispatch/`)
 

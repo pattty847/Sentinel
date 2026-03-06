@@ -25,7 +25,6 @@ if (WIN32)
         COMMAND "$ENV{QT_MSVC}/bin/windeployqt.exe"
                 --no-opengl
                 --no-system-d3d-compiler
-                --no-compiler-runtime
                 --no-translations
                 "$<TARGET_FILE:sentinel_server>"
         COMMENT "Running windeployqt for sentinel-server"

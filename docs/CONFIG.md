@@ -55,9 +55,11 @@ server:
     host: advanced-trade-ws.coinbase.com
     port: 443
     target: /v1
-    use_jwt: false
+    use_jwt: false   # Set true only when key.json exists and you need user/futures channels
     ssl_ca_bundle: resources/certs/ca-bundle.crt
 ```
+
+Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 
 Client config (local UI):
 ```yaml

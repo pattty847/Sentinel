@@ -124,16 +124,20 @@ See `config/server_config.yaml` and `config/client_config.yaml` for all options.
 
 ---
 
-## API Keys
+## API Keys (optional)
 
-Drop a `key.json` in project root:
+**Public market data** (order book, trades, candles, heartbeats) does **not** require an API key. You can run the server without any key file and stream level2/market_trades from Coinbase Advanced Trade WebSocket.
+
+For **authenticated channels** (e.g. user orders, futures balance) or future private features, add a `key.json` in the project root:
 
 ```json
 {
-  "key": "your-coinbase-api-key",
+  "key": "your-coinbase-cdp-api-key-name",
   "secret": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
 }
 ```
+
+See [Advanced Trade WebSocket channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels) for which channels require authentication.
 
 ---
 

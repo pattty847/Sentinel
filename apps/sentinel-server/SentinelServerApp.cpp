@@ -72,14 +72,11 @@ bool SentinelServerApp::initialize() {
             sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort);
         }
 
-        // 1. Authenticator
-        try {
-            m_authenticator = std::make_unique<Authenticator>();
-        } catch (const std::exception& e) {
-            sLog_Error("Authenticator init failed: " << e.what());
-            return false;
-        }
-        
+        // 1. Authenticator (optional: public channels work without key.json)
+        m_authenticator = std::make_unique<Authenticator>();
+        // Only send JWT when we have credentials and config enables it (user/futures channels need auth)
+        m_serverConfig.mdc.useJwt = m_authenticator->hasCredentials() && m_serverConfig.mdc.useJwt;
+
         // 2. Market Data Core
         try {
             m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, m_serverConfig.mdc);

@@ -1,13 +1,10 @@
 /*
 Sentinel — Authenticator
-Role: Implements the logic for loading API keys from a file and signing JWTs.
-Inputs/Outputs: Reads 'key.json'; creates and signs a JWT with an ES256 algorithm.
+Role: Loads CDP API keys from a file (optional) and signs JWTs for authenticated channels.
+Public market data (level2, market_trades, heartbeats, candles, etc.) does not require auth;
+only the user and futures_balance_summary channels require a key. When key.json is missing or
+empty, hasCredentials() is false and callers should omit JWT (see Advanced Trade WebSocket docs).
 Threading: All methods execute on the calling thread.
-Performance: File I/O is a one-time cost in the constructor.
-Integration: The concrete implementation of the authentication token generator.
-Observability: Logs file-not-found and JSON parsing errors to std::cerr.
-Related: Authenticator.hpp.
-Assumptions: The linked JWT library supports ES256 signing.
 */
 #include "Authenticator.hpp"
 #include <nlohmann/json.hpp>
@@ -84,28 +81,27 @@ std::string Authenticator::createRestJwt(const std::string& method,
 void Authenticator::loadKeyFile(const std::string& path) {
     std::ifstream key_file(path);
     if (!key_file.is_open()) {
-        throw std::runtime_error("🔑 Authenticator: Failed to open key file: " + path);
+        sLog_App("Authenticator: No key file at [" + path + "] – using public market data only (no JWT).");
+        return;
     }
-    
+
     nlohmann::json j;
     try {
         key_file >> j;
+    } catch (const std::exception& ex) {
+        sLog_App("Authenticator: Failed to parse key file [" + path + "]: " + ex.what() + " – using public only.");
+        return;
     }
-    catch (const std::exception& ex) {
-        throw std::runtime_error("🔑 Authenticator: Failed to parse JSON from key file: " + std::string(ex.what()));
-    }
-    
+
     m_keyId = j.value("key", "");
     m_privateKey = j.value("secret", "");
-    
-    if (m_keyId.empty()) {
-        throw std::runtime_error("🔑 Authenticator: Missing 'key' field in key file");
+
+    if (m_keyId.empty() || m_privateKey.empty()) {
+        sLog_App("Authenticator: Key file missing 'key' or 'secret' – using public market data only.");
+        return;
     }
-    if (m_privateKey.empty()) {
-        throw std::runtime_error("🔑 Authenticator: Missing 'secret' field in key file");
-    }
-    
-    sLog_App(std::string("Authenticator: Successfully loaded API keys from [") + path + "]");
+
+    sLog_App(std::string("Authenticator: Loaded API keys from [") + path + "] (JWT available for authenticated channels).");
 } 
 
 std::string Authenticator::generateNonce() {
