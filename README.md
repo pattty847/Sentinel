@@ -1,6 +1,6 @@
 # Sentinel v2.1.0-alpha
 
-Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20, Qt 6, and with sub-millisecond rendering.
+Open source GPU-accelerated order book heatmap trading terminal. Written in C++20 and Qt 6, with a server/client architecture and GPU-first rendering.
 
 <div align="center">
   <img src="https://img.shields.io/badge/C++-20-blue" />
@@ -10,7 +10,38 @@ Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
-## Server-Client Main Branch Recent Changes
+## Project Status
+
+The repository `main` branch is currently behind the latest runnable preview build.
+
+Active development is happening on `tpo-footprint-v1`, which has been a long-running feature branch for the new TPO / footprint work and related server/client improvements.
+
+If you are a **non-developer** and just want to run Sentinel, use the latest pre-release from the GitHub Releases page:
+
+- [Download the latest release](https://github.com/pattty847/Sentinel-Trading-Terminal/releases/tag/Alpha-Testing)
+- [View all releases](https://github.com/pattty847/Sentinel-Trading-Terminal/releases)
+
+The current public pre-release includes:
+
+- Bundled dependencies for end users
+- A runnable server/client package
+- A simple launch script
+- Live heatmap rendering
+- Live candles chart
+- Dockable UI layout
+- TradingView screener integration
+- Heatmap tuning controls
+
+Work in progress on the feature branch:
+
+- TPO / footprint chart
+- Additional heatmap and candle timeframes beyond the current 1s flow
+- Stock candles widget
+- SEC filing viewer
+
+`main` remains the stable landing page for the project, but the latest public preview build currently comes from `tpo-footprint-v1`.
+
+## Main Branch Overview
 
 <img width="2559" height="1388" alt="Screenshot 2026-02-02 141503" src="https://github.com/user-attachments/assets/b0d32701-816d-4508-aa1b-9753eeb7b601" />
 <img width="2559" height="1392" alt="image" src="https://github.com/user-attachments/assets/4e100ad3-4da9-42d1-b75b-22f71b9f0c07" />
@@ -126,7 +157,11 @@ See `config/server_config.yaml` and `config/client_config.yaml` for all options.
 
 ## API Keys
 
-Drop a `key.json` in project root:
+Depending on the branch/build you are using, API key requirements may differ.
+
+For the latest public preview release from `tpo-footprint-v1`, public market data is available without API keys. Future private/account features will still require authenticated credentials.
+
+Older development flows may still reference a `key.json` in the project root:
 
 ```json
 {
