@@ -730,4 +730,465 @@ SEC_API_USER_AGENT=...           # Already required for SEC
 
 ---
 
+## 16. Free Data Sources — Not Yet Integrated
+
+These are all genuinely free (no credit card, no paid tier required) and meaningfully additive. Ranked by signal value.
+
+### Tier 1 — High Signal, Add First
+
+#### FRED (Federal Reserve Economic Data)
+**API**: `fredapi` Python library, free key at fred.stlouisfed.org
+**What it gives you**: The macro regime backdrop that price action happens *inside of*. Without this, you can't tell if a sector rotation is stock-specific or rate-driven.
+
+Key series to pull on a daily/weekly schedule:
+| Series ID | Signal |
+|-----------|--------|
+| `DGS10` | 10-year Treasury yield — primary driver of equity valuation multiples |
+| `T10Y2Y` | Yield curve spread — inversion = recession risk, steepening = risk-on |
+| `VIXCLS` | VIX closing price — market fear level, option sellers' hedge |
+| `DTWEXBGS` | DXY (trade-weighted dollar) — inverse relationship with crypto and commodities |
+| `BAMLH0A0HYM2` | High-yield credit spread — credit stress indicator, leads equity by 2-4 weeks |
+| `M2SL` | M2 money supply — liquidity proxy, correlates strongly with crypto bull/bear |
+| `CPIAUCSL` | CPI YoY — Fed policy constraint, drives rate expectations |
+| `UNRATE` | Unemployment rate — economic cycle position |
+
+**Integration**: `scripts/macro/fred_collector.py`, fetched weekly, cached in SQLite. Added to regime context as `macro_regime` object: `{rate_env: "RISING|FALLING|STABLE", curve: "INVERTED|FLAT|STEEP", risk_appetite: "RISK_ON|RISK_OFF|NEUTRAL"}`.
+
+**Why this matters for the AI**: The LLM can now say *"This stock is selling off because credit spreads widened 40bps this week, not because of company-specific issues. The whole sector is repricing."*
+
+---
+
+#### CFTC Commitment of Traders (COT) Reports
+**API**: `cot-reports` Python library or direct CFTC download at cftc.gov/MarketReports
+**What it gives you**: What the big institutional players (commercials, large speculators, small speculators) are actually positioned in futures markets. Published every Friday for the prior Tuesday's positions.
+
+Key markets to track:
+- **S&P 500 futures (E-mini)** — net large spec positioning = institutional equity sentiment
+- **Bitcoin futures (CME)** — net positioning reveals institutional crypto stance
+- **Treasury futures (10Y, 2Y)** — rate expectations from the biggest players
+- **Dollar Index futures** — macro dollar positioning
+- **Gold/Silver futures** — safe haven demand proxy
+
+**Integration**: `scripts/macro/cot_collector.py`, weekly fetch (Friday after 3pm ET), cached. Produces: `{asset: "ES", large_spec_net: 45000, commercial_net: -52000, small_spec_net: 7000, net_change_wk: +3200}`.
+
+**Why this matters**: COT extreme positioning is one of the most reliable contrarian signals that exist. When large specs are record-net-long, tops are near. When record-short, bottoms are near. The AI can flag "COT positioning at 90th percentile net long — historically precedes 3-8% corrections."
+
+---
+
+#### Crypto Fear & Greed Index
+**API**: `https://api.alternative.me/fng/` — completely free, no key
+**What it gives you**: Composite sentiment index 0-100 for crypto, updated daily. Built from volatility, market momentum, social media, surveys, dominance, trends.
+
+**Integration**: One `requests.get` call, ~100ms. Add to crypto context as `crypto_sentiment_score: 73, crypto_sentiment_label: "GREED"`.
+
+**Why this matters**: Extreme fear (<15) and extreme greed (>85) are powerful mean-reversion signals. The AI can flag "Fear & Greed at 91 (Extreme Greed) — historically crypto 30-day returns from this level: -12% median."
+
+---
+
+#### CoinGecko API (Free Tier)
+**API**: `pycoingecko` library, free tier = 30 calls/min, no key required
+**What it gives you**:
+- **BTC dominance** — when BTC dom rises, alts bleed; when it falls, alt season
+- **Total crypto market cap** — macro crypto regime
+- **DeFi total TVL** — on-chain capital flows
+- **Exchange inflow/outflow** — coins moving to exchange = sell pressure
+- **Funding rates** (for major perpetuals) — crowded long/short indicator
+- **Top gainers/losers** — sector rotation within crypto
+
+**Why this matters**: BTC dominance + funding rates + exchange flows give you the *structural crypto regime* separate from individual coin price action. "BTC dominance at 58% and rising, perp funding negative — this is a risk-off crypto environment regardless of what BTC chart shows."
+
+---
+
+#### Alpha Vantage (Free Tier)
+**API**: Free API key, 25 req/day free (was 5/min — now more restrictive, but usable)
+**What it gives you**: Intraday stock candles (1min, 5min, 15min, 30min, 60min) for US equities — the one piece you're missing for stocks.
+
+**Realistic usage with free tier**: Cache aggressively. At 25 req/day, cover 5-10 watchlist stocks with 1h candles (3 years of daily = 1 call). Intraday is limited but 1h candles for key stocks is achievable.
+
+**Upgrade path**: If a user wants intraday for stocks, this is the first thing to pay for ($50/mo for 75 req/min). But even the free tier unlocks hourly candles.
+
+---
+
+### Tier 2 — Strong Signal, Add in Phase 3-4
+
+#### Google Trends (`pytrends`)
+**What it gives you**: Search volume for any query, normalized 0-100, weekly or daily. Free, no key.
+
+Key uses:
+- Ticker symbol search volume → retail interest surge (a leading indicator of top for meme stocks)
+- "How to buy Bitcoin" → proxy for new retail crypto entrants (classic cycle top signal)
+- Inverse: declining search volume during price rise = institutional-only, more sustainable
+
+```python
+from pytrends.request import TrendReq
+pytrends = TrendReq()
+pytrends.build_payload(["NVDA", "buy nvidia stock"], timeframe="today 3-m")
+```
+
+---
+
+#### Reddit API (PRAW)
+**What it gives you**: Post/comment volume and sentiment for stocks in r/wallstreetbets, r/stocks, r/investing, r/SecurityAnalysis. Free with app credentials.
+
+Useful signals:
+- Mention velocity (mentions/day trending up = retail attention incoming)
+- Sentiment ratio of comments (positive vs negative in top 100 comments)
+- Award count on posts (high awards = high conviction, often contrarian signal)
+
+**Caveat**: r/wsb is a contrarian indicator — when they pile in, be careful. But the mention velocity itself is predictive of volatility spikes.
+
+---
+
+#### Binance WebSocket (Second Crypto Venue)
+**What it gives you**: Same as Coinbase — L2 order book, trades, klines — but for a different exchange with 3-5x the volume for most pairs.
+
+**Why both matter**: Cross-venue bid/ask comparison reveals:
+- Arbitrage pressure (price divergence between venues = directional pressure incoming)
+- Which venue has the "real" price discovery (usually Binance for crypto)
+- Binance perp vs Coinbase spot = funding rate proxy (if perp > spot, longs are paying shorts)
+
+`libs/core/marketdata/` already has the Coinbase WebSocket transport. Adding Binance is a near-identical implementation of the same WebSocket pattern against `wss://stream.binance.com`.
+
+---
+
+#### CBOE Options Data (Free Subset)
+**API**: CBOE data page, delayed options chain for free
+**What it gives you**: Put/call ratio for indices and major stocks (delayed 15min, but usable for daily context).
+
+Key signals:
+- **Equity P/C ratio > 0.9** → excessive put buying = fear = often contrarian bullish
+- **Index P/C ratio < 0.8** → complacency = potential top
+- **Unusual options volume vs open interest** → informed positioning signal (proxy for the options flow data you don't want to pay for yet)
+
+---
+
+#### BLS Economic Calendar
+**API**: `bls.gov/developers/` — free key, 500 queries/day
+**What it gives you**: Official release dates + data for CPI, PPI, jobs report, retail sales, etc.
+
+**Integration use**: Populate an `economic_calendar` table so the AI can say *"CPI release is in 2 trading days — elevated pre-release volatility is expected, current heatmap compression may be pre-event positioning."*
+
+---
+
+#### SEC EDGAR RSS Feeds (Real-time Filing Alerts)
+**API**: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&dateb=&owner=include&count=40&search_text=` — free, no key
+**What it gives you**: You already pull Form 4 on demand. The RSS feed gives you **real-time push** when a new Form 4 is filed for any company.
+
+**Integration**: Background async task in `ai_pipeline.py` polls EDGAR RSS every 5 min for watchlist symbols. When a Form 4 lands for an active watchlist symbol, it fires an immediate AI re-analysis trigger. This is the difference between seeing insider selling the same day vs 3 days later.
+
+---
+
+#### OpenBB Platform (Open Source Terminal)
+**What it is**: Open-source Python financial data platform with 100+ data connectors. Not an API itself but a library that wraps many free sources.
+
+**Useful connectors**:
+- Earnings dates (from multiple free sources)
+- Analyst estimates (consensus EPS/revenue)
+- Short interest data (FINRA bi-monthly free data)
+- ETF holdings (which ETFs hold a stock, and their inflow/outflow)
+
+---
+
+### Tier 3 — Supplementary, Add When Convenient
+
+| Source | What | Free? | Signal Value |
+|--------|------|-------|--------------|
+| **Wikipedia Pageviews API** | Page views for company Wikipedia pages | Yes | Retail attention proxy |
+| **GitHub API** | Commit activity, star growth for crypto projects | Yes | Developer activity = project health |
+| **FINRA Short Interest** | Bi-monthly short interest for all NYSE/NASDAQ stocks | Yes | High short interest = squeeze candidate or fundamentally broken |
+| **Treasury Direct Auction Results** | T-bill/bond auction demand (bid-to-cover ratio) | Yes | Macro liquidity stress |
+| **World Bank / IMF APIs** | Quarterly macro data | Yes | Long-term regime backdrop |
+
+---
+
+## 17. ML Models for Synthesis & Compression
+
+The key insight here: **ML models sit between raw data and the LLM.** Their job is compression and detection — turning 10,000 data points into 10 structured signals. This makes the LLM prompt smaller, cheaper, faster, and more accurate.
+
+```
+Raw Data (noisy, high-dimensional)
+    ↓
+ML Compression & Detection Layer
+    ↓
+Structured Signals (compact, labeled)
+    ↓
+LLM Narrative Generation (cheap, grounded, fast)
+```
+
+### 17.1 Regime Detection — Hidden Markov Model (HMM)
+
+**Library**: `hmmlearn` (pure Python, ~2MB)
+**Purpose**: Unsupervised detection of latent market regimes from price/volume sequences.
+
+An HMM with 4 states trained on `[log_returns, volume_ratio, atr_ratio, adx]` will self-organize into states that correspond to trending/ranging/accumulation/distribution — without you labeling any training data. The model learns the transition probabilities between states.
+
+```python
+from hmmlearn import hmm
+import numpy as np
+
+# Features: [log_return, normalized_volume, atr_percentile, adx]
+# Each row = one candle
+model = hmm.GaussianHMM(n_components=4, covariance_type="full", n_iter=200)
+model.fit(feature_matrix)  # Train on 2 years of daily data
+
+# Inference (real-time)
+current_state = model.predict(recent_features)[-1]
+state_probs = model.predict_proba(recent_features)[-1]
+# → regime_state: 2, probabilities: [0.05, 0.08, 0.81, 0.06]
+```
+
+**Output to prompt**: `hmm_regime: 2, hmm_confidence: 0.81, hmm_bars_in_state: 7, hmm_transition_prob_next_5: 0.23`
+
+**Why better than pure rule-based**: The HMM learns the actual statistical properties of each regime from data rather than hardcoded thresholds. It handles messy real markets where ADX=24 doesn't cleanly mean "ranging."
+
+---
+
+### 17.2 Changepoint Detection — Ruptures
+
+**Library**: `ruptures` (pure Python)
+**Purpose**: Find the exact bar where market regime changed. Answers "when did this trend start?" and "is this a genuine break or noise?"
+
+```python
+import ruptures as rpt
+
+# Detect structural breaks in price series
+signal = np.array(close_prices)
+algo = rpt.Pelt(model="rbf").fit(signal)
+breakpoints = algo.predict(pen=3)  # penalty controls sensitivity
+# → breakpoints: [45, 127, 203] — bar indices where regime changed
+```
+
+**Output to prompt**: `last_regime_change_bars_ago: 14, regime_change_confidence: HIGH, prior_regime_duration: 45_bars`
+
+---
+
+### 17.3 Order Book Compression — Autoencoder
+
+**Library**: `PyTorch` (lightweight inference, ~50MB)
+**Purpose**: Compress the full heatmap bid/ask density (which is a 128-row vector at each moment) into a small latent vector that captures the *shape* of liquidity.
+
+```python
+# Encoder: 128-dim heatmap slice → 8-dim latent vector
+# Trained on historical heatmap data
+
+encoder = HeatmapEncoder()  # small MLP: 128 → 64 → 32 → 8
+latent = encoder(heatmap_column)  # 8 floats
+# latent[0] ≈ "top-heaviness" (ask wall strength)
+# latent[1] ≈ "bottom-heaviness" (bid wall strength)
+# latent[2] ≈ "concentration" (tight cluster vs spread)
+# etc.
+
+# Reconstruction error = anomaly score
+reconstructed = decoder(latent)
+anomaly_score = mse(heatmap_column, reconstructed)
+# High anomaly_score → unusual heatmap shape → flag for LLM
+```
+
+**Output to prompt**: `heatmap_latent: [0.82, -0.31, 0.44, ...]`, `heatmap_anomaly_score: 0.73 (HIGH)`, `heatmap_shape: "ASK_DOMINATED_CONCENTRATED"`
+
+This means instead of sending the LLM 128 raw numbers, you send 8 floats + a label. Massive compression, same information.
+
+---
+
+### 17.4 SEC Filing Sentiment — FinBERT
+
+**Library**: `transformers` from HuggingFace, model `ProsusAI/finbert`
+**Purpose**: Classify the sentiment of SEC filing text as POSITIVE, NEGATIVE, or NEUTRAL with financial domain understanding. Regular BERT fails on financial language ("headwinds", "material uncertainty", "going concern").
+
+```python
+from transformers import pipeline
+
+# Load once at startup (~440MB model, runs on CPU in ~200ms/passage)
+nlp = pipeline("text-classification", model="ProsusAI/finbert")
+
+# Classify 8-K material sections, 10-K risk factors, etc.
+result = nlp("The company experienced significant headwinds in Q3 due to supply chain disruptions and expects material uncertainty in H1 2025.")
+# → [{"label": "negative", "score": 0.94}]
+
+# For Form 4 context sections, MD&A paragraphs, etc.
+```
+
+**Output to prompt**: `filing_sentiment: {10k_risk_section: "NEGATIVE (0.94)", 8k_description: "NEUTRAL (0.61)", mda_tone: "NEGATIVE (0.87)"}`
+
+**Why this matters**: Two companies can both file 8-Ks. One says "we signed a material partnership agreement." The other says "we are disclosing a material weakness in internal controls." FinBERT catches this distinction. The LLM can then focus on *why* it matters rather than doing the classification.
+
+---
+
+### 17.5 Anomaly Detection — Isolation Forest
+
+**Library**: `scikit-learn`
+**Purpose**: Flag unusual combinations of signals without needing labeled examples of "anomalies." Isolation Forest learns what "normal" looks like and scores everything else.
+
+```python
+from sklearn.ensemble import IsolationForest
+
+# Features: [volume, rel_volume, atr, price_change, bid_ask_ratio, delta]
+model = IsolationForest(contamination=0.05)  # 5% of data is anomalous
+model.fit(historical_features)
+
+# Score today's data
+anomaly_score = model.score_samples([today_features])[0]
+# → -0.7 (very anomalous) vs -0.1 (normal)
+```
+
+**Use cases**:
+- Crypto: flag unusual combinations of heatmap imbalance + volume + price movement
+- Stocks: flag unusual combinations of screener signals (e.g., high rel volume + ADX spike + RSI extreme simultaneously)
+
+**Output to prompt**: `order_flow_anomaly_score: -0.71 (TOP_2_PERCENTILE), anomaly_type: "VOLUME_HEATMAP_DELTA_CLUSTER"`
+
+---
+
+### 17.6 Signal Aggregation — LightGBM
+
+**Library**: `lightgbm`
+**Purpose**: Combine all numerical signals into a probability score for each regime/outcome. This is the "meta-model" that aggregates weak signals into a stronger prediction.
+
+```python
+import lightgbm as lgb
+
+# Features: HMM state, Isolation Forest score, RSI, ADX, COT net,
+#           insider buy/sell count, FRED yield curve, Fear&Greed, etc.
+# Target: next-N-bar regime label (labeled from HMM in hindsight)
+
+model = lgb.LGBMClassifier(n_estimators=100, max_depth=5)
+model.fit(X_train, y_train)
+
+# Real-time prediction
+regime_probs = model.predict_proba([current_features])[0]
+# → [trending_prob: 0.12, ranging_prob: 0.31, accumulation_prob: 0.48, distribution_prob: 0.09]
+```
+
+**Why LightGBM over a neural net**: Trains in seconds on a CPU, interpretable feature importances, handles missing data natively (when FRED data is stale, etc.), doesn't need GPU.
+
+**Output to prompt**: `lgbm_regime_probs: {accumulation: 0.48, ranging: 0.31, distribution: 0.09, trending: 0.12}`, `top_contributing_signals: ["insider_net_buy_count", "hmm_state_2", "fred_credit_spread_rising"]`
+
+The LightGBM feature importance also tells you *which signals drove the prediction* — which goes directly into the LLM prompt as an explanation.
+
+---
+
+### 17.7 Pattern Matching — DTW + KNN
+
+**Library**: `tslearn` or `fastdtw`
+**Purpose**: Find historical price action sequences that are most similar to what's happening now (Dynamic Time Warping). Answer: "what happened last time the chart looked like this?"
+
+```python
+from fastdtw import fastdtw
+
+# Current 20-bar normalized return sequence
+current_pattern = normalize(recent_20_bars)
+
+# Compare against database of historical patterns
+distances = [(fastdtw(current_pattern, hist_pattern)[0], hist_outcome)
+             for hist_pattern, hist_outcome in pattern_db]
+
+top_3_matches = sorted(distances)[:3]
+# → historical analog: "2023-03-14, next 5 days: +4.2%"
+#                      "2022-09-07, next 5 days: -2.1%"
+#                      "2024-01-22, next 5 days: +3.8%"
+```
+
+**Output to prompt**: `historical_analogs: [{date: "2023-03-14", similarity: 0.94, outcome_5d: "+4.2%"}, ...]`, `analog_consensus: "BULLISH (2/3 analogs positive)"`
+
+This gives the LLM actual historical precedent to cite rather than making generalizations.
+
+---
+
+### 17.8 Real-time Noise Filter — Kalman Filter
+
+**Library**: `pykalman` or pure numpy implementation
+**Purpose**: Separate trend signal from noise in real-time. Unlike a moving average (which lags), a Kalman filter adapts its smoothing to the current volatility level.
+
+```python
+# Kalman-filtered price = best estimate of "true" price stripped of noise
+# Kalman velocity = instantaneous trend direction and speed
+# Kalman residual = how far current price deviates from filtered trend
+
+kf_price, kf_velocity, kf_residual = kalman_filter(price_series)
+# → kf_price: 67,342 (smooth)
+# → kf_velocity: +12.3 per bar (trending up at this rate)
+# → kf_residual: +187 (current price 187 above filter = extended)
+```
+
+**Output to prompt**: `kalman_velocity: +12.3 (UPTREND), kalman_extension: +187 (EXTENDED_2.1_SIGMA), kalman_trend_stable: true`
+
+**Why this matters for the AI**: The Kalman residual directly answers "is price extended?" without needing RSI or other lagging indicators. And the velocity gives rate-of-change of trend.
+
+---
+
+### 17.9 Sentence Embeddings for Filing Similarity
+
+**Library**: `sentence-transformers`, model `all-MiniLM-L6-v2` (~80MB, fast CPU inference)
+**Purpose**: Convert SEC filing text sections into dense vectors, enabling semantic search and similarity comparison.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Embed risk factors from 10-K
+embedding = model.encode("The company faces significant competition from well-funded competitors...")
+
+# Compare to historical embeddings of known distress cases
+# Or: find the most semantically similar historical filings
+similarity = cosine_similarity(embedding, historical_embeddings)
+```
+
+**Use cases**:
+- "Does this 10-K's risk section sound more like a company about to cut guidance?"
+- Cluster similar filings to find peer companies with similar risk profiles
+- Detect when language in filings is shifting toward more negative/uncertain framing over time
+
+---
+
+### Summary: ML Pipeline Position in Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  ML COMPRESSION LAYER                        │
+│                                                              │
+│  Raw price/volume  → Kalman Filter      → kf_velocity       │
+│                   → HMM                → regime_state       │
+│                   → Ruptures           → last_breakpoint    │
+│                   → Isolation Forest   → anomaly_score      │
+│                   → DTW/KNN            → historical_analogs │
+│                                                              │
+│  Raw heatmap      → Autoencoder        → 8-dim latent       │
+│                   → Isolation Forest   → heatmap_anomaly    │
+│                                                              │
+│  SEC filing text  → FinBERT            → sentiment_score    │
+│                   → Sentence-BERT      → filing_embedding   │
+│                                                              │
+│  All signals      → LightGBM           → regime_probs       │
+│                                         + feature_importance│
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+              ~30 compact numbers + labels
+                          ↓
+                  LLM PROMPT (~800 tokens)
+                          ↓
+                 Human narrative + annotations
+```
+
+**Python additions to `scripts/requirements.txt`**:
+```
+hmmlearn>=0.3.2           # HMM regime detection
+ruptures>=1.1.9           # Changepoint detection
+scikit-learn>=1.4.0       # Isolation Forest, preprocessing
+lightgbm>=4.3.0           # Signal aggregation meta-model
+fastdtw>=0.3.4            # Pattern matching
+pykalman>=0.9.7           # Kalman filter
+torch>=2.2.0              # Autoencoder (CPU-only, lightweight inference)
+transformers>=4.40.0      # FinBERT (text-classification pipeline)
+sentence-transformers>=3.0.0  # MiniLM filing embeddings
+fredapi>=0.5.0             # FRED macro data
+cot-reports>=0.3.0         # CFTC COT data
+pycoingecko>=3.1.0         # CoinGecko crypto data
+pytrends>=4.9.2            # Google Trends
+praw>=7.7.0                # Reddit API
+bls>=0.3.0                 # BLS economic data
+```
+
+---
+
 *This document is the blueprint. Phase 1 can be started immediately — the SEC data pipeline and TradingView screener are already operational. The first working analysis (stocks, SEC + screener → Claude → commentary dock) requires only the Python AI layer and a thin C++ subprocess wrapper.*
