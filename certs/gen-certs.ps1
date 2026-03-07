@@ -14,6 +14,28 @@ $keyFile = Join-Path $outDir "sentinel-server.key"
 $crtFile = Join-Path $outDir "sentinel-server.crt"
 $cnfFile = Join-Path $outDir "_san.cnf"
 
+function Resolve-OpenSslExe {
+    $cmd = Get-Command openssl.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        "$env:ProgramFiles\Git\usr\bin\openssl.exe",
+        "$env:ProgramFiles\Git\mingw64\bin\openssl.exe",
+        "$env:ProgramFiles(x86)\Git\usr\bin\openssl.exe",
+        "$env:ProgramFiles(x86)\Git\mingw64\bin\openssl.exe"
+    )
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
 # Minimal OpenSSL config with Subject Alternative Names
 @"
 [req]
@@ -34,13 +56,22 @@ DNS.1 = localhost
 IP.1  = 127.0.0.1
 "@ | Set-Content $cnfFile
 
-Write-Host "Generating EC private key..."
-& openssl ecparam -name prime256v1 -genkey -noout -out $keyFile
+try {
+    $opensslExe = Resolve-OpenSslExe
+    if (-not $opensslExe) {
+        throw "OpenSSL not found. Install Git for Windows or add openssl.exe to PATH."
+    }
 
-Write-Host "Generating self-signed certificate (365 days)..."
-& openssl req -new -x509 -key $keyFile -out $crtFile -days 365 -config $cnfFile
+    Write-Host "Using OpenSSL: $opensslExe"
+    Write-Host "Generating EC private key..."
+    & $opensslExe ecparam -name prime256v1 -genkey -noout -out $keyFile
 
-Remove-Item $cnfFile -ErrorAction SilentlyContinue
+    Write-Host "Generating self-signed certificate (365 days)..."
+    & $opensslExe req -new -x509 -key $keyFile -out $crtFile -days 365 -config $cnfFile
+} finally {
+    Remove-Item $cnfFile -ErrorAction SilentlyContinue
+}
+
 
 Write-Host ""
 Write-Host "Done. Files written to:"

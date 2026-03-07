@@ -120,7 +120,14 @@ else
 fi
 
 # README
-cp "${SENTINEL_ROOT}/README-RUN.md" ./README.md
+if [[ -f "${SENTINEL_ROOT}/scripts/release/LAUNCH_README.md" ]]; then
+  cp "${SENTINEL_ROOT}/scripts/release/LAUNCH_README.md" ./LAUNCH_README.md
+fi
+if [[ -f "${SENTINEL_ROOT}/README-RUN.md" ]]; then
+  cp "${SENTINEL_ROOT}/README-RUN.md" ./README.md
+elif [[ -f "${SENTINEL_ROOT}/README.md" ]]; then
+  cp "${SENTINEL_ROOT}/README.md" ./README.md
+fi
 
 # Launcher: start server in background, then run client (same shell so CWD = package dir for config/certs)
 # SENTINEL_QML_PATH makes the main QML view load from package libs/gui/qml (avoids build-machine path when distributed)
