@@ -13,11 +13,11 @@
  *     sessionEndMs], so TPO columns line up with their corresponding candles.
  *
  * Letter encoding in the Grayscale16 texture:
- *   neutral  (no letter): 0x8000  ← maps to mid-grey in the shader
- *   present  (any letter): value above neutral, scaled by letter position
- *                           in the A-Z alphabet so each letter gets a unique
+ *   neutral  (no letter): 0x8000  ← culled by neutralFloor (transparent)
+ *   present  (any letter): value BELOW neutral in [0x6666, 0x1000], scaled
+ *                           by letter index so each letter gets a unique
  *                           intensity.  The shader maps this to bid colour
- *                           (blue spectrum).
+ *                           (blue spectrum); 'A' is faint, 'Z' is bright.
  *
  * The letter-to-intensity mapping gives the GPU shader enough information to
  * distinguish letter brackets visually without needing MSDF glyphs.
@@ -52,14 +52,20 @@ namespace {
 //   signedDelta = (encoded - 0.5) * 2.0
 //   signedDelta < 0  → bid color (blue)    ← letters go here
 //   signedDelta >= 0 → ask color (gold)
-//   signedDelta == 0 → neutral (0x8000, culled by neutralFloor)
+//   magnitude ≤ neutralFloor → transparent (discarded)
 //
-// Letters must therefore encode BELOW 0x8000.  'A' maps to 0x7FFF (just
-// below neutral, faintest blue) and 'Z' maps to 0x0001 (maximum intensity
-// blue), so later letters in the alphabet are progressively brighter.
+// Letters encode BELOW 0x8000 (neutral) in range [0x6666, 0x1000]:
+//   'A' (idx=0) → 0x6666: magnitude ≈ 0.20 (faint blue, clearly visible)
+//   'Z' (idx=25) → ~0x1000: magnitude ≈ 0.88 (bright blue)
+//
+// The gap between neutral (magnitude ≈ 0.00002) and 'A' (0.20) is large
+// enough that neutralFloor=0.05 reliably culls background without clipping
+// any letter.  The previous range [0x7FFF, 0x0FFF] put 'A' only 1 bit below
+// neutral (magnitude ≈ 0.00003), making early letters invisible and leaking
+// a faint gray background when neutral cells barely passed the cull test.
 inline uint16_t encodeLetterToU16(char letter) {
     if (letter == '\0') {
-        return 0x8000u;  // neutral → transparent
+        return 0x8000u;  // neutral → discarded by neutralFloor
     }
     // Normalise to 0-25 index (wrap unknown chars to 0).
     int idx = 0;
@@ -68,10 +74,10 @@ inline uint16_t encodeLetterToU16(char letter) {
     } else if (letter >= 'a' && letter <= 'z') {
         idx = letter - 'a';
     }
-    // Map 0-25 into [0x0FFF, 0x7FFF]: below neutral → bid → blue.
-    // 'A' (idx=0) → 0x7FFF (faintest), 'Z' (idx=25) → 0x0FFF (brightest).
-    const uint16_t top  = 0x7FFFu;
-    const uint16_t step = static_cast<uint16_t>(0x7000u / 25);
+    // Map [0,25] → [0x6666, 0x1000]: below neutral (0x8000) → bid → blue.
+    // 'A' (idx=0) → 0x6666 (faint), 'Z' (idx=25) → ~0x1000 (bright).
+    const uint16_t top  = 0x6666u;
+    const uint16_t step = static_cast<uint16_t>((0x6666u - 0x1000u) / 25u);  // ≈ 884
     return static_cast<uint16_t>(top - static_cast<uint16_t>(idx) * step);
 }
 
@@ -311,12 +317,12 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
 
     // ── Material parameters ─────────────────────────────────────────────────
-    m_node->setColor(QColor(42, 50, 60, 180));
+    m_node->setColor(QColor(42, 50, 60, 255));         // alpha=255: letter alpha driven by shaped intensity
     m_node->setBidColor(QColor(102, 180, 255, 255));   // blue – letters
     m_node->setAskColor(QColor(255, 196, 80,  255));   // gold – unused by TPO
-    m_node->setNeutralFloor(0.0f);    // 0x8000 exact neutral is already transparent; let all letters through
-    m_node->setMagnitudeScale(2.0f);  // boost: letters live in [0, 0.5] range, scale to [0, 1]
-    m_node->setMagnitudeGamma(0.5f);  // mild gamma lift so early letters (A/B/C) are clearly visible
+    m_node->setNeutralFloor(0.05f);   // 0x8000 has magnitude≈0.00002; 0.05 culls background reliably
+    m_node->setMagnitudeScale(1.0f);  // letters span [0.20, 0.88]; no extra boost needed
+    m_node->setMagnitudeGamma(0.5f);  // sqrt lift: 'A' alpha≈0.45, 'Z' alpha≈0.94
 
     Q_UNUSED(forceFull);
     Q_UNUSED(timeOffset);
