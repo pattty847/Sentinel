@@ -120,7 +120,7 @@ gui:
   screenshot_dir: ./screenshots
 ```
 
-See `config/server_config.yaml` and `config/client_config.yaml` for all options.
+See `config/server_config.yaml` and `config/client_config.yaml` for all options. For a guided overview and ownership rules, see **`docs/CONFIG.md`**.
 
 ---
 
@@ -153,11 +153,23 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 
 ---
 
-## Docs
+## Documentation
 
-- `docs/ARCHITECTURE.md` — dataflow and rendering pipeline
-- `docs/MARKETDATA.md` — MarketDataCoreEngine pipeline
-- `docs/FEATURES.md` - Outline of features for the terminal
+Structured outline of project docs (in `docs/`, excluding `docs/TODO.md` and `docs/private/` if present). Use these for architecture, setup, and behavior; keep them as the single source of truth.
+
+| Document | Purpose |
+|----------|---------|
+| **Architecture & pipeline** | |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System overview: client–server split, directory layout, data and rendering pipeline, TimeAxisMapping, protocol, threading, performance. Start here for how pieces fit together. |
+| [`docs/MARKETDATA.md`](docs/MARKETDATA.md) | Market data stack: MarketDataCoreEngine, transport, auth, dispatch, threading, TLS/WSS, and trading stream (paper). |
+| [`docs/COORDINATE_SYSTEMS.md`](docs/COORDINATE_SYSTEMS.md) | Chart coordinate spaces (world, grid, screen) and renderer contracts; when to use texture-quad vs geometry; forbidden cross-contract patterns. |
+| **Setup & configuration** | |
+| [`docs/CONFIG.md`](docs/CONFIG.md) | Server and client YAML config files, load order, ownership (server-authoritative vs client-only), and example snippets. |
+| [`docs/PAPER_TRADING_QUICKSTART.md`](docs/PAPER_TRADING_QUICKSTART.md) | Paper trading: config, run order, subscribe, hotkeys (B/S/F/C), UI feedback, troubleshooting. |
+| **Reference** | |
+| [`docs/FEATURES.md`](docs/FEATURES.md) | Feature overview and notable completed work (e.g. axis performance). |
+
+For task tracking and roadmap, see `docs/TODO.md` (not part of the canonical outline above).
 
 ---
 

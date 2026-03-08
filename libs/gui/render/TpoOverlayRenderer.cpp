@@ -254,9 +254,17 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     // ── Source rect (Y range always from shared viewport) ──────────────────
     QRectF tpoSrcRect(0, 0, m_gridWidth, m_gridHeight);
     if (sourceRect.width() > 0.0 && sourceRect.height() > 0.0) {
-        const qreal srcX = std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
-        const qreal srcW = std::clamp(sourceRect.width(), 1.0,
-                                      static_cast<qreal>(m_gridWidth) - srcX);
+        // VerticalTimeline mode is session-time anchored: X in the texture is
+        // [0..sessionPeriods). Reusing heatmap sourceRect.x here causes the TPO
+        // texture to drift/stretch while horizontal panning.
+        // Keep full session X coverage and only inherit Y clipping from sourceRect.
+        const bool lockTimelineX = (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline);
+        const qreal srcX = lockTimelineX
+            ? 0.0
+            : std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
+        const qreal srcW = lockTimelineX
+            ? static_cast<qreal>(m_gridWidth)
+            : std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth) - srcX);
         const qreal srcY = std::clamp(sourceRect.y(), 0.0, static_cast<qreal>(m_gridHeight - 1));
         const qreal srcH = std::clamp(sourceRect.height(), 1.0,
                                       static_cast<qreal>(m_gridHeight) - srcY);
