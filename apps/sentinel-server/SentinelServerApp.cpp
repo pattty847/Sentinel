@@ -140,7 +140,7 @@ bool SentinelServerApp::initialize() {
             sLog_Error("MarketDataCore Error: " << error);
         });
 
-        m_marketDataCore->onLatency([](int latencyMs) {
+        m_marketDataCore->onLatency([this](int latencyMs) {
             // Log Coinbase WebSocket latency (server time - Coinbase timestamp)
             // This runs frequently, so throttle logging
             static int lastLoggedLatency = -1;
@@ -154,6 +154,8 @@ bool SentinelServerApp::initialize() {
                 lastLoggedLatency = latencyMs;
                 lastLogTime = now;
             }
+            if (m_server)
+                m_server->broadcastCoinbaseLatency(latencyMs);
         });
 
         QObject::connect(m_server.get(), &SentinelStreamServer::clientSubscribed, this,

@@ -6,11 +6,13 @@
 #include "render/MsdfGlyphNode.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
+#include "render/TpoDebugTrace.hpp"
 
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QtEndian>
 #include <algorithm>
+#include <sstream>
 UnifiedGridRenderer::FrameContext UnifiedGridRenderer::buildFrameContext() const {
     FrameContext frame;
     frame.surfaceBounds = boundingRect();
@@ -270,6 +272,35 @@ void UnifiedGridRenderer::renderOverlays(
             tpoSessionLogTimer.restart();
         }
     }
+    if (tpo_debug::enabled() && drawTpo) {
+        static QElapsedTimer tpoFileLogTimer;
+        static bool tpoFileLogTimerStarted = false;
+        if (!tpoFileLogTimerStarted) {
+            tpoFileLogTimer.start();
+            tpoFileLogTimerStarted = true;
+        }
+        if (tpoFileLogTimer.elapsed() > 250) {
+            std::ostringstream payload;
+            payload << "{"
+                    << "\"sessionStartMs\":" << tpoSessionStart
+                    << ",\"sessionEndMs\":" << tpoSessionEnd
+                    << ",\"bracketMs\":" << tpoBracketMs
+                    << ",\"sessionColumns\":" << tpoSessionColumns
+                    << ",\"viewStartMs\":" << frame.mapping.viewStartMs
+                    << ",\"viewEndMs\":" << frame.mapping.viewEndMs
+                    << ",\"drawRectX\":" << drawRect.x()
+                    << ",\"drawRectW\":" << drawRect.width()
+                    << ",\"srcRectX\":" << srcRect.x()
+                    << ",\"srcRectW\":" << srcRect.width()
+                    << ",\"mappingValid\":" << (frame.mapping.valid ? "true" : "false")
+                    << "}";
+            tpo_debug::append("UnifiedGridRenderer.Render.cpp:renderOverlays",
+                              "tpo_render_context",
+                              "H4",
+                              payload.str());
+            tpoFileLogTimer.restart();
+        }
+    }
     m_tpoOverlay.render(window(),
                         texNode,
                         drawTpo,
@@ -283,7 +314,8 @@ void UnifiedGridRenderer::renderOverlays(
                         tpoSessionStart,
                         tpoSessionEnd,
                         frame.mapping.viewStartMs,
-                        frame.mapping.viewEndMs);
+                        frame.mapping.viewEndMs,
+                        frame.surfaceBounds); // world→screen base; must match candle/label mapping
 }
 
 void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,

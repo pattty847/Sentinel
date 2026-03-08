@@ -13,6 +13,7 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
+#include "TpoDebugTrace.hpp"
 #include "SentinelLogging.hpp"
 #include "../../core/protocol/VolumeProfileSlice.hpp"
 #include <algorithm>
@@ -20,6 +21,7 @@ Assumptions: Server is authoritative for heatmap columns.
 #include <limits>
 #include <cstring>
 #include <bit>
+#include <sstream>
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
@@ -273,6 +275,24 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
         return;
     }
 
+    if (tpo_debug::enabled()) {
+        std::ostringstream payload;
+        payload << "{"
+                << "\"symbol\":\"" << slice.symbol.toStdString() << "\""
+                << ",\"bucketStartMs\":" << slice.bucketStartMs
+                << ",\"bucketEndMs\":" << slice.bucketEndMs
+                << ",\"timeframeMs\":" << slice.timeframeMs
+                << ",\"sessionType\":" << slice.sessionType
+                << ",\"gridWidth\":" << resolvedWidth
+                << ",\"gridHeight\":" << resolvedHeight
+                << ",\"lettersBytes\":" << slice.letters.size()
+                << "}";
+        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
+                          "tpo_slice_ingest",
+                          "H1",
+                          payload.str());
+    }
+
     m_tpoStream->setSessionType(slice.sessionType);
 
     if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
@@ -298,6 +318,21 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
     }
 
     const auto snap = m_tpoStream->snapshot();
+    if (tpo_debug::enabled()) {
+        std::ostringstream payload;
+        payload << "{"
+                << "\"sessionStartMs\":" << snap.sessionStartMs
+                << ",\"sessionEndMs\":" << snap.sessionEndMs
+                << ",\"timeframeMs\":" << snap.timeframeMs
+                << ",\"gridWidth\":" << snap.gridWidth
+                << ",\"gridHeight\":" << snap.gridHeight
+                << ",\"pendingUploads\":" << pendingUploads.size()
+                << "}";
+        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
+                          "tpo_snapshot_after_ingest",
+                          "H2",
+                          payload.str());
+    }
     for (auto& upload : pendingUploads) {
         emit tpoColumnReady(upload.x,
                             snap.gridWidth,

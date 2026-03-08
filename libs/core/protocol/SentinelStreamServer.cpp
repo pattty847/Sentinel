@@ -120,6 +120,7 @@ class Session : public std::enable_shared_from_this<Session> {
     int64_t tpoBucketMs_ = 900'000;
     SessionManager::SessionType tpoSessionType_ = SessionManager::SessionType::H24;
     int64_t tpoSessionMs_ = SessionManager::sessionDurationMs(SessionManager::SessionType::H24);
+    uint64_t m_latencySenderId = 0;
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -637,8 +638,23 @@ public:
             [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
                 self->on_bar_closed(symbol, tf, bar);
             });
-            
+        if (owner_) {
+            m_latencySenderId = owner_->registerLatencySender(
+                [weak_this = std::weak_ptr<Session>(self), exec = ws_.get_executor()](int ms) {
+                    net::post(exec, [weak_this, ms]() {
+                        if (auto s = weak_this.lock())
+                            s->sendCoinbaseLatency(ms);
+                    });
+                });
+        }
         do_read();
+    }
+
+    void sendCoinbaseLatency(int ms) {
+        nlohmann::json payload;
+        payload["type"] = protocol::toString(protocol::MessageType::CoinbaseLatency);
+        payload["ms"] = ms;
+        do_write(payload.dump());
     }
 
     void do_read() {
@@ -1408,6 +1424,10 @@ public:
     }
 
     void fail(beast::error_code ec, char const* what) {
+        if (owner_ && m_latencySenderId != 0) {
+            owner_->unregisterLatencySender(m_latencySenderId);
+            m_latencySenderId = 0;
+        }
         if (ec != websocket::error::closed && ec != net::error::operation_aborted) {
              sLog_Error("Session error: " << what << ": " << ec.message().c_str());
         }
@@ -1508,4 +1528,31 @@ void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {
     return *m_restClient;
+}
+
+uint64_t SentinelStreamServer::registerLatencySender(std::function<void(int)> sendFn) {
+    const uint64_t id = m_nextLatencySenderId++;
+    std::lock_guard<std::mutex> lock(m_latencySendersMutex);
+    m_latencySenders.emplace_back(id, std::move(sendFn));
+    return id;
+}
+
+void SentinelStreamServer::unregisterLatencySender(uint64_t id) {
+    std::lock_guard<std::mutex> lock(m_latencySendersMutex);
+    m_latencySenders.erase(
+        std::remove_if(m_latencySenders.begin(), m_latencySenders.end(),
+            [id](const std::pair<uint64_t, std::function<void(int)>>& p) { return p.first == id; }),
+        m_latencySenders.end());
+}
+
+void SentinelStreamServer::broadcastCoinbaseLatency(int milliseconds) {
+    std::vector<std::function<void(int)>> copy;
+    {
+        std::lock_guard<std::mutex> lock(m_latencySendersMutex);
+        copy.reserve(m_latencySenders.size());
+        for (auto& p : m_latencySenders)
+            copy.push_back(p.second);
+    }
+    for (auto& fn : copy)
+        fn(milliseconds);
 }

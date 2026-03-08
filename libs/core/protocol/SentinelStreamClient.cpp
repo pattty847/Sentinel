@@ -549,6 +549,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::VolumeProfileSlice:
                 handleVolumeProfileSliceMessage(msg);
                 return;
+            case protocol::MessageType::CoinbaseLatency:
+                handleCoinbaseLatencyMessage(msg);
+                return;
             case protocol::MessageType::Unknown:
                 break;
             default:
@@ -1249,4 +1252,12 @@ void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json&
     slice.valPrice       = valPrice;
     slice.volumeBinsF32  = std::move(bins);
     emit volumeProfileSliceReceived(slice);
+}
+
+void SentinelStreamClient::handleCoinbaseLatencyMessage(const nlohmann::json& msg) {
+    if (!msg.contains("ms") || !msg["ms"].is_number_integer()) {
+        return;
+    }
+    const int ms = msg["ms"].get<int>();
+    emit coinbaseLatencyReceived(ms);
 }

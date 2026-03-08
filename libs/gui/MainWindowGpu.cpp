@@ -142,6 +142,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
         connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
         connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
+        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
+            connect(remote->streamClient(), &SentinelStreamClient::coinbaseLatencyReceived,
+                    m_statusBar, &StatusBar::setCoinbaseLatency, Qt::QueuedConnection);
+        }
         sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
     }
     

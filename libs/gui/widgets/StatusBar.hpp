@@ -22,6 +22,7 @@ public:
     void setGpuUsage(int percent);
     void setFps(double fps);
     void setLatency(int milliseconds);
+    void setCoinbaseLatency(int milliseconds);
     void setReadyStatus(const QString& status = "Ready");
     void showVersion();
 
@@ -35,6 +36,7 @@ private:
     QLabel* m_cpuLabel;
     QLabel* m_gpuLabel;
     QLabel* m_latencyLabel;
+    QLabel* m_coinbaseLatencyLabel;
     QLabel* m_versionLabel;
 
     // Metrics storage
@@ -42,6 +44,7 @@ private:
     int m_cpuPercent = 0;
     int m_gpuPercent = 0;
     int m_latencyMs = 0;
+    int m_coinbaseLatencyMs = -1;
     bool m_connected = false;
     
     QTimer* m_updateTimer;

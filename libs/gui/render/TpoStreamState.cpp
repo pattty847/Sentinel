@@ -11,11 +11,13 @@
  * Threading: Ingest on data thread; snapshot / reads must take the internal lock.
  */
 #include "TpoStreamState.hpp"
+#include "TpoDebugTrace.hpp"
 
 #include "../../core/servermodel/SessionManager.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <unordered_set>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,6 +37,7 @@ void TpoStreamState::setSessionType(int sessionType) {
     if (dur > 0) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_sessionMs = dur;
+        m_sessionType = sessionType;
     }
 }
 
@@ -105,10 +108,16 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
     }
 
     // ── Session boundary alignment ──────────────────────────────────────────
-    // Use simple floor-div alignment (same as original, no tz lookup needed at
-    // client level since the server stamps wall-clock buckets).
-    const int64_t sessionStartMs = (bucketStartMs / sessionMs) * sessionMs;
-    const int64_t sessionEndMs   = sessionStartMs + sessionMs;
+    // Match server boundary semantics (SessionManager::sessionContaining).
+    const auto boundary = SessionManager::sessionContaining(
+        bucketStartMs,
+        static_cast<SessionManager::SessionType>(m_sessionType));
+    const int64_t sessionStartMs = boundary.valid
+        ? boundary.startMs
+        : ((bucketStartMs / sessionMs) * sessionMs);
+    const int64_t sessionEndMs = boundary.valid
+        ? boundary.endMs
+        : (sessionStartMs + sessionMs);
 
     if (m_sessionStartMs <= 0) {
         m_sessionStartMs = sessionStartMs;
@@ -195,6 +204,27 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
     }
     m_timeframeMs      = timeframeMs;
     m_lastSliceStartMs = bucketStartMs;
+
+    if (tpo_debug::enabled()) {
+        std::ostringstream payload;
+        payload << "{"
+                << "\"bucketStartMs\":" << bucketStartMs
+                << ",\"bucketEndMs\":" << bucketEndMs
+                << ",\"timeframeMs\":" << timeframeMs
+                << ",\"sessionType\":" << m_sessionType
+                << ",\"sessionStartMs\":" << m_sessionStartMs
+                << ",\"sessionEndMs\":" << m_sessionEndMs
+                << ",\"periodIdx\":" << periodIdx
+                << ",\"boundedPeriod\":" << boundedPeriod
+                << ",\"gridWidth\":" << m_gridWidth
+                << ",\"gridHeight\":" << m_gridHeight
+                << ",\"filledColumns\":" << m_filledColumns
+                << "}";
+        tpo_debug::append("TpoStreamState.cpp:ingestSlice",
+                          "tpo_period_alignment",
+                          "H3",
+                          payload.str());
+    }
 
     {
         std::lock_guard<std::mutex> uploadLock(m_uploadMutex);

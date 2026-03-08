@@ -46,6 +46,9 @@ public:
     void setDisplayMode(TpoStreamState::DisplayMode mode);
     TpoStreamState::DisplayMode displayMode() const { return m_displayMode; }
 
+    // drawRect      – heatmap overlap rect; used for HorizontalProfile draw area.
+    // surfaceBounds – full item area (0,0,w,h); VerticalTimeline uses this for world→screen
+    //                 projection so session columns align with candles regardless of ring state.
     void render(QQuickWindow* window,
                 QSGNode* parentNode,
                 bool drawTpo,
@@ -60,7 +63,8 @@ public:
                 int64_t sessionStartMs    = 0,
                 int64_t sessionEndMs      = 0,
                 int64_t viewStartMs       = 0,
-                int64_t viewEndMs         = 0);
+                int64_t viewEndMs         = 0,
+                QRectF  surfaceBounds     = QRectF());
 
 private:
     void ensureImage();

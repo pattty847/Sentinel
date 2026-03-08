@@ -23,6 +23,7 @@
  * distinguish letter brackets visually without needing MSDF glyphs.
  */
 #include "TpoOverlayRenderer.hpp"
+#include "TpoDebugTrace.hpp"
 
 #include "FootprintIntensityNode.hpp"
 #include "SentinelLogging.hpp"
@@ -37,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -44,11 +46,20 @@
 namespace {
 
 // Encode a letter byte to a Grayscale16 texture value.
-// Returns 0x8000 (neutral) for '\0', otherwise maps 'A'–'Z' / 'a'–'z'
-// to a range above neutral so the shader can colourise by bracket.
+// Returns 0x8000 (neutral / transparent) for '\0'.
+//
+// The FootprintIntensityNode shader maps texture values as:
+//   signedDelta = (encoded - 0.5) * 2.0
+//   signedDelta < 0  → bid color (blue)    ← letters go here
+//   signedDelta >= 0 → ask color (gold)
+//   signedDelta == 0 → neutral (0x8000, culled by neutralFloor)
+//
+// Letters must therefore encode BELOW 0x8000.  'A' maps to 0x7FFF (just
+// below neutral, faintest blue) and 'Z' maps to 0x0001 (maximum intensity
+// blue), so later letters in the alphabet are progressively brighter.
 inline uint16_t encodeLetterToU16(char letter) {
     if (letter == '\0') {
-        return 0x8000u;
+        return 0x8000u;  // neutral → transparent
     }
     // Normalise to 0-25 index (wrap unknown chars to 0).
     int idx = 0;
@@ -57,11 +68,11 @@ inline uint16_t encodeLetterToU16(char letter) {
     } else if (letter >= 'a' && letter <= 'z') {
         idx = letter - 'a';
     }
-    // Map 0-25 to the range [0x9000, 0xFFFF] so the shader sees a strong
-    // positive value for every letter.  Increment is 0x2EEF (~12015).
-    const uint16_t base = 0x9000u;
-    const uint16_t step = static_cast<uint16_t>(0x6FFFu / 25);
-    return static_cast<uint16_t>(base + static_cast<uint16_t>(idx) * step);
+    // Map 0-25 into [0x0FFF, 0x7FFF]: below neutral → bid → blue.
+    // 'A' (idx=0) → 0x7FFF (faintest), 'Z' (idx=25) → 0x0FFF (brightest).
+    const uint16_t top  = 0x7FFFu;
+    const uint16_t step = static_cast<uint16_t>(0x7000u / 25);
+    return static_cast<uint16_t>(top - static_cast<uint16_t>(idx) * step);
 }
 
 } // namespace
@@ -136,7 +147,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                                 int64_t sessionStartMs,
                                 int64_t sessionEndMs,
                                 int64_t viewStartMs,
-                                int64_t viewEndMs) {
+                                int64_t viewEndMs,
+                                QRectF  surfaceBounds) {
     if (!window || !parentNode) {
         return;
     }
@@ -254,40 +266,57 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     // ── Source rect (Y range always from shared viewport) ──────────────────
     QRectF tpoSrcRect(0, 0, m_gridWidth, m_gridHeight);
     if (sourceRect.width() > 0.0 && sourceRect.height() > 0.0) {
-        // VerticalTimeline mode is session-time anchored: X in the texture is
-        // [0..sessionPeriods). Reusing heatmap sourceRect.x here causes the TPO
-        // texture to drift/stretch while horizontal panning.
-        // Keep full session X coverage and only inherit Y clipping from sourceRect.
-        const bool lockTimelineX = (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline);
-        const qreal srcX = lockTimelineX
-            ? 0.0
-            : std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
-        const qreal srcW = lockTimelineX
-            ? static_cast<qreal>(m_gridWidth)
-            : std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth) - srcX);
         const qreal srcY = std::clamp(sourceRect.y(), 0.0, static_cast<qreal>(m_gridHeight - 1));
         const qreal srcH = std::clamp(sourceRect.height(), 1.0,
                                       static_cast<qreal>(m_gridHeight) - srcY);
-        tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
+        if (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline &&
+            sessionStartMs > 0 && sessionEndMs > sessionStartMs &&
+            viewStartMs > 0 && viewEndMs > viewStartMs) {
+            // Map visible world-time interval inside session into texture X.
+            const int64_t visibleStart = std::max(viewStartMs, sessionStartMs);
+            const int64_t visibleEnd = std::min(viewEndMs, sessionEndMs);
+            if (visibleEnd > visibleStart) {
+                const double sessionSpanMs = static_cast<double>(sessionEndMs - sessionStartMs);
+                const double x0 = (static_cast<double>(visibleStart - sessionStartMs) / sessionSpanMs) *
+                                  static_cast<double>(m_gridWidth);
+                const double x1 = (static_cast<double>(visibleEnd - sessionStartMs) / sessionSpanMs) *
+                                  static_cast<double>(m_gridWidth);
+                const qreal srcX = std::clamp(static_cast<qreal>(x0), 0.0, static_cast<qreal>(m_gridWidth - 1));
+                const qreal srcW = std::clamp(static_cast<qreal>(x1 - x0), 1.0,
+                                              static_cast<qreal>(m_gridWidth) - srcX);
+                tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
+            } else {
+                tpoSrcRect = QRectF();
+            }
+        } else {
+            const qreal srcX = std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
+            const qreal srcW = std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth) - srcX);
+            tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
+        }
     }
 
     // ── Draw rect: mode-specific positioning ────────────────────────────────
+    // VerticalTimeline projects session time onto screen using surfaceBounds (full item area,
+    // 0,0,w,h) + viewStart/End — the same base that candles and labels use.  drawRect is the
+    // heatmap's ring-clipped overlap rect and must NOT be used here; doing so causes the session
+    // to drift rightward as the ring buffer advances and to mis-scale relative to other layers.
     QRectF effectiveDrawRect = drawRect;
     if (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline &&
         sessionStartMs > 0 && sessionEndMs > sessionStartMs &&
         viewStartMs > 0    && viewEndMs > viewStartMs) {
-        effectiveDrawRect = computeTimelinedDrawRect(drawRect,
+        const QRectF projectionBase = (!surfaceBounds.isEmpty()) ? surfaceBounds : drawRect;
+        effectiveDrawRect = computeTimelinedDrawRect(projectionBase,
                                                      sessionStartMs, sessionEndMs,
                                                      viewStartMs, viewEndMs);
     }
 
     // ── Material parameters ─────────────────────────────────────────────────
     m_node->setColor(QColor(42, 50, 60, 180));
-    m_node->setBidColor(QColor(102, 180, 255, 255));
-    m_node->setAskColor(QColor(255, 196, 80, 255));
-    m_node->setNeutralFloor(0.01f);
-    m_node->setMagnitudeScale(1.0f);
-    m_node->setMagnitudeGamma(0.65f);
+    m_node->setBidColor(QColor(102, 180, 255, 255));   // blue – letters
+    m_node->setAskColor(QColor(255, 196, 80,  255));   // gold – unused by TPO
+    m_node->setNeutralFloor(0.0f);    // 0x8000 exact neutral is already transparent; let all letters through
+    m_node->setMagnitudeScale(2.0f);  // boost: letters live in [0, 0.5] range, scale to [0, 1]
+    m_node->setMagnitudeGamma(0.5f);  // mild gamma lift so early letters (A/B/C) are clearly visible
 
     Q_UNUSED(forceFull);
     Q_UNUSED(timeOffset);
@@ -299,6 +328,40 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     } else {
         m_node->setRect(QRectF());
         m_node->setSourceRect(QRectF());
+    }
+
+    if (tpo_debug::enabled() && drawTpo) {
+        static QElapsedTimer tpoOverlayLogTimer;
+        static bool tpoOverlayLogTimerStarted = false;
+        if (!tpoOverlayLogTimerStarted) {
+            tpoOverlayLogTimer.start();
+            tpoOverlayLogTimerStarted = true;
+        }
+        if (tpoOverlayLogTimer.elapsed() > 250) {
+            std::ostringstream payload;
+            payload << "{"
+                    << "\"mode\":" << static_cast<int>(m_displayMode)
+                    << ",\"gridWidth\":" << m_gridWidth
+                    << ",\"gridHeight\":" << m_gridHeight
+                    << ",\"drawRectX\":" << drawRect.x()
+                    << ",\"drawRectW\":" << drawRect.width()
+                    << ",\"effectiveDrawRectX\":" << effectiveDrawRect.x()
+                    << ",\"effectiveDrawRectW\":" << effectiveDrawRect.width()
+                    << ",\"sourceRectX\":" << sourceRect.x()
+                    << ",\"sourceRectW\":" << sourceRect.width()
+                    << ",\"tpoSrcRectX\":" << tpoSrcRect.x()
+                    << ",\"tpoSrcRectW\":" << tpoSrcRect.width()
+                    << ",\"sessionStartMs\":" << sessionStartMs
+                    << ",\"sessionEndMs\":" << sessionEndMs
+                    << ",\"viewStartMs\":" << viewStartMs
+                    << ",\"viewEndMs\":" << viewEndMs
+                    << "}";
+            tpo_debug::append("TpoOverlayRenderer.cpp:render",
+                              "tpo_overlay_mapping",
+                              "H5",
+                              payload.str());
+            tpoOverlayLogTimer.restart();
+        }
     }
 
     // ── GL incremental column upload ────────────────────────────────────────

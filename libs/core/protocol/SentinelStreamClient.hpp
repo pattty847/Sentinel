@@ -124,6 +124,7 @@ signals:
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
+    void coinbaseLatencyReceived(int milliseconds);
 
 private:
     void run();
@@ -154,6 +155,7 @@ private:
     void handlePositionUpdateMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
     void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
+    void handleCoinbaseLatencyMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;

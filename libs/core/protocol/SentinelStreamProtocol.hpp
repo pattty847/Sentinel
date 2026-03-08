@@ -45,6 +45,7 @@ enum class MessageType {
     OrderUpdate,
     PositionUpdate,
     Error,
+    CoinbaseLatency,
     Unknown
 };
 
@@ -76,6 +77,7 @@ inline std::string toString(MessageType t) {
         case MessageType::OrderUpdate: return "order_update";
         case MessageType::PositionUpdate: return "position_update";
         case MessageType::Error: return "error";
+        case MessageType::CoinbaseLatency: return "coinbase_latency";
         default: return "unknown";
     }
 }
@@ -107,6 +109,7 @@ inline MessageType fromString(const std::string& s) {
     if (s == "order_update") return MessageType::OrderUpdate;
     if (s == "position_update") return MessageType::PositionUpdate;
     if (s == "error") return MessageType::Error;
+    if (s == "coinbase_latency") return MessageType::CoinbaseLatency;
     return MessageType::Unknown;
 }
 

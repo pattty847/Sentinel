@@ -9,6 +9,9 @@
 #include <unordered_set>
 #include <mutex>
 #include <thread>
+#include <functional>
+#include <vector>
+#include <atomic>
 #include "../servermodel/ServerDataModel.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
@@ -47,6 +50,9 @@ public:
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
+    void broadcastCoinbaseLatency(int milliseconds);
+    uint64_t registerLatencySender(std::function<void(int)> sendFn);
+    void unregisterLatencySender(uint64_t id);
 
 private:
     void doAccept();
@@ -62,6 +68,10 @@ private:
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::unique_ptr<trading::TradingEngine> m_tradingEngine;
+
+    std::mutex m_latencySendersMutex;
+    std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;
+    std::atomic<uint64_t> m_nextLatencySenderId{0};
 };
 
 

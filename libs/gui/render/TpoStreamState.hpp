@@ -87,6 +87,7 @@ private:
     int64_t m_sessionStartMs = 0;
     int64_t m_sessionEndMs   = 0;
     int64_t m_sessionMs = 86'400'000;  // default H24 session fallback
+    int m_sessionType = 4;             // SessionManager::SessionType::H24 fallback
     int64_t m_lastSliceStartMs = 0;
     int64_t m_timeframeMs = 0;
     DisplayMode m_displayMode = DisplayMode::VerticalTimeline;
