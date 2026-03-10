@@ -43,8 +43,8 @@ Work in progress on the feature branch:
 
 ## Main Branch Overview
 
-<img width="2559" height="1388" alt="Screenshot 2026-02-02 141503" src="https://github.com/user-attachments/assets/b0d32701-816d-4508-aa1b-9753eeb7b601" />
-<img width="2559" height="1392" alt="image" src="https://github.com/user-attachments/assets/4e100ad3-4da9-42d1-b75b-22f71b9f0c07" />
+<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 54 36 PM" src="https://github.com/user-attachments/assets/f21af350-9510-41f4-93e4-7a760a36ecde" />
+<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 55 03 PM" src="https://github.com/user-attachments/assets/154652c2-2176-40ec-8a7f-605877060991" />
 
 ### Features
 - Full Server Client architecture
@@ -195,6 +195,7 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 ## License
 
 AGPL-3.0
+
 
 
 
