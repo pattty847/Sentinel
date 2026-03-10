@@ -41,6 +41,7 @@
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "TradeInputManager.hpp"
+#include "widgets/PaperTradingDock.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
@@ -214,6 +215,10 @@ void MainWindowGPU::setupUI() {
     
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
+
+    // Create PaperTradingDock
+    m_paperTradingDock = new PaperTradingDock(this);
+    m_paperTradingDock->setDataSource(m_dataSource.get());
     if (m_qquickView) {
     }
     auto symbolControls = dockFactory.getSymbolControls();
@@ -773,6 +778,21 @@ void MainWindowGPU::connectMarketDataSignals() {
             this, [](const QString& error) {
                 sLog_Error("DataSource error: " << error);
             });
+
+    // PaperTradingDock wiring
+    if (m_paperTradingDock) {
+        connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                m_paperTradingDock, &PaperTradingDock::onOrderUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                m_paperTradingDock, &PaperTradingDock::onPositionUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                m_paperTradingDock, &PaperTradingDock::onAlgoOrderEvent, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::pnlSnapshotReceived,
+                m_paperTradingDock, &PaperTradingDock::onPnlSnapshot, Qt::QueuedConnection);
+        // Update symbol when user subscribes
+        connect(this, &MainWindowGPU::symbolChanged,
+                m_paperTradingDock, &PaperTradingDock::setSymbol, Qt::QueuedConnection);
+    }
 }
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {
@@ -857,5 +877,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
+    docks.paperTradingDock = m_paperTradingDock;
     return docks;
 }

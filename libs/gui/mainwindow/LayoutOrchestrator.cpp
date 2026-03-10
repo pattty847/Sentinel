@@ -7,6 +7,7 @@
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
+#include "../widgets/PaperTradingDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QScreen>
@@ -76,6 +77,10 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.aiCommentaryDock);
         docks.aiCommentaryDock->setFloating(false);
     }
+    if (docks.paperTradingDock && docks.paperTradingDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.paperTradingDock);
+        docks.paperTradingDock->setFloating(false);
+    }
     if (docks.labDock && docks.labDock->parent() == m_mainWindow) {
         m_mainWindow->removeDockWidget(docks.labDock);
         docks.labDock->setFloating(false);
@@ -133,6 +138,9 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
     m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
+    if (docks.paperTradingDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.paperTradingDock);
+    }
 }
 
 void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {

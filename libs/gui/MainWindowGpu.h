@@ -34,6 +34,7 @@ class ThemeBridge;
 class HeatmapSettingsDialog;
 class TradeInputManager;
 class TradeBlotterDock;
+class PaperTradingDock;
 
 class DockFactory;
 class QmlSceneController;
@@ -122,6 +123,7 @@ private:
     QMetaObject::Connection m_candleViewportConn;
     std::unique_ptr<TradeInputManager> m_tradeInputManager;
     TradeBlotterDock* m_tradeBlotterDock = nullptr;
+    PaperTradingDock* m_paperTradingDock = nullptr;
     QLabel* m_positionOverlayLabel = nullptr;
     QDoubleSpinBox* m_orderQtyInput = nullptr;
 

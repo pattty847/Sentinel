@@ -33,6 +33,8 @@
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../trading/TradingEngine.hpp"
+#include "../trading/AlgoEngine.hpp"
+#include "../trading/AvendellaMM.hpp"
 #include "Cpp20Utils.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
@@ -561,6 +563,9 @@ public:
         QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
+        if (owner_ && m_tradingBroadcasterRegistered) {
+            owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
+        }
     }
 
     void run() {
@@ -646,6 +651,16 @@ public:
                             s->sendCoinbaseLatency(ms);
                     });
                 });
+
+            // Register for trading/algo broadcast messages
+            m_tradingBroadcasterId = owner_->registerTradingBroadcaster(
+                [weak_this = std::weak_ptr<Session>(self), exec = ws_.get_executor()](const std::string& json) {
+                    net::post(exec, [weak_this, json]() {
+                        if (auto s = weak_this.lock())
+                            s->do_write(json);
+                    });
+                });
+            m_tradingBroadcasterRegistered = true;
         }
         do_read();
     }
@@ -936,6 +951,38 @@ public:
 
                     self->do_write(payload.dump());
                 }).detach();
+            } else if (type == "trade_command") {
+                if (owner_ && owner_->m_tradingEngine) {
+                    try {
+                        auto cmd = trading::parseTradeCommandJson(msg);
+                        owner_->processTradeCommand(cmd);
+                    } catch (const std::exception& ex) {
+                        sLog_Error("trade_command parse error: " << ex.what());
+                    }
+                }
+            } else if (type == "algo_command") {
+                if (owner_ && owner_->m_algoEngine.get()) {
+                    try {
+                        const std::string algoId = j.value("algo_id", "");
+                        const std::string action  = j.value("action", "");
+                        const std::string symbol  = j.value("symbol", "");
+                        auto paramsJ = j.value("params", nlohmann::json::object());
+                        trading::AlgoParams params;
+                        params.spreadBps       = paramsJ.value("spread_bps", 10.0);
+                        params.orderQty        = paramsJ.value("order_qty", 0.01);
+                        params.maxPositionQty  = paramsJ.value("max_position_qty", 0.1);
+                        params.skewBps         = paramsJ.value("skew_bps", 5.0);
+                        if (action == "start") {
+                            owner_->algoEngine().startAlgo(algoId, symbol, params);
+                            sLog_App("AlgoEngine: started " << QString::fromStdString(algoId) << " on " << QString::fromStdString(symbol));
+                        } else if (action == "stop") {
+                            owner_->algoEngine().stopAlgo(algoId);
+                            sLog_App("AlgoEngine: stopped " << QString::fromStdString(algoId));
+                        }
+                    } catch (const std::exception& ex) {
+                        sLog_Error("algo_command error: " << ex.what());
+                    }
+                }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
@@ -1048,6 +1095,13 @@ public:
     }
     
     void on_trade(const Trade& trade) {
+        // Tick AlgoEngine on every trade (even unsubscribed symbols — algos may be running)
+        if (owner_ && owner_->m_algoEngine) {
+            const int64_t tsMs = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    trade.timestamp.time_since_epoch()).count());
+            owner_->algoEngine().onTick(trade.product_id, trade.price, tsMs);
+        }
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
         nlohmann::json j;
@@ -1473,7 +1527,31 @@ void SentinelStreamServer::start() {
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
 
-        doAccept();
+    
+    // Initialize paper trading engine + algo engine
+    if (!m_tradingEngine) {
+        const double slippageBps = m_serverConfig.trading.slippageBps;
+        m_tradingEngine = std::make_unique<trading::TradingEngine>(
+            [this](const std::string& symbol) -> double {
+                // Price resolver: last trade price from model
+                auto& hotData = m_model.ensureSymbol(symbol);
+                return hotData.liveBook.getMidPrice();
+            },
+            slippageBps);
+
+        m_algoEngine = std::make_unique<trading::AlgoEngine>(*m_tradingEngine);
+        m_algoEngine->registerAlgo(std::make_unique<trading::AvendellaMM>());
+
+        m_algoEngine->setResultCallback(
+            [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
+                for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
+                for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
+                for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
+                for (auto& ev : events) broadcastAlgoOrderEvent(ev);
+            });
+    }
+
+    doAccept();
         
         m_thread = std::thread([this] {
             while (m_running) {
@@ -1513,7 +1591,31 @@ void SentinelStreamServer::doAccept() {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
             if (m_running) {
-                doAccept();
+            
+    // Initialize paper trading engine + algo engine
+    if (!m_tradingEngine) {
+        const double slippageBps = m_serverConfig.trading.slippageBps;
+        m_tradingEngine = std::make_unique<trading::TradingEngine>(
+            [this](const std::string& symbol) -> double {
+                // Price resolver: last trade price from model
+                auto& hotData = m_model.ensureSymbol(symbol);
+                return hotData.liveBook.getMidPrice();
+            },
+            slippageBps);
+
+        m_algoEngine = std::make_unique<trading::AlgoEngine>(*m_tradingEngine);
+        m_algoEngine->registerAlgo(std::make_unique<trading::AvendellaMM>());
+
+        m_algoEngine->setResultCallback(
+            [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
+                for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
+                for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
+                for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
+                for (auto& ev : events) broadcastAlgoOrderEvent(ev);
+            });
+    }
+
+    doAccept();
             }
         });
 }
@@ -1555,4 +1657,101 @@ void SentinelStreamServer::broadcastCoinbaseLatency(int milliseconds) {
     }
     for (auto& fn : copy)
         fn(milliseconds);
+}
+
+// ─── Trading engine & AlgoEngine initialization ──────────────────────────────
+
+void SentinelStreamServer::processTradeCommand(const trading::TradeCommand& command) {
+    if (!m_tradingEngine) return;
+    auto result = m_tradingEngine->onCommand(command);
+    for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
+    for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
+    for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
+}
+
+uint64_t SentinelStreamServer::registerTradingBroadcaster(TradingBroadcastFn fn) {
+    const uint64_t id = m_nextBroadcasterId++;
+    std::lock_guard<std::mutex> lock(m_tradingBroadcastMutex);
+    m_tradingBroadcasters.emplace_back(id, std::move(fn));
+    return id;
+}
+
+void SentinelStreamServer::unregisterTradingBroadcaster(uint64_t id) {
+    std::lock_guard<std::mutex> lock(m_tradingBroadcastMutex);
+    m_tradingBroadcasters.erase(
+        std::remove_if(m_tradingBroadcasters.begin(), m_tradingBroadcasters.end(),
+            [id](const std::pair<uint64_t, TradingBroadcastFn>& p) { return p.first == id; }),
+        m_tradingBroadcasters.end());
+}
+
+namespace {
+void broadcastJson(std::mutex& mtx,
+                   std::vector<std::pair<uint64_t, SentinelStreamServer::TradingBroadcastFn>>& senders,
+                   const std::string& json) {
+    std::vector<SentinelStreamServer::TradingBroadcastFn> copy;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        copy.reserve(senders.size());
+        for (auto& p : senders) copy.push_back(p.second);
+    }
+    for (auto& fn : copy) fn(json);
+}
+} // namespace
+
+void SentinelStreamServer::broadcastOrderUpdate(const trading::OrderUpdate& ou) {
+    emit orderUpdateBroadcast(ou);
+    nlohmann::json j;
+    j["type"] = "order_update";
+    j["order_id"] = ou.orderId;
+    j["symbol"] = ou.symbol;
+    j["status"] = trading::toString(ou.status);
+    j["side"] = trading::toString(ou.side);
+    j["qty"] = ou.qty;
+    j["filled_qty"] = ou.filledQty;
+    j["remaining_qty"] = ou.remainingQty;
+    j["avg_price"] = ou.avgPrice;
+    j["limit_price"] = ou.limitPrice;
+    j["algo_id"] = ou.algoId;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastPositionUpdate(const trading::PositionUpdate& pu) {
+    emit positionUpdateBroadcast(pu);
+    nlohmann::json j;
+    j["type"] = "position_update";
+    j["symbol"] = pu.symbol;
+    j["position_qty"] = pu.positionQty;
+    j["avg_price"] = pu.avgPrice;
+    j["unrealized_pnl"] = pu.unrealizedPnl;
+    j["realized_pnl"] = pu.realizedPnl;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& ev) {
+    emit algoOrderEventBroadcast(ev);
+    nlohmann::json j;
+    j["type"] = "algo_order_event";
+    j["algo_id"] = ev.algoId;
+    j["order_id"] = ev.orderId;
+    j["symbol"] = ev.symbol;
+    j["side"] = trading::toString(ev.side);
+    j["order_type"] = trading::toString(ev.orderType);
+    j["price"] = ev.price;
+    j["qty"] = ev.qty;
+    j["status"] = trading::toString(ev.status);
+    j["timestamp_ms"] = ev.timestampMs;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastPnlSnapshot(const trading::PnlSnapshot& ps) {
+    emit pnlSnapshotBroadcast(ps);
+    nlohmann::json j;
+    j["type"] = "pnl_snapshot";
+    j["symbol"] = ps.symbol;
+    j["timestamp_ms"] = ps.timestampMs;
+    j["unrealized_pnl"] = ps.unrealizedPnl;
+    j["realized_pnl"] = ps.realizedPnl;
+    j["total_pnl"] = ps.totalPnl;
+    j["algo_id"] = ps.algoId;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
 }

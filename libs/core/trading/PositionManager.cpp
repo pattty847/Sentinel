@@ -24,6 +24,7 @@ Position PositionManager::applyFill(const std::string& symbol, OrderSide side, d
     const double nextQty = priorQty + signedQty;
 
     if (std::abs(priorQty) < 1e-12 || (priorQty * signedQty > 0.0)) {
+        // Opening or adding to position
         const double priorAbs = std::abs(priorQty);
         const double nextAbs = std::abs(nextQty);
         if (nextAbs > 1e-12) {
@@ -32,13 +33,27 @@ Position PositionManager::applyFill(const std::string& symbol, OrderSide side, d
             pos.avgPrice = 0.0;
         }
     } else if ((priorQty * nextQty) < 0.0) {
+        // Flip: realize on the closed portion, open new position at fill price
+        const double closedQty = std::abs(priorQty);
+        const double closedPnl = (fillPrice - pos.avgPrice) * (priorQty > 0.0 ? closedQty : -closedQty);
+        pos.realizedPnl += closedPnl;
         pos.avgPrice = fillPrice;
     } else if (std::abs(nextQty) < 1e-12) {
+        // Full close: realize entire position
+        const double closedPnl = (fillPrice - pos.avgPrice) * priorQty;
+        pos.realizedPnl += closedPnl;
         pos.avgPrice = 0.0;
+    } else {
+        // Partial close: realize proportional PnL
+        const double closedQty = qty;
+        const double closedPnl = (fillPrice - pos.avgPrice) * (priorQty > 0.0 ? closedQty : -closedQty);
+        pos.realizedPnl += closedPnl;
     }
 
     pos.netQty = nextQty;
-    pos.unrealizedPnl = (markPrice - pos.avgPrice) * pos.netQty;
+    pos.unrealizedPnl = std::abs(nextQty) > 1e-12
+                            ? (markPrice - pos.avgPrice) * pos.netQty
+                            : 0.0;
     return pos;
 }
 
@@ -46,10 +61,12 @@ Position PositionManager::markToMarket(const std::string& symbol, double markPri
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_positions.find(symbol);
     if (it == m_positions.end()) {
-        return Position{symbol, 0.0, 0.0, 0.0};
+        return Position{symbol, 0.0, 0.0, 0.0, 0.0};
     }
     Position out = it->second;
-    out.unrealizedPnl = (markPrice - out.avgPrice) * out.netQty;
+    out.unrealizedPnl = std::abs(out.netQty) > 1e-12
+                            ? (markPrice - out.avgPrice) * out.netQty
+                            : 0.0;
     return out;
 }
 

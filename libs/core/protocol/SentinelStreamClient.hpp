@@ -81,6 +81,7 @@ public:
                              int limit = 50,
                              double minVolume = 0.0);
     void sendTradeCommand(const trading::TradeCommand& command);
+    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params);
 
 signals:
     void connected();
@@ -124,6 +125,8 @@ signals:
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
+    void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
+    void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
     void coinbaseLatencyReceived(int milliseconds);
 
 private:
@@ -156,6 +159,8 @@ private:
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
     void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
     void handleCoinbaseLatencyMessage(const nlohmann::json& msg);
+    void handleAlgoOrderEventMessage(const nlohmann::json& msg);
+    void handlePnlSnapshotMessage(const nlohmann::json& msg);
 
     std::string m_host;
     std::string m_port;

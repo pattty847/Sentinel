@@ -45,6 +45,11 @@ add_library(sentinel_core
     trading/PaperExecutionAdapter.cpp
     trading/TradingEngine.hpp
     trading/TradingEngine.cpp
+    trading/IAlgo.hpp
+    trading/AlgoEngine.hpp
+    trading/AlgoEngine.cpp
+    trading/AvendellaMM.hpp
+    trading/AvendellaMM.cpp
 )
 
 # Find required packages
