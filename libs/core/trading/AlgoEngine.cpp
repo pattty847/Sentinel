@@ -38,9 +38,12 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
             if (!algo->isRunning()) {
                 continue;
             }
+            if (!algo->symbol().empty() && algo->symbol() != symbol) {
+                continue;
+            }
 
-            auto openOrders = std::vector<Order>{}; // TODO: filter by algoId if needed
-            Position position{};
+            auto openOrders = m_engine.getOpenOrders(symbol, algo->id());
+            Position position = m_engine.getPosition(symbol).value_or(Position{symbol, 0.0, 0.0, 0.0, 0.0});
 
             auto cmds = algo->onTick(lastTradePrice, timestampMs, openOrders, position);
             if (!cmds.empty()) {
@@ -86,6 +89,7 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
 
     // Also tick limit order fills for this symbol
     auto tickResult = m_engine.onTick(symbol, lastTradePrice, timestampMs);
+    std::vector<OrderUpdate> algoOwnedUpdates;
     for (auto& ou : tickResult.orderUpdates) {
         if (!ou.algoId.empty()) {
             AlgoOrderEvent ev;
@@ -99,9 +103,12 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
             ev.status = ou.status;
             ev.timestampMs = timestampMs;
             algoEvents.push_back(ev);
-
-            // Forward fill notification to algo
-            std::lock_guard<std::mutex> lock(m_mutex);
+            algoOwnedUpdates.push_back(ou);
+        }
+    }
+    if (!algoOwnedUpdates.empty()) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& ou : algoOwnedUpdates) {
             auto it = m_algos.find(ou.algoId);
             if (it != m_algos.end()) {
                 it->second->onOrderUpdate(ou);
@@ -115,11 +122,17 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
     combinedResult.pnlSnapshots.insert(combinedResult.pnlSnapshots.end(),
                                         tickResult.pnlSnapshots.begin(), tickResult.pnlSnapshots.end());
 
-    if (m_callback && (!combinedResult.orderUpdates.empty() ||
-                        !combinedResult.positionUpdates.empty() ||
-                        !combinedResult.pnlSnapshots.empty() ||
-                        !algoEvents.empty())) {
-        m_callback(std::move(combinedResult), std::move(algoEvents));
+    ResultCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cb = m_callback;
+    }
+
+    if (cb && (!combinedResult.orderUpdates.empty() ||
+               !combinedResult.positionUpdates.empty() ||
+               !combinedResult.pnlSnapshots.empty() ||
+               !algoEvents.empty())) {
+        cb(std::move(combinedResult), std::move(algoEvents));
     }
 }
 

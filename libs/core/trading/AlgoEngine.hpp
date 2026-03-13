@@ -30,7 +30,7 @@ struct AlgoOrderEvent {
  *
  * All public methods are thread-safe (called from the data-processing thread).
  * The callback for broadcasting results (orders, position updates, PnL, algo events)
- * is invoked synchronously inside the mutex scope — callers must not re-enter.
+ * is invoked synchronously outside the engine mutex.
  */
 class AlgoEngine {
 public:

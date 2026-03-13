@@ -27,6 +27,7 @@ public:
     virtual void start(const std::string& symbol, const AlgoParams& params) = 0;
     virtual void stop() = 0;
     virtual bool isRunning() const = 0;
+    virtual const std::string& symbol() const = 0;
 
     // Called on every trade tick. Returns any trade commands the algo wants to issue.
     virtual std::vector<TradeCommand> onTick(double lastTradePrice, int64_t timestampMs,

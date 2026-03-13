@@ -34,6 +34,8 @@ public:
     TradingResult onTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs);
 
     std::optional<Order> findOrder(const std::string& orderId) const;
+    std::vector<Order> getOpenOrders(const std::string& symbol, const std::string& algoId = "") const;
+    std::optional<Position> getPosition(const std::string& symbol) const;
 
 private:
     TradingResult handlePlaceOrder(const TradeCommand& command);

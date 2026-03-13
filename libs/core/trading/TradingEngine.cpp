@@ -17,6 +17,25 @@ std::optional<Order> TradingEngine::findOrder(const std::string& orderId) const 
     return m_orders.get(orderId);
 }
 
+std::vector<Order> TradingEngine::getOpenOrders(const std::string& symbol, const std::string& algoId) const {
+    auto orders = m_orders.getAllActiveForSymbol(symbol);
+    if (algoId.empty()) {
+        return orders;
+    }
+    std::vector<Order> filtered;
+    filtered.reserve(orders.size());
+    for (const auto& o : orders) {
+        if (o.algoId == algoId) {
+            filtered.push_back(o);
+        }
+    }
+    return filtered;
+}
+
+std::optional<Position> TradingEngine::getPosition(const std::string& symbol) const {
+    return m_positions.get(symbol);
+}
+
 TradingResult TradingEngine::onExternalFill(const std::string& orderId,
                                             double cumulativeFilledQty,
                                             double fillPrice) {
@@ -171,7 +190,10 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     order.avgPrice = 0.0;
     order.algoId = command.algoId;
 
-    if (command.orderType == OrderType::Limit && command.hasPrice) {
+    if (command.orderType == OrderType::Limit) {
+        if (!command.hasPrice || command.price <= 0.0) {
+            return out;
+        }
         // Resting limit: acknowledge as Open
         order.status = OrderStatus::Open;
         m_orders.upsert(order);

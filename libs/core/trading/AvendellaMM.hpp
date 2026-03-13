@@ -26,6 +26,7 @@ public:
     void start(const std::string& symbol, const AlgoParams& params) override;
     void stop() override;
     bool isRunning() const override { return m_running; }
+    const std::string& symbol() const override { return m_symbol; }
 
     std::vector<TradeCommand> onTick(double lastTradePrice, int64_t timestampMs,
                                       const std::vector<Order>& openOrders,
@@ -42,10 +43,12 @@ private:
     AlgoParams m_params;
 
     double m_lastMid = 0.0;       // Mid price at last quote
-    std::string m_bidOrderId;     // ID of resting bid
-    std::string m_askOrderId;     // ID of resting ask
+    std::string m_bidOrderId;     // server-assigned order ID of resting bid
+    std::string m_askOrderId;     // server-assigned order ID of resting ask
     bool m_bidLive = false;
     bool m_askLive = false;
+    bool m_bidPending = false;    // order submitted, waiting for OPEN ack
+    bool m_askPending = false;    // order submitted, waiting for OPEN ack
 
     uint64_t m_cmdSeq = 0;
 
@@ -53,8 +56,8 @@ private:
     bool isStale(double newMid) const;
 
     std::string nextCmdId();
-    TradeCommand makeLimitOrder(OrderSide side, double price, int64_t timestampMs) const;
-    TradeCommand makeCancelOrder(const std::string& orderId, int64_t timestampMs) const;
+    TradeCommand makeLimitOrder(OrderSide side, double price, int64_t timestampMs);
+    TradeCommand makeCancelOrder(const std::string& orderId, int64_t timestampMs);
 };
 
 } // namespace trading

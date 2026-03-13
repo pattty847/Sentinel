@@ -14,6 +14,8 @@ void AvendellaMM::start(const std::string& symbol, const AlgoParams& params) {
     m_askOrderId.clear();
     m_bidLive = false;
     m_askLive = false;
+    m_bidPending = false;
+    m_askPending = false;
     m_running = true;
 }
 
@@ -21,6 +23,8 @@ void AvendellaMM::stop() {
     m_running = false;
     m_bidLive = false;
     m_askLive = false;
+    m_bidPending = false;
+    m_askPending = false;
 }
 
 bool AvendellaMM::isStale(double newMid) const {
@@ -68,18 +72,20 @@ std::vector<TradeCommand> AvendellaMM::onTick(double lastTradePrice, int64_t tim
         m_lastMid = mid;
     }
 
-    // Post new quotes if not live
-    if (!m_bidLive && canBid && bidPrice > 0.0) {
+    // Post new quotes if neither live nor awaiting OPEN ack
+    if (!m_bidLive && !m_bidPending && canBid && bidPrice > 0.0) {
         auto cmd = makeLimitOrder(OrderSide::Buy, bidPrice, timestampMs);
-        m_bidOrderId = cmd.commandId; // track by commandId until we get the real orderId back
+        m_bidOrderId = cmd.commandId; // temporary until OPEN ack provides server orderId
         cmds.push_back(std::move(cmd));
+        m_bidPending = true;
         m_bidLive = true;
     }
 
-    if (!m_askLive && canAsk && askPrice > 0.0) {
+    if (!m_askLive && !m_askPending && canAsk && askPrice > 0.0) {
         auto cmd = makeLimitOrder(OrderSide::Sell, askPrice, timestampMs);
-        m_askOrderId = cmd.commandId;
+        m_askOrderId = cmd.commandId; // temporary until OPEN ack provides server orderId
         cmds.push_back(std::move(cmd));
+        m_askPending = true;
         m_askLive = true;
     }
 
@@ -87,23 +93,36 @@ std::vector<TradeCommand> AvendellaMM::onTick(double lastTradePrice, int64_t tim
 }
 
 void AvendellaMM::onOrderUpdate(const OrderUpdate& update) {
-    if (update.status == OrderStatus::Filled || update.status == OrderStatus::Canceled) {
-        if (update.orderId == m_bidOrderId) {
-            m_bidLive = false;
-        }
-        if (update.orderId == m_askOrderId) {
-            m_askLive = false;
-        }
-    }
-    // Track the real server-assigned orderId after the first open acknowledgement
     if (update.status == OrderStatus::Open) {
-        if (update.side == OrderSide::Buy && !m_bidLive) {
+        if (update.side == OrderSide::Buy) {
             m_bidOrderId = update.orderId;
             m_bidLive = true;
+            m_bidPending = false;
         }
-        if (update.side == OrderSide::Sell && !m_askLive) {
+        if (update.side == OrderSide::Sell) {
             m_askOrderId = update.orderId;
             m_askLive = true;
+            m_askPending = false;
+        }
+        return;
+    }
+
+    if (update.status == OrderStatus::Filled ||
+        update.status == OrderStatus::Canceled ||
+        update.status == OrderStatus::Rejected) {
+        if (update.orderId == m_bidOrderId || update.side == OrderSide::Buy) {
+            m_bidLive = false;
+            m_bidPending = false;
+            if (update.orderId == m_bidOrderId) {
+                m_bidOrderId.clear();
+            }
+        }
+        if (update.orderId == m_askOrderId || update.side == OrderSide::Sell) {
+            m_askLive = false;
+            m_askPending = false;
+            if (update.orderId == m_askOrderId) {
+                m_askOrderId.clear();
+            }
         }
     }
 }
@@ -112,9 +131,9 @@ std::string AvendellaMM::nextCmdId() {
     return "avmm-" + std::to_string(++m_cmdSeq);
 }
 
-TradeCommand AvendellaMM::makeLimitOrder(OrderSide side, double price, int64_t timestampMs) const {
+TradeCommand AvendellaMM::makeLimitOrder(OrderSide side, double price, int64_t timestampMs) {
     TradeCommand cmd;
-    cmd.commandId = const_cast<AvendellaMM*>(this)->nextCmdId();
+    cmd.commandId = nextCmdId();
     cmd.action = TradeAction::PlaceOrder;
     cmd.symbol = m_symbol;
     cmd.side = side;
@@ -127,9 +146,9 @@ TradeCommand AvendellaMM::makeLimitOrder(OrderSide side, double price, int64_t t
     return cmd;
 }
 
-TradeCommand AvendellaMM::makeCancelOrder(const std::string& orderId, int64_t timestampMs) const {
+TradeCommand AvendellaMM::makeCancelOrder(const std::string& orderId, int64_t timestampMs) {
     TradeCommand cmd;
-    cmd.commandId = const_cast<AvendellaMM*>(this)->nextCmdId();
+    cmd.commandId = nextCmdId();
     cmd.action = TradeAction::CancelOrder;
     cmd.symbol = m_symbol;
     cmd.targetOrderId = orderId;
