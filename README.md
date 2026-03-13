@@ -10,7 +10,27 @@ Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
-## Server-Client Main Branch Recent Changes
+## Live Demos
+
+### Heatmap Render
+
+High-frequency 1s timeframe heatmap population on the main chart.
+
+![Heatmap render demo](docs/assets/gifs/heatmap-render.gif)
+
+### Stock Chart + Insider Signals
+
+Daily stock chart with SEC insider transaction overlays and hover detail.
+
+![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif)
+
+### TV Screener
+
+Quick pass through the stock screener workflow.
+
+![Stock screener demo](docs/assets/gifs/stock-screener.gif)
+
+## Recent Screens
 
 <img width="2559" height="1388" alt="Screenshot 2026-02-02 141503" src="https://github.com/user-attachments/assets/b0d32701-816d-4508-aa1b-9753eeb7b601" />
 <img width="2559" height="1392" alt="image" src="https://github.com/user-attachments/assets/4e100ad3-4da9-42d1-b75b-22f71b9f0c07" />
@@ -162,6 +182,7 @@ Structured outline of project docs (in `docs/`, excluding `docs/TODO.md` and `do
 | **Architecture & pipeline** | |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System overview: client–server split, directory layout, data and rendering pipeline, TimeAxisMapping, protocol, threading, performance. Start here for how pieces fit together. |
 | [`docs/MARKETDATA.md`](docs/MARKETDATA.md) | Market data stack: MarketDataCoreEngine, transport, auth, dispatch, threading, TLS/WSS, and trading stream (paper). |
+| [`docs/UI_ARCHITECTURE.md`](docs/UI_ARCHITECTURE.md) | GUI architecture: QML/Widgets, dock layout, rendering pipeline, coordinate systems, and performance invariants. |
 | [`docs/COORDINATE_SYSTEMS.md`](docs/COORDINATE_SYSTEMS.md) | Chart coordinate spaces (world, grid, screen) and renderer contracts; when to use texture-quad vs geometry; forbidden cross-contract patterns. |
 | **Setup & configuration** | |
 | [`docs/CONFIG.md`](docs/CONFIG.md) | Server and client YAML config files, load order, ownership (server-authoritative vs client-only), and example snippets. |
