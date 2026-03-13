@@ -11,25 +11,32 @@ Sentinel is a GPU-accelerated trading terminal with a mandatory client–server 
 - **Hot-path efficiency** — Pre-aggregated buffers and JSON + base64 transport keep overhead low between server and GPU.
 - **Deterministic threading** — Network I/O (Boost.Beast), aggregation, and rendering run on dedicated threads. Cross-thread communication uses `Qt::QueuedConnection` only.
 
-## Directory layout
+## Major Subsystems and Ownership Boundaries
 
-```
-apps/
-  sentinel_gui/       # Visualization client (remote-only)
-  sentinel-server/    # Headless data daemon
+Sentinel is rigidly divided into three main operational theaters: **Core**, **GUI**, and **App Bootstraps**.
 
-libs/
-  core/               # Pure C++; only QtCore allowed when necessary
-    marketdata/       # Exchange transports, MarketDataCoreEngine (see MARKETDATA.md)
-    protocol/         # Client–server WebSocket protocol
-    servermodel/      # Server state, aggregation, persistence
-    model/            # Shared DTOs
-  gui/
-    UnifiedGridRenderer   # GPU pipeline orchestration
-    datasources/          # RemoteGridDataSource
-    render/               # GPU nodes, MSDF atlas (HeatmapIntensityNode, MsdfGlyphNode, overlays)
-    qml/                  # UI components
-```
+### 1. Core (`libs/core`)
+**Responsibility:** Business logic, networking, state management, and data aggregation.
+**Ownership & Boundaries:**
+- The Core must remain purely C++ (with minimal QtCore usage if functionally necessary). It cannot have any Qt GUI dependencies.
+- **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
+- **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
+- **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`).
+- **`trading`:** Owns simulated order execution, local order storage, and position tracking.
+
+### 2. GUI (`libs/gui`)
+**Responsibility:** GPU-accelerated rendering, declarative UI, and data sourcing for the visualizer.
+**Ownership & Boundaries:**
+- The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
+- **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives heatmap slices and buffers them before dispatching to the renderer.
+- **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapIntensityNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
+- **`qml` & `widgets`:** Owns the declarative scenes (e.g., `CandleChartView`) and the dockable window management (e.g., `HeatmapDock`, `OrderBookDock`).
+
+### 3. Application Bootstraps (`apps/`)
+**Responsibility:** Executable entry points.
+**Ownership & Boundaries:**
+- **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
+- **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 
 ## Data pipeline
 

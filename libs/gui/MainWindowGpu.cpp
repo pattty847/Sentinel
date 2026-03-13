@@ -29,6 +29,7 @@
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/StockChartDock.hpp"
+#include "widgets/OrderBookDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
@@ -196,6 +197,7 @@ void MainWindowGPU::setupUI() {
     m_watchlistDock = docks.watchlistDock;
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
+    m_orderBookDock = docks.orderBookDock;
     if (m_screenerDock) {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
@@ -224,6 +226,9 @@ void MainWindowGPU::setupUI() {
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
+    if (m_orderBookDock) {
+        connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
+    }
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
             if (chartDebugEnabled()) {
@@ -631,8 +636,10 @@ void MainWindowGPU::setupMenuBar() {
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
+    docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
+    docks.orderBookDock = m_orderBookDock;
 
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
@@ -857,5 +864,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
+    docks.orderBookDock = m_orderBookDock;
     return docks;
 }

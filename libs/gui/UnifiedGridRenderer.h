@@ -21,7 +21,8 @@
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
-#include "render/MsdfAtlas.hpp"
+#include "render/ChartTextAtlas.hpp"
+#include "render/ChartTextRenderer.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
@@ -32,9 +33,9 @@
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/VolumeProfileState.hpp"
+#include "models/AxisModel.hpp"
 
 class DataProcessor;
-class MsdfGlyphNode;
 class HeatmapIntensityNode;
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
@@ -81,6 +82,8 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
+    Q_PROPERTY(QObject* priceAxisSource READ priceAxisSource WRITE setPriceAxisSource NOTIFY axisSourcesChanged)
+    Q_PROPERTY(QObject* timeAxisSource READ timeAxisSource WRITE setTimeAxisSource NOTIFY axisSourcesChanged)
 
 private:
     struct FrameViewportSnapshot {
@@ -166,17 +169,28 @@ private:
     mutable std::mutex m_frameContextMutex;
     MappingFrameContext m_lastFrameContext;
 
-    MsdfAtlas m_msdfAtlas;
-    bool m_msdfAtlasBuilt = false;
-    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
-    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
+    struct AxisTickSnapshot {
+        double position = 0.0;
+        QString label;
+        bool isMajorTick = false;
+    };
+
+    ChartTextAtlas m_chartTextAtlas;
+    bool m_chartTextAtlasBuilt = false;
+    ChartTextRenderer m_chartTextRenderer;
+    std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
     int m_labelRingGridWidth = 0;
     int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
-    class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
-    class MsdfGlyphNode* m_blackGlyphNode = nullptr;
+    AxisModel* m_priceAxisSource = nullptr;
+    AxisModel* m_timeAxisSource = nullptr;
+    std::vector<QMetaObject::Connection> m_priceAxisConnections;
+    std::vector<QMetaObject::Connection> m_timeAxisConnections;
+    mutable std::mutex m_axisSnapshotMutex;
+    std::vector<AxisTickSnapshot> m_priceAxisTicks;
+    std::vector<AxisTickSnapshot> m_timeAxisTicks;
     FootprintOverlayRenderer m_footprintOverlay;
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
@@ -240,6 +254,8 @@ public:
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
+    QObject* priceAxisSource() const { return m_priceAxisSource; }
+    QObject* timeAxisSource() const { return m_timeAxisSource; }
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -308,7 +324,17 @@ public:
     
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
+    Q_INVOKABLE void zoomAt(double rawDelta, double centerX, double centerY,
+                            double viewportWidth = -1.0,
+                            double viewportHeight = -1.0);
+    Q_INVOKABLE void zoomTimeAt(double rawDelta, double centerX,
+                                double viewportWidth = -1.0);
+    Q_INVOKABLE void zoomPriceAt(double rawDelta, double centerY,
+                                 double viewportHeight = -1.0);
     Q_INVOKABLE void resetZoom();
+    Q_INVOKABLE void beginPanAt(double x, double y);
+    Q_INVOKABLE void updatePanAt(double x, double y);
+    Q_INVOKABLE void endPanAt();
     Q_INVOKABLE void panLeft();
     Q_INVOKABLE void panRight();
     Q_INVOKABLE void panUp();
@@ -361,6 +387,7 @@ signals:
     void timeframeChanged();
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
+    void axisSourcesChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -387,6 +414,13 @@ private:
     };
 
     void buildMsdfAtlas();
+    void syncAxisTicks(AxisModel* model,
+                       std::vector<QMetaObject::Connection>& connections,
+                       std::vector<AxisTickSnapshot>& storage,
+                       AxisModel*& target,
+                       QObject* source);
+    void refreshAxisTickSnapshot(AxisModel* model, std::vector<AxisTickSnapshot>& storage);
+    void submitAxisText();
     bool ingestHeatmapColumnEvent(const HeatmapColumnEvent& event);
     void connectDataProcessorSignals();
     void startHeatmapRenderLoop();
@@ -421,6 +455,8 @@ private:
                            int gridHeight);
     void clearLabelGeometry();
     void updateFpsEstimate();
+    void setPriceAxisSource(QObject* source);
+    void setTimeAxisSource(QObject* source);
 
 private:
     void setIntensityScale(double scale);

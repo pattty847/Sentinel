@@ -35,7 +35,7 @@ void UnifiedGridRenderer::init() {
     m_heatmapGamma = client.heatmap.gamma;
     m_heatmapContrast = client.heatmap.contrast;
     m_heatmapShaderFloor = client.heatmap.shaderFloor;
-    if (client.heatmap.labelPx > 0) {
+    if (client.heatmap.labelPx > 0 && client.heatmap.labelPx <= 128) {
         m_heatmapLabelPx = client.heatmap.labelPx;
     }
     qRegisterMetaType<Trade>("Trade");

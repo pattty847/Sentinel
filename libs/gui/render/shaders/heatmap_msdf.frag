@@ -17,13 +17,15 @@ float median(float r, float g, float b) {
 
 void main() {
     vec3 msdf = texture(glyphTex, v_texcoord).rgb;
-    float sd = median(msdf.r, msdf.g, msdf.b) - 0.5;
+    float sd = (median(msdf.r, msdf.g, msdf.b) - 0.5) * params.z;
     float pxRange = params.x;
+    float sdfBias = params.y;
+    float sprFloor = params.w;
 
     vec2 unitRange = vec2(pxRange) / vec2(textureSize(glyphTex, 0));
     vec2 screenTexSize = vec2(1.0) / fwidth(v_texcoord);
-    float screenPxRange = max(0.5 * dot(unitRange, screenTexSize), 1.0);
-    float alpha = clamp(sd * screenPxRange + 0.5, 0.0, 1.0);
+    float screenPxRange = max(0.5 * dot(unitRange, screenTexSize), sprFloor);
+    float alpha = clamp((sd + sdfBias) * screenPxRange + 0.5, 0.0, 1.0);
 
     float outA = color.a * alpha;
     fragColor = vec4(color.rgb * outA, outA);

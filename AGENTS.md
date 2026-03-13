@@ -1,10 +1,7 @@
 # AGENTS.md — Sentinel Agent Operating Rules (Slim)
 
 Source of truth for coding agents working on Sentinel.
-Default goal: make the requested change safely, with minimal context and minimal churn.
-
-Machine: Windows 11
-Build: `cmake --build --preset windows-msvc-vs`
+Default goal: make the requested change safely.
 
 ## 0) Fast Start (Read Minimum First)
 
@@ -56,7 +53,7 @@ If a change crosses these boundaries, stop and justify it before proceeding.
 ## 4) Commands (Use These First)
 
 Build:
-- `cmake --build --preset windows-msvc-vs`
+- `cmake --build --preset windows-msvc-vs/mac-clang`
 
 Runtime/testing:
 - Prefer targeted validation for touched area first

@@ -102,6 +102,17 @@ QHash<int, QByteArray> AxisModel::roleNames() const {
     return roles;
 }
 
+void AxisModel::copyTicks(std::vector<AxisModel::TickSnapshot>& out) const {
+    out.clear();
+    out.reserve(m_ticks.size());
+    for (const TickInfo& tick : m_ticks) {
+        if (tick.label.isEmpty()) {
+            continue;
+        }
+        out.push_back(TickSnapshot{tick.value, tick.position, tick.label, tick.isMajorTick});
+    }
+}
+
 void AxisModel::onViewportChanged() {
     updateTicksAndNotify();
 }

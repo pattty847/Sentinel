@@ -7,7 +7,7 @@ heatmap:
   gamma: 1.05
   contrast: 1.15
   shader_floor: 0.01
-  label_px: 9999  # Disable labels
+  label_px: 13  # Enable labels
   client_cache_columns: 0
 
   # Initial viewport (client only)
@@ -17,7 +17,7 @@ heatmap:
 gui:
   api_port: 17100
   screenshot_dir: ./screenshots
-  # msdf_font: resources/fonts/YourFont.ttf
+  msdf_font: resources/fonts/RobotoMono/RobotoMono-Regular.ttf
   default_order_qty: 1.0
 
 server:

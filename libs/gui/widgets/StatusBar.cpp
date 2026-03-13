@@ -41,13 +41,10 @@ StatusBar::StatusBar(QWidget* parent)
     m_gpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
     layout->addWidget(m_gpuLabel);
     
-    m_latencyLabel = new QLabel("Latency: -- ms", this);
+    // Latency area now used for Coinbase websocket latency
+    m_latencyLabel = new QLabel("Latency (CB): -- ms", this);
     m_latencyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
     layout->addWidget(m_latencyLabel);
-    
-    m_coinbaseLatencyLabel = new QLabel("CB: -- ms", this);
-    m_coinbaseLatencyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_coinbaseLatencyLabel);
     
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
     m_versionLabel->setStyleSheet("QLabel { color: #666; font-size: 9px; }");
@@ -106,10 +103,10 @@ void StatusBar::setLatency(int milliseconds) {
 
 void StatusBar::setCoinbaseLatency(int milliseconds) {
     m_coinbaseLatencyMs = milliseconds;
-    m_coinbaseLatencyLabel->setText(QString("CB: %1 ms").arg(milliseconds));
+    m_latencyLabel->setText(QString("Latency (CB): %1 ms").arg(milliseconds));
     
     QString color = milliseconds < 50 ? "#44ff44" : (milliseconds < 100 ? "#ffaa00" : "#ff4444");
-    m_coinbaseLatencyLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
+    m_latencyLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
 }
 
 void StatusBar::setReadyStatus(const QString& status) {

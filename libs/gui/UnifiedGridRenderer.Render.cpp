@@ -3,13 +3,13 @@
 
 #include "SentinelLogging.hpp"
 #include "render/HeatmapIntensityNode.hpp"
-#include "render/MsdfGlyphNode.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
 #include "render/TpoDebugTrace.hpp"
 
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QTimeZone>
 #include <QtEndian>
 #include <algorithm>
 #include <sstream>
@@ -46,8 +46,7 @@ HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNod
     if (!texNode) {
         texNode = new HeatmapIntensityNode();
         m_heatmapOverlay.onRootRebuilt();
-        m_whiteGlyphNode = nullptr;
-        m_blackGlyphNode = nullptr;
+        m_chartTextRenderer.onRootRebuilt();
         m_footprintOverlay.onRootRebuilt();
         m_tpoOverlay.onRootRebuilt();
         m_vpRenderer.onRootRebuilt();
@@ -262,8 +261,8 @@ void UnifiedGridRenderer::renderOverlays(
         if (tpoSessionLogTimer.elapsed() > 1000) {
             const int computedColumns = static_cast<int>(
                 std::max<int64_t>(1, (tpoSessionEnd - tpoSessionStart) / tpoBracketMs));
-            const QDateTime startDt = QDateTime::fromMSecsSinceEpoch(tpoSessionStart, Qt::UTC);
-            const QDateTime endDt = QDateTime::fromMSecsSinceEpoch(tpoSessionEnd, Qt::UTC);
+            const QDateTime startDt = QDateTime::fromMSecsSinceEpoch(tpoSessionStart, QTimeZone::utc());
+            const QDateTime endDt = QDateTime::fromMSecsSinceEpoch(tpoSessionEnd, QTimeZone::utc());
             sLog_Debug(QString("TPO session: %1-%2 UTC | Bracket: %3m | Columns: %4")
                            .arg(startDt.toString(QStringLiteral("HH:mm")))
                            .arg(endDt.toString(QStringLiteral("HH:mm")))
@@ -350,55 +349,88 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
     const float cellH = (srcRectCurrent.height() > 0.0f)
         ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
         : 0.0f;
-    const int labelPx = (m_heatmapLabelPx > 0) ? m_heatmapLabelPx : 14;
-    const float labelThreshold = static_cast<float>(labelPx);
+    const float cellW = (srcRectCurrent.width() > 0.0f)
+        ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRectCurrent.width())
+        : 0.0f;
 
-    if (!(labelVisible && cellH >= labelThreshold && m_msdfAtlasBuilt && window())) {
+    // Only render labels when we are zoomed in enough for both height and width to support text
+    const float minCellH = 11.0f;
+    const float minCellW = 24.0f;
+
+    if (!(labelVisible && cellH >= minCellH && cellW >= minCellW && m_chartTextAtlasBuilt && window())) {
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
+            static QElapsedTimer labelDebugTimer;
+            static bool labelDebugStarted = false;
+            if (!labelDebugStarted) {
+                labelDebugTimer.start();
+                labelDebugStarted = true;
+            }
+            if (labelDebugTimer.elapsed() > 1000) {
+                sLog_Debug(QString("Heatmap text gated: visible=%1 cellH=%2 cellW=%3 atlas=%4 window=%5")
+                               .arg(labelVisible ? 1 : 0)
+                               .arg(cellH, 0, 'f', 2)
+                               .arg(cellW, 0, 'f', 2)
+                               .arg(m_chartTextAtlasBuilt ? 1 : 0)
+                               .arg(window() ? 1 : 0));
+                labelDebugTimer.restart();
+            }
+        }
         clearLabelGeometry();
         return;
     }
 
-    const float fontPx = static_cast<float>(m_msdfAtlas.fontPx());
-    const float scale = (fontPx > 0.0f) ? std::clamp(cellH / fontPx, 0.25f, 2.5f) : 1.0f;
+    const float fontPx = static_cast<float>(m_chartTextAtlas.fontPx());
+    
+    // Smooth ramp for legible text scaling based on cell size
+    const float appearMinPx = 11.0f;
+    const float fullSizePx = 22.0f;
+    const float maxScale = 0.95f; 
+    const float minScale = 0.45f;
+    const float cellMin = std::min(cellW, cellH);
+    
+    // Smoothstep interpolation (t * t * (3 - 2t))
+    const float t = std::clamp((cellMin - appearMinPx) / (fullSizePx - appearMinPx), 0.0f, 1.0f);
+    const float eased = t * t * (3.0f - 2.0f * t);
+    const float easedScale = minScale + (maxScale - minScale) * eased;
+    
+    // Guaranteed hard bounds limit so text NEVER crosses the cell walls regardless of the S-curve
+    const float vertScale = (cellH * 0.75f) / fontPx;
+    const float horizScale = (cellW * 0.85f) / (fontPx * 2.5f);
+    const float safeScale = std::min(vertScale, horizScale);
+    
+    const float scale = (fontPx > 0.0f) ? std::min(easedScale, safeScale) : 1.0f;
 
-    if (m_labelWhiteQuads.capacity() < 32000) {
-        m_labelWhiteQuads.reserve(32000);
-    }
-    if (m_labelBlackQuads.capacity() < 32000) {
-        m_labelBlackQuads.reserve(32000);
+    if (m_heatmapLabelGlyphs.capacity() < 32000) {
+        m_heatmapLabelGlyphs.reserve(32000);
     }
 
     const bool dollars = (m_liquidityLabelMode != 0);
-    HeatmapLabelRenderer::buildLabelQuads(frame.mapping,
-                                          snapshot,
-                                          m_msdfAtlas,
-                                          m_labelLiquidityRing,
-                                          m_labelIntensityRing,
-                                          m_labelLiquidityScales,
-                                          scale,
-                                          dollars,
-                                          m_labelWhiteQuads,
-                                          m_labelBlackQuads);
-
-    if (!m_whiteGlyphNode) {
-        m_whiteGlyphNode = new MsdfGlyphNode();
-        m_whiteGlyphNode->setColor(Qt::white);
-        m_whiteGlyphNode->ensureCapacity(32000);
-        texNode->appendChildNode(m_whiteGlyphNode);
+    HeatmapLabelRenderer::buildLabelGlyphs(frame.mapping,
+                                           snapshot,
+                                           m_chartTextAtlas,
+                                           m_labelLiquidityRing,
+                                           m_labelIntensityRing,
+                                           m_labelLiquidityScales,
+                                           scale,
+                                           dollars,
+                                           m_heatmapLabelGlyphs);
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
+        static QElapsedTimer labelSubmitTimer;
+        static bool labelSubmitStarted = false;
+        if (!labelSubmitStarted) {
+            labelSubmitTimer.start();
+            labelSubmitStarted = true;
+        }
+        if (labelSubmitTimer.elapsed() > 1000) {
+            sLog_Debug(QString("Heatmap text submit: glyphs=%1 cellH=%2 cellW=%3 scale=%4")
+                           .arg(static_cast<int>(m_heatmapLabelGlyphs.size()))
+                           .arg(cellH, 0, 'f', 2)
+                           .arg(cellW, 0, 'f', 2)
+                           .arg(scale, 0, 'f', 2));
+            labelSubmitTimer.restart();
+        }
     }
-    if (!m_blackGlyphNode) {
-        m_blackGlyphNode = new MsdfGlyphNode();
-        m_blackGlyphNode->setColor(Qt::black);
-        m_blackGlyphNode->ensureCapacity(32000);
-        texNode->appendChildNode(m_blackGlyphNode);
-    }
-
-    m_whiteGlyphNode->setAtlas(m_msdfAtlas.image(), window());
-    m_whiteGlyphNode->setPxRange(m_msdfAtlas.pxRange());
-    m_blackGlyphNode->setAtlas(m_msdfAtlas.image(), window());
-    m_blackGlyphNode->setPxRange(m_msdfAtlas.pxRange());
-    m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
-    m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
+    m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 
 void UnifiedGridRenderer::applyLabelUploads(
@@ -453,14 +485,7 @@ void UnifiedGridRenderer::applyLabelUploads(
 }
 
 void UnifiedGridRenderer::clearLabelGeometry() {
-    if (m_whiteGlyphNode) {
-        m_labelWhiteQuads.clear();
-        m_whiteGlyphNode->updateGeometry(m_labelWhiteQuads);
-    }
-    if (m_blackGlyphNode) {
-        m_labelBlackQuads.clear();
-        m_blackGlyphNode->updateGeometry(m_labelBlackQuads);
-    }
+    m_heatmapLabelGlyphs.clear();
 }
 
 void UnifiedGridRenderer::updateFpsEstimate() {
@@ -490,6 +515,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         ? frame.time.activeTimeframeMs
         : static_cast<int64_t>(snapshot.appendMs);
     const bool drawHeatmap = frame.overlays.heatmap;
+    const bool textOnlyDebug = qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_ONLY");
     const bool drawFootprint = frame.overlays.footprint;
     const bool drawTpo = frame.overlays.tpo;
     const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
@@ -529,7 +555,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                       framePendingTpoUploads);
     renderOverlays(texNode,
                    frame,
-                   drawHeatmap,
+                   drawHeatmap && !textOnlyDebug,
                    drawFootprint,
                    drawTpo,
                    gridWidth,
@@ -538,13 +564,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                    framePendingFootprintUploads,
                    framePendingTpoUploads);
 
-    if (!drawHeatmap) {
-        m_whiteGlyphNode = nullptr;
-        m_blackGlyphNode = nullptr;
-        return texNode;
+    m_chartTextRenderer.beginFrame(texNode, window(), m_chartTextAtlas);
+    submitAxisText();
+    if (drawHeatmap) {
+        updateLabelGeometry(texNode, frame, snapshot, gridWidth, gridHeight);
+    } else {
+        clearLabelGeometry();
     }
-
-    updateLabelGeometry(texNode, frame, snapshot, gridWidth, gridHeight);
+    m_chartTextRenderer.endFrame();
+    if (m_chartTextRenderer.droppedGlyphs() > 0 && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Chart text dropped glyphs: total=%1 high=%2 low=%3")
+                       .arg(m_chartTextRenderer.droppedGlyphs())
+                       .arg(m_chartTextRenderer.droppedHighGlyphs())
+                       .arg(m_chartTextRenderer.droppedLowGlyphs()));
+    }
     updateFpsEstimate();
     return texNode;
 }

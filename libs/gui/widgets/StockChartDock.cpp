@@ -37,9 +37,12 @@ StockChartDock::StockChartDock(QWidget* parent)
     : DockablePanel("StockChartDock", "Stock Chart", parent)
     , m_periodGroup(new QButtonGroup(this))
     , m_process(new QProcess(this))
+    , m_secApiClient(new SecApiClient(this))
 {
     connect(m_process, &QProcess::finished,        this, &StockChartDock::onProcessFinished);
     connect(m_process, &QProcess::errorOccurred,   this, &StockChartDock::onProcessError);
+    connect(m_secApiClient, &SecApiClient::insiderSignalsReady, this, &StockChartDock::onSecSignalsReady);
+    connect(m_secApiClient, &SecApiClient::apiError, this, &StockChartDock::onSecApiError);
 
     buildUi();
 }
@@ -141,9 +144,11 @@ void StockChartDock::loadSymbol(const QString& ticker, const QString& companyNam
     if (auto* root = qmlRoot()) {
         root->setProperty("ticker",  m_currentTicker);
         root->setProperty("company", m_currentCompany);
+        QMetaObject::invokeMethod(root, "clearSecSignals");
     }
 
     startFetch();
+    startSecFetch();
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
@@ -152,17 +157,22 @@ void StockChartDock::onFetchClicked() {
     const QString t = m_tickerInput->text().trimmed().toUpper();
     if (t.isEmpty()) return;
     m_currentTicker = t;
-    if (auto* root = qmlRoot())
+    if (auto* root = qmlRoot()) {
         root->setProperty("ticker", m_currentTicker);
+        QMetaObject::invokeMethod(root, "clearSecSignals");
+    }
     startFetch();
+    startSecFetch();
 }
 
 void StockChartDock::onPeriodChanged(const QString& period) {
     m_currentPeriod = period;
     if (auto* root = qmlRoot())
         root->setProperty("period", period);
-    if (!m_currentTicker.isEmpty())
+    if (!m_currentTicker.isEmpty()) {
         startFetch();
+        startSecFetch();
+    }
 }
 
 void StockChartDock::onProcessFinished(int exitCode, QProcess::ExitStatus /*status*/) {
@@ -219,6 +229,25 @@ void StockChartDock::onProcessError(QProcess::ProcessError error) {
     setStatus(msg, true);
 }
 
+void StockChartDock::onSecSignalsReady(const QJsonObject& payload) {
+    const QString payloadSymbol = payload.value("symbol").toString().trimmed().toUpper();
+    if (!payloadSymbol.isEmpty() && payloadSymbol != m_currentTicker) {
+        return;
+    }
+    if (auto* root = qmlRoot()) {
+        root->setProperty("secSignalsLoading", false);
+        QMetaObject::invokeMethod(root, "setSecSignals", Q_ARG(QVariant, QVariant::fromValue(payload.toVariantMap())));
+    }
+}
+
+void StockChartDock::onSecApiError(const QString& error) {
+    if (auto* root = qmlRoot()) {
+        root->setProperty("secSignalsLoading", false);
+        QMetaObject::invokeMethod(root, "clearSecSignals");
+    }
+    setStatus("SEC signals: " + error, true);
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 void StockChartDock::startFetch() {
@@ -261,6 +290,25 @@ void StockChartDock::startFetch() {
     const QString scriptsDir = QFileInfo(scriptPath).absolutePath() + "/..";
     m_process->setWorkingDirectory(QDir(scriptsDir).absolutePath());
     m_process->start("uv", {"run", "python", scriptPath, m_currentTicker, m_currentPeriod});
+}
+
+void StockChartDock::startSecFetch() {
+    if (m_currentTicker.isEmpty() || !m_secApiClient) {
+        return;
+    }
+    if (auto* root = qmlRoot()) {
+        QMetaObject::invokeMethod(root, "clearSecSignals");
+        root->setProperty("secSignalsLoading", true);
+    }
+    m_secApiClient->fetchInsiderSignals(m_currentTicker, secDaysBackForCurrentPeriod());
+}
+
+int StockChartDock::secDaysBackForCurrentPeriod() const {
+    if (m_currentPeriod == "1y") return 365;
+    if (m_currentPeriod == "2y") return 365 * 2;
+    if (m_currentPeriod == "5y") return 365 * 5;
+    if (m_currentPeriod == "10y") return 365 * 10;
+    return 365 * 15;
 }
 
 QObject* StockChartDock::qmlRoot() const {

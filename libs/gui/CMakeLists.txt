@@ -78,6 +78,17 @@ set(GRID_CORE_SOURCES
     render/UgrFrameMath.cpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
+    render/ChartTextPrimitives.hpp
+    render/ChartTextAtlas.hpp
+    render/ChartTextAtlas.cpp
+    render/ChartTextLayout.hpp
+    render/ChartTextLayout.cpp
+    render/ChartTextDebugNode.hpp
+    render/ChartTextDebugNode.cpp
+    render/ChartTextNode.hpp
+    render/ChartTextNode.cpp
+    render/ChartTextRenderer.hpp
+    render/ChartTextRenderer.cpp
     render/HeatmapOverlayRenderer.hpp
     render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp

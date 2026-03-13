@@ -23,6 +23,7 @@ class LabDock;
 class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
+class OrderBookDock;
 
 class LayoutOrchestrator {
 public:
@@ -35,6 +36,7 @@ public:
         WatchlistDock* watchlistDock = nullptr;
         ScreenerDock* screenerDock = nullptr;
         StockChartDock* stockChartDock = nullptr;
+        OrderBookDock* orderBookDock = nullptr;
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);

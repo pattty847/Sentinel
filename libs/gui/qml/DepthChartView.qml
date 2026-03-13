@@ -17,8 +17,9 @@ Rectangle {
     property int currentActiveTimeframe: 100
 
     // Asset-specific volume ranges (BTC/ETH/DOGE differ by orders of magnitude)
+    // TODO: Make dynamic
     property real maxVolumeRange: {
-        if (symbol.includes("BTC")) return 100.0;
+        if (symbol.includes("BTC")) return 10.0;
         if (symbol.includes("ETH")) return 500.0;
         if (symbol.includes("DOGE")) return 10000.0;
         return 1000.0;
@@ -27,6 +28,24 @@ Rectangle {
     property real lastTimeSpan: 0
     property int lastTimeframe: 0
     property bool showTimeGrid: false
+
+    function clampChartX(x) {
+        return Math.max(0, Math.min(unifiedGridRenderer.width, x))
+    }
+
+    function clampChartY(y) {
+        return Math.max(0, Math.min(unifiedGridRenderer.height, y))
+    }
+
+    function mapPriceAxisPoint(source, x, y) {
+        const p = source.mapToItem(unifiedGridRenderer, x, y)
+        return Qt.point(Math.max(0, unifiedGridRenderer.width - 1), clampChartY(p.y))
+    }
+
+    function mapTimeAxisPoint(source, x, y) {
+        const p = source.mapToItem(unifiedGridRenderer, x, y)
+        return Qt.point(clampChartX(p.x), Math.max(0, unifiedGridRenderer.height - 1))
+    }
 
     Connections {
         target: unifiedGridRenderer
@@ -38,7 +57,7 @@ Rectangle {
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
-        anchors.rightMargin: 70
+        anchors.rightMargin: 90
         anchors.bottomMargin: 30
         color: root.color
         visible: true
@@ -49,12 +68,14 @@ Rectangle {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
         anchors.fill: parent
-        anchors.rightMargin: 70
+        anchors.rightMargin: 90
         anchors.bottomMargin: 30
         visible: true
         intensityScale: 1.0
         maxCells: 500000
         heatmapBackgroundColor: "black"
+        priceAxisSource: priceAxisModel
+        timeAxisSource: timeAxisModel
         z: 1
         
         onTimeframeChanged: {
@@ -138,13 +159,13 @@ Rectangle {
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 30
         anchors.topMargin: 10
-        width: 70
+        width: 90
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
-        z: 2
+        z: 5
         
-        enabled: false
+        enabled: true
         clip: true
 
         PriceAxisModel {
@@ -152,30 +173,40 @@ Rectangle {
             target: unifiedGridRenderer
             tickSize: unifiedGridRenderer.heatmapTickSize
         }
-        
-        Item {
-            id: priceAxisLabels
+
+        MouseArea {
             anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            hoverEnabled: true
+            preventStealing: true
+            cursorShape: Qt.SizeVerCursor
 
-            Repeater {
-                model: priceAxisModel
+            property real lastY: 0
 
-                Item {
-                    width: priceAxis.width
-                    height: 16
-                    y: model.position - 8 + 1.5
-                    visible: model.label !== ""
-                    
-                    Text {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: "#E0E0E0"
-                        font.pixelSize: 10
-                        font.family: "monospace"
-                        text: model.label
-                    }
-                }
+            onPressed: function(mouse) {
+                lastY = mouse.y
+            }
+            onPositionChanged: function(mouse) {
+                if (!pressed)
+                    return
+                const p = root.mapPriceAxisPoint(priceAxis, mouse.x, mouse.y)
+                const deltaY = mouse.y - lastY
+                lastY = mouse.y
+                unifiedGridRenderer.zoomPriceAt(-deltaY * 24.0, p.y,
+                                                unifiedGridRenderer.height)
+            }
+            onReleased: {}
+            onCanceled: {}
+        }
+
+        WheelHandler {
+            target: null
+
+            onWheel: function(event) {
+                const p = root.mapPriceAxisPoint(priceAxis, event.x, event.y)
+                unifiedGridRenderer.zoomPriceAt(event.angleDelta.y, p.y,
+                                                unifiedGridRenderer.height)
+                event.accepted = true
             }
         }
     }
@@ -185,42 +216,54 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom  
-        anchors.rightMargin: 70
+        anchors.rightMargin: 90
         height: 30
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 2
         
-        enabled: false
+        enabled: true
         clip: true
 
         TimeAxisModel {
             id: timeAxisModel
             target: unifiedGridRenderer
         }
-        
-        Item {
-            id: timeAxisLabels
+
+        MouseArea {
             anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            hoverEnabled: true
+            preventStealing: true
+            cursorShape: Qt.SizeHorCursor
 
-            Repeater {
-                model: timeAxisModel
+            property real lastX: 0
 
-                Item {
-                    width: 80
-                    height: timeAxis.height
-                    x: model.position - 40
-                    visible: model.label !== ""
-                    
-                    Text {
-                        anchors.centerIn: parent
-                        color: "#E0E0E0"
-                        font.pixelSize: 10
-                        font.family: "monospace"
-                        text: model.label
-                    }
-                }
+            onPressed: function(mouse) {
+                lastX = mouse.x
+            }
+            onPositionChanged: function(mouse) {
+                if (!pressed)
+                    return
+                const p = root.mapTimeAxisPoint(timeAxis, mouse.x, mouse.y)
+                const deltaX = mouse.x - lastX
+                lastX = mouse.x
+                unifiedGridRenderer.zoomTimeAt(deltaX * 24.0, p.x,
+                                               unifiedGridRenderer.width)
+            }
+            onReleased: {}
+            onCanceled: {}
+        }
+
+        WheelHandler {
+            target: null
+
+            onWheel: function(event) {
+                const p = root.mapTimeAxisPoint(timeAxis, event.x, event.y)
+                unifiedGridRenderer.zoomTimeAt(event.angleDelta.y, p.x,
+                                               unifiedGridRenderer.width)
+                event.accepted = true
             }
         }
     }
@@ -229,12 +272,12 @@ Rectangle {
         id: axisCorner
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        width: 70
+        width: 90
         height: 30
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
-        z: 3
+        z: 6
     }
 
     Rectangle {

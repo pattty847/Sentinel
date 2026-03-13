@@ -53,6 +53,19 @@ void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
     runSecScript("sec/sec_fetch_transactions.py", args, "transactions");
 }
 
+void SecApiClient::fetchInsiderSignals(const QString& ticker, int daysBack) {
+    if (!m_pythonReady) {
+        emit apiError("SEC API not ready");
+        return;
+    }
+
+    emit statusUpdate(QString("Fetching insider signals for %1...").arg(ticker));
+
+    QStringList args;
+    args << ticker << QString::number(daysBack);
+    runSecScript("sec/sec_fetch_signals.py", args, "insider_signals");
+}
+
 void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     if (!m_pythonReady) {
         emit apiError("SEC API not ready");
@@ -115,9 +128,23 @@ void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatu
         QString jsonStr = output.mid(output.indexOf("TRANSACTIONS_DATA:") + 18).trimmed();
         parseTransactionsData(jsonStr);
     }
+    else if (output.contains("INSIDER_SIGNALS_DATA:")) {
+        QString jsonStr = output.mid(output.indexOf("INSIDER_SIGNALS_DATA:") + 21).trimmed();
+        parseInsiderSignalsData(jsonStr);
+    }
     else if (output.contains("FINANCIALS_DATA:")) {
         QString jsonStr = output.mid(output.indexOf("FINANCIALS_DATA:") + 16).trimmed();
         parseFinancialsData(jsonStr);
+    }
+    else if (output.contains("ERROR_DATA:")) {
+        QString jsonStr = output.mid(output.indexOf("ERROR_DATA:") + 11).trimmed();
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
+        if (error.error == QJsonParseError::NoError && doc.isObject()) {
+            emit apiError(doc.object().value("error").toString(jsonStr));
+        } else {
+            emit apiError(jsonStr);
+        }
     }
     else {
         emit apiError("Unexpected output: " + output);
@@ -192,9 +219,9 @@ void SecApiClient::parseTransactionsData(const QString& jsonStr) {
     for (const QJsonValue& value : array) {
         QJsonObject obj = value.toObject();
         Transaction tx;
-        tx.date = obj["transactionDate"].toString();
-        tx.insiderName = obj["insiderName"].toString();
-        tx.transactionType = obj["transactionType"].toString();
+        tx.date = obj["date"].toString();
+        tx.insiderName = obj["filer"].toString();
+        tx.transactionType = obj["type"].toString();
         tx.shares = obj["shares"].toDouble();
         tx.price = obj["price"].toDouble();
         transactions.append(tx);
@@ -202,6 +229,19 @@ void SecApiClient::parseTransactionsData(const QString& jsonStr) {
     
     emit transactionsReady(transactions);
     emit statusUpdate(QString("Loaded %1 transactions").arg(transactions.size()));
+}
+
+void SecApiClient::parseInsiderSignalsData(const QString& jsonStr) {
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
+
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+        emit apiError("Failed to parse insider signals data: " + error.errorString());
+        return;
+    }
+
+    emit insiderSignalsReady(doc.object());
+    emit statusUpdate("Insider signals loaded");
 }
 
 void SecApiClient::parseFinancialsData(const QString& jsonStr) {

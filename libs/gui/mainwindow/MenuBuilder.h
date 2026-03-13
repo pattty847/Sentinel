@@ -25,6 +25,7 @@ class LabDock;
 class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
+class OrderBookDock;
 
 class MenuBuilder {
 public:
@@ -37,6 +38,7 @@ public:
         WatchlistDock* watchlistDock = nullptr;
         ScreenerDock* screenerDock = nullptr;
         StockChartDock* stockChartDock = nullptr;
+        OrderBookDock* orderBookDock = nullptr;
     };
 
     struct Callbacks {

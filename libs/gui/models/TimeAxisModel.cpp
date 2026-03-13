@@ -67,33 +67,8 @@ bool TimeAxisModel::updateEffectiveViewport() {
     m_effectiveOffsetPx = 0.0;
     m_effectiveSpanPx = viewWidth;
     m_effectiveViewportValid = true;
-
-    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
-        return true;
-    }
-
-    if (auto* grid = renderer()) {
-        qint64 dataStart = 0;
-        qint64 dataEnd = 0;
-        if (grid->heatmapDataTimeRange(dataStart, dataEnd)) {
-            const double overlapStart = std::max(viewStart, static_cast<double>(dataStart));
-            const double overlapEnd = std::min(viewEnd, static_cast<double>(dataEnd));
-            if (overlapEnd <= overlapStart) {
-                m_effectiveViewportValid = false;
-                return false;
-            }
-            if (overlapStart > viewStart || overlapEnd < viewEnd) {
-                const double ratioStart = (overlapStart - viewStart) / viewSpan;
-                const double ratioEnd = (overlapEnd - viewStart) / viewSpan;
-                m_effectiveOffsetPx = viewWidth * ratioStart;
-                m_effectiveSpanPx = viewWidth * (ratioEnd - ratioStart);
-                m_effectiveStart = overlapStart;
-                m_effectiveEnd = overlapEnd;
-                m_effectiveViewportValid = (m_effectiveSpanPx > 0.0);
-            }
-        }
-    }
-
+    // Axis labels track the full viewport, not just the currently filled
+    // heatmap overlap, so future timestamps remain visible as the view leads data.
     return m_effectiveViewportValid;
 }
 

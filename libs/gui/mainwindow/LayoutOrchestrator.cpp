@@ -7,8 +7,8 @@
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
+#include "../widgets/OrderBookDock.hpp"
 #include "../widgets/LayoutManager.hpp"
-#include "../../core/SentinelLogging.hpp"
 #include <QScreen>
 #include <QGuiApplication>
 #include <QTabWidget>
@@ -88,14 +88,32 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.stockChartDock);
         docks.stockChartDock->setFloating(false);
     }
+    if (docks.orderBookDock && docks.orderBookDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.orderBookDock);
+        docks.orderBookDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, docks.heatmapDock);
+
+    // Place DOM adjacent to the chart (center/right of heatmap), not tabbed into the right-side stack.
+    if (docks.orderBookDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.orderBookDock);
+        m_mainWindow->splitDockWidget(docks.heatmapDock, docks.orderBookDock, Qt::Horizontal);
+    }
     if (docks.watchlistDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.watchlistDock);
+        if (docks.orderBookDock) {
+            // Create a third (rightmost) column for the right-side stack.
+            m_mainWindow->splitDockWidget(docks.orderBookDock, docks.watchlistDock, Qt::Horizontal);
+        }
     }
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
+    if (!docks.watchlistDock && docks.orderBookDock) {
+        // No watchlist: make SEC the anchor for the rightmost column.
+        m_mainWindow->splitDockWidget(docks.orderBookDock, docks.secDock, Qt::Horizontal);
+    }
     if (docks.watchlistDock) {
         m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.secDock);
     }
@@ -154,6 +172,7 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.aiCommentaryDock, fallback);
     applyMinimum(docks.labDock, QSize(360, 240));
     applyMinimum(docks.watchlistDock, QSize(320, 360));
+    applyMinimum(docks.orderBookDock, QSize(280, 360));
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
@@ -164,11 +183,16 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
         m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
     }
     
-    // Horizontal split: 70% charts (left), 30% right pane
+    // Horizontal split:
+    // - If DOM is present: charts + DOM take most width, right stack is separate.
+    // - Otherwise: classic charts vs right pane.
+    if (docks.orderBookDock) {
+        m_mainWindow->resizeDocks({docks.heatmapDock, docks.orderBookDock}, {75, 25}, Qt::Horizontal);
+    }
     if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.heatmapDock, docks.watchlistDock}, {70, 30}, Qt::Horizontal);
+        m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
     } else {
-        m_mainWindow->resizeDocks({docks.heatmapDock, docks.secDock}, {70, 30}, Qt::Horizontal);
+        m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
     }
     if (docks.watchlistDock) {
         m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
@@ -180,6 +204,7 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
 
 void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.heatmapDock) docks.heatmapDock->show();
+    if (docks.orderBookDock) docks.orderBookDock->show();
     if (docks.secDock) docks.secDock->show();
     if (docks.copenetDock) docks.copenetDock->show();
     if (docks.aiCommentaryDock) docks.aiCommentaryDock->show();

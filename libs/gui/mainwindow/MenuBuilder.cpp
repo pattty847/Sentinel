@@ -7,13 +7,12 @@
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
-#include "../../core/SentinelLogging.hpp"
+#include "../widgets/OrderBookDock.hpp"
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QObject>
 #include <QQuickItem>
-#include "../widgets/LayoutManager.hpp"
 
 MenuBuilder::MenuBuilder(QMenuBar* menuBar) : m_menuBar(menuBar) {
 }
@@ -51,6 +50,9 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     }
     if (docks.stockChartDock) {
         m_viewMenu->addAction(docks.stockChartDock->toggleViewAction());
+    }
+    if (docks.orderBookDock) {
+        m_viewMenu->addAction(docks.orderBookDock->toggleViewAction());
     }
 }
 

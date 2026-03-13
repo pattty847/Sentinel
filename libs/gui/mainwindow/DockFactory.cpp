@@ -8,6 +8,7 @@
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
+#include "../widgets/OrderBookDock.hpp"
 
 DockFactory::DockFactory(QWidget* parent) : m_parent(parent) {
 }
@@ -27,6 +28,7 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.watchlistDock = new WatchlistDock(m_parent);
     m_docks.screenerDock   = new ScreenerDock(m_parent);
     m_docks.stockChartDock = new StockChartDock(m_parent);
+    m_docks.orderBookDock  = new OrderBookDock(m_parent);
 
     // Keep minimum sizes aligned with each dock's own size hints.
     m_docks.heatmapDock->setMinimumSize(m_docks.heatmapDock->minimumSizeHint());
@@ -34,6 +36,7 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.labDock->setMinimumSize(m_docks.labDock->minimumSizeHint());
     m_docks.watchlistDock->setMinimumSize(m_docks.watchlistDock->minimumSizeHint());
     m_docks.screenerDock->setMinimumSize(m_docks.screenerDock->minimumSizeHint());
+    m_docks.orderBookDock->setMinimumSize(m_docks.orderBookDock->minimumSizeHint());
     return m_docks;
 }
 

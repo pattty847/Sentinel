@@ -41,9 +41,9 @@ Exchange WebSocket → Transport → Auth (optional) → Dispatch → Callbacks 
 
 ### 3. Dispatch (`dispatch/`)
 
-- **MessageDispatcher** — Parses JSON from the WebSocket into typed events (`TradeEvent`, `BookSnapshotEvent`, `BookUpdateEvent`, etc.). Stateless `parse` entry point.
+- **MessageDispatcher** — Parses JSON from the WebSocket into typed events (`Event` variant containing `TradeEvent`, `BookSnapshotEvent`, `BookUpdateEvent`, etc.). Stateless `parse` entry point. It handles DTO transformations such as fast string-to-double parsing (`Cpp20Utils::fastStringToDouble`) and ISO8601 timestamp conversion.
 
-**Flow:** `channel=market_trades` → `TradeEvent[]`; `channel=l2_data` + `type=snapshot` → `BookSnapshotEvent`; `type=update` → `BookUpdateEvent`.
+**Flow:** `channel=market_trades` → array of `TradeEvent`; `channel=l2_data` + `type=snapshot` → `BookSnapshotEvent`; `type=update` → `BookUpdateEvent`.
 
 ### 4. Callbacks
 
@@ -51,14 +51,14 @@ The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpd
 
 ### 5. Data models (`model/`)
 
-- **Trade** — `product_id`, `price`, `size`, `side`, `timestamp`.
-- **OrderBookLevel**, **BookLevelUpdate**, **OrderBook** — Snapshot and incremental update structures.
-- **LiveOrderBook** — Dense, fixed-range order book for visualization and GPU. Maps a continuous price range to a vector for O(1) updates. The engine does **not** own `LiveOrderBook` instances; it only delivers snapshot and update data. The consumer creates and updates the book.
+- **Trade** — `product_id`, `price`, `size`, `side` (`AggressorSide` enum), `timestamp`.
+- **BookLevelUpdate**, **BookDelta** — Incremental update structures.
+- **LiveOrderBook** — Dense, fixed-range order book for visualization and GPU. Maps a continuous price range to pre-allocated `std::vector<double>` arrays for `O(1)` updates using `price_to_index`. It uses `std::mutex` to ensure thread-safety on aggregations and structural mutations. The engine does **not** own `LiveOrderBook` instances; it only delivers snapshot and update data. The consumer creates and updates the book.
 
-## Threading
+## Threading & Pure C++ Boundary
 
-- **Worker thread (Boost.Asio)** — `MarketDataCoreEngine` runs `m_ioc.run()` on a dedicated thread. All network I/O, parsing, and callback invocation happen there. A `while (m_running)` loop with try/catch keeps the thread and `io_context` resilient to handler exceptions.
-- **GUI thread (Qt)** — `MarketDataCoreQt` lives on the GUI thread. When a callback fires on the worker thread, the adapter uses `Qt::QueuedConnection` to emit the corresponding signal on the GUI thread so UI updates stay safe.
+- **Worker thread (Boost.Asio)** — `MarketDataCoreEngine` runs `m_ioc.run()` on a dedicated thread. All network I/O, parsing, and `std::function` callback invocation happen there. A `while (m_running)` loop with try/catch keeps the thread and `io_context` resilient to handler exceptions.
+- **GUI thread Boundary (Qt)** — `MarketDataCoreQt` acts as the pure C++ boundary buffer. It lives on the GUI thread and registers C++ DTOs with Qt's MetaObject system (`qRegisterMetaType`). When a callback fires on the worker thread, the adapter uses `QMetaObject::invokeMethod` with `Qt::QueuedConnection` to safely copy DTO payloads (e.g., `std::move(updatesCopy)`) and emit signals on the GUI thread, protecting the core from Qt object leaks and keeping UI updates safe.
 
 ## Message flow
 

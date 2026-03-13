@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
@@ -507,6 +508,27 @@ class Session : public std::enable_shared_from_this<Session> {
         }
         const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
 
+        // ── Coinbase candle fallback ─────────────────────────────────────────
+        // The trade tape only covers the period since server startup.  For
+        // historical buckets where the tape is empty, synthesise TPO letters
+        // from the Coinbase OHLCV candle's L/H range (all prices between Low
+        // and High are marked as visited — standard OHLC approximation).
+        // Fetch the whole range in one call so the inner loop is O(1) lookups.
+        std::unordered_map<int64_t, OHLCVBar> candleByBucket;
+        const int64_t timeframeSec = timeframeMs / 1000;
+        const auto candleGranularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
+        if (candleGranularity) {
+            const int64_t startSec = firstStart / 1000;
+            const int64_t endSec   = effectiveEnd / 1000;
+            const CandleFetchResult res = owner_->restClient().fetchProductCandles(
+                symbol, startSec, endSec, *candleGranularity, effectiveCount);
+            if (res.ok) {
+                for (const auto& bar : res.candles) {
+                    candleByBucket[bar.timestamp_ms] = bar;
+                }
+            }
+        }
+
         nlohmann::json payload;
         payload["type"] = "tpo_history_chunk";
         payload["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
@@ -532,6 +554,32 @@ class Session : public std::enable_shared_from_this<Session> {
                                       letters)) {
                 continue;
             }
+
+            // If the trade tape had no data for this bucket, fall back to the
+            // Coinbase candle L/H range so the full session profile is visible.
+            if (!candleByBucket.empty()) {
+                bool hasLetters = false;
+                for (int r = 0; r < gridHeight; ++r) {
+                    if (letters.at(r) != '\0') { hasLetters = true; break; }
+                }
+                if (!hasLetters) {
+                    const auto it = candleByBucket.find(bucketStart);
+                    if (it != candleByBucket.end()) {
+                        const auto& bar = it->second;
+                        const char letter = tpoLetterForBucket(bucketStart, timeframeMs);
+                        // Row 0 = maxPrice; row (gridHeight-1) = minPrice.
+                        // High price → smaller row index; Low price → larger row index.
+                        const int rowHigh = static_cast<int>(std::floor((maxPrice - bar.high) / tickSize));
+                        const int rowLow  = static_cast<int>(std::floor((maxPrice - bar.low)  / tickSize));
+                        const int rStart  = std::max(0, rowHigh);
+                        const int rEnd    = std::min(gridHeight - 1, rowLow);
+                        for (int r = rStart; r <= rEnd; ++r) {
+                            letters[r] = letter;
+                        }
+                    }
+                }
+            }
+
             nlohmann::json item;
             item["time_start"] = bucketStart;
             item["time_end"] = bucketEnd;

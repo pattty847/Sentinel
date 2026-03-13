@@ -36,7 +36,6 @@ private:
     QLabel* m_cpuLabel;
     QLabel* m_gpuLabel;
     QLabel* m_latencyLabel;
-    QLabel* m_coinbaseLatencyLabel;
     QLabel* m_versionLabel;
 
     // Metrics storage

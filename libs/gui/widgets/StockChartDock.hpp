@@ -4,6 +4,7 @@
 #pragma once
 
 #include "DockablePanel.hpp"
+#include "SecApiClient.hpp"
 
 #include <QQuickView>
 #include <QProcess>
@@ -30,9 +31,13 @@ private slots:
     void onPeriodChanged(const QString& period);
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
     void onProcessError(QProcess::ProcessError error);
+    void onSecSignalsReady(const QJsonObject& payload);
+    void onSecApiError(const QString& error);
 
 private:
     void startFetch();
+    void startSecFetch();
+    int secDaysBackForCurrentPeriod() const;
     void setStatus(const QString& msg, bool error = false);
     QObject* qmlRoot() const;
 
@@ -47,6 +52,7 @@ private:
 
     // Process
     QProcess*     m_process      = nullptr;
+    SecApiClient* m_secApiClient = nullptr;
 
     QString m_currentTicker;
     QString m_currentCompany;

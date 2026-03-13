@@ -6,32 +6,20 @@ Sentinel — HeatmapLabelRenderer
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <QtGlobal>
 
-namespace {
-bool useBlackLabel(uint16_t encoded) {
-    if (encoded == 0) {
-        return false;
-    }
-    const float magnitude = (encoded >= 0x8000u)
-        ? (static_cast<float>(encoded - 0x8000u) / 32767.0f)
-        : (static_cast<float>(encoded) / 32767.0f);
-    return magnitude > 0.5f;
-}
-} // namespace
 
-void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
-                                           const HeatmapStreamState::Snapshot& snapshot,
-                                           const MsdfAtlas& atlas,
-                                           const std::vector<uint16_t>& liquidityRing,
-                                           const std::vector<uint16_t>& intensityRing,
-                                           const std::vector<double>& liquidityScales,
-                                           float scale,
-                                           bool dollars,
-                                           std::vector<GlyphQuad>& whiteQuads,
-                                           std::vector<GlyphQuad>& blackQuads,
-                                           int onlyColumn) {
-    whiteQuads.clear();
-    blackQuads.clear();
+void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
+                                            const HeatmapStreamState::Snapshot& snapshot,
+                                            const ChartTextAtlas& atlas,
+                                            const std::vector<uint16_t>& liquidityRing,
+                                            const std::vector<uint16_t>& intensityRing,
+                                            const std::vector<double>& liquidityScales,
+                                            float scale,
+                                            bool dollars,
+                                            std::vector<ChartGlyphInstance>& glyphs,
+                                            int onlyColumn) {
+    glyphs.clear();
 
     if (!mapping.valid || !atlas.isBuilt() ||
         snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0 || snapshot.tickSize <= 0.0) {
@@ -47,25 +35,14 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
     const bool haveIntensity = (intensityRing.size() == expectedSize);
     const bool haveScales = (liquidityScales.size() == static_cast<size_t>(gridWidth));
 
-    // Derive iteration range from mapping srcRect (same as old code).
-    // timeOffset is used ONLY for ring data lookup, NOT for screen positioning.
     const QRectF& srcRect = mapping.srcRect;
-    [[maybe_unused]] const QRectF& drawRect = mapping.drawRect;
-    [[maybe_unused]] const float cellW = static_cast<float>(mapping.cellW);
-    [[maybe_unused]] const float cellH = static_cast<float>(mapping.cellH);
-
     const int cellsX = static_cast<int>(std::ceil(srcRect.width())) + 1;
     const int cellsY = static_cast<int>(std::ceil(srcRect.height()));
 
-    // Ring offset: convert logical srcRect column to physical ring column.
-    // timeOffset represents the physical ring offset for the GPU shader.
     const float baseX = static_cast<float>(srcRect.x()) + (mapping.timeOffset * gridWidth);
     const int startX = static_cast<int>(std::floor(baseX));
-    [[maybe_unused]] const float fracX = baseX - static_cast<float>(startX);
-
     const float baseY = static_cast<float>(srcRect.y());
     const int startY = static_cast<int>(std::floor(baseY));
-    [[maybe_unused]] const float fracY = baseY - static_cast<float>(startY);
 
     int onlyTexX = -1;
     int onlyI = -1;
@@ -86,7 +63,6 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
         }
     }
 
-    const float padding = static_cast<float>(atlas.paddingPx());
     for (int j = 0; j < cellsY; ++j) {
         int texY = startY + j;
         if (texY < 0) {
@@ -138,25 +114,35 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
             for (const QChar c : label) {
                 const auto& glyph = atlas.glyph(c);
                 if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+                    penX += glyph.advance;
                     continue;
                 }
-                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()) - padding);
-                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()) + padding);
-                minY = std::min(minY, static_cast<float>(glyph.bounds.top()) - padding);
-                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()) + padding);
+                minX = std::min(minX, penX + static_cast<float>(glyph.bounds.left()));
+                maxX = std::max(maxX, penX + static_cast<float>(glyph.bounds.right()));
+                minY = std::min(minY, static_cast<float>(glyph.bounds.top()));
+                maxY = std::max(maxY, static_cast<float>(glyph.bounds.bottom()));
                 penX += glyph.advance;
             }
             if (!std::isfinite(minX) || !std::isfinite(maxX)) {
                 continue;
             }
 
-            // Screen positioning via TimeAxisMapping — no timeOffset in screen math.
-            // Cell center: world time for this texture column's center, and price for this row.
-            const double bucketTimeMs = mapping.dataStartMs + (static_cast<double>(texX) * mapping.appendMs) + (mapping.appendMs * 0.5);
-            const float centerX = static_cast<float>(mapping.timeToScreenX(bucketTimeMs));
-            const float centerY = static_cast<float>(mapping.priceToScreenY(price));
+            const double cellW = mapping.drawRect.width() / mapping.srcRect.width();
+            const double cellH = mapping.drawRect.height() / mapping.srcRect.height();
+            const double colFracOffset = static_cast<double>(baseX) - static_cast<double>(startX);
+            
+            const float centerX = static_cast<float>(mapping.drawRect.x() + (static_cast<double>(i) - colFracOffset + 0.5) * cellW);
+            const float centerY = static_cast<float>(mapping.priceToScreenY(price) + cellH * 0.5);
+            
             const float originX = centerX - (minX + maxX) * 0.5f * scale;
             const float originY = centerY - (minY + maxY) * 0.5f * scale;
+            
+            // Clip labels that overflow past the draw rect (e.g. into the price axis)
+            if (originX > mapping.drawRect.right() || originX + (maxX - minX) * scale > mapping.drawRect.right() + 4.0f) {
+                continue;
+            }
+
+            const QColor color = Qt::white;
 
             penX = 0.0f;
             for (const QChar c : label) {
@@ -166,36 +152,14 @@ void HeatmapLabelRenderer::buildLabelQuads(const TimeAxisMapping& mapping,
                     continue;
                 }
 
-                const float x0 = originX + (penX + glyph.bounds.left() - padding) * scale;
-                const float y0 = originY + (glyph.bounds.top() - padding) * scale;
-                const float x1 = originX + (penX + glyph.bounds.right() + padding) * scale;
-                const float y1 = originY + (glyph.bounds.bottom() + padding) * scale;
-
-                const float u0 = static_cast<float>(glyph.uv.left());
-                const float v0 = static_cast<float>(glyph.uv.top());
-                const float u1 = static_cast<float>(glyph.uv.right());
-                const float v1 = static_cast<float>(glyph.uv.bottom());
-
-                GlyphQuad quad;
-                quad.pos[0] = QVector2D(x0, y0);
-                quad.pos[1] = QVector2D(x0, y1);
-                quad.pos[2] = QVector2D(x1, y0);
-                quad.pos[3] = QVector2D(x1, y0);
-                quad.pos[4] = QVector2D(x0, y1);
-                quad.pos[5] = QVector2D(x1, y1);
-
-                quad.uv[0] = QVector2D(u0, v0);
-                quad.uv[1] = QVector2D(u0, v1);
-                quad.uv[2] = QVector2D(u1, v0);
-                quad.uv[3] = QVector2D(u1, v0);
-                quad.uv[4] = QVector2D(u0, v1);
-                quad.uv[5] = QVector2D(u1, v1);
-
-                if (haveIntensity && useBlackLabel(encoded)) {
-                    blackQuads.push_back(quad);
-                } else {
-                    whiteQuads.push_back(quad);
-                }
+                ChartGlyphInstance instance;
+                instance.rect = QRectF(originX + (penX + glyph.bounds.left()) * scale,
+                                       originY + glyph.bounds.top() * scale,
+                                       glyph.bounds.width() * scale,
+                                       glyph.bounds.height() * scale);
+                instance.uv = glyph.uv;
+                instance.color = color;
+                glyphs.push_back(instance);
                 penX += glyph.advance;
             }
         }
@@ -260,5 +224,6 @@ QString HeatmapLabelRenderer::formatLiquidityLabel(double value, bool dollars) {
         number = QString::number(scaled, 'f', 0);
     }
 
+    Q_UNUSED(dollars);
     return QString("%1%2").arg(number, suffix);
 }

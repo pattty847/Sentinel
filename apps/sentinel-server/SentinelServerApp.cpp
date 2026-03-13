@@ -154,8 +154,16 @@ bool SentinelServerApp::initialize() {
                 lastLoggedLatency = latencyMs;
                 lastLogTime = now;
             }
-            if (m_server)
-                m_server->broadcastCoinbaseLatency(latencyMs);
+            if (m_server) {
+                static int lastBroadcastMs = -1;
+                static auto lastBroadcastTime = std::chrono::steady_clock::now();
+                const auto sinceBroadcast = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBroadcastTime).count();
+                if (sinceBroadcast >= 1000 || std::abs(latencyMs - lastBroadcastMs) > 5) {
+                    m_server->broadcastCoinbaseLatency(latencyMs);
+                    lastBroadcastMs = latencyMs;
+                    lastBroadcastTime = now;
+                }
+            }
         });
 
         QObject::connect(m_server.get(), &SentinelStreamServer::clientSubscribed, this,
