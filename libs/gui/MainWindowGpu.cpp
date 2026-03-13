@@ -32,6 +32,7 @@
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/PaperTradingDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
+#include "render/AlgoOverlayRenderer.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
@@ -377,6 +378,13 @@ void MainWindowGPU::setupConnections() {
                 m_paperTradingDock, &PaperTradingDock::onAlgoOrderEvent, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::pnlSnapshotReceived,
                 m_paperTradingDock, &PaperTradingDock::onPnlSnapshot, Qt::QueuedConnection);
+    }
+
+    if (m_qquickView && m_qquickView->rootObject()) {
+        if (auto* overlay = m_qquickView->rootObject()->findChild<AlgoOverlayRenderer*>("algoOverlayRenderer")) {
+            connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                    overlay, &AlgoOverlayRenderer::onAlgoOrderEvent, Qt::QueuedConnection);
+        }
     }
 }
 

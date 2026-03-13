@@ -194,6 +194,10 @@ void PaperTradingDock::buildPnlPanel(QWidget* parent) {
 // ─── Slots ──────────────────────────────────────────────────────────────────
 
 void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
+    if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
+        return;
+    }
+
     const QString oid = QString::fromStdString(update.orderId);
     int row = m_orderIdToRow.value(oid, -1);
     if (row < 0) {
@@ -222,6 +226,10 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
 }
 
 void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) {
+    if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
+        return;
+    }
+
     if (m_posLabel)
         m_posLabel->setText(QString::number(update.positionQty, 'f', 4));
     if (m_avgPriceLabel)
@@ -247,6 +255,10 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
 }
 
 void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
+    if (!m_symbol.isEmpty() && QString::fromStdString(event.symbol) != m_symbol) {
+        return;
+    }
+
     if (event.status == trading::OrderStatus::Filled) {
         ++m_algoFillCount;
         if (m_algoFillCountLabel)
@@ -255,6 +267,9 @@ void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
 }
 
 void PaperTradingDock::onPnlSnapshot(const trading::PnlSnapshot& snap) {
+    if (!m_symbol.isEmpty() && QString::fromStdString(snap.symbol) != m_symbol) {
+        return;
+    }
     if (!m_pnlCurve) return;
     m_pnlCurve->appendPoint(snap.timestampMs, snap.totalPnl, QString::fromStdString(snap.algoId));
 

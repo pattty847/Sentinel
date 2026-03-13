@@ -98,6 +98,15 @@ Rectangle {
         timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))
         z: 2
     }
+
+    AlgoOverlayRenderer {
+        id: algoOverlayRenderer
+        objectName: "algoOverlayRenderer"
+        anchors.fill: unifiedGridRenderer
+        mappingProvider: unifiedGridRenderer
+        enabled: true
+        z: 3
+    }
     
     Item {
         id: gridLines
