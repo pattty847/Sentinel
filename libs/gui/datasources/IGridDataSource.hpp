@@ -11,6 +11,7 @@
 #include "../../core/protocol/TpoSlice.hpp"
 #include "../../core/protocol/VolumeProfileSlice.hpp"
 #include "../../core/trading/TradingTypes.hpp"
+#include "../../core/trading/AlgoEngine.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -50,6 +51,7 @@ public:
                                       int64_t endTimeSec,
                                       int limit) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
+    virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;
 
     // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
@@ -73,10 +75,14 @@ signals:
     void errorOccurred(const QString& error);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
+    void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
+    void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 };
 
 Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
 Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(trading::OrderUpdate)
 Q_DECLARE_METATYPE(trading::PositionUpdate)
+Q_DECLARE_METATYPE(trading::AlgoOrderEvent)
+Q_DECLARE_METATYPE(trading::PnlSnapshot)
 

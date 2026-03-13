@@ -23,6 +23,7 @@ const char* toString(OrderSide side) {
 const char* toString(OrderType type) {
     switch (type) {
         case OrderType::Market: return "MARKET";
+        case OrderType::Limit: return "LIMIT";
         default: return "UNKNOWN";
     }
 }
@@ -34,6 +35,7 @@ const char* toString(OrderStatus status) {
         case OrderStatus::Filled: return "FILLED";
         case OrderStatus::Canceled: return "CANCELED";
         case OrderStatus::Rejected: return "REJECTED";
+        case OrderStatus::Open: return "OPEN";
         default: return "REJECTED";
     }
 }
@@ -54,6 +56,7 @@ OrderSide orderSideFromString(const std::string& side) {
 
 OrderType orderTypeFromString(const std::string& type) {
     if (type == "MARKET") return OrderType::Market;
+    if (type == "LIMIT") return OrderType::Limit;
     return OrderType::Unknown;
 }
 
@@ -62,6 +65,7 @@ OrderStatus orderStatusFromString(const std::string& status) {
     if (status == "PARTIAL") return OrderStatus::Partial;
     if (status == "FILLED") return OrderStatus::Filled;
     if (status == "CANCELED") return OrderStatus::Canceled;
+    if (status == "OPEN") return OrderStatus::Open;
     return OrderStatus::Rejected;
 }
 

@@ -30,6 +30,7 @@
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/StockChartDock.hpp"
 #include "widgets/OrderBookDock.hpp"
+#include "widgets/PaperTradingDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
@@ -198,6 +199,8 @@ void MainWindowGPU::setupUI() {
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
     m_orderBookDock = docks.orderBookDock;
+    m_paperTradingDock = new PaperTradingDock(this);
+    m_paperTradingDock->setDataSource(m_dataSource.get());
     if (m_screenerDock) {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
@@ -228,6 +231,9 @@ void MainWindowGPU::setupUI() {
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     if (m_orderBookDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
+    }
+    if (m_paperTradingDock) {
+        connect(this, &MainWindowGPU::symbolChanged, m_paperTradingDock, &PaperTradingDock::setSymbol, Qt::QueuedConnection);
     }
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
@@ -362,6 +368,16 @@ void MainWindowGPU::setupConnections() {
         });
     }
     connectMarketDataSignals();
+    if (m_paperTradingDock) {
+        connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                m_paperTradingDock, &PaperTradingDock::onOrderUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                m_paperTradingDock, &PaperTradingDock::onPositionUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                m_paperTradingDock, &PaperTradingDock::onAlgoOrderEvent, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::pnlSnapshotReceived,
+                m_paperTradingDock, &PaperTradingDock::onPnlSnapshot, Qt::QueuedConnection);
+    }
 }
 
 void MainWindowGPU::setupGuiApiServer() {
@@ -865,5 +881,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
+    docks.paperTradingDock = m_paperTradingDock;
     return docks;
 }

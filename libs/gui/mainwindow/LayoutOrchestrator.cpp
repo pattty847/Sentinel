@@ -8,6 +8,7 @@
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
 #include "../widgets/OrderBookDock.hpp"
+#include "../widgets/PaperTradingDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include <QScreen>
 #include <QGuiApplication>
@@ -92,6 +93,10 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.orderBookDock);
         docks.orderBookDock->setFloating(false);
     }
+    if (docks.paperTradingDock && docks.paperTradingDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.paperTradingDock);
+        docks.paperTradingDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
@@ -148,6 +153,16 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
             m_mainWindow->tabifyDockWidget(docks.secDock, docks.stockChartDock);
         }
     }
+    if (docks.paperTradingDock) {
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.paperTradingDock);
+        if (docks.stockChartDock) {
+            m_mainWindow->tabifyDockWidget(docks.stockChartDock, docks.paperTradingDock);
+        } else if (docks.screenerDock) {
+            m_mainWindow->tabifyDockWidget(docks.screenerDock, docks.paperTradingDock);
+        } else {
+            m_mainWindow->tabifyDockWidget(docks.secDock, docks.paperTradingDock);
+        }
+    }
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
     m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
@@ -173,6 +188,7 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.labDock, QSize(360, 240));
     applyMinimum(docks.watchlistDock, QSize(320, 360));
     applyMinimum(docks.orderBookDock, QSize(280, 360));
+    applyMinimum(docks.paperTradingDock, QSize(360, 280));
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
@@ -211,5 +227,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.labDock) docks.labDock->show();
     if (docks.watchlistDock) docks.watchlistDock->show();
     if (docks.stockChartDock) docks.stockChartDock->show();
+    if (docks.paperTradingDock) docks.paperTradingDock->show();
 }
 
