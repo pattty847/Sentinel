@@ -41,10 +41,30 @@ Work in progress on the feature branch:
 
 `main` remains the stable landing page for the project, but the latest public preview build currently comes from `tpo-footprint-v1`.
 
+## Live Demos
+
+### Heatmap Render
+
+High-frequency 1s timeframe heatmap population on the main chart.
+
+![Heatmap render demo](docs/assets/gifs/heatmap-render.gif)
+
+### Stock Chart + Insider Signals
+
+Daily stock chart with SEC insider transaction overlays and hover detail.
+
+![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif)
+
+### TV Screener
+
+Quick pass through the stock screener workflow.
+
+![Stock screener demo](docs/assets/gifs/stock-screener.gif)
+
 ## Main Branch Overview
 
-<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 54 36 PM" src="https://github.com/user-attachments/assets/f21af350-9510-41f4-93e4-7a760a36ecde" />
-<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 55 03 PM" src="https://github.com/user-attachments/assets/154652c2-2176-40ec-8a7f-605877060991" />
+<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 54 36 PM" src="https://github.com/user-attachments/assets/f21af350-9510-41f4-93e4-7a760a36ecde" />
+<img width="1920" height="1080" alt="Screenshot 2026-03-09 at 10 55 03 PM" src="https://github.com/user-attachments/assets/154652c2-2176-40ec-8a7f-605877060991" />
 
 ### Features
 - Full Server Client architecture
@@ -186,9 +206,28 @@ Core handles market data, caching, and transforms. GUI handles all rendering and
 
 ## Docs
 
+<<<<<<< HEAD
 - `docs/ARCHITECTURE.md` — dataflow and rendering pipeline
 - `docs/MARKETDATA.md` — MarketDataCoreEngine pipeline
 - `docs/FEATURES.md` - Outline of features for the terminal
+=======
+Structured outline of project docs (in `docs/`, excluding `docs/TODO.md` and `docs/private/` if present). Use these for architecture, setup, and behavior; keep them as the single source of truth.
+
+| Document | Purpose |
+|----------|---------|
+| **Architecture & pipeline** | |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System overview: client–server split, directory layout, data and rendering pipeline, TimeAxisMapping, protocol, threading, performance. Start here for how pieces fit together. |
+| [`docs/MARKETDATA.md`](docs/MARKETDATA.md) | Market data stack: MarketDataCoreEngine, transport, auth, dispatch, threading, TLS/WSS, and trading stream (paper). |
+| [`docs/UI_ARCHITECTURE.md`](docs/UI_ARCHITECTURE.md) | GUI architecture: QML/Widgets, dock layout, rendering pipeline, coordinate systems, and performance invariants. |
+| [`docs/COORDINATE_SYSTEMS.md`](docs/COORDINATE_SYSTEMS.md) | Chart coordinate spaces (world, grid, screen) and renderer contracts; when to use texture-quad vs geometry; forbidden cross-contract patterns. |
+| **Setup & configuration** | |
+| [`docs/CONFIG.md`](docs/CONFIG.md) | Server and client YAML config files, load order, ownership (server-authoritative vs client-only), and example snippets. |
+| [`docs/PAPER_TRADING_QUICKSTART.md`](docs/PAPER_TRADING_QUICKSTART.md) | Paper trading: config, run order, subscribe, hotkeys (B/S/F/C), UI feedback, troubleshooting. |
+| **Reference** | |
+| [`docs/FEATURES.md`](docs/FEATURES.md) | Feature overview and notable completed work (e.g. axis performance). |
+
+For task tracking and roadmap, see `docs/TODO.md` (not part of the canonical outline above).
+>>>>>>> 537b6d5 (Add demo GIFs to README)
 
 ---
 
