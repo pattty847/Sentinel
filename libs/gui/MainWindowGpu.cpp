@@ -213,6 +213,18 @@ void MainWindowGPU::setupUI() {
             }
         });
     }
+    if (m_watchlistDock) {
+        connect(m_watchlistDock, &WatchlistDock::symbolSelected, this, [this](const QString& symbol, const QString& assetType) {
+            if (assetType == "crypto" && m_symbolInput) {
+                m_symbolInput->setText(symbol);
+                onSubscribe();
+            } else if (assetType == "stock" && m_stockChartDock) {
+                m_stockChartDock->show();
+                m_stockChartDock->raise();
+                m_stockChartDock->loadSymbol(symbol);
+            }
+        });
+    }
     
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
