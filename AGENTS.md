@@ -115,6 +115,14 @@ Update only the relevant canonical doc in the same change:
 - New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
 - Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
 
+## 8a) Commit Checkpoints
+
+- Prefer manual git commits after a coherent batch of logic lands and verifies cleanly.
+- Group commits by feature or infrastructure slice, not by file type.
+- Default checkpoint rule: if a meaningful feature seam is implemented and targeted validation passed, make a commit unless the user says not to.
+- Do not sweep unrelated modified files into the same commit; leave unrelated worktree changes alone.
+- Commit messages should say what changed and why at the feature level, not just "fix stuff".
+
 ## 9) References (Read on Demand Not By Default)
 
 - `docs/ARCHITECTURE.md`

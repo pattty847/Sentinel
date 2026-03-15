@@ -50,6 +50,21 @@ add_library(sentinel_core
     trading/AlgoEngine.cpp
     trading/AvendellaMM.hpp
     trading/AvendellaMM.cpp
+    trading/BacktestTypes.hpp
+    trading/IExecutionModel.hpp
+    trading/IBacktestStrategy.hpp
+    trading/MarketEventSource.hpp
+    trading/MarketEventSource.cpp
+    trading/TradeDrivenExecutionModel.hpp
+    trading/TradeDrivenExecutionModel.cpp
+    trading/SimulationBroker.hpp
+    trading/SimulationBroker.cpp
+    trading/ReplayEngine.hpp
+    trading/ReplayEngine.cpp
+    trading/AlgoBacktestAdapter.hpp
+    trading/AlgoBacktestAdapter.cpp
+    trading/LiveTradingSession.hpp
+    trading/LiveTradingSession.cpp
 )
 
 # Find required packages

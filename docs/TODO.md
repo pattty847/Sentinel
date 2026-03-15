@@ -667,3 +667,42 @@ _(empty)_
 #### Session log
 - **2026-02-14** - Refactored protocol message handling to reduce complexity while preserving schema/payload guardrails and existing signal semantics; added focused helper tests, build is green, helper test binary passes when launched with Qt/build DLL PATH.
 - **2026-02-14** - Fixed Coinbase heartbeat subscription policy: removed duplicate standalone heartbeat subscribe and made heartbeat frames symbol-scoped via SubscriptionManager product_ids; SubscriptionManagerTests passing.
+
+---
+
+### F18: Trading Simulation Stack (Paper + Replay)
+**Status:** active
+**Created:** 2026-03-14
+**Updated:** 2026-03-14
+
+> Blueprint: `docs/TRADING_SIMULATION_BLUEPRINT.md`
+
+#### Now
+- [ ] Migrate live manual paper trading onto the shared simulation broker
+- [ ] Migrate live algo paper trading onto the shared simulation broker
+- [ ] Define the live session controller that feeds streamed market events into the broker
+- [ ] Audit current trade and heatmap persistence to confirm what is durable vs RAM-only
+
+#### Next
+- [ ] Define durable historical trade dataset format for replay
+- [ ] Add replay controls on top of existing chart widgets
+- [ ] Design the first `BookEvent` / book-aware execution model seam
+
+#### Later
+- [ ] Add historical order-book capture and replay
+- [ ] Add visual replay on the chart and heatmap
+- [ ] Add more plug-and-play strategies on the shared strategy interface
+- [ ] Add research/report tooling on top of replay outputs
+
+#### Done
+- [x] Added shared backtest core types (`MarketEvent`, `OrderIntent`, `ExecutionEvent`, `BacktestResult`) (2026-03-14)
+- [x] Added pluggable execution-model seam with trade-driven v1 implementation (2026-03-14)
+- [x] Added reusable simulation broker and replay engine (2026-03-14)
+- [x] Added `IAlgo` adapter so Avendella runs through replay without rewriting the live algo interface (2026-03-14)
+- [x] Added `sentinel_backtest` CLI runner and targeted core tests (2026-03-14)
+- [x] Moved live server manual paper trading and Avendella algo routing onto the shared simulation broker via `LiveTradingSession` (2026-03-14)
+
+#### Session log
+- **2026-03-14** - Defined the long-term shared trading simulation plan: one execution core for live manual paper trading, live algo trading, and historical replay. Locked in trade-first execution realism, broker unification before book-aware fills, and replay UI on top of existing chart widgets first.
+- **2026-03-14** - Implemented backtest core v1 in `libs/core/trading` with a trade-driven execution model, simulation broker, replay engine, CSV trade source, Avendella adapter, CLI runner, and passing targeted tests.
+- **2026-03-14** - Replaced the server's separate `TradingEngine` + `AlgoEngine` live path with a shared `LiveTradingSession` built on the simulation broker. Manual trade commands and Avendella live ticks now flow through the same broker abstraction as replay.

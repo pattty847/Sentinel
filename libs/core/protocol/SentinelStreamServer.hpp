@@ -15,9 +15,7 @@
 #include "../servermodel/ServerDataModel.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
-#include "../trading/AlgoEngine.hpp"
-
-namespace trading { class TradingEngine; }
+#include "../trading/LiveTradingSession.hpp"
 
 class Authenticator;
 class CoinbaseRestClient;
@@ -58,9 +56,10 @@ public:
     void broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void broadcastPnlSnapshot(const trading::PnlSnapshot& snapshot);
     void broadcastCoinbaseLatency(int milliseconds);
-    trading::AlgoEngine& algoEngine() { return *m_algoEngine; }
-    trading::AlgoEngine* algoEnginePtr() const { return m_algoEngine.get(); }
-    trading::TradingEngine* tradingEnginePtr() const { return m_tradingEngine.get(); }
+    bool startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params);
+    void stopAlgo(const std::string& algoId);
+    trading::LiveTradingSession& tradingSession() { return *m_tradingSession; }
+    trading::LiveTradingSession* tradingSessionPtr() const { return m_tradingSession.get(); }
     uint64_t registerLatencySender(std::function<void(int)> sendFn);
     void unregisterLatencySender(uint64_t id);
 
@@ -77,8 +76,7 @@ private:
     std::unique_ptr<tcp::acceptor> m_acceptor;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
-    std::unique_ptr<trading::TradingEngine> m_tradingEngine;
-    std::unique_ptr<trading::AlgoEngine> m_algoEngine;
+    std::unique_ptr<trading::LiveTradingSession> m_tradingSession;
 
     std::mutex m_latencySendersMutex;
     std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;
@@ -92,4 +90,3 @@ public:
     void unregisterTradingBroadcaster(uint64_t id);
 private:
 };
-

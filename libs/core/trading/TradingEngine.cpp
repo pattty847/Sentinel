@@ -214,10 +214,12 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     out.orderUpdates.push_back(OrderUpdate{order.id, order.symbol, order.status, order.side,
                                            order.qty, 0.0, order.qty, 0.0, 0.0, order.algoId});
 
-    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch())
-                      .count();
-    auto fillResult = fillOrder(order, fillPrice, fillPrice, now);
+    const int64_t fillTimestamp = command.timestamp > 0
+        ? command.timestamp
+        : std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+    auto fillResult = fillOrder(order, fillPrice, fillPrice, fillTimestamp);
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
     out.pnlSnapshots.insert(out.pnlSnapshots.end(), fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());

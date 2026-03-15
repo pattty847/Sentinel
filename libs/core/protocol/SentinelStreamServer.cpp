@@ -33,9 +33,7 @@
 #include "../marketdata/auth/Authenticator.hpp"
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
-#include "../trading/TradingEngine.hpp"
-#include "../trading/AlgoEngine.hpp"
-#include "../trading/AvendellaMM.hpp"
+#include "../trading/LiveTradingSession.hpp"
 #include "Cpp20Utils.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
@@ -1026,7 +1024,7 @@ public:
                     self->do_write(payload.dump());
                 }).detach();
             } else if (type == "trade_command") {
-                if (owner_ && owner_->tradingEnginePtr()) {
+                if (owner_ && owner_->tradingSessionPtr()) {
                     try {
                         auto cmd = trading::parseTradeCommandJson(msg);
                         owner_->processTradeCommand(cmd);
@@ -1035,7 +1033,7 @@ public:
                     }
                 }
             } else if (type == "algo_command") {
-                if (owner_ && owner_->algoEnginePtr()) {
+                if (owner_ && owner_->tradingSessionPtr()) {
                     try {
                         const std::string algoId = j.value("algo_id", "");
                         const std::string action  = j.value("action", "");
@@ -1047,11 +1045,12 @@ public:
                         params.maxPositionQty  = paramsJ.value("max_position_qty", 0.1);
                         params.skewBps         = paramsJ.value("skew_bps", 5.0);
                         if (action == "start") {
-                            owner_->algoEngine().startAlgo(algoId, symbol, params);
-                            sLog_App("AlgoEngine: started " << QString::fromStdString(algoId) << " on " << QString::fromStdString(symbol));
+                            if (owner_->startAlgo(algoId, symbol, params)) {
+                                sLog_App("LiveTradingSession: started " << QString::fromStdString(algoId) << " on " << QString::fromStdString(symbol));
+                            }
                         } else if (action == "stop") {
-                            owner_->algoEngine().stopAlgo(algoId);
-                            sLog_App("AlgoEngine: stopped " << QString::fromStdString(algoId));
+                            owner_->stopAlgo(algoId);
+                            sLog_App("LiveTradingSession: stopped " << QString::fromStdString(algoId));
                         }
                     } catch (const std::exception& ex) {
                         sLog_Error("algo_command error: " << ex.what());
@@ -1169,12 +1168,12 @@ public:
     }
     
     void on_trade(const Trade& trade) {
-        // Tick AlgoEngine on every trade (even unsubscribed symbols — algos may be running)
-        if (owner_ && owner_->algoEnginePtr()) {
+        // Tick live trading session on every trade (even unsubscribed symbols — algos may be running)
+        if (owner_ && owner_->tradingSessionPtr()) {
             const int64_t tsMs = static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     trade.timestamp.time_since_epoch()).count());
-            owner_->algoEngine().onTick(trade.product_id, trade.price, tsMs);
+            owner_->tradingSession().onTradeTick(trade.product_id, trade.price, tsMs);
         }
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
@@ -1601,18 +1600,16 @@ void SentinelStreamServer::start() {
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
 
-        if (!m_tradingEngine) {
+        if (!m_tradingSession) {
             const double slippageBps = m_serverConfig.trading.slippageBps;
-            m_tradingEngine = std::make_unique<trading::TradingEngine>(
+            m_tradingSession = std::make_unique<trading::LiveTradingSession>(
                 [this](const std::string& symbol) -> double {
                     auto& hotData = m_model.ensureSymbol(symbol);
                     return resolveMidPrice(hotData.liveBook);
                 },
                 slippageBps);
-
-            m_algoEngine = std::make_unique<trading::AlgoEngine>(*m_tradingEngine);
-            m_algoEngine->registerAlgo(std::make_unique<trading::AvendellaMM>());
-            m_algoEngine->setResultCallback(
+            m_tradingSession->registerAlgo(std::make_unique<trading::AvendellaMM>());
+            m_tradingSession->setResultCallback(
                 [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
                     for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
                     for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
@@ -1708,11 +1705,22 @@ void SentinelStreamServer::broadcastCoinbaseLatency(int milliseconds) {
 // ─── Trading engine & AlgoEngine initialization ──────────────────────────────
 
 void SentinelStreamServer::processTradeCommand(const trading::TradeCommand& command) {
-    if (!m_tradingEngine) return;
-    auto result = m_tradingEngine->onCommand(command);
-    for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
-    for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
-    for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
+    if (!m_tradingSession) return;
+    m_tradingSession->processTradeCommand(command);
+}
+
+bool SentinelStreamServer::startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params) {
+    if (!m_tradingSession) {
+        return false;
+    }
+    return m_tradingSession->startAlgo(algoId, symbol, params);
+}
+
+void SentinelStreamServer::stopAlgo(const std::string& algoId) {
+    if (!m_tradingSession) {
+        return;
+    }
+    m_tradingSession->stopAlgo(algoId);
 }
 
 uint64_t SentinelStreamServer::registerTradingBroadcaster(std::function<void(const std::string&)> fn) {
