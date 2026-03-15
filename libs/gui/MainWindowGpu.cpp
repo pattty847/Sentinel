@@ -202,16 +202,12 @@ void MainWindowGPU::setupUI() {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
         }
-        connect(m_screenerDock, &ScreenerDock::rowSelected, this, [this](const QString& symbol, const QString& assetType) {
-            if (assetType == "crypto" && m_symbolInput) {
-                m_symbolInput->setText(symbol);
-                onSubscribe();
-            } else if (assetType == "stock" && m_stockChartDock) {
-                m_stockChartDock->show();
-                m_stockChartDock->raise();
-                m_stockChartDock->loadSymbol(symbol);
-            }
-        });
+        connect(m_screenerDock, &ScreenerDock::rowSelected,
+                this, &MainWindowGPU::onAssetSymbolSelected);
+    }
+    if (m_watchlistDock) {
+        connect(m_watchlistDock, &WatchlistDock::symbolSelected,
+                this, &MainWindowGPU::onAssetSymbolSelected);
     }
     
     m_qquickView = m_heatmapDock->qquickView();
@@ -404,6 +400,17 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     this);
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
+    }
+}
+
+void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& assetType) {
+    if (assetType == QLatin1String("crypto") && m_symbolInput) {
+        m_symbolInput->setText(symbol);
+        onSubscribe();
+    } else if (assetType == QLatin1String("stock") && m_stockChartDock) {
+        m_stockChartDock->show();
+        m_stockChartDock->raise();
+        m_stockChartDock->loadSymbol(symbol);
     }
 }
 

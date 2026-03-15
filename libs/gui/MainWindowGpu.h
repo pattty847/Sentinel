@@ -62,6 +62,8 @@ private slots:
     void onSubscribe();
     void onConnectionStatusChanged(bool connected);
     void resetLayoutToDefault();
+    // Shared routing slot for screener and watchlist symbol selections.
+    void onAssetSymbolSelected(const QString& symbol, const QString& assetType);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
