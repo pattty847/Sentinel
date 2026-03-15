@@ -156,6 +156,8 @@ qt6_add_qml_module(sentinel_gui_lib
     SOURCES
         render/CandlestickOverlayItem.hpp
         render/CandlestickOverlayItem.cpp
+        render/AlgoOverlayRenderer.hpp
+        render/AlgoOverlayRenderer.cpp
     QML_FILES
         qml/DepthChartView.qml
         qml/LabView.qml

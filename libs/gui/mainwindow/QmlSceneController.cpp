@@ -17,8 +17,16 @@ QmlSceneController::QmlSceneController(QQuickView* qquickView)
     : m_qquickView(qquickView) {
 }
 
+void qml_register_types_Sentinel_Charts();
+
 static void addSentinelChartsImportPath(QQmlEngine* engine) {
     if (!engine) return;
+
+    static bool registered = false;
+    if (!registered) {
+        qml_register_types_Sentinel_Charts();
+        registered = true;
+    }
 
     engine->addImportPath("qrc:/qt/qml");
 

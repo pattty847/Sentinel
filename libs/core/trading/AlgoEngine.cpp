@@ -29,9 +29,50 @@ void AlgoEngine::stopAlgo(const std::string& algoId) {
 }
 
 void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs) {
-    // Collect commands from all running algos
+    TradingResult combinedResult;
+    std::vector<AlgoOrderEvent> algoEvents;
     std::vector<std::pair<IAlgo*, std::vector<TradeCommand>>> algoCommands;
 
+    const auto buildAlgoEvent = [timestampMs](const OrderUpdate& ou) {
+        AlgoOrderEvent ev;
+        ev.algoId = ou.algoId;
+        ev.orderId = ou.orderId;
+        ev.symbol = ou.symbol;
+        ev.side = ou.side;
+        ev.orderType = (ou.limitPrice > 0.0) ? OrderType::Limit : OrderType::Market;
+        ev.price = (ou.limitPrice > 0.0) ? ou.limitPrice : ou.avgPrice;
+        ev.qty = ou.qty;
+        ev.status = ou.status;
+        ev.timestampMs = timestampMs;
+        return ev;
+    };
+
+    // Fill resting orders for this market tick before algos decide to cancel/requote.
+    auto tickResult = m_engine.onTick(symbol, lastTradePrice, timestampMs);
+    std::vector<OrderUpdate> algoOwnedTickUpdates;
+    for (auto& ou : tickResult.orderUpdates) {
+        if (!ou.algoId.empty()) {
+            algoEvents.push_back(buildAlgoEvent(ou));
+            algoOwnedTickUpdates.push_back(ou);
+        }
+    }
+    if (!algoOwnedTickUpdates.empty()) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& ou : algoOwnedTickUpdates) {
+            auto it = m_algos.find(ou.algoId);
+            if (it != m_algos.end()) {
+                it->second->onOrderUpdate(ou);
+            }
+        }
+    }
+    combinedResult.orderUpdates.insert(combinedResult.orderUpdates.end(),
+                                       tickResult.orderUpdates.begin(), tickResult.orderUpdates.end());
+    combinedResult.positionUpdates.insert(combinedResult.positionUpdates.end(),
+                                          tickResult.positionUpdates.begin(), tickResult.positionUpdates.end());
+    combinedResult.pnlSnapshots.insert(combinedResult.pnlSnapshots.end(),
+                                       tickResult.pnlSnapshots.begin(), tickResult.pnlSnapshots.end());
+
+    // Collect commands from all running algos after fills/position changes have been applied.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (auto& [id, algo] : m_algos) {
@@ -52,27 +93,13 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
         }
     }
 
-    // Process commands through TradingEngine and collect results
-    TradingResult combinedResult;
-    std::vector<AlgoOrderEvent> algoEvents;
-
     for (auto& [algo, cmds] : algoCommands) {
         for (auto& cmd : cmds) {
             auto result = m_engine.onCommand(cmd);
 
             // Build AlgoOrderEvent for each order update from this algo
             for (auto& ou : result.orderUpdates) {
-                AlgoOrderEvent ev;
-                ev.algoId = cmd.algoId;
-                ev.orderId = ou.orderId;
-                ev.symbol = ou.symbol;
-                ev.side = ou.side;
-                ev.orderType = (ou.limitPrice > 0.0) ? OrderType::Limit : OrderType::Market;
-                ev.price = (ou.limitPrice > 0.0) ? ou.limitPrice : ou.avgPrice;
-                ev.qty = ou.qty;
-                ev.status = ou.status;
-                ev.timestampMs = timestampMs;
-                algoEvents.push_back(ev);
+                algoEvents.push_back(buildAlgoEvent(ou));
 
                 // Forward to algo for state tracking
                 algo->onOrderUpdate(ou);
@@ -86,41 +113,6 @@ void AlgoEngine::onTick(const std::string& symbol, double lastTradePrice, int64_
                                                 result.pnlSnapshots.begin(), result.pnlSnapshots.end());
         }
     }
-
-    // Also tick limit order fills for this symbol
-    auto tickResult = m_engine.onTick(symbol, lastTradePrice, timestampMs);
-    std::vector<OrderUpdate> algoOwnedUpdates;
-    for (auto& ou : tickResult.orderUpdates) {
-        if (!ou.algoId.empty()) {
-            AlgoOrderEvent ev;
-            ev.algoId = ou.algoId;
-            ev.orderId = ou.orderId;
-            ev.symbol = ou.symbol;
-            ev.side = ou.side;
-            ev.orderType = (ou.limitPrice > 0.0) ? OrderType::Limit : OrderType::Market;
-            ev.price = (ou.limitPrice > 0.0) ? ou.limitPrice : ou.avgPrice;
-            ev.qty = ou.qty;
-            ev.status = ou.status;
-            ev.timestampMs = timestampMs;
-            algoEvents.push_back(ev);
-            algoOwnedUpdates.push_back(ou);
-        }
-    }
-    if (!algoOwnedUpdates.empty()) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        for (const auto& ou : algoOwnedUpdates) {
-            auto it = m_algos.find(ou.algoId);
-            if (it != m_algos.end()) {
-                it->second->onOrderUpdate(ou);
-            }
-        }
-    }
-    combinedResult.orderUpdates.insert(combinedResult.orderUpdates.end(),
-                                        tickResult.orderUpdates.begin(), tickResult.orderUpdates.end());
-    combinedResult.positionUpdates.insert(combinedResult.positionUpdates.end(),
-                                           tickResult.positionUpdates.begin(), tickResult.positionUpdates.end());
-    combinedResult.pnlSnapshots.insert(combinedResult.pnlSnapshots.end(),
-                                        tickResult.pnlSnapshots.begin(), tickResult.pnlSnapshots.end());
 
     ResultCallback cb;
     {

@@ -3,6 +3,7 @@
 #include <QDockWidget>
 #include <QHash>
 #include <QLabel>
+#include <QSet>
 #include <QString>
 
 #include "../../core/trading/TradingTypes.hpp"
@@ -76,6 +77,7 @@ private:
     QPushButton* m_stopBtn = nullptr;
     int m_algoFillCount = 0;
     double m_algoCumPnl = 0.0;
+    QSet<QString> m_countedAlgoFillIds;
 
     // PnL curve
     PnlCurveItem* m_pnlCurve = nullptr;

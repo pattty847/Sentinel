@@ -8,12 +8,14 @@ Threading: Slot called on GUI thread; updatePaintNode on render thread.
 
 #include <QQuickItem>
 #include <QPointer>
+#include <QMetaObject>
 #include <QSGGeometryNode>
 #include <QSGFlatColorMaterial>
 #include <QColor>
 #include <QMutex>
 #include <vector>
 #include <deque>
+#include <unordered_map>
 #include <cstdint>
 #include <QtQml/qqmlregistration.h>
 
@@ -40,6 +42,7 @@ public:
 
 public slots:
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
+    void onMappingChanged();
 
 signals:
     void mappingProviderChanged();
@@ -50,18 +53,22 @@ protected:
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
-    struct PendingEvent {
-        trading::AlgoOrderEvent event;
+    struct OrderSpan {
+        trading::OrderSide side = trading::OrderSide::Unknown;
+        double price = 0.0;
+        int64_t openedMs = 0;
+        int64_t closedMs = 0;
+        trading::OrderStatus terminalStatus = trading::OrderStatus::New;
+        bool active = false;
     };
 
-    void buildGeometry(QSGNode* root);
-
     QPointer<QObject> m_mappingProvider;
+    std::vector<QMetaObject::Connection> m_mappingConnections;
     bool m_enabled = true;
     bool m_dirty = false;
 
     QMutex m_pendingMutex;
-    std::vector<PendingEvent> m_pending; // GUI thread → render thread
-
-    std::deque<trading::AlgoOrderEvent> m_events; // render-thread only
+    std::vector<trading::AlgoOrderEvent> m_pending; // GUI thread -> render thread
+    std::unordered_map<std::string, OrderSpan> m_orderSpans; // render-thread only
+    std::deque<trading::AlgoOrderEvent> m_markers; // render-thread only
 };

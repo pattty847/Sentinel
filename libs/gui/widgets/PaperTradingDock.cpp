@@ -18,6 +18,7 @@
 
 PaperTradingDock::PaperTradingDock(QWidget* parent)
     : QDockWidget(QStringLiteral("Paper Trading"), parent) {
+    setObjectName(QStringLiteral("PaperTradingDock"));
     buildUi();
 }
 
@@ -223,6 +224,16 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
         : QString::number(update.avgPrice, 'f', 2));
     m_orderLog->item(row, 5)->setText(QString::fromUtf8(trading::toString(update.status)));
     m_orderLog->scrollToBottom();
+
+    if (!update.algoId.empty() && update.status == trading::OrderStatus::Filled) {
+        if (!m_countedAlgoFillIds.contains(oid)) {
+            m_countedAlgoFillIds.insert(oid);
+            ++m_algoFillCount;
+            if (m_algoFillCountLabel) {
+                m_algoFillCountLabel->setText(QString("Fills: %1").arg(m_algoFillCount));
+            }
+        }
+    }
 }
 
 void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) {
@@ -259,11 +270,6 @@ void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
         return;
     }
 
-    if (event.status == trading::OrderStatus::Filled) {
-        ++m_algoFillCount;
-        if (m_algoFillCountLabel)
-            m_algoFillCountLabel->setText(QString("Fills: %1").arg(m_algoFillCount));
-    }
 }
 
 void PaperTradingDock::onPnlSnapshot(const trading::PnlSnapshot& snap) {
@@ -299,6 +305,10 @@ void PaperTradingDock::onStartAlgoClicked() {
     if (m_startBtn) m_startBtn->setEnabled(false);
     if (m_stopBtn) m_stopBtn->setEnabled(true);
     m_algoFillCount = 0;
+    m_countedAlgoFillIds.clear();
+    if (m_algoFillCountLabel) {
+        m_algoFillCountLabel->setText(QStringLiteral("Fills: 0"));
+    }
 }
 
 void PaperTradingDock::onStopAlgoClicked() {

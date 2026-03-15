@@ -15,7 +15,23 @@ AlgoOverlayRenderer::AlgoOverlayRenderer(QQuickItem* parent)
 
 void AlgoOverlayRenderer::setMappingProvider(QObject* provider) {
     if (m_mappingProvider == provider) return;
+
+    for (const auto& connection : m_mappingConnections) {
+        QObject::disconnect(connection);
+    }
+    m_mappingConnections.clear();
+
     m_mappingProvider = provider;
+    if (m_mappingProvider) {
+        m_mappingConnections.push_back(QObject::connect(
+            m_mappingProvider, SIGNAL(viewportChanged()), this, SLOT(onMappingChanged())));
+        m_mappingConnections.push_back(QObject::connect(
+            m_mappingProvider, SIGNAL(timeframeChanged()), this, SLOT(onMappingChanged())));
+        m_mappingConnections.push_back(QObject::connect(
+            m_mappingProvider, SIGNAL(panVisualOffsetChanged()), this, SLOT(onMappingChanged())));
+        m_mappingConnections.push_back(QObject::connect(
+            m_mappingProvider, SIGNAL(liveRenderTick()), this, SLOT(onMappingChanged())));
+    }
     m_dirty = true;
     update();
     emit mappingProviderChanged();
@@ -31,9 +47,14 @@ void AlgoOverlayRenderer::setEnabled(bool v) {
 
 void AlgoOverlayRenderer::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
     QMutexLocker lock(&m_pendingMutex);
-    m_pending.push_back({event});
+    m_pending.push_back(event);
     m_dirty = true;
     QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+}
+
+void AlgoOverlayRenderer::onMappingChanged() {
+    m_dirty = true;
+    update();
 }
 
 void AlgoOverlayRenderer::geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) {
@@ -50,16 +71,40 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         return nullptr;
     }
 
-    // Drain pending events from GUI thread
+    // Drain pending events from GUI thread and maintain active order spans.
     {
         QMutexLocker lock(&m_pendingMutex);
-        for (auto& p : m_pending) {
-            m_events.push_back(std::move(p.event));
+        for (auto& ev : m_pending) {
+            if (!ev.orderId.empty()) {
+                auto& span = m_orderSpans[ev.orderId];
+                if (ev.status == trading::OrderStatus::Open) {
+                    span.side = ev.side;
+                    span.price = ev.price;
+                    span.openedMs = ev.timestampMs;
+                    span.closedMs = 0;
+                    span.terminalStatus = trading::OrderStatus::New;
+                    span.active = true;
+                } else if (ev.status == trading::OrderStatus::Filled ||
+                           ev.status == trading::OrderStatus::Canceled ||
+                           ev.status == trading::OrderStatus::Rejected) {
+                    if (!span.active && span.openedMs == 0) {
+                        span.side = ev.side;
+                        span.price = ev.price;
+                        span.openedMs = ev.timestampMs;
+                    }
+                    span.closedMs = ev.timestampMs;
+                    span.terminalStatus = ev.status;
+                    span.active = false;
+                    m_markers.push_back(ev);
+                }
+            } else {
+                m_markers.push_back(ev);
+            }
         }
         m_pending.clear();
     }
-    while (static_cast<int>(m_events.size()) > kMaxEvents) {
-        m_events.pop_front();
+    while (static_cast<int>(m_markers.size()) > kMaxEvents) {
+        m_markers.pop_front();
     }
 
     if (!m_dirty && oldNode) {
@@ -95,32 +140,59 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         QSGGeometry::DrawingMode mode;
     };
 
-    const QColor bidColor(0, 200, 255, 200);    // cyan for buy
-    const QColor askColor(255, 140, 0, 200);    // orange for sell
+    const QColor activeLineColor(255, 255, 255, 245);
     const QColor fillColor(255, 255, 255, 230); // white for fill diamond
-    const QColor cancelColor(120, 120, 120, 100);
+    const QColor cancelColor(190, 190, 190, 180);
 
-    ColoredVerts bidLines{bidColor, {}, QSGGeometry::DrawLines};
-    ColoredVerts askLines{askColor, {}, QSGGeometry::DrawLines};
+    ColoredVerts bidLines{activeLineColor, {}, QSGGeometry::DrawLines};
+    ColoredVerts askLines{activeLineColor, {}, QSGGeometry::DrawLines};
     ColoredVerts cancelLines{cancelColor, {}, QSGGeometry::DrawLines};
     ColoredVerts fills{fillColor, {}, QSGGeometry::DrawTriangles};
 
-    const float lineHalfWidthPx = std::max(2.0f, W * 0.003f);
+    for (const auto& [orderId, span] : m_orderSpans) {
+        Q_UNUSED(orderId);
+        if (span.price <= 0.0 || span.openedMs <= 0) continue;
 
-    for (const auto& ev : m_events) {
+        const float y = static_cast<float>(mapping.priceToScreenY(span.price));
+        if (y < -20.0f || y > H + 20.0f) continue;
+
+        const double visibleStart = mapping.visibleDataStartMs();
+        const double visibleEnd = mapping.visibleDataEndMs();
+        if (visibleEnd <= visibleStart) continue;
+
+        const double spanEndMs = span.active
+            ? visibleEnd
+            : (span.closedMs > 0 ? static_cast<double>(span.closedMs) : visibleEnd);
+        if (spanEndMs < visibleStart || static_cast<double>(span.openedMs) > visibleEnd) {
+            continue;
+        }
+
+        const double startMs = std::max(static_cast<double>(span.openedMs), visibleStart);
+        const double endMs = std::min(spanEndMs, visibleEnd);
+        float x0 = static_cast<float>(mapping.timeToScreenX(startMs));
+        float x1 = static_cast<float>(mapping.timeToScreenX(endMs));
+        if (span.active) {
+            x1 = static_cast<float>(mapping.drawRect.right());
+        }
+        if (x1 < x0) std::swap(x0, x1);
+        if (std::abs(x1 - x0) < 1.0f) {
+            x1 = x0 + 1.0f;
+        }
+
+        ColoredVerts& target = (span.side == trading::OrderSide::Buy) ? bidLines : askLines;
+        target.verts.push_back({x0, y});
+        target.verts.push_back({x1, y});
+    }
+
+    for (const auto& ev : m_markers) {
         if (ev.price <= 0.0) continue;
 
         const float y = static_cast<float>(mapping.priceToScreenY(ev.price));
         if (y < -20.0f || y > H + 20.0f) continue;
 
         const float x = static_cast<float>(mapping.timeToScreenX(static_cast<double>(ev.timestampMs)));
-        bool isBuy = (ev.side == trading::OrderSide::Buy);
 
-        if (ev.status == trading::OrderStatus::Open) {
-            ColoredVerts& target = isBuy ? bidLines : askLines;
-            target.verts.push_back({x - lineHalfWidthPx * 8, y});
-            target.verts.push_back({x + lineHalfWidthPx * 8, y});
-        } else if (ev.status == trading::OrderStatus::Filled) {
+        if (ev.status == trading::OrderStatus::Filled) {
             const float r = std::max(3.5f, H * 0.004f);
             fills.verts.push_back({x, y - r});
             fills.verts.push_back({x - r, y});
@@ -129,8 +201,9 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             fills.verts.push_back({x - r, y});
             fills.verts.push_back({x, y + r});
         } else if (ev.status == trading::OrderStatus::Canceled) {
-            cancelLines.verts.push_back({x - lineHalfWidthPx * 6, y});
-            cancelLines.verts.push_back({x + lineHalfWidthPx * 6, y});
+            const float halfWidth = std::max(6.0f, W * 0.01f);
+            cancelLines.verts.push_back({x - halfWidth, y});
+            cancelLines.verts.push_back({x + halfWidth, y});
         }
     }
 

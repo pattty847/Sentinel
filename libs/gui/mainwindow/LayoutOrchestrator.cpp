@@ -19,15 +19,19 @@ LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow)
 }
 
 void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
+    const QMainWindow::DockOptions previousOptions = m_mainWindow->dockOptions();
     m_mainWindow->setUpdatesEnabled(false);
     
     configureDockOptions();
+    m_mainWindow->setDockOptions(m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks);
     removeAllDocks(docks);
     addDocksToLayout(docks);
     applyDockConstraints(docks);
     setDockSizes(docks);
     showAllDocks(docks);
     
+    m_mainWindow->setDockOptions((m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks) |
+                                 (previousOptions & QMainWindow::AnimatedDocks));
     m_mainWindow->setUpdatesEnabled(true);
 }
 
@@ -153,19 +157,13 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
             m_mainWindow->tabifyDockWidget(docks.secDock, docks.stockChartDock);
         }
     }
-    if (docks.paperTradingDock) {
-        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.paperTradingDock);
-        if (docks.stockChartDock) {
-            m_mainWindow->tabifyDockWidget(docks.stockChartDock, docks.paperTradingDock);
-        } else if (docks.screenerDock) {
-            m_mainWindow->tabifyDockWidget(docks.screenerDock, docks.paperTradingDock);
-        } else {
-            m_mainWindow->tabifyDockWidget(docks.secDock, docks.paperTradingDock);
-        }
-    }
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
     m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
+    if (docks.paperTradingDock) {
+        m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.paperTradingDock);
+        m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.paperTradingDock);
+    }
 }
 
 void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
@@ -194,9 +192,9 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
     if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {10, 90, 90}, Qt::Vertical);
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {20, 80, 90}, Qt::Vertical);
     } else {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {20, 80, 90}, Qt::Vertical);
     }
     
     // Horizontal split:
@@ -215,7 +213,11 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     } else {
         m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
     }
-    m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+    if (docks.paperTradingDock) {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock, docks.paperTradingDock}, {1, 1, 1}, Qt::Horizontal);
+    } else {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+    }
 }
 
 void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
