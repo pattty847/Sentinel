@@ -39,7 +39,8 @@ void ViewportAutoScrollController::updateLagFromView(const GridViewState& view,
 
 void ViewportAutoScrollController::updateLagFromView(const GridViewState& view,
                                                      const HeatmapStreamState& stream,
-                                                     int64_t timeframeMs) {
+                                                     int64_t timeframeMs,
+                                                     int64_t steadyNowMs) {
     const auto snapshot = stream.snapshot();
     if (timeframeMs <= 0 || snapshot.gridWidth <= 0 ||
         snapshot.lastSliceStartMs == std::numeric_limits<int64_t>::min()) {
@@ -47,9 +48,16 @@ void ViewportAutoScrollController::updateLagFromView(const GridViewState& view,
     }
     const int64_t spanMs = std::max<int64_t>(1, view.getVisibleTimeEnd() - view.getVisibleTimeStart());
     const int64_t padMs = static_cast<int64_t>(spanMs * m_paddingFrac);
-    m_autoScrollLagMs = (view.getVisibleTimeEnd() - (snapshot.lastSliceStartMs + timeframeMs)) - padMs;
+    int64_t anchorTimeMs = snapshot.lastSliceStartMs + timeframeMs;
+    if (m_smoothEnabled &&
+        steadyNowMs != std::numeric_limits<int64_t>::min() &&
+        snapshot.streamBaseMs != std::numeric_limits<int64_t>::min()) {
+        anchorTimeMs = snapshot.streamBaseMs + steadyNowMs + timeframeMs;
+    }
+    m_autoScrollLagMs = (view.getVisibleTimeEnd() - anchorTimeMs) - padMs;
     const int64_t maxSpanMs = static_cast<int64_t>(snapshot.gridWidth) * timeframeMs;
     m_autoScrollSpanMs = std::min(spanMs, maxSpanMs);
+    m_lastViewEndMs = view.getVisibleTimeEnd();
 }
 
 bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
