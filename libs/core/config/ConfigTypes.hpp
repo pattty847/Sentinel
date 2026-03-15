@@ -10,7 +10,10 @@ struct ServerHeatmapConfig {
     int gridHeight = 2048;
     double tickSize = 0.0;
     double recenterDelta = 0.01;
-    std::vector<int64_t> timeframesMs{1000, 60000, 3600000, 86400000};
+    // All 7 timeframes that the toolbar exposes: 1s, 1m, 5m, 15m, 1h, 4h, 1D.
+    // The server pre-builds a TWAP heatmap ring buffer for each of these so
+    // the client can switch between any of them without waiting for data.
+    std::vector<int64_t> timeframesMs{1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
     int64_t activeTimeframeMs = 0;
     double bandFast = 0.15;
     double bandMedium = 0.25;

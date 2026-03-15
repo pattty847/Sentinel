@@ -504,8 +504,23 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     m_timeAuthority.setActiveTimeframeMs(static_cast<int64_t>(timeframe_ms));
     if (m_useGpuHeatmap && timeframe_ms > 0) {
       if (m_heatmapStream) {
+        // Reset the ring buffer so stale data from the previous timeframe
+        // does not appear at the new cadence (which would cause columns to
+        // appear massively wide because old 1 s buckets are treated as 1 m
+        // buckets, stretching the visible window by 60×).
+        const auto snap = m_heatmapStream->snapshot();
+        m_heatmapStream->reset(snap.gridWidth > 0 ? snap.gridWidth : m_heatmapGridWidth,
+                               snap.gridHeight > 0 ? snap.gridHeight : m_heatmapGridHeight,
+                               snap.minPrice, snap.maxPrice, snap.tickSize);
         m_heatmapStream->setAppendMs(timeframe_ms);
       }
+      // Force the viewport to re-initialise for the new cadence so that the
+      // auto-scroll controller chooses a sensible visible time window instead
+      // of keeping the old (now wrong) span.
+      if (m_autoScrollController) {
+        m_autoScrollController->resetSpan();
+      }
+      m_heatmapViewportInitialized = false;
     }
     m_manualTimeframeSet = true;
     m_manualTimeframeTimer.start();
@@ -513,7 +528,11 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       QMetaObject::invokeMethod(
           m_dataProcessor.get(),
           [this, timeframe_ms]() {
-            m_dataProcessor->addTimeframe(timeframe_ms);
+            // Update both the display timeframe and the slice filter so that
+            // only slices belonging to the newly selected timeframe pass
+            // through DataProcessor::onHeatmapSliceReceived.
+            m_dataProcessor->setTimeframe(timeframe_ms);
+            m_dataProcessor->setServerTimeframe(timeframe_ms);
           },
           Qt::QueuedConnection);
     }
