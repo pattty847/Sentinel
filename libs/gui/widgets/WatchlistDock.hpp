@@ -10,6 +10,18 @@
 class WatchlistDock : public DockablePanel {
     Q_OBJECT
 public:
+    // Named roles for QStandardItem custom data — replaces magic Qt::UserRole + N numbers.
+    enum WatchlistItemRole {
+        IsSectionRole = Qt::UserRole + 1,
+        TickerRole,
+        AssetTypeRole,
+    };
+
+    // Strongly-typed asset class — prevents typo-prone "crypto"/"stock" string comparisons
+    // inside WatchlistDock. The public signal still uses QString for interface consistency
+    // with ScreenerDock::rowSelected so callers share a single routing slot.
+    enum class AssetType { Stock, Crypto };
+
     explicit WatchlistDock(QWidget* parent = nullptr);
     QSize minimumSizeHint() const override;
 
@@ -24,10 +36,14 @@ private slots:
 
 private:
     struct WatchlistPreset {
-        QString name;
-        QString assetType;           // "stock" or "crypto"
+        QString    name;
+        AssetType  assetType;
         QVector<QPair<QString, QString>> symbols; // (ticker, description)
     };
+
+    static QString assetTypeString(AssetType t) {
+        return (t == AssetType::Crypto) ? QStringLiteral("crypto") : QStringLiteral("stock");
+    }
 
     void buildUi() override;
     void initPresets();
