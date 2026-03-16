@@ -17,6 +17,7 @@ class QLabel;
 class QGroupBox;
 class PnlCurveItem;
 class IGridDataSource;
+struct Trade;
 
 /**
  * PaperTradingDock — replaces the simple TradeBlotterDock.
@@ -39,12 +40,19 @@ public:
     void setSymbol(const QString& symbol);
 
 public slots:
+    void onTradeReceived(const Trade& trade);
     void onOrderUpdated(const trading::OrderUpdate& update);
     void onPositionUpdated(const trading::PositionUpdate& update);
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void onPnlSnapshot(const trading::PnlSnapshot& snapshot);
 
 private slots:
+    void onBuyMarketClicked();
+    void onSellMarketClicked();
+    void onBuyLimitClicked();
+    void onSellLimitClicked();
+    void onFlattenClicked();
+    void onCancelAllClicked();
     void onStartAlgoClicked();
     void onStopAlgoClicked();
 
@@ -53,16 +61,31 @@ private:
     void buildManualTab(QWidget* parent);
     void buildAlgoTab(QWidget* parent);
     void buildPnlPanel(QWidget* parent);
+    void resetForSymbolChange();
+    void sendManualCommand(trading::TradeAction action,
+                           trading::OrderSide side,
+                           trading::OrderType orderType,
+                           bool hasPrice = false,
+                           double price = 0.0);
 
     QString m_symbol;
     IGridDataSource* m_dataSource = nullptr;
 
     // Manual tab
+    QLabel* m_lastPriceLabel = nullptr;
     QLabel* m_posLabel = nullptr;
     QLabel* m_avgPriceLabel = nullptr;
     QLabel* m_uPnlLabel = nullptr;
     QLabel* m_rPnlLabel = nullptr;
     QLabel* m_totalPnlLabel = nullptr;
+    QDoubleSpinBox* m_manualQtySpin = nullptr;
+    QDoubleSpinBox* m_limitPriceSpin = nullptr;
+    QPushButton* m_buyMarketBtn = nullptr;
+    QPushButton* m_sellMarketBtn = nullptr;
+    QPushButton* m_buyLimitBtn = nullptr;
+    QPushButton* m_sellLimitBtn = nullptr;
+    QPushButton* m_flattenBtn = nullptr;
+    QPushButton* m_cancelAllBtn = nullptr;
     QTableWidget* m_orderLog = nullptr;
     QHash<QString, int> m_orderIdToRow;
 

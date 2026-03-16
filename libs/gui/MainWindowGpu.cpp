@@ -33,6 +33,7 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
+#include "render/PaperTradeOverlayModel.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
@@ -370,6 +371,8 @@ void MainWindowGPU::setupConnections() {
     }
     connectMarketDataSignals();
     if (m_paperTradingDock) {
+        connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                m_paperTradingDock, &PaperTradingDock::onTradeReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
                 m_paperTradingDock, &PaperTradingDock::onOrderUpdated, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
@@ -384,6 +387,14 @@ void MainWindowGPU::setupConnections() {
         if (auto* overlay = m_qquickView->rootObject()->findChild<AlgoOverlayRenderer*>("algoOverlayRenderer")) {
             connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
                     overlay, &AlgoOverlayRenderer::onAlgoOrderEvent, Qt::QueuedConnection);
+        }
+        if (auto* overlayModel = m_qquickView->rootObject()->findChild<PaperTradeOverlayModel*>("paperTradeOverlayModel")) {
+            connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                    overlayModel, &PaperTradeOverlayModel::onTradeReceived, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onOrderUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onPositionUpdated, Qt::QueuedConnection);
         }
     }
 }

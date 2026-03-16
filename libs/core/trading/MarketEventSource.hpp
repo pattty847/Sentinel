@@ -2,8 +2,11 @@
 
 #include "BacktestTypes.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <istream>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace trading {
@@ -31,6 +34,25 @@ public:
 
 private:
     std::istream& m_input;
+};
+
+class TickBinaryTradeEventSource : public IMarketEventSource {
+public:
+    explicit TickBinaryTradeEventSource(const std::filesystem::path& path,
+                                        std::string symbolFilter = {});
+    std::optional<MarketEvent> next() override;
+
+private:
+    bool openNextFile();
+    void closeCurrentFile();
+    static std::vector<std::filesystem::path> enumerateFiles(const std::filesystem::path& path);
+    static std::string trimNullTerminated(const char* data, std::size_t size);
+
+    std::vector<std::filesystem::path> m_files;
+    std::size_t m_fileIndex = 0;
+    std::ifstream m_currentFile;
+    std::string m_currentSymbol;
+    std::string m_symbolFilter;
 };
 
 } // namespace trading

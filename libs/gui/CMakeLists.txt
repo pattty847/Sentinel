@@ -107,6 +107,10 @@ set(GRID_CORE_SOURCES
     widgets/LabDock.cpp
     render/AlgoOverlayRenderer.hpp
     render/AlgoOverlayRenderer.cpp
+    render/PaperTradeOverlayRenderer.hpp
+    render/PaperTradeOverlayRenderer.cpp
+    render/PaperTradeOverlayModel.hpp
+    render/PaperTradeOverlayModel.cpp
     render/PnlCurveItem.hpp
     render/PnlCurveItem.cpp
 )
@@ -158,6 +162,10 @@ qt6_add_qml_module(sentinel_gui_lib
         render/CandlestickOverlayItem.cpp
         render/AlgoOverlayRenderer.hpp
         render/AlgoOverlayRenderer.cpp
+        render/PaperTradeOverlayRenderer.hpp
+        render/PaperTradeOverlayRenderer.cpp
+        render/PaperTradeOverlayModel.hpp
+        render/PaperTradeOverlayModel.cpp
     QML_FILES
         qml/DepthChartView.qml
         qml/LabView.qml

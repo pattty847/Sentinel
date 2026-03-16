@@ -107,6 +107,154 @@ Rectangle {
         enabled: true
         z: 3
     }
+
+    PaperTradeOverlayModel {
+        id: paperTradeOverlayModel
+        objectName: "paperTradeOverlayModel"
+        symbol: root.symbol
+        mappingProvider: unifiedGridRenderer
+    }
+
+    PaperTradeOverlayRenderer {
+        id: paperTradeOverlayRenderer
+        objectName: "paperTradeOverlayRenderer"
+        anchors.fill: unifiedGridRenderer
+        mappingProvider: unifiedGridRenderer
+        overlayModel: paperTradeOverlayModel
+        enabled: true
+        z: 4
+    }
+
+    Item {
+        id: paperTradeOverlayLayer
+        anchors.fill: unifiedGridRenderer
+        z: 5
+
+        function formatQty(value) {
+            return Number(value).toFixed(4)
+        }
+
+        function formatPrice(value) {
+            return "$" + Number(value).toFixed(2)
+        }
+
+        function formatPnl(value) {
+            const numeric = Number(value)
+            return (numeric >= 0 ? "+" : "") + "$" + numeric.toFixed(2)
+        }
+
+        function formatPct(value) {
+            const numeric = Number(value)
+            return (numeric >= 0 ? "+" : "") + numeric.toFixed(2) + "%"
+        }
+
+        function priceToChartY(price) {
+            const _mappingRevision = paperTradeOverlayRenderer.mappingRevision
+            return paperTradeOverlayRenderer.screenYForPrice(Number(price))
+        }
+
+        Repeater {
+            model: paperTradeOverlayModel.openOrders
+            delegate: Item {
+                anchors.fill: parent
+                property real lineY: paperTradeOverlayLayer.priceToChartY(modelData.price)
+                visible: lineY >= 0 && lineY <= parent.height
+                onLineYChanged: paperTradeOverlayModel.logOrderOverlaySample(modelData.orderId, lineY, "line_y_changed")
+
+                Rectangle {
+                    id: orderPill
+                    x: Math.max(8, parent.width - width - 18)
+                    y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
+                    radius: 4
+                    color: "#0d1422"
+                    border.width: 1
+                    border.color: modelData.side === "BUY" ? "#4f8cff" : "#f59b5a"
+                    height: 22
+                    width: orderRow.implicitWidth + 16
+
+                    Row {
+                        id: orderRow
+                        anchors.centerIn: parent
+                        spacing: 6
+
+                        Text {
+                            text: modelData.side === "BUY" ? "Buy" : "Sell"
+                            color: modelData.side === "BUY" ? "#8fb3ff" : "#ffc187"
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                        Text {
+                            text: Number(modelData.qty).toFixed(4)
+                            color: "#d9e2ff"
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                        Text {
+                            text: "Limit"
+                            color: "#97a7d8"
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                    }
+                }
+            }
+        }
+
+        Repeater {
+            model: Object.keys(paperTradeOverlayModel.activePosition).length ? [paperTradeOverlayModel.activePosition] : []
+            delegate: Item {
+                anchors.fill: parent
+                property real lineY: paperTradeOverlayLayer.priceToChartY(modelData.entryPrice)
+                property real markY: paperTradeOverlayLayer.priceToChartY(modelData.markPrice)
+                property bool isLong: modelData.side === "LONG"
+                property color lineColor: isLong ? "#4f8cff" : "#f26d6d"
+                property color pnlColor: Number(modelData.totalPnl) >= 0 ? "#5be39b" : "#ff8c82"
+                property real topY: Math.max(0, Math.min(lineY, markY))
+                property real bottomY: Math.min(parent.height, Math.max(lineY, markY))
+                property real bandHeight: Math.max(1, bottomY - topY)
+                visible: (lineY >= 0 && lineY <= parent.height) || (markY >= 0 && markY <= parent.height)
+                onLineYChanged: paperTradeOverlayModel.logPositionOverlaySample(lineY, markY, "entry_line_y_changed")
+                onMarkYChanged: paperTradeOverlayModel.logPositionOverlaySample(lineY, markY, "mark_line_y_changed")
+
+                Rectangle {
+                    id: positionPill
+                    x: Math.max(8, parent.width - width - 18)
+                    y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
+                    radius: 4
+                    color: "#101724"
+                    border.width: 1
+                    border.color: lineColor
+                    height: 24
+                    width: positionRow.implicitWidth + 18
+
+                    Row {
+                        id: positionRow
+                        anchors.centerIn: parent
+                        spacing: 8
+
+                        Text {
+                            text: (isLong ? "Long " : "Short ") + paperTradeOverlayLayer.formatQty(modelData.absQty)
+                            color: "#d9e2ff"
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                        Text {
+                            text: paperTradeOverlayLayer.formatPnl(modelData.openPnl) + " / " + paperTradeOverlayLayer.formatPct(modelData.openPnlPct)
+                            color: pnlColor
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                        Text {
+                            text: "@ " + paperTradeOverlayLayer.formatPrice(modelData.entryPrice)
+                            color: "#98a9db"
+                            font.pixelSize: 11
+                            font.family: "Roboto Mono"
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     Item {
         id: gridLines

@@ -8,7 +8,11 @@
 #include "trading/LiveTradingSession.hpp"
 #include "trading/SimulationBroker.hpp"
 #include "trading/TradeDrivenExecutionModel.hpp"
+#include "servermodel/TickBinaryLogger.hpp"
 
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -270,6 +274,47 @@ TEST(BacktestCore, CsvTradeEventSourceParsesRows) {
     EXPECT_EQ(event->trade->symbol, "BTC-USD");
     EXPECT_DOUBLE_EQ(event->trade->price, 100.0);
     EXPECT_DOUBLE_EQ(event->trade->qty, 1.5);
+}
+
+TEST(BacktestCore, TickBinaryTradeEventSourceParsesTradeFiles) {
+    namespace fs = std::filesystem;
+    const fs::path tempDir = fs::temp_directory_path() / "sentinel_tick_reader_test";
+    fs::create_directories(tempDir);
+    const fs::path filePath = tempDir / "00.bin";
+
+    {
+        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(out.is_open());
+
+        LogFormat::FileHeader fileHeader;
+        fileHeader.created_at_ms = 1000;
+        std::memcpy(fileHeader.symbol, "BTC-USD", 7);
+        out.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
+
+        LogFormat::TradePayload tradePayload;
+        tradePayload.price = 123.45;
+        tradePayload.size = 0.75;
+        tradePayload.side = 1;
+
+        LogFormat::RecordHeader recordHeader;
+        recordHeader.type = LogFormat::RecordType::Trade;
+        recordHeader.timestamp_ms = 2000;
+        recordHeader.payload_len = sizeof(tradePayload);
+
+        out.write(reinterpret_cast<const char*>(&recordHeader), sizeof(recordHeader));
+        out.write(reinterpret_cast<const char*>(&tradePayload), sizeof(tradePayload));
+    }
+
+    trading::TickBinaryTradeEventSource source(tempDir, "BTC-USD");
+    auto event = source.next();
+    ASSERT_TRUE(event.has_value());
+    ASSERT_TRUE(event->trade.has_value());
+    EXPECT_EQ(event->trade->symbol, "BTC-USD");
+    EXPECT_EQ(event->trade->timestampMs, 2000);
+    EXPECT_DOUBLE_EQ(event->trade->price, 123.45);
+    EXPECT_DOUBLE_EQ(event->trade->qty, 0.75);
+
+    fs::remove_all(tempDir);
 }
 
 TEST(BacktestCore, LiveTradingSessionProcessesManualCommand) {

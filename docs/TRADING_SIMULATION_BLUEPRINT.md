@@ -199,6 +199,23 @@ Scope:
 Status:
 - not started
 
+### Phase 4a: Live Paper Trading UX Polish
+
+Scope:
+- make manual paper trading feel real before broad replay work
+- prioritize forward testing while historical capture is still sparse
+- improve on-chart order and position interactions
+
+Planned scope:
+- resting limit orders render as strong horizontal lines
+- filled orders transition from resting/pending styling to position styling
+- show live close / mark cleanly in the paper-trading module
+- show position pill with PnL dollars / percent
+- add draggable TP / SL handles that create linked risk orders
+
+Status:
+- in progress
+
 ### Phase 5: Book-Aware Execution
 
 Scope:
@@ -240,21 +257,25 @@ Status:
 - [x] Existing `IAlgo` strategies can run through replay via adapter
 - [x] CLI backtest runner exists
 - [x] Live server trading now routes manual orders and Avendella through the shared simulation broker
+- [x] Backtest runner can read real captured hourly trade logs from `data/market/.../*.bin`
+- [x] Manual paper trading now has renderer-backed order/position overlays with live mark, entry-price pill, and forward-testing polish
 
 ## Near-Term Next Work
 
 - [x] Move live manual paper trading onto the shared simulation broker
 - [x] Move live algo paper trading onto the shared simulation broker
-- [ ] Define live session controller / adapter feeding market events into the broker
-- [ ] Audit current trade and heatmap persistence to confirm what is durable vs RAM-only
-- [ ] Decide historical trade dataset format for long-lived replay
+- [x] Add a reader for existing `data/market/.../*.bin` trade logs into `MarketEvent` replay
+- [ ] Build a thin replay path from those trade logs before broader replay UI work
+- [ ] Define the first TP / SL interaction model for manual paper trading
 
 ## Later Work
 
 - [ ] Add `BookEvent` path and book-aware execution model
+- [ ] Define durable historical trade dataset format once continuous capture is real
 - [ ] Add replay controls in the UI
 - [ ] Drive chart overlays from replay results
 - [ ] Add heatmap visual replay from recorded data
+- [ ] Add TradingView-style TP / SL drag handles and linked risk-order UX
 - [ ] Add additional strategy implementations on the same interface
 - [ ] Add experiment/report tooling on top of replay results
 

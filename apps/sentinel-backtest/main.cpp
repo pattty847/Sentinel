@@ -6,6 +6,7 @@
 #include "trading/TradeDrivenExecutionModel.hpp"
 
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -16,13 +17,13 @@
 namespace {
 
 struct CliArgs {
-    std::string csvPath;
+    std::string inputPath;
     std::string symbol = "BTC-USD";
     trading::AlgoParams params;
 };
 
 void printUsage() {
-    std::cerr << "Usage: sentinel_backtest <trades.csv> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
+    std::cerr << "Usage: sentinel_backtest <trades.csv|trade_log.bin|trade_dir> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
 }
 
 std::optional<CliArgs> parseArgs(int argc, char** argv) {
@@ -32,7 +33,7 @@ std::optional<CliArgs> parseArgs(int argc, char** argv) {
     }
 
     CliArgs args;
-    args.csvPath = argv[1];
+    args.inputPath = argv[1];
     if (argc >= 3) {
         args.symbol = argv[2];
     }
@@ -65,13 +66,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::ifstream input(args->csvPath);
-    if (!input.is_open()) {
-        std::cerr << "Could not open trade file: " << args->csvPath << "\n";
+    if (!std::filesystem::exists(args->inputPath)) {
+        std::cerr << "Could not open trade source: " << args->inputPath << "\n";
         return 1;
     }
 
-    trading::CsvTradeEventSource source(input);
+    std::unique_ptr<trading::IMarketEventSource> source;
+    std::ifstream csvInput;
+    const std::filesystem::path inputPath(args->inputPath);
+    if (inputPath.extension() == ".csv") {
+        csvInput.open(inputPath);
+        if (!csvInput.is_open()) {
+            std::cerr << "Could not open CSV trade file: " << args->inputPath << "\n";
+            return 1;
+        }
+        source = std::make_unique<trading::CsvTradeEventSource>(csvInput);
+    } else {
+        source = std::make_unique<trading::TickBinaryTradeEventSource>(inputPath, args->symbol);
+    }
+
     trading::SimulationBroker broker(
         {},
         std::make_unique<trading::TradeDrivenExecutionModel>(),
@@ -84,7 +97,7 @@ int main(int argc, char** argv) {
     config.symbol = args->symbol;
     config.strategyId = strategy.id();
     trading::ReplayEngine replay;
-    auto result = replay.run(source, strategy, broker, config);
+    auto result = replay.run(*source, strategy, broker, config);
 
     std::cout << "strategy=" << result.summary.strategyId
               << " symbol=" << result.summary.symbol
