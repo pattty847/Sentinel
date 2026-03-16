@@ -124,9 +124,11 @@ venv/
 .venv/
 ENV/
 .python-version
+.mcp.json
+package-lock.json
+.code-review-graph/
 
 # AI settings
-.cursor/
 .claude/
 CLAUDE.md
 # AGENTS.md
@@ -137,10 +139,9 @@ _agent/
 # Documentation subdirectories (keep only base docs/)
 /docs/private/
 /docs/TODO.md
+/docs/FEATURE_ARCHIVE.md
+docs/REFACTOR_PLAN.md
 /_agent/
 
 data/
-/screenshots/
-
-# Random files
-liquidity_timeseries_log.txt
+screenshots/
