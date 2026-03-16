@@ -21,6 +21,12 @@ class CandlestickBatched : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
 
+public:
+    // Signal type for SEC insider overrides — matches the int values passed from QML.
+    enum class SignalType { None = 0, Buy = 1, Sell = 2, Mixed = 3 };
+    Q_ENUM(SignalType)
+
+private:
     Q_PROPERTY(bool lodEnabled READ lodEnabled WRITE setLodEnabled NOTIFY lodEnabledChanged)
     Q_PROPERTY(float candleWidth READ candleWidth WRITE setCandleWidth NOTIFY candleWidthChanged)
     Q_PROPERTY(float candleSpacing READ candleSpacing WRITE setCandleSpacing NOTIFY candleSpacingChanged)
@@ -38,6 +44,12 @@ class CandlestickBatched : public QQuickItem {
     Q_PROPERTY(int    lastVisibleIndex  READ lastVisibleIndex  NOTIFY visibleRangeChanged)
     // Constant fraction of item height reserved for inline volume bars (bottom portion)
     Q_PROPERTY(float volumeHeightFraction READ volumeHeightFraction CONSTANT)
+    // SEC signal body-color overrides (configurable from QML like bullishColor/bearishColor)
+    Q_PROPERTY(QColor buySignalColor   READ buySignalColor   WRITE setBuySignalColor   NOTIFY buySignalColorChanged)
+    Q_PROPERTY(QColor sellSignalColor  READ sellSignalColor  WRITE setSellSignalColor  NOTIFY sellSignalColorChanged)
+    Q_PROPERTY(QColor mixedSignalColor READ mixedSignalColor WRITE setMixedSignalColor NOTIFY mixedSignalColorChanged)
+    // Alpha (0-255) for inline volume bars; lower = more supplemental feel (default 85)
+    Q_PROPERTY(int volumeBarAlpha READ volumeBarAlpha WRITE setVolumeBarAlpha NOTIFY volumeBarAlphaChanged)
 
 public:
     explicit CandlestickBatched(QQuickItem* parent = nullptr);
@@ -56,6 +68,10 @@ public:
     int    firstVisibleIndex() const { return m_firstVis; }
     int    lastVisibleIndex()  const { return m_lastVis; }
     float  volumeHeightFraction() const { return kVolFraction; }
+    QColor buySignalColor()   const { return m_buySignalColor; }
+    QColor sellSignalColor()  const { return m_sellSignalColor; }
+    QColor mixedSignalColor() const { return m_mixedSignalColor; }
+    int    volumeBarAlpha()   const { return m_volumeBarAlpha; }
 
     void setLodEnabled(bool enabled);
     void setCandleWidth(float width);
@@ -85,6 +101,10 @@ public:
     Q_INVOKABLE void setBullishColor(const QColor& color);
     Q_INVOKABLE void setBearishColor(const QColor& color);
     Q_INVOKABLE void setWickColor(const QColor& color);
+    void setBuySignalColor(const QColor& color);
+    void setSellSignalColor(const QColor& color);
+    void setMixedSignalColor(const QColor& color);
+    void setVolumeBarAlpha(int alpha);
 
 signals:
     void candleCountChanged(int count);
@@ -101,6 +121,10 @@ signals:
     void zoomScaleChanged();
     // Emitted on GUI thread whenever visible price range or index range changes.
     void visibleRangeChanged();
+    void buySignalColorChanged();
+    void sellSignalColorChanged();
+    void mixedSignalColorChanged();
+    void volumeBarAlphaChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -130,8 +154,8 @@ private:
     int    m_firstVis = -1;
     int    m_lastVis  = -1;
 
-    // SEC signal color overrides: candle index → signal type (1=buy, 2=sell, 3=mixed)
-    QHash<int, int> m_signalOverrides;
+    // SEC signal color overrides: candle index → SignalType
+    QHash<int, SignalType> m_signalOverrides;
 
     bool m_lodEnabled = true;
     float m_candleWidth = 12.0f;
@@ -142,7 +166,11 @@ private:
     float m_viewOffset = 0.0f;
     float m_zoomScale  = 1.0f;
 
-    QColor m_bullishColor = QColor(47, 221, 122, 220);
-    QColor m_bearishColor = QColor(239, 92, 85, 220);
-    QColor m_wickColor = QColor(255, 255, 255, 200);
+    QColor m_bullishColor    = QColor( 47, 221, 122, 220);
+    QColor m_bearishColor    = QColor(239,  92,  85, 220);
+    QColor m_wickColor       = QColor(255, 255, 255, 200);
+    QColor m_buySignalColor  = QColor(  0, 230, 118, 235);  // bright green
+    QColor m_sellSignalColor = QColor(255,  23,  68, 235);  // bright red
+    QColor m_mixedSignalColor= QColor(255, 202,  40, 235);  // amber
+    int    m_volumeBarAlpha  = 85;
 };

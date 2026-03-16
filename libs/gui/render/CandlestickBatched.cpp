@@ -21,35 +21,22 @@ namespace {
 class CandleRootNode final : public QSGNode {
 public:
     CandleRootNode() {
-        volNode  = new QSGGeometryNode();
-        wickNode = new QSGGeometryNode();
-        bodyNode = new QSGGeometryNode();
+        // Helper: allocate one colored-vertex geometry node and wire it up.
+        auto makeNode = [](QSGGeometry*& geom, QSGVertexColorMaterial*& mat) -> QSGGeometryNode* {
+            auto* node = new QSGGeometryNode();
+            geom = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            mat  = new QSGVertexColorMaterial();
+            node->setGeometry(geom);
+            node->setMaterial(mat);
+            node->setFlag(QSGNode::OwnsGeometry, true);
+            node->setFlag(QSGNode::OwnsMaterial, true);
+            return node;
+        };
 
-        volGeometry  = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
-        wickGeometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
-        bodyGeometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
-
-        volGeometry->setDrawingMode(QSGGeometry::DrawTriangles);
-        wickGeometry->setDrawingMode(QSGGeometry::DrawTriangles);
-        bodyGeometry->setDrawingMode(QSGGeometry::DrawTriangles);
-
-        volMaterial  = new QSGVertexColorMaterial();
-        wickMaterial = new QSGVertexColorMaterial();
-        bodyMaterial = new QSGVertexColorMaterial();
-
-        volNode->setGeometry(volGeometry);
-        volNode->setMaterial(volMaterial);
-        wickNode->setGeometry(wickGeometry);
-        wickNode->setMaterial(wickMaterial);
-        bodyNode->setGeometry(bodyGeometry);
-        bodyNode->setMaterial(bodyMaterial);
-
-        volNode->setFlag(QSGNode::OwnsGeometry, true);
-        volNode->setFlag(QSGNode::OwnsMaterial, true);
-        wickNode->setFlag(QSGNode::OwnsGeometry, true);
-        wickNode->setFlag(QSGNode::OwnsMaterial, true);
-        bodyNode->setFlag(QSGNode::OwnsGeometry, true);
-        bodyNode->setFlag(QSGNode::OwnsMaterial, true);
+        volNode  = makeNode(volGeometry,  volMaterial);
+        wickNode = makeNode(wickGeometry, wickMaterial);
+        bodyNode = makeNode(bodyGeometry, bodyMaterial);
 
         appendChildNode(volNode);   // drawn first → behind candles
         appendChildNode(wickNode);
@@ -263,7 +250,7 @@ void CandlestickBatched::setSecSignalOverrides(const QVariantList& overrides) {
         const int index = m.value("index", -1).toInt();
         const int type  = m.value("signalType", 0).toInt();
         if (index >= 0 && index < static_cast<int>(m_candles.size()) && type > 0)
-            m_signalOverrides[index] = type;
+            m_signalOverrides[index] = static_cast<SignalType>(type);
     }
     markDirty();
 }
@@ -286,6 +273,35 @@ void CandlestickBatched::setWickColor(const QColor& color) {
     if (m_wickColor == color) return;
     m_wickColor = color;
     markDirty();
+}
+
+void CandlestickBatched::setBuySignalColor(const QColor& color) {
+    if (m_buySignalColor == color) return;
+    m_buySignalColor = color;
+    markDirty();
+    emit buySignalColorChanged();
+}
+
+void CandlestickBatched::setSellSignalColor(const QColor& color) {
+    if (m_sellSignalColor == color) return;
+    m_sellSignalColor = color;
+    markDirty();
+    emit sellSignalColorChanged();
+}
+
+void CandlestickBatched::setMixedSignalColor(const QColor& color) {
+    if (m_mixedSignalColor == color) return;
+    m_mixedSignalColor = color;
+    markDirty();
+    emit mixedSignalColorChanged();
+}
+
+void CandlestickBatched::setVolumeBarAlpha(int alpha) {
+    alpha = std::clamp(alpha, 0, 255);
+    if (m_volumeBarAlpha == alpha) return;
+    m_volumeBarAlpha = alpha;
+    markDirty();
+    emit volumeBarAlphaChanged();
 }
 
 // ── Viewport computation (GUI thread) ─────────────────────────────────────────
@@ -500,10 +516,10 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         const auto it = m_signalOverrides.find(i);
         if (it != m_signalOverrides.end()) {
             switch (it.value()) {
-                case 1:  bodyColor = QColor(0,   230, 118, 235); break; // buy  → bright green
-                case 2:  bodyColor = QColor(255,  23,  68, 235); break; // sell → bright red
-                case 3:  bodyColor = QColor(255, 202,  40, 235); break; // mixed → amber
-                default: bodyColor = bullish ? m_bullishColor : m_bearishColor; break;
+                case SignalType::Buy:   bodyColor = m_buySignalColor;   break;
+                case SignalType::Sell:  bodyColor = m_sellSignalColor;  break;
+                case SignalType::Mixed: bodyColor = m_mixedSignalColor; break;
+                default:               bodyColor = bullish ? m_bullishColor : m_bearishColor; break;
             }
         } else {
             bodyColor = bullish ? m_bullishColor : m_bearishColor;
@@ -524,7 +540,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
                 static_cast<uchar>(vc.red()),
                 static_cast<uchar>(vc.green()),
                 static_cast<uchar>(vc.blue()),
-                85);  // semi-transparent so they feel supplemental, not dominant
+                static_cast<uchar>(m_volumeBarAlpha));
     }
 
     root->volNode->markDirty(QSGNode::DirtyGeometry);
