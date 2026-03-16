@@ -245,43 +245,92 @@ Rectangle {
         return Math.max(10, Math.min(chartArea.height - signalTooltipCard.height - 10, 38))
     }
 
+    // ── Nice-number helper (mirrors PriceAxisModel::calculateNicePriceStep) ──
+    // Rounds rawStep up to the nearest 1/2/2.5/5/10 × magnitude value.
+    function niceStep(rawStep) {
+        if (rawStep <= 0) return 1
+        const mag  = Math.pow(10, Math.floor(Math.log10(rawStep)))
+        const norm = rawStep / mag
+        let nice
+        if      (norm <= 1.0) nice = 1.0
+        else if (norm <= 2.0) nice = 2.0
+        else if (norm <= 2.5) nice = 2.5
+        else if (norm <= 5.0) nice = 5.0
+        else                  nice = 10.0
+        return nice * mag
+    }
+
     // ── Price axis labels ─────────────────────────────────────────────────────
-    // Returns an array of {price, y} objects for the right-side price axis.
-    // Reacts to visiblePriceMin/Max changes (candleChart emits visibleRangeChanged).
+    // Computes tick positions using the niceStep algorithm so labels always land
+    // on clean round numbers (e.g. $150, $155, $160) regardless of zoom level.
     property var priceAxisTicks: {
-        var _min = candleChart.visiblePriceMin  // establish QML binding dependency
+        var _min = candleChart.visiblePriceMin  // binding dep → reacts to pan/zoom
         var _max = candleChart.visiblePriceMax
         if (_max <= _min || candleChart.candleCount === 0) return []
-        const count = 6
-        const step  = (_max - _min) / (count - 1)
-        const ticks = []
-        for (let i = 0; i < count; ++i) {
-            const price = _min + step * i
-            const y     = root.priceToY(price) - 7  // center label on the price line
-            if (y >= 0 && y <= candleChart.height * (1.0 - root.volFraction))
-                ticks.push({ price: price, y: y })
+
+        const candleAreaH = candleChart.height * (1.0 - root.volFraction)
+        const minGapPx    = 50
+        const maxCount    = Math.max(2, Math.floor(candleAreaH / minGapPx))
+        const step        = root.niceStep((_max - _min) / (maxCount - 1))
+
+        // Decimal places inferred from the visible range (mirrors PriceAxisModel::formatLabel)
+        const range    = _max - _min
+        const decimals = range > 1000 ? 0 : range > 100 ? 1 : 2
+
+        // Align first tick to a step boundary so labels stay stable during pan
+        const firstIdx = Math.ceil(_min / step)
+        const lastIdx  = Math.floor(_max / step)
+        const ticks    = []
+        for (let i = firstIdx; i <= lastIdx && ticks.length < 20; ++i) {
+            const price = i * step
+            const y     = root.priceToY(price) - 7   // center label on the grid line
+            if (y >= 0 && y <= candleAreaH)
+                ticks.push({ label: "$" + price.toFixed(decimals), y: y })
         }
         return ticks
     }
 
     // ── Time axis labels ──────────────────────────────────────────────────────
-    // Returns an array of {label, x} objects sampled across visible candles.
+    // Picks a nice candle interval from the 1/2/5/10 progression so labels are
+    // evenly spaced and the first tick is aligned to a multiple of the interval
+    // (so ticks stay stable / don't drift while panning).
     property var timeAxisTicks: {
-        var _off   = candleChart.viewOffset   // binding dependency (pan)
-        var _zoom  = candleChart.zoomScale    // binding dependency (zoom)
+        var _off   = candleChart.viewOffset        // binding dep (pan)
+        var _zoom  = candleChart.zoomScale         // binding dep (zoom)
         var _first = candleChart.firstVisibleIndex
         var _last  = candleChart.lastVisibleIndex
         if (_first < 0 || _last < 0 || root.candleData.length === 0) return []
-        const count    = _last - _first + 1
-        const interval = Math.max(1, Math.round(count / 6))
-        const ticks    = []
-        for (let i = _first; i <= _last; i += interval) {
+
+        const visibleCount = _last - _first + 1
+        const targetCount  = 6
+
+        // Nice candle intervals following the 1/2/5/10 progression.
+        // 63 ≈ quarter, 126 ≈ half-year, 252 ≈ trading year.
+        const candidates = [1, 2, 5, 10, 20, 50, 63, 126, 252, 504, 1008]
+        const rawInterval = Math.max(1, Math.round(visibleCount / targetCount))
+        let interval = candidates[candidates.length - 1]
+        for (let c = 0; c < candidates.length; ++c) {
+            if (candidates[c] >= rawInterval) { interval = candidates[c]; break }
+        }
+
+        // Date format adapts to interval granularity
+        function formatDate(d, iv) {
+            if (!d) return ""
+            if (iv >= 252) return d.slice(0, 4)     // YYYY
+            if (iv >= 20)  return d.slice(0, 7)     // YYYY-MM
+            return d.slice(5, 10)                    // MM-DD
+        }
+
+        // Align first tick to a multiple of interval (stable under pan)
+        const alignedFirst = Math.ceil(_first / interval) * interval
+        const ticks = []
+        for (let i = alignedFirst; i <= _last; i += interval) {
             if (i >= root.candleData.length) break
             const d = root.candleData[i].date || ""
             if (!d) continue
             const x = root.candleCenterX(i)
             if (x >= 0 && x <= candleChart.width)
-                ticks.push({ label: d.slice(0, 7), x: x })
+                ticks.push({ label: formatDate(d, interval), x: x })
         }
         return ticks
     }
@@ -409,7 +458,7 @@ Rectangle {
                     delegate: Text {
                         x:              6
                         y:              modelData.y
-                        text:           modelData.price.toFixed(2)
+                        text:           modelData.label
                         color:          "#4a5f70"
                         font.pixelSize: 10
                         font.family:    "Roboto Mono"
