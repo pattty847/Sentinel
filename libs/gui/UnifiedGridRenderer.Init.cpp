@@ -539,6 +539,7 @@ void UnifiedGridRenderer::startHeatmapRenderLoop() {
                 m_panSyncPending = false;
             }
         }
+        emit liveRenderTick();
         update();
     });
     m_heatmapRenderTimer->start(16);

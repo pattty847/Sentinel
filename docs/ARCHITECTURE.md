@@ -22,7 +22,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`).
-- **`trading`:** Owns simulated order execution, local order storage, and position tracking.
+- **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
 
 ### 2. GUI (`libs/gui`)
 **Responsibility:** GPU-accelerated rendering, declarative UI, and data sourcing for the visualizer.
@@ -37,6 +37,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Ownership & Boundaries:**
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
+- **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
 
 ## Data pipeline
 
@@ -125,3 +126,4 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/CONFIG.md` | Server and client config files and options |
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
 | `docs/FEATURES.md` | Feature overview and notable changes |
+| `docs/TRADING_SIMULATION_BLUEPRINT.md` | Long-term plan for shared live paper trading, replay, and future book-aware execution |

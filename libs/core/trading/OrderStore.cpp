@@ -4,7 +4,7 @@ namespace trading {
 
 namespace {
 bool isActive(const Order& o) {
-    return o.status == OrderStatus::New || o.status == OrderStatus::Partial;
+    return o.status == OrderStatus::New || o.status == OrderStatus::Partial || o.status == OrderStatus::Open;
 }
 }
 

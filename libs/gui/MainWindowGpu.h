@@ -30,6 +30,7 @@ class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
 class OrderBookDock;
+class PaperTradingDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
@@ -103,6 +104,7 @@ private:
     ScreenerDock* m_screenerDock = nullptr;
     StockChartDock* m_stockChartDock = nullptr;
     OrderBookDock* m_orderBookDock = nullptr;
+    PaperTradingDock* m_paperTradingDock = nullptr;
 
     // UI Controls (accessed through HeatmapDock)
     QLineEdit* m_symbolInput = nullptr;

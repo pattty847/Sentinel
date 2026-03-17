@@ -8,6 +8,7 @@
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
 #include "../widgets/OrderBookDock.hpp"
+#include "../widgets/PaperTradingDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include <QScreen>
 #include <QGuiApplication>
@@ -18,15 +19,19 @@ LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow)
 }
 
 void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
+    const QMainWindow::DockOptions previousOptions = m_mainWindow->dockOptions();
     m_mainWindow->setUpdatesEnabled(false);
     
     configureDockOptions();
+    m_mainWindow->setDockOptions(m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks);
     removeAllDocks(docks);
     addDocksToLayout(docks);
     applyDockConstraints(docks);
     setDockSizes(docks);
     showAllDocks(docks);
     
+    m_mainWindow->setDockOptions((m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks) |
+                                 (previousOptions & QMainWindow::AnimatedDocks));
     m_mainWindow->setUpdatesEnabled(true);
 }
 
@@ -92,6 +97,10 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
         m_mainWindow->removeDockWidget(docks.orderBookDock);
         docks.orderBookDock->setFloating(false);
     }
+    if (docks.paperTradingDock && docks.paperTradingDock->parent() == m_mainWindow) {
+        m_mainWindow->removeDockWidget(docks.paperTradingDock);
+        docks.paperTradingDock->setFloating(false);
+    }
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
@@ -151,6 +160,10 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
     m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
+    if (docks.paperTradingDock) {
+        m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.paperTradingDock);
+        m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.paperTradingDock);
+    }
 }
 
 void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
@@ -173,14 +186,15 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.labDock, QSize(360, 240));
     applyMinimum(docks.watchlistDock, QSize(320, 360));
     applyMinimum(docks.orderBookDock, QSize(280, 360));
+    applyMinimum(docks.paperTradingDock, QSize(360, 280));
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
     if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {10, 90, 90}, Qt::Vertical);
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {20, 80, 90}, Qt::Vertical);
     } else {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {10, 90, 90}, Qt::Vertical);
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {20, 80, 90}, Qt::Vertical);
     }
     
     // Horizontal split:
@@ -199,7 +213,11 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     } else {
         m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
     }
-    m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+    if (docks.paperTradingDock) {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock, docks.paperTradingDock}, {1, 1, 1}, Qt::Horizontal);
+    } else {
+        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+    }
 }
 
 void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
@@ -211,5 +229,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.labDock) docks.labDock->show();
     if (docks.watchlistDock) docks.watchlistDock->show();
     if (docks.stockChartDock) docks.stockChartDock->show();
+    if (docks.paperTradingDock) docks.paperTradingDock->show();
 }
 

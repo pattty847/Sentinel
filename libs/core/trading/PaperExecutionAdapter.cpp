@@ -16,4 +16,17 @@ double PaperExecutionAdapter::fillPrice(double lastTradePrice, OrderSide side) c
     return lastTradePrice;
 }
 
+bool PaperExecutionAdapter::shouldFillLimit(const Order& order, double lastTradePrice) const {
+    if (order.limitPrice <= 0.0 || lastTradePrice <= 0.0) {
+        return false;
+    }
+    if (order.side == OrderSide::Buy) {
+        return lastTradePrice <= order.limitPrice;
+    }
+    if (order.side == OrderSide::Sell) {
+        return lastTradePrice >= order.limitPrice;
+    }
+    return false;
+}
+
 } // namespace trading

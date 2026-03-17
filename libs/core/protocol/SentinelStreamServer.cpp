@@ -20,8 +20,8 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
@@ -33,7 +33,7 @@
 #include "../marketdata/auth/Authenticator.hpp"
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
 #include "../marketdata/model/TradeData.h"
-#include "../trading/TradingEngine.hpp"
+#include "../trading/LiveTradingSession.hpp"
 #include "Cpp20Utils.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
@@ -91,6 +91,32 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     payload["default_symbols"] = cfg.defaultSymbols;
     return payload;
 }
+
+double resolveMidPrice(const LiveOrderBook& book) {
+    const auto& bids = book.getBids();
+    const auto& asks = book.getAsks();
+
+    double bestBid = 0.0;
+    for (size_t i = bids.size(); i > 0; --i) {
+        if (bids[i - 1] > 0.0) {
+            bestBid = book.index_to_price(i - 1);
+            break;
+        }
+    }
+
+    double bestAsk = 0.0;
+    for (size_t i = 0; i < asks.size(); ++i) {
+        if (asks[i] > 0.0) {
+            bestAsk = book.index_to_price(i);
+            break;
+        }
+    }
+
+    if (bestBid > 0.0 && bestAsk > 0.0) {
+        return (bestBid + bestAsk) * 0.5;
+    }
+    return (bestBid > 0.0) ? bestBid : bestAsk;
+}
 }
 
 class Session : public std::enable_shared_from_this<Session> {
@@ -122,6 +148,8 @@ class Session : public std::enable_shared_from_this<Session> {
     SessionManager::SessionType tpoSessionType_ = SessionManager::SessionType::H24;
     int64_t tpoSessionMs_ = SessionManager::sessionDurationMs(SessionManager::SessionType::H24);
     uint64_t m_latencySenderId = 0;
+    uint64_t m_tradingBroadcasterId = 0;
+    bool m_tradingBroadcasterRegistered = false;
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -508,23 +536,19 @@ class Session : public std::enable_shared_from_this<Session> {
         }
         const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
 
-        // ── Coinbase candle fallback ─────────────────────────────────────────
-        // The trade tape only covers the period since server startup.  For
-        // historical buckets where the tape is empty, synthesise TPO letters
-        // from the Coinbase OHLCV candle's L/H range (all prices between Low
-        // and High are marked as visited — standard OHLC approximation).
-        // Fetch the whole range in one call so the inner loop is O(1) lookups.
         std::unordered_map<int64_t, OHLCVBar> candleByBucket;
-        const int64_t timeframeSec = timeframeMs / 1000;
-        const auto candleGranularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
-        if (candleGranularity) {
-            const int64_t startSec = firstStart / 1000;
-            const int64_t endSec   = effectiveEnd / 1000;
-            const CandleFetchResult res = owner_->restClient().fetchProductCandles(
-                symbol, startSec, endSec, *candleGranularity, effectiveCount);
-            if (res.ok) {
-                for (const auto& bar : res.candles) {
-                    candleByBucket[bar.timestamp_ms] = bar;
+        if (owner_) {
+            const int64_t timeframeSec = timeframeMs / 1000;
+            const auto candleGranularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
+            if (candleGranularity) {
+                const int64_t startSec = firstStart / 1000;
+                const int64_t endSec = effectiveEnd / 1000;
+                const CandleFetchResult res = owner_->restClient().fetchProductCandles(
+                    symbol, startSec, endSec, *candleGranularity, effectiveCount);
+                if (res.ok) {
+                    for (const auto& bar : res.candles) {
+                        candleByBucket[bar.timestamp_ms] = bar;
+                    }
                 }
             }
         }
@@ -554,32 +578,29 @@ class Session : public std::enable_shared_from_this<Session> {
                                       letters)) {
                 continue;
             }
-
-            // If the trade tape had no data for this bucket, fall back to the
-            // Coinbase candle L/H range so the full session profile is visible.
             if (!candleByBucket.empty()) {
                 bool hasLetters = false;
                 for (int r = 0; r < gridHeight; ++r) {
-                    if (letters.at(r) != '\0') { hasLetters = true; break; }
+                    if (letters.at(r) != '\0') {
+                        hasLetters = true;
+                        break;
+                    }
                 }
                 if (!hasLetters) {
                     const auto it = candleByBucket.find(bucketStart);
                     if (it != candleByBucket.end()) {
                         const auto& bar = it->second;
                         const char letter = tpoLetterForBucket(bucketStart, timeframeMs);
-                        // Row 0 = maxPrice; row (gridHeight-1) = minPrice.
-                        // High price → smaller row index; Low price → larger row index.
                         const int rowHigh = static_cast<int>(std::floor((maxPrice - bar.high) / tickSize));
-                        const int rowLow  = static_cast<int>(std::floor((maxPrice - bar.low)  / tickSize));
-                        const int rStart  = std::max(0, rowHigh);
-                        const int rEnd    = std::min(gridHeight - 1, rowLow);
+                        const int rowLow = static_cast<int>(std::floor((maxPrice - bar.low) / tickSize));
+                        const int rStart = std::max(0, rowHigh);
+                        const int rEnd = std::min(gridHeight - 1, rowLow);
                         for (int r = rStart; r <= rEnd; ++r) {
                             letters[r] = letter;
                         }
                     }
                 }
             }
-
             nlohmann::json item;
             item["time_start"] = bucketStart;
             item["time_end"] = bucketEnd;
@@ -609,6 +630,14 @@ public:
         QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
+        if (owner_ && m_latencySenderId != 0) {
+            owner_->unregisterLatencySender(m_latencySenderId);
+            m_latencySenderId = 0;
+        }
+        if (owner_ && m_tradingBroadcasterRegistered) {
+            owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
+            m_tradingBroadcasterRegistered = false;
+        }
     }
 
     void run() {
@@ -694,6 +723,16 @@ public:
                             s->sendCoinbaseLatency(ms);
                     });
                 });
+
+            // Register for trading/algo broadcast messages
+            m_tradingBroadcasterId = owner_->registerTradingBroadcaster(
+                [weak_this = std::weak_ptr<Session>(self), exec = ws_.get_executor()](const std::string& json) {
+                    net::post(exec, [weak_this, json]() {
+                        if (auto s = weak_this.lock())
+                            s->do_write(json);
+                    });
+                });
+            m_tradingBroadcasterRegistered = true;
         }
         do_read();
     }
@@ -984,6 +1023,39 @@ public:
 
                     self->do_write(payload.dump());
                 }).detach();
+            } else if (type == "trade_command") {
+                if (owner_ && owner_->tradingSessionPtr()) {
+                    try {
+                        auto cmd = trading::parseTradeCommandJson(msg);
+                        owner_->processTradeCommand(cmd);
+                    } catch (const std::exception& ex) {
+                        sLog_Error("trade_command parse error: " << ex.what());
+                    }
+                }
+            } else if (type == "algo_command") {
+                if (owner_ && owner_->tradingSessionPtr()) {
+                    try {
+                        const std::string algoId = j.value("algo_id", "");
+                        const std::string action  = j.value("action", "");
+                        const std::string symbol  = j.value("symbol", "");
+                        auto paramsJ = j.value("params", nlohmann::json::object());
+                        trading::AlgoParams params;
+                        params.spreadBps       = paramsJ.value("spread_bps", 10.0);
+                        params.orderQty        = paramsJ.value("order_qty", 0.01);
+                        params.maxPositionQty  = paramsJ.value("max_position_qty", 0.1);
+                        params.skewBps         = paramsJ.value("skew_bps", 5.0);
+                        if (action == "start") {
+                            if (owner_->startAlgo(algoId, symbol, params)) {
+                                sLog_App("LiveTradingSession: started " << QString::fromStdString(algoId) << " on " << QString::fromStdString(symbol));
+                            }
+                        } else if (action == "stop") {
+                            owner_->stopAlgo(algoId);
+                            sLog_App("LiveTradingSession: stopped " << QString::fromStdString(algoId));
+                        }
+                    } catch (const std::exception& ex) {
+                        sLog_Error("algo_command error: " << ex.what());
+                    }
+                }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  subscriptions_.erase(symbol);
@@ -1096,6 +1168,13 @@ public:
     }
     
     void on_trade(const Trade& trade) {
+        // Tick live trading session on every trade (even unsubscribed symbols — algos may be running)
+        if (owner_ && owner_->tradingSessionPtr()) {
+            const int64_t tsMs = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    trade.timestamp.time_since_epoch()).count());
+            owner_->tradingSession().onTradeTick(trade.product_id, trade.price, tsMs);
+        }
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
         nlohmann::json j;
@@ -1506,7 +1585,7 @@ SentinelStreamServer::~SentinelStreamServer() {
 
 void SentinelStreamServer::start() {
     if (m_running) return;
-    
+
     try {
         m_running = true;
 
@@ -1521,8 +1600,27 @@ void SentinelStreamServer::start() {
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
 
+        if (!m_tradingSession) {
+            const double slippageBps = m_serverConfig.trading.slippageBps;
+            m_tradingSession = std::make_unique<trading::LiveTradingSession>(
+                [this](const std::string& symbol) -> double {
+                    auto& hotData = m_model.ensureSymbol(symbol);
+                    return resolveMidPrice(hotData.liveBook);
+                },
+                slippageBps);
+            m_tradingSession->registerAlgo(std::make_unique<trading::AvendellaMM>());
+            m_tradingSession->setResultCallback(
+                [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
+                    for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
+                    for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
+                    for (auto& ru : result.riskOrderUpdates) broadcastRiskOrderUpdate(ru);
+                    for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
+                    for (auto& ev : events) broadcastAlgoOrderEvent(ev);
+                });
+        }
+
         doAccept();
-        
+
         m_thread = std::thread([this] {
             while (m_running) {
                 try {
@@ -1603,4 +1701,124 @@ void SentinelStreamServer::broadcastCoinbaseLatency(int milliseconds) {
     }
     for (auto& fn : copy)
         fn(milliseconds);
+}
+
+// ─── Trading engine & AlgoEngine initialization ──────────────────────────────
+
+void SentinelStreamServer::processTradeCommand(const trading::TradeCommand& command) {
+    if (!m_tradingSession) return;
+    m_tradingSession->processTradeCommand(command);
+}
+
+bool SentinelStreamServer::startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params) {
+    if (!m_tradingSession) {
+        return false;
+    }
+    return m_tradingSession->startAlgo(algoId, symbol, params);
+}
+
+void SentinelStreamServer::stopAlgo(const std::string& algoId) {
+    if (!m_tradingSession) {
+        return;
+    }
+    m_tradingSession->stopAlgo(algoId);
+}
+
+uint64_t SentinelStreamServer::registerTradingBroadcaster(std::function<void(const std::string&)> fn) {
+    const uint64_t id = m_nextBroadcasterId++;
+        std::lock_guard<std::mutex> lock(m_tradingBroadcastMutex);
+        m_tradingBroadcasters.emplace_back(id, std::move(fn));
+    return id;
+}
+
+void SentinelStreamServer::unregisterTradingBroadcaster(uint64_t id) {
+    std::lock_guard<std::mutex> lock(m_tradingBroadcastMutex);
+    m_tradingBroadcasters.erase(
+        std::remove_if(m_tradingBroadcasters.begin(), m_tradingBroadcasters.end(),
+            [id](const std::pair<uint64_t, std::function<void(const std::string&)>>& p) { return p.first == id; }),
+        m_tradingBroadcasters.end());
+}
+
+namespace {
+void broadcastJson(std::mutex& mtx,
+                   std::vector<std::pair<uint64_t, std::function<void(const std::string&)>>>& senders,
+                   const std::string& json) {
+    std::vector<std::function<void(const std::string&)>> copy;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        copy.reserve(senders.size());
+        for (auto& p : senders) copy.push_back(p.second);
+    }
+    for (auto& fn : copy) fn(json);
+}
+} // namespace
+
+void SentinelStreamServer::broadcastOrderUpdate(const trading::OrderUpdate& ou) {
+    emit orderUpdateBroadcast(ou);
+    nlohmann::json j;
+    j["type"] = "order_update";
+    j["order_id"] = ou.orderId;
+    j["symbol"] = ou.symbol;
+    j["status"] = trading::toString(ou.status);
+    j["side"] = trading::toString(ou.side);
+    j["qty"] = ou.qty;
+    j["filled_qty"] = ou.filledQty;
+    j["remaining_qty"] = ou.remainingQty;
+    j["avg_price"] = ou.avgPrice;
+    j["limit_price"] = ou.limitPrice;
+    j["algo_id"] = ou.algoId;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastPositionUpdate(const trading::PositionUpdate& pu) {
+    emit positionUpdateBroadcast(pu);
+    nlohmann::json j;
+    j["type"] = "position_update";
+    j["symbol"] = pu.symbol;
+    j["position_qty"] = pu.positionQty;
+    j["avg_price"] = pu.avgPrice;
+    j["unrealized_pnl"] = pu.unrealizedPnl;
+    j["realized_pnl"] = pu.realizedPnl;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& ru) {
+    emit riskOrderUpdateBroadcast(ru);
+    nlohmann::json j;
+    j["type"] = "risk_order_update";
+    j["symbol"] = ru.symbol;
+    j["has_take_profit"] = ru.hasTakeProfit;
+    j["take_profit_price"] = ru.takeProfitPrice;
+    j["has_stop_loss"] = ru.hasStopLoss;
+    j["stop_loss_price"] = ru.stopLossPrice;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& ev) {
+    emit algoOrderEventBroadcast(ev);
+    nlohmann::json j;
+    j["type"] = "algo_order_event";
+    j["algo_id"] = ev.algoId;
+    j["order_id"] = ev.orderId;
+    j["symbol"] = ev.symbol;
+    j["side"] = trading::toString(ev.side);
+    j["order_type"] = trading::toString(ev.orderType);
+    j["price"] = ev.price;
+    j["qty"] = ev.qty;
+    j["status"] = trading::toString(ev.status);
+    j["timestamp_ms"] = ev.timestampMs;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastPnlSnapshot(const trading::PnlSnapshot& ps) {
+    emit pnlSnapshotBroadcast(ps);
+    nlohmann::json j;
+    j["type"] = "pnl_snapshot";
+    j["symbol"] = ps.symbol;
+    j["timestamp_ms"] = ps.timestampMs;
+    j["unrealized_pnl"] = ps.unrealizedPnl;
+    j["realized_pnl"] = ps.realizedPnl;
+    j["total_pnl"] = ps.totalPnl;
+    j["algo_id"] = ps.algoId;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
 }

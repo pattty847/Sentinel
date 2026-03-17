@@ -19,7 +19,10 @@ public:
 
     void resetSpan();
     void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream);
-    void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream, int64_t timeframeMs);
+    void updateLagFromView(const GridViewState& view,
+                           const HeatmapStreamState& stream,
+                           int64_t timeframeMs,
+                           int64_t steadyNowMs = std::numeric_limits<int64_t>::min());
     bool initializeViewport(GridViewState& view,
                             const HeatmapStreamState& stream,
                             int64_t sliceStartMs,

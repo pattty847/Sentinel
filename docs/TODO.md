@@ -41,19 +41,13 @@ Each feature is a self-contained block. Use this template:
 ---
 
 ### F0: MSDF heatmap labels
-**Status:** active
+**Status:** mostly done
 **Created:** 2026-01-30
-**Updated:** 2026-01-30
+**Updated:** 2026-03-16
 
 #### Now
 - [ ] Label geo cache: cache per-column quads; rebuild only when column/viewport/thresholds change
 - [ ] Thresholds: store raw liquidity/intensity per cell so past columns can be re-evaluated
-
-#### Next
-_(empty)_
-
-#### Later
-- [ ] Wire MSDF atlas cache into label path (load from disk on startup, upload once)
 
 #### Done
 - [x] Swap GlyphAtlas -> MsdfAtlas and HeatmapGlyphNode -> MsdfGlyphNode in UnifiedGridRenderer (2026-01-30)
@@ -68,16 +62,19 @@ _(empty)_
 ### F1: Heatmap / Caching
 **Status:** active
 **Created:** 2026-01-30
-**Updated:** 2026-01-30
+**Updated:** 2026-03-16
 
 #### Now
 - [ ] Auto history request on symbol change (no manual subscribe needed)
 - [ ] Scroll-past-cache fetch (request older history)
+- [ ] Preserve historical heatmap columns across band recenter instead of clearing visual history
+- [ ] Persist derived heatmap history to disk and reload on startup with explicit gap handling for dev/offline periods
 
 #### Next
 - [ ] Derived timeframe rollups (non-anchor TFs from 1s/1m/1h/1d)
 - [ ] Per-client TF stream (client asks for derived TF)
 - [ ] StatusBar metrics wiring (FPS, GPU mem, upload bandwidth)
+- [ ] Page persisted heatmap history into the bounded GPU ring so the canvas feels infinite without needing an infinite texture
 
 #### Later
 - [ ] Heatmap settings panel v2 (extra controls + templates)
@@ -87,330 +84,171 @@ _(empty)_
 _(nothing yet)_
 
 #### Session log
-_(no entries yet)_
+- **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
 
 ---
 
 ### F2: Heatmap Settings Expansion
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Add Heatmap Visual Settings section (opacity, contrast, gamma)
-* [ ] Add toggle for heatmap blending mode (additive / max / overwrite)
-* [ ] Add per-side color controls (bid/ask hue + saturation)
-* [ ] Add heatmap value normalization modes (global, visible range, session)
-* [ ] Add toggle for heatmap magnifier (already stubbed in UI)
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Add heatmap smoothing kernel (none / box / gaussian)
-* [ ] Add decay rate control for historical liquidity
-* [ ] Add heatmap persistence slider (time-weighted fading)
-
-#### Later (ideas / low-priority)
-
-* [ ] Preset profiles (Scalp / Swing / HTF / Meme)
-* [ ] Hotkey cycling between heatmap modes
+#### Now
+- [ ] Add toggle for heatmap blending mode (additive / max / overwrite)
+- [ ] Add per-side color controls (bid/ask hue + saturation)
+- [ ] Add heatmap value normalization modes (global, visible range, session)
+- [ ] Add toggle for heatmap magnifier (already stubbed in UI)
 
 #### Done
-
-* [x] Core heatmap rendering stabilized (2026-02-02)
+- [x] Add Heatmap Visual Settings section (opacity, contrast, gamma) (2026-02-02)
+- [x] Core heatmap rendering stabilized (2026-02-02)
 
 #### Session log
-
 * **2026-02-02** — Axis refactor unlocked stable panning; heatmap is now performant enough to justify rich settings.
 
 ---
 
 ### F3: Candlestick ↔ Heatmap Unification
-
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-14
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
+#### Now
+- [ ] Rename HeatmapDock → ChartDock (class + files) to reflect multi-chart purpose
 
-* [ ] Rename HeatmapDock → ChartDock (class + files) to reflect multi-chart purpose
-* [ ] Define shared coordinate system for candles + heatmap
-* [ ] Overlay candlesticks directly on heatmap canvas
-* [ ] Ensure Z-ordering works with opacity + blending
-* [ ] Add toggle: "Candles Over Heatmap"
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Wire timeframe combo to actual timeframe switching
-* [ ] Wire chart type combo (Candle/Hollow/Line) to rendering
-* [ ] Add candle body opacity control when heatmap visible
-* [ ] Add wick-only mode for minimal obstruction
-* [ ] Sync candle aggregation with heatmap resolution
-
-#### Later (ideas / low-priority)
-
-* [ ] Candle heatmap fusion mode (color candles by delta / absorption)
-* [ ] Auto-hide candles at extreme zoom levels
+#### Next
+- [ ] Wire timeframe combo to actual timeframe switching
+- [ ] Wire chart type combo (Candle/Hollow/Line) to rendering
+- [ ] Add candle body opacity control when heatmap visible
+- [ ] Add wick-only mode for minimal obstruction
+- [ ] Sync candle aggregation with heatmap resolution
 
 #### Done
-
-* [x] Dedicated plan created (`docs/plans/CANDLES_HEATMAP_UNIFICATION.md`) (2026-02-02)
+- [x] Dedicated plan created (`docs/plans/CANDLES_HEATMAP_UNIFICATION.md`) (2026-02-02)
+- [x] Define shared coordinate system for candles + heatmap (2026-02-02)
+- [x] Overlay candlesticks directly on heatmap canvas (2026-02-02)
+- [x] Ensure Z-ordering works with opacity + blending (2026-02-02)
+- [x] Add toggle: "Candles Over Heatmap" (2026-02-02)
 
 #### Session log
-
-* **2026-02-02** — Performance headroom finally makes unified rendering viable without hacks.
-* **2026-02-02** — Added HeatmapDock → ChartDock rename task; dock already titled "Charts" but class name needs update.
-* **2026-02-03** - Defaulted chart mode to hybrid candles+heatmap and auto-request candle history on reconnect.
-* **2026-02-03** - Gate auto-subscribe on user action; size candle history request to visible window.
-* **2026-02-03** - Wire toolbar timeframe to renderer/candles and add 1s option.
-* **2026-02-03** - Add SENTINEL_CHART_DEBUG logging for timeframe + candle overlay diagnostics.
-* **2026-02-03** - Apply panVisualOffset in viewport transform to prevent candle snap.
-* **2026-02-14** - Refactored UnifiedGridRenderer hotspots: extracted heatmap ingest/timer helpers, moved label-ring ownership to HeatmapStreamState, and shared viewport/render-rect math via UgrFrameMath.
-* **2026-02-14** - Decomposed updatePaintNode into frame-build/publish/upload-drain/overlay/label/FPS helpers; updatePaintNode now acts as orchestration-only hot-path entry.
-* **2026-02-14** - Split UnifiedGridRenderer implementation into UnifiedGridRenderer.cpp (core API), UnifiedGridRenderer.Init.cpp (init/ingest/wiring), and UnifiedGridRenderer.Render.cpp (render-thread hot path).
-* **2026-02-15** - Axis perf guardrail: during drag, AxisModel now updates positions-only (PositionRole) instead of full tick/label recalculation to reduce QML label binding churn.
-* **2026-02-15** - Fixed likely FPS regression source in UGR: label snapshot/ring data is now cached and only refreshed when heatmap generation changes (removed per-frame full snapshot copies).
-* **2026-02-15** - Pan interaction now forces manual mode immediately (disable auto-scroll on pan start; remove pan-to-auto handoff on release) to prevent hidden continuous viewport churn.
+- **2026-02-02** — Performance headroom finally makes unified rendering viable without hacks.
+- **2026-02-15** — Completed major UGR refactor for candle stability; axis perf guardrail added for pan/zoom fluidity.
 
 ---
 
 ### F4: Footprint Chart Core
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-08
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Finalize Bid/Ask vs Delta display modes
-* [ ] Implement cluster vs profile visual styles
-* [ ] Implement width scaling modes (rotation-aware)
-* [ ] Render per-cell numbers efficiently (GPU batched)
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Add imbalance detection logic
-* [ ] Add imbalance highlighting thresholds
-* [ ] Add candle-level stats (V, Δ, max imbalance)
-
-#### Later (ideas / low-priority)
-
-* [ ] Footprint replay mode (tick-by-tick build)
-* [ ] Footprint compression at low zoom
+#### Now
+- [ ] Finalize Bid/Ask vs Delta display modes
+- [ ] Implement cluster vs profile visual styles
+- [ ] Implement width scaling modes (rotation-aware)
+- [ ] Render per-cell numbers efficiently (GPU batched)
 
 #### Done
-
-* [x] Basic footprint rendering functional (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — Footprint UI exists; logic depth now the bottleneck, not rendering.
-* **2026-02-08** - Switched server footprint_slice from synthetic heatmap-derived values to trade-side delta ladder per bucket with q16 quant+quant_scale; next verify visual semantics vs target clustered footprint.
+- [x] Basic footprint rendering functional (2026-02-02)
 
 ---
 
 ### F5: Orderbook Profile Overlay
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Render aggregated orderbook profile alongside heatmap
-* [ ] Add profile normalization modes
-* [ ] Add toggle for profile labels
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Session-scoped profiles
-* [ ] Compare two profiles (before/after move)
-
-#### Later (ideas / low-priority)
-
-* [ ] Profile divergence alerts
-* [ ] AI-annotated profile commentary
+#### Now
+- [ ] Render aggregated orderbook profile alongside heatmap
+- [ ] Add profile normalization modes
+- [ ] Add toggle for profile labels
 
 #### Done
-
-* [x] Profile rendering stub exists (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — Profile view pairs naturally with heatmap; must stay lightweight.
+- [x] Profile rendering stub exists (2026-02-02)
 
 ---
 
 ### F6: Market & Liquidation Bubbles
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Add trade bubble rendering (size = volume)
-* [ ] Add liquidation bubble rendering (distinct style)
-* [ ] Add toggles for both
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Fade bubbles over time
-* [ ] Bubble clustering at low zoom
-
-#### Later (ideas / low-priority)
-
-* [ ] Bubble-to-heatmap interaction (impact highlight)
-* [ ] Event replay mode
+#### Now
+- [ ] Add trade bubble rendering (size = volume)
+- [ ] Add liquidation bubble rendering (distinct style)
+- [ ] Add toggles for both
 
 #### Done
-
-* [x] UI toggles wired (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — Visual noise risk acknowledged; must remain optional.
+- [x] UI toggles wired (2026-02-02)
 
 ---
 
 ### F7: MSDF Text Rendering System
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Implement MSDF font atlas generation
-* [ ] Replace QML Text with GPU MSDF text
-* [ ] Integrate zoom-stable label rendering
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Add text LOD system (numbers → hints → none)
-* [ ] Color-coded numeric overlays
-
-#### Later (ideas / low-priority)
-
-* [ ] Animated text emphasis (delta spikes)
-* [ ] Text outlines for dense heatmaps
+#### Now
+- [ ] Add text LOD system (numbers → hints → none)
+- [ ] Color-coded numeric overlays
 
 #### Done
-
-* [x] Plan created (`docs/plans/MSDF_TEXT_LAB.md`) (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — Axis refactor exposed text as next performance frontier.
+- [x] Plan created (`docs/plans/MSDF_TEXT_LAB.md`) (2026-02-02)
+- [x] Implement MSDF font atlas generation (2026-02-02)
+- [x] Replace QML Text with GPU MSDF text (2026-02-02)
+- [x] Integrate zoom-stable label rendering (2026-02-02)
 
 ---
 
 ### F8: TPO / Market Profile
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Implement TPO letter assignment per time slice
-* [ ] Render TPO columns aligned with price axis
-* [ ] Add POC, VAH, VAL calculation
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Session segmentation (RTH / ETH / custom)
-* [ ] TPO vs Volume Profile toggle
-
-#### Later (ideas / low-priority)
-
-* [ ] Composite profiles
-* [ ] AI explanation of profile shape
+#### Now
+- [ ] Implement TPO letter assignment per time slice
+- [ ] Render TPO columns aligned with price axis
+- [ ] Add POC, VAH, VAL calculation
 
 #### Done
-
-* [x] Plan exists (`docs/plans/TPO.md`) (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — Core market structure feature; cannot be half-assed.
+- [x] Plan exists (`docs/plans/TPO.md`) (2026-02-02)
 
 ---
 
 ### F9: Chart Interaction & UX Polish
-
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-02
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-* [ ] Right-click context menu consistency
-* [ ] Unified settings panel behavior
-* [ ] Keyboard shortcuts for major toggles
-
-#### Next (queued — pick up when Now is clear)
-
-* [ ] Quick presets menu
-* [ ] Per-chart state persistence
-
-#### Later (ideas / low-priority)
-
-* [ ] Command palette
-* [ ] “Explain what I’m seeing” AI button
+#### Now
+- [ ] Right-click context menu consistency
+- [ ] Unified settings panel behavior
+- [ ] Keyboard shortcuts for major toggles
 
 #### Done
-
-* [x] Alert UX documented (2026-02-02)
-
-#### Session log
-
-* **2026-02-02** — UX debt acceptable short-term, dangerous long-term.
+- [x] Alert UX documented (2026-02-02)
 
 ---
 
 ### F10: Coinbase REST Candle History
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-02-08
+**Updated:** 2026-03-16
 
 #### Now
-- [x] Serve 1s candles from live trade aggregation (no REST history)
 - [ ] Roll up 1m candles to custom timeframes (on-demand)
 - [ ] Add server-side candle cache per (symbol, timeframe)
-- [x] Stream live candle updates over WS (barUpdate/barClosed)
-- [x] Add server-side gating for candle updates (threshold + silence)
-
-#### Next
-- [ ] Merge REST history with live candles (overwrite forming bar when closed)
-- [ ] Add gap rendering hints for no-trade buckets
-- [ ] Candle stream verifier script (auto-start server + swap config; manual fallback)
-
-#### Later
-- [ ] Persist candle cache to disk for fast restart
 
 #### Done
-- [x] Coinbase REST candles fetcher + REST JWT (2026-02-02)
-- [x] WS candle_history_request / candle_history_chunk (server + client) (2026-02-02)
+- [x] Coinbase REST candles fetcher + WS chunking implemented (2026-02-02)
 - [x] 1s candles from trade aggregation history (2026-02-02)
-- [x] Live candle WS updates (barUpdate/barClosed) (2026-02-02)
-- [x] Server-side candle update gating (2026-02-02)
-
-#### Session log
-- **2026-02-02** — Added Coinbase REST candle history endpoint and WS request/response. Next: 1s candles + rollups + caching.
-- **2026-02-02** — Implemented 1s candle history from trade aggregation for WS requests.
-- **2026-02-02** — Added live candle WS updates with seq per (symbol, tf); gating next.
-- **2026-02-02** — Added basic gating on candle updates (high/low, close move, silence).
-- **2026-02-02** — Deferred robust candle test harness; add script later with auto-run + manual fallback.
-- **2026-02-08** — Explored toolbar timeframe/candle path; found protocol schema gating mismatch and mapping-timeframe coupling blocking reliable TF switching.
+- [x] Live candle WS updates with gating (threshold + silence) (2026-02-02)
 
 ---
 
 ### F11: Heatmap Color System Overhaul
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-03-01
+**Updated:** 2026-03-16
 
 #### Now
 - [ ] Add palette regeneration trigger when color settings change (expose gradient setters + dirty flag)
@@ -418,252 +256,118 @@ _(no entries yet)_
 #### Next
 - [ ] Add preset system: Classic, Fire, Ocean, Monochrome, Matrix
 - [ ] Add color picker widgets for custom bid/ask colors
-- [ ] Add "Intensity Curve" slider (replaces hardcoded palette gamma)
-- [ ] Add live preview in settings dialog
-
-#### Later
-- [ ] Per-exchange color profiles (Coinbase vs Binance palettes)
-- [ ] Time-of-day adaptive colors (bright during trading hours, dark at night)
-- [ ] Heatmap color based on velocity/absorption (not just liquidity)
-- [ ] "Hot spot" mode - highlight extreme liquidity with pulsing effect
 
 #### Done
-- [x] Identified hardcoded palette as root cause of bland colors (2026-02-02)
-- [x] Analyzed reference heatmap (Binance-style) for color strategy (2026-02-02)
-- [x] Multi-stop gradient system implemented in HeatmapOverlayRenderer (2026-02-02)
-- [x] Palette gamma fixed to 2.0 for dramatic dark→bright progression (2026-02-02)
-- [x] Bid gradient → electric cyan: dark teal → mid cyan → bright cyan → white-hot (2026-03-01)
-- [x] Ask gradient → hot orange: dark red → orange-red → hot orange → white-hot (2026-03-01)
-- [x] Shader floor lowered to 0.0 for true blacks on low-liquidity cells (2026-03-01)
-- [x] Default shader gamma 1.05→0.85, contrast 1.15→1.6 for more punch (2026-03-01)
-
-#### Session log
-- **2026-02-02** — Discovered hardcoded RGB values and backwards gamma (0.65) in palette generation. Settings dialog was wired correctly but palette never regenerated! Solution: dynamic multi-stop gradients with high gamma (2.0+) and near-zero floor for dramatic dark→bright progression.
-- **2026-03-01** — Replaced bland green bid gradient with electric cyan (teal→cyan→white-hot). Punched up ask gradient with more stops and white-hot top. Dropped shader gamma to 0.85 and raised contrast to 1.6 for sharper hot-spot falloff. Floor set to 0.0 for true blacks.
+- [x] Multi-stop gradient system implemented (2026-03-01)
+- [x] Electric cyan (bid) and Hot orange (ask) palettes implemented (2026-03-01)
+- [x] Shader punch-up (gamma/contrast/black floor) (2026-03-01)
 
 ---
 
 ### F12: Chart Toolbar Implementation
-
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-02-08
+**Updated:** 2026-03-16
 
-#### Now (current sprint — do these first)
-
-**Symbol Controls (DONE):**
-- [x] Symbol search input (QLineEdit) - working
-- [x] Subscribe button - working
-
-**Chart Mode Switcher (DONE):**
-- [x] Heatmap mode button (icon-heatmap.svg) - working
-- [x] Candles mode button (icon-candles.svg) - working
-- [x] Hybrid mode button (icon-hybrid.svg) - working
-
-**Timeframe & Type (PARTIAL):**
+#### Now
 - [ ] Wire timeframe combo to actual data refresh (1m, 5m, 15m, 1h, 4h, 1D)
 - [ ] Wire chart type combo (Candle, Hollow, Line) to rendering logic
-
-**Liquidity Controls (PARTIAL):**
-- [ ] Wire liquidity mode combo (Asset/USD) to label formatting
 - [ ] Wire liquidity threshold slider to heatmap filter
 
-#### Next (queued — pick up when Now is clear)
-
-**Action Buttons (MISSING):**
-- [ ] Implement Indicators panel (icon-indicators.svg)
-- [ ] Implement Layouts menu (icon-layout.svg) - save/load/default layouts
-- [ ] Implement Quick Search (icon-search.svg) - fuzzy symbol search
-- [ ] Implement Settings panel (icon-settings.svg) - heatmap/candle/general settings
-- [ ] Implement Fullscreen toggle (icon-fullscreen.svg) - F11 keybind
-- [ ] Wire Screenshot button (icon-camera.svg) to GuiApiServer
-
-#### Later (ideas / low-priority)
-
-**Toolbar Enhancements:**
-- [ ] Add Drawing Tools submenu (trend lines, fib, rectangles)
-- [ ] Add Alerts submenu (price alerts, indicator alerts)
-- [ ] Add Replay mode controls (time travel / tick replay)
-- [ ] Add Watchlist quick-add button
-- [ ] Toolbar customization (show/hide controls, reorder)
-- [ ] Keyboard shortcuts for all toolbar actions
-
-**Visual Polish:**
-- [ ] Hover tooltips with keyboard shortcuts
-- [ ] Active state highlighting for toggled buttons
-- [ ] Toolbar themes (compact / spacious / minimal)
-- [ ] Icon animation on mode switches
-
 #### Done
-
-- [x] Toolbar UI structure created (TopToolbar.cpp) (2026-01-XX)
-- [x] Chart mode switching functional (2026-01-XX)
-- [x] Symbol subscription functional (2026-01-XX)
-
-#### Session log
-
-- **2026-02-02** — Inventoried all toolbar controls; identified wiring gaps for timeframe/liquidity/actions.
-- **2026-02-02** — Toolbar is visually complete but many buttons emit signals without backend implementation.
-- **2026-02-08** — Verified toolbar signals are wired in MainWindowGPU; timeframe emits history requests, but end-to-end behavior is blocked by protocol/schema and renderer timeframe coupling issues.
-
----
-
-### F13: Comment Cleanup (libs/ — senior-dev standard)
-**Status:** complete
-**Created:** 2026-02-03
-**Updated:** 2026-02-03
-
-#### Now
-- [x] Continue cleanup pass on remaining files with egregious comments
-
-#### Next
-- [x] **Audit:** Generate list of files with `//` comments (e.g. `rg "//" libs/ --files-with-matches` or search in IDE). ~102 files, ~1016 comments.
-- [x] **Triage per file:** Open each file; for each comment decide: **gut** (remove), **concise** (one line “why”), or **deeper** (keep/expand only if non-obvious invariant or protocol).
-- [x] **Gut:** Remove COT, “what” comments, Python-style `#`, filler, TODOs with no ticket, and file-header essays.
-- [x] **Concise:** Replace verbose blocks with a single “why” line where intent is subtle.
-- [x] **Deeper:** Add or keep “why” only for protocol/threading/magic numbers/invariants; ensure C++ style (`//` or `/* */`), no stray `#`.
-- [x] **Check:** Build + quick sanity run after each batch of files.
-
-#### Later
-- [x] Apply same policy to `apps/` and `libs/gui` if desired.
-- [x] Add or point to commenting rules in AGENTS.md (done: §3).
-
-#### Done
-- [x] Commenting guidelines added to AGENTS.md §3 (2026-02-03)
-- [x] Outline for comment cleanup added to TODO (2026-02-03)
-- [x] Cleaned up 10 egregious files: SentinelLogging.cpp, AxisModel.hpp, Authenticator.hpp, LayoutManager.cpp, HeatmapDock.cpp, TimeframeAggregator.hpp, CandlestickBatched.cpp, MenuBuilder.cpp, ShortcutBinder.cpp, UnifiedGridRenderer.cpp (2026-02-03)
-
-#### Session log
-- **2026-02-03** — Outlined efficient pass: audit → triage per file (gut / concise / deeper) → batch by dir, verify build. Deferred to dedicated session.
-- **2026-02-03** — Re-added a handful of “why” comments for platform quirks, latency sanity, and zoom/pan thresholds.
-- **2026-02-03** — Cleaned up 10 worst offenders: removed verbose section headers, Doxygen blocks, redundant file headers, and “what” comments. Kept minimal “why” comments for threading/invariants only. Files now follow AGENTS.md §3 standards.
-
----
-
-### F14: Agent Notes System (_agent)
-**Status:** done
-**Created:** 2026-02-06
-**Updated:** 2026-02-06
-
-#### Now
-_(empty)_
-
-#### Next
-_(empty)_
-
-#### Later
-_(empty)_
-
-#### Done
-- [x] Add `_agent/` folder with standardized notes files (2026-02-06)
-- [x] Seed invariants, failure modes, repo map, and decisions (2026-02-06)
-- [x] Document agent notes format in AGENTS.md (2026-02-06)
-- [x] Gitignore `_agent/` (2026-02-06)
-
-#### Session log
-- **2026-02-06** — Created `_agent` notes system and seeded initial content; documented format and rules in AGENTS.md.
+- [x] Toolbar UI structure (TopToolbar.cpp) (2026-01-XX)
+- [x] Symbol search and mode switching functional (2026-02-02)
 
 ---
 
 ### F15: GUI Architecture Refactor (RendererHost + Overlays)
 **Status:** active
 **Created:** 2026-02-09
-**Updated:** 2026-02-10
+**Updated:** 2026-03-16
 
-#### Now (current sprint � do these first)
-- [x] Phase 1: MappingProvider seam for candles (remove direct CandlestickOverlayItem -> UnifiedGridRenderer mapping dependency)
-- [x] Phase 1: Remove QML write path for renderer `primaryField`; route mode authority from ChartModeController
-- [x] Phase 1: Introduce FrameContext construction in updatePaintNode with immutable snapshots and generation counters
-- [x] Phase 2: Start overlay extraction with candle path first
-
-#### Next (queued � pick up when Now is clear)
-- [x] Extract Footprint overlay module behind host orchestration
-- [x] Extract Heatmap overlay module behind host orchestration
-- [x] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
-
-#### Later (ideas / low-priority)
-- [ ] Full folder reorg after boundaries stabilize
-- [ ] Add diagnostics overlay and per-phase perf gates dashboard
+#### Now
+- [ ] Extract Footprint overlay module behind host orchestration
+- [ ] Extract Heatmap overlay module behind host orchestration
+- [ ] Introduce explicit TimeAuthority and decouple cadence from heatmap ownership
 
 #### Done
-- [x] Week 0 stabilization fixes completed (2026-02-09)
-
-#### Session log
-- **2026-02-09** � Started Phase 1 implementation: added `ITimeAxisMappingProvider`, switched candles to provider contract, and moved renderer primary field control to ChartModeController-driven flow. Next: FrameContext + generation counters.
-- **2026-02-09** - Completed Phase 1 FrameContext snapshot plumbing: provider now exposes `MappingFrameContext`; candlestick overlay consumes immutable frame snapshots and generation counters.
-- **2026-02-09** - Phase 2 started with candle path: CandlestickOverlayItem no longer depends on GridViewState and now consumes MappingFrameContext only via mappingProvider.
-- **2026-02-09** - Extracted footprint overlay module: `FootprintOverlayRenderer` now owns footprint node/image/texture lifecycle while UnifiedGridRenderer orchestrates snapshots and upload queue handoff.
-- **2026-02-09** - Extracted heatmap overlay module: `HeatmapOverlayRenderer` now owns heatmap node texture/palette lifecycle and upload application while UGR retains frame mapping and label orchestration.
-- **2026-02-10** - Added `TimeAuthority` seed and switched render cadence consumers (timer fractional offset, mapping cadence, auto-scroll lag/smooth) to explicit authority timeframe.
-- **2026-02-10** - Removed remaining implicit `snapshot.appendMs` ownership in UGR helper/mapping/debug paths; these now resolve cadence from `TimeAuthority` with stream snapshot only as fallback.
-- **2026-02-10** - Extended published `MappingFrameContext` with explicit time snapshot fields (`activeTimeframeMs`, `nowEventTimeMs`, `hasEventTime`) to keep overlay consumption immutable and host-independent.
-- **2026-02-10** - Added boundary progression metadata to `TimeAuthority` snapshot (`currentBoundaryStartMs`, `nextBoundaryStartMs`, `boundarySequence`) and published it via `MappingFrameContext` for future empty-bar/slice overlay behavior.
-- **2026-02-10** - Candlestick overlay now treats `boundarySequence` (when cadence matches timeframe) as a geometry dirty trigger, enabling deterministic cadence-driven updates beyond payload-only generation bumps.
-- **2026-02-10** - Added bounded synthetic candle continuity in CandlestickOverlayItem to fill sparse gaps and extend to current authority boundary when cadence/timeframe match.
-- **2026-02-10** - Added candle debug counters for sparse-session validation (`base_visible`, `synthetic`, cadence/boundary fields) under `SENTINEL_CHART_DEBUG`.
-- **2026-02-10** - Candle visibility polish: enforce minimum candle body height for flat/empty bars and force candle geometry dirty on `panVisualOffsetChanged` for live drag updates.
-- **2026-02-10** - Heatmap/candle cadence sync pass: server now emits forming heatmap updates each 50ms sampler tick and client heatmap ingest treats same-bucket slices as in-place column refresh (no reset/extra append).
+- [x] Phase 1: MappingProvider seam and FrameContext snapshotting (2026-02-09)
+- [x] Phase 2: Candlestick overlay extraction (2026-02-09)
+- [x] Added synthetic candle continuity for sparse sessions (2026-02-10)
 
 ---
 
 ### F16: Screener Dock + Lab Candle Viewer
 **Status:** active
 **Created:** 2026-02-11
-**Updated:** 2026-02-13
+**Updated:** 2026-03-16
 
 > Full plan: `docs/private/plans/SCREENER_AND_LAB.md`
 
 #### Now
 - [ ] Wire crypto row click → heatmap symbol subscription in MainWindowGPU
-- [ ] Start screener_server.py on app launch (QProcess) or document manual start
-- [ ] Lab → pure candle viewer (wire CandlestickBatched to live data, drop demo scaffolding)
-
-#### Next
-- [ ] Field picker UI in ScreenerDock (select which indicators to show)
-- [ ] yfinance candle backend for stocks in Lab viewer
-- [ ] Add ScreenerDock to LayoutOrchestrator default layout
-
-#### Later
-- [ ] Persist screener filter config (selected fields, thresholds) via LayoutManager/QSettings
-- [ ] Alert on screener condition (e.g. RSI crosses threshold)
-- [ ] Multi-symbol watchlist sync between screener and heatmap
+- [ ] Start screener_server.py on app launch (QProcess)
+- [ ] Lab → pure candle viewer (wire CandlestickBatched to live data)
 
 #### Done
-- [x] `scripts/screener/screener_server.py` — persistent aiohttp/WebSocket server (2026-02-13)
-- [x] `scripts/screener/screener_fetch.py` — one-shot CLI query (2026-02-13)
-- [x] `scripts/screener/screener_core.py` — shared field resolution + serialization (2026-02-13)
-- [x] `scripts/screener/test_screener.py` — 3 tests all green (2026-02-13)
-- [x] `ScreenerDock` — new dock, QTableView, WebSocket client, crypto+stocks, interval slider (2026-02-13)
-- [x] Wired into DockFactory, MenuBuilder, LayoutOrchestrator, MainWindowGpu (2026-02-13)
-- [x] Qt6::WebSockets added to CMakeLists — clean build (2026-02-13)
-
-#### Session log
-- **2026-02-11** — Explored tvscreener library, defined architecture. Python server pattern mirrors SEC backend. Lab repurposed as candle viewer. Routing: crypto→heatmap+Lab, stocks→Lab only.
-- **2026-02-13** — Built full Python screener backend (server+fetch+core+tests, all passing). Built ScreenerDock C++ widget with WebSocket client, table, interval slider, asset toggle. Wired into all plumbing. Clean build. Next: wire row click → heatmap, launch server from app.
-
+- [x] Screener backend (Python server + fetcher + core) (2026-02-13)
+- [x] ScreenerDock C++ widget with WS client and table (2026-02-13)
 
 ---
 
-### F17: SentinelStreamClient Message Router Refactor
-**Status:** done
-**Created:** 2026-02-14
-**Updated:** 2026-02-14
+### F18: Trading Simulation Stack (Paper + Replay)
+**Status:** active
+**Created:** 2026-03-14
+**Updated:** 2026-03-17
+
+> Blueprint: `docs/TRADING_SIMULATION_BLUEPRINT.md`
 
 #### Now
-_(empty)_
-
-#### Next
-_(empty)_
-
-#### Later
-_(empty)_
+- [ ] Build a thin replay path from binary trade logs
+- [ ] Manual paper-trading polish pass for TP/SL visuals and interaction smoothing
 
 #### Done
-- [x] Split `SentinelStreamClient::handleMessage` into per-family handlers with `MessageType` dispatch (2026-02-14)
-- [x] Added internal parse helper seam (`SentinelStreamClientParseHelpers`) for server config/candle/orderbook mapping reuse (2026-02-14)
-- [x] Added targeted helper tests (`test_sentinel_stream_client_parse_helpers`) and wired CMake target (2026-02-14)
-- [x] Windows preset build green after refactor (`cmake --build --preset windows-msvc-vs`) (2026-02-14)
+- [x] Shared backtest core types and execution model (2026-03-14)
+- [x] Unified simulation broker and replay engine (2026-03-14)
+- [x] Binary trade-log reader for captured tape (2026-03-16)
+- [x] Polish manual paper trading for forward testing (live mark, renderer-backed order/position overlays, entry-price/PnL pill) (2026-03-16)
+- [x] Manual-only TP/SL risk system with server-backed attached risk orders, staged drag UI, confirm/discard, and OCO clearing (2026-03-17)
 
 #### Session log
-- **2026-02-14** - Refactored protocol message handling to reduce complexity while preserving schema/payload guardrails and existing signal semantics; added focused helper tests, build is green, helper test binary passes when launched with Qt/build DLL PATH.
-- **2026-02-14** - Fixed Coinbase heartbeat subscription policy: removed duplicate standalone heartbeat subscribe and made heartbeat frames symbol-scoped via SubscriptionManager product_ids; SubscriptionManagerTests passing.
+- **2026-03-17** - Added server-backed manual TP/SL with stop-market SL, take-profit exits, chart-staged drag/confirm flow, renderer-owned bracket geometry, and targeted backend tests. Remaining work is polish, not core feature plumbing.
+
+---
+
+### F19: Refactoring — Safety & Correctness
+**Status:** active
+**Created:** 2026-03-16
+**Updated:** 2026-03-16
+
+> Reference: `docs/REFACTOR_PLAN.md` (Areas 5, 6, 7, 8)
+
+#### Now
+- [ ] Implement `DockablePanel` CRTP guard to enforce init order (Area 6)
+- [ ] Smart pointer sweep: Audit raw `new` calls in `libs/gui/render/` (Area 5)
+- [ ] Introduce strong typedef wrappers for coordinate systems (Area 7)
+- [ ] Add protocol round-trip and DataProcessor validation tests (Area 8)
+
+#### Session log
+- **2026-03-16** — Consolidated safety-focused refactors from the master plan. Priority: Fix FM-029 (dock lifecycle).
+
+---
+
+### F20: Refactoring — Architecture & Performance
+**Status:** active
+**Created:** 2026-03-16
+**Updated:** 2026-03-16
+
+> Reference: `docs/REFACTOR_PLAN.md` (Areas 1, 2, 3, 4)
+
+#### Now
+- [ ] Formalize `IOverlayRenderer` interface and reduce UGR scope (Area 1)
+- [ ] Extract `TextureOverlayBase` for heatmap/footprint DRY (Area 2)
+- [ ] Implement batch signal coalesce gate in `DataProcessor` (Area 3)
+- [ ] Implement Message handler registry in `SentinelStreamClient` (Area 4)
+
+#### Session log
+- **2026-03-16** — Consolidated architectural refactors. Goal: decouple overlays and improve GUI thread throughput.

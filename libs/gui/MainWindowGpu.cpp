@@ -13,6 +13,8 @@
 #include <QStatusBar>
 #include <QElapsedTimer>
 #include <QThread>
+#include <QDateTime>
+#include <QUuid>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "UnifiedGridRenderer.h"
@@ -30,7 +32,10 @@
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/StockChartDock.hpp"
 #include "widgets/OrderBookDock.hpp"
+#include "widgets/PaperTradingDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
+#include "render/AlgoOverlayRenderer.hpp"
+#include "render/PaperTradeOverlayModel.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
@@ -198,6 +203,8 @@ void MainWindowGPU::setupUI() {
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
     m_orderBookDock = docks.orderBookDock;
+    m_paperTradingDock = new PaperTradingDock(this);
+    m_paperTradingDock->setDataSource(m_dataSource.get());
     if (m_screenerDock) {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
@@ -224,6 +231,9 @@ void MainWindowGPU::setupUI() {
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     if (m_orderBookDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
+    }
+    if (m_paperTradingDock) {
+        connect(this, &MainWindowGPU::symbolChanged, m_paperTradingDock, &PaperTradingDock::setSymbol, Qt::QueuedConnection);
     }
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
@@ -358,6 +368,53 @@ void MainWindowGPU::setupConnections() {
         });
     }
     connectMarketDataSignals();
+    if (m_paperTradingDock) {
+        connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                m_paperTradingDock, &PaperTradingDock::onTradeReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                m_paperTradingDock, &PaperTradingDock::onOrderUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                m_paperTradingDock, &PaperTradingDock::onPositionUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                m_paperTradingDock, &PaperTradingDock::onAlgoOrderEvent, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::pnlSnapshotReceived,
+                m_paperTradingDock, &PaperTradingDock::onPnlSnapshot, Qt::QueuedConnection);
+    }
+
+    if (m_qquickView && m_qquickView->rootObject()) {
+        if (auto* overlay = m_qquickView->rootObject()->findChild<AlgoOverlayRenderer*>("algoOverlayRenderer")) {
+            connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                    overlay, &AlgoOverlayRenderer::onAlgoOrderEvent, Qt::QueuedConnection);
+        }
+        if (auto* overlayModel = m_qquickView->rootObject()->findChild<PaperTradeOverlayModel*>("paperTradeOverlayModel")) {
+            connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                    overlayModel, &PaperTradeOverlayModel::onTradeReceived, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onOrderUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onPositionUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::riskOrderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onRiskOrderUpdated, Qt::QueuedConnection);
+            connect(overlayModel, &PaperTradeOverlayModel::applyAttachedRiskRequested,
+                    this,
+                    [this](bool hasTakeProfit, double takeProfitPrice, bool hasStopLoss, double stopLossPrice) {
+                        if (!m_dataSource || m_currentSymbol.isEmpty()) {
+                            return;
+                        }
+                        trading::TradeCommand cmd;
+                        cmd.commandId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+                        cmd.action = trading::TradeAction::SetAttachedRisk;
+                        cmd.symbol = m_currentSymbol.toStdString();
+                        cmd.timestamp = QDateTime::currentMSecsSinceEpoch();
+                        cmd.hasTakeProfit = hasTakeProfit;
+                        cmd.takeProfitPrice = takeProfitPrice;
+                        cmd.hasStopLoss = hasStopLoss;
+                        cmd.stopLossPrice = stopLossPrice;
+                        m_dataSource->sendTradeCommand(cmd);
+                    },
+                    Qt::QueuedConnection);
+        }
+    }
 }
 
 void MainWindowGPU::setupGuiApiServer() {
@@ -872,5 +929,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
+    docks.paperTradingDock = m_paperTradingDock;
     return docks;
 }

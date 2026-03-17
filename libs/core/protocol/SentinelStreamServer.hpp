@@ -15,8 +15,7 @@
 #include "../servermodel/ServerDataModel.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
-
-namespace trading { class TradingEngine; }
+#include "../trading/LiveTradingSession.hpp"
 
 class Authenticator;
 class CoinbaseRestClient;
@@ -43,6 +42,9 @@ signals:
     void clientUnsubscribed(const QString& symbol);
     void orderUpdateBroadcast(const trading::OrderUpdate& update);
     void positionUpdateBroadcast(const trading::PositionUpdate& update);
+    void riskOrderUpdateBroadcast(const trading::RiskOrderUpdate& update);
+    void algoOrderEventBroadcast(const trading::AlgoOrderEvent& event);
+    void pnlSnapshotBroadcast(const trading::PnlSnapshot& snapshot);
 
 public:
     void notifyClientSubscribed(const std::string& symbol);
@@ -50,7 +52,16 @@ public:
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
+    void broadcastOrderUpdate(const trading::OrderUpdate& update);
+    void broadcastPositionUpdate(const trading::PositionUpdate& update);
+    void broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& update);
+    void broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& event);
+    void broadcastPnlSnapshot(const trading::PnlSnapshot& snapshot);
     void broadcastCoinbaseLatency(int milliseconds);
+    bool startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params);
+    void stopAlgo(const std::string& algoId);
+    trading::LiveTradingSession& tradingSession() { return *m_tradingSession; }
+    trading::LiveTradingSession* tradingSessionPtr() const { return m_tradingSession.get(); }
     uint64_t registerLatencySender(std::function<void(int)> sendFn);
     void unregisterLatencySender(uint64_t id);
 
@@ -67,11 +78,17 @@ private:
     std::unique_ptr<tcp::acceptor> m_acceptor;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
-    std::unique_ptr<trading::TradingEngine> m_tradingEngine;
+    std::unique_ptr<trading::LiveTradingSession> m_tradingSession;
 
     std::mutex m_latencySendersMutex;
     std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;
     std::atomic<uint64_t> m_nextLatencySenderId{0};
+
+    std::mutex m_tradingBroadcastMutex;
+    std::vector<std::pair<uint64_t, std::function<void(const std::string&)>>> m_tradingBroadcasters;
+    std::atomic<uint64_t> m_nextBroadcasterId{0};
+public:
+    uint64_t registerTradingBroadcaster(std::function<void(const std::string&)> fn);
+    void unregisterTradingBroadcaster(uint64_t id);
+private:
 };
-
-

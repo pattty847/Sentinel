@@ -42,8 +42,12 @@ enum class MessageType {
     ScreenerRequest,
     ScreenerUpdate,
     TradeCommand,
+    AlgoCommand,
     OrderUpdate,
     PositionUpdate,
+    RiskOrderUpdate,
+    AlgoOrderEvent,
+    PnlSnapshot,
     Error,
     CoinbaseLatency,
     Unknown
@@ -74,8 +78,12 @@ inline std::string toString(MessageType t) {
         case MessageType::ScreenerRequest: return "screener_request";
         case MessageType::ScreenerUpdate:  return "screener_update";
         case MessageType::TradeCommand: return "trade_command";
+        case MessageType::AlgoCommand: return "algo_command";
         case MessageType::OrderUpdate: return "order_update";
         case MessageType::PositionUpdate: return "position_update";
+        case MessageType::RiskOrderUpdate: return "risk_order_update";
+        case MessageType::AlgoOrderEvent: return "algo_order_event";
+        case MessageType::PnlSnapshot: return "pnl_snapshot";
         case MessageType::Error: return "error";
         case MessageType::CoinbaseLatency: return "coinbase_latency";
         default: return "unknown";
@@ -106,12 +114,15 @@ inline MessageType fromString(const std::string& s) {
     if (s == "screener_request") return MessageType::ScreenerRequest;
     if (s == "screener_update")  return MessageType::ScreenerUpdate;
     if (s == "trade_command") return MessageType::TradeCommand;
+    if (s == "algo_command") return MessageType::AlgoCommand;
     if (s == "order_update") return MessageType::OrderUpdate;
     if (s == "position_update") return MessageType::PositionUpdate;
+    if (s == "risk_order_update") return MessageType::RiskOrderUpdate;
+    if (s == "algo_order_event") return MessageType::AlgoOrderEvent;
+    if (s == "pnl_snapshot") return MessageType::PnlSnapshot;
     if (s == "error") return MessageType::Error;
     if (s == "coinbase_latency") return MessageType::CoinbaseLatency;
     return MessageType::Unknown;
 }
 
 } // namespace protocol
-

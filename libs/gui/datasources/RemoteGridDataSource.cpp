@@ -68,6 +68,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<trading::OrderUpdate>("trading::OrderUpdate");
     qRegisterMetaType<trading::PositionUpdate>("trading::PositionUpdate");
+    qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
+    qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
+    qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
@@ -106,8 +109,14 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::orderUpdated,
             this, &IGridDataSource::orderUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::algoOrderEventReceived,
+            this, &RemoteGridDataSource::onAlgoOrderEventReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::pnlSnapshotReceived,
+            this, &RemoteGridDataSource::onPnlSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::positionUpdated,
             this, &IGridDataSource::positionUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::riskOrderUpdated,
+            this, &IGridDataSource::riskOrderUpdated, Qt::QueuedConnection);
 }
 
 void RemoteGridDataSource::connectToServer() {
@@ -341,4 +350,19 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
                    .arg(endTimeSec)
                    .arg(candles.size()));
     }
+}
+
+void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,
+                                            const std::string& action,
+                                            const std::string& symbol,
+                                            const trading::AlgoParams& params) {
+    m_client.sendAlgoCommand(algoId, action, symbol, params);
+}
+
+void RemoteGridDataSource::onAlgoOrderEventReceived(const trading::AlgoOrderEvent& event) {
+    emit algoOrderEventReceived(event);
+}
+
+void RemoteGridDataSource::onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot) {
+    emit pnlSnapshotReceived(snapshot);
 }

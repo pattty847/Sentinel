@@ -736,7 +736,11 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     if (enabled && m_viewState->isTimeWindowValid() && m_heatmapStream &&
         m_autoScrollController) {
       m_autoScrollController->updateLagFromView(
-          *m_viewState, *m_heatmapStream, m_timeAuthority.activeTimeframeMs());
+          *m_viewState,
+          *m_heatmapStream,
+          m_timeAuthority.activeTimeframeMs(),
+          m_heatmapClock.isValid() ? m_heatmapClock.elapsed()
+                                   : std::numeric_limits<int64_t>::min());
     }
   }
 }

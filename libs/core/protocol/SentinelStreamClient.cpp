@@ -398,7 +398,11 @@ void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command
         {"side", trading::toString(command.side)},
         {"order_type", trading::toString(command.orderType)},
         {"qty", command.qty},
-        {"timestamp", command.timestamp}
+        {"timestamp", command.timestamp},
+        {"has_take_profit", command.hasTakeProfit},
+        {"take_profit_price", command.takeProfitPrice},
+        {"has_stop_loss", command.hasStopLoss},
+        {"stop_loss_price", command.stopLossPrice}
     };
     msg["price"] = command.hasPrice ? nlohmann::json(command.price) : nlohmann::json(nullptr);
     if (!command.targetOrderId.empty()) {
@@ -543,6 +547,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::PositionUpdate:
                 handlePositionUpdateMessage(msg);
                 return;
+            case protocol::MessageType::RiskOrderUpdate:
+                handleRiskOrderUpdateMessage(msg);
+                return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
                 return;
@@ -551,6 +558,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::CoinbaseLatency:
                 handleCoinbaseLatencyMessage(msg);
+                return;
+            case protocol::MessageType::AlgoOrderEvent:
+                handleAlgoOrderEventMessage(msg);
+                return;
+            case protocol::MessageType::PnlSnapshot:
+                handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Unknown:
                 break;
@@ -1032,6 +1045,8 @@ void SentinelStreamClient::handleOrderUpdateMessage(const nlohmann::json& msg) {
     update.filledQty = msg.value("filled_qty", 0.0);
     update.remainingQty = msg.value("remaining_qty", 0.0);
     update.avgPrice = msg.value("avg_price", 0.0);
+    update.limitPrice = msg.value("limit_price", 0.0);
+    update.algoId = msg.value("algo_id", "");
     if (!update.orderId.empty()) {
         emit orderUpdated(update);
     }
@@ -1043,8 +1058,21 @@ void SentinelStreamClient::handlePositionUpdateMessage(const nlohmann::json& msg
     update.positionQty = msg.value("position_qty", 0.0);
     update.avgPrice = msg.value("avg_price", 0.0);
     update.unrealizedPnl = msg.value("unrealized_pnl", 0.0);
+    update.realizedPnl = msg.value("realized_pnl", 0.0);
     if (!update.symbol.empty()) {
         emit positionUpdated(update);
+    }
+}
+
+void SentinelStreamClient::handleRiskOrderUpdateMessage(const nlohmann::json& msg) {
+    trading::RiskOrderUpdate update;
+    update.symbol = msg.value("symbol", "");
+    update.hasTakeProfit = msg.value("has_take_profit", false);
+    update.takeProfitPrice = msg.value("take_profit_price", 0.0);
+    update.hasStopLoss = msg.value("has_stop_loss", false);
+    update.stopLossPrice = msg.value("stop_loss_price", 0.0);
+    if (!update.symbol.empty()) {
+        emit riskOrderUpdated(update);
     }
 }
 
@@ -1260,4 +1288,57 @@ void SentinelStreamClient::handleCoinbaseLatencyMessage(const nlohmann::json& ms
     }
     const int ms = msg["ms"].get<int>();
     emit coinbaseLatencyReceived(ms);
+}
+
+void SentinelStreamClient::handleAlgoOrderEventMessage(const nlohmann::json& msg) {
+    trading::AlgoOrderEvent ev;
+    ev.algoId = msg.value("algo_id", "");
+    ev.orderId = msg.value("order_id", "");
+    ev.symbol = msg.value("symbol", "");
+    ev.side = trading::orderSideFromString(msg.value("side", "UNKNOWN"));
+    ev.orderType = trading::orderTypeFromString(msg.value("order_type", "LIMIT"));
+    ev.price = msg.value("price", 0.0);
+    ev.qty = msg.value("qty", 0.0);
+    ev.status = trading::orderStatusFromString(msg.value("status", "REJECTED"));
+    ev.timestampMs = msg.value("timestamp_ms", static_cast<int64_t>(0));
+    if (!ev.algoId.empty()) {
+        emit algoOrderEventReceived(ev);
+    }
+}
+
+void SentinelStreamClient::handlePnlSnapshotMessage(const nlohmann::json& msg) {
+    trading::PnlSnapshot snap;
+    snap.symbol = msg.value("symbol", "");
+    snap.timestampMs = msg.value("timestamp_ms", static_cast<int64_t>(0));
+    snap.unrealizedPnl = msg.value("unrealized_pnl", 0.0);
+    snap.realizedPnl = msg.value("realized_pnl", 0.0);
+    snap.totalPnl = msg.value("total_pnl", 0.0);
+    snap.algoId = msg.value("algo_id", "");
+    if (!snap.symbol.empty()) {
+        emit pnlSnapshotReceived(snap);
+    }
+}
+
+void SentinelStreamClient::sendAlgoCommand(const std::string& algoId,
+                                            const std::string& action,
+                                            const std::string& symbol,
+                                            const trading::AlgoParams& params) {
+    nlohmann::json j;
+    j["type"] = "algo_command";
+    j["algo_id"] = algoId;
+    j["action"] = action;
+    j["symbol"] = symbol;
+    j["params"] = {
+        {"spread_bps", params.spreadBps},
+        {"order_qty", params.orderQty},
+        {"max_position_qty", params.maxPositionQty},
+        {"skew_bps", params.skewBps}
+    };
+    // Enqueue on io thread
+    net::post(m_strand, [this, payload = j.dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
 }

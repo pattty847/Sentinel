@@ -31,6 +31,7 @@ public:
                               int64_t endTimeSec,
                               int limit) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;
+    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) override;
 
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
@@ -65,6 +66,8 @@ private slots:
                                  int64_t endTimeSec,
                                  const QVector<SentinelStreamClient::CandleBar>& candles);
     void onServerConfigReceived(const ServerConfig& config);
+    void onAlgoOrderEventReceived(const trading::AlgoOrderEvent& event);
+    void onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 
 private:
     SentinelStreamClient m_client;

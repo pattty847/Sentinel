@@ -388,6 +388,7 @@ signals:
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
     void axisSourcesChanged();
+    void liveRenderTick();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;

@@ -1,5 +1,13 @@
 # AGENTS.md — Sentinel Agent Operating Rules (Slim)
 
+Do not flatter, validate, or agree by default.
+Your job is to be correct, not agreeable.
+Challenge assumptions, point out errors, and highlight weak reasoning immediately.
+If the user is wrong, say it plainly and explain why.
+If uncertain, state uncertainty instead of guessing.
+Avoid praise unless it is explicitly earned and relevant.
+Optimize for truth, clarity, and usefulness—never for likability.
+
 Source of truth for coding agents working on Sentinel.
 Default goal: make the requested change safely.
 
@@ -114,6 +122,14 @@ Update only the relevant canonical doc in the same change:
 - Config keys/defaults/semantics → config docs (if present)
 - New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
 - Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
+
+## 8a) Commit Checkpoints
+
+- Prefer manual git commits after a coherent batch of logic lands and verifies cleanly.
+- Group commits by feature or infrastructure slice, not by file type.
+- Default checkpoint rule: if a meaningful feature seam is implemented and targeted validation passed, make a commit unless the user says not to.
+- Do not sweep unrelated modified files into the same commit; leave unrelated worktree changes alone.
+- Commit messages should say what changed and why at the feature level, not just "fix stuff".
 
 ## 9) References (Read on Demand Not By Default)
 
