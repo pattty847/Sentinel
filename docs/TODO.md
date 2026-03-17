@@ -252,7 +252,6 @@ _(nothing yet)_
 **Updated:** 2026-03-16
 
 #### Now
-- [ ] Add palette regeneration trigger when color settings change (expose gradient setters + dirty flag)
 
 #### Next
 - [ ] Add preset system: Classic, Fire, Ocean, Monochrome, Matrix
@@ -262,6 +261,7 @@ _(nothing yet)_
 - [x] Multi-stop gradient system implemented (2026-03-01)
 - [x] Electric cyan (bid) and Hot orange (ask) palettes implemented (2026-03-01)
 - [x] Shader punch-up (gamma/contrast/black floor) (2026-03-01)
+- [x] Add palette regeneration trigger — setPaletteGamma/setBidGradient/setAskGradient + dirty flag (2026-03-17)
 
 ---
 

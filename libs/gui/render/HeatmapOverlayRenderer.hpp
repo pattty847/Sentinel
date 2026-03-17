@@ -18,9 +18,17 @@ public:
         QByteArray data;
     };
 
+    struct ColorStop {
+        float position = 0.0f;
+        QColor color;
+    };
+
     void setGridDimensions(int width, int height);
     void setIntensityBytesPerCell(int bytesPerCell);
     void setBackgroundColor(const QColor& color);
+    void setPaletteGamma(double gamma);
+    void setBidGradient(const std::vector<ColorStop>& stops);
+    void setAskGradient(const std::vector<ColorStop>& stops);
     void requestFullTextureRebuild();
     void onRootRebuilt();
 
@@ -37,11 +45,6 @@ public:
                      std::vector<PendingUpload>& pendingUploads);
 
 private:
-    struct ColorStop {
-        float position = 0.0f;
-        QColor color;
-    };
-
     struct ColorGradient {
         std::vector<ColorStop> stops;
         QColor interpolate(float t) const;

@@ -64,6 +64,27 @@ void HeatmapOverlayRenderer::setBackgroundColor(const QColor& color) {
     m_textureDirty = true;
 }
 
+void HeatmapOverlayRenderer::setPaletteGamma(double gamma) {
+    if (m_paletteGamma == gamma) {
+        return;
+    }
+    m_paletteGamma = gamma;
+    m_paletteDirty = true;
+    m_textureDirty = true;
+}
+
+void HeatmapOverlayRenderer::setBidGradient(const std::vector<ColorStop>& stops) {
+    m_bidGradient.stops = stops;
+    m_paletteDirty = true;
+    m_textureDirty = true;
+}
+
+void HeatmapOverlayRenderer::setAskGradient(const std::vector<ColorStop>& stops) {
+    m_askGradient.stops = stops;
+    m_paletteDirty = true;
+    m_textureDirty = true;
+}
+
 void HeatmapOverlayRenderer::requestFullTextureRebuild() {
     m_rebuildPending.store(true, std::memory_order_release);
 }
@@ -91,16 +112,17 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
     if (m_bidGradient.stops.empty()) {
-        // Electric cyan — dark teal → mid cyan → bright cyan → white-hot
+        // Electric cyan — dark teal → mid cyan → bright cyan → white-hot (defaults)
         m_bidGradient.stops = {
             {0.00f, QColor(  0,  20,  25)},
             {0.35f, QColor(  0, 110, 130)},
             {0.70f, QColor(  0, 210, 220)},
             {1.00f, QColor(160, 255, 248)},
         };
+        m_paletteDirty = true;
     }
     if (m_askGradient.stops.empty()) {
-        // Hot orange — dark red → orange-red → hot orange → white-hot
+        // Hot orange — dark red → orange-red → hot orange → white-hot (defaults)
         m_askGradient.stops = {
             {0.00f, QColor( 35,   5,   0)},
             {0.30f, QColor(160,  30,  10)},
@@ -108,6 +130,7 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
             {0.85f, QColor(255, 160,  30)},
             {1.00f, QColor(255, 230,  80)},
         };
+        m_paletteDirty = true;
     }
 
     if (m_rebuildPending.exchange(false, std::memory_order_acq_rel)) {
