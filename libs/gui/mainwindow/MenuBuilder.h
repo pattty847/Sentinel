@@ -17,7 +17,7 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <functional>
 
 // Forward declarations
-class HeatmapDock;
+class ChartDock;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
@@ -30,7 +30,7 @@ class OrderBookDock;
 class MenuBuilder {
 public:
     struct DockWidgets {
-        HeatmapDock* heatmapDock = nullptr;
+        ChartDock* heatmapDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
@@ -52,7 +52,7 @@ public:
     explicit MenuBuilder(QMenuBar* menuBar);
 
     void buildMenus(const DockWidgets& docks, const Callbacks& callbacks);
-    void setHeatmapDock(HeatmapDock* heatmapDock) { m_heatmapDock = heatmapDock; }
+    void setChartDock(ChartDock* heatmapDock) { m_heatmapDock = heatmapDock; }
 
 private:
     void buildViewMenu(const DockWidgets& docks);
@@ -65,6 +65,6 @@ private:
     QMenu* m_layoutsMenu = nullptr;
     QMenu* m_toolsMenu = nullptr;
     QMenu* m_debugMenu = nullptr;
-    HeatmapDock* m_heatmapDock = nullptr;
+    ChartDock* m_heatmapDock = nullptr;
 };
 

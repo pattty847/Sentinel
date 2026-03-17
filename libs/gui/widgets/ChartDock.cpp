@@ -1,4 +1,4 @@
-#include "HeatmapDock.hpp"
+#include "ChartDock.hpp"
 #include <QQuickView>
 #include <QSurfaceFormat>
 #include <QSGRendererInterface>
@@ -8,17 +8,17 @@
 #include <QHBoxLayout>
 #include <QFrame>
 
-HeatmapDock::HeatmapDock(QWidget* parent)
-    : DockablePanel("HeatmapDock", "Charts", parent)
+ChartDock::ChartDock(QWidget* parent)
+    : DockablePanel("ChartDock", "Charts", parent)
 {
     buildUi();
 }
 
-QSize HeatmapDock::minimumSizeHint() const {
+QSize ChartDock::minimumSizeHint() const {
     return QSize(420, 300);
 }
 
-void HeatmapDock::buildUi() {
+void ChartDock::buildUi() {
     QVBoxLayout* mainLayout = new QVBoxLayout(m_contentWidget);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
@@ -60,7 +60,7 @@ void HeatmapDock::buildUi() {
     }
 }
 
-QObject* HeatmapDock::rootObject() const {
+QObject* ChartDock::rootObject() const {
     if (m_qquickView) {
         return m_qquickView->rootObject();
     }

@@ -1,5 +1,5 @@
 #include "LayoutOrchestrator.h"
-#include "../widgets/HeatmapDock.hpp"
+#include "../widgets/ChartDock.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"

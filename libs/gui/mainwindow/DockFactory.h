@@ -15,7 +15,7 @@ Related: MainWindowGpu.cpp, DockablePanel.hpp.
 #include <QToolButton>
 
 // Forward declarations
-class HeatmapDock;
+class ChartDock;
 class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
@@ -29,7 +29,7 @@ class OrderBookDock;
 class DockFactory {
 public:
     struct DockWidgets {
-        HeatmapDock* heatmapDock = nullptr;
+        ChartDock* heatmapDock = nullptr;
         StatusBar* statusBar = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;

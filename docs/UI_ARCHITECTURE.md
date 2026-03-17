@@ -7,7 +7,7 @@ The `libs/gui` module is strictly responsible for declarative UI management (QML
 
 ### MainWindowGpu
 `MainWindowGpu` is the central host for the GUI process. It lives exclusively on the main thread and has the following responsibilities:
-*   **Layout & Dock Management:** Manages dockable widgets (HeatmapDock, SecFilingDock, ScreenerDock, etc.) via `LayoutOrchestrator` and `DockFactory`.
+*   **Layout & Dock Management:** Manages dockable widgets (ChartDock, SecFilingDock, ScreenerDock, etc.) via `LayoutOrchestrator` and `DockFactory`.
 *   **Scene Control:** Initializes and bridges the declarative QML environment (`QmlSceneController`) to the underlying C++ backend.
 *   **Connection Lifecycle:** Establishes connection to the remote backend (`RemoteGridDataSource`) and routes connection status changes to the UI layer.
 *   **State Propagation:** Distributes state updates (e.g., Active Symbol) down to independent docks and controllers via signals.

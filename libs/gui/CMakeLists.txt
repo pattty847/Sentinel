@@ -121,7 +121,7 @@ set(WIDGET_SOURCES
     "widgets/CopenetFeedDock.cpp"
     "widgets/DockablePanel.cpp"
     "widgets/FontSettingsDialog.cpp"
-    "widgets/HeatmapDock.cpp"
+    "widgets/ChartDock.cpp"
     "widgets/LayoutManager.cpp"
     "marketdata/MarketDataCoreQt.cpp"
     "widgets/OrderBookDock.cpp"

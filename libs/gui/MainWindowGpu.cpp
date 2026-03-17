@@ -20,7 +20,7 @@
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
-#include "widgets/HeatmapDock.hpp"
+#include "widgets/ChartDock.hpp"
 #include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
@@ -711,7 +711,7 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
-    m_menuBuilder->setHeatmapDock(m_heatmapDock);
+    m_menuBuilder->setChartDock(m_heatmapDock);
 
     m_menuBuilder->buildMenus(docks, callbacks);
 }

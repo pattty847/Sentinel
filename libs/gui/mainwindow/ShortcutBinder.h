@@ -15,7 +15,7 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <functional>
 
 // Forward declarations
-class HeatmapDock;
+class ChartDock;
 class SecFilingDock;
 
 class ShortcutBinder {
@@ -27,7 +27,7 @@ public:
     };
 
     struct DockWidgets {
-        HeatmapDock* heatmapDock = nullptr;
+        ChartDock* heatmapDock = nullptr;
         SecFilingDock* secDock = nullptr;
     };
 

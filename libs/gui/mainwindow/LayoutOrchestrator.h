@@ -15,7 +15,7 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <QApplication>
 
 // Forward declarations
-class HeatmapDock;
+class ChartDock;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
@@ -29,7 +29,7 @@ class PaperTradingDock;
 class LayoutOrchestrator {
 public:
     struct DockWidgets {
-        HeatmapDock* heatmapDock = nullptr;
+        ChartDock* heatmapDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;

@@ -20,7 +20,7 @@
 // Forward declarations
 class ChartModeController;
 class UnifiedGridRenderer;
-class HeatmapDock;
+class ChartDock;
 class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
@@ -94,7 +94,7 @@ private:
     void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
-    HeatmapDock* m_heatmapDock = nullptr;
+    ChartDock* m_heatmapDock = nullptr;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
@@ -106,7 +106,7 @@ private:
     OrderBookDock* m_orderBookDock = nullptr;
     PaperTradingDock* m_paperTradingDock = nullptr;
 
-    // UI Controls (accessed through HeatmapDock)
+    // UI Controls (accessed through ChartDock)
     QLineEdit* m_symbolInput = nullptr;
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;

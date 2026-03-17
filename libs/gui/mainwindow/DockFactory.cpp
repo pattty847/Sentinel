@@ -1,5 +1,5 @@
 #include "DockFactory.h"
-#include "../widgets/HeatmapDock.hpp"
+#include "../widgets/ChartDock.hpp"
 #include "../widgets/StatusBar.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
@@ -17,8 +17,8 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     // Create bottom status bar
     m_docks.statusBar = new StatusBar(m_parent);
     
-    // Create HeatmapDock (includes QML scene)
-    m_docks.heatmapDock = new HeatmapDock(m_parent);
+    // Create ChartDock (includes QML scene)
+    m_docks.heatmapDock = new ChartDock(m_parent);
     
     // Create all other docks
     m_docks.secDock = new SecFilingDock(m_parent);

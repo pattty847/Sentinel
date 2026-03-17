@@ -1,5 +1,5 @@
 #include "ShortcutBinder.h"
-#include "../widgets/HeatmapDock.hpp"
+#include "../widgets/ChartDock.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include <QShortcut>
 #include <QKeySequence>

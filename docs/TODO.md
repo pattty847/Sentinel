@@ -114,7 +114,6 @@ _(nothing yet)_
 **Updated:** 2026-03-16
 
 #### Now
-- [ ] Rename HeatmapDock → ChartDock (class + files) to reflect multi-chart purpose
 
 #### Next
 - [ ] Wire timeframe combo to actual timeframe switching
@@ -129,10 +128,12 @@ _(nothing yet)_
 - [x] Overlay candlesticks directly on heatmap canvas (2026-02-02)
 - [x] Ensure Z-ordering works with opacity + blending (2026-02-02)
 - [x] Add toggle: "Candles Over Heatmap" (2026-02-02)
+- [x] Rename HeatmapDock → ChartDock (class + files) (2026-03-17)
 
 #### Session log
 - **2026-02-02** — Performance headroom finally makes unified rendering viable without hacks.
 - **2026-02-15** — Completed major UGR refactor for candle stability; axis perf guardrail added for pan/zoom fluidity.
+- **2026-03-17** — Renamed HeatmapDock → ChartDock across all source files and CMakeLists.
 
 ---
 
