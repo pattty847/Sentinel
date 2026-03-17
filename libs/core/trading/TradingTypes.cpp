@@ -8,6 +8,7 @@ const char* toString(TradeAction action) {
         case TradeAction::CancelOrder: return "CANCEL_ORDER";
         case TradeAction::CancelAll: return "CANCEL_ALL";
         case TradeAction::Flatten: return "FLATTEN";
+        case TradeAction::SetAttachedRisk: return "SET_ATTACHED_RISK";
         default: return "UNKNOWN";
     }
 }
@@ -45,6 +46,7 @@ TradeAction tradeActionFromString(const std::string& action) {
     if (action == "CANCEL_ORDER") return TradeAction::CancelOrder;
     if (action == "CANCEL_ALL") return TradeAction::CancelAll;
     if (action == "FLATTEN") return TradeAction::Flatten;
+    if (action == "SET_ATTACHED_RISK") return TradeAction::SetAttachedRisk;
     return TradeAction::Unknown;
 }
 

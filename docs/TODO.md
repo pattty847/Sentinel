@@ -318,19 +318,23 @@ _(nothing yet)_
 ### F18: Trading Simulation Stack (Paper + Replay)
 **Status:** active
 **Created:** 2026-03-14
-**Updated:** 2026-03-16
+**Updated:** 2026-03-17
 
 > Blueprint: `docs/TRADING_SIMULATION_BLUEPRINT.md`
 
 #### Now
 - [ ] Build a thin replay path from binary trade logs
-- [ ] Define the first TP / SL interaction model (linked orders/handles)
+- [ ] Manual paper-trading polish pass for TP/SL visuals and interaction smoothing
 
 #### Done
 - [x] Shared backtest core types and execution model (2026-03-14)
 - [x] Unified simulation broker and replay engine (2026-03-14)
 - [x] Binary trade-log reader for captured tape (2026-03-16)
 - [x] Polish manual paper trading for forward testing (live mark, renderer-backed order/position overlays, entry-price/PnL pill) (2026-03-16)
+- [x] Manual-only TP/SL risk system with server-backed attached risk orders, staged drag UI, confirm/discard, and OCO clearing (2026-03-17)
+
+#### Session log
+- **2026-03-17** - Added server-backed manual TP/SL with stop-market SL, take-profit exits, chart-staged drag/confirm flow, renderer-owned bracket geometry, and targeted backend tests. Remaining work is polish, not core feature plumbing.
 
 ---
 

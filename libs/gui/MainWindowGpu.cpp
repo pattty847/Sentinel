@@ -13,6 +13,8 @@
 #include <QStatusBar>
 #include <QElapsedTimer>
 #include <QThread>
+#include <QDateTime>
+#include <QUuid>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "UnifiedGridRenderer.h"
@@ -395,6 +397,26 @@ void MainWindowGPU::setupConnections() {
                     overlayModel, &PaperTradeOverlayModel::onOrderUpdated, Qt::QueuedConnection);
             connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
                     overlayModel, &PaperTradeOverlayModel::onPositionUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::riskOrderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onRiskOrderUpdated, Qt::QueuedConnection);
+            connect(overlayModel, &PaperTradeOverlayModel::applyAttachedRiskRequested,
+                    this,
+                    [this](bool hasTakeProfit, double takeProfitPrice, bool hasStopLoss, double stopLossPrice) {
+                        if (!m_dataSource || m_currentSymbol.isEmpty()) {
+                            return;
+                        }
+                        trading::TradeCommand cmd;
+                        cmd.commandId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+                        cmd.action = trading::TradeAction::SetAttachedRisk;
+                        cmd.symbol = m_currentSymbol.toStdString();
+                        cmd.timestamp = QDateTime::currentMSecsSinceEpoch();
+                        cmd.hasTakeProfit = hasTakeProfit;
+                        cmd.takeProfitPrice = takeProfitPrice;
+                        cmd.hasStopLoss = hasStopLoss;
+                        cmd.stopLossPrice = stopLossPrice;
+                        m_dataSource->sendTradeCommand(cmd);
+                    },
+                    Qt::QueuedConnection);
         }
     }
 }

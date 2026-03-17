@@ -45,6 +45,7 @@ enum class MessageType {
     AlgoCommand,
     OrderUpdate,
     PositionUpdate,
+    RiskOrderUpdate,
     AlgoOrderEvent,
     PnlSnapshot,
     Error,
@@ -80,6 +81,7 @@ inline std::string toString(MessageType t) {
         case MessageType::AlgoCommand: return "algo_command";
         case MessageType::OrderUpdate: return "order_update";
         case MessageType::PositionUpdate: return "position_update";
+        case MessageType::RiskOrderUpdate: return "risk_order_update";
         case MessageType::AlgoOrderEvent: return "algo_order_event";
         case MessageType::PnlSnapshot: return "pnl_snapshot";
         case MessageType::Error: return "error";
@@ -115,6 +117,7 @@ inline MessageType fromString(const std::string& s) {
     if (s == "algo_command") return MessageType::AlgoCommand;
     if (s == "order_update") return MessageType::OrderUpdate;
     if (s == "position_update") return MessageType::PositionUpdate;
+    if (s == "risk_order_update") return MessageType::RiskOrderUpdate;
     if (s == "algo_order_event") return MessageType::AlgoOrderEvent;
     if (s == "pnl_snapshot") return MessageType::PnlSnapshot;
     if (s == "error") return MessageType::Error;
@@ -123,4 +126,3 @@ inline MessageType fromString(const std::string& s) {
 }
 
 } // namespace protocol
-

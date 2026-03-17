@@ -10,6 +10,7 @@ enum class TradeAction {
     CancelOrder,
     CancelAll,
     Flatten,
+    SetAttachedRisk,
     Unknown,
 };
 
@@ -43,10 +44,22 @@ struct TradeCommand {
     double qty = 0.0;
     double price = 0.0;
     bool hasPrice = false;
+    bool hasTakeProfit = false;
+    double takeProfitPrice = 0.0;
+    bool hasStopLoss = false;
+    double stopLossPrice = 0.0;
     int64_t timestamp = 0;
     std::string targetOrderId;
     // Tag to identify the originating algorithm (empty = manual trade)
     std::string algoId;
+};
+
+struct RiskOrderUpdate {
+    std::string symbol;
+    bool hasTakeProfit = false;
+    double takeProfitPrice = 0.0;
+    bool hasStopLoss = false;
+    double stopLossPrice = 0.0;
 };
 
 struct Order {

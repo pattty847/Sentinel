@@ -42,6 +42,30 @@ qint64 PaperTradeOverlayModel::nowMs() {
     return QDateTime::currentMSecsSinceEpoch();
 }
 
+double PaperTradeOverlayModel::priceFromScreenY(double screenY) const {
+    if (!m_mappingProvider) {
+        return 0.0;
+    }
+    const TimeAxisMapping mapping = m_mappingProvider->currentTimeAxisMapping();
+    if (!mapping.valid) {
+        return 0.0;
+    }
+    return mapping.screenYToPrice(screenY);
+}
+
+bool PaperTradeOverlayModel::isLongPosition() const {
+    return m_hasPosition && m_position.positionQty > 0.0;
+}
+
+void PaperTradeOverlayModel::emitRiskStateChanged() {
+    const bool nowVisible = riskConfirmVisible();
+    emit riskStateChanged();
+    if (nowVisible != m_lastRiskConfirmVisible) {
+        m_lastRiskConfirmVisible = nowVisible;
+        emit riskConfirmVisibleChanged();
+    }
+}
+
 bool PaperTradeOverlayModel::shouldLogOverlaySample(qint64& lastLogMs) const {
     if (!paperTradeDebugEnabled()) {
         return false;
@@ -125,9 +149,14 @@ void PaperTradeOverlayModel::setSymbol(const QString& symbol) {
     m_hasPosition = false;
     m_lastTradePrice = 0.0;
     m_hasLastTrade = false;
+    m_activeRisk = RiskState{};
+    m_stagedRisk = RiskState{};
+    m_hasStagedRisk = false;
+    m_draggingLeg.clear();
     emit symbolChanged();
     emit openOrdersChanged();
     emit activePositionChanged();
+    emitRiskStateChanged();
 }
 
 void PaperTradeOverlayModel::setMappingProvider(QObject* provider) {
@@ -206,6 +235,22 @@ QVariantMap PaperTradeOverlayModel::activePosition() const {
     out["realizedPnl"] = m_position.realizedPnl;
     out["totalPnl"] = totalPnl;
     out["pnlPct"] = pnlPct;
+    return out;
+}
+
+QVariantMap PaperTradeOverlayModel::riskState() const {
+    QVariantMap out;
+    const RiskState& live = m_hasStagedRisk ? m_stagedRisk : m_activeRisk;
+    out["hasActiveTakeProfit"] = m_activeRisk.hasTakeProfit;
+    out["activeTakeProfitPrice"] = m_activeRisk.takeProfitPrice;
+    out["hasActiveStopLoss"] = m_activeRisk.hasStopLoss;
+    out["activeStopLossPrice"] = m_activeRisk.stopLossPrice;
+    out["hasTakeProfit"] = live.hasTakeProfit;
+    out["takeProfitPrice"] = live.takeProfitPrice;
+    out["hasStopLoss"] = live.hasStopLoss;
+    out["stopLossPrice"] = live.stopLossPrice;
+    out["hasStagedRiskChanges"] = m_hasStagedRisk;
+    out["draggingLeg"] = m_draggingLeg;
     return out;
 }
 
@@ -300,7 +345,117 @@ void PaperTradeOverlayModel::onPositionUpdated(const trading::PositionUpdate& up
                        .arg(jsonNumber(totalPnl))
                        .arg(currentViewportJson())
                        .arg(currentMappingJson()));
+    if (std::abs(update.positionQty) < 1e-12) {
+        m_activeRisk = RiskState{};
+        m_stagedRisk = RiskState{};
+        m_hasStagedRisk = false;
+        m_draggingLeg.clear();
+        emitRiskStateChanged();
+    }
     emit activePositionChanged();
+}
+
+void PaperTradeOverlayModel::onRiskOrderUpdated(const trading::RiskOrderUpdate& update) {
+    if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
+        return;
+    }
+    m_activeRisk.hasTakeProfit = update.hasTakeProfit;
+    m_activeRisk.takeProfitPrice = update.takeProfitPrice;
+    m_activeRisk.hasStopLoss = update.hasStopLoss;
+    m_activeRisk.stopLossPrice = update.stopLossPrice;
+    if (!m_hasStagedRisk) {
+        m_stagedRisk = m_activeRisk;
+    }
+    emitRiskStateChanged();
+}
+
+bool PaperTradeOverlayModel::canShowRiskControls() const {
+    return m_hasPosition && std::abs(m_position.positionQty) > 1e-12;
+}
+
+bool PaperTradeOverlayModel::hasStagedRiskChanges() const {
+    return m_hasStagedRisk;
+}
+
+bool PaperTradeOverlayModel::beginRiskDrag(const QString& leg) {
+    if (!canShowRiskControls()) {
+        return false;
+    }
+    if (leg != QStringLiteral("tp") && leg != QStringLiteral("sl")) {
+        return false;
+    }
+    m_stagedRisk = m_activeRisk;
+    m_hasStagedRisk = true;
+    m_draggingLeg = leg;
+    emitRiskStateChanged();
+    return true;
+}
+
+void PaperTradeOverlayModel::updateRiskDrag(double screenY) {
+    if (!m_hasStagedRisk || m_draggingLeg.isEmpty() || !canShowRiskControls()) {
+        return;
+    }
+    const double price = priceFromScreenY(screenY);
+    if (price <= 0.0) {
+        return;
+    }
+    const bool isLong = isLongPosition();
+    if (m_draggingLeg == QStringLiteral("tp")) {
+        if ((isLong && price <= m_position.avgPrice) || (!isLong && price >= m_position.avgPrice)) {
+            return;
+        }
+        m_stagedRisk.hasTakeProfit = true;
+        m_stagedRisk.takeProfitPrice = price;
+    } else if (m_draggingLeg == QStringLiteral("sl")) {
+        if ((isLong && price >= m_position.avgPrice) || (!isLong && price <= m_position.avgPrice)) {
+            return;
+        }
+        m_stagedRisk.hasStopLoss = true;
+        m_stagedRisk.stopLossPrice = price;
+    }
+    emitRiskStateChanged();
+}
+
+void PaperTradeOverlayModel::endRiskDrag() {
+    if (m_draggingLeg.isEmpty()) {
+        return;
+    }
+    m_draggingLeg.clear();
+    emitRiskStateChanged();
+}
+
+void PaperTradeOverlayModel::discardStagedRisk() {
+    m_stagedRisk = m_activeRisk;
+    m_hasStagedRisk = false;
+    m_draggingLeg.clear();
+    emitRiskStateChanged();
+}
+
+void PaperTradeOverlayModel::setRiskState(bool hasTakeProfit,
+                                          double takeProfitPrice,
+                                          bool hasStopLoss,
+                                          double stopLossPrice) {
+    m_stagedRisk.hasTakeProfit = hasTakeProfit;
+    m_stagedRisk.takeProfitPrice = takeProfitPrice;
+    m_stagedRisk.hasStopLoss = hasStopLoss;
+    m_stagedRisk.stopLossPrice = stopLossPrice;
+    m_hasStagedRisk = true;
+    emitRiskStateChanged();
+}
+
+void PaperTradeOverlayModel::confirmStagedRisk() {
+    if (!m_hasStagedRisk || !canShowRiskControls()) {
+        return;
+    }
+    const RiskState confirmed = m_stagedRisk;
+    m_activeRisk = confirmed;
+    m_hasStagedRisk = false;
+    m_draggingLeg.clear();
+    emitRiskStateChanged();
+    emit applyAttachedRiskRequested(confirmed.hasTakeProfit,
+                                    confirmed.takeProfitPrice,
+                                    confirmed.hasStopLoss,
+                                    confirmed.stopLossPrice);
 }
 
 void PaperTradeOverlayModel::logPositionOverlaySample(double displayedEntryY,

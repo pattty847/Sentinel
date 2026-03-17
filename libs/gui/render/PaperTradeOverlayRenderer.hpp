@@ -70,6 +70,18 @@ private:
         double totalPnl = 0.0;
     };
 
+    struct RiskSnapshot {
+        bool hasTakeProfit = false;
+        double takeProfitPrice = 0.0;
+        bool hasStopLoss = false;
+        double stopLossPrice = 0.0;
+        bool hasActiveTakeProfit = false;
+        double activeTakeProfitPrice = 0.0;
+        bool hasActiveStopLoss = false;
+        double activeStopLossPrice = 0.0;
+        bool hasStagedChanges = false;
+    };
+
     QPointer<QObject> m_mappingProviderObject;
     ITimeAxisMappingProvider* m_mappingProvider = nullptr;
     std::vector<QMetaObject::Connection> m_mappingConnections;
@@ -85,4 +97,5 @@ private:
     QMutex m_snapshotMutex;
     std::vector<OrderSnapshot> m_orders;
     PositionSnapshot m_position;
+    RiskSnapshot m_risk;
 };

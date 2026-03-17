@@ -38,6 +38,7 @@ enum class OrderIntentAction {
     CancelOrder,
     CancelAll,
     Flatten,
+    SetAttachedRisk,
 };
 
 struct OrderIntent {
@@ -49,6 +50,10 @@ struct OrderIntent {
     double qty = 0.0;
     double price = 0.0;
     bool hasPrice = false;
+    bool hasTakeProfit = false;
+    double takeProfitPrice = 0.0;
+    bool hasStopLoss = false;
+    double stopLossPrice = 0.0;
     int64_t timestampMs = 0;
     std::string targetOrderId;
     std::string algoId;
@@ -63,6 +68,7 @@ enum class ExecutionEventType {
     OrderRejected,
     PositionUpdated,
     PnlSnapshot,
+    RiskUpdated,
 };
 
 struct ExecutionEvent {
@@ -73,6 +79,7 @@ struct ExecutionEvent {
     std::optional<OrderUpdate> orderUpdate;
     std::optional<PositionUpdate> positionUpdate;
     std::optional<PnlSnapshot> pnlSnapshot;
+    std::optional<RiskOrderUpdate> riskOrderUpdate;
 };
 
 struct BrokerSnapshot {
@@ -114,6 +121,7 @@ struct BacktestResult {
     std::vector<OrderUpdate> fillLog;
     std::vector<PositionUpdate> positionTimeline;
     std::vector<PnlSnapshot> pnlCurve;
+    std::vector<RiskOrderUpdate> riskOrderLog;
 };
 
 inline TradeAction toTradeAction(OrderIntentAction action) {
@@ -122,6 +130,7 @@ inline TradeAction toTradeAction(OrderIntentAction action) {
     case OrderIntentAction::CancelOrder: return TradeAction::CancelOrder;
     case OrderIntentAction::CancelAll: return TradeAction::CancelAll;
     case OrderIntentAction::Flatten: return TradeAction::Flatten;
+    case OrderIntentAction::SetAttachedRisk: return TradeAction::SetAttachedRisk;
     }
     return TradeAction::Unknown;
 }
@@ -136,6 +145,10 @@ inline TradeCommand toTradeCommand(const OrderIntent& intent) {
     command.qty = intent.qty;
     command.price = intent.price;
     command.hasPrice = intent.hasPrice;
+    command.hasTakeProfit = intent.hasTakeProfit;
+    command.takeProfitPrice = intent.takeProfitPrice;
+    command.hasStopLoss = intent.hasStopLoss;
+    command.stopLossPrice = intent.stopLossPrice;
     command.timestamp = intent.timestampMs;
     command.targetOrderId = intent.targetOrderId;
     command.algoId = intent.algoId;
@@ -150,6 +163,7 @@ inline OrderIntent fromTradeCommand(const TradeCommand& command) {
     case TradeAction::CancelOrder: intent.action = OrderIntentAction::CancelOrder; break;
     case TradeAction::CancelAll: intent.action = OrderIntentAction::CancelAll; break;
     case TradeAction::Flatten: intent.action = OrderIntentAction::Flatten; break;
+    case TradeAction::SetAttachedRisk: intent.action = OrderIntentAction::SetAttachedRisk; break;
     default: intent.action = OrderIntentAction::PlaceOrder; break;
     }
     intent.symbol = command.symbol;
@@ -158,6 +172,10 @@ inline OrderIntent fromTradeCommand(const TradeCommand& command) {
     intent.qty = command.qty;
     intent.price = command.price;
     intent.hasPrice = command.hasPrice;
+    intent.hasTakeProfit = command.hasTakeProfit;
+    intent.takeProfitPrice = command.takeProfitPrice;
+    intent.hasStopLoss = command.hasStopLoss;
+    intent.stopLossPrice = command.stopLossPrice;
     intent.timestampMs = command.timestamp;
     intent.targetOrderId = command.targetOrderId;
     intent.algoId = command.algoId;

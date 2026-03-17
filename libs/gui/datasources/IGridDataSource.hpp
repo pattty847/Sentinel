@@ -75,6 +75,7 @@ signals:
     void errorOccurred(const QString& error);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
+    void riskOrderUpdated(const trading::RiskOrderUpdate& update);
     void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
     void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 };
@@ -83,6 +84,6 @@ Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
 Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(trading::OrderUpdate)
 Q_DECLARE_METATYPE(trading::PositionUpdate)
+Q_DECLARE_METATYPE(trading::RiskOrderUpdate)
 Q_DECLARE_METATYPE(trading::AlgoOrderEvent)
 Q_DECLARE_METATYPE(trading::PnlSnapshot)
-

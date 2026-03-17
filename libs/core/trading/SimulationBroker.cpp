@@ -60,7 +60,8 @@ BacktestResult SimulationBroker::buildResult(const BacktestConfig& config) const
 
 std::vector<ExecutionEvent> SimulationBroker::recordTradingResult(const TradingResult& result, int64_t timestampMs) {
     std::vector<ExecutionEvent> events;
-    events.reserve(result.orderUpdates.size() + result.positionUpdates.size() + result.pnlSnapshots.size());
+    events.reserve(result.orderUpdates.size() + result.positionUpdates.size() +
+                   result.pnlSnapshots.size() + result.riskOrderUpdates.size());
 
     for (const auto& update : result.orderUpdates) {
         ExecutionEvent event;
@@ -102,6 +103,17 @@ std::vector<ExecutionEvent> SimulationBroker::recordTradingResult(const TradingR
         m_result.executionEvents.push_back(event);
         m_result.pnlCurve.push_back(snapshot);
         updateSummaryFromPnl(snapshot);
+        events.push_back(event);
+    }
+
+    for (const auto& update : result.riskOrderUpdates) {
+        ExecutionEvent event;
+        event.type = ExecutionEventType::RiskUpdated;
+        event.timestampMs = timestampMs;
+        event.symbol = update.symbol;
+        event.riskOrderUpdate = update;
+        m_result.executionEvents.push_back(event);
+        m_result.riskOrderLog.push_back(update);
         events.push_back(event);
     }
 

@@ -42,6 +42,7 @@ signals:
     void clientUnsubscribed(const QString& symbol);
     void orderUpdateBroadcast(const trading::OrderUpdate& update);
     void positionUpdateBroadcast(const trading::PositionUpdate& update);
+    void riskOrderUpdateBroadcast(const trading::RiskOrderUpdate& update);
     void algoOrderEventBroadcast(const trading::AlgoOrderEvent& event);
     void pnlSnapshotBroadcast(const trading::PnlSnapshot& snapshot);
 
@@ -53,6 +54,7 @@ public:
     void processTradeCommand(const trading::TradeCommand& command);
     void broadcastOrderUpdate(const trading::OrderUpdate& update);
     void broadcastPositionUpdate(const trading::PositionUpdate& update);
+    void broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& update);
     void broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void broadcastPnlSnapshot(const trading::PnlSnapshot& snapshot);
     void broadcastCoinbaseLatency(int milliseconds);

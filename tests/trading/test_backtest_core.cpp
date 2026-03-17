@@ -370,3 +370,84 @@ TEST(BacktestCore, LiveTradingSessionRunsAvendellaOnTradeTicks) {
     EXPECT_FALSE(captured.orderUpdates.empty());
     EXPECT_FALSE(algoEvents.empty());
 }
+
+TEST(BacktestCore, LiveTradingSessionTakeProfitClosesPositionAndClearsSiblingRisk) {
+    trading::LiveTradingSession session(
+        [](const std::string&) { return 100.0; },
+        0.0);
+
+    trading::TradingResult captured;
+    session.setResultCallback([&](trading::TradingResult result, std::vector<trading::AlgoOrderEvent>) {
+        captured = std::move(result);
+    });
+
+    trading::TradeCommand entry;
+    entry.commandId = "entry-1";
+    entry.action = trading::TradeAction::PlaceOrder;
+    entry.symbol = "BTC-USD";
+    entry.side = trading::OrderSide::Buy;
+    entry.orderType = trading::OrderType::Market;
+    entry.qty = 1.0;
+    entry.timestamp = 1000;
+    session.processTradeCommand(entry);
+
+    trading::TradeCommand risk;
+    risk.commandId = "risk-1";
+    risk.action = trading::TradeAction::SetAttachedRisk;
+    risk.symbol = "BTC-USD";
+    risk.hasTakeProfit = true;
+    risk.takeProfitPrice = 110.0;
+    risk.hasStopLoss = true;
+    risk.stopLossPrice = 95.0;
+    risk.timestamp = 1100;
+    session.processTradeCommand(risk);
+    ASSERT_FALSE(captured.riskOrderUpdates.empty());
+    EXPECT_TRUE(captured.riskOrderUpdates.back().hasTakeProfit);
+    EXPECT_TRUE(captured.riskOrderUpdates.back().hasStopLoss);
+
+    session.onTradeTick("BTC-USD", 110.0, 1200);
+
+    ASSERT_FALSE(captured.positionUpdates.empty());
+    EXPECT_DOUBLE_EQ(captured.positionUpdates.back().positionQty, 0.0);
+    ASSERT_FALSE(captured.riskOrderUpdates.empty());
+    EXPECT_FALSE(captured.riskOrderUpdates.back().hasTakeProfit);
+    EXPECT_FALSE(captured.riskOrderUpdates.back().hasStopLoss);
+}
+
+TEST(BacktestCore, LiveTradingSessionStopLossUsesStopMarketExit) {
+    trading::LiveTradingSession session(
+        [](const std::string&) { return 100.0; },
+        10.0);
+
+    trading::TradingResult captured;
+    session.setResultCallback([&](trading::TradingResult result, std::vector<trading::AlgoOrderEvent>) {
+        captured = std::move(result);
+    });
+
+    trading::TradeCommand entry;
+    entry.commandId = "entry-2";
+    entry.action = trading::TradeAction::PlaceOrder;
+    entry.symbol = "BTC-USD";
+    entry.side = trading::OrderSide::Buy;
+    entry.orderType = trading::OrderType::Market;
+    entry.qty = 1.0;
+    entry.timestamp = 1000;
+    session.processTradeCommand(entry);
+
+    trading::TradeCommand risk;
+    risk.commandId = "risk-2";
+    risk.action = trading::TradeAction::SetAttachedRisk;
+    risk.symbol = "BTC-USD";
+    risk.hasStopLoss = true;
+    risk.stopLossPrice = 95.0;
+    risk.timestamp = 1100;
+    session.processTradeCommand(risk);
+
+    session.onTradeTick("BTC-USD", 94.0, 1200);
+
+    ASSERT_FALSE(captured.orderUpdates.empty());
+    EXPECT_EQ(captured.orderUpdates.back().status, trading::OrderStatus::Filled);
+    EXPECT_NEAR(captured.orderUpdates.back().avgPrice, 93.906, 1e-6);
+    ASSERT_FALSE(captured.positionUpdates.empty());
+    EXPECT_DOUBLE_EQ(captured.positionUpdates.back().positionQty, 0.0);
+}

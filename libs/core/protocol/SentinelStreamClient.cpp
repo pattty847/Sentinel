@@ -398,7 +398,11 @@ void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command
         {"side", trading::toString(command.side)},
         {"order_type", trading::toString(command.orderType)},
         {"qty", command.qty},
-        {"timestamp", command.timestamp}
+        {"timestamp", command.timestamp},
+        {"has_take_profit", command.hasTakeProfit},
+        {"take_profit_price", command.takeProfitPrice},
+        {"has_stop_loss", command.hasStopLoss},
+        {"stop_loss_price", command.stopLossPrice}
     };
     msg["price"] = command.hasPrice ? nlohmann::json(command.price) : nlohmann::json(nullptr);
     if (!command.targetOrderId.empty()) {
@@ -542,6 +546,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 return;
             case protocol::MessageType::PositionUpdate:
                 handlePositionUpdateMessage(msg);
+                return;
+            case protocol::MessageType::RiskOrderUpdate:
+                handleRiskOrderUpdateMessage(msg);
                 return;
             case protocol::MessageType::ScreenerUpdate:
                 handleScreenerUpdateMessage(msg);
@@ -1054,6 +1061,18 @@ void SentinelStreamClient::handlePositionUpdateMessage(const nlohmann::json& msg
     update.realizedPnl = msg.value("realized_pnl", 0.0);
     if (!update.symbol.empty()) {
         emit positionUpdated(update);
+    }
+}
+
+void SentinelStreamClient::handleRiskOrderUpdateMessage(const nlohmann::json& msg) {
+    trading::RiskOrderUpdate update;
+    update.symbol = msg.value("symbol", "");
+    update.hasTakeProfit = msg.value("has_take_profit", false);
+    update.takeProfitPrice = msg.value("take_profit_price", 0.0);
+    update.hasStopLoss = msg.value("has_stop_loss", false);
+    update.stopLossPrice = msg.value("stop_loss_price", 0.0);
+    if (!update.symbol.empty()) {
+        emit riskOrderUpdated(update);
     }
 }
 

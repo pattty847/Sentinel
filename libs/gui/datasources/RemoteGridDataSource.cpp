@@ -68,6 +68,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<trading::OrderUpdate>("trading::OrderUpdate");
     qRegisterMetaType<trading::PositionUpdate>("trading::PositionUpdate");
+    qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
     qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
     qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
@@ -114,6 +115,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onPnlSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::positionUpdated,
             this, &IGridDataSource::positionUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::riskOrderUpdated,
+            this, &IGridDataSource::riskOrderUpdated, Qt::QueuedConnection);
 }
 
 void RemoteGridDataSource::connectToServer() {

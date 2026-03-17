@@ -115,6 +115,9 @@ void PaperTradeOverlayRenderer::setOverlayModel(QObject* model) {
             m_overlayModel, &PaperTradeOverlayModel::activePositionChanged,
             this, &PaperTradeOverlayRenderer::syncFromModel, Qt::QueuedConnection));
         m_modelConnections.push_back(QObject::connect(
+            m_overlayModel, &PaperTradeOverlayModel::riskStateChanged,
+            this, &PaperTradeOverlayRenderer::syncFromModel, Qt::QueuedConnection));
+        m_modelConnections.push_back(QObject::connect(
             m_overlayModel, &PaperTradeOverlayModel::symbolChanged,
             this, &PaperTradeOverlayRenderer::syncFromModel, Qt::QueuedConnection));
         syncFromModel();
@@ -175,10 +178,25 @@ void PaperTradeOverlayRenderer::syncFromModel() {
         position.totalPnl = activePosition.value(QStringLiteral("totalPnl")).toDouble();
     }
 
+    RiskSnapshot risk;
+    const QVariantMap riskState = m_overlayModel->riskState();
+    if (!riskState.isEmpty()) {
+        risk.hasTakeProfit = riskState.value(QStringLiteral("hasTakeProfit")).toBool();
+        risk.takeProfitPrice = riskState.value(QStringLiteral("takeProfitPrice")).toDouble();
+        risk.hasStopLoss = riskState.value(QStringLiteral("hasStopLoss")).toBool();
+        risk.stopLossPrice = riskState.value(QStringLiteral("stopLossPrice")).toDouble();
+        risk.hasActiveTakeProfit = riskState.value(QStringLiteral("hasActiveTakeProfit")).toBool();
+        risk.activeTakeProfitPrice = riskState.value(QStringLiteral("activeTakeProfitPrice")).toDouble();
+        risk.hasActiveStopLoss = riskState.value(QStringLiteral("hasActiveStopLoss")).toBool();
+        risk.activeStopLossPrice = riskState.value(QStringLiteral("activeStopLossPrice")).toDouble();
+        risk.hasStagedChanges = riskState.value(QStringLiteral("hasStagedRiskChanges")).toBool();
+    }
+
     {
         QMutexLocker lock(&m_snapshotMutex);
         m_orders = std::move(orders);
         m_position = position;
+        m_risk = risk;
     }
 
     m_dirty = true;
@@ -215,10 +233,12 @@ QSGNode* PaperTradeOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePain
 
     std::vector<OrderSnapshot> orders;
     PositionSnapshot position;
+    RiskSnapshot risk;
     {
         QMutexLocker lock(&m_snapshotMutex);
         orders = m_orders;
         position = m_position;
+        risk = m_risk;
     }
 
     if (!m_dirty && oldNode) {
@@ -234,6 +254,12 @@ QSGNode* PaperTradeOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePain
     ColoredVerts entryLine{position.isLong ? QColor(79, 140, 255, 255) : QColor(242, 109, 109, 255), {}, QSGGeometry::DrawLines};
     ColoredVerts markLine{position.totalPnl >= 0.0 ? QColor(91, 227, 155, 245) : QColor(255, 140, 130, 245), {}, QSGGeometry::DrawLines};
     ColoredVerts pnlBand{position.totalPnl >= 0.0 ? QColor(24, 55, 43, 150) : QColor(59, 36, 24, 150), {}, QSGGeometry::DrawTriangles};
+    ColoredVerts tpLine{QColor(19, 201, 167, 255), {}, QSGGeometry::DrawLines};
+    ColoredVerts slLine{QColor(240, 171, 40, 255), {}, QSGGeometry::DrawLines};
+    ColoredVerts stagedTpLine{QColor(19, 201, 167, 180), {}, QSGGeometry::DrawLines};
+    ColoredVerts stagedSlLine{QColor(240, 171, 40, 180), {}, QSGGeometry::DrawLines};
+    ColoredVerts tpBand{QColor(19, 201, 167, 48), {}, QSGGeometry::DrawTriangles};
+    ColoredVerts slBand{QColor(240, 171, 40, 48), {}, QSGGeometry::DrawTriangles};
 
     for (const auto& order : orders) {
         const float y = static_cast<float>(mapping.priceToScreenY(order.price));
@@ -259,6 +285,40 @@ QSGNode* PaperTradeOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePain
         entryLine.verts.push_back({0.0f, entryY});
         entryLine.verts.push_back({widthPx, entryY});
         addDashedHorizontal(markLine.verts, widthPx, markY, 8.0f, 6.0f);
+
+        const auto addRiskLine = [&](ColoredVerts& line, double price, bool dashed) {
+            const float y = static_cast<float>(mapping.priceToScreenY(price));
+            if (y < -20.0f || y > heightPx + 20.0f) {
+                return;
+            }
+            if (dashed) {
+                addDashedHorizontal(line.verts, widthPx, y, 8.0f, 6.0f);
+            } else {
+                line.verts.push_back({0.0f, y});
+                line.verts.push_back({widthPx, y});
+            }
+        };
+        const auto addRiskBand = [&](ColoredVerts& band, double targetPrice) {
+            const float targetY = static_cast<float>(mapping.priceToScreenY(targetPrice));
+            const float bandTop = std::clamp(std::min(entryY, targetY), 0.0f, heightPx);
+            const float bandBottom = std::clamp(std::max(entryY, targetY), 0.0f, heightPx);
+            if (bandBottom > bandTop + 0.5f) {
+                addQuad(band.verts, 0.0f, bandTop, widthPx, bandBottom);
+            }
+        };
+
+        if (risk.hasTakeProfit && risk.takeProfitPrice > 0.0) {
+            addRiskLine(risk.hasStagedChanges ? stagedTpLine : tpLine, risk.takeProfitPrice, true);
+            addRiskBand(tpBand, risk.takeProfitPrice);
+        } else if (risk.hasActiveTakeProfit && risk.activeTakeProfitPrice > 0.0) {
+            addRiskLine(tpLine, risk.activeTakeProfitPrice, true);
+        }
+        if (risk.hasStopLoss && risk.stopLossPrice > 0.0) {
+            addRiskLine(risk.hasStagedChanges ? stagedSlLine : slLine, risk.stopLossPrice, true);
+            addRiskBand(slBand, risk.stopLossPrice);
+        } else if (risk.hasActiveStopLoss && risk.activeStopLossPrice > 0.0) {
+            addRiskLine(slLine, risk.activeStopLossPrice, true);
+        }
     }
 
     QSGNode* root = oldNode ? oldNode : new QSGNode();
@@ -297,10 +357,16 @@ QSGNode* PaperTradeOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePain
     };
 
     addToTree(pnlBand);
+    addToTree(tpBand);
+    addToTree(slBand);
     addToTree(bidLines);
     addToTree(askLines);
     addToTree(entryLine);
     addToTree(markLine);
+    addToTree(tpLine);
+    addToTree(slLine);
+    addToTree(stagedTpLine);
+    addToTree(stagedSlLine);
 
     while (root->childCount() > childIdx) {
         delete root->childAtIndex(root->childCount() - 1);

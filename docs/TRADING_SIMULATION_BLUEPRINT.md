@@ -214,7 +214,7 @@ Planned scope:
 - add draggable TP / SL handles that create linked risk orders
 
 Status:
-- in progress
+- mostly complete
 
 ### Phase 5: Book-Aware Execution
 
@@ -259,6 +259,7 @@ Status:
 - [x] Live server trading now routes manual orders and Avendella through the shared simulation broker
 - [x] Backtest runner can read real captured hourly trade logs from `data/market/.../*.bin`
 - [x] Manual paper trading now has renderer-backed order/position overlays with live mark, entry-price pill, and forward-testing polish
+- [x] Manual paper trading now has server-backed TP/SL brackets with staged drag, confirm/discard, and OCO-style clearing
 
 ## Near-Term Next Work
 
@@ -266,7 +267,7 @@ Status:
 - [x] Move live algo paper trading onto the shared simulation broker
 - [x] Add a reader for existing `data/market/.../*.bin` trade logs into `MarketEvent` replay
 - [ ] Build a thin replay path from those trade logs before broader replay UI work
-- [ ] Define the first TP / SL interaction model for manual paper trading
+- [ ] Polish TP/SL interaction and visuals now that the manual-only bracket system is in place
 
 ## Later Work
 
@@ -275,7 +276,7 @@ Status:
 - [ ] Add replay controls in the UI
 - [ ] Drive chart overlays from replay results
 - [ ] Add heatmap visual replay from recorded data
-- [ ] Add TradingView-style TP / SL drag handles and linked risk-order UX
+- [ ] Extend risk orders beyond the first manual-only single-bracket implementation
 - [ ] Add additional strategy implementations on the same interface
 - [ ] Add experiment/report tooling on top of replay results
 

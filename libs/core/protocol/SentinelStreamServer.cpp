@@ -1613,6 +1613,7 @@ void SentinelStreamServer::start() {
                 [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
                     for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
                     for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
+                    for (auto& ru : result.riskOrderUpdates) broadcastRiskOrderUpdate(ru);
                     for (auto& ps : result.pnlSnapshots) broadcastPnlSnapshot(ps);
                     for (auto& ev : events) broadcastAlgoOrderEvent(ev);
                 });
@@ -1778,6 +1779,18 @@ void SentinelStreamServer::broadcastPositionUpdate(const trading::PositionUpdate
     j["avg_price"] = pu.avgPrice;
     j["unrealized_pnl"] = pu.unrealizedPnl;
     j["realized_pnl"] = pu.realizedPnl;
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& ru) {
+    emit riskOrderUpdateBroadcast(ru);
+    nlohmann::json j;
+    j["type"] = "risk_order_update";
+    j["symbol"] = ru.symbol;
+    j["has_take_profit"] = ru.hasTakeProfit;
+    j["take_profit_price"] = ru.takeProfitPrice;
+    j["has_stop_loss"] = ru.hasStopLoss;
+    j["stop_loss_price"] = ru.stopLossPrice;
     broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
 }
 

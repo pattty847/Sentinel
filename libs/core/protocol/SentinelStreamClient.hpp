@@ -127,6 +127,7 @@ signals:
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
+    void riskOrderUpdated(const trading::RiskOrderUpdate& update);
     void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
     void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
     void coinbaseLatencyReceived(int milliseconds);
@@ -158,6 +159,7 @@ private:
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleOrderUpdateMessage(const nlohmann::json& msg);
     void handlePositionUpdateMessage(const nlohmann::json& msg);
+    void handleRiskOrderUpdateMessage(const nlohmann::json& msg);
     void handleScreenerUpdateMessage(const nlohmann::json& msg);
     void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
     void handleCoinbaseLatencyMessage(const nlohmann::json& msg);
