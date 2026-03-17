@@ -12,6 +12,8 @@
 #include "../widgets/LayoutManager.hpp"
 #include <QScreen>
 #include <QGuiApplication>
+#include <QCoreApplication>
+#include <QEventLoop>
 #include <QTabWidget>
 
 LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow) 
@@ -24,6 +26,10 @@ void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
     
     configureDockOptions();
     m_mainWindow->setDockOptions(m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks);
+    // Flush any in-flight dock animations before rearranging — tabifyDockWidget crashes
+    // if called while an animation abort triggers animationFinished/showTabBars on a
+    // widget that's no longer in a valid state.
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     removeAllDocks(docks);
     addDocksToLayout(docks);
     applyDockConstraints(docks);
@@ -65,104 +71,77 @@ void LayoutOrchestrator::configureDockOptions() {
 }
 
 void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
-    if (docks.heatmapDock && docks.heatmapDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.heatmapDock);
-        docks.heatmapDock->setFloating(false);
-    }
-    if (docks.secDock && docks.secDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.secDock);
-        docks.secDock->setFloating(false);
-    }
-    if (docks.copenetDock && docks.copenetDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.copenetDock);
-        docks.copenetDock->setFloating(false);
-    }
-    if (docks.aiCommentaryDock && docks.aiCommentaryDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.aiCommentaryDock);
-        docks.aiCommentaryDock->setFloating(false);
-    }
-    if (docks.labDock && docks.labDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.labDock);
-        docks.labDock->setFloating(false);
-    }
-    if (docks.watchlistDock && docks.watchlistDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.watchlistDock);
-        docks.watchlistDock->setFloating(false);
-    }
-    if (docks.stockChartDock && docks.stockChartDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.stockChartDock);
-        docks.stockChartDock->setFloating(false);
-    }
-    if (docks.orderBookDock && docks.orderBookDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.orderBookDock);
-        docks.orderBookDock->setFloating(false);
-    }
-    if (docks.paperTradingDock && docks.paperTradingDock->parent() == m_mainWindow) {
-        m_mainWindow->removeDockWidget(docks.paperTradingDock);
-        docks.paperTradingDock->setFloating(false);
-    }
+    auto remove = [this](QDockWidget* dock) {
+        if (dock && dock->parent() == m_mainWindow) {
+            m_mainWindow->removeDockWidget(dock);
+            dock->setFloating(false);
+        }
+    };
+    remove(docks.heatmapDock);
+    remove(docks.orderBookDock);
+    remove(docks.watchlistDock);
+    remove(docks.secDock);
+    remove(docks.labDock);
+    remove(docks.screenerDock);
+    remove(docks.stockChartDock);
+    remove(docks.paperTradingDock);
+    remove(docks.copenetDock);
+    remove(docks.aiCommentaryDock);
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
+    // Left column: heatmap
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, docks.heatmapDock);
 
-    // Place DOM adjacent to the chart (center/right of heatmap), not tabbed into the right-side stack.
+    // Middle column: order book (narrow DOM, adjacent to heatmap)
     if (docks.orderBookDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.orderBookDock);
         m_mainWindow->splitDockWidget(docks.heatmapDock, docks.orderBookDock, Qt::Horizontal);
     }
+
+    // Right column: tabbed stack.
+    // Watchlist is the tab anchor; all others tabify onto it (or secDock if no watchlist).
+    QDockWidget* rightAnchor = nullptr;
     if (docks.watchlistDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.watchlistDock);
         if (docks.orderBookDock) {
-            // Create a third (rightmost) column for the right-side stack.
             m_mainWindow->splitDockWidget(docks.orderBookDock, docks.watchlistDock, Qt::Horizontal);
         }
-    }
-    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
-    if (!docks.watchlistDock && docks.orderBookDock) {
-        // No watchlist: make SEC the anchor for the rightmost column.
-        m_mainWindow->splitDockWidget(docks.orderBookDock, docks.secDock, Qt::Horizontal);
-    }
-    if (docks.watchlistDock) {
-        m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.secDock);
+        rightAnchor = docks.watchlistDock;
     }
 
-    if (docks.labDock) {
-        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.labDock);
-        if (docks.watchlistDock) {
-            m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.labDock);
-        } else {
-            m_mainWindow->tabifyDockWidget(docks.secDock, docks.labDock);
-        }
+    // secDock: anchor if no watchlist, otherwise tab onto watchlist
+    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
+    if (!rightAnchor && docks.orderBookDock) {
+        m_mainWindow->splitDockWidget(docks.orderBookDock, docks.secDock, Qt::Horizontal);
     }
-    if (docks.screenerDock) {
-        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.screenerDock);
-        // Tab with the right-side group — screener sits alongside watchlist/SEC/lab
-        if (docks.labDock) {
-            m_mainWindow->tabifyDockWidget(docks.labDock, docks.screenerDock);
-        } else if (docks.watchlistDock) {
-            m_mainWindow->tabifyDockWidget(docks.watchlistDock, docks.screenerDock);
-        } else {
-            m_mainWindow->tabifyDockWidget(docks.secDock, docks.screenerDock);
-        }
+    if (rightAnchor) {
+        m_mainWindow->tabifyDockWidget(rightAnchor, docks.secDock);
+    } else {
+        rightAnchor = docks.secDock;
     }
-    if (docks.stockChartDock) {
-        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.stockChartDock);
-        // Tab alongside screener/lab/watchlist on the right
-        if (docks.screenerDock) {
-            m_mainWindow->tabifyDockWidget(docks.screenerDock, docks.stockChartDock);
-        } else if (docks.labDock) {
-            m_mainWindow->tabifyDockWidget(docks.labDock, docks.stockChartDock);
-        } else {
-            m_mainWindow->tabifyDockWidget(docks.secDock, docks.stockChartDock);
-        }
+
+    // Remaining right-column tabs: Lab, Screener, StockChart, PaperTrading
+    auto tabifyRight = [&](QDockWidget* dock) {
+        if (!dock) return;
+        m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
+        m_mainWindow->tabifyDockWidget(rightAnchor, dock);
+    };
+    tabifyRight(docks.labDock);
+    tabifyRight(docks.screenerDock);
+    tabifyRight(docks.stockChartDock);
+    tabifyRight(docks.paperTradingDock);
+
+    // Bottom strip: CopeNet and AI Commentary — added to layout but hidden by default.
+    // They are not production-ready; users can show them via the View menu.
+    if (docks.copenetDock) {
+        m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
     }
-    m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.copenetDock);
-    m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
-    m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
-    if (docks.paperTradingDock) {
-        m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.paperTradingDock);
-        m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.paperTradingDock);
+    if (docks.aiCommentaryDock) {
+        m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, docks.aiCommentaryDock);
+        if (docks.copenetDock) {
+            m_mainWindow->tabifyDockWidget(docks.copenetDock, docks.aiCommentaryDock);
+        }
     }
 }
 
@@ -179,56 +158,47 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     };
     
     const QSize fallback(260, 160);
-    applyMinimum(docks.heatmapDock, QSize(420, 300));
-    applyMinimum(docks.secDock, QSize(440, 380));
-    applyMinimum(docks.copenetDock, fallback);
-    applyMinimum(docks.aiCommentaryDock, fallback);
-    applyMinimum(docks.labDock, QSize(360, 240));
-    applyMinimum(docks.watchlistDock, QSize(320, 360));
-    applyMinimum(docks.orderBookDock, QSize(280, 360));
+    applyMinimum(docks.heatmapDock,      QSize(420, 300));
+    applyMinimum(docks.orderBookDock,    QSize(280, 360));
+    applyMinimum(docks.watchlistDock,    QSize(320, 360));
+    applyMinimum(docks.secDock,          QSize(440, 380));
+    applyMinimum(docks.labDock,          QSize(360, 240));
+    applyMinimum(docks.screenerDock,     QSize(360, 280));
+    applyMinimum(docks.stockChartDock,   QSize(360, 280));
     applyMinimum(docks.paperTradingDock, QSize(360, 280));
+    applyMinimum(docks.copenetDock,      fallback);
+    applyMinimum(docks.aiCommentaryDock, fallback);
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
-    if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.watchlistDock}, {20, 80, 90}, Qt::Vertical);
-    } else {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.heatmapDock, docks.secDock}, {20, 80, 90}, Qt::Vertical);
-    }
-    
-    // Horizontal split:
-    // - If DOM is present: charts + DOM take most width, right stack is separate.
-    // - Otherwise: classic charts vs right pane.
+
+    // Horizontal: heatmap takes ~3/4, order book ~1/4 of their combined width.
     if (docks.orderBookDock) {
         m_mainWindow->resizeDocks({docks.heatmapDock, docks.orderBookDock}, {75, 25}, Qt::Horizontal);
     }
-    if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
-    } else {
-        m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
-    }
-    if (docks.watchlistDock) {
-        m_mainWindow->resizeDocks({docks.watchlistDock}, {1}, Qt::Horizontal);
-    } else {
-        m_mainWindow->resizeDocks({docks.secDock}, {1}, Qt::Horizontal);
-    }
-    if (docks.paperTradingDock) {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock, docks.paperTradingDock}, {1, 1, 1}, Qt::Horizontal);
-    } else {
-        m_mainWindow->resizeDocks({docks.copenetDock, docks.aiCommentaryDock}, {1, 1}, Qt::Horizontal);
+
+    // Give the right-side tab stack a minimal horizontal hint — it auto-fills the remainder.
+    QDockWidget* rightAnchor = docks.watchlistDock ? static_cast<QDockWidget*>(docks.watchlistDock)
+                                                   : docks.secDock;
+    if (rightAnchor) {
+        m_mainWindow->resizeDocks({rightAnchor}, {1}, Qt::Horizontal);
     }
 }
 
 void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
-    if (docks.heatmapDock) docks.heatmapDock->show();
-    if (docks.orderBookDock) docks.orderBookDock->show();
-    if (docks.secDock) docks.secDock->show();
-    if (docks.copenetDock) docks.copenetDock->show();
-    if (docks.aiCommentaryDock) docks.aiCommentaryDock->show();
-    if (docks.labDock) docks.labDock->show();
-    if (docks.watchlistDock) docks.watchlistDock->show();
-    if (docks.stockChartDock) docks.stockChartDock->show();
+    if (docks.heatmapDock)      docks.heatmapDock->show();
+    if (docks.orderBookDock)    docks.orderBookDock->show();
+    if (docks.watchlistDock)    docks.watchlistDock->show();
+    if (docks.secDock)          docks.secDock->show();
+    if (docks.labDock)          docks.labDock->show();
+    if (docks.screenerDock)     docks.screenerDock->show();
+    if (docks.stockChartDock)   docks.stockChartDock->show();
     if (docks.paperTradingDock) docks.paperTradingDock->show();
+
+    // CopeNet and AI Commentary are in the layout but hidden by default — not ready for production.
+    // Users can show them via the View menu.
+    if (docks.copenetDock)      docks.copenetDock->hide();
+    if (docks.aiCommentaryDock) docks.aiCommentaryDock->hide();
 }
 

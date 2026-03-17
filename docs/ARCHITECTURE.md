@@ -21,7 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core must remain purely C++ (with minimal QtCore usage if functionally necessary). It cannot have any Qt GUI dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
-- **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`).
+- **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
 
 ### 2. GUI (`libs/gui`)
@@ -59,7 +59,7 @@ Exchange → MarketDataCoreEngine → ServerDataModel → Persistence + Sentinel
 WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer → GPU
 ```
 
-- **SentinelStreamClient** — Boost.Beast WebSocket client with reconnection.
+- **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
 - **RemoteGridDataSource** — Local buffers for received slices; emits `heatmapSliceReceived`.
 - **DataProcessor** — Validates slices and forwards to renderer; no local aggregation in remote mode.
 - **UnifiedGridRenderer** — Viewport state, ring-buffer uploads, `updatePaintNode()`; drives heatmap, footprint, TPO, candles, labels.
@@ -121,6 +121,7 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 
 | Document | Description |
 |----------|-------------|
+| `docs/SENTINEL_STREAM_CLIENT.md` | SentinelStreamClient: WebSocket client, message handling, validation, render-object prep |
 | `docs/MARKETDATA.md` | MarketDataCoreEngine pipeline, transport, auth, threading, TLS, trading stream |
 | `docs/COORDINATE_SYSTEMS.md` | Coordinate spaces and renderer contracts |
 | `docs/CONFIG.md` | Server and client config files and options |
