@@ -11,6 +11,13 @@ High-level outline of what Sentinel provides. For implementation and pipeline de
 - [x] **Refactored Protocol** — Specialized message-router architecture for low-latency dispatch.
 - [x] **Agent Infrastructure** — Automated invariant tracking and "Why"-focused documentation.
 
+## Recent shipped changes (Mar 2026)
+- [x] **Avendella MM integration (paper)** — Algo engine wiring, chart overlays, and state-flow hardening for paper trading.
+- [x] **Manual TP/SL risk brackets** — Server-backed attached risk orders with staged chart interaction + OCO clearing.
+- [x] **Trade-log replay path** — Binary trade-log read path feeding replay + chart overlays.
+- [x] **ChartDock rename** — HeatmapDock consolidated into ChartDock naming across GUI and docs.
+- [x] **Timeframe switching fixes** — Resolved stale/wide-column mismatch in heatmap timeframe changes.
+
 ## Core capabilities
 
 - **Client–server trading terminal** — Headless server for 24/7 data ingestion; Qt6/QML client for visualization. Client is remote-only (no local-only mode).

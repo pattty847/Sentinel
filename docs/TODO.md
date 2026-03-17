@@ -109,15 +109,13 @@ _(nothing yet)_
 ---
 
 ### F3: Candlestick ↔ Heatmap Unification
-**Status:** active
+**Status:** paused
 **Created:** 2026-02-02
-**Updated:** 2026-03-16
+**Updated:** 2026-03-17
 
 #### Now
 
 #### Next
-- [ ] Wire timeframe combo to actual timeframe switching
-- [ ] Wire chart type combo (Candle/Hollow/Line) to rendering
 - [ ] Add candle body opacity control when heatmap visible
 - [ ] Add wick-only mode for minimal obstruction
 - [ ] Sync candle aggregation with heatmap resolution
@@ -134,6 +132,7 @@ _(nothing yet)_
 - **2026-02-02** — Performance headroom finally makes unified rendering viable without hacks.
 - **2026-02-15** — Completed major UGR refactor for candle stability; axis perf guardrail added for pan/zoom fluidity.
 - **2026-03-17** — Renamed HeatmapDock → ChartDock across all source files and CMakeLists.
+- **2026-03-17** — De-scoped duplicate toolbar items from F3; chart toolbar wiring tracked under F12.
 
 ---
 
@@ -201,17 +200,23 @@ _(nothing yet)_
 ---
 
 ### F8: TPO / Market Profile
-**Status:** paused
+**Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-03-16
+**Updated:** 2026-03-17
 
 #### Now
-- [ ] Implement TPO letter assignment per time slice
-- [ ] Render TPO columns aligned with price axis
-- [ ] Add POC, VAH, VAL calculation
+- [ ] Finalize TPO letter assignment per timeframe/session slice (stable sequence and rollover)
+- [ ] Finish TPO column rendering alignment with shared time/price mapping (no drift vs candles/heatmap)
+- [ ] Complete POC/VAH/VAL calculation + render in TPO mode
+- [ ] Validate 24H vs 1W session behavior end-to-end (request, stream, renderer)
+- [ ] Add focused regression checks for TPO session/timeframe switching
 
 #### Done
 - [x] Plan exists (`docs/plans/TPO.md`) (2026-02-02)
+- [x] Baseline TPO overlay letter rendering refinements landed (`TpoOverlayRenderer`) (2026-03-13)
+
+#### Session log
+- **2026-03-17** — Re-activated F8 as the primary delivery lane. Goal tonight: finish TPO/footprint behavior and session correctness before new feature work.
 
 ---
 
@@ -268,16 +273,19 @@ _(nothing yet)_
 ### F12: Chart Toolbar Implementation
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-03-16
+**Updated:** 2026-03-17
 
 #### Now
-- [ ] Wire timeframe combo to actual data refresh (1m, 5m, 15m, 1h, 4h, 1D)
 - [ ] Wire chart type combo (Candle, Hollow, Line) to rendering logic
 - [ ] Wire liquidity threshold slider to heatmap filter
 
 #### Done
 - [x] Toolbar UI structure (TopToolbar.cpp) (2026-01-XX)
 - [x] Symbol search and mode switching functional (2026-02-02)
+- [x] Timeframe switching wired and stale-column/wide-column mismatch fixed (2026-03-17)
+
+#### Session log
+- **2026-03-17** — Moved timeframe-wiring ownership fully into F12 to remove overlap with F3 and keep chart control work in one lane.
 
 ---
 
@@ -331,6 +339,7 @@ _(nothing yet)_
 - [x] Shared backtest core types and execution model (2026-03-14)
 - [x] Unified simulation broker and replay engine (2026-03-14)
 - [x] Binary trade-log reader for captured tape (2026-03-16)
+- [x] Trade-log replay path + paper trading chart overlays integrated (2026-03-16)
 - [x] Polish manual paper trading for forward testing (live mark, renderer-backed order/position overlays, entry-price/PnL pill) (2026-03-16)
 - [x] Manual-only TP/SL risk system with server-backed attached risk orders, staged drag UI, confirm/discard, and OCO clearing (2026-03-17)
 
