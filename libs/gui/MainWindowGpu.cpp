@@ -17,6 +17,7 @@
 #include <QUuid>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
+#include "../core/servermodel/SessionManager.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
@@ -581,10 +582,12 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     if (timeframeMs != 900000 && timeframeMs != 1800000) {
         timeframeMs = 900000;
     }
-    if (sessionType != 4 && sessionType != 5) {
+    if (sessionType < static_cast<int>(SessionManager::SessionType::NY) ||
+        sessionType > static_cast<int>(SessionManager::SessionType::W1)) {
         sessionType = 4;
     }
-    const int64_t sessionMs = (sessionType == 5) ? (5LL * 86400000LL) : 86400000LL;
+    const int64_t sessionMs = SessionManager::sessionDurationMs(
+        static_cast<SessionManager::SessionType>(sessionType));
     const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
     if (chartDebugEnabled()) {
         sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 sessionType=%3 count=%4")

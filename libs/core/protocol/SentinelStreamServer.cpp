@@ -316,6 +316,33 @@ class Session : public std::enable_shared_from_this<Session> {
         return static_cast<char>('A' + ((letterIndex + 26) % 26));
     }
 
+    static int64_t alignDownMs(int64_t valueMs, int64_t stepMs) {
+        if (valueMs <= 0 || stepMs <= 0) {
+            return 0;
+        }
+        return (valueMs / stepMs) * stepMs;
+    }
+
+    static void fillTpoRowsFromBar(const OHLCVBar& bar,
+                                   int gridHeight,
+                                   double maxPrice,
+                                   double tickSize,
+                                   char letter,
+                                   QByteArray& out) {
+        if (gridHeight <= 0 || tickSize <= 0.0 || out.size() != gridHeight) {
+            return;
+        }
+        const double hiPrice = std::max(bar.high, bar.low);
+        const double loPrice = std::min(bar.high, bar.low);
+        const int rowHigh = static_cast<int>(std::floor((maxPrice - hiPrice) / tickSize));
+        const int rowLow = static_cast<int>(std::floor((maxPrice - loPrice) / tickSize));
+        const int rStart = std::max(0, rowHigh);
+        const int rEnd = std::min(gridHeight - 1, rowLow);
+        for (int row = rStart; row <= rEnd; ++row) {
+            out[row] = letter;
+        }
+    }
+
     bool buildTpoColumnWindow(const std::string& symbol,
                               int64_t bucketStartMs,
                               int64_t bucketEndMs,
@@ -339,6 +366,70 @@ class Session : public std::enable_shared_from_this<Session> {
             }
             out[row] = letter;
         }
+        return true;
+    }
+
+    bool fetchBatchedCandles(const std::string& symbol,
+                             int64_t startMs,
+                             int64_t endMs,
+                             int64_t timeframeSec,
+                             std::vector<OHLCVBar>& out) {
+        out.clear();
+        if (!owner_ || symbol.empty() || startMs <= 0 || endMs <= startMs || timeframeSec <= 0) {
+            return false;
+        }
+
+        const auto granularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
+        if (!granularity) {
+            return false;
+        }
+
+        constexpr int kBatchLimit = 350;
+        const int64_t batchSpanSec = timeframeSec * static_cast<int64_t>(kBatchLimit);
+        const int64_t startSec = startMs / 1000;
+        const int64_t endSec = endMs / 1000;
+        std::unordered_map<int64_t, OHLCVBar> byStartMs;
+
+        for (int64_t cursorSec = startSec; cursorSec < endSec; cursorSec += batchSpanSec) {
+            const int64_t chunkEndSec = std::min(endSec, cursorSec + batchSpanSec);
+            if (chunkEndSec <= cursorSec) {
+                break;
+            }
+            const int limit = static_cast<int>(std::max<int64_t>(
+                1,
+                std::min<int64_t>(kBatchLimit,
+                                  (chunkEndSec - cursorSec + timeframeSec - 1) / timeframeSec)));
+            CandleFetchResult res = owner_->restClient().fetchProductCandles(
+                symbol, cursorSec, chunkEndSec, *granularity, limit);
+            if (!res.ok) {
+                sLog_Warning("TPO history candle bootstrap failed for "
+                             << QString::fromStdString(symbol)
+                             << " [" << cursorSec << ".." << chunkEndSec
+                             << "] tfSec=" << timeframeSec
+                             << " error=" << QString::fromStdString(res.error));
+                continue;
+            }
+            for (const auto& bar : res.candles) {
+                if (bar.timestamp_ms < startMs || bar.timestamp_ms >= endMs) {
+                    continue;
+                }
+                byStartMs[bar.timestamp_ms] = bar;
+            }
+        }
+
+        if (byStartMs.empty()) {
+            return false;
+        }
+
+        out.reserve(byStartMs.size());
+        for (const auto& [ts, bar] : byStartMs) {
+            Q_UNUSED(ts);
+            out.push_back(bar);
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const OHLCVBar& a, const OHLCVBar& b) {
+                      return a.timestamp_ms < b.timestamp_ms;
+                  });
         return true;
     }
 
@@ -522,34 +613,58 @@ class Session : public std::enable_shared_from_this<Session> {
             return;
         }
 
-        int effectiveCount = std::max(1, std::min(count, std::max(1, gridWidth)));
-        effectiveCount = std::min(effectiveCount, 512);
-        int64_t effectiveEnd = endTimeMs;
-        if (effectiveEnd <= 0) {
-            effectiveEnd = static_cast<int64_t>(
+        const auto sessionType = static_cast<SessionManager::SessionType>(tpoSessionType_);
+        const int64_t sessionMs = SessionManager::sessionDurationMs(sessionType);
+        const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
+        const int payloadGridWidth = std::max(1, sessionPeriods);
+        const int effectiveCount = std::min(std::max(1, std::min(count, payloadGridWidth)), 512);
+
+        int64_t anchorMs = endTimeMs;
+        if (anchorMs <= 0) {
+            anchorMs = static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count());
         }
-        effectiveEnd = (effectiveEnd / timeframeMs) * timeframeMs;
-        if (effectiveEnd <= 0) {
+        if (anchorMs <= 0) {
             return;
         }
-        const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
 
-        std::unordered_map<int64_t, OHLCVBar> candleByBucket;
-        if (owner_) {
-            const int64_t timeframeSec = timeframeMs / 1000;
-            const auto candleGranularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
-            if (candleGranularity) {
-                const int64_t startSec = firstStart / 1000;
-                const int64_t endSec = effectiveEnd / 1000;
-                const CandleFetchResult res = owner_->restClient().fetchProductCandles(
-                    symbol, startSec, endSec, *candleGranularity, effectiveCount);
-                if (res.ok) {
-                    for (const auto& bar : res.candles) {
-                        candleByBucket[bar.timestamp_ms] = bar;
-                    }
+        const auto sessionBoundary = SessionManager::sessionContaining(
+            std::max<int64_t>(0, anchorMs - 1), sessionType);
+        if (!sessionBoundary.valid || sessionBoundary.endMs <= sessionBoundary.startMs) {
+            return;
+        }
+
+        const int64_t sessionStart = sessionBoundary.startMs;
+        const int64_t sessionEnd = sessionBoundary.endMs;
+        const int64_t nowMs = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        const int64_t availableEnd = std::clamp(
+            alignDownMs(std::min(anchorMs, nowMs), timeframeMs),
+            sessionStart + timeframeMs,
+            sessionEnd);
+        const int availablePeriods = static_cast<int>(std::clamp<int64_t>(
+            (availableEnd - sessionStart) / timeframeMs,
+            1,
+            payloadGridWidth));
+        const int startPeriod = std::max(0, availablePeriods - effectiveCount);
+        const int64_t firstStart = sessionStart + static_cast<int64_t>(startPeriod) * timeframeMs;
+
+        std::vector<OHLCVBar> minuteCandles;
+        std::unordered_map<int64_t, std::vector<OHLCVBar>> candlesByBucket;
+        if (fetchBatchedCandles(symbol, sessionStart, availableEnd, 60, minuteCandles)) {
+            candlesByBucket.reserve(static_cast<size_t>(std::min(payloadGridWidth, 512)));
+            for (const auto& bar : minuteCandles) {
+                if (bar.timestamp_ms < sessionStart || bar.timestamp_ms >= sessionEnd) {
+                    continue;
                 }
+                const int64_t relative = bar.timestamp_ms - sessionStart;
+                if (relative < 0) {
+                    continue;
+                }
+                const int64_t bucketStart = sessionStart + ((relative / timeframeMs) * timeframeMs);
+                candlesByBucket[bucketStart].push_back(bar);
             }
         }
 
@@ -559,7 +674,7 @@ class Session : public std::enable_shared_from_this<Session> {
         payload["symbol"] = symbol;
         payload["timeframe_ms"] = timeframeMs;
         payload["session_type"] = static_cast<int>(tpoSessionType_);
-        payload["grid_width"] = gridWidth;
+        payload["grid_width"] = payloadGridWidth;
         payload["grid_height"] = gridHeight;
         payload["format"] = "tpo_ascii";
         payload["encoding"] = "base64";
@@ -578,27 +693,11 @@ class Session : public std::enable_shared_from_this<Session> {
                                       letters)) {
                 continue;
             }
-            if (!candleByBucket.empty()) {
-                bool hasLetters = false;
-                for (int r = 0; r < gridHeight; ++r) {
-                    if (letters.at(r) != '\0') {
-                        hasLetters = true;
-                        break;
-                    }
-                }
-                if (!hasLetters) {
-                    const auto it = candleByBucket.find(bucketStart);
-                    if (it != candleByBucket.end()) {
-                        const auto& bar = it->second;
-                        const char letter = tpoLetterForBucket(bucketStart, timeframeMs);
-                        const int rowHigh = static_cast<int>(std::floor((maxPrice - bar.high) / tickSize));
-                        const int rowLow = static_cast<int>(std::floor((maxPrice - bar.low) / tickSize));
-                        const int rStart = std::max(0, rowHigh);
-                        const int rEnd = std::min(gridHeight - 1, rowLow);
-                        for (int r = rStart; r <= rEnd; ++r) {
-                            letters[r] = letter;
-                        }
-                    }
+            const auto it = candlesByBucket.find(bucketStart);
+            if (it != candlesByBucket.end()) {
+                const char letter = tpoLetterForBucket(bucketStart, timeframeMs);
+                for (const auto& bar : it->second) {
+                    fillTpoRowsFromBar(bar, gridHeight, maxPrice, tickSize, letter, letters);
                 }
             }
             nlohmann::json item;
@@ -877,6 +976,18 @@ public:
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
                     switch (sessionType) {
+                        case static_cast<int>(SessionManager::SessionType::NY):
+                            tpoSessionType_ = SessionManager::SessionType::NY;
+                            break;
+                        case static_cast<int>(SessionManager::SessionType::London):
+                            tpoSessionType_ = SessionManager::SessionType::London;
+                            break;
+                        case static_cast<int>(SessionManager::SessionType::Asia):
+                            tpoSessionType_ = SessionManager::SessionType::Asia;
+                            break;
+                        case static_cast<int>(SessionManager::SessionType::Australia):
+                            tpoSessionType_ = SessionManager::SessionType::Australia;
+                            break;
                         case static_cast<int>(SessionManager::SessionType::H24):
                             tpoSessionType_ = SessionManager::SessionType::H24;
                             break;

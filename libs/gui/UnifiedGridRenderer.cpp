@@ -449,7 +449,7 @@ void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
 }
 
 void UnifiedGridRenderer::setTpoSessionType(int sessionType) {
-  const int clamped = (sessionType == 5) ? 5 : 4;
+  const int clamped = (sessionType >= 0 && sessionType <= 5) ? sessionType : 4;
   if (m_tpoSessionType == clamped) {
     return;
   }

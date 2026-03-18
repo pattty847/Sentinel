@@ -125,9 +125,13 @@ inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
         return { sessionStart, sessionStart + spec.durationMs, true };
     }
 
-    // Standard sessions: open offset relative to UTC midnight of epochMs.
+    // Standard sessions: if epochMs lands before today's open, resolve to the
+    // most recent completed session instead of a future one.
     const int64_t midnight = utcMidnightBefore(epochMs);
-    const int64_t sessionStart = midnight + spec.openOffsetMs;
+    int64_t sessionStart = midnight + spec.openOffsetMs;
+    if (epochMs < sessionStart) {
+        sessionStart -= kMsPerDay;
+    }
     return { sessionStart, sessionStart + spec.durationMs, true };
 }
 

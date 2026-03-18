@@ -96,6 +96,10 @@ void HeatmapSettingsDialog::buildUi() {
     form->addRow("TPO Bracket", m_tpoTimeframeCombo);
 
     m_tpoSessionCombo = new QComboBox(this);
+    m_tpoSessionCombo->addItem("New York", 0);
+    m_tpoSessionCombo->addItem("London", 1);
+    m_tpoSessionCombo->addItem("Asia", 2);
+    m_tpoSessionCombo->addItem("Australia", 3);
     m_tpoSessionCombo->addItem("24H", 4);
     m_tpoSessionCombo->addItem("1W", 5);
     form->addRow("TPO Session", m_tpoSessionCombo);
