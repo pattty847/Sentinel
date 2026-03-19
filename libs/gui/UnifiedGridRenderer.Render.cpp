@@ -176,7 +176,40 @@ void UnifiedGridRenderer::drainFrameUploads(
     std::vector<HeatmapStreamState::PendingColumn> pendingUploads;
     m_heatmapStream->takePendingUploads(pendingUploads);
     heatmapUploads.reserve(pendingUploads.size());
+    const double threshold = m_heatmapLiquidityThreshold;
+    const int bytesPerCell = m_intensityBytesPerCell;
+    const int gridHeight = m_heatmapGridHeight;
+    const int labelMode = m_liquidityLabelMode;
+    const auto streamSnap = m_heatmapStream->snapshot();
     for (auto& upload : pendingUploads) {
+        if (threshold > 0.0 && !upload.liquidity.isEmpty() && upload.liquidityScale > 0.0) {
+            const int expectedLiq = gridHeight * static_cast<int>(sizeof(uint16_t));
+            if (upload.liquidity.size() == expectedLiq &&
+                upload.data.size() == gridHeight * bytesPerCell) {
+                const auto* liqRaw = reinterpret_cast<const uint16_t*>(upload.liquidity.constData());
+                if (bytesPerCell == 1) {
+                    auto* dst = reinterpret_cast<uint8_t*>(upload.data.data());
+                    for (int y = 0; y < gridHeight; ++y) {
+                        const uint16_t packed = qFromLittleEndian(liqRaw[y]);
+                        if (packed == 0) { dst[y] = 0; continue; }
+                        double val = static_cast<double>(packed) * upload.liquidityScale;
+                        if (labelMode != 0 && streamSnap.tickSize > 0.0)
+                            val *= (streamSnap.maxPrice - static_cast<double>(y) * streamSnap.tickSize);
+                        if (val < threshold) dst[y] = 0;
+                    }
+                } else if (bytesPerCell == 2) {
+                    auto* dst = reinterpret_cast<uint16_t*>(upload.data.data());
+                    for (int y = 0; y < gridHeight; ++y) {
+                        const uint16_t packed = qFromLittleEndian(liqRaw[y]);
+                        if (packed == 0) { dst[y] = 0; continue; }
+                        double val = static_cast<double>(packed) * upload.liquidityScale;
+                        if (labelMode != 0 && streamSnap.tickSize > 0.0)
+                            val *= (streamSnap.maxPrice - static_cast<double>(y) * streamSnap.tickSize);
+                        if (val < threshold) dst[y] = 0;
+                    }
+                }
+            }
+        }
         heatmapUploads.push_back({upload.x, std::move(upload.data)});
     }
 }

@@ -81,6 +81,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
+    Q_PROPERTY(double heatmapMaxObservedLiquidity READ heatmapMaxObservedLiquidity NOTIFY heatmapMaxObservedLiquidityChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
     Q_PROPERTY(QObject* priceAxisSource READ priceAxisSource WRITE setPriceAxisSource NOTIFY axisSourcesChanged)
     Q_PROPERTY(QObject* timeAxisSource READ timeAxisSource WRITE setTimeAxisSource NOTIFY axisSourcesChanged)
@@ -134,6 +135,7 @@ private:
     bool m_showModeFlagsOverlay = false;
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
+    double m_heatmapMaxObservedLiquidity = 0.0;
     double m_heatmapTickSize = 0.0;
 
     bool m_manualTimeframeSet = false;
@@ -237,6 +239,7 @@ public:
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
+    double heatmapMaxObservedLiquidity() const { return m_heatmapMaxObservedLiquidity; }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
     double heatmapGamma() const { return m_heatmapGamma; }
     double heatmapContrast() const { return m_heatmapContrast; }
@@ -376,6 +379,7 @@ signals:
     void showModeFlagsOverlayChanged();
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
+    void heatmapMaxObservedLiquidityChanged();
     void heatmapBackgroundColorChanged();
     void heatmapGammaChanged();
     void heatmapContrastChanged();
@@ -472,6 +476,7 @@ private:
     void setAutoScrollPaddingFrac(double fraction);
     void setAutoScrollSmoothEnabled(bool enabled);
     void setHeatmapLiquidityThreshold(double threshold);
+    void rebuildHeatmapTextureFromRing();
     void setHeatmapBackgroundColor(const QColor& color);
 
     std::unique_ptr<GridViewState> m_viewState;

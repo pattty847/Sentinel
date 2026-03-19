@@ -215,47 +215,28 @@ bool UnifiedGridRenderer::ingestHeatmapColumnEvent(const HeatmapColumnEvent& eve
 
     const int expectedLiquidityBytes = m_heatmapGridHeight * static_cast<int>(sizeof(uint16_t));
     const bool haveLiquidityColumn = (event.liquidityColumn.size() == expectedLiquidityBytes);
-    QByteArray intensityColumn = event.column;
-    if (m_heatmapLiquidityThreshold > 0.0 && haveLiquidityColumn && event.liquidityScale > 0.0 &&
-        intensityColumn.size() == m_heatmapGridHeight * bytesPerCell) {
+
+    // Track max observed liquidity for slider scale (no filtering at ingest — applied at drain)
+    if (haveLiquidityColumn && event.liquidityScale > 0.0) {
         const auto* raw = reinterpret_cast<const uint16_t*>(event.liquidityColumn.constData());
-        const double threshold = m_heatmapLiquidityThreshold;
-        if (bytesPerCell == 1) {
-            auto* dst = reinterpret_cast<uint8_t*>(intensityColumn.data());
-            for (int y = 0; y < m_heatmapGridHeight; ++y) {
-                const uint16_t packed = qFromLittleEndian(raw[y]);
-                if (packed == 0) {
-                    dst[y] = 0;
-                    continue;
-                }
-                double value = static_cast<double>(packed) * event.liquidityScale;
-                if (m_liquidityLabelMode != 0) {
-                    const double price = event.maxPrice - (static_cast<double>(y) * event.tickSize);
-                    value *= price;
-                }
-                if (value < threshold) {
-                    dst[y] = 0;
-                }
+        double colMax = 0.0;
+        for (int y = 0; y < m_heatmapGridHeight; ++y) {
+            const uint16_t packed = qFromLittleEndian(raw[y]);
+            if (packed == 0) continue;
+            double value = static_cast<double>(packed) * event.liquidityScale;
+            if (m_liquidityLabelMode != 0) {
+                const double price = event.maxPrice - (static_cast<double>(y) * event.tickSize);
+                value *= price;
             }
-        } else if (bytesPerCell == 2) {
-            auto* dst = reinterpret_cast<uint16_t*>(intensityColumn.data());
-            for (int y = 0; y < m_heatmapGridHeight; ++y) {
-                const uint16_t packed = qFromLittleEndian(raw[y]);
-                if (packed == 0) {
-                    dst[y] = 0;
-                    continue;
-                }
-                double value = static_cast<double>(packed) * event.liquidityScale;
-                if (m_liquidityLabelMode != 0) {
-                    const double price = event.maxPrice - (static_cast<double>(y) * event.tickSize);
-                    value *= price;
-                }
-                if (value < threshold) {
-                    dst[y] = 0;
-                }
-            }
+            if (value > colMax) colMax = value;
+        }
+        if (colMax > m_heatmapMaxObservedLiquidity) {
+            m_heatmapMaxObservedLiquidity = colMax;
+            emit heatmapMaxObservedLiquidityChanged();
         }
     }
+
+    const QByteArray& intensityColumn = event.column;
 
     if (m_heatmapStream) {
         const qint64 nowMs = m_heatmapClock.elapsed();

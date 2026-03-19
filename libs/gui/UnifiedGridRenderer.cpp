@@ -556,8 +556,89 @@ void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
     return;
   }
   m_heatmapLiquidityThreshold = clamped;
+  rebuildHeatmapTextureFromRing();
   update();
   emit heatmapLiquidityThresholdChanged();
+}
+
+void UnifiedGridRenderer::rebuildHeatmapTextureFromRing() {
+  if (!m_heatmapStream) {
+      return;
+  }
+  HeatmapStreamState::LabelSnapshot snap;
+  if (!m_heatmapStream->copyLabelSnapshot(snap)) {
+      // No liquidity data — still trigger a visual refresh
+      m_heatmapOverlay.requestFullTextureRebuild();
+      return;
+  }
+  const auto& ss = snap.snapshot;
+  if (ss.gridWidth <= 0 || ss.gridHeight <= 0) {
+      return;
+  }
+
+  const double threshold = m_heatmapLiquidityThreshold;
+  const int bytesPerCell = m_intensityBytesPerCell;
+  const int labelMode = m_liquidityLabelMode;
+
+  std::vector<HeatmapStreamState::PendingColumn> columns;
+  columns.reserve(ss.gridWidth);
+
+  for (int x = 0; x < ss.gridWidth; ++x) {
+      QByteArray intensityData;
+      QByteArray liquidityData;
+      if (bytesPerCell == 1) {
+          intensityData.resize(ss.gridHeight);
+          auto* dst = reinterpret_cast<uint8_t*>(intensityData.data());
+          liquidityData.resize(ss.gridHeight * static_cast<int>(sizeof(uint16_t)));
+          auto* liqDst = reinterpret_cast<uint16_t*>(liquidityData.data());
+          for (int y = 0; y < ss.gridHeight; ++y) {
+              const uint16_t ringVal = snap.intensityRing[static_cast<size_t>(y) * ss.gridWidth + x];
+              uint8_t cell = static_cast<uint8_t>(ringVal / 257);
+              const uint16_t liqRaw = snap.liquidityRing[static_cast<size_t>(y) * ss.gridWidth + x];
+              liqDst[y] = qToLittleEndian(liqRaw);
+              if (threshold > 0.0) {
+                  if (liqRaw == 0) {
+                      cell = 0;
+                  } else {
+                      double val = static_cast<double>(liqRaw) * snap.liquidityScales[x];
+                      if (labelMode != 0 && ss.tickSize > 0.0)
+                          val *= (ss.maxPrice - static_cast<double>(y) * ss.tickSize);
+                      if (val < threshold) cell = 0;
+                  }
+              }
+              dst[y] = cell;
+          }
+      } else {
+          intensityData.resize(ss.gridHeight * 2);
+          auto* dst = reinterpret_cast<uint16_t*>(intensityData.data());
+          liquidityData.resize(ss.gridHeight * static_cast<int>(sizeof(uint16_t)));
+          auto* liqDst = reinterpret_cast<uint16_t*>(liquidityData.data());
+          for (int y = 0; y < ss.gridHeight; ++y) {
+              const uint16_t ringVal = snap.intensityRing[static_cast<size_t>(y) * ss.gridWidth + x];
+              uint16_t cell = ringVal;
+              const uint16_t liqRaw = snap.liquidityRing[static_cast<size_t>(y) * ss.gridWidth + x];
+              liqDst[y] = qToLittleEndian(liqRaw);
+              if (threshold > 0.0) {
+                  if (liqRaw == 0) {
+                      cell = 0;
+                  } else {
+                      double val = static_cast<double>(liqRaw) * snap.liquidityScales[x];
+                      if (labelMode != 0 && ss.tickSize > 0.0)
+                          val *= (ss.maxPrice - static_cast<double>(y) * ss.tickSize);
+                      if (val < threshold) cell = 0;
+                  }
+              }
+              dst[y] = qToLittleEndian(cell);
+          }
+      }
+      const double liqScale = (x < static_cast<int>(snap.liquidityScales.size()))
+                                  ? snap.liquidityScales[x]
+                                  : 1.0;
+      columns.push_back({x, std::move(intensityData), std::move(liquidityData), liqScale});
+  }
+
+  m_heatmapStream->injectPendingUploads(std::move(columns));
+  m_heatmapOverlay.requestFullTextureRebuild();
 }
 
 void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor &color) {

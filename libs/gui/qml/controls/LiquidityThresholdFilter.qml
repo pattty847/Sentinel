@@ -9,11 +9,21 @@ Column {
     property var target: null  // UnifiedGridRenderer instance
     property bool enabled: true
 
-    // Asset-aware liquidity scaling from parent context
-    property real maxLiquidityRange: 1000.0  // Default, should be set by parent
+    // Range auto-driven from observed data max; sqrt-scaled for sensitivity at low values
+    readonly property real maxLiquidityRange: root.target
+        ? Math.max(1.0, root.target.heatmapMaxObservedLiquidity)
+        : 1000.0
 
     // Signals
     signal valueChanged(var newValue)
+
+    // sqrt mapping helpers: slider pos → value uses quadratic, value → pos uses sqrt
+    function valueToRatio(val) {
+        return Math.sqrt(Math.max(0.0, val) / root.maxLiquidityRange)
+    }
+    function ratioToValue(ratio) {
+        return ratio * ratio * root.maxLiquidityRange
+    }
 
     Rectangle {
         width: 150
@@ -34,7 +44,10 @@ Column {
     Text {
         text: {
             if (!root.target) return "Min Liquidity: 0.00"
-            return "Min Liquidity: " + root.target.heatmapLiquidityThreshold.toFixed(2)
+            const v = root.target.heatmapLiquidityThreshold
+            return v >= 1000000 ? "Min Liq: " + (v / 1000000).toFixed(2) + "M"
+                 : v >= 1000   ? "Min Liq: " + (v / 1000).toFixed(2) + "K"
+                 : "Min Liq: " + v.toFixed(2)
         }
         color: "#00FF00"
         font.pixelSize: 11
@@ -63,8 +76,12 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             z: 10
             opacity: 1.0
-            x: 1 + Math.max(0, Math.min(sliderTrack.width - width - 2,
-                root.target ? (root.target.heatmapLiquidityThreshold / root.maxLiquidityRange) * (parent.width - width - 2) : 0))
+            x: {
+                if (!root.target) return 1
+                const ratio = root.valueToRatio(root.target.heatmapLiquidityThreshold)
+                return 1 + Math.max(0, Math.min(sliderTrack.width - width - 2,
+                    ratio * (parent.width - width - 2)))
+            }
             layer.enabled: true
             layer.smooth: false
 
@@ -78,8 +95,8 @@ Column {
 
                 onPositionChanged: {
                     if (drag.active && root.target) {
-                        var ratio = parent.x / (parent.parent.width - parent.width)
-                        var value = ratio * root.maxLiquidityRange
+                        const ratio = parent.x / (parent.parent.width - parent.width)
+                        const value = root.ratioToValue(ratio)
                         root.target.heatmapLiquidityThreshold = value
                         root.valueChanged(value)
                     }
@@ -96,12 +113,22 @@ Column {
             font.pixelSize: 9
         }
         Text {
-            text: (root.maxLiquidityRange / 2).toFixed(0)
+            text: {
+                const mid = root.ratioToValue(0.5)
+                return mid >= 1000000 ? (mid / 1000000).toFixed(1) + "M"
+                     : mid >= 1000   ? (mid / 1000).toFixed(1) + "K"
+                     : mid.toFixed(0)
+            }
             color: "#00FF00"
             font.pixelSize: 9
         }
         Text {
-            text: root.maxLiquidityRange.toFixed(0)
+            text: {
+                const mx = root.maxLiquidityRange
+                return mx >= 1000000 ? (mx / 1000000).toFixed(1) + "M"
+                     : mx >= 1000   ? (mx / 1000).toFixed(1) + "K"
+                     : mx.toFixed(0)
+            }
             color: "#00FF00"
             font.pixelSize: 9
         }
