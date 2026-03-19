@@ -47,7 +47,7 @@ Each feature is a self-contained block. Use this template:
 
 #### Now
 - [ ] Label geo cache: cache per-column quads; rebuild only when column/viewport/thresholds change
-- [ ] Thresholds: store raw liquidity/intensity per cell so past columns can be re-evaluated
+- [x] Thresholds: store raw liquidity/intensity per cell so past columns can be re-evaluated (2026-03-19)
 
 #### Done
 - [x] Swap GlyphAtlas -> MsdfAtlas and HeatmapGlyphNode -> MsdfGlyphNode in UnifiedGridRenderer (2026-01-30)
@@ -62,7 +62,7 @@ Each feature is a self-contained block. Use this template:
 ### F1: Heatmap / Caching
 **Status:** active
 **Created:** 2026-01-30
-**Updated:** 2026-03-16
+**Updated:** 2026-03-17
 
 #### Now
 - [ ] Auto history request on symbol change (no manual subscribe needed)
@@ -75,6 +75,7 @@ Each feature is a self-contained block. Use this template:
 - [ ] Per-client TF stream (client asks for derived TF)
 - [ ] StatusBar metrics wiring (FPS, GPU mem, upload bandwidth)
 - [ ] Page persisted heatmap history into the bounded GPU ring so the canvas feels infinite without needing an infinite texture
+- [ ] Define a sliding-window world-history architecture for heatmap/TPO/footprint so viewport panning pages through larger persisted datasets instead of treating fixed grid width/height as total history/range
 
 #### Later
 - [ ] Heatmap settings panel v2 (extra controls + templates)
@@ -85,6 +86,7 @@ _(nothing yet)_
 
 #### Session log
 - **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
+- **2026-03-17** - Captured the next architectural issue explicitly: chart layers need a larger persisted world-history model with a bounded GPU window, so long-range heatmap/TPO browsing can feel infinite without fixed-grid hard stops.
 
 ---
 
@@ -277,7 +279,7 @@ _(nothing yet)_
 
 #### Now
 - [ ] Wire chart type combo (Candle, Hollow, Line) to rendering logic
-- [ ] Wire liquidity threshold slider to heatmap filter
+- [x] Wire liquidity threshold slider to heatmap filter — retroactive filter on ring + log scale + 80ms debounce (2026-03-19)
 
 #### Done
 - [x] Toolbar UI structure (TopToolbar.cpp) (2026-01-XX)
