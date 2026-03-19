@@ -23,6 +23,7 @@ public:
     void setFps(double fps);
     void setLatency(int milliseconds);
     void setCoinbaseLatency(int milliseconds);
+    void setUploadBandwidth(double mbPerSec);
     void setReadyStatus(const QString& status = "Ready");
     void showVersion();
 
@@ -36,6 +37,7 @@ private:
     QLabel* m_cpuLabel;
     QLabel* m_gpuLabel;
     QLabel* m_latencyLabel;
+    QLabel* m_uploadLabel;
     QLabel* m_versionLabel;
 
     // Metrics storage

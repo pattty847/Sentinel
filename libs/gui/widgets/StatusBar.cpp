@@ -40,7 +40,11 @@ StatusBar::StatusBar(QWidget* parent)
     m_gpuLabel = new QLabel("GPU: --%", this);
     m_gpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
     layout->addWidget(m_gpuLabel);
-    
+
+    m_uploadLabel = new QLabel("UP: -- MB/s", this);
+    m_uploadLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
+    layout->addWidget(m_uploadLabel);
+
     // Latency area now used for Coinbase websocket latency
     m_latencyLabel = new QLabel("Latency (CB): -- ms", this);
     m_latencyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
@@ -111,6 +115,12 @@ void StatusBar::setCoinbaseLatency(int milliseconds) {
 
 void StatusBar::setReadyStatus(const QString& status) {
     m_readyLabel->setText(status);
+}
+
+void StatusBar::setUploadBandwidth(double mbPerSec) {
+    m_uploadLabel->setText(QString("UP: %1 MB/s").arg(mbPerSec, 0, 'f', 2));
+    const QString color = mbPerSec < 10.0 ? "#888" : (mbPerSec < 50.0 ? "#ffaa00" : "#ff4444");
+    m_uploadLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
 }
 
 void StatusBar::updateMetrics() {

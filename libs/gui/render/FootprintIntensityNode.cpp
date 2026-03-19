@@ -1,4 +1,5 @@
 #include "FootprintIntensityNode.hpp"
+#include "../PerformanceMonitor.hpp"
 
 #include <QMatrix4x4>
 #include <QOpenGLContext>
@@ -19,7 +20,7 @@ public:
         Q_UNUSED(oldMaterial);
         auto* material = static_cast<FootprintIntensityMaterial*>(newMaterial);
         QByteArray* data = state.uniformData();
-        const int uniformSize = sizeof(float) * (16 + 16);
+        const int uniformSize = sizeof(float) * (16 + 20);
         if (data->size() != uniformSize) {
             data->resize(uniformSize);
         }
@@ -41,10 +42,15 @@ public:
                                material->magnitudeScale(),
                                material->magnitudeGamma(),
                                material->timeOffset());
+        const QVector4D cellDebug(material->cellDebugEnabled(),
+                                  material->cellBorderFrac(),
+                                  material->cellBorderAlpha(),
+                                  0.0f);
         memcpy(data->data() + 64, &neutralColor, sizeof(QVector4D));
         memcpy(data->data() + 64 + sizeof(QVector4D), &bidColor, sizeof(QVector4D));
         memcpy(data->data() + 64 + sizeof(QVector4D) * 2, &askColor, sizeof(QVector4D));
         memcpy(data->data() + 64 + sizeof(QVector4D) * 3, &tuning, sizeof(QVector4D));
+        memcpy(data->data() + 64 + sizeof(QVector4D) * 4, &cellDebug, sizeof(QVector4D));
         changed = true;
         return changed;
     }
@@ -83,6 +89,7 @@ public:
         const int height = (*texture)->textureSize().height();
         const int expectedBytes = height * static_cast<int>(sizeof(uint16_t));
         gl->glBindTexture(GL_TEXTURE_2D, glTex->nativeTexture());
+        qint64 totalUploadBytes = 0;
         for (const auto& upload : uploads) {
             const int x = upload.first;
             if (x < 0 || x >= width || upload.second.size() != expectedBytes) {
@@ -92,6 +99,10 @@ public:
             gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                 GL_RED, GL_UNSIGNED_SHORT,
                                 upload.second.constData());
+            totalUploadBytes += expectedBytes;
+        }
+        if (totalUploadBytes > 0) {
+            PerformanceMonitor::instance().addUploadBytes(totalUploadBytes);
         }
     }
 };
@@ -135,6 +146,15 @@ int FootprintIntensityMaterial::compare(const QSGMaterial* other) const {
     }
     if (m_timeOffset != rhs->m_timeOffset) {
         return m_timeOffset < rhs->m_timeOffset ? -1 : 1;
+    }
+    if (m_cellDebugEnabled != rhs->m_cellDebugEnabled) {
+        return m_cellDebugEnabled < rhs->m_cellDebugEnabled ? -1 : 1;
+    }
+    if (m_cellBorderFrac != rhs->m_cellBorderFrac) {
+        return m_cellBorderFrac < rhs->m_cellBorderFrac ? -1 : 1;
+    }
+    if (m_cellBorderAlpha != rhs->m_cellBorderAlpha) {
+        return m_cellBorderAlpha < rhs->m_cellBorderAlpha ? -1 : 1;
     }
     return 0;
 }
@@ -232,6 +252,21 @@ void FootprintIntensityNode::setTimeOffset(float offset) {
         return;
     }
     m_material.setTimeOffset(offset);
+    markDirty(QSGNode::DirtyMaterial);
+}
+
+void FootprintIntensityNode::setCellDebug(bool enabled, float borderFrac, float borderAlpha) {
+    const float on = enabled ? 1.0f : 0.0f;
+    const float clampedFrac = std::clamp(borderFrac, 0.0f, 0.49f);
+    const float clampedAlpha = std::clamp(borderAlpha, 0.0f, 1.0f);
+    if (m_material.cellDebugEnabled() == on &&
+        m_material.cellBorderFrac() == clampedFrac &&
+        m_material.cellBorderAlpha() == clampedAlpha) {
+        return;
+    }
+    m_material.setCellDebugEnabled(on);
+    m_material.setCellBorderFrac(clampedFrac);
+    m_material.setCellBorderAlpha(clampedAlpha);
     markDirty(QSGNode::DirtyMaterial);
 }
 

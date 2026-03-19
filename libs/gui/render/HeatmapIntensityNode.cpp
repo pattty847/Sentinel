@@ -1,4 +1,5 @@
 #include "HeatmapIntensityNode.hpp"
+#include "../PerformanceMonitor.hpp"
 #include <QMatrix4x4>
 #include <QVector4D>
 #include <QOpenGLContext>
@@ -66,6 +67,7 @@ public:
                         gl->glBindTexture(GL_TEXTURE_2D, glTex->nativeTexture());
                         const int height = (*texture)->textureSize().height();
                         const int width = (*texture)->textureSize().width();
+                        qint64 totalUploadBytes = 0;
                         for (const auto& upload : uploads) {
                             const int x = upload.first;
                             if (x < 0 || x >= width) {
@@ -77,17 +79,23 @@ public:
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_RED, GL_UNSIGNED_BYTE,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             } else if (byteCount == height * 2) {
                                 gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_RED, GL_UNSIGNED_SHORT,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             } else if (byteCount == height * 4) {
                                 gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_BGRA, GL_UNSIGNED_BYTE,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             }
+                        }
+                        if (totalUploadBytes > 0) {
+                            PerformanceMonitor::instance().addUploadBytes(totalUploadBytes);
                         }
                     }
                 }

@@ -20,17 +20,22 @@ public:
     int getCpuUsage() const { return m_cpuPercent.load(); }
     int getGpuUsage() const { return m_gpuPercent.load(); }
     int getLatency() const { return m_latencyMs.load(); }
+    double getUploadBandwidthMBps() const { return m_uploadBandwidthMBps.load(); }
 
     // Manual updates (called from other systems)
     void updateCpuUsage(int percent);
     void updateGpuUsage(int percent);
     void updateLatency(int milliseconds);
 
+    // Render-thread safe: accumulate bytes uploaded to GPU this frame
+    void addUploadBytes(qint64 n) { m_uploadBytesAccum.fetch_add(n, std::memory_order_relaxed); }
+
 signals:
     void fpsChanged(double fps);
     void cpuUsageChanged(int percent);
     void gpuUsageChanged(int percent);
     void latencyChanged(int milliseconds);
+    void uploadBandwidthChanged(double mbPerSec);
 
 private slots:
     void onFrameSwapped();
@@ -57,6 +62,8 @@ private:
     std::atomic<int> m_cpuPercent{0};
     std::atomic<int> m_gpuPercent{0};
     std::atomic<int> m_latencyMs{0};
+    std::atomic<qint64> m_uploadBytesAccum{0};
+    std::atomic<double> m_uploadBandwidthMBps{0.0};
     QTimer* m_cpuUpdateTimer = nullptr;
 
 #ifdef _WIN32

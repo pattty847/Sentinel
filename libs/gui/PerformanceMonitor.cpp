@@ -71,6 +71,11 @@ void PerformanceMonitor::onFrameSwapped() {
         m_currentFps.store(fps);
         emit fpsChanged(fps);
 
+        const qint64 uploadBytes = m_uploadBytesAccum.exchange(0, std::memory_order_relaxed);
+        const double mbps = (static_cast<double>(uploadBytes) / (1024.0 * 1024.0)) / (currentMs / 1000.0);
+        m_uploadBandwidthMBps.store(mbps);
+        emit uploadBandwidthChanged(mbps);
+
         m_frameCount = 0;
         m_fpsTimer.restart();
         lastFrameMs = 0;
