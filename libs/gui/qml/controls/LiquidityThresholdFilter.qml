@@ -5,24 +5,39 @@ Column {
     spacing: 5
     z: 10
 
-    // Standard interface for all controls
-    property var target: null  // UnifiedGridRenderer instance
+    property var target: null
     property bool enabled: true
 
-    // Range auto-driven from observed data max; sqrt-scaled for sensitivity at low values
     readonly property real maxLiquidityRange: root.target
         ? Math.max(1.0, root.target.heatmapMaxObservedLiquidity)
         : 1000.0
 
-    // Signals
     signal valueChanged(var newValue)
 
-    // sqrt mapping helpers: slider pos → value uses quadratic, value → pos uses sqrt
+    // Log scale: value = minVal * (maxRange/minVal)^ratio
+    // Leftmost dead zone (ratio < deadZone) maps to threshold=0 (off).
+    readonly property real _minVal: 1.0
+    readonly property real _deadZone: 0.04   // ~6px at 150px width = "off" zone
+
     function valueToRatio(val) {
-        return Math.sqrt(Math.max(0.0, val) / root.maxLiquidityRange)
+        if (val <= 0) return 0
+        const logSpan = Math.log(root.maxLiquidityRange / root._minVal)
+        if (logSpan <= 0) return root._deadZone
+        const r = Math.log(Math.max(val, root._minVal) / root._minVal) / logSpan
+        return root._deadZone + r * (1.0 - root._deadZone)
     }
     function ratioToValue(ratio) {
-        return ratio * ratio * root.maxLiquidityRange
+        if (ratio < root._deadZone) return 0
+        const r = (ratio - root._deadZone) / (1.0 - root._deadZone)
+        const logSpan = Math.log(root.maxLiquidityRange / root._minVal)
+        return root._minVal * Math.exp(r * logSpan)
+    }
+
+    function fmtVal(v) {
+        if (v <= 0)       return "off"
+        if (v >= 1000000) return (v / 1000000).toFixed(2) + "M"
+        if (v >= 1000)    return (v / 1000).toFixed(1) + "K"
+        return v.toFixed(1)
     }
 
     Rectangle {
@@ -42,13 +57,9 @@ Column {
     }
 
     Text {
-        text: {
-            if (!root.target) return "Min Liquidity: 0.00"
-            const v = root.target.heatmapLiquidityThreshold
-            return v >= 1000000 ? "Min Liq: " + (v / 1000000).toFixed(2) + "M"
-                 : v >= 1000   ? "Min Liq: " + (v / 1000).toFixed(2) + "K"
-                 : "Min Liq: " + v.toFixed(2)
-        }
+        text: root.target
+            ? "Min Liq: " + root.fmtVal(root.target.heatmapLiquidityThreshold)
+            : "Min Liq: off"
         color: "#00FF00"
         font.pixelSize: 11
         font.bold: true
@@ -75,7 +86,6 @@ Column {
             radius: 2
             anchors.verticalCenter: parent.verticalCenter
             z: 10
-            opacity: 1.0
             x: {
                 if (!root.target) return 1
                 const ratio = root.valueToRatio(root.target.heatmapLiquidityThreshold)
@@ -106,31 +116,19 @@ Column {
     }
 
     Row {
-        spacing: 15
+        spacing: 8
+        Text { text: "off";  color: "#00FF00"; font.pixelSize: 9 }
         Text {
-            text: "0"
-            color: "#00FF00"
-            font.pixelSize: 9
+            text: root.fmtVal(root.ratioToValue(root._deadZone + (1.0 - root._deadZone) * 0.33))
+            color: "#00FF00"; font.pixelSize: 9
         }
         Text {
-            text: {
-                const mid = root.ratioToValue(0.5)
-                return mid >= 1000000 ? (mid / 1000000).toFixed(1) + "M"
-                     : mid >= 1000   ? (mid / 1000).toFixed(1) + "K"
-                     : mid.toFixed(0)
-            }
-            color: "#00FF00"
-            font.pixelSize: 9
+            text: root.fmtVal(root.ratioToValue(root._deadZone + (1.0 - root._deadZone) * 0.67))
+            color: "#00FF00"; font.pixelSize: 9
         }
         Text {
-            text: {
-                const mx = root.maxLiquidityRange
-                return mx >= 1000000 ? (mx / 1000000).toFixed(1) + "M"
-                     : mx >= 1000   ? (mx / 1000).toFixed(1) + "K"
-                     : mx.toFixed(0)
-            }
-            color: "#00FF00"
-            font.pixelSize: 9
+            text: root.fmtVal(root.maxLiquidityRange)
+            color: "#00FF00"; font.pixelSize: 9
         }
     }
 }
