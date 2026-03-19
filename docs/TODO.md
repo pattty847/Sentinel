@@ -65,7 +65,7 @@ Each feature is a self-contained block. Use this template:
 **Updated:** 2026-03-17
 
 #### Now
-- [ ] Auto history request on symbol change (no manual subscribe needed)
+- [x] Auto history request on symbol change / reconnect (2026-03-19)
 - [ ] Scroll-past-cache fetch (request older history)
 - [ ] Preserve historical heatmap columns across band recenter instead of clearing visual history
 - [ ] Persist derived heatmap history to disk and reload on startup with explicit gap handling for dev/offline periods
@@ -73,7 +73,7 @@ Each feature is a self-contained block. Use this template:
 #### Next
 - [ ] Derived timeframe rollups (non-anchor TFs from 1s/1m/1h/1d)
 - [ ] Per-client TF stream (client asks for derived TF)
-- [ ] StatusBar metrics wiring (FPS, GPU mem, upload bandwidth)
+- [x] StatusBar metrics wiring — upload bandwidth MB/s wired (FPS/CPU/GPU already done) (2026-03-19)
 - [ ] Page persisted heatmap history into the bounded GPU ring so the canvas feels infinite without needing an infinite texture
 - [ ] Define a sliding-window world-history architecture for heatmap/TPO/footprint so viewport panning pages through larger persisted datasets instead of treating fixed grid width/height as total history/range
 
@@ -261,7 +261,7 @@ _(nothing yet)_
 #### Now
 
 #### Next
-- [ ] Add preset system: Classic, Fire, Ocean, Monochrome, Matrix
+- [x] Add preset system: Electric, Fire, Ocean, Monochrome, Matrix — toolbar combo + UGR Q_INVOKABLE (2026-03-19)
 - [ ] Add color picker widgets for custom bid/ask colors
 
 #### Done
@@ -278,7 +278,7 @@ _(nothing yet)_
 **Updated:** 2026-03-17
 
 #### Now
-- [ ] Wire chart type combo (Candle, Hollow, Line) to rendering logic
+- [x] Wire chart type combo (Candle, Hollow, Line) to rendering logic — CandleStyle enum + geometry per mode (2026-03-19)
 - [x] Wire liquidity threshold slider to heatmap filter — retroactive filter on ring + log scale + 80ms debounce (2026-03-19)
 
 #### Done
@@ -316,7 +316,7 @@ _(nothing yet)_
 > Full plan: `docs/private/plans/SCREENER_AND_LAB.md`
 
 #### Now
-- [ ] Wire crypto row click → heatmap symbol subscription in MainWindowGPU
+- [x] Wire crypto row click → heatmap symbol subscription in MainWindowGPU (already done via ScreenerDock::rowSelected → onAssetSymbolSelected)
 - [ ] Start screener_server.py on app launch (QProcess)
 - [ ] Lab → pure candle viewer (wire CandlestickBatched to live data)
 
