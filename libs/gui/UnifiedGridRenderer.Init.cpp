@@ -216,10 +216,12 @@ bool UnifiedGridRenderer::ingestHeatmapColumnEvent(const HeatmapColumnEvent& eve
     const int expectedLiquidityBytes = m_heatmapGridHeight * static_cast<int>(sizeof(uint16_t));
     const bool haveLiquidityColumn = (event.liquidityColumn.size() == expectedLiquidityBytes);
 
-    // Track max observed liquidity for slider scale (no filtering at ingest — applied at drain)
+    // Track min/max observed liquidity for slider scale (no filtering at ingest — applied at drain)
     if (haveLiquidityColumn && event.liquidityScale > 0.0) {
         const auto* raw = reinterpret_cast<const uint16_t*>(event.liquidityColumn.constData());
+        double colMin = std::numeric_limits<double>::max();
         double colMax = 0.0;
+        int nonZeroCount = 0;
         for (int y = 0; y < m_heatmapGridHeight; ++y) {
             const uint16_t packed = qFromLittleEndian(raw[y]);
             if (packed == 0) continue;
@@ -229,10 +231,17 @@ bool UnifiedGridRenderer::ingestHeatmapColumnEvent(const HeatmapColumnEvent& eve
                 value *= price;
             }
             if (value > colMax) colMax = value;
+            if (value < colMin) colMin = value;
+            ++nonZeroCount;
         }
+
         if (colMax > m_heatmapMaxObservedLiquidity) {
             m_heatmapMaxObservedLiquidity = colMax;
             emit heatmapMaxObservedLiquidityChanged();
+        }
+        if (nonZeroCount > 0 && colMin < m_heatmapMinObservedLiquidity) {
+            m_heatmapMinObservedLiquidity = colMin;
+            emit heatmapMinObservedLiquidityChanged();
         }
     }
 

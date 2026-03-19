@@ -556,7 +556,17 @@ void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
     return;
   }
   m_heatmapLiquidityThreshold = clamped;
-  rebuildHeatmapTextureFromRing();
+  // Debounce: defer the expensive ring rebuild until the slider stops moving.
+  if (!m_thresholdRebuildTimer) {
+      m_thresholdRebuildTimer = new QTimer(this);
+      m_thresholdRebuildTimer->setSingleShot(true);
+      m_thresholdRebuildTimer->setInterval(80);
+      connect(m_thresholdRebuildTimer, &QTimer::timeout, this, [this] {
+          rebuildHeatmapTextureFromRing();
+          update();
+      });
+  }
+  m_thresholdRebuildTimer->start(); // restarts if already running
   update();
   emit heatmapLiquidityThresholdChanged();
 }

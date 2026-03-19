@@ -82,6 +82,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
     Q_PROPERTY(double heatmapMaxObservedLiquidity READ heatmapMaxObservedLiquidity NOTIFY heatmapMaxObservedLiquidityChanged)
+    Q_PROPERTY(double heatmapMinObservedLiquidity READ heatmapMinObservedLiquidity NOTIFY heatmapMinObservedLiquidityChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
     Q_PROPERTY(QObject* priceAxisSource READ priceAxisSource WRITE setPriceAxisSource NOTIFY axisSourcesChanged)
     Q_PROPERTY(QObject* timeAxisSource READ timeAxisSource WRITE setTimeAxisSource NOTIFY axisSourcesChanged)
@@ -136,6 +137,8 @@ private:
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
     double m_heatmapMaxObservedLiquidity = 0.0;
+    double m_heatmapMinObservedLiquidity = std::numeric_limits<double>::max();
+    QTimer* m_thresholdRebuildTimer = nullptr;
     double m_heatmapTickSize = 0.0;
 
     bool m_manualTimeframeSet = false;
@@ -240,6 +243,11 @@ public:
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     double heatmapMaxObservedLiquidity() const { return m_heatmapMaxObservedLiquidity; }
+    double heatmapMinObservedLiquidity() const {
+        return m_heatmapMinObservedLiquidity == std::numeric_limits<double>::max()
+                   ? 0.0
+                   : m_heatmapMinObservedLiquidity;
+    }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
     double heatmapGamma() const { return m_heatmapGamma; }
     double heatmapContrast() const { return m_heatmapContrast; }
@@ -380,6 +388,7 @@ signals:
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
     void heatmapMaxObservedLiquidityChanged();
+    void heatmapMinObservedLiquidityChanged();
     void heatmapBackgroundColorChanged();
     void heatmapGammaChanged();
     void heatmapContrastChanged();
