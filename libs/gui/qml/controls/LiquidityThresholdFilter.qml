@@ -15,8 +15,14 @@ Column {
     signal valueChanged(var newValue)
 
     // Log scale: value = minVal * (maxRange/minVal)^ratio
+    // _minVal is the actual observed data minimum — log scale spans real data range.
     // Leftmost dead zone (ratio < deadZone) maps to threshold=0 (off).
-    readonly property real _minVal: 1.0
+    readonly property real _minVal: {
+        const obsMin = root.target ? root.target.heatmapMinObservedLiquidity : 0
+        const obsMax = root.maxLiquidityRange
+        // fallback: 1/1000th of max (before data arrives or if min==0)
+        return obsMin > 0 ? obsMin : (obsMax > 0 ? obsMax / 1000.0 : 1e-6)
+    }
     readonly property real _deadZone: 0.04   // ~6px at 150px width = "off" zone
 
     function valueToRatio(val) {
