@@ -304,6 +304,14 @@ void CandlestickBatched::setVolumeBarAlpha(int alpha) {
     emit volumeBarAlphaChanged();
 }
 
+void CandlestickBatched::setCandleStyle(int style) {
+    const auto s = static_cast<CandleStyle>(std::clamp(style, 0, 2));
+    if (m_candleStyle == s) return;
+    m_candleStyle = s;
+    markDirty();
+    emit candleStyleChanged();
+}
+
 // ── Viewport computation (GUI thread) ─────────────────────────────────────────
 
 void CandlestickBatched::recomputeViewport() {
@@ -482,12 +490,15 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     const float volBarMaxH  = h - volAreaTop - 2.0f; // 2px bottom margin
 
     // ── Allocate geometry ────────────────────────────────────────────────────
+    // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts).
+    const bool isHollow = (m_candleStyle == CandleStyle::Hollow);
+    const bool isLine   = (m_candleStyle == CandleStyle::Line);
     root->volGeometry->allocate(visCount * 6);
-    root->wickGeometry->allocate(visCount * 6);
-    root->bodyGeometry->allocate(visCount * 6);
+    root->wickGeometry->allocate(isLine ? 0 : visCount * 6);
+    root->bodyGeometry->allocate(isHollow ? visCount * 24 : visCount * 6);
 
     auto* volVerts  = root->volGeometry->vertexDataAsColoredPoint2D();
-    auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
+    auto* wickVerts = isLine ? nullptr : root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
     const uchar wr = static_cast<uchar>(m_wickColor.red());
@@ -503,15 +514,14 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         const float cx  = startX + static_cast<float>(i) * totalWidth;
         const float ccx = cx + scaledBody * 0.5f;
 
-        // ── Wick ──────────────────────────────────────────────────────────────
-        const float wickW = std::max(1.0f, scaledBody * 0.15f);
-        addQuad(wickVerts, ccx - wickW * 0.5f, priceToY(c.high),
-                           ccx + wickW * 0.5f, priceToY(c.low), wr, wg, wb, wa);
+        // ── Wick (skipped in Line mode) ───────────────────────────────────────
+        if (!isLine) {
+            const float wickW = std::max(1.0f, scaledBody * 0.15f);
+            addQuad(wickVerts, ccx - wickW * 0.5f, priceToY(c.high),
+                               ccx + wickW * 0.5f, priceToY(c.low), wr, wg, wb, wa);
+        }
 
         // ── Body — SEC signal color override ─────────────────────────────────
-        const float bodyY0 = priceToY(std::max(c.open, c.close));
-        const float bodyY1 = priceToY(std::min(c.open, c.close));
-
         QColor bodyColor;
         const auto it = m_signalOverrides.find(i);
         if (it != m_signalOverrides.end()) {
@@ -526,11 +536,40 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         }
         if (hovered) bodyColor = bodyColor.lighter(130);
 
-        addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY1,
-                static_cast<uchar>(bodyColor.red()),
-                static_cast<uchar>(bodyColor.green()),
-                static_cast<uchar>(bodyColor.blue()),
-                static_cast<uchar>(bodyColor.alpha()));
+        const uchar br = static_cast<uchar>(bodyColor.red());
+        const uchar bg = static_cast<uchar>(bodyColor.green());
+        const uchar bb = static_cast<uchar>(bodyColor.blue());
+        const uchar ba = static_cast<uchar>(bodyColor.alpha());
+
+        if (isLine) {
+            // Line mode: 2px horizontal tick at close price
+            const float closeY = priceToY(c.close);
+            addQuad(bodyVerts, cx, closeY - 1.0f, cx + scaledBody, closeY + 1.0f, br, bg, bb, ba);
+        } else if (isHollow && bullish) {
+            // Hollow mode: bullish candles draw as border outline only
+            const float bodyY0 = priceToY(std::max(c.open, c.close));
+            const float bodyY1 = priceToY(std::min(c.open, c.close));
+            const float bw = std::max(1.0f, scaledBody * 0.12f); // border thickness
+            // Top
+            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY0 + bw, br, bg, bb, ba);
+            // Bottom
+            addQuad(bodyVerts, cx, bodyY1 - bw, cx + scaledBody, bodyY1, br, bg, bb, ba);
+            // Left
+            addQuad(bodyVerts, cx, bodyY0, cx + bw, bodyY1, br, bg, bb, ba);
+            // Right
+            addQuad(bodyVerts, cx + scaledBody - bw, bodyY0, cx + scaledBody, bodyY1, br, bg, bb, ba);
+        } else {
+            // Normal filled body (also used for bearish candles in Hollow mode)
+            const float bodyY0 = priceToY(std::max(c.open, c.close));
+            const float bodyY1 = priceToY(std::min(c.open, c.close));
+            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY1, br, bg, bb, ba);
+            // Pad remaining 3 quads for hollow-mode allocation (degenerate, same point)
+            if (isHollow) {
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
+            }
+        }
 
         // ── Volume bar (bottom region, semi-transparent) ───────────────────
         const float volFrac = static_cast<float>(c.volume / maxVol);

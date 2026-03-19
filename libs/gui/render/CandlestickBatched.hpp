@@ -26,6 +26,9 @@ public:
     enum class SignalType { None = 0, Buy = 1, Sell = 2, Mixed = 3 };
     Q_ENUM(SignalType)
 
+    enum class CandleStyle { Candle = 0, Hollow = 1, Line = 2 };
+    Q_ENUM(CandleStyle)
+
 private:
     Q_PROPERTY(bool lodEnabled READ lodEnabled WRITE setLodEnabled NOTIFY lodEnabledChanged)
     Q_PROPERTY(float candleWidth READ candleWidth WRITE setCandleWidth NOTIFY candleWidthChanged)
@@ -50,6 +53,8 @@ private:
     Q_PROPERTY(QColor mixedSignalColor READ mixedSignalColor WRITE setMixedSignalColor NOTIFY mixedSignalColorChanged)
     // Alpha (0-255) for inline volume bars; lower = more supplemental feel (default 85)
     Q_PROPERTY(int volumeBarAlpha READ volumeBarAlpha WRITE setVolumeBarAlpha NOTIFY volumeBarAlphaChanged)
+    // Candle rendering style: 0=Candle, 1=Hollow, 2=Line
+    Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
 
 public:
     explicit CandlestickBatched(QQuickItem* parent = nullptr);
@@ -72,6 +77,7 @@ public:
     QColor sellSignalColor()  const { return m_sellSignalColor; }
     QColor mixedSignalColor() const { return m_mixedSignalColor; }
     int    volumeBarAlpha()   const { return m_volumeBarAlpha; }
+    int    candleStyle()      const { return static_cast<int>(m_candleStyle); }
 
     void setLodEnabled(bool enabled);
     void setCandleWidth(float width);
@@ -105,6 +111,7 @@ public:
     void setSellSignalColor(const QColor& color);
     void setMixedSignalColor(const QColor& color);
     void setVolumeBarAlpha(int alpha);
+    void setCandleStyle(int style);
 
 signals:
     void candleCountChanged(int count);
@@ -125,6 +132,7 @@ signals:
     void sellSignalColorChanged();
     void mixedSignalColorChanged();
     void volumeBarAlphaChanged();
+    void candleStyleChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -173,4 +181,5 @@ private:
     QColor m_sellSignalColor = QColor(255,  23,  68, 235);  // bright red
     QColor m_mixedSignalColor= QColor(255, 202,  40, 235);  // amber
     int    m_volumeBarAlpha  = 85;
+    CandleStyle m_candleStyle = CandleStyle::Candle;
 };
