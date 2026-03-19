@@ -690,6 +690,57 @@ void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
   emit heatmapShaderFloorChanged();
 }
 
+void UnifiedGridRenderer::setHeatmapColorPreset(const QString& preset) {
+    using CS = HeatmapOverlayRenderer::ColorStop;
+    struct Preset {
+        std::vector<CS> bid;
+        std::vector<CS> ask;
+        double gamma = 2.0;
+    };
+
+    static const QHash<QString, Preset> kPresets = {
+        // Electric (default): cyan bids, orange asks
+        {"Electric", {
+            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(0,30,60)}, {0.7f, QColor(0,180,220)}, {1.0f, QColor(0,255,255)}},
+            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(60,20,0)}, {0.7f, QColor(220,120,0)}, {1.0f, QColor(255,200,0)}},
+            2.0
+        }},
+        // Fire: dark red → orange → yellow asks; cyan bids stay subtle
+        {"Fire", {
+            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(20,40,80)}, {1.0f, QColor(60,120,200)}},
+            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(80,0,0)}, {0.6f, QColor(200,60,0)}, {0.85f, QColor(255,140,0)}, {1.0f, QColor(255,255,0)}},
+            1.8
+        }},
+        // Ocean: deep blue → teal → white bids; green asks
+        {"Ocean", {
+            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(0,20,80)}, {0.7f, QColor(0,100,180)}, {1.0f, QColor(0,220,255)}},
+            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,60,40)}, {0.8f, QColor(0,180,100)}, {1.0f, QColor(0,255,160)}},
+            2.2
+        }},
+        // Monochrome: white bids, gray asks
+        {"Monochrome", {
+            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(80,80,80)}, {1.0f, QColor(220,220,220)}},
+            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(50,50,50)}, {1.0f, QColor(140,140,140)}},
+            2.0
+        }},
+        // Matrix: green only
+        {"Matrix", {
+            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,40,0)}, {1.0f, QColor(0,255,0)}},
+            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,20,0)}, {1.0f, QColor(0,180,0)}},
+            1.6
+        }},
+    };
+
+    auto it = kPresets.find(preset);
+    if (it == kPresets.end()) {
+        return;
+    }
+    m_heatmapOverlay.setBidGradient(it->bid);
+    m_heatmapOverlay.setAskGradient(it->ask);
+    m_heatmapOverlay.setPaletteGamma(it->gamma);
+    update();
+}
+
 void UnifiedGridRenderer::setPrimaryField(int field) {
   if (m_primaryField == field) {
     return;

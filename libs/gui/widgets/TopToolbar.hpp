@@ -38,6 +38,7 @@ signals:
     void screenshotRequested();
     void liquidityThresholdChanged(double threshold);
     void liquidityLabelModeChanged(int mode);
+    void colorPresetSelected(const QString& preset);
 
 private:
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
@@ -46,6 +47,7 @@ private:
     QLineEdit* m_symbolSearch = nullptr;
     QComboBox* m_timeframeCombo = nullptr;
     QComboBox* m_chartTypeCombo = nullptr;
+    QComboBox* m_colorPresetCombo = nullptr;
     QSlider* m_liquiditySlider = nullptr;
     QComboBox* m_liquidityModeCombo = nullptr;
     QToolButton* m_subscribeButton = nullptr;

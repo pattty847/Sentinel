@@ -129,6 +129,13 @@ TopToolbar::TopToolbar(QWidget* parent)
     addWidget(m_chartTypeCombo);
     connect(m_chartTypeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::chartTypeSelected);
 
+    m_colorPresetCombo = new QComboBox(this);
+    m_colorPresetCombo->addItems({"Electric", "Fire", "Ocean", "Monochrome", "Matrix"});
+    m_colorPresetCombo->setFixedWidth(100);
+    m_colorPresetCombo->setToolTip("Heatmap color palette");
+    addWidget(m_colorPresetCombo);
+    connect(m_colorPresetCombo, &QComboBox::currentTextChanged, this, &TopToolbar::colorPresetSelected);
+
     addSeparator();
 
     QLabel* liqLabel = new QLabel("Liq", this);

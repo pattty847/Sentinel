@@ -323,6 +323,11 @@ void MainWindowGPU::setupUI() {
                 renderer->setProperty("liquidityLabelMode", mode);
             }
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (renderer) renderer->setHeatmapColorPreset(preset);
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
             if (!m_qmlController) return;
