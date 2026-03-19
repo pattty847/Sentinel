@@ -876,6 +876,15 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         m_subscribeButton->setText(connected ? "Subscribe" : "Connect");
         m_subscribeButton->setEnabled(true);
     }
+
+    // Auto-request history when we (re)connect with an existing subscription.
+    if (connected && m_userSubscribed && !m_currentSymbol.isEmpty()) {
+        requestHeatmapHistoryForSymbol(m_currentSymbol);
+        requestFootprintHistoryForSymbol(m_currentSymbol);
+        requestTpoHistoryForSymbol(m_currentSymbol);
+        requestCandleHistoryForSymbol(m_currentSymbol);
+        sLog_App(QString("Auto-requested history on connect: %1").arg(m_currentSymbol));
+    }
 }
 
 bool MainWindowGPU::validateComponents() {
