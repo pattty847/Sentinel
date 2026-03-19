@@ -68,6 +68,7 @@
 #include <QTabWidget>
 #include <QtGlobal>
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace {
@@ -295,9 +296,24 @@ void MainWindowGPU::setupUI() {
         connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityThresholdChanged, this, [this](double value) {
             if (!m_qmlController) return;
             auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (renderer) {
-                renderer->setProperty("heatmapLiquidityThreshold", value);
+            if (!renderer) return;
+            // value is raw 0–1000 slider position.
+            // Convert to log-scaled threshold using the observed data range.
+            // Dead zone: bottom 4% of slider (value < 40) = threshold 0 (off).
+            constexpr double kSliderMax = 1000.0;
+            constexpr double kDeadZone  = 0.04;
+            const double ratio = value / kSliderMax;
+            double threshold = 0.0;
+            if (ratio >= kDeadZone) {
+                const double obsMin = renderer->heatmapMinObservedLiquidity();
+                const double obsMax = renderer->heatmapMaxObservedLiquidity();
+                const double minVal = (obsMin > 0.0 && obsMin < obsMax) ? obsMin : (obsMax > 0.0 ? obsMax / 1000.0 : 1e-9);
+                const double maxVal = obsMax > 0.0 ? obsMax : 1e-6;
+                const double r = (ratio - kDeadZone) / (1.0 - kDeadZone);
+                const double logSpan = std::log(maxVal / minVal);
+                threshold = minVal * std::exp(r * logSpan);
             }
+            renderer->setProperty("heatmapLiquidityThreshold", threshold);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityLabelModeChanged, this, [this](int mode) {
             if (!m_qmlController) return;
