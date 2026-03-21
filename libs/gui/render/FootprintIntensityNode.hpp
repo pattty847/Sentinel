@@ -28,6 +28,9 @@ public:
     void setMagnitudeScale(float scale) { m_magnitudeScale = scale; }
     void setMagnitudeGamma(float gamma) { m_magnitudeGamma = gamma; }
     void setTimeOffset(float offset) { m_timeOffset = offset; }
+    void setCellDebugEnabled(float enabled) { m_cellDebugEnabled = enabled; }
+    void setCellBorderFrac(float frac) { m_cellBorderFrac = frac; }
+    void setCellBorderAlpha(float alpha) { m_cellBorderAlpha = alpha; }
     void enqueueColumn(int x, QByteArray data);
     void takePendingUploads(std::vector<std::pair<int, QByteArray>>& out);
 
@@ -39,6 +42,9 @@ public:
     float magnitudeScale() const { return m_magnitudeScale; }
     float magnitudeGamma() const { return m_magnitudeGamma; }
     float timeOffset() const { return m_timeOffset; }
+    float cellDebugEnabled() const { return m_cellDebugEnabled; }
+    float cellBorderFrac() const { return m_cellBorderFrac; }
+    float cellBorderAlpha() const { return m_cellBorderAlpha; }
 
 private:
     QSGTexture* m_texture = nullptr;
@@ -49,6 +55,9 @@ private:
     float m_magnitudeScale = 1.0f;
     float m_magnitudeGamma = 0.9f;
     float m_timeOffset = 0.0f;
+    float m_cellDebugEnabled = 0.0f;
+    float m_cellBorderFrac = 0.0f;
+    float m_cellBorderAlpha = 0.0f;
     std::mutex m_uploadMutex;
     std::vector<std::pair<int, QByteArray>> m_pendingUploads;
 };
@@ -67,6 +76,7 @@ public:
     void setMagnitudeScale(float scale);
     void setMagnitudeGamma(float gamma);
     void setTimeOffset(float offset);
+    void setCellDebug(bool enabled, float borderFrac = 0.0f, float borderAlpha = 0.0f);
     void setTexture(QSGTexture* texture);
     void enqueueColumn(int x, QByteArray data);
     bool hasTexture() const { return m_material.texture() != nullptr; }

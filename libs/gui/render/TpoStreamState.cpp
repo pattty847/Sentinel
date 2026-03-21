@@ -12,6 +12,7 @@
  */
 #include "TpoStreamState.hpp"
 #include "TpoDebugTrace.hpp"
+#include "SentinelLogging.hpp"
 
 #include "../../core/servermodel/SessionManager.hpp"
 
@@ -19,6 +20,29 @@
 #include <cmath>
 #include <sstream>
 #include <unordered_set>
+
+namespace {
+struct RowStats {
+    int occupied = 0;
+    int firstRow = -1;
+    int lastRow = -1;
+};
+
+RowStats summarizeRows(const QByteArray& data) {
+    RowStats stats;
+    for (int i = 0; i < data.size(); ++i) {
+        if (data.at(i) == '\0') {
+            continue;
+        }
+        ++stats.occupied;
+        if (stats.firstRow < 0) {
+            stats.firstRow = i;
+        }
+        stats.lastRow = i;
+    }
+    return stats;
+}
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Session configuration
@@ -147,6 +171,27 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         if (col.size() != gridHeight) {
             col = QByteArray(gridHeight, '\0');
         }
+        const RowStats beforeStats = summarizeRows(col);
+        const RowStats incomingStats = summarizeRows(data);
+        if (incomingStats.occupied == 0 && beforeStats.occupied > 0) {
+            sentinel::log_file::appendLine(
+                "/tmp/sentinel_tpo_client.log",
+                QString("TPO ingest bucket preserved existing rows: start=%1 end=%2 tfMs=%3 period=%4 incomingRows=0 prevRows=%5 prevSpan=[%6..%7]")
+                    .arg(bucketStartMs)
+                    .arg(bucketEndMs)
+                    .arg(timeframeMs)
+                    .arg(boundedPeriod)
+                    .arg(beforeStats.occupied)
+                    .arg(beforeStats.firstRow)
+                    .arg(beforeStats.lastRow));
+            m_writeColumn = boundedPeriod;
+            if (m_filledColumns < m_gridWidth) {
+                m_filledColumns = std::max(m_filledColumns, boundedPeriod + 1);
+            }
+            m_timeframeMs = timeframeMs;
+            m_lastSliceStartMs = bucketStartMs;
+            return false;
+        }
         bool changed = false;
         for (int row = 0; row < gridHeight; ++row) {
             const char letter = data.at(row);
@@ -158,6 +203,24 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         if (changed) {
             touchedColumns.insert(boundedPeriod);
         }
+        const RowStats afterStats = summarizeRows(col);
+        sentinel::log_file::appendLine(
+            "/tmp/sentinel_tpo_client.log",
+            QString("TPO ingest bucket: start=%1 end=%2 tfMs=%3 period=%4 incomingRows=%5 incomingSpan=[%6..%7] prevRows=%8 prevSpan=[%9..%10] resultRows=%11 resultSpan=[%12..%13] shrank=%14")
+                .arg(bucketStartMs)
+                .arg(bucketEndMs)
+                .arg(timeframeMs)
+                .arg(boundedPeriod)
+                .arg(incomingStats.occupied)
+                .arg(incomingStats.firstRow)
+                .arg(incomingStats.lastRow)
+                .arg(beforeStats.occupied)
+                .arg(beforeStats.firstRow)
+                .arg(beforeStats.lastRow)
+                .arg(afterStats.occupied)
+                .arg(afterStats.firstRow)
+                .arg(afterStats.lastRow)
+                .arg((beforeStats.occupied > afterStats.occupied) ? 1 : 0));
     } else {
         // ── Mode A: rank-indexed horizontal profile ──────────────────────────
         // Column[rank] holds all price levels that have been visited at least

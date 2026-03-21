@@ -11,6 +11,7 @@ layout(std140, binding = 0) uniform buf {
     vec4 bidColor;
     vec4 askColor;
     vec4 tuning;
+    vec4 cellDebug;
 };
 
 void main() {
@@ -27,5 +28,17 @@ void main() {
     vec3 polarity = mix(bidColor.rgb, askColor.rgb, step(0.0, signedDelta));
     vec3 mapped = mix(neutralColor.rgb, polarity, shaped);
     float intensity = clamp(shaped, 0.0, 1.0);
-    fragColor = vec4(mapped, neutralColor.a * intensity);
+    vec4 outColor = vec4(mapped, neutralColor.a * intensity);
+    if (cellDebug.x > 0.5) {
+        vec2 texSize = vec2(textureSize(dataTex, 0));
+        vec2 cellPos = fract(uv * texSize);
+        float edgeDist = min(min(cellPos.x, 1.0 - cellPos.x),
+                             min(cellPos.y, 1.0 - cellPos.y));
+        float borderMask = 1.0 - step(cellDebug.y, edgeDist);
+        if (borderMask > 0.0) {
+            outColor.rgb = mix(outColor.rgb, vec3(1.0), clamp(cellDebug.z, 0.0, 1.0) * borderMask);
+            outColor.a = max(outColor.a, borderMask * clamp(cellDebug.z, 0.0, 1.0));
+        }
+    }
+    fragColor = outColor;
 }

@@ -323,6 +323,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     m_node->setNeutralFloor(0.05f);   // 0x8000 has magnitude≈0.00002; 0.05 culls background reliably
     m_node->setMagnitudeScale(1.0f);  // letters span [0.20, 0.88]; no extra boost needed
     m_node->setMagnitudeGamma(0.5f);  // sqrt lift: 'A' alpha≈0.45, 'Z' alpha≈0.94
+    m_node->setCellDebug(!qEnvironmentVariableIsSet("SENTINEL_TPO_BOX_DEBUG_OFF"),
+                         0.14f,
+                         0.85f);
 
     Q_UNUSED(forceFull);
     Q_UNUSED(timeOffset);

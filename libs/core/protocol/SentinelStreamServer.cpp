@@ -117,6 +117,27 @@ double resolveMidPrice(const LiveOrderBook& book) {
     }
     return (bestBid > 0.0) ? bestBid : bestAsk;
 }
+
+struct TpoLetterStats {
+    int occupiedRows = 0;
+    int firstRow = -1;
+    int lastRow = -1;
+};
+
+TpoLetterStats summarizeTpoLetters(const QByteArray& letters) {
+    TpoLetterStats stats;
+    for (int i = 0; i < letters.size(); ++i) {
+        if (letters.at(i) == '\0') {
+            continue;
+        }
+        ++stats.occupiedRows;
+        if (stats.firstRow < 0) {
+            stats.firstRow = i;
+        }
+        stats.lastRow = i;
+    }
+    return stats;
+}
 }
 
 class Session : public std::enable_shared_from_this<Session> {
@@ -248,6 +269,71 @@ class Session : public std::enable_shared_from_this<Session> {
             outMaxPrice = outMinPrice + span;
         }
         return outMaxPrice > outMinPrice && outTickSize > 0.0;
+    }
+
+    bool resolveTpoGridAndRange(const std::string& symbol,
+                                int& outGridWidth,
+                                int& outGridHeight,
+                                double& outTickSize,
+                                double& outMinPrice,
+                                double& outMaxPrice) {
+        if (!owner_) {
+            return false;
+        }
+        const auto& cfg = owner_->serverConfig();
+        int64_t heatmapTfMs = 0;
+        if (cfg.heatmap.activeTimeframeMs > 0) {
+            heatmapTfMs = cfg.heatmap.activeTimeframeMs;
+        } else if (!cfg.heatmap.timeframesMs.empty()) {
+            heatmapTfMs = cfg.heatmap.timeframesMs.front();
+        } else {
+            heatmapTfMs = 1000;
+        }
+
+        std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
+        int histGridWidth = 0;
+        int histGridHeight = 0;
+        if (model_.getHeatmapHistory(symbol, heatmapTfMs, 0, 1, histGridWidth, histGridHeight, columns) &&
+            !columns.empty()) {
+            const auto& latest = columns.back();
+            outGridWidth = std::max(1, histGridWidth);
+            outGridHeight = std::max(1, histGridHeight);
+            outTickSize = (latest.tickSize > 0.0) ? latest.tickSize : cfg.heatmap.tickSize;
+            outMinPrice = latest.minPrice;
+            outMaxPrice = latest.maxPrice;
+            if (outTickSize > 0.0 && outMaxPrice > outMinPrice) {
+                sentinel::log_file::appendLine(
+                    "/tmp/sentinel_tpo_server.log",
+                    QString("TPO bootstrap range from heatmap history: symbol=%1 tfMs=%2 grid=%3x%4 range=[%5..%6] tick=%7")
+                        .arg(QString::fromStdString(symbol))
+                        .arg(heatmapTfMs)
+                        .arg(outGridWidth)
+                        .arg(outGridHeight)
+                        .arg(outMinPrice, 0, 'f', 4)
+                        .arg(outMaxPrice, 0, 'f', 4)
+                        .arg(outTickSize, 0, 'g', 10));
+                return true;
+            }
+        }
+
+        const bool ok = resolveFootprintGridAndRange(symbol,
+                                                     outGridWidth,
+                                                     outGridHeight,
+                                                     outTickSize,
+                                                     outMinPrice,
+                                                     outMaxPrice);
+        if (ok) {
+            sentinel::log_file::appendLine(
+                "/tmp/sentinel_tpo_server.log",
+                QString("TPO bootstrap range fallback to live book: symbol=%1 grid=%2x%3 range=[%4..%5] tick=%6")
+                    .arg(QString::fromStdString(symbol))
+                    .arg(outGridWidth)
+                    .arg(outGridHeight)
+                    .arg(outMinPrice, 0, 'f', 4)
+                    .arg(outMaxPrice, 0, 'f', 4)
+                    .arg(outTickSize, 0, 'g', 10));
+        }
+        return ok;
     }
 
     bool buildFootprintDeltaWindow(const std::string& symbol,
@@ -409,6 +495,15 @@ class Session : public std::enable_shared_from_this<Session> {
                              << " error=" << QString::fromStdString(res.error));
                 continue;
             }
+            sentinel::log_file::appendLine(
+                "/tmp/sentinel_tpo_server.log",
+                QString("TPO bootstrap candle chunk: symbol=%1 tfSec=%2 chunk=[%3..%4] limit=%5 returned=%6")
+                    .arg(QString::fromStdString(symbol))
+                    .arg(timeframeSec)
+                    .arg(cursorSec)
+                    .arg(chunkEndSec)
+                    .arg(limit)
+                    .arg(static_cast<int>(res.candles.size())));
             for (const auto& bar : res.candles) {
                 if (bar.timestamp_ms < startMs || bar.timestamp_ms >= endMs) {
                     continue;
@@ -430,6 +525,14 @@ class Session : public std::enable_shared_from_this<Session> {
                   [](const OHLCVBar& a, const OHLCVBar& b) {
                       return a.timestamp_ms < b.timestamp_ms;
                   });
+        sentinel::log_file::appendLine(
+            "/tmp/sentinel_tpo_server.log",
+            QString("TPO bootstrap candle summary: symbol=%1 tfSec=%2 window=[%3..%4] kept=%5")
+                .arg(QString::fromStdString(symbol))
+                .arg(timeframeSec)
+                .arg(startSec)
+                .arg(endSec)
+                .arg(static_cast<int>(out.size())));
         return true;
     }
 
@@ -534,7 +637,7 @@ class Session : public std::enable_shared_from_this<Session> {
         double tickSize = 0.0;
         double minPrice = 0.0;
         double maxPrice = 0.0;
-        if (!resolveFootprintGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
+        if (!resolveTpoGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
             return;
         }
 
@@ -667,6 +770,19 @@ class Session : public std::enable_shared_from_this<Session> {
                 candlesByBucket[bucketStart].push_back(bar);
             }
         }
+        sentinel::log_file::appendLine(
+            "/tmp/sentinel_tpo_server.log",
+            QString("TPO history bootstrap: symbol=%1 session=[%2..%3] tfMs=%4 periods=%5 requested=%6 firstStart=%7 availableEnd=%8 minuteCandles=%9 bucketsWithCandles=%10")
+                .arg(QString::fromStdString(symbol))
+                .arg(sessionStart)
+                .arg(sessionEnd)
+                .arg(timeframeMs)
+                .arg(payloadGridWidth)
+                .arg(effectiveCount)
+                .arg(firstStart)
+                .arg(availableEnd)
+                .arg(static_cast<int>(minuteCandles.size()))
+                .arg(static_cast<int>(candlesByBucket.size())));
 
         nlohmann::json payload;
         payload["type"] = "tpo_history_chunk";
@@ -700,6 +816,19 @@ class Session : public std::enable_shared_from_this<Session> {
                     fillTpoRowsFromBar(bar, gridHeight, maxPrice, tickSize, letter, letters);
                 }
             }
+            const auto stats = summarizeTpoLetters(letters);
+            const int minuteCount = (it != candlesByBucket.end()) ? static_cast<int>(it->second.size()) : 0;
+            sentinel::log_file::appendLine(
+                "/tmp/sentinel_tpo_server.log",
+                QString("TPO bootstrap bucket: symbol=%1 start=%2 end=%3 tfMs=%4 minuteCandles=%5 occupiedRows=%6 rowSpan=[%7..%8]")
+                    .arg(QString::fromStdString(symbol))
+                    .arg(bucketStart)
+                    .arg(bucketEnd)
+                    .arg(timeframeMs)
+                    .arg(minuteCount)
+                    .arg(stats.occupiedRows)
+                    .arg(stats.firstRow)
+                    .arg(stats.lastRow));
             nlohmann::json item;
             item["time_start"] = bucketStart;
             item["time_end"] = bucketEnd;
@@ -1409,6 +1538,19 @@ public:
                                   tpoLetters)) {
             return;
         }
+        const auto liveTpoStats = summarizeTpoLetters(tpoLetters);
+        sentinel::log_file::appendLine(
+            "/tmp/sentinel_tpo_server.log",
+            QString("TPO live bucket emit: symbol=%1 start=%2 end=%3 tfMs=%4 occupiedRows=%5 rowSpan=[%6..%7] heatmapSlice=[%8..%9]")
+                .arg(QString::fromStdString(sym))
+                .arg(tpoBucketStart)
+                .arg(tpoBucketEnd)
+                .arg(tpoTimeframeMs)
+                .arg(liveTpoStats.occupiedRows)
+                .arg(liveTpoStats.firstRow)
+                .arg(liveTpoStats.lastRow)
+                .arg(slice.bucketStartMs)
+                .arg(slice.bucketEndMs));
 
         nlohmann::json tpo;
         tpo["type"] = "tpo_slice";
