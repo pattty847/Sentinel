@@ -11,6 +11,8 @@
 #include <QByteArray>
 #include <QSizeF>
 #include <QColor>
+#include <QPointer>
+#include <QMetaObject>
 #include <cstdint>
 #include <vector>
 #include <array>
@@ -21,6 +23,7 @@
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "render/GridViewState.hpp"
+#include "render/AxisLayout.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "render/ChartTextRenderer.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
@@ -37,6 +40,8 @@
 
 class DataProcessor;
 class HeatmapIntensityNode;
+class QQuickWindow;
+class QScreen;
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_OBJECT
@@ -81,11 +86,15 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
+    Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
     Q_PROPERTY(double heatmapMaxObservedLiquidity READ heatmapMaxObservedLiquidity NOTIFY heatmapMaxObservedLiquidityChanged)
     Q_PROPERTY(double heatmapMinObservedLiquidity READ heatmapMinObservedLiquidity NOTIFY heatmapMinObservedLiquidityChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
     Q_PROPERTY(QObject* priceAxisSource READ priceAxisSource WRITE setPriceAxisSource NOTIFY axisSourcesChanged)
     Q_PROPERTY(QObject* timeAxisSource READ timeAxisSource WRITE setTimeAxisSource NOTIFY axisSourcesChanged)
+    Q_PROPERTY(double effectiveAxisLabelPx READ effectiveAxisLabelPx NOTIFY axisLayoutChanged)
+    Q_PROPERTY(int priceAxisWidthPx READ priceAxisWidthPx NOTIFY axisLayoutChanged)
+    Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
 
 private:
     struct FrameViewportSnapshot {
@@ -136,6 +145,7 @@ private:
     bool m_showModeFlagsOverlay = false;
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
+    int m_candleStyle = 0;
     double m_heatmapMaxObservedLiquidity = 0.0;
     double m_heatmapMinObservedLiquidity = std::numeric_limits<double>::max();
     QTimer* m_thresholdRebuildTimer = nullptr;
@@ -180,6 +190,13 @@ private:
         bool isMajorTick = false;
     };
 
+    struct AxisLayoutSnapshot {
+        float axisLabelPx = static_cast<float>(AxisLayout::kAutoAxisLabelBasePx);
+        float axisScale = 1.0f;
+        int priceAxisWidthPx = 90;
+        int timeAxisHeightPx = 30;
+    };
+
     ChartTextAtlas m_chartTextAtlas;
     bool m_chartTextAtlasBuilt = false;
     ChartTextRenderer m_chartTextRenderer;
@@ -196,6 +213,15 @@ private:
     mutable std::mutex m_axisSnapshotMutex;
     std::vector<AxisTickSnapshot> m_priceAxisTicks;
     std::vector<AxisTickSnapshot> m_timeAxisTicks;
+    mutable std::mutex m_axisLayoutMutex;
+    AxisLayoutSnapshot m_axisLayoutSnapshot;
+    double m_effectiveAxisLabelPx = AxisLayout::kAutoAxisLabelBasePx;
+    int m_priceAxisWidthPx = 90;
+    int m_timeAxisHeightPx = 30;
+    int m_axisLabelPxOverride = 0;
+    QPointer<QScreen> m_axisLayoutWindowScreen;
+    QMetaObject::Connection m_axisLayoutWindowConnection;
+    QMetaObject::Connection m_axisLayoutScreenConnection;
     FootprintOverlayRenderer m_footprintOverlay;
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
@@ -242,6 +268,8 @@ public:
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
+    int candleStyle() const { return m_candleStyle; }
+    void setCandleStyle(int style);
     double heatmapMaxObservedLiquidity() const { return m_heatmapMaxObservedLiquidity; }
     double heatmapMinObservedLiquidity() const {
         return m_heatmapMinObservedLiquidity == std::numeric_limits<double>::max()
@@ -267,6 +295,9 @@ public:
     QObject* viewState() const { return m_viewState.get(); }
     QObject* priceAxisSource() const { return m_priceAxisSource; }
     QObject* timeAxisSource() const { return m_timeAxisSource; }
+    double effectiveAxisLabelPx() const { return m_effectiveAxisLabelPx; }
+    int priceAxisWidthPx() const { return m_priceAxisWidthPx; }
+    int timeAxisHeightPx() const { return m_timeAxisHeightPx; }
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -388,6 +419,7 @@ signals:
     void showModeFlagsOverlayChanged();
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
+    void candleStyleChanged();
     void heatmapMaxObservedLiquidityChanged();
     void heatmapMinObservedLiquidityChanged();
     void heatmapBackgroundColorChanged();
@@ -402,6 +434,7 @@ signals:
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
     void axisSourcesChanged();
+    void axisLayoutChanged();
     void liveRenderTick();
 
 protected:
@@ -435,6 +468,8 @@ private:
                        AxisModel*& target,
                        QObject* source);
     void refreshAxisTickSnapshot(AxisModel* model, std::vector<AxisTickSnapshot>& storage);
+    void refreshAxisLayout();
+    void bindAxisLayoutWindow(class QQuickWindow* window);
     void submitAxisText();
     bool ingestHeatmapColumnEvent(const HeatmapColumnEvent& event);
     void connectDataProcessorSignals();

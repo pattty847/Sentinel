@@ -329,13 +329,11 @@ void MainWindowGPU::setupUI() {
             if (renderer) renderer->setHeatmapColorPreset(preset);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::chartTypeSelected, this, [this](const QString& type) {
-            if (!m_qquickView) return;
-            auto* candle = m_qquickView->rootObject()
-                ? m_qquickView->rootObject()->findChild<QObject*>("candlestickRenderer")
-                : nullptr;
-            if (!candle) return;
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (!renderer) return;
             const int style = (type == "Hollow") ? 1 : (type == "Line") ? 2 : 0;
-            candle->setProperty("candleStyle", style);
+            renderer->setCandleStyle(style);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {

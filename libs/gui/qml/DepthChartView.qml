@@ -62,8 +62,8 @@ Rectangle {
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
-        anchors.rightMargin: 90
-        anchors.bottomMargin: 30
+        anchors.rightMargin: unifiedGridRenderer.priceAxisWidthPx
+        anchors.bottomMargin: unifiedGridRenderer.timeAxisHeightPx
         color: root.color
         visible: true
         z: 0
@@ -73,8 +73,8 @@ Rectangle {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
         anchors.fill: parent
-        anchors.rightMargin: 90
-        anchors.bottomMargin: 30
+        anchors.rightMargin: priceAxisChrome.width
+        anchors.bottomMargin: timeAxisChrome.height
         visible: true
         intensityScale: 1.0
         maxCells: 500000
@@ -101,6 +101,7 @@ Rectangle {
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
         timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))
+        candleStyle: unifiedGridRenderer.candleStyle
         z: 2
     }
 
@@ -556,20 +557,24 @@ Rectangle {
     }
     
     Rectangle {
-        id: priceAxis
+        id: priceAxisChrome
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 30
-        anchors.topMargin: 10
-        width: 90
+        anchors.bottom: axisCorner.top
+        width: unifiedGridRenderer.priceAxisWidthPx
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
-        z: 5
-        
+        clip: true
+        z: 0
+    }
+
+    Item {
+        id: priceAxis
+        anchors.fill: priceAxisChrome
         enabled: true
         clip: true
+        z: 5
 
         PriceAxisModel {
             id: priceAxisModel
@@ -615,19 +620,24 @@ Rectangle {
     }
     
     Rectangle {
-        id: timeAxis
+        id: timeAxisChrome
         anchors.left: parent.left
-        anchors.right: parent.right
+        anchors.right: axisCorner.left
         anchors.bottom: parent.bottom  
-        anchors.rightMargin: 90
-        height: 30
+        height: unifiedGridRenderer.timeAxisHeightPx
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
-        z: 2
-        
+        clip: true
+        z: 0
+    }
+
+    Item {
+        id: timeAxis
+        anchors.fill: timeAxisChrome
         enabled: true
         clip: true
+        z: 5
 
         TimeAxisModel {
             id: timeAxisModel
@@ -675,12 +685,12 @@ Rectangle {
         id: axisCorner
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        width: 90
-        height: 30
+        width: unifiedGridRenderer.priceAxisWidthPx
+        height: unifiedGridRenderer.timeAxisHeightPx
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
-        z: 6
+        z: 0
     }
 
     Rectangle {

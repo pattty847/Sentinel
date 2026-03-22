@@ -33,6 +33,8 @@ class CandlestickOverlayItem : public QQuickItem {
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
     Q_PROPERTY(QString symbol READ symbol WRITE setSymbol NOTIFY symbolChanged)
     Q_PROPERTY(int timeframeSec READ timeframeSec WRITE setTimeframeSec NOTIFY timeframeSecChanged)
+    // 0=Candle, 1=Hollow, 2=Line
+    Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
 
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
@@ -45,12 +47,15 @@ public:
     void setSymbol(const QString& symbol);
     int timeframeSec() const { return m_timeframeSec; }
     void setTimeframeSec(int sec);
+    int candleStyle() const { return m_candleStyle; }
+    void setCandleStyle(int style);
 
 signals:
     void candleBufferChanged();
     void mappingProviderChanged();
     void symbolChanged();
     void timeframeSecChanged();
+    void candleStyleChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -80,5 +85,6 @@ private:
 
     QString m_symbol;
     int m_timeframeSec = 1;
+    int m_candleStyle = 0; // 0=Candle, 1=Hollow, 2=Line
     std::vector<CandleOverlayBar> m_visibleCandles;
 };

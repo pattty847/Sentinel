@@ -224,6 +224,14 @@ void CandlestickOverlayItem::setTimeframeSec(int sec) {
     emit timeframeSecChanged();
 }
 
+void CandlestickOverlayItem::setCandleStyle(int style) {
+    style = std::clamp(style, 0, 2);
+    if (m_candleStyle == style) return;
+    m_candleStyle = style;
+    markGeometryDirty();
+    emit candleStyleChanged();
+}
+
 void CandlestickOverlayItem::connectCandleSignals() {
     if (!m_candleBuffer) {
         return;
@@ -447,9 +455,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    root->wickGeometry->allocate(visibleCount * 6);
-    root->bodyGeometry->allocate(visibleCount * 6);
-    auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
+    const bool isHollow = (m_candleStyle == 1);
+    const bool isLine   = (m_candleStyle == 2);
+    // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
+    root->wickGeometry->allocate(isLine ? 0 : visibleCount * 6);
+    root->bodyGeometry->allocate(isHollow ? visibleCount * 24 : visibleCount * 6);
+    auto* wickVerts = isLine ? nullptr : root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
     const uchar wickR = 240;
@@ -482,9 +493,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const float wickX1 = centerX + wickWidth * 0.5f;
 
         // Y: price → screen via TimeAxisMapping (pan already baked in)
-        const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
-        const float yLowF  = static_cast<float>(mapping.priceToScreenY(c.low));
-        const float yOpenF = static_cast<float>(mapping.priceToScreenY(c.open));
+        const float yHighF  = static_cast<float>(mapping.priceToScreenY(c.high));
+        const float yLowF   = static_cast<float>(mapping.priceToScreenY(c.low));
+        const float yOpenF  = static_cast<float>(mapping.priceToScreenY(c.open));
         const float yCloseF = static_cast<float>(mapping.priceToScreenY(c.close));
         float bodyY0 = std::min(yOpenF, yCloseF);
         float bodyY1 = std::max(yOpenF, yCloseF);
@@ -494,11 +505,32 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             bodyY1 = mid + 0.75f;
         }
 
-        addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
-        if (bullish) {
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bullR, bullG, bullB, bullA);
+        const uchar br = bullish ? bullR : bearR;
+        const uchar bg = bullish ? bullG : bearG;
+        const uchar bb = bullish ? bullB : bearB;
+        const uchar ba = bullish ? bullA : bearA;
+
+        if (isLine) {
+            // Line: 2px tick at close price, no wicks
+            addQuad(bodyVerts, bodyX0, yCloseF - 1.0f, bodyX1, yCloseF + 1.0f, br, bg, bb, ba);
+        } else if (isHollow && bullish) {
+            // Hollow bullish: border outline only (4 quads)
+            addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
+            const float bw = std::max(1.0f, bodyWidth * 0.12f);
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
+            addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left
+            addQuad(bodyVerts, bodyX1 - bw, bodyY0, bodyX1, bodyY1, br, bg, bb, ba); // right
         } else {
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bearR, bearG, bearB, bearA);
+            // Normal filled body (also bearish in Hollow mode)
+            addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
+            if (isHollow) {
+                // Pad 3 unused body quads with degenerate (invisible) entries to maintain allocation
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+            }
         }
     }
 

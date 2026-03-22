@@ -15,6 +15,8 @@
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <QSGVertexColorMaterial>
+#include <QQuickWindow>
+#include <QScreen>
 #include <QStringList>
 #include <QThread>
 #include <QTimer>
@@ -60,6 +62,8 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   setFlag(ItemAcceptsInputMethod, true);
 
   setAcceptHoverEvents(false); // Reduce event capture
+  connect(this, &QQuickItem::windowChanged, this,
+          &UnifiedGridRenderer::bindAxisLayoutWindow);
 
   init();
 }
@@ -148,8 +152,11 @@ void UnifiedGridRenderer::syncAxisTicks(
                                   [refresh]() { refresh(); }));
     refresh();
   } else {
-    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-    storage.clear();
+    {
+      std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
+      storage.clear();
+    }
+    refreshAxisLayout();
     update();
   }
 
@@ -158,18 +165,109 @@ void UnifiedGridRenderer::syncAxisTicks(
 
 void UnifiedGridRenderer::refreshAxisTickSnapshot(
     AxisModel *model, std::vector<AxisTickSnapshot> &storage) {
-  std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-  storage.clear();
-  if (!model) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
+    storage.clear();
+    if (model) {
+      std::vector<AxisModel::TickSnapshot> ticks;
+      model->copyTicks(ticks);
+      storage.reserve(ticks.size());
+      for (const auto &tick : ticks) {
+        storage.push_back({tick.position, tick.label, tick.isMajorTick});
+      }
+    }
+  }
+  refreshAxisLayout();
+}
+
+void UnifiedGridRenderer::bindAxisLayoutWindow(QQuickWindow *window) {
+  if (m_axisLayoutWindowConnection) {
+    disconnect(m_axisLayoutWindowConnection);
+    m_axisLayoutWindowConnection = {};
+  }
+  if (m_axisLayoutScreenConnection) {
+    disconnect(m_axisLayoutScreenConnection);
+    m_axisLayoutScreenConnection = {};
+  }
+  m_axisLayoutWindowScreen.clear();
+
+  auto bindScreen = [this](QScreen *screen) {
+    if (m_axisLayoutScreenConnection) {
+      disconnect(m_axisLayoutScreenConnection);
+      m_axisLayoutScreenConnection = {};
+    }
+    m_axisLayoutWindowScreen = screen;
+    if (screen) {
+      m_axisLayoutScreenConnection =
+          connect(screen, &QScreen::logicalDotsPerInchChanged, this,
+                  [this](qreal) { refreshAxisLayout(); });
+    }
+    refreshAxisLayout();
+  };
+
+  if (window) {
+    m_axisLayoutWindowConnection =
+        connect(window, &QQuickWindow::screenChanged, this, bindScreen);
+    bindScreen(window->screen());
+  } else {
+    refreshAxisLayout();
+  }
+}
+
+void UnifiedGridRenderer::refreshAxisLayout() {
+  int envAxisLabelPx = 0;
+  envIntValue("SENTINEL_AXIS_LABEL_PX", envAxisLabelPx);
+
+  double logicalDpiY = 96.0;
+  if (QQuickWindow *itemWindow = window(); itemWindow && itemWindow->screen()) {
+    logicalDpiY = itemWindow->screen()->logicalDotsPerInchY();
+  } else if (m_axisLayoutWindowScreen) {
+    logicalDpiY = m_axisLayoutWindowScreen->logicalDotsPerInchY();
   }
 
-  std::vector<AxisModel::TickSnapshot> ticks;
-  model->copyTicks(ticks);
-  storage.reserve(ticks.size());
-  for (const auto &tick : ticks) {
-    storage.push_back({tick.position, tick.label, tick.isMajorTick});
+  const int resolvedLabelPx = AxisLayout::resolveEffectiveAxisLabelPx(
+      logicalDpiY, m_axisLabelPxOverride, envAxisLabelPx);
+  const float axisScale =
+      (m_chartTextAtlas.fontPx() > 0)
+          ? (static_cast<float>(resolvedLabelPx) /
+             static_cast<float>(m_chartTextAtlas.fontPx()))
+          : 1.0f;
+
+  std::vector<QString> priceLabels;
+  {
+    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
+    priceLabels.reserve(m_priceAxisTicks.size());
+    for (const auto &tick : m_priceAxisTicks) {
+      if (!tick.label.isEmpty()) {
+        priceLabels.push_back(tick.label);
+      }
+    }
   }
+
+  const int nextPriceAxisWidth = AxisLayout::measurePriceAxisWidthPx(
+      m_chartTextAtlas, axisScale, priceLabels, m_priceAxisWidthPx);
+  const int nextTimeAxisHeight = AxisLayout::measureTimeAxisHeightPx(
+      m_chartTextAtlas, axisScale, m_timeAxisHeightPx);
+
+  {
+    std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
+    m_axisLayoutSnapshot = AxisLayoutSnapshot{
+        static_cast<float>(resolvedLabelPx), axisScale, nextPriceAxisWidth,
+        nextTimeAxisHeight};
+  }
+
+  const bool changed =
+      !qFuzzyCompare(m_effectiveAxisLabelPx + 1.0,
+                     static_cast<double>(resolvedLabelPx) + 1.0) ||
+      m_priceAxisWidthPx != nextPriceAxisWidth ||
+      m_timeAxisHeightPx != nextTimeAxisHeight;
+  m_effectiveAxisLabelPx = static_cast<double>(resolvedLabelPx);
+  m_priceAxisWidthPx = nextPriceAxisWidth;
+  m_timeAxisHeightPx = nextTimeAxisHeight;
+  if (changed) {
+    emit axisLayoutChanged();
+  }
+  update();
 }
 
 void UnifiedGridRenderer::submitAxisText() {
@@ -178,19 +276,18 @@ void UnifiedGridRenderer::submitAxisText() {
   }
   const bool axisPixelSnap =
       !qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_NO_PIXEL_SNAP");
-  float axisLabelPx = 15.0f;
-  envFloatValue("SENTINEL_AXIS_LABEL_PX", axisLabelPx);
-  const float axisScale =
-      (m_chartTextAtlas.fontPx() > 0)
-          ? (axisLabelPx / static_cast<float>(m_chartTextAtlas.fontPx()))
-          : 1.0f;
 
   std::vector<AxisTickSnapshot> priceTicks;
   std::vector<AxisTickSnapshot> timeTicks;
+  AxisLayoutSnapshot axisLayout;
   {
     std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
     priceTicks = m_priceAxisTicks;
     timeTicks = m_timeAxisTicks;
+  }
+  {
+    std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
+    axisLayout = m_axisLayoutSnapshot;
   }
 
   if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
@@ -217,7 +314,9 @@ void UnifiedGridRenderer::submitAxisText() {
               .arg(m_chartTextAtlas.pxRange(), 0, 'f', 2)
               .arg(m_chartTextAtlas.paddingPx())
               .arg(m_chartTextAtlas.lineHeightPx(), 0, 'f', 2)
-              .arg(axisScale * static_cast<float>(m_chartTextAtlas.fontPx()), 0,
+              .arg(axisLayout.axisScale *
+                       static_cast<float>(m_chartTextAtlas.fontPx()),
+                   0,
                    'f', 2)
               .arg(axisPixelSnap ? 1 : 0));
       auto logSample = [&](const char *label, const QString &text,
@@ -226,7 +325,7 @@ void UnifiedGridRenderer::submitAxisText() {
         sampleRun.text = text;
         sampleRun.anchor = anchor;
         sampleRun.color = Qt::white;
-        sampleRun.scale = axisScale;
+        sampleRun.scale = axisLayout.axisScale;
         sampleRun.hAlign =
             (QString::fromLatin1(label) == QStringLiteral("price"))
                 ? ChartTextRun::HorizontalAlign::Left
@@ -262,39 +361,61 @@ void UnifiedGridRenderer::submitAxisText() {
       };
       if (!priceTicks.empty()) {
         logSample("price", priceTicks.front().label,
-                  QPointF(width() + 4.0, priceTicks.front().position + 11.5));
+                  QPointF(width() + 6.0, priceTicks.front().position));
       }
       if (!timeTicks.empty()) {
         logSample("time", timeTicks.front().label,
-                  QPointF(timeTicks.front().position, height() + 15.0));
+                  QPointF(timeTicks.front().position,
+                          height() + axisLayout.timeAxisHeightPx * 0.5));
       }
       chartTextDebugTimer.restart();
     }
   }
 
-  const QColor axisColor(Qt::white);
+  const qreal priceInsetLeft = 4.0;
+  const qreal priceInsetRight = 4.0;
+  const qreal timeInsetTop = 2.0;
+  const qreal timeInsetBottom = 2.0;
+  const QRectF priceSafeRect(
+      width() + priceInsetLeft, 0.0,
+      std::max(0.0, static_cast<double>(axisLayout.priceAxisWidthPx) -
+                        (priceInsetLeft + priceInsetRight)),
+      height());
+  const QRectF timeSafeRect(
+      0.0, height() + timeInsetTop, width(),
+      std::max(0.0, static_cast<double>(axisLayout.timeAxisHeightPx) -
+                        (timeInsetTop + timeInsetBottom)));
+  const qreal priceAnchorX = priceSafeRect.left();
+  const qreal timeAnchorY = timeSafeRect.center().y();
+  const QColor axisColor(255, 255, 255, 255);
   for (const auto &tick : priceTicks) {
     ChartTextRun run;
     run.text = tick.label;
-    run.anchor = QPointF(width() + 4.0, tick.position + 11.5);
+    run.anchor = QPointF(priceAnchorX, tick.position);
     run.color = axisColor;
-    run.scale = axisScale;
+    run.scale = axisLayout.axisScale;
     run.hAlign = ChartTextRun::HorizontalAlign::Left;
     run.vAlign = ChartTextRun::VerticalAlign::Center;
     run.useStableMetrics = true;
     run.pixelSnap = axisPixelSnap;
+    if (!AxisLayout::runFitsRect(m_chartTextAtlas, run, priceSafeRect)) {
+      continue;
+    }
     m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);
   }
   for (const auto &tick : timeTicks) {
     ChartTextRun run;
     run.text = tick.label;
-    run.anchor = QPointF(tick.position, height() + 15.0);
+    run.anchor = QPointF(tick.position, timeAnchorY);
     run.color = axisColor;
-    run.scale = axisScale;
+    run.scale = axisLayout.axisScale;
     run.hAlign = ChartTextRun::HorizontalAlign::Center;
     run.vAlign = ChartTextRun::VerticalAlign::Center;
     run.useStableMetrics = true;
     run.pixelSnap = axisPixelSnap;
+    if (!AxisLayout::runFitsRect(m_chartTextAtlas, run, timeSafeRect)) {
+      continue;
+    }
     m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);
   }
 }
@@ -310,6 +431,7 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
     if (m_viewState) {
       m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
     }
+    refreshAxisLayout();
     update();
   }
 }
@@ -317,9 +439,11 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
 void UnifiedGridRenderer::componentComplete() {
   QQuickItem::componentComplete();
 
+  bindAxisLayoutWindow(window());
   if (m_viewState && width() > 0 && height() > 0) {
     m_viewState->setViewportSize(width(), height());
   }
+  refreshAxisLayout();
 }
 
 void UnifiedGridRenderer::setIntensityScale(double scale) {
@@ -690,6 +814,13 @@ void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
   emit heatmapShaderFloorChanged();
 }
 
+void UnifiedGridRenderer::setCandleStyle(int style) {
+    style = std::clamp(style, 0, 2);
+    if (m_candleStyle == style) return;
+    m_candleStyle = style;
+    emit candleStyleChanged();
+}
+
 void UnifiedGridRenderer::setHeatmapColorPreset(const QString& preset) {
     using CS = HeatmapOverlayRenderer::ColorStop;
     struct Preset {
@@ -974,12 +1105,14 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
+  m_axisLabelPxOverride = config.gui.axisLabelPx;
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;
   } else if (config.heatmap.labelPx > 128) {
     qWarning("Heatmap labelPx=%d exceeds sane maximum (128), using default %d",
              config.heatmap.labelPx, m_heatmapLabelPx);
   }
+  refreshAxisLayout();
   update();
   if (m_dataProcessor && config.heatmap.clientCacheColumns > 0) {
     const int capacity = config.heatmap.clientCacheColumns;
