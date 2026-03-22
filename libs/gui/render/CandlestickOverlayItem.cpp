@@ -63,6 +63,32 @@ inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
     v += 6;
 }
 
+// Draws a diagonal line segment as a thin quad (2 triangles).
+inline void addLineSegment(QSGGeometry::ColoredPoint2D*& v,
+                           float x1, float y1, float x2, float y2,
+                           float thickness,
+                           uchar r, uchar g, uchar b, uchar a) {
+    const float dx = x2 - x1;
+    const float dy = y2 - y1;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 0.5f) {
+        // Degenerate segment — emit invisible (collapsed) verts
+        for (int i = 0; i < 6; ++i) v[i].set(x1, y1, r, g, b, 0);
+        v += 6;
+        return;
+    }
+    const float ht = thickness * 0.5f;
+    const float px = -dy / len * ht;
+    const float py =  dx / len * ht;
+    v[0].set(x1 + px, y1 + py, r, g, b, a);
+    v[1].set(x1 - px, y1 - py, r, g, b, a);
+    v[2].set(x2 + px, y2 + py, r, g, b, a);
+    v[3].set(x1 - px, y1 - py, r, g, b, a);
+    v[4].set(x2 - px, y2 - py, r, g, b, a);
+    v[5].set(x2 + px, y2 + py, r, g, b, a);
+    v += 6;
+}
+
 bool candleDebugEnabled() {
     static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
     return enabled;
@@ -457,42 +483,76 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     const bool isHollow = (m_candleStyle == 1);
     const bool isLine   = (m_candleStyle == 2);
-    // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
-    root->wickGeometry->allocate(isLine ? 0 : visibleCount * 6);
-    root->bodyGeometry->allocate(isHollow ? visibleCount * 24 : visibleCount * 6);
-    auto* wickVerts = isLine ? nullptr : root->wickGeometry->vertexDataAsColoredPoint2D();
-    auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
-    const uchar wickR = 240;
-    const uchar wickG = 240;
-    const uchar wickB = 240;
-    const uchar wickA = 200;
-    const uchar bullR = 60;
-    const uchar bullG = 210;
-    const uchar bullB = 110;
-    const uchar bullA = 220;
-    const uchar bearR = 230;
-    const uchar bearG = 80;
-    const uchar bearB = 80;
-    const uchar bearA = 220;
+    const uchar wickR = 240, wickG = 240, wickB = 240, wickA = 200;
+    const uchar bullR = 60,  bullG = 210, bullB = 110, bullA = 220;
+    const uchar bearR = 230, bearG = 80,  bearB = 80,  bearA = 220;
+
+    // ── Line mode: pre-compute positions, then draw segments + ticks ───────────
+    if (isLine) {
+        struct ClosePoint { float cx, cy, bx0, bx1; uchar r, g, b, a; };
+        std::vector<ClosePoint> pts;
+        pts.reserve(static_cast<size_t>(visibleCount));
+        for (const auto& c : filtered) {
+            const bool bullish = c.close >= c.open;
+            const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
+            const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
+            const double cw   = xEnd - x;
+            const float bw    = std::max(1.0f, static_cast<float>(cw) * 0.7f);
+            const float cx    = static_cast<float>(x + cw * 0.5);
+            pts.push_back({cx,
+                           static_cast<float>(mapping.priceToScreenY(c.close)),
+                           cx - bw * 0.5f, cx + bw * 0.5f,
+                           bullish ? bullR : bearR,
+                           bullish ? bullG : bearG,
+                           bullish ? bullB : bearB,
+                           bullish ? bullA : bearA});
+        }
+        const int segCount = std::max(0, visibleCount - 1);
+        root->wickGeometry->allocate(0);
+        // segments + ticks
+        root->bodyGeometry->allocate((segCount + visibleCount) * 6);
+        auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
+
+        // 1. Draw connecting segments between consecutive closes
+        for (int i = 0; i < segCount; ++i) {
+            addLineSegment(bodyVerts,
+                           pts[i].cx, pts[i].cy, pts[i + 1].cx, pts[i + 1].cy,
+                           1.5f, pts[i].r, pts[i].g, pts[i].b, pts[i].a);
+        }
+        // 2. Draw close tick at each candle (slightly wider than the line, on top)
+        for (const auto& p : pts) {
+            addQuad(bodyVerts, p.bx0, p.cy - 1.5f, p.bx1, p.cy + 1.5f,
+                    p.r, p.g, p.b, p.a);
+        }
+
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
+
+    // ── Candle / Hollow mode ───────────────────────────────────────────────────
+    // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
+    root->wickGeometry->allocate(visibleCount * 6);
+    root->bodyGeometry->allocate(isHollow ? visibleCount * 24 : visibleCount * 6);
+    auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
+    auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
     for (const auto& c : filtered) {
         const bool bullish = c.close >= c.open;
 
-        // X: world time → screen via TimeAxisMapping (no timeOffset, no manual column math)
-        const double x = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
+        const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
         const double candleW = xEnd - x;
         float bodyWidth = std::max(1.0f, static_cast<float>(candleW) * 0.7f);
         const float centerX = static_cast<float>(x + candleW * 0.5);
-        const float bodyX0 = centerX - bodyWidth * 0.5f;
-        const float bodyX1 = centerX + bodyWidth * 0.5f;
+        const float bodyX0  = centerX - bodyWidth * 0.5f;
+        const float bodyX1  = centerX + bodyWidth * 0.5f;
 
         const float wickWidth = std::max(1.0f, bodyWidth * 0.2f);
         const float wickX0 = centerX - wickWidth * 0.5f;
         const float wickX1 = centerX + wickWidth * 0.5f;
 
-        // Y: price → screen via TimeAxisMapping (pan already baked in)
         const float yHighF  = static_cast<float>(mapping.priceToScreenY(c.high));
         const float yLowF   = static_cast<float>(mapping.priceToScreenY(c.low));
         const float yOpenF  = static_cast<float>(mapping.priceToScreenY(c.open));
@@ -510,23 +570,20 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const uchar bb = bullish ? bullB : bearB;
         const uchar ba = bullish ? bullA : bearA;
 
-        if (isLine) {
-            // Line: 2px tick at close price, no wicks
-            addQuad(bodyVerts, bodyX0, yCloseF - 1.0f, bodyX1, yCloseF + 1.0f, br, bg, bb, ba);
-        } else if (isHollow && bullish) {
+        addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
+
+        if (isHollow && bullish) {
             // Hollow bullish: border outline only (4 quads)
-            addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
             const float bw = std::max(1.0f, bodyWidth * 0.12f);
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
             addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left
             addQuad(bodyVerts, bodyX1 - bw, bodyY0, bodyX1, bodyY1, br, bg, bb, ba); // right
         } else {
-            // Normal filled body (also bearish in Hollow mode)
-            addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
+            // Normal filled body (also bearish candles in Hollow mode)
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
             if (isHollow) {
-                // Pad 3 unused body quads with degenerate (invisible) entries to maintain allocation
+                // Pad 3 unused body quads with collapsed (invisible) entries
                 addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
                 addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
                 addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
