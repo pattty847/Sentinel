@@ -488,9 +488,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const uchar bullR = 60,  bullG = 210, bullB = 110, bullA = 220;
     const uchar bearR = 230, bearG = 80,  bearB = 80,  bearA = 220;
 
-    // ── Line mode: pre-compute positions, then draw segments + ticks ───────────
+    // ── Line mode: continuous line connecting all close prices, no candle shapes ─
     if (isLine) {
-        struct ClosePoint { float cx, cy, bx0, bx1; uchar r, g, b, a; };
+        struct ClosePoint { float cx, cy; uchar r, g, b, a; };
         std::vector<ClosePoint> pts;
         pts.reserve(static_cast<size_t>(visibleCount));
         for (const auto& c : filtered) {
@@ -498,11 +498,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
             const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
             const double cw   = xEnd - x;
-            const float bw    = std::max(1.0f, static_cast<float>(cw) * 0.7f);
             const float cx    = static_cast<float>(x + cw * 0.5);
             pts.push_back({cx,
                            static_cast<float>(mapping.priceToScreenY(c.close)),
-                           cx - bw * 0.5f, cx + bw * 0.5f,
                            bullish ? bullR : bearR,
                            bullish ? bullG : bearG,
                            bullish ? bullB : bearB,
@@ -510,20 +508,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
         const int segCount = std::max(0, visibleCount - 1);
         root->wickGeometry->allocate(0);
-        // segments + ticks
-        root->bodyGeometry->allocate((segCount + visibleCount) * 6);
+        root->bodyGeometry->allocate(segCount * 6);
         auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
-        // 1. Draw connecting segments between consecutive closes
         for (int i = 0; i < segCount; ++i) {
             addLineSegment(bodyVerts,
                            pts[i].cx, pts[i].cy, pts[i + 1].cx, pts[i + 1].cy,
                            1.5f, pts[i].r, pts[i].g, pts[i].b, pts[i].a);
-        }
-        // 2. Draw close tick at each candle (slightly wider than the line, on top)
-        for (const auto& p : pts) {
-            addQuad(bodyVerts, p.bx0, p.cy - 1.5f, p.bx1, p.cy + 1.5f,
-                    p.r, p.g, p.b, p.a);
         }
 
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
