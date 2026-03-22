@@ -87,6 +87,7 @@ struct ClientGuiConfig {
     int apiPort = 17100;
     std::string screenshotDir = "./screenshots";
     std::string msdfFontPath;
+    int axisLabelPx = 0;
     double defaultOrderQty = 1.0;
 };
 

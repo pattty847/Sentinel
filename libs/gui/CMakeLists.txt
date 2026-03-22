@@ -78,6 +78,8 @@ set(GRID_CORE_SOURCES
     render/UgrFrameMath.cpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
+    render/AxisLayout.hpp
+    render/AxisLayout.cpp
     render/ChartTextPrimitives.hpp
     render/ChartTextAtlas.hpp
     render/ChartTextAtlas.cpp

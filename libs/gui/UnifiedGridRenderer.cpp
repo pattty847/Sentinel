@@ -386,19 +386,29 @@ void UnifiedGridRenderer::submitAxisText() {
       std::max(0.0, static_cast<double>(axisLayout.timeAxisHeightPx) -
                         (timeInsetTop + timeInsetBottom)));
   const qreal priceAnchorX = priceSafeRect.left();
-  const qreal timeAnchorY = timeSafeRect.center().y();
+  const qreal stableMetricCenterOffset =
+      0.5 * static_cast<qreal>(m_chartTextAtlas.glyphTopPx() +
+                               m_chartTextAtlas.glyphBottomPx()) *
+      static_cast<qreal>(axisLayout.axisScale);
+  const qreal timeAnchorY = timeSafeRect.center().y() + stableMetricCenterOffset;
   const QColor axisColor(255, 255, 255, 255);
   for (const auto &tick : priceTicks) {
     ChartTextRun run;
     run.text = tick.label;
-    run.anchor = QPointF(priceAnchorX, tick.position);
+    run.anchor = QPointF(priceAnchorX, tick.position + stableMetricCenterOffset);
     run.color = axisColor;
     run.scale = axisLayout.axisScale;
     run.hAlign = ChartTextRun::HorizontalAlign::Left;
     run.vAlign = ChartTextRun::VerticalAlign::Center;
     run.useStableMetrics = true;
     run.pixelSnap = axisPixelSnap;
-    if (!AxisLayout::runFitsRect(m_chartTextAtlas, run, priceSafeRect)) {
+    QRectF runRect;
+    if (!ChartTextLayout::measureRunRect(m_chartTextAtlas, run, runRect)) {
+      continue;
+    }
+    if (runRect.top() < priceSafeRect.top() ||
+        runRect.bottom() > priceSafeRect.bottom() ||
+        runRect.right() > priceSafeRect.right()) {
       continue;
     }
     m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);

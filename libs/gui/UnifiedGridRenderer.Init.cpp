@@ -53,6 +53,7 @@ void UnifiedGridRenderer::init() {
     m_autoScrollController->setPaddingFrac(m_autoScrollPaddingFrac);
     m_autoScrollController->setSmoothEnabled(m_smoothAutoScrollEnabled);
     buildMsdfAtlas();
+    refreshAxisLayout();
     m_dataProcessorThread = std::make_unique<QThread>();
     m_dataProcessor = std::make_unique<DataProcessor>();
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
@@ -60,6 +61,10 @@ void UnifiedGridRenderer::init() {
     if (store.hasServerConfig()) {
         applyServerConfig(store.serverConfig());
     }
+    connect(&store, &GuiConfigStore::clientConfigUpdated, this,
+            [this](const ClientConfig& config) { applyClientConfig(config); });
+    connect(&store, &GuiConfigStore::serverConfigUpdated, this,
+            [this](const ServerConfig& config) { applyServerConfig(config); });
     
     connectDataProcessorSignals();
     m_dataProcessorThread->start();

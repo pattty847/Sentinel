@@ -203,6 +203,7 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(guiNode, "api_port", cfg.gui.apiPort);
         readScalar(guiNode, "screenshot_dir", cfg.gui.screenshotDir);
         readScalar(guiNode, "msdf_font", cfg.gui.msdfFontPath);
+        readScalar(guiNode, "axis_label_px", cfg.gui.axisLabelPx);
         readScalar(guiNode, "default_order_qty", cfg.gui.defaultOrderQty);
     }
 

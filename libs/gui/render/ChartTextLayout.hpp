@@ -7,6 +7,9 @@
 
 class ChartTextLayout {
 public:
+    static bool measureRunRect(const ChartTextAtlas& atlas,
+                               const ChartTextRun& run,
+                               QRectF& outRect);
     static void appendRun(const ChartTextAtlas& atlas,
                           const ChartTextRun& run,
                           std::vector<ChartGlyphInstance>& out);

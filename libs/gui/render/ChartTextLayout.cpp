@@ -50,17 +50,17 @@ RunMetrics measureRun(const ChartTextAtlas& atlas, const ChartTextRun& run) {
 }
 } // namespace
 
-void ChartTextLayout::appendRun(const ChartTextAtlas& atlas,
-                                const ChartTextRun& run,
-                                std::vector<ChartGlyphInstance>& out) {
+bool ChartTextLayout::measureRunRect(const ChartTextAtlas& atlas,
+                                     const ChartTextRun& run,
+                                     QRectF& outRect) {
+    outRect = QRectF();
     if (!atlas.isBuilt() || run.text.isEmpty() || run.scale <= 0.0f) {
-        return;
+        return false;
     }
-
 
     const RunMetrics runMetrics = measureRun(atlas, run);
     if (!runMetrics.valid) {
-        return;
+        return false;
     }
 
     float originX = static_cast<float>(run.anchor.x());
@@ -85,6 +85,29 @@ void ChartTextLayout::appendRun(const ChartTextAtlas& atlas,
         originX = std::round(originX);
         originY = std::round(originY);
     }
+
+    outRect = QRectF(originX + runMetrics.minX * run.scale,
+                     originY + runMetrics.minY * run.scale,
+                     (runMetrics.maxX - runMetrics.minX) * run.scale,
+                     (runMetrics.maxY - runMetrics.minY) * run.scale);
+    return true;
+}
+
+void ChartTextLayout::appendRun(const ChartTextAtlas& atlas,
+                                const ChartTextRun& run,
+                                std::vector<ChartGlyphInstance>& out) {
+    if (!atlas.isBuilt() || run.text.isEmpty() || run.scale <= 0.0f) {
+        return;
+    }
+
+    QRectF runRect;
+    if (!measureRunRect(atlas, run, runRect)) {
+        return;
+    }
+
+    const RunMetrics runMetrics = measureRun(atlas, run);
+    const float originX = static_cast<float>(runRect.x() - runMetrics.minX * run.scale);
+    const float originY = static_cast<float>(runRect.y() - runMetrics.minY * run.scale);
 
     float penX = 0.0f;
     bool firstGlyph = true;
