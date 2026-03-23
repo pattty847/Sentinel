@@ -16,6 +16,10 @@ public:
     void setPaddingFrac(double fraction);
     void setSmoothEnabled(bool enabled);
     bool smoothEnabled() const { return m_smoothEnabled; }
+    void setInitialViewportPct(int pct);  // 1–100, % of grid width to show on first init
+    void setInitialPricePct(int pct);     // 1–100, % of price range; 0 = full range
+    int initialViewportPct() const { return m_initialViewportPct; }
+    int initialPricePct() const { return m_initialPricePct; }
 
     void resetSpan();
     void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream);
@@ -45,4 +49,6 @@ private:
     int64_t m_lastViewEndMs = std::numeric_limits<int64_t>::min();
     double m_paddingFrac = 0.05;
     bool m_smoothEnabled = true;
+    int m_initialViewportPct = 10;  // % of grid width
+    int m_initialPricePct = 5;      // % of price range; 0 = full
 };

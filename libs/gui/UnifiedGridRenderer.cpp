@@ -390,7 +390,7 @@ void UnifiedGridRenderer::submitAxisText() {
       0.5 * static_cast<qreal>(m_chartTextAtlas.glyphTopPx() +
                                m_chartTextAtlas.glyphBottomPx()) *
       static_cast<qreal>(axisLayout.axisScale);
-  const qreal timeAnchorY = timeSafeRect.center().y() + stableMetricCenterOffset;
+  const qreal timeAnchorY = timeSafeRect.center().y();
   const QColor axisColor(255, 255, 255, 255);
   for (const auto &tick : priceTicks) {
     ChartTextRun run;
@@ -423,7 +423,12 @@ void UnifiedGridRenderer::submitAxisText() {
     run.vAlign = ChartTextRun::VerticalAlign::Center;
     run.useStableMetrics = true;
     run.pixelSnap = axisPixelSnap;
-    if (!AxisLayout::runFitsRect(m_chartTextAtlas, run, timeSafeRect)) {
+    QRectF runRect;
+    if (!ChartTextLayout::measureRunRect(m_chartTextAtlas, run, runRect)) {
+      continue;
+    }
+    if (runRect.left() < timeSafeRect.left() ||
+        runRect.right() > timeSafeRect.right()) {
       continue;
     }
     m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);
@@ -1115,6 +1120,10 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
+  if (m_autoScrollController) {
+    m_autoScrollController->setInitialViewportPct(config.heatmap.initialViewportPct);
+    m_autoScrollController->setInitialPricePct(config.heatmap.initialPricePct);
+  }
   m_axisLabelPxOverride = config.gui.axisLabelPx;
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;

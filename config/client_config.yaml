@@ -11,8 +11,8 @@ heatmap:
   client_cache_columns: 0
 
   # Initial viewport (client only)
-  initial_viewport_pct: 10
-  # initial_price_pct: auto
+  initial_viewport_pct: 10   # Time zoom (% of grid width)
+  initial_price_pct: 5      # Price zoom (% of full range); 0 = full
 
 gui:
   api_port: 17100

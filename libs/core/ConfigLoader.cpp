@@ -190,6 +190,8 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "shader_floor", cfg.heatmap.shaderFloor);
         readScalar(heatmapNode, "label_px", cfg.heatmap.labelPx);
         readScalar(heatmapNode, "client_cache_columns", cfg.heatmap.clientCacheColumns);
+        readScalar(heatmapNode, "initial_viewport_pct", cfg.heatmap.initialViewportPct);
+        readScalar(heatmapNode, "initial_price_pct", cfg.heatmap.initialPricePct);
     }
 
     YAML::Node guiNode;

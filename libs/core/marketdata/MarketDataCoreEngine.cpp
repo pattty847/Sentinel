@@ -16,7 +16,8 @@ namespace {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    static constexpr int64_t kHeartbeatStaleThresholdMs = 10000;
+    // Coinbase can be slow to send first frames; 20s avoids aggressive reconnect loop.
+    static constexpr int64_t kHeartbeatStaleThresholdMs = 20000;
 }
 
 MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config)
@@ -486,7 +487,7 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
             const int64_t nowMs = steadyClockMs();
             const int64_t lastMs = m_lastHeartbeatMs.load();
             if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
-                sLog_Error("Heartbeat stale (>10s); reconnecting...");
+                sLog_Error("Heartbeat stale (>20s); reconnecting...");
                 triggerImmediateReconnect("stale heartbeat");
                 return;
             }
@@ -498,7 +499,10 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
 void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     net::post(m_strand, [this, r = std::string(reason)](){
         sLog_Data(std::string("Immediate reconnect: ") + r);
-        m_backoffDuration = std::chrono::seconds(1);
+        // Use 5s backoff for stale heartbeat to avoid hammering Coinbase when they're slow.
+        m_backoffDuration = (r == "stale heartbeat")
+            ? std::chrono::seconds(5)
+            : std::chrono::seconds(1);
         m_reconnectTimer.cancel();
         if (m_transport) {
             m_transport->close();

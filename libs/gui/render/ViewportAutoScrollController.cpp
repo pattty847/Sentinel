@@ -26,6 +26,14 @@ void ViewportAutoScrollController::setSmoothEnabled(bool enabled) {
     m_smoothEnabled = enabled;
 }
 
+void ViewportAutoScrollController::setInitialViewportPct(int pct) {
+    m_initialViewportPct = std::clamp(pct, 1, 100);
+}
+
+void ViewportAutoScrollController::setInitialPricePct(int pct) {
+    m_initialPricePct = std::clamp(pct, 0, 100);
+}
+
 void ViewportAutoScrollController::resetSpan() {
     m_autoScrollSpanMs = 0;
     m_lastViewEndMs = std::numeric_limits<int64_t>::min();
@@ -70,7 +78,8 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
     }
     const int64_t maxSpanMs = std::max<int64_t>(1, static_cast<int64_t>(snapshot.gridWidth - 1) * timeframeMs);
     if (m_autoScrollSpanMs <= 0 || m_autoScrollSpanMs > maxSpanMs) {
-        m_autoScrollSpanMs = static_cast<int64_t>(maxSpanMs * (1.0 - m_paddingFrac));
+        const double pct = static_cast<double>(std::clamp(m_initialViewportPct, 1, 100)) / 100.0;
+        m_autoScrollSpanMs = static_cast<int64_t>(maxSpanMs * pct * (1.0 - m_paddingFrac));
         if (m_autoScrollSpanMs <= 0) {
             m_autoScrollSpanMs = maxSpanMs;
         }
@@ -82,7 +91,17 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
     if (viewEnd <= viewStart) {
         return false;
     }
-    view.setViewport(viewStart, viewEnd, snapshot.minPrice, snapshot.maxPrice);
+    double viewMinPrice = snapshot.minPrice;
+    double viewMaxPrice = snapshot.maxPrice;
+    if (m_initialPricePct > 0 && m_initialPricePct < 100 &&
+        snapshot.maxPrice > snapshot.minPrice) {
+        const double mid = (snapshot.minPrice + snapshot.maxPrice) * 0.5;
+        const double fullRange = snapshot.maxPrice - snapshot.minPrice;
+        const double viewRange = fullRange * (static_cast<double>(m_initialPricePct) / 100.0);
+        viewMinPrice = mid - viewRange * 0.5;
+        viewMaxPrice = mid + viewRange * 0.5;
+    }
+    view.setViewport(viewStart, viewEnd, viewMinPrice, viewMaxPrice);
     m_lastViewEndMs = viewEnd;
     return true;
 }

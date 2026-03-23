@@ -38,8 +38,8 @@ heatmap:
   label_px: 24      # Min cell height (px) before labels render
 
   # Initial viewport (client)
-  initial_viewport_pct: 10  # Time zoom (% of grid width)
-  # initial_price_pct: auto  # Price zoom (omit for square cells)
+  initial_viewport_pct: 10   # Time zoom (% of grid width) — zooms in so data is visible
+  initial_price_pct: 5      # Price zoom (% of full range); 0 = full range
 
 # =============================================================================
 # Server Settings
