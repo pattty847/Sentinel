@@ -18,6 +18,7 @@ public:
     ~StatusBar() override = default;
     
     void setConnectionStatus(bool connected);
+    void setConnectionConnecting();
     void setCpuUsage(int percent);
     void setGpuUsage(int percent);
     void setFps(double fps);

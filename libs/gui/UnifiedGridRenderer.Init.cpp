@@ -2,6 +2,7 @@
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
+#include <QDateTime>
 #include <QMetaObject>
 #include <QMetaType>
 #include <QElapsedTimer>
@@ -398,9 +399,25 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                 if (m_autoScrollController) {
                     m_autoScrollController->resetSpan();
                 }
-                if (m_viewState && m_viewState->isAutoScrollEnabled()) {
-                    m_heatmapViewportInitialized = false;
+                m_heatmapViewportInitialized = false;
+                if (m_viewState && minPrice < maxPrice && gridWidth > 0) {
+                    const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
+                        ? m_timeAuthority.activeTimeframeMs()
+                        : 1000;
+                    const int pct = m_autoScrollController
+                        ? std::clamp(m_autoScrollController->initialViewportPct(), 1, 100)
+                        : 10;
+                    const int64_t maxSpanMs = static_cast<int64_t>(gridWidth) * cadenceMs;
+                    const int64_t spanMs = std::max<int64_t>(1, maxSpanMs * pct / 100);
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    m_viewState->setViewport(nowMs - spanMs, nowMs, minPrice, maxPrice);
                 }
+                // Defensive: force axis models to recalculate after a range reset.
+                // The setViewport() above emits viewportChanged() which should trigger
+                // this automatically, but reconnect/stale-connection scenarios can leave
+                // the time axis blank if the signal chain was interrupted.
+                if (m_timeAxisSource) { m_timeAxisSource->recalculateTicks(); }
+                if (m_priceAxisSource) { m_priceAxisSource->recalculateTicks(); }
                 update();
             },
             Qt::QueuedConnection);

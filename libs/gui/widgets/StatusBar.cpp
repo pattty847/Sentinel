@@ -25,8 +25,8 @@ StatusBar::StatusBar(QWidget* parent)
     
     layout->addStretch();
     
-    m_connectionLabel = new QLabel("Disconnected", this);
-    m_connectionLabel->setStyleSheet("QLabel { color: #ff4444; font-size: 10px; }");
+    m_connectionLabel = new QLabel("🟡 Connecting...", this);
+    m_connectionLabel->setStyleSheet("QLabel { color: #ffaa00; font-size: 10px; }");
     layout->addWidget(m_connectionLabel);
 
     m_fpsLabel = new QLabel("FPS: --", this);
@@ -71,6 +71,12 @@ void StatusBar::setConnectionStatus(bool connected) {
         m_connectionLabel->setText("🔴 Disconnected");
         m_connectionLabel->setStyleSheet("QLabel { color: #ff4444; font-size: 10px; }");
     }
+}
+
+void StatusBar::setConnectionConnecting() {
+    m_connected = false;
+    m_connectionLabel->setText("🟡 Connecting...");
+    m_connectionLabel->setStyleSheet("QLabel { color: #ffaa00; font-size: 10px; }");
 }
 
 void StatusBar::setCpuUsage(int percent) {

@@ -853,24 +853,6 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
-    connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
-            this, [this](bool connected) {
-                if (!connected || !m_dataSource) {
-                    return;
-                }
-                if (!m_userSubscribed) {
-                    return;
-                }
-                const QString symbol = m_currentSymbol;
-                if (symbol.isEmpty()) {
-                    return;
-                }
-                m_dataSource->subscribe(symbol);
-                requestHeatmapHistoryForSymbol(symbol);
-                requestFootprintHistoryForSymbol(symbol);
-                requestTpoHistoryForSymbol(symbol);
-                requestCandleHistoryForSymbol(symbol);
-            });
 
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
@@ -880,7 +862,12 @@ void MainWindowGPU::connectMarketDataSignals() {
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     if (m_statusBar) {
-        m_statusBar->setConnectionStatus(connected);
+        if (connected) {
+            m_statusBar->setConnectionStatus(true);
+        } else {
+            // Show "Connecting..." immediately on disconnect — we always attempt reconnect.
+            m_statusBar->setConnectionConnecting();
+        }
     }
     m_connected = connected;
 
@@ -889,13 +876,23 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         m_subscribeButton->setEnabled(true);
     }
 
-    // Auto-request history when we (re)connect with an existing subscription.
-    if (connected && m_userSubscribed && !m_currentSymbol.isEmpty()) {
-        requestHeatmapHistoryForSymbol(m_currentSymbol);
-        requestFootprintHistoryForSymbol(m_currentSymbol);
-        requestTpoHistoryForSymbol(m_currentSymbol);
-        requestCandleHistoryForSymbol(m_currentSymbol);
-        sLog_App(QString("Auto-requested history on connect: %1").arg(m_currentSymbol));
+    if (connected) {
+        // Auto-subscribe to default symbol on first connection if user hasn't done so manually.
+        if (!m_userSubscribed && !m_currentSymbol.isEmpty()) {
+            m_userSubscribed = true;
+            if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
+            sLog_App(QString("Auto-subscribed to %1 on first connect").arg(m_currentSymbol));
+        }
+
+        // (Re)send subscription and request history for active symbol.
+        if (m_userSubscribed && !m_currentSymbol.isEmpty() && m_dataSource) {
+            m_dataSource->subscribe(m_currentSymbol);
+            requestHeatmapHistoryForSymbol(m_currentSymbol);
+            requestFootprintHistoryForSymbol(m_currentSymbol);
+            requestTpoHistoryForSymbol(m_currentSymbol);
+            requestCandleHistoryForSymbol(m_currentSymbol);
+            sLog_App(QString("Subscribed and requested history on connect: %1").arg(m_currentSymbol));
+        }
     }
 }
 
