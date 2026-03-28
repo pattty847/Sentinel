@@ -62,11 +62,11 @@ Each feature is a self-contained block. Use this template:
 ### F1: Heatmap / Caching
 **Status:** active
 **Created:** 2026-01-30
-**Updated:** 2026-03-17
+**Updated:** 2026-03-26
 
 #### Now
 - [x] Auto history request on symbol change / reconnect (2026-03-19)
-- [ ] Scroll-past-cache fetch (request older history)
+- [x] Scroll-past-cache fetch (request older history) (2026-03-26)
 - [ ] Preserve historical heatmap columns across band recenter instead of clearing visual history
 - [ ] Persist derived heatmap history to disk and reload on startup with explicit gap handling for dev/offline periods
 
@@ -87,6 +87,7 @@ _(nothing yet)_
 #### Session log
 - **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
 - **2026-03-17** - Captured the next architectural issue explicitly: chart layers need a larger persisted world-history model with a bounded GPU window, so long-range heatmap/TPO browsing can feel infinite without fixed-grid hard stops.
+- **2026-03-26** - Implemented scroll-past-cache fetch: UGR.onViewportChanged detects when visibleTimeStart < oldest cached slice, debounces 300ms, emits heatmapHistoryNeeded(tfMs, endTimeMs, count). MainWindowGpu wires it to requestHeatmapHistory with current symbol. Full project builds clean.
 
 ---
 
@@ -204,21 +205,24 @@ _(nothing yet)_
 ### F8: TPO / Market Profile
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-03-17
+**Updated:** 2026-03-26
 
 #### Now
 - [ ] Finalize TPO letter assignment per timeframe/session slice (stable sequence and rollover)
 - [ ] Finish TPO column rendering alignment with shared time/price mapping (no drift vs candles/heatmap)
-- [ ] Complete POC/VAH/VAL calculation + render in TPO mode
 - [ ] Validate 24H vs 1W session behavior end-to-end (request, stream, renderer)
 - [ ] Add focused regression checks for TPO session/timeframe switching
 
 #### Done
 - [x] Plan exists (`docs/plans/TPO.md`) (2026-02-02)
 - [x] Baseline TPO overlay letter rendering refinements landed (`TpoOverlayRenderer`) (2026-03-13)
+- [x] POC/VAH/VAL computation in TpoStreamState::computePocVahVal() (2026-03-26)
+- [x] DataProcessor emits tpoPocVahValReady after each slice ingest (2026-03-26)
+- [x] UGR stores and renders POC (gold 2.5px) + VAH/VAL (cyan 1.2px) as horizontal lines (2026-03-26)
 
 #### Session log
 - **2026-03-17** — Re-activated F8 as the primary delivery lane. Goal tonight: finish TPO/footprint behavior and session correctness before new feature work.
+- **2026-03-26** — Implemented full POC/VAH/VAL pipeline: TpoStreamState computes histogram + 70% value area expansion, DataProcessor emits per-slice, UGR renders 3 colored horizontal line nodes (gold POC, cyan VAH/VAL) on the render thread under m_tpoPendingMutex.
 
 ---
 
@@ -311,30 +315,33 @@ _(nothing yet)_
 ### F16: Screener Dock + Lab Candle Viewer
 **Status:** active
 **Created:** 2026-02-11
-**Updated:** 2026-03-16
+**Updated:** 2026-03-26
 
 > Full plan: `docs/private/plans/SCREENER_AND_LAB.md`
 
 #### Now
 - [x] Wire crypto row click → heatmap symbol subscription in MainWindowGPU (already done via ScreenerDock::rowSelected → onAssetSymbolSelected)
-- [ ] Start screener_server.py on app launch (QProcess)
+- [x] Start screener_server.py on app launch (QProcess) (2026-03-26)
 - [ ] Lab → pure candle viewer (wire CandlestickBatched to live data)
 
 #### Done
 - [x] Screener backend (Python server + fetcher + core) (2026-02-13)
 - [x] ScreenerDock C++ widget with WS client and table (2026-02-13)
+- [x] Auto-trigger initial screener fetch when stream client connects (2026-03-26)
+
+#### Session log
+- **2026-03-26** — Added startScreenerServer()/stopScreenerServer() to MainWindowGPU: uses QProcess + uv run, searches 5 candidate paths relative to app dir, logs to sLog_App, killed on closeEvent. Auto-starts on first showEvent.
 
 ---
 
 ### F18: Trading Simulation Stack (Paper + Replay)
 **Status:** active
 **Created:** 2026-03-14
-**Updated:** 2026-03-17
+**Updated:** 2026-03-26
 
 > Blueprint: `docs/TRADING_SIMULATION_BLUEPRINT.md`
 
 #### Now
-- [ ] Build a thin replay path from binary trade logs
 - [ ] Manual paper-trading polish pass for TP/SL visuals and interaction smoothing
 
 #### Done
@@ -344,9 +351,11 @@ _(nothing yet)_
 - [x] Trade-log replay path + paper trading chart overlays integrated (2026-03-16)
 - [x] Polish manual paper trading for forward testing (live mark, renderer-backed order/position overlays, entry-price/PnL pill) (2026-03-16)
 - [x] Manual-only TP/SL risk system with server-backed attached risk orders, staged drag UI, confirm/discard, and OCO clearing (2026-03-17)
+- [x] Backtest tab in PaperTradingDock: file picker, symbol/spread/qty/maxpos params, QProcess sentinel_backtest runner, live stdout output, status label (2026-03-26)
 
 #### Session log
 - **2026-03-17** - Added server-backed manual TP/SL with stop-market SL, take-profit exits, chart-staged drag/confirm flow, renderer-owned bracket geometry, and targeted backend tests. Remaining work is polish, not core feature plumbing.
+- **2026-03-26** - Added Backtest tab to PaperTradingDock with binary trade log file picker, AvendellaMM params, QProcess runner, real-time stdout/stderr output, and yellow/green/red status label. Binary located by searching candidate paths relative to app dir.
 
 ---
 

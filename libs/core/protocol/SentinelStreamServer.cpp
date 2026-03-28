@@ -393,13 +393,21 @@ class Session : public std::enable_shared_from_this<Session> {
         return true;
     }
 
-    static char tpoLetterForBucket(int64_t bucketStartMs, int64_t timeframeMs) {
+    // Returns the Market Profile letter for a TPO time bucket.
+    // Letter is always relative to sessionStartMs so it resets to 'A' at each
+    // session open (standard Market Profile convention).
+    // Falls back to epoch-relative assignment when sessionStartMs == 0.
+    static char tpoLetterForBucket(int64_t bucketStartMs,
+                                   int64_t timeframeMs,
+                                   int64_t sessionStartMs = 0) {
         if (timeframeMs <= 0) {
             return 'A';
         }
-        const int64_t sequence = bucketStartMs / timeframeMs;
+        const int64_t base = (sessionStartMs > 0) ? sessionStartMs : 0;
+        const int64_t relativeMs = bucketStartMs - base;
+        const int64_t sequence = (relativeMs >= 0) ? (relativeMs / timeframeMs) : (bucketStartMs / timeframeMs);
         const int letterIndex = static_cast<int>(sequence % 26);
-        return static_cast<char>('A' + ((letterIndex + 26) % 26));
+        return static_cast<char>('A' + letterIndex);
     }
 
     static int64_t alignDownMs(int64_t valueMs, int64_t stepMs) {
@@ -442,9 +450,12 @@ class Session : public std::enable_shared_from_this<Session> {
             return false;
         }
         out = QByteArray(gridHeight, '\0');
+        // Compute session-relative letter so 'A' always aligns to session open.
+        const auto sessionBoundary = SessionManager::sessionContaining(bucketStartMs, tpoSessionType_);
+        const int64_t sessionStartForLetter = sessionBoundary.valid ? sessionBoundary.startMs : 0;
+        const char letter = tpoLetterForBucket(bucketStartMs, timeframeMs, sessionStartForLetter);
         std::vector<ServerDataModel::FootprintTradeSample> trades;
         model_.collectFootprintTrades(symbol, bucketStartMs, bucketEndMs, trades);
-        const char letter = tpoLetterForBucket(bucketStartMs, timeframeMs);
         for (const auto& sample : trades) {
             const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
             if (row < 0 || row >= gridHeight) {
@@ -811,7 +822,8 @@ class Session : public std::enable_shared_from_this<Session> {
             }
             const auto it = candlesByBucket.find(bucketStart);
             if (it != candlesByBucket.end()) {
-                const char letter = tpoLetterForBucket(bucketStart, timeframeMs);
+                // sessionStart is the boundary already computed for this history batch.
+                const char letter = tpoLetterForBucket(bucketStart, timeframeMs, sessionStart);
                 for (const auto& bar : it->second) {
                     fillTpoRowsFromBar(bar, gridHeight, maxPrice, tickSize, letter, letters);
                 }

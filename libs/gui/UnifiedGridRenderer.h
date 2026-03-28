@@ -114,6 +114,7 @@ private:
     QElapsedTimer m_manualTimeframeTimer;
 
     bool m_panSyncPending = false;
+    bool m_historyFetchPending = false;  // debounce for scroll-past-cache history fetch
 
     bool m_useGpuHeatmap = false;
     HeatmapOverlayRenderer m_heatmapOverlay;
@@ -150,6 +151,18 @@ private:
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
     std::vector<IOverlayRenderer*> m_overlays;  // non-owning; points to inline members above
+    // POC/VAH/VAL profile markers — written on main thread, read on render thread under m_tpoPendingMutex.
+    mutable std::mutex m_tpoPendingMutex;
+    int m_tpoPocRow = -1;
+    int m_tpoVahRow = -1;
+    int m_tpoValRow = -1;
+    int m_tpoPvvGridHeight = 0;
+    double m_tpoPvvMaxPrice = 0.0;
+    double m_tpoPvvTickSize = 0.0;
+    bool m_tpoPvvDirty = false;
+    // QSG nodes for POC/VAH/VAL horizontal lines — owned by render tree, nulled in onRootRebuilt.
+    // [0] = POC (gold), [1] = VAH (cyan), [2] = VAL (cyan)
+    QSGGeometryNode* m_pvvLineNodes[3] = {nullptr, nullptr, nullptr};
     int m_tpoTimeframeMs = 900000;            // standard 15m
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
@@ -342,6 +355,9 @@ signals:
     void axisSourcesChanged();
     void axisLayoutChanged();
     void liveRenderTick();
+    // Emitted when the viewport has scrolled past the oldest cached heatmap data.
+    // Receiver should call IGridDataSource::requestHeatmapHistory with these params.
+    void heatmapHistoryNeeded(int64_t timeframeMs, int64_t endTimeMs, int count);
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -378,6 +394,9 @@ private:
                         std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
                         std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
                         std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
+    void renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
+                                 const FrameContext& frame,
+                                 bool show);
     void updateLabelGeometry(HeatmapIntensityNode* texNode,
                              const FrameContext& frame,
                              const HeatmapStreamState::Snapshot& snapshot,

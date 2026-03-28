@@ -15,6 +15,9 @@ class QDoubleSpinBox;
 class QPushButton;
 class QLabel;
 class QGroupBox;
+class QLineEdit;
+class QPlainTextEdit;
+class QProcess;
 class PnlCurveItem;
 class IGridDataSource;
 struct Trade;
@@ -60,6 +63,7 @@ private:
     void buildUi();
     void buildManualTab(QWidget* parent);
     void buildAlgoTab(QWidget* parent);
+    void buildBacktestTab(QWidget* parent);
     void buildPnlPanel(QWidget* parent);
     void resetForSymbolChange();
     void sendManualCommand(trading::TradeAction action,
@@ -104,4 +108,15 @@ private:
 
     // PnL curve
     PnlCurveItem* m_pnlCurve = nullptr;
+
+    // Backtest tab
+    QLineEdit*    m_btFilePath   = nullptr;
+    QLineEdit*    m_btSymbol     = nullptr;
+    QDoubleSpinBox* m_btSpread  = nullptr;
+    QDoubleSpinBox* m_btQty     = nullptr;
+    QDoubleSpinBox* m_btMaxPos  = nullptr;
+    QPushButton*  m_btRunBtn    = nullptr;
+    QPlainTextEdit* m_btOutput  = nullptr;
+    QLabel*       m_btStatus    = nullptr;
+    QProcess*     m_btProcess   = nullptr;
 };

@@ -44,6 +44,20 @@ public:
         int pendingUploads = 0;
     };
 
+    // POC/VAH/VAL profile markers computed from accumulated session letters.
+    // Row indices are in grid space (0 = highest price, gridHeight-1 = lowest price).
+    // valid is false when there is not enough data to compute.
+    struct PocVahVal {
+        int pocRow = -1;   // Point of Control: price level with most time-at-price
+        int vahRow = -1;   // Value Area High: upper bound of 70% value area
+        int valRow = -1;   // Value Area Low:  lower bound of 70% value area
+        bool valid = false;
+    };
+
+    // Compute POC/VAH/VAL from the current session column data.
+    // Thread-safe: acquires m_mutex internally.
+    PocVahVal computePocVahVal() const;
+
     void clear();
     void reset(int gridWidth, int gridHeight);
 

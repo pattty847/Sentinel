@@ -66,6 +66,8 @@
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
+#include <QCoreApplication>
+#include <QProcess>
 #include <QtGlobal>
 #include <algorithm>
 #include <cmath>
@@ -490,6 +492,79 @@ void MainWindowGPU::setupGuiApiServer() {
     }
 }
 
+void MainWindowGPU::startScreenerServer() {
+    if (m_screenerProcess && m_screenerProcess->state() != QProcess::NotRunning) {
+        return;  // already running
+    }
+
+    // Locate scripts/screener/screener_server.py relative to the running binary.
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates;
+    for (const QString& rel : {
+             QStringLiteral("../../../../scripts"),         // dev: build/mac-clang/apps/sentinel-gui/ -> repo/scripts
+             QStringLiteral("../../../scripts"),
+             QStringLiteral("../../scripts"),
+             QStringLiteral("../scripts"),
+             QStringLiteral("scripts"),
+         }) {
+        candidates << QDir(appDir).absoluteFilePath(rel);
+    }
+
+    QString scriptsDir;
+    for (const QString& candidate : candidates) {
+        if (QFileInfo(candidate + QStringLiteral("/screener/screener_server.py")).exists()) {
+            scriptsDir = candidate;
+            break;
+        }
+    }
+
+    if (scriptsDir.isEmpty()) {
+        sLog_App("Screener server not started: scripts/screener/screener_server.py not found near " << appDir);
+        return;
+    }
+
+    // Use 'uv run' so Python deps are automatically resolved from the venv.
+    const QString uvBin = QStringLiteral("uv");
+    QStringList args;
+    args << QStringLiteral("run")
+         << QStringLiteral("python")
+         << QStringLiteral("screener/screener_server.py");
+
+    if (!m_screenerProcess) {
+        m_screenerProcess = new QProcess(this);
+        // Log stderr to the app log for debugging.
+        connect(m_screenerProcess, &QProcess::readyReadStandardError, this, [this]() {
+            const QString err = QString::fromUtf8(m_screenerProcess->readAllStandardError()).trimmed();
+            if (!err.isEmpty()) {
+                sLog_App("[screener_server] " << err);
+            }
+        });
+        connect(m_screenerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [](int exitCode, QProcess::ExitStatus status) {
+                    sLog_App("Screener server exited: code=" << exitCode
+                             << " status=" << static_cast<int>(status));
+                });
+    }
+
+    m_screenerProcess->setWorkingDirectory(scriptsDir);
+    m_screenerProcess->start(uvBin, args);
+    if (m_screenerProcess->waitForStarted(2000)) {
+        sLog_App("Screener server started (pid=" << m_screenerProcess->processId() << ")");
+    } else {
+        sLog_App("Screener server failed to start: " << m_screenerProcess->errorString());
+    }
+}
+
+void MainWindowGPU::stopScreenerServer() {
+    if (!m_screenerProcess || m_screenerProcess->state() == QProcess::NotRunning) {
+        return;
+    }
+    m_screenerProcess->terminate();
+    if (!m_screenerProcess->waitForFinished(2000)) {
+        m_screenerProcess->kill();
+    }
+}
+
 void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& assetType) {
     if (assetType == QLatin1String("crypto") && m_symbolInput) {
         m_symbolInput->setText(symbol);
@@ -699,6 +774,7 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
+    stopScreenerServer();
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
@@ -708,6 +784,8 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 
     if (m_firstShow) {
         m_firstShow = false;
+
+        startScreenerServer();
 
         if (const auto screen = QApplication::primaryScreen()) {
             setGeometry(screen->availableGeometry());
@@ -825,6 +903,24 @@ void MainWindowGPU::connectMarketDataSignals() {
                     return;
                 }
                 requestTpoHistoryForSymbol(m_currentSymbol);
+            },
+            Qt::QueuedConnection);
+
+    // Scroll-past-cache: fetch older heatmap history when the user pans past the edge.
+    connect(unifiedGridRenderer,
+            &UnifiedGridRenderer::heatmapHistoryNeeded,
+            this,
+            [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
+                if (!m_dataSource || m_currentSymbol.isEmpty()) return;
+                if (!m_connected) return;
+                if (chartDebugEnabled()) {
+                    sLog_Debug(QString("Heatmap scroll-past-cache fetch: symbol=%1 tf=%2 end=%3 count=%4")
+                               .arg(m_currentSymbol)
+                               .arg(timeframeMs)
+                               .arg(endTimeMs)
+                               .arg(count));
+                }
+                m_dataSource->requestHeatmapHistory(m_currentSymbol, timeframeMs, endTimeMs, count);
             },
             Qt::QueuedConnection);
 

@@ -117,6 +117,36 @@ void UnifiedGridRenderer::onViewportChanged() {
   if (!m_viewState || !m_dataProcessor)
     return;
   update();
+
+  // Scroll-past-cache: when the left edge of the viewport moves before the
+  // oldest cached heatmap data, request an older history batch from the server.
+  // Debounced with a 300ms single-shot timer to avoid flooding while panning.
+  if (!m_historyFetchPending && m_heatmapStreamService && m_heatmapStreamService->stream()) {
+    const auto snap = m_heatmapStreamService->stream()->snapshot();
+    const bool haveData = (snap.filledColumns > 0 &&
+                           snap.appendMs > 0 &&
+                           snap.lastSliceStartMs > std::numeric_limits<int64_t>::min());
+    if (haveData) {
+      const int64_t oldestDataMs = snap.lastSliceStartMs -
+          static_cast<int64_t>(snap.filledColumns - 1) * snap.appendMs;
+      if (m_viewState->getVisibleTimeStart() < oldestDataMs) {
+        m_historyFetchPending = true;
+        QTimer::singleShot(300, this, [this]() {
+          m_historyFetchPending = false;
+          if (!m_viewState || !m_heatmapStreamService || !m_heatmapStreamService->stream()) return;
+          const auto s = m_heatmapStreamService->stream()->snapshot();
+          const bool still = (s.filledColumns > 0 && s.appendMs > 0 &&
+                              s.lastSliceStartMs > std::numeric_limits<int64_t>::min());
+          if (!still) return;
+          const int64_t oldestMs = s.lastSliceStartMs -
+              static_cast<int64_t>(s.filledColumns - 1) * s.appendMs;
+          if (m_viewState->getVisibleTimeStart() >= oldestMs) return;
+          const int count = (s.gridWidth > 0) ? s.gridWidth : 1024;
+          emit heatmapHistoryNeeded(m_currentTimeframe_ms, oldestMs, count);
+        });
+      }
+    }
+  }
 }
 
 void UnifiedGridRenderer::setPriceAxisSource(QObject *source) {
@@ -257,6 +287,7 @@ void UnifiedGridRenderer::setShowModeFlagsOverlay(bool show) {
 }
 
 void UnifiedGridRenderer::clearData() {
+  m_historyFetchPending = false;
   if (m_viewState) {
     m_viewState->resetZoom();
   }

@@ -232,6 +232,21 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
             },
             Qt::QueuedConnection);
 
+    // ── TPO POC/VAH/VAL ────────────────────────────────────────────────────
+    connect(m_dataProcessor.get(), &DataProcessor::tpoPocVahValReady,
+            this,
+            [this](int pocRow, int vahRow, int valRow,
+                   int gridHeight, double maxPrice, double tickSize) {
+                std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+                m_tpoPocRow = pocRow;
+                m_tpoVahRow = vahRow;
+                m_tpoValRow = valRow;
+                m_tpoPvvGridHeight = gridHeight;
+                m_tpoPvvMaxPrice = maxPrice;
+                m_tpoPvvTickSize = tickSize;
+                m_tpoPvvDirty = true;
+            },
+            Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::volumeProfileReady,
             this,
             [this](std::vector<float> bins, VolumeProfileState::Snapshot snap) {

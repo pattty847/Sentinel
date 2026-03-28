@@ -11,9 +11,13 @@
 
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QSGFlatColorMaterial>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
 #include <QTimeZone>
 #include <QtEndian>
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNode) {
@@ -23,6 +27,7 @@ HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNod
         for (auto* overlay : m_overlays)
             overlay->onRootRebuilt();
         m_chartTextRenderer.onRootRebuilt();
+        m_pvvLineNodes[0] = m_pvvLineNodes[1] = m_pvvLineNodes[2] = nullptr;
     }
     return texNode;
 }
@@ -574,7 +579,137 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                        .arg(m_chartTextRenderer.droppedLowGlyphs()));
     }
     updateFpsEstimate();
+
+    // ── TPO POC/VAH/VAL horizontal lines ────────────────────────────────────
+    renderTpoPocVahValLines(texNode, frame, m_tpoLayerEnabled);
+
     return texNode;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TPO POC / VAH / VAL horizontal line overlay
+// ─────────────────────────────────────────────────────────────────────────────
+// Draws three lines anchored to price levels:
+//   POC  — gold  (#F5C518, 2.5px)
+//   VAH  — cyan  (#4FC3F7, 1.2px)
+//   VAL  — cyan  (#4FC3F7, 1.2px)
+//
+// Each line is a separate QSGGeometryNode (flat-color quad) child of texNode.
+// show=false hides all three lines without deleting the nodes.
+void UnifiedGridRenderer::renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
+                                                   const FrameContext& frame,
+                                                   bool show) {
+    if (!texNode) {
+        return;
+    }
+
+    // Static per-line config: {color, halfHeight}.
+    struct LineConfig {
+        QColor color;
+        float  halfH;
+    };
+    static const LineConfig kConfigs[3] = {
+        { QColor(245, 197,  24, 220), 1.25f },  // POC: gold, 2.5px
+        { QColor( 79, 195, 247, 180), 0.6f  },  // VAH: cyan, 1.2px
+        { QColor( 79, 195, 247, 180), 0.6f  },  // VAL: cyan, 1.2px
+    };
+
+    // Ensure all three nodes exist as children of texNode.
+    for (int i = 0; i < 3; ++i) {
+        if (!m_pvvLineNodes[i]) {
+            auto* node = new QSGGeometryNode();
+            auto* mat  = new QSGFlatColorMaterial();
+            mat->setColor(kConfigs[i].color);
+            node->setMaterial(mat);
+            node->setFlag(QSGNode::OwnsMaterial, true);
+            // Empty geometry until we have data.
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            node->setGeometry(geom);
+            node->setFlag(QSGNode::OwnsGeometry, true);
+            texNode->appendChildNode(node);
+            m_pvvLineNodes[i] = node;
+        }
+    }
+
+    if (!show || !frame.mapping.valid) {
+        // Hide: set empty geometry on all nodes.
+        for (int i = 0; i < 3; ++i) {
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            m_pvvLineNodes[i]->setGeometry(geom);
+            m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+            m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+        }
+        return;
+    }
+
+    // Capture poc/vah/val under lock.
+    int pocRow = -1, vahRow = -1, valRow = -1;
+    double pvvMaxPrice = 0.0, pvvTickSize = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+        pocRow     = m_tpoPocRow;
+        vahRow     = m_tpoVahRow;
+        valRow     = m_tpoValRow;
+        pvvMaxPrice = m_tpoPvvMaxPrice;
+        pvvTickSize = m_tpoPvvTickSize;
+    }
+
+    if (pocRow < 0 || pvvMaxPrice <= 0.0 || pvvTickSize <= 0.0) {
+        return;
+    }
+
+    // Row → price (row 0 = highest price in the grid).
+    auto rowToPrice = [&](int row) -> double {
+        return pvvMaxPrice - row * pvvTickSize;
+    };
+
+    const float prices[3] = {
+        static_cast<float>(rowToPrice(pocRow)),
+        static_cast<float>(rowToPrice(vahRow)),
+        static_cast<float>(rowToPrice(valRow)),
+    };
+
+    const float left  = static_cast<float>(frame.mapping.drawRect.left());
+    const float right = static_cast<float>(frame.mapping.drawRect.right());
+    if (right <= left) {
+        return;
+    }
+
+    struct Vert { float x, y; };
+
+    for (int i = 0; i < 3; ++i) {
+        const float cy    = static_cast<float>(frame.mapping.priceToScreenY(prices[i]));
+        const float halfH = kConfigs[i].halfH;
+
+        // Skip if off-screen vertically.
+        const float top    = static_cast<float>(frame.surfaceBounds.top());
+        const float bottom = static_cast<float>(frame.surfaceBounds.bottom());
+        if (cy + halfH < top || cy - halfH > bottom) {
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            m_pvvLineNodes[i]->setGeometry(geom);
+            m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+            m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+            continue;
+        }
+
+        // 2-triangle quad for the line.
+        auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 6);
+        geom->setDrawingMode(QSGGeometry::DrawTriangles);
+        auto* v = static_cast<Vert*>(geom->vertexData());
+        v[0] = {left,  cy - halfH};
+        v[1] = {right, cy - halfH};
+        v[2] = {left,  cy + halfH};
+        v[3] = {left,  cy + halfH};
+        v[4] = {right, cy - halfH};
+        v[5] = {right, cy + halfH};
+
+        m_pvvLineNodes[i]->setGeometry(geom);
+        m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+        m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+    }
 }
 
 

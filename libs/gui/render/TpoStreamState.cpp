@@ -333,6 +333,88 @@ TpoStreamState::Snapshot TpoStreamState::snapshot() const {
 //  Private reset helper
 // ─────────────────────────────────────────────────────────────────────────────
 
+TpoStreamState::PocVahVal TpoStreamState::computePocVahVal() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_gridWidth <= 0 || m_gridHeight <= 0 || m_columns.empty()) {
+        return {};
+    }
+
+    // Build per-row histogram: count how many columns have a non-null letter at each row.
+    std::vector<int> hist(static_cast<size_t>(m_gridHeight), 0);
+    int total = 0;
+    for (const auto& col : m_columns) {
+        if (col.size() != m_gridHeight) {
+            continue;
+        }
+        for (int row = 0; row < m_gridHeight; ++row) {
+            if (col.at(row) != '\0') {
+                ++hist[static_cast<size_t>(row)];
+                ++total;
+            }
+        }
+    }
+    if (total == 0) {
+        return {};
+    }
+
+    // POC: row with the highest count.
+    int pocRow = 0;
+    int pocCount = 0;
+    for (int row = 0; row < m_gridHeight; ++row) {
+        if (hist[static_cast<size_t>(row)] > pocCount) {
+            pocCount = hist[static_cast<size_t>(row)];
+            pocRow = row;
+        }
+    }
+    if (pocCount == 0) {
+        return {};
+    }
+
+    // Value Area: expand from POC until accumulated count >= 70% of total.
+    // Standard Market Profile rule: at each step, choose the direction (up or down)
+    // whose next two rows sum to the larger value.
+    const int target = static_cast<int>(std::ceil(total * 0.70));
+    int accumulated = pocCount;
+    int vahRow = pocRow;
+    int valRow = pocRow;
+
+    while (accumulated < target) {
+        const int upRow   = vahRow - 1;
+        const int downRow = valRow + 1;
+        const bool canUp   = upRow >= 0;
+        const bool canDown = downRow < m_gridHeight;
+
+        if (!canUp && !canDown) {
+            break;
+        }
+
+        // Sum next two rows in each direction (standard TPO value area convention).
+        auto rowCount = [&](int r) -> int {
+            if (r < 0 || r >= m_gridHeight) return 0;
+            return hist[static_cast<size_t>(r)];
+        };
+        const int upSum   = canUp   ? (rowCount(upRow)   + rowCount(upRow - 1))   : -1;
+        const int downSum = canDown ? (rowCount(downRow) + rowCount(downRow + 1)) : -1;
+
+        if (!canDown || (canUp && upSum >= downSum)) {
+            // Expand upward (decreasing row index = higher price).
+            accumulated += rowCount(upRow);
+            --vahRow;
+        } else {
+            // Expand downward.
+            accumulated += rowCount(downRow);
+            ++valRow;
+        }
+    }
+
+    PocVahVal result;
+    result.pocRow = pocRow;
+    result.vahRow = vahRow;
+    result.valRow = valRow;
+    result.valid  = true;
+    return result;
+}
+
 void TpoStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_gridWidth        = gridWidth;
     m_gridHeight       = gridHeight;
