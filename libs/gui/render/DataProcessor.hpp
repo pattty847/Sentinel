@@ -80,6 +80,11 @@ signals:
                         int64_t sessionStartMs,
                         int64_t sessionEndMs,
                         int64_t timeframeMs);
+    // Emitted after session data changes; row indices in grid space (0 = highest price).
+    // maxPrice and tickSize let the receiver convert row → price without heatmap coupling.
+    void tpoPocVahValReady(int pocRow, int vahRow, int valRow,
+                           int gridHeight,
+                           double maxPrice, double tickSize);
     void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:
@@ -137,6 +142,8 @@ private:
     std::unique_ptr<FootprintStreamState> m_footprintStream;
     int m_tpoGridWidth = 5120;
     int m_tpoGridHeight = 2048;
+    double m_tpoMaxPrice = 0.0;
+    double m_tpoTickSize = 0.0;
     std::unique_ptr<TpoStreamState> m_tpoStream;
     std::unique_ptr<VolumeProfileState> m_vpStream;
 

@@ -301,6 +301,12 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
         m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
     }
 
+    // Track price range for POC/VAH/VAL → price conversion downstream.
+    if (slice.maxPrice > 0.0 && slice.tickSize > 0.0) {
+        m_tpoMaxPrice = slice.maxPrice;
+        m_tpoTickSize = slice.tickSize;
+    }
+
     const bool ok = m_tpoStream->ingestSlice(slice.bucketStartMs,
                                              slice.bucketEndMs,
                                              slice.timeframeMs,
@@ -309,6 +315,16 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                                              slice.letters);
     if (!ok) {
         return;
+    }
+
+    // Emit POC/VAH/VAL after each successful ingest.
+    if (m_tpoMaxPrice > 0.0 && m_tpoTickSize > 0.0) {
+        const auto pvv = m_tpoStream->computePocVahVal();
+        if (pvv.valid) {
+            emit tpoPocVahValReady(pvv.pocRow, pvv.vahRow, pvv.valRow,
+                                   m_tpoGridHeight,
+                                   m_tpoMaxPrice, m_tpoTickSize);
+        }
     }
 
     std::vector<TpoStreamState::PendingUpload> pendingUploads;

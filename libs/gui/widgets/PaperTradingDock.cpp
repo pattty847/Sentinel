@@ -2,11 +2,18 @@
 #include "../render/PnlCurveItem.hpp"
 #include "../datasources/IGridDataSource.hpp"
 
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QProcess>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -65,6 +72,10 @@ void PaperTradingDock::buildUi() {
     auto* algoTab = new QWidget(tabs);
     buildAlgoTab(algoTab);
     tabs->addTab(algoTab, QStringLiteral("Algorithms"));
+
+    auto* backtestTab = new QWidget(tabs);
+    buildBacktestTab(backtestTab);
+    tabs->addTab(backtestTab, QStringLiteral("Backtest"));
 
     rootLayout->addWidget(tabs, 2);
 
@@ -228,6 +239,166 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
 
     connect(m_startBtn, &QPushButton::clicked, this, &PaperTradingDock::onStartAlgoClicked);
     connect(m_stopBtn, &QPushButton::clicked, this, &PaperTradingDock::onStopAlgoClicked);
+}
+
+void PaperTradingDock::buildBacktestTab(QWidget* parent) {
+    auto* layout = new QVBoxLayout(parent);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(6);
+
+    // ── Trade log file picker ───────────────────────────────────────────────
+    auto* fileGroup = new QGroupBox(QStringLiteral("Trade Log"), parent);
+    auto* fileLayout = new QHBoxLayout(fileGroup);
+    fileLayout->setSpacing(4);
+    m_btFilePath = new QLineEdit(fileGroup);
+    m_btFilePath->setPlaceholderText(QStringLiteral("/path/to/trade_log.bin or directory/"));
+    fileLayout->addWidget(m_btFilePath, 1);
+    auto* browseBtn = new QPushButton(QStringLiteral("Browse"), fileGroup);
+    browseBtn->setFixedWidth(60);
+    fileLayout->addWidget(browseBtn);
+    layout->addWidget(fileGroup);
+
+    // ── Parameters ─────────────────────────────────────────────────────────
+    auto* paramGroup = new QGroupBox(QStringLiteral("Parameters"), parent);
+    auto* paramGrid = new QGridLayout(paramGroup);
+    paramGrid->setSpacing(4);
+
+    auto addLabeledSpin = [&](int row, const QString& label, QDoubleSpinBox*& spin,
+                              double min, double max, double step, double def,
+                              const QString& suffix) {
+        paramGrid->addWidget(new QLabel(label, paramGroup), row, 0);
+        spin = new QDoubleSpinBox(paramGroup);
+        spin->setRange(min, max);
+        spin->setSingleStep(step);
+        spin->setValue(def);
+        spin->setSuffix(suffix);
+        spin->setDecimals(4);
+        paramGrid->addWidget(spin, row, 1);
+    };
+
+    paramGrid->addWidget(new QLabel(QStringLiteral("Symbol:"), paramGroup), 0, 0);
+    m_btSymbol = new QLineEdit(QStringLiteral("BTC-USD"), paramGroup);
+    paramGrid->addWidget(m_btSymbol, 0, 1);
+
+    addLabeledSpin(1, QStringLiteral("Spread (bps):"), m_btSpread,  1.0, 500.0, 1.0, 10.0, QStringLiteral(" bps"));
+    addLabeledSpin(2, QStringLiteral("Order Qty:"),    m_btQty,     0.0001, 100.0, 0.001, 0.01, {});
+    addLabeledSpin(3, QStringLiteral("Max Pos:"),      m_btMaxPos,  0.001, 100.0, 0.01,  0.1,  {});
+    layout->addWidget(paramGroup);
+
+    // ── Run button + status ─────────────────────────────────────────────────
+    auto* runRow = new QHBoxLayout();
+    m_btRunBtn = new QPushButton(QStringLiteral("▶ Run Backtest"), parent);
+    m_btRunBtn->setStyleSheet("QPushButton { background: #1a3a6a; color: #82b4ff; border: 1px solid #4478cc; padding: 4px 12px; }");
+    m_btStatus = new QLabel(QStringLiteral("Select a trade log and press Run."), parent);
+    m_btStatus->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
+    runRow->addWidget(m_btRunBtn);
+    runRow->addWidget(m_btStatus, 1);
+    layout->addLayout(runRow);
+
+    // ── Output area ─────────────────────────────────────────────────────────
+    m_btOutput = new QPlainTextEdit(parent);
+    m_btOutput->setReadOnly(true);
+    m_btOutput->setFont(QFont(QStringLiteral("Roboto Mono"), 10));
+    m_btOutput->setStyleSheet(
+        "QPlainTextEdit { background: #0f1218; color: #c0c8d4; border: 1px solid #222; }");
+    m_btOutput->setMinimumHeight(120);
+    layout->addWidget(m_btOutput, 1);
+
+    // ── Browse handler ─────────────────────────────────────────────────────
+    connect(browseBtn, &QPushButton::clicked, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(
+            this,
+            QStringLiteral("Select Trade Log"),
+            QDir::homePath(),
+            QStringLiteral("Binary Trade Logs (*.bin);;CSV Trade Logs (*.csv);;All Files (*)"));
+        if (!path.isEmpty()) {
+            m_btFilePath->setText(path);
+        }
+    });
+
+    // ── Run handler ────────────────────────────────────────────────────────
+    connect(m_btRunBtn, &QPushButton::clicked, this, [this]() {
+        const QString inputPath = m_btFilePath->text().trimmed();
+        if (inputPath.isEmpty()) {
+            m_btStatus->setText(QStringLiteral("Error: no trade log selected."));
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            return;
+        }
+        if (!QFileInfo::exists(inputPath)) {
+            m_btStatus->setText(QStringLiteral("Error: file not found."));
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            return;
+        }
+
+        // Locate sentinel_backtest binary relative to the running application.
+        const QString appDir = QCoreApplication::applicationDirPath();
+        QStringList candidates;
+        // Dev build layouts.
+        for (const auto& rel : {
+                 QString("../sentinel-backtest/sentinel-backtest"),
+                 QString("../../sentinel-backtest/sentinel-backtest"),
+                 QString("../../../apps/sentinel-backtest/sentinel-backtest"),
+                 QString("sentinel-backtest"),
+             }) {
+            candidates << QDir(appDir).absoluteFilePath(rel);
+        }
+
+        QString backtestBin;
+        for (const auto& c : candidates) {
+            if (QFileInfo::exists(c) && QFileInfo(c).isExecutable()) {
+                backtestBin = QDir::cleanPath(c);
+                break;
+            }
+        }
+
+        if (backtestBin.isEmpty()) {
+            m_btStatus->setText(QStringLiteral("Error: sentinel_backtest binary not found."));
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            return;
+        }
+
+        // Kill any previous run.
+        if (m_btProcess && m_btProcess->state() != QProcess::NotRunning) {
+            m_btProcess->kill();
+            m_btProcess->waitForFinished(500);
+        }
+
+        m_btOutput->clear();
+        m_btStatus->setText(QStringLiteral("Running..."));
+        m_btStatus->setStyleSheet("QLabel { color: #ffc107; font-size: 10px; }");
+        m_btRunBtn->setEnabled(false);
+
+        const QString symbol  = m_btSymbol->text().trimmed().isEmpty()
+                                    ? QStringLiteral("BTC-USD")
+                                    : m_btSymbol->text().trimmed();
+        const QString spread  = QString::number(m_btSpread->value(), 'f', 2);
+        const QString qty     = QString::number(m_btQty->value(), 'f', 4);
+        const QString maxPos  = QString::number(m_btMaxPos->value(), 'f', 4);
+
+        if (!m_btProcess) {
+            m_btProcess = new QProcess(this);
+            connect(m_btProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+                m_btOutput->appendPlainText(QString::fromLocal8Bit(m_btProcess->readAllStandardOutput()).trimmed());
+            });
+            connect(m_btProcess, &QProcess::readyReadStandardError, this, [this]() {
+                m_btOutput->appendPlainText(QStringLiteral("[stderr] ") +
+                    QString::fromLocal8Bit(m_btProcess->readAllStandardError()).trimmed());
+            });
+            connect(m_btProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [this](int code, QProcess::ExitStatus status) {
+                m_btRunBtn->setEnabled(true);
+                if (status == QProcess::CrashExit || code != 0) {
+                    m_btStatus->setText(QString("Exited with code %1").arg(code));
+                    m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+                } else {
+                    m_btStatus->setText(QStringLiteral("Done."));
+                    m_btStatus->setStyleSheet("QLabel { color: #4caf50; font-size: 10px; }");
+                }
+            });
+        }
+
+        m_btProcess->start(backtestBin, {inputPath, symbol, spread, qty, maxPos});
+    });
 }
 
 void PaperTradingDock::buildPnlPanel(QWidget* parent) {

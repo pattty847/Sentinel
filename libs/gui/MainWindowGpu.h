@@ -12,6 +12,7 @@
 #include <QSGRendererInterface>
 #include <QCloseEvent>
 #include <QPointer>
+#include <QProcess>
 #include <memory>
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
@@ -132,4 +133,9 @@ private:
     QDoubleSpinBox* m_orderQtyInput = nullptr;
 
     bool m_firstShow = true;
+
+    // Screener Python server subprocess (owned lifetime = window lifetime)
+    QProcess* m_screenerProcess = nullptr;
+    void startScreenerServer();
+    void stopScreenerServer();
 };
