@@ -532,17 +532,30 @@ void MainWindowGPU::startScreenerServer() {
 
     if (!m_screenerProcess) {
         m_screenerProcess = new QProcess(this);
-        // Log stderr to the app log for debugging.
-        connect(m_screenerProcess, &QProcess::readyReadStandardError, this, [this]() {
+        // Capture both stdout and stderr so we see Python tracebacks.
+        auto logOutput = [this]() {
+            const QString out = QString::fromUtf8(m_screenerProcess->readAllStandardOutput()).trimmed();
+            if (!out.isEmpty()) sLog_App("[screener_server] " << out);
+        };
+        auto logErr = [this]() {
             const QString err = QString::fromUtf8(m_screenerProcess->readAllStandardError()).trimmed();
-            if (!err.isEmpty()) {
-                sLog_App("[screener_server] " << err);
-            }
-        });
+            if (!err.isEmpty()) sLog_App("[screener_server] " << err);
+        };
+        connect(m_screenerProcess, &QProcess::readyReadStandardOutput, this, logOutput);
+        connect(m_screenerProcess, &QProcess::readyReadStandardError,  this, logErr);
         connect(m_screenerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [](int exitCode, QProcess::ExitStatus status) {
+                this, [this, scriptsDir, uvBin, args](int exitCode, QProcess::ExitStatus status) {
                     sLog_App("Screener server exited: code=" << exitCode
                              << " status=" << static_cast<int>(status));
+                    // Auto-restart on unexpected exit (not during shutdown).
+                    if (m_screenerProcess) {
+                        QTimer::singleShot(2000, this, [this, scriptsDir, uvBin, args]() {
+                            if (!m_screenerProcess) return;
+                            sLog_App("Screener server restarting...");
+                            m_screenerProcess->setWorkingDirectory(scriptsDir);
+                            m_screenerProcess->start(uvBin, args);
+                        });
+                    }
                 });
     }
 
@@ -557,11 +570,15 @@ void MainWindowGPU::startScreenerServer() {
 
 void MainWindowGPU::stopScreenerServer() {
     if (!m_screenerProcess || m_screenerProcess->state() == QProcess::NotRunning) {
+        m_screenerProcess = nullptr;
         return;
     }
-    m_screenerProcess->terminate();
-    if (!m_screenerProcess->waitForFinished(2000)) {
-        m_screenerProcess->kill();
+    // Null first so the finished() handler doesn't schedule an auto-restart.
+    QProcess* proc = m_screenerProcess;
+    m_screenerProcess = nullptr;
+    proc->terminate();
+    if (!proc->waitForFinished(2000)) {
+        proc->kill();
     }
 }
 

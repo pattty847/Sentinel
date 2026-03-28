@@ -391,8 +391,9 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
         ? bytesPerCellGuess
         : 1;
 
-    emit heatmapRangeReset(first.minPrice, first.maxPrice, first.tickSize, gridWidth, gridHeight);
-    // Week 0: batch history handoff to avoid queuing one cross-thread signal per column.
+    // Do NOT emit heatmapRangeReset here — that stomps the viewport back to "now"
+    // every time a history batch arrives (e.g. scroll-past-cache fetch).
+    // heatmapRangeReset is for live slice initialisation only (onHeatmapSliceReceived).
     emit heatmapHistoryBatchReady(timeframeMs, gridWidth, gridHeight, columns, bytesPerCell);
 }
 

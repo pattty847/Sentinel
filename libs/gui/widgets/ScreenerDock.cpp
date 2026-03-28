@@ -57,13 +57,7 @@ void ScreenerDock::setStreamClient(SentinelStreamClient* client) {
     if (m_client) {
         connect(m_client, &SentinelStreamClient::screenerUpdateReceived,
                 this, &ScreenerDock::onScreenerUpdate, Qt::QueuedConnection);
-        setStatus("Connected — fetching...");
-        // Auto-trigger an initial fetch so the table populates on launch.
-        QTimer::singleShot(500, this, [this]() {
-            if (m_client && m_model->rowCount() == 0) {
-                requestFetch();
-            }
-        });
+        setStatus("Connected — press Refresh to fetch");
     } else {
         setStatus("No stream client", true);
     }
