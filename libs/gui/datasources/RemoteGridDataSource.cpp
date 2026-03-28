@@ -66,6 +66,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
+    qRegisterMetaType<BookDelta>("BookDelta");
+    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
     qRegisterMetaType<trading::OrderUpdate>("trading::OrderUpdate");
     qRegisterMetaType<trading::PositionUpdate>("trading::PositionUpdate");
     qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");

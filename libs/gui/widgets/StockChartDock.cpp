@@ -48,6 +48,13 @@ StockChartDock::StockChartDock(QWidget* parent)
 }
 
 StockChartDock::~StockChartDock() {
+    // Disconnect SecApiClient before QQuickView is destroyed by ~QWidget.
+    // Without this, SecApiClient::~SecApiClient() calls waitForFinished()
+    // which can fire processFinished → onPythonError → apiError → onSecApiError
+    // → qmlRoot() on an already-destroyed QQuickView (dangling pointer crash).
+    if (m_secApiClient) {
+        m_secApiClient->disconnect(this);
+    }
     if (m_process->state() != QProcess::NotRunning)
         m_process->kill();
 }

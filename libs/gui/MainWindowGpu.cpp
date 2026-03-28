@@ -886,6 +886,9 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
 
         // (Re)send subscription and request history for active symbol.
         if (m_userSubscribed && !m_currentSymbol.isEmpty() && m_dataSource) {
+            // Notify all docks/widgets of the active symbol so they can
+            // filter incoming data (e.g. OrderBookDock sets m_currentSymbol).
+            emit symbolChanged(m_currentSymbol);
             m_dataSource->subscribe(m_currentSymbol);
             requestHeatmapHistoryForSymbol(m_currentSymbol);
             requestFootprintHistoryForSymbol(m_currentSymbol);
