@@ -27,18 +27,28 @@
  */
 #pragma once
 
+#include "IOverlayRenderer.hpp"
 #include "VolumeProfileState.hpp"
 
 #include <QColor>
 #include <QRectF>
+#include <mutex>
 #include <vector>
 
 class QQuickWindow;
 class QSGNode;
 class QSGGeometryNode;
 
-class VolumeProfileRenderer {
+class VolumeProfileRenderer : public IOverlayRenderer {
 public:
+    /// Thread-safe enqueue (called from GUI thread).
+    void enqueue(std::vector<float> bins, VolumeProfileState::Snapshot snap);
+    /// Drain pending data into local copies (called from render thread).
+    /// Returns true if new data was available.
+    bool drainPending(std::vector<float>& bins, VolumeProfileState::Snapshot& snap);
+    /// Clear all pending data (called from GUI thread on clearData).
+    void clearPending();
+
     // ── Configuration ──────────────────────────────────────────────────────
     // Width of the histogram as a fraction of the chart width (0–1).
     void setWidthFraction(float frac);
@@ -50,7 +60,8 @@ public:
     void setPocColor(const QColor& color);
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
-    void onRootRebuilt();
+    void onRootRebuilt() override;
+    int zOrder() const override { return 3; }
 
     // ── Hot path ──────────────────────────────────────────────────────────
     // Called once per frame from the render thread.
@@ -88,4 +99,9 @@ private:
     QColor m_barColor  = QColor(100, 160, 220, 180);
     QColor m_vaColor   = QColor( 60, 200, 100,  60);
     QColor m_pocColor  = QColor(255, 215,   0, 240);
+
+    mutable std::mutex m_pendingMutex;
+    std::vector<float> m_pendingBins;
+    VolumeProfileState::Snapshot m_pendingSnap;
+    bool m_pendingDirty = false;
 };

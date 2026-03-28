@@ -79,6 +79,31 @@ void VolumeProfileRenderer::setPocColor(const QColor& color) {
 //  Lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
+void VolumeProfileRenderer::enqueue(std::vector<float> bins, VolumeProfileState::Snapshot snap) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingBins = std::move(bins);
+    m_pendingSnap = std::move(snap);
+    m_pendingDirty = true;
+}
+
+bool VolumeProfileRenderer::drainPending(std::vector<float>& bins, VolumeProfileState::Snapshot& snap) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (m_pendingDirty || !m_pendingBins.empty()) {
+        bins = m_pendingBins;
+        snap = m_pendingSnap;
+        m_pendingDirty = false;
+        return true;
+    }
+    return false;
+}
+
+void VolumeProfileRenderer::clearPending() {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingBins.clear();
+    m_pendingSnap = {};
+    m_pendingDirty = false;
+}
+
 void VolumeProfileRenderer::onRootRebuilt() {
     m_vaNode   = nullptr;
     m_barsNode = nullptr;

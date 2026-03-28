@@ -8,35 +8,32 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
-#include <QByteArray>
-#include <QSizeF>
 #include <QColor>
-#include <QPointer>
-#include <QMetaObject>
 #include <cstdint>
 #include <vector>
-#include <array>
 #include <memory>
 #include <atomic>
 #include <mutex>
-#include <limits>
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
+// ── Core rendering types (needed by inline members) ──────────────────────────
 #include "render/GridViewState.hpp"
 #include "render/AxisLayout.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "render/ChartTextRenderer.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
-#include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
-#include "render/TimeAuthority.hpp"
+// ── Extracted services ───────────────────────────────────────────────────────
+#include "render/AxisTextService.hpp"
+#include "render/HeatmapStreamService.hpp"
+#include "render/FrameContext.hpp"
+// ── Overlay renderers (owned inline) ─────────────────────────────────────────
+#include "render/IOverlayRenderer.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
-#include "render/VolumeProfileState.hpp"
-#include "models/AxisModel.hpp"
 
 class DataProcessor;
 class HeatmapIntensityNode;
@@ -97,41 +94,6 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
 
 private:
-    struct FrameViewportSnapshot {
-        bool valid = false;
-        qint64 timeStart = 0;
-        qint64 timeEnd = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        QPointF panVisualOffset;
-        bool dragging = false;
-        bool autoScrollEnabled = false;
-    };
-
-    struct FrameStreamGenerations {
-        uint64_t heatmap = 0;
-        uint64_t footprint = 0;
-        uint64_t candle = 0;
-    };
-
-    struct FrameContext {
-        struct OverlayActivationSet {
-            bool heatmap = false;
-            bool footprint = false;
-            bool tpo = false;
-        };
-        TimeAuthority::Snapshot time;
-        QRectF surfaceBounds;
-        double surfaceDpr = 1.0;
-        qint64 presentationTimeMs = 0;
-        FrameViewportSnapshot viewport;
-        HeatmapStreamState::Snapshot heatmapSnapshot;
-        FrameStreamGenerations streamGenerations;
-        OverlayActivationSet overlays;
-        bool forceFull = false;
-        TimeAxisMapping mapping;
-    };
-
     double m_intensityScale = 1.0;
     int m_maxCells = 100000;
     double m_minVolumeFilter = 0.0;
@@ -146,27 +108,17 @@ private:
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
     int m_candleStyle = 0;
-    double m_heatmapMaxObservedLiquidity = 0.0;
-    double m_heatmapMinObservedLiquidity = std::numeric_limits<double>::max();
     QTimer* m_thresholdRebuildTimer = nullptr;
-    double m_heatmapTickSize = 0.0;
 
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
-    
+
     bool m_panSyncPending = false;
 
     bool m_useGpuHeatmap = false;
-    int m_heatmapGridWidth = 5120;
-    int m_heatmapGridHeight = 2048;
     HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
-    bool m_heatmapViewportInitialized = false;
-    int m_intensityBytesPerCell = 1;
-    QElapsedTimer m_heatmapClock;
-    std::unique_ptr<class HeatmapStreamState> m_heatmapStream;
-    TimeAuthority m_timeAuthority;
-    std::unique_ptr<class ViewportAutoScrollController> m_autoScrollController;
+    std::unique_ptr<HeatmapStreamService> m_heatmapStreamService;
     double m_autoScrollPaddingFrac = 0.08;
     bool m_smoothAutoScrollEnabled = true;
     QColor m_heatmapBackgroundColor = QColor(18, 20, 24);
@@ -184,19 +136,6 @@ private:
     mutable std::mutex m_frameContextMutex;
     MappingFrameContext m_lastFrameContext;
 
-    struct AxisTickSnapshot {
-        double position = 0.0;
-        QString label;
-        bool isMajorTick = false;
-    };
-
-    struct AxisLayoutSnapshot {
-        float axisLabelPx = static_cast<float>(AxisLayout::kAutoAxisLabelBasePx);
-        float axisScale = 1.0f;
-        int priceAxisWidthPx = 90;
-        int timeAxisHeightPx = 30;
-    };
-
     ChartTextAtlas m_chartTextAtlas;
     bool m_chartTextAtlasBuilt = false;
     ChartTextRenderer m_chartTextRenderer;
@@ -206,39 +145,11 @@ private:
     std::vector<uint16_t> m_labelLiquidityRing;
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
-    AxisModel* m_priceAxisSource = nullptr;
-    AxisModel* m_timeAxisSource = nullptr;
-    std::vector<QMetaObject::Connection> m_priceAxisConnections;
-    std::vector<QMetaObject::Connection> m_timeAxisConnections;
-    mutable std::mutex m_axisSnapshotMutex;
-    std::vector<AxisTickSnapshot> m_priceAxisTicks;
-    std::vector<AxisTickSnapshot> m_timeAxisTicks;
-    mutable std::mutex m_axisLayoutMutex;
-    AxisLayoutSnapshot m_axisLayoutSnapshot;
-    double m_effectiveAxisLabelPx = AxisLayout::kAutoAxisLabelBasePx;
-    int m_priceAxisWidthPx = 90;
-    int m_timeAxisHeightPx = 30;
-    int m_axisLabelPxOverride = 0;
-    QPointer<QScreen> m_axisLayoutWindowScreen;
-    QMetaObject::Connection m_axisLayoutWindowConnection;
-    QMetaObject::Connection m_axisLayoutScreenConnection;
+    std::unique_ptr<AxisTextService> m_axisTextService;
     FootprintOverlayRenderer m_footprintOverlay;
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
-    // Main thread enqueues pending uploads; render thread swaps to local frame snapshot.
-    mutable std::mutex m_footprintPendingMutex;
-    std::vector<FootprintOverlayRenderer::PendingUpload> m_pendingFootprintUploads;
-    mutable std::mutex m_tpoPendingMutex;
-    std::vector<TpoOverlayRenderer::PendingUpload> m_pendingTpoUploads;
-    int64_t m_tpoSessionStartMs = 0;
-    int64_t m_tpoSessionEndMs = 0;
-    int64_t m_tpoBracketMs = 0;
-    int m_tpoSessionColumns = 0;
-    // VP data protected by mutex; written on data thread, read on render thread.
-    mutable std::mutex m_vpMutex;
-    std::vector<float> m_vpBins;              // most-recent bins for render
-    VolumeProfileState::Snapshot m_vpSnap;    // most-recent snapshot for render
-    bool m_vpDirty = false;
+    std::vector<IOverlayRenderer*> m_overlays;  // non-owning; points to inline members above
     int m_tpoTimeframeMs = 900000;            // standard 15m
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
@@ -250,7 +161,6 @@ private:
     std::atomic<qint64> m_totalBytesUploaded{0};
     std::atomic<double> m_uploadBandwidthMBps{0.0};
     qint64 m_lastBandwidthUpdate = 0;
-    std::atomic<uint64_t> m_heatmapStreamGeneration{0};
     std::atomic<uint64_t> m_footprintStreamGeneration{0};
     std::atomic<uint64_t> m_candleStreamGeneration{0};
     std::atomic<int64_t> m_lastIncomingHeatmapSliceTimeframeMs{0};
@@ -270,12 +180,8 @@ public:
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     int candleStyle() const { return m_candleStyle; }
     void setCandleStyle(int style);
-    double heatmapMaxObservedLiquidity() const { return m_heatmapMaxObservedLiquidity; }
-    double heatmapMinObservedLiquidity() const {
-        return m_heatmapMinObservedLiquidity == std::numeric_limits<double>::max()
-                   ? 0.0
-                   : m_heatmapMinObservedLiquidity;
-    }
+    double heatmapMaxObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->maxObservedLiquidity() : 0.0; }
+    double heatmapMinObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->minObservedLiquidity() : 0.0; }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
     double heatmapGamma() const { return m_heatmapGamma; }
     double heatmapContrast() const { return m_heatmapContrast; }
@@ -293,11 +199,11 @@ public:
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
-    QObject* priceAxisSource() const { return m_priceAxisSource; }
-    QObject* timeAxisSource() const { return m_timeAxisSource; }
-    double effectiveAxisLabelPx() const { return m_effectiveAxisLabelPx; }
-    int priceAxisWidthPx() const { return m_priceAxisWidthPx; }
-    int timeAxisHeightPx() const { return m_timeAxisHeightPx; }
+    QObject* priceAxisSource() const { return m_axisTextService ? m_axisTextService->priceAxisSource() : nullptr; }
+    QObject* timeAxisSource() const { return m_axisTextService ? m_axisTextService->timeAxisSource() : nullptr; }
+    double effectiveAxisLabelPx() const { return m_axisTextService ? m_axisTextService->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
+    int priceAxisWidthPx() const { return m_axisTextService ? m_axisTextService->priceAxisWidthPx() : 90; }
+    int timeAxisHeightPx() const { return m_axisTextService ? m_axisTextService->timeAxisHeightPx() : 30; }
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -314,7 +220,7 @@ public:
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     Q_INVOKABLE QPointF getPanVisualOffset() const;
-    double heatmapTickSize() const { return m_heatmapTickSize; }
+    double heatmapTickSize() const { return m_heatmapStreamService ? m_heatmapStreamService->tickSize() : 0.0; }
 
     bool heatmapDataPriceRange(double& outMin, double& outMax) const;
     bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
@@ -448,33 +354,10 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
-    struct HeatmapColumnEvent {
-        int64_t sliceStartMs = 0;
-        int64_t sliceEndMs = 0;
-        int64_t timeframeMs = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        double tickSize = 0.0;
-        QByteArray column;
-        QByteArray liquidityColumn;
-        double liquidityScale = 1.0;
-        int intensityBytesPerCell = 1;
-    };
-
     void buildMsdfAtlas();
-    void syncAxisTicks(AxisModel* model,
-                       std::vector<QMetaObject::Connection>& connections,
-                       std::vector<AxisTickSnapshot>& storage,
-                       AxisModel*& target,
-                       QObject* source);
-    void refreshAxisTickSnapshot(AxisModel* model, std::vector<AxisTickSnapshot>& storage);
-    void refreshAxisLayout();
-    void bindAxisLayoutWindow(class QQuickWindow* window);
-    void submitAxisText();
-    bool ingestHeatmapColumnEvent(const HeatmapColumnEvent& event);
+    bool ingestHeatmapColumn(const HeatmapStreamService::HeatmapColumnEvent& event);
     void connectDataProcessorSignals();
     void startHeatmapRenderLoop();
-    FrameContext buildFrameContext() const;
     HeatmapIntensityNode* ensureHeatmapRootNode(QSGNode* oldNode);
     void computeAndApplyFrameMapping(FrameContext& frame,
                                      HeatmapIntensityNode* texNode,

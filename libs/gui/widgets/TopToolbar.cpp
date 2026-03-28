@@ -65,12 +65,14 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_heatmapButton->setChecked(true);
     m_heatmapButton->setAutoExclusive(false);
 
-    m_footprintButton = addIconButton(":/svg/footprint.svg", "Footprint");
-    m_footprintButton->setCheckable(true);
+    m_footprintButton = addIconButton(":/svg/footprint.svg", "Coming Soon!");
+    m_footprintButton->setCheckable(false);
+    m_footprintButton->setEnabled(false);
     m_footprintButton->setAutoExclusive(false);
 
-    m_tpoButton = addIconButton(":/svg/tpo_chart.svg", "TPO");
-    m_tpoButton->setCheckable(true);
+    m_tpoButton = addIconButton(":/svg/tpo_chart.svg", "Coming Soon!");
+    m_tpoButton->setCheckable(false);
+    m_tpoButton->setEnabled(false);
     m_tpoButton->setAutoExclusive(false);
 
     m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Volume Profile");

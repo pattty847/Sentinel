@@ -63,7 +63,11 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
 
   setAcceptHoverEvents(false); // Reduce event capture
   connect(this, &QQuickItem::windowChanged, this,
-          &UnifiedGridRenderer::bindAxisLayoutWindow);
+          [this](QQuickWindow* w) {
+              if (m_axisTextService) {
+                  m_axisTextService->bindAxisLayoutWindow(w);
+              }
+          });
 
   init();
 }
@@ -116,324 +120,17 @@ void UnifiedGridRenderer::onViewportChanged() {
 }
 
 void UnifiedGridRenderer::setPriceAxisSource(QObject *source) {
-  syncAxisTicks(m_priceAxisSource, m_priceAxisConnections, m_priceAxisTicks,
-                m_priceAxisSource, source);
+  if (m_axisTextService) {
+    m_axisTextService->setPriceAxisSource(source);
+  }
 }
 
 void UnifiedGridRenderer::setTimeAxisSource(QObject *source) {
-  syncAxisTicks(m_timeAxisSource, m_timeAxisConnections, m_timeAxisTicks,
-                m_timeAxisSource, source);
-}
-
-void UnifiedGridRenderer::syncAxisTicks(
-    AxisModel *currentModel, std::vector<QMetaObject::Connection> &connections,
-    std::vector<AxisTickSnapshot> &storage, AxisModel *&target,
-    QObject *source) {
-  AxisModel *nextModel = qobject_cast<AxisModel *>(source);
-  if (currentModel == nextModel) {
-    return;
-  }
-
-  for (const auto &connection : connections) {
-    disconnect(connection);
-  }
-  connections.clear();
-  target = nextModel;
-
-  if (target) {
-    auto refresh = [this, &storage, model = target]() {
-      refreshAxisTickSnapshot(model, storage);
-      update();
-    };
-    connections.push_back(connect(
-        target, &QAbstractItemModel::dataChanged, this,
-        [refresh](const auto &, const auto &, const auto &) { refresh(); }));
-    connections.push_back(connect(target, &QAbstractItemModel::modelReset, this,
-                                  [refresh]() { refresh(); }));
-    refresh();
-  } else {
-    {
-      std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-      storage.clear();
-    }
-    refreshAxisLayout();
-    update();
-  }
-
-  emit axisSourcesChanged();
-}
-
-void UnifiedGridRenderer::refreshAxisTickSnapshot(
-    AxisModel *model, std::vector<AxisTickSnapshot> &storage) {
-  {
-    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-    storage.clear();
-    if (model) {
-      std::vector<AxisModel::TickSnapshot> ticks;
-      model->copyTicks(ticks);
-      storage.reserve(ticks.size());
-      for (const auto &tick : ticks) {
-        storage.push_back({tick.position, tick.label, tick.isMajorTick});
-      }
-    }
-  }
-  refreshAxisLayout();
-}
-
-void UnifiedGridRenderer::bindAxisLayoutWindow(QQuickWindow *window) {
-  if (m_axisLayoutWindowConnection) {
-    disconnect(m_axisLayoutWindowConnection);
-    m_axisLayoutWindowConnection = {};
-  }
-  if (m_axisLayoutScreenConnection) {
-    disconnect(m_axisLayoutScreenConnection);
-    m_axisLayoutScreenConnection = {};
-  }
-  m_axisLayoutWindowScreen.clear();
-
-  auto bindScreen = [this](QScreen *screen) {
-    if (m_axisLayoutScreenConnection) {
-      disconnect(m_axisLayoutScreenConnection);
-      m_axisLayoutScreenConnection = {};
-    }
-    m_axisLayoutWindowScreen = screen;
-    if (screen) {
-      m_axisLayoutScreenConnection =
-          connect(screen, &QScreen::logicalDotsPerInchChanged, this,
-                  [this](qreal) { refreshAxisLayout(); });
-    }
-    refreshAxisLayout();
-  };
-
-  if (window) {
-    m_axisLayoutWindowConnection =
-        connect(window, &QQuickWindow::screenChanged, this, bindScreen);
-    bindScreen(window->screen());
-  } else {
-    refreshAxisLayout();
+  if (m_axisTextService) {
+    m_axisTextService->setTimeAxisSource(source);
   }
 }
 
-void UnifiedGridRenderer::refreshAxisLayout() {
-  int envAxisLabelPx = 0;
-  envIntValue("SENTINEL_AXIS_LABEL_PX", envAxisLabelPx);
-
-  double logicalDpiY = 96.0;
-  if (QQuickWindow *itemWindow = window(); itemWindow && itemWindow->screen()) {
-    logicalDpiY = itemWindow->screen()->logicalDotsPerInchY();
-  } else if (m_axisLayoutWindowScreen) {
-    logicalDpiY = m_axisLayoutWindowScreen->logicalDotsPerInchY();
-  }
-
-  const int resolvedLabelPx = AxisLayout::resolveEffectiveAxisLabelPx(
-      logicalDpiY, m_axisLabelPxOverride, envAxisLabelPx);
-  const float axisScale =
-      (m_chartTextAtlas.fontPx() > 0)
-          ? (static_cast<float>(resolvedLabelPx) /
-             static_cast<float>(m_chartTextAtlas.fontPx()))
-          : 1.0f;
-
-  std::vector<QString> priceLabels;
-  {
-    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-    priceLabels.reserve(m_priceAxisTicks.size());
-    for (const auto &tick : m_priceAxisTicks) {
-      if (!tick.label.isEmpty()) {
-        priceLabels.push_back(tick.label);
-      }
-    }
-  }
-
-  const int nextPriceAxisWidth = AxisLayout::measurePriceAxisWidthPx(
-      m_chartTextAtlas, axisScale, priceLabels, m_priceAxisWidthPx);
-  const int nextTimeAxisHeight = AxisLayout::measureTimeAxisHeightPx(
-      m_chartTextAtlas, axisScale, m_timeAxisHeightPx);
-
-  {
-    std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
-    m_axisLayoutSnapshot = AxisLayoutSnapshot{
-        static_cast<float>(resolvedLabelPx), axisScale, nextPriceAxisWidth,
-        nextTimeAxisHeight};
-  }
-
-  const bool changed =
-      !qFuzzyCompare(m_effectiveAxisLabelPx + 1.0,
-                     static_cast<double>(resolvedLabelPx) + 1.0) ||
-      m_priceAxisWidthPx != nextPriceAxisWidth ||
-      m_timeAxisHeightPx != nextTimeAxisHeight;
-  m_effectiveAxisLabelPx = static_cast<double>(resolvedLabelPx);
-  m_priceAxisWidthPx = nextPriceAxisWidth;
-  m_timeAxisHeightPx = nextTimeAxisHeight;
-  if (changed) {
-    emit axisLayoutChanged();
-  }
-  update();
-}
-
-void UnifiedGridRenderer::submitAxisText() {
-  if (!m_chartTextAtlasBuilt) {
-    return;
-  }
-  const bool axisPixelSnap =
-      !qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_NO_PIXEL_SNAP");
-
-  std::vector<AxisTickSnapshot> priceTicks;
-  std::vector<AxisTickSnapshot> timeTicks;
-  AxisLayoutSnapshot axisLayout;
-  {
-    std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-    priceTicks = m_priceAxisTicks;
-    timeTicks = m_timeAxisTicks;
-  }
-  {
-    std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
-    axisLayout = m_axisLayoutSnapshot;
-  }
-
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
-    static QElapsedTimer chartTextDebugTimer;
-    static bool chartTextDebugStarted = false;
-    if (!chartTextDebugStarted) {
-      chartTextDebugTimer.start();
-      chartTextDebugStarted = true;
-    }
-    if (chartTextDebugTimer.elapsed() > 1000) {
-      const QString firstPrice = priceTicks.empty() ? QStringLiteral("<none>")
-                                                    : priceTicks.front().label;
-      const QString firstTime = timeTicks.empty() ? QStringLiteral("<none>")
-                                                  : timeTicks.front().label;
-      sLog_Debug(
-          QString("Chart text axis snapshot: price=%1 firstPrice=%2 time=%3 "
-                  "firstTime=%4 atlasFontPx=%5 pxRange=%6 padding=%7 "
-                  "lineHeight=%8 scale=%9 snap=%10")
-              .arg(static_cast<int>(priceTicks.size()))
-              .arg(firstPrice)
-              .arg(static_cast<int>(timeTicks.size()))
-              .arg(firstTime)
-              .arg(m_chartTextAtlas.fontPx())
-              .arg(m_chartTextAtlas.pxRange(), 0, 'f', 2)
-              .arg(m_chartTextAtlas.paddingPx())
-              .arg(m_chartTextAtlas.lineHeightPx(), 0, 'f', 2)
-              .arg(axisLayout.axisScale *
-                       static_cast<float>(m_chartTextAtlas.fontPx()),
-                   0,
-                   'f', 2)
-              .arg(axisPixelSnap ? 1 : 0));
-      auto logSample = [&](const char *label, const QString &text,
-                           const QPointF &anchor) {
-        ChartTextRun sampleRun;
-        sampleRun.text = text;
-        sampleRun.anchor = anchor;
-        sampleRun.color = Qt::white;
-        sampleRun.scale = axisLayout.axisScale;
-        sampleRun.hAlign =
-            (QString::fromLatin1(label) == QStringLiteral("price"))
-                ? ChartTextRun::HorizontalAlign::Left
-                : ChartTextRun::HorizontalAlign::Center;
-        sampleRun.vAlign = ChartTextRun::VerticalAlign::Center;
-        sampleRun.useStableMetrics = true;
-        sampleRun.pixelSnap = axisPixelSnap;
-        ChartGlyphInstance sampleGlyph;
-        float renderPx = 0.0f;
-        if (ChartTextLayout::buildDebugSample(m_chartTextAtlas, sampleRun,
-                                              sampleGlyph, renderPx)) {
-          const float fracX = static_cast<float>(
-              sampleGlyph.rect.left() - std::floor(sampleGlyph.rect.left()));
-          const float fracY = static_cast<float>(
-              sampleGlyph.rect.top() - std::floor(sampleGlyph.rect.top()));
-          sLog_Debug(
-              QString("Chart text sample[%1]: text=%2 renderPx=%3 rect=[%4,%5 "
-                      "%6x%7] frac=[%8,%9] uv=[%10,%11 %12x%13]")
-                  .arg(QString::fromLatin1(label))
-                  .arg(text)
-                  .arg(renderPx, 0, 'f', 2)
-                  .arg(sampleGlyph.rect.left(), 0, 'f', 2)
-                  .arg(sampleGlyph.rect.top(), 0, 'f', 2)
-                  .arg(sampleGlyph.rect.width(), 0, 'f', 2)
-                  .arg(sampleGlyph.rect.height(), 0, 'f', 2)
-                  .arg(fracX, 0, 'f', 2)
-                  .arg(fracY, 0, 'f', 2)
-                  .arg(sampleGlyph.uv.left(), 0, 'f', 4)
-                  .arg(sampleGlyph.uv.top(), 0, 'f', 4)
-                  .arg(sampleGlyph.uv.width(), 0, 'f', 4)
-                  .arg(sampleGlyph.uv.height(), 0, 'f', 4));
-        }
-      };
-      if (!priceTicks.empty()) {
-        logSample("price", priceTicks.front().label,
-                  QPointF(width() + 6.0, priceTicks.front().position));
-      }
-      if (!timeTicks.empty()) {
-        logSample("time", timeTicks.front().label,
-                  QPointF(timeTicks.front().position,
-                          height() + axisLayout.timeAxisHeightPx * 0.5));
-      }
-      chartTextDebugTimer.restart();
-    }
-  }
-
-  const qreal priceInsetLeft = 4.0;
-  const qreal priceInsetRight = 4.0;
-  const qreal timeInsetTop = 2.0;
-  const qreal timeInsetBottom = 2.0;
-  const QRectF priceSafeRect(
-      width() + priceInsetLeft, 0.0,
-      std::max(0.0, static_cast<double>(axisLayout.priceAxisWidthPx) -
-                        (priceInsetLeft + priceInsetRight)),
-      height());
-  const QRectF timeSafeRect(
-      0.0, height() + timeInsetTop, width(),
-      std::max(0.0, static_cast<double>(axisLayout.timeAxisHeightPx) -
-                        (timeInsetTop + timeInsetBottom)));
-  const qreal priceAnchorX = priceSafeRect.left();
-  const qreal stableMetricCenterOffset =
-      0.5 * static_cast<qreal>(m_chartTextAtlas.glyphTopPx() +
-                               m_chartTextAtlas.glyphBottomPx()) *
-      static_cast<qreal>(axisLayout.axisScale);
-  const qreal timeAnchorY = timeSafeRect.center().y();
-  const QColor axisColor(255, 255, 255, 255);
-  for (const auto &tick : priceTicks) {
-    ChartTextRun run;
-    run.text = tick.label;
-    run.anchor = QPointF(priceAnchorX, tick.position + stableMetricCenterOffset);
-    run.color = axisColor;
-    run.scale = axisLayout.axisScale;
-    run.hAlign = ChartTextRun::HorizontalAlign::Left;
-    run.vAlign = ChartTextRun::VerticalAlign::Center;
-    run.useStableMetrics = true;
-    run.pixelSnap = axisPixelSnap;
-    QRectF runRect;
-    if (!ChartTextLayout::measureRunRect(m_chartTextAtlas, run, runRect)) {
-      continue;
-    }
-    if (runRect.top() < priceSafeRect.top() ||
-        runRect.bottom() > priceSafeRect.bottom() ||
-        runRect.right() > priceSafeRect.right()) {
-      continue;
-    }
-    m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);
-  }
-  for (const auto &tick : timeTicks) {
-    ChartTextRun run;
-    run.text = tick.label;
-    run.anchor = QPointF(tick.position, timeAnchorY);
-    run.color = axisColor;
-    run.scale = axisLayout.axisScale;
-    run.hAlign = ChartTextRun::HorizontalAlign::Center;
-    run.vAlign = ChartTextRun::VerticalAlign::Center;
-    run.useStableMetrics = true;
-    run.pixelSnap = axisPixelSnap;
-    QRectF runRect;
-    if (!ChartTextLayout::measureRunRect(m_chartTextAtlas, run, runRect)) {
-      continue;
-    }
-    if (runRect.left() < timeSafeRect.left() ||
-        runRect.right() > timeSafeRect.right()) {
-      continue;
-    }
-    m_chartTextRenderer.submitRun(run, ChartTextRenderer::Priority::High);
-  }
-}
 
 void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
                                          const QRectF &oldGeometry) {
@@ -446,7 +143,9 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
     if (m_viewState) {
       m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
     }
-    refreshAxisLayout();
+    if (m_axisTextService) {
+      m_axisTextService->refreshAxisLayout();
+    }
     update();
   }
 }
@@ -454,11 +153,15 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
 void UnifiedGridRenderer::componentComplete() {
   QQuickItem::componentComplete();
 
-  bindAxisLayoutWindow(window());
+  if (m_axisTextService) {
+    m_axisTextService->bindAxisLayoutWindow(window());
+  }
   if (m_viewState && width() > 0 && height() > 0) {
     m_viewState->setViewportSize(width(), height());
   }
-  refreshAxisLayout();
+  if (m_axisTextService) {
+    m_axisTextService->refreshAxisLayout();
+  }
 }
 
 void UnifiedGridRenderer::setIntensityScale(double scale) {
@@ -494,9 +197,8 @@ void UnifiedGridRenderer::setAutoScrollPaddingFrac(double fraction) {
   const double clamped = std::clamp(fraction, 0.0, 0.45);
   if (m_autoScrollPaddingFrac != clamped) {
     m_autoScrollPaddingFrac = clamped;
-    if (m_autoScrollController) {
-      m_autoScrollController->setPaddingFrac(clamped);
-      m_autoScrollController->resetSpan();
+    if (m_heatmapStreamService) {
+      m_heatmapStreamService->setAutoScrollPaddingFrac(clamped);
     }
     emit autoScrollPaddingFracChanged();
   }
@@ -505,8 +207,8 @@ void UnifiedGridRenderer::setAutoScrollPaddingFrac(double fraction) {
 void UnifiedGridRenderer::setAutoScrollSmoothEnabled(bool enabled) {
   if (m_smoothAutoScrollEnabled != enabled) {
     m_smoothAutoScrollEnabled = enabled;
-    if (m_autoScrollController) {
-      m_autoScrollController->setSmoothEnabled(enabled);
+    if (m_heatmapStreamService) {
+      m_heatmapStreamService->setAutoScrollSmoothEnabled(enabled);
     }
     emit autoScrollSmoothEnabledChanged();
   }
@@ -562,18 +264,10 @@ void UnifiedGridRenderer::clearData() {
     QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData,
                               Qt::QueuedConnection);
   }
-  {
-    std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
-    m_pendingFootprintUploads.clear();
-  }
-  {
-    std::lock_guard<std::mutex> lock(m_vpMutex);
-    m_vpBins.clear();
-    m_vpSnap = {};
-    m_vpDirty = false;
-  }
+  m_footprintOverlay.clearPending();
+  m_vpRenderer.clearPending();
   m_footprintOverlay.requestNeutralReset();
-  m_heatmapStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
+  m_heatmapStreamService->incrementGeneration();
   m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
   update();
 }
@@ -640,26 +334,8 @@ void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   if (m_currentTimeframe_ms != timeframe_ms) {
     m_currentTimeframe_ms = timeframe_ms;
-    m_timeAuthority.setActiveTimeframeMs(static_cast<int64_t>(timeframe_ms));
-    if (m_useGpuHeatmap && timeframe_ms > 0) {
-      if (m_heatmapStream) {
-        // Reset the ring buffer so stale data from the previous timeframe
-        // does not appear at the new cadence (which would cause columns to
-        // appear massively wide because old 1 s buckets are treated as 1 m
-        // buckets, stretching the visible window by 60×).
-        const auto snap = m_heatmapStream->snapshot();
-        m_heatmapStream->reset(snap.gridWidth > 0 ? snap.gridWidth : m_heatmapGridWidth,
-                               snap.gridHeight > 0 ? snap.gridHeight : m_heatmapGridHeight,
-                               snap.minPrice, snap.maxPrice, snap.tickSize);
-        m_heatmapStream->setAppendMs(timeframe_ms);
-      }
-      // Force the viewport to re-initialise for the new cadence so that the
-      // auto-scroll controller chooses a sensible visible time window instead
-      // of keeping the old (now wrong) span.
-      if (m_autoScrollController) {
-        m_autoScrollController->resetSpan();
-      }
-      m_heatmapViewportInitialized = false;
+    if (m_useGpuHeatmap && timeframe_ms > 0 && m_heatmapStreamService) {
+      m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms));
     }
     m_manualTimeframeSet = true;
     m_manualTimeframeTimer.start();
@@ -711,83 +387,8 @@ void UnifiedGridRenderer::setHeatmapLiquidityThreshold(double threshold) {
 }
 
 void UnifiedGridRenderer::rebuildHeatmapTextureFromRing() {
-  if (!m_heatmapStream) {
-      return;
-  }
-  HeatmapStreamState::LabelSnapshot snap;
-  if (!m_heatmapStream->copyLabelSnapshot(snap)) {
-      // No liquidity data — still trigger a visual refresh
-      m_heatmapOverlay.requestFullTextureRebuild();
-      return;
-  }
-  const auto& ss = snap.snapshot;
-  if (ss.gridWidth <= 0 || ss.gridHeight <= 0) {
-      return;
-  }
-
-  const double threshold = m_heatmapLiquidityThreshold;
-  const int bytesPerCell = m_intensityBytesPerCell;
-  const int labelMode = m_liquidityLabelMode;
-
-  std::vector<HeatmapStreamState::PendingColumn> columns;
-  columns.reserve(ss.gridWidth);
-
-  for (int x = 0; x < ss.gridWidth; ++x) {
-      QByteArray intensityData;
-      QByteArray liquidityData;
-      if (bytesPerCell == 1) {
-          intensityData.resize(ss.gridHeight);
-          auto* dst = reinterpret_cast<uint8_t*>(intensityData.data());
-          liquidityData.resize(ss.gridHeight * static_cast<int>(sizeof(uint16_t)));
-          auto* liqDst = reinterpret_cast<uint16_t*>(liquidityData.data());
-          for (int y = 0; y < ss.gridHeight; ++y) {
-              const uint16_t ringVal = snap.intensityRing[static_cast<size_t>(y) * ss.gridWidth + x];
-              uint8_t cell = static_cast<uint8_t>(ringVal / 257);
-              const uint16_t liqRaw = snap.liquidityRing[static_cast<size_t>(y) * ss.gridWidth + x];
-              liqDst[y] = qToLittleEndian(liqRaw);
-              if (threshold > 0.0) {
-                  if (liqRaw == 0) {
-                      cell = 0;
-                  } else {
-                      double val = static_cast<double>(liqRaw) * snap.liquidityScales[x];
-                      if (labelMode != 0 && ss.tickSize > 0.0)
-                          val *= (ss.maxPrice - static_cast<double>(y) * ss.tickSize);
-                      if (val < threshold) cell = 0;
-                  }
-              }
-              dst[y] = cell;
-          }
-      } else {
-          intensityData.resize(ss.gridHeight * 2);
-          auto* dst = reinterpret_cast<uint16_t*>(intensityData.data());
-          liquidityData.resize(ss.gridHeight * static_cast<int>(sizeof(uint16_t)));
-          auto* liqDst = reinterpret_cast<uint16_t*>(liquidityData.data());
-          for (int y = 0; y < ss.gridHeight; ++y) {
-              const uint16_t ringVal = snap.intensityRing[static_cast<size_t>(y) * ss.gridWidth + x];
-              uint16_t cell = ringVal;
-              const uint16_t liqRaw = snap.liquidityRing[static_cast<size_t>(y) * ss.gridWidth + x];
-              liqDst[y] = qToLittleEndian(liqRaw);
-              if (threshold > 0.0) {
-                  if (liqRaw == 0) {
-                      cell = 0;
-                  } else {
-                      double val = static_cast<double>(liqRaw) * snap.liquidityScales[x];
-                      if (labelMode != 0 && ss.tickSize > 0.0)
-                          val *= (ss.maxPrice - static_cast<double>(y) * ss.tickSize);
-                      if (val < threshold) cell = 0;
-                  }
-              }
-              dst[y] = qToLittleEndian(cell);
-          }
-      }
-      const double liqScale = (x < static_cast<int>(snap.liquidityScales.size()))
-                                  ? snap.liquidityScales[x]
-                                  : 1.0;
-      columns.push_back({x, std::move(intensityData), std::move(liquidityData), liqScale});
-  }
-
-  m_heatmapStream->injectPendingUploads(std::move(columns));
-  m_heatmapOverlay.requestFullTextureRebuild();
+  m_heatmapStreamService->rebuildTextureFromRing(
+      m_heatmapOverlay, m_heatmapLiquidityThreshold, m_liquidityLabelMode);
 }
 
 void UnifiedGridRenderer::setHeatmapBackgroundColor(const QColor &color) {
@@ -1021,14 +622,10 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     update();
     emit autoScrollEnabledChanged();
     sLog_Render("Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
-    if (enabled && m_viewState->isTimeWindowValid() && m_heatmapStream &&
-        m_autoScrollController) {
-      m_autoScrollController->updateLagFromView(
+    if (enabled && m_viewState->isTimeWindowValid() && m_heatmapStreamService) {
+      m_heatmapStreamService->updateAutoScrollLag(
           *m_viewState,
-          *m_heatmapStream,
-          m_timeAuthority.activeTimeframeMs(),
-          m_heatmapClock.isValid() ? m_heatmapClock.elapsed()
-                                   : std::numeric_limits<int64_t>::min());
+          m_heatmapStreamService->timeAuthority().activeTimeframeMs());
     }
   }
 }
@@ -1120,18 +717,20 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
-  if (m_autoScrollController) {
-    m_autoScrollController->setInitialViewportPct(config.heatmap.initialViewportPct);
-    m_autoScrollController->setInitialPricePct(config.heatmap.initialPricePct);
+  if (m_heatmapStreamService) {
+    m_heatmapStreamService->setInitialViewportPct(config.heatmap.initialViewportPct);
+    m_heatmapStreamService->setInitialPricePct(config.heatmap.initialPricePct);
   }
-  m_axisLabelPxOverride = config.gui.axisLabelPx;
+  if (m_axisTextService) {
+    m_axisTextService->setAxisLabelPxOverride(config.gui.axisLabelPx);
+    m_axisTextService->refreshAxisLayout();
+  }
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;
   } else if (config.heatmap.labelPx > 128) {
     qWarning("Heatmap labelPx=%d exceeds sane maximum (128), using default %d",
              config.heatmap.labelPx, m_heatmapLabelPx);
   }
-  refreshAxisLayout();
   update();
   if (m_dataProcessor && config.heatmap.clientCacheColumns > 0) {
     const int capacity = config.heatmap.clientCacheColumns;
@@ -1145,24 +744,9 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
 }
 
 void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
-  bool gridChanged = false;
-  if (config.heatmap.gridWidth > 0 &&
-      config.heatmap.gridWidth != m_heatmapGridWidth) {
-    m_heatmapGridWidth = config.heatmap.gridWidth;
-    gridChanged = true;
-  }
-  if (config.heatmap.gridHeight > 0 &&
-      config.heatmap.gridHeight != m_heatmapGridHeight) {
-    m_heatmapGridHeight = config.heatmap.gridHeight;
-    gridChanged = true;
-  }
-  if (gridChanged) {
-    m_heatmapOverlay.setGridDimensions(m_heatmapGridWidth, m_heatmapGridHeight);
-    m_heatmapOverlay.requestFullTextureRebuild();
-    if (m_heatmapStream) {
-      m_heatmapStream->setGridDimensions(m_heatmapGridWidth,
-                                         m_heatmapGridHeight);
-    }
+  if (m_heatmapStreamService) {
+    m_heatmapStreamService->setGridDimensions(
+        config.heatmap.gridWidth, config.heatmap.gridHeight, m_heatmapOverlay);
   }
 
   int64_t forcedTf = config.heatmap.activeTimeframeMs;
@@ -1191,35 +775,14 @@ void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
 }
 
 void UnifiedGridRenderer::fitHeatmapToDataRange() {
-  const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot()
-                                        : HeatmapStreamState::Snapshot{};
-  const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
-                                ? m_timeAuthority.activeTimeframeMs()
-                                : static_cast<int64_t>(snapshot.appendMs);
-  if (!m_viewState || cadenceMs <= 0 || snapshot.gridWidth <= 0) {
-    return;
+  if (m_heatmapStreamService->fitToDataRange(m_viewState.get())) {
+    update();
   }
-  if (snapshot.lastSliceStartMs == std::numeric_limits<int64_t>::min()) {
-    return;
-  }
-  const int64_t bufferSpanMs = std::max<int64_t>(
-      1, static_cast<int64_t>(snapshot.gridWidth) * cadenceMs);
-  const int64_t dataEnd = snapshot.lastSliceStartMs + cadenceMs;
-  const int64_t dataStart = dataEnd - bufferSpanMs;
-  if (dataEnd <= dataStart) {
-    return;
-  }
-  if (m_viewState->isAutoScrollEnabled()) {
-    m_viewState->enableAutoScroll(false);
-  }
-  m_viewState->setViewport(dataStart, dataEnd, snapshot.minPrice,
-                           snapshot.maxPrice);
-  update();
 }
 
 QString UnifiedGridRenderer::getTextureSize() const {
-  if (m_useGpuHeatmap && m_heatmapStream) {
-    const auto snapshot = m_heatmapStream->snapshot();
+  if (m_useGpuHeatmap && m_heatmapStreamService->stream()) {
+    const auto snapshot = m_heatmapStreamService->stream()->snapshot();
     if (snapshot.gridWidth > 0 && snapshot.gridHeight > 0) {
       return QString("%1x%2").arg(snapshot.gridWidth).arg(snapshot.gridHeight);
     }
@@ -1228,13 +791,13 @@ QString UnifiedGridRenderer::getTextureSize() const {
 }
 
 QString UnifiedGridRenderer::getTextureMemory() const {
-  if (m_useGpuHeatmap && m_heatmapStream) {
-    const auto snapshot = m_heatmapStream->snapshot();
+  if (m_useGpuHeatmap && m_heatmapStreamService->stream()) {
+    const auto snapshot = m_heatmapStreamService->stream()->snapshot();
     if (snapshot.gridWidth <= 0 || snapshot.gridHeight <= 0) {
       return "N/A";
     }
     const int bytesPerPixel =
-        (m_intensityBytesPerCell > 0) ? m_intensityBytesPerCell : 1;
+        (m_heatmapStreamService->intensityBytesPerCell() > 0) ? m_heatmapStreamService->intensityBytesPerCell() : 1;
     qint64 bytes = static_cast<qint64>(snapshot.gridWidth) *
                    snapshot.gridHeight * bytesPerPixel;
     double mb = bytes / (1024.0 * 1024.0);
@@ -1245,17 +808,17 @@ QString UnifiedGridRenderer::getTextureMemory() const {
 
 QString UnifiedGridRenderer::getTextureFormat() const {
   if (m_useGpuHeatmap) {
-    return (m_intensityBytesPerCell == 2) ? "Grayscale16" : "Grayscale8";
+    return (m_heatmapStreamService->intensityBytesPerCell() == 2) ? "Grayscale16" : "Grayscale8";
   }
   return "N/A";
 }
 
 QString UnifiedGridRenderer::getLabelRingMemory() const {
-  if (!m_heatmapStream) {
+  if (!m_heatmapStreamService->stream()) {
     return "Label ring: N/A";
   }
   HeatmapStreamState::LabelSnapshot labels;
-  if (!m_heatmapStream->copyLabelSnapshot(labels)) {
+  if (!m_heatmapStreamService->stream()->copyLabelSnapshot(labels)) {
     return "Label ring: N/A";
   }
   const int gridWidth = labels.snapshot.gridWidth;
@@ -1291,11 +854,11 @@ double UnifiedGridRenderer::getUploadBandwidth() const {
 }
 
 QString UnifiedGridRenderer::getRingCursorInfo() const {
-  if (m_useGpuHeatmap && m_heatmapStream) {
-    const auto snapshot = m_heatmapStream->snapshot();
+  if (m_useGpuHeatmap && m_heatmapStreamService->stream()) {
+    const auto snapshot = m_heatmapStreamService->stream()->snapshot();
     if (snapshot.gridWidth > 0) {
       return QString("%1/%2")
-          .arg(m_heatmapStream->writeColumn())
+          .arg(m_heatmapStreamService->stream()->writeColumn())
           .arg(snapshot.gridWidth);
     }
   }
@@ -1304,8 +867,8 @@ QString UnifiedGridRenderer::getRingCursorInfo() const {
 
 int UnifiedGridRenderer::getDirtyRegionCount() const {
   if (m_useGpuHeatmap) {
-    if (m_heatmapStream) {
-      return m_heatmapStream->pendingUploadCount();
+    if (m_heatmapStreamService->stream()) {
+      return m_heatmapStreamService->stream()->pendingUploadCount();
     }
   }
   return 0;
@@ -1388,10 +951,10 @@ TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const {
 
 bool UnifiedGridRenderer::heatmapDataPriceRange(double &outMin,
                                                 double &outMax) const {
-  if (!m_heatmapStream) {
+  if (!m_heatmapStreamService->stream()) {
     return false;
   }
-  const auto snapshot = m_heatmapStream->snapshot();
+  const auto snapshot = m_heatmapStreamService->stream()->snapshot();
   if (snapshot.tickSize <= 0.0 || snapshot.maxPrice <= snapshot.minPrice) {
     return false;
   }
@@ -1402,12 +965,12 @@ bool UnifiedGridRenderer::heatmapDataPriceRange(double &outMin,
 
 bool UnifiedGridRenderer::heatmapDataTimeRange(qint64 &outStart,
                                                qint64 &outEnd) const {
-  if (!m_heatmapStream) {
+  if (!m_heatmapStreamService->stream()) {
     return false;
   }
-  const auto snapshot = m_heatmapStream->snapshot();
-  const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
-                                ? m_timeAuthority.activeTimeframeMs()
+  const auto snapshot = m_heatmapStreamService->stream()->snapshot();
+  const int64_t cadenceMs = (m_heatmapStreamService->timeAuthority().activeTimeframeMs() > 0)
+                                ? m_heatmapStreamService->timeAuthority().activeTimeframeMs()
                                 : static_cast<int64_t>(snapshot.appendMs);
   if (cadenceMs <= 0 || snapshot.gridWidth <= 0) {
     return false;
@@ -1445,17 +1008,17 @@ QString UnifiedGridRenderer::getViewportMathDebug() const {
   if (!m_viewState) {
     return "Viewport: N/A";
   }
-  const auto snapshot = m_heatmapStream ? m_heatmapStream->snapshot()
+  const auto snapshot = m_heatmapStreamService->stream() ? m_heatmapStreamService->stream()->snapshot()
                                         : HeatmapStreamState::Snapshot{};
   const QRectF bounds = boundingRect();
   const bool forceFull =
       qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
   const int gridWidth =
-      (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
+      (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapStreamService->gridWidth();
   const int gridHeight =
-      (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
-  const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
-                                ? m_timeAuthority.activeTimeframeMs()
+      (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapStreamService->gridHeight();
+  const int64_t cadenceMs = (m_heatmapStreamService->timeAuthority().activeTimeframeMs() > 0)
+                                ? m_heatmapStreamService->timeAuthority().activeTimeframeMs()
                                 : static_cast<int64_t>(snapshot.appendMs);
 
   UgrFrameMath::ViewportState viewportState;
@@ -1563,23 +1126,23 @@ QString UnifiedGridRenderer::getDataPipelineDebug() const {
   QStringList lines;
   lines << "Data Pipeline";
 
-  if (!m_heatmapStream) {
+  if (!m_heatmapStreamService->stream()) {
     lines << "stream: N/A";
     return lines.join('\n');
   }
 
-  const auto snapshot = m_heatmapStream->snapshot();
+  const auto snapshot = m_heatmapStreamService->stream()->snapshot();
   const int gridWidth =
-      (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
+      (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapStreamService->gridWidth();
   const int gridHeight =
-      (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
-  const int pendingUploads = m_heatmapStream->pendingUploadCount();
-  const int writeColumn = m_heatmapStream->writeColumn();
-  const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
-                                ? m_timeAuthority.activeTimeframeMs()
+      (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapStreamService->gridHeight();
+  const int pendingUploads = m_heatmapStreamService->stream()->pendingUploadCount();
+  const int writeColumn = m_heatmapStreamService->stream()->writeColumn();
+  const int64_t cadenceMs = (m_heatmapStreamService->timeAuthority().activeTimeframeMs() > 0)
+                                ? m_heatmapStreamService->timeAuthority().activeTimeframeMs()
                                 : static_cast<int64_t>(snapshot.appendMs);
-  const qint64 lastAppendMs = m_heatmapStream->lastAppendMs();
-  const qint64 nowMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
+  const qint64 lastAppendMs = m_heatmapStreamService->stream()->lastAppendMs();
+  const qint64 nowMs = m_heatmapStreamService->clock().isValid() ? m_heatmapStreamService->clock().elapsed() : 0;
   const qint64 ageMs =
       (lastAppendMs > 0 && nowMs >= lastAppendMs) ? (nowMs - lastAppendMs) : -1;
 

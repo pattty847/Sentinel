@@ -80,6 +80,14 @@ set(GRID_CORE_SOURCES
     render/HeatmapLabelRenderer.cpp
     render/AxisLayout.hpp
     render/AxisLayout.cpp
+    render/AxisTextService.hpp
+    render/AxisTextService.cpp
+    render/HeatmapStreamService.hpp
+    render/HeatmapStreamService.cpp
+    render/IOverlayRenderer.hpp
+    render/FrameContext.hpp
+    render/FrameContextBuilder.hpp
+    render/FrameContextBuilder.cpp
     render/ChartTextPrimitives.hpp
     render/ChartTextAtlas.hpp
     render/ChartTextAtlas.cpp

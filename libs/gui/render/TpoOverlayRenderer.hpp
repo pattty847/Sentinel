@@ -1,11 +1,13 @@
 #pragma once
 
+#include "IOverlayRenderer.hpp"
 #include "TpoStreamState.hpp"   // for TpoStreamState::DisplayMode
 
 #include <QByteArray>
 #include <QImage>
 #include <QRectF>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 class QQuickWindow;
@@ -31,7 +33,7 @@ class FootprintIntensityNode;
  *     Requires valid sessionStartMs / sessionEndMs in the snapshot plus
  *     a valid TimeAxisMapping (passed as extra parameters).
  */
-class TpoOverlayRenderer {
+class TpoOverlayRenderer : public IOverlayRenderer {
 public:
     struct PendingUpload {
         int x = 0;
@@ -40,7 +42,21 @@ public:
         QByteArray letters;
     };
 
-    void onRootRebuilt();
+    /// Thread-safe enqueue with session metadata (called from GUI thread).
+    void enqueue(PendingUpload upload,
+                 int64_t sessionStartMs,
+                 int64_t sessionEndMs,
+                 int64_t bracketMs,
+                 int sessionColumns);
+    /// Swap pending uploads and snapshot session metadata (called from render thread).
+    void drainPending(std::vector<PendingUpload>& out,
+                      int64_t& sessionStartMs,
+                      int64_t& sessionEndMs,
+                      int64_t& bracketMs,
+                      int& sessionColumns);
+
+    void onRootRebuilt() override;
+    int zOrder() const override { return 2; }
 
     // Set display mode (determines how drawRect is computed).
     void setDisplayMode(TpoStreamState::DisplayMode mode);
@@ -83,4 +99,11 @@ private:
     QImage m_image;
     TpoStreamState::DisplayMode m_displayMode =
         TpoStreamState::DisplayMode::VerticalTimeline;
+
+    mutable std::mutex m_pendingMutex;
+    std::vector<PendingUpload> m_pendingUploads;
+    int64_t m_sessionStartMs = 0;
+    int64_t m_sessionEndMs = 0;
+    int64_t m_bracketMs = 0;
+    int m_sessionColumns = 0;
 };

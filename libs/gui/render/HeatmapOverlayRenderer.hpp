@@ -1,6 +1,8 @@
 // Render-thread heatmap overlay module used by the chart renderer host.
 #pragma once
 
+#include "IOverlayRenderer.hpp"
+
 #include <QByteArray>
 #include <QColor>
 #include <QImage>
@@ -11,7 +13,7 @@
 class QQuickWindow;
 class HeatmapIntensityNode;
 
-class HeatmapOverlayRenderer {
+class HeatmapOverlayRenderer : public IOverlayRenderer {
 public:
     struct PendingUpload {
         int x = 0;
@@ -30,7 +32,8 @@ public:
     void setBidGradient(const std::vector<ColorStop>& stops);
     void setAskGradient(const std::vector<ColorStop>& stops);
     void requestFullTextureRebuild();
-    void onRootRebuilt();
+    void onRootRebuilt() override;
+    int zOrder() const override { return 0; }
 
     void applyToNode(QQuickWindow* window,
                      HeatmapIntensityNode* node,

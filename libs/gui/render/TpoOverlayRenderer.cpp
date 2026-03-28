@@ -87,6 +87,37 @@ inline uint16_t encodeLetterToU16(char letter) {
 //  Lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
+void TpoOverlayRenderer::enqueue(PendingUpload upload,
+                                  int64_t sessionStartMs,
+                                  int64_t sessionEndMs,
+                                  int64_t bracketMs,
+                                  int sessionColumns) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (m_pendingUploads.capacity() < static_cast<size_t>(upload.gridWidth)) {
+        m_pendingUploads.reserve(static_cast<size_t>(upload.gridWidth));
+    }
+    m_pendingUploads.push_back(std::move(upload));
+    m_sessionStartMs = sessionStartMs;
+    m_sessionEndMs = sessionEndMs;
+    m_bracketMs = bracketMs;
+    m_sessionColumns = sessionColumns;
+}
+
+void TpoOverlayRenderer::drainPending(std::vector<PendingUpload>& out,
+                                       int64_t& sessionStartMs,
+                                       int64_t& sessionEndMs,
+                                       int64_t& bracketMs,
+                                       int& sessionColumns) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (!m_pendingUploads.empty()) {
+        out.swap(m_pendingUploads);
+    }
+    sessionStartMs = m_sessionStartMs;
+    sessionEndMs = m_sessionEndMs;
+    bracketMs = m_bracketMs;
+    sessionColumns = m_sessionColumns;
+}
+
 void TpoOverlayRenderer::onRootRebuilt() {
     m_node = nullptr;
     m_lastWriteColumn = -1;

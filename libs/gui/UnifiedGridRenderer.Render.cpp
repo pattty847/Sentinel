@@ -2,7 +2,9 @@
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
+#include "render/FrameContextBuilder.hpp"
 #include "render/HeatmapIntensityNode.hpp"
+#include "render/HeatmapStreamState.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
 #include "render/TpoDebugTrace.hpp"
@@ -13,43 +15,14 @@
 #include <QtEndian>
 #include <algorithm>
 #include <sstream>
-UnifiedGridRenderer::FrameContext UnifiedGridRenderer::buildFrameContext() const {
-    FrameContext frame;
-    frame.surfaceBounds = boundingRect();
-    frame.surfaceDpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-    const qint64 steadyNowMs = m_heatmapClock.isValid() ? m_heatmapClock.elapsed() : 0;
-    frame.time = m_timeAuthority.snapshot(steadyNowMs);
-    frame.presentationTimeMs = frame.time.nowPresentationMs;
-    frame.heatmapSnapshot = m_heatmapStream ? m_heatmapStream->snapshot() : HeatmapStreamState::Snapshot{};
-    frame.overlays.heatmap = m_heatmapLayerEnabled;
-    frame.overlays.footprint = m_footprintLayerEnabled;
-    frame.overlays.tpo = m_tpoLayerEnabled;
-    frame.forceFull = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL");
-    frame.streamGenerations.heatmap = m_heatmapStreamGeneration.load(std::memory_order_acquire);
-    frame.streamGenerations.footprint = m_footprintStreamGeneration.load(std::memory_order_acquire);
-    frame.streamGenerations.candle = m_candleStreamGeneration.load(std::memory_order_acquire);
-    if (m_viewState && m_viewState->isTimeWindowValid()) {
-        frame.viewport.valid = true;
-        frame.viewport.timeStart = m_viewState->getVisibleTimeStart();
-        frame.viewport.timeEnd = m_viewState->getVisibleTimeEnd();
-        frame.viewport.minPrice = m_viewState->getMinPrice();
-        frame.viewport.maxPrice = m_viewState->getMaxPrice();
-        frame.viewport.panVisualOffset = m_viewState->getPanVisualOffset();
-        frame.viewport.dragging = m_viewState->isDragging();
-        frame.viewport.autoScrollEnabled = m_viewState->isAutoScrollEnabled();
-    }
-    return frame;
-}
 
 HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNode) {
     auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
     if (!texNode) {
         texNode = new HeatmapIntensityNode();
-        m_heatmapOverlay.onRootRebuilt();
+        for (auto* overlay : m_overlays)
+            overlay->onRootRebuilt();
         m_chartTextRenderer.onRootRebuilt();
-        m_footprintOverlay.onRootRebuilt();
-        m_tpoOverlay.onRootRebuilt();
-        m_vpRenderer.onRootRebuilt();
     }
     return texNode;
 }
@@ -61,7 +34,7 @@ void UnifiedGridRenderer::computeAndApplyFrameMapping(FrameContext& frame,
                                                        int gridHeight) {
     const auto& snapshot = frame.heatmapSnapshot;
     m_heatmapOverlay.setGridDimensions(gridWidth, gridHeight);
-    m_heatmapOverlay.setIntensityBytesPerCell(m_intensityBytesPerCell);
+    m_heatmapOverlay.setIntensityBytesPerCell(m_heatmapStreamService->intensityBytesPerCell());
     m_heatmapOverlay.setBackgroundColor(m_heatmapBackgroundColor);
 
     const QRectF bounds = frame.surfaceBounds;
@@ -157,30 +130,21 @@ void UnifiedGridRenderer::drainFrameUploads(
     std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
     std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
     std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads) {
-    {
-        std::lock_guard<std::mutex> lock(m_footprintPendingMutex);
-        if (!m_pendingFootprintUploads.empty()) {
-            footprintUploads.swap(m_pendingFootprintUploads);
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
-        if (!m_pendingTpoUploads.empty()) {
-            tpoUploads.swap(m_pendingTpoUploads);
-        }
-    }
+    m_footprintOverlay.drainPending(footprintUploads);
+    // TPO drain is handled in renderOverlays where session metadata is needed.
+    (void)tpoUploads;
 
-    if (!m_heatmapStream) {
+    if (!m_heatmapStreamService->stream()) {
         return;
     }
     std::vector<HeatmapStreamState::PendingColumn> pendingUploads;
-    m_heatmapStream->takePendingUploads(pendingUploads);
+    m_heatmapStreamService->stream()->takePendingUploads(pendingUploads);
     heatmapUploads.reserve(pendingUploads.size());
     const double threshold = m_heatmapLiquidityThreshold;
-    const int bytesPerCell = m_intensityBytesPerCell;
-    const int gridHeight = m_heatmapGridHeight;
+    const int bytesPerCell = m_heatmapStreamService->intensityBytesPerCell();
+    const int gridHeight = m_heatmapStreamService->gridHeight();
     const int labelMode = m_liquidityLabelMode;
-    const auto streamSnap = m_heatmapStream->snapshot();
+    const auto streamSnap = m_heatmapStreamService->stream()->snapshot();
     for (auto& upload : pendingUploads) {
         if (threshold > 0.0 && !upload.liquidity.isEmpty() && upload.liquidityScale > 0.0) {
             const int expectedLiq = gridHeight * static_cast<int>(sizeof(uint16_t));
@@ -252,14 +216,7 @@ void UnifiedGridRenderer::renderOverlays(
     // ── TPO / VP dispatch ──────────────────────────────────────────────────
     std::vector<float> localBins;
     VolumeProfileState::Snapshot localSnap;
-    {
-        std::lock_guard<std::mutex> lock(m_vpMutex);
-        if (m_vpDirty || !m_vpBins.empty()) {
-            localBins = m_vpBins;
-            localSnap = m_vpSnap;
-            m_vpDirty = false;
-        }
-    }
+    m_vpRenderer.drainPending(localBins, localSnap);
 
     m_vpRenderer.render(texNode,
                         m_volumeProfileLayerEnabled && !localBins.empty(),
@@ -273,13 +230,9 @@ void UnifiedGridRenderer::renderOverlays(
     int64_t tpoSessionEnd = 0;
     int64_t tpoBracketMs = 0;
     int tpoSessionColumns = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
-        tpoSessionStart = m_tpoSessionStartMs;
-        tpoSessionEnd = m_tpoSessionEndMs;
-        tpoBracketMs = m_tpoBracketMs;
-        tpoSessionColumns = m_tpoSessionColumns;
-    }
+    m_tpoOverlay.drainPending(tpoUploads,
+                              tpoSessionStart, tpoSessionEnd,
+                              tpoBracketMs, tpoSessionColumns);
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG") &&
         drawTpo &&
         tpoSessionStart > 0 &&
@@ -364,9 +317,9 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
         m_labelLiquidityScales.assign(gridWidth, 1.0);
     }
 
-    if (m_heatmapStream) {
+    if (m_heatmapStreamService->stream()) {
         std::vector<HeatmapStreamState::PendingLabelColumn> pendingLabelUploads;
-        m_heatmapStream->takePendingLabelUploads(pendingLabelUploads);
+        m_heatmapStreamService->stream()->takePendingLabelUploads(pendingLabelUploads);
         if (!pendingLabelUploads.empty()) {
             applyLabelUploads(pendingLabelUploads, gridWidth, gridHeight);
         }
@@ -485,20 +438,20 @@ void UnifiedGridRenderer::applyLabelUploads(
     }
 
     const int expectedLiquidityBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
-    const int expectedIntensityBytes = gridHeight * m_intensityBytesPerCell;
+    const int expectedIntensityBytes = gridHeight * m_heatmapStreamService->intensityBytesPerCell();
     for (const auto& upload : uploads) {
         const int column = upload.x;
         if (column < 0 || column >= gridWidth) {
             continue;
         }
         if (upload.intensity.size() == expectedIntensityBytes) {
-            if (m_intensityBytesPerCell == 1) {
+            if (m_heatmapStreamService->intensityBytesPerCell() == 1) {
                 const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
                 for (int y = 0; y < gridHeight; ++y) {
                     m_labelIntensityRing[static_cast<size_t>(y) * gridWidth + column] =
                         static_cast<uint16_t>(src[y]) * 257;
                 }
-            } else if (m_intensityBytesPerCell == 2) {
+            } else if (m_heatmapStreamService->intensityBytesPerCell() == 2) {
                 const auto* src = reinterpret_cast<const uint16_t*>(upload.intensity.constData());
                 for (int y = 0; y < gridHeight; ++y) {
                     const uint16_t raw = qFromLittleEndian(src[y]);
@@ -542,7 +495,14 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         return oldNode;
     }
 
-    FrameContext frame = buildFrameContext();
+    FrameContext frame = FrameContextBuilder::build(
+        boundingRect(), window(),
+        m_heatmapStreamService->clock(), m_heatmapStreamService->timeAuthority(),
+        m_heatmapStreamService->stream(), m_viewState.get(),
+        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
+        m_heatmapStreamService->streamGeneration(),
+        m_footprintStreamGeneration.load(std::memory_order_acquire),
+        m_candleStreamGeneration.load(std::memory_order_acquire));
     const auto& snapshot = frame.heatmapSnapshot;
     const int64_t cadenceMs = (frame.time.activeTimeframeMs > 0)
         ? frame.time.activeTimeframeMs
@@ -551,8 +511,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     const bool textOnlyDebug = qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_ONLY");
     const bool drawFootprint = frame.overlays.footprint;
     const bool drawTpo = frame.overlays.tpo;
-    const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapGridWidth;
-    const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapGridHeight;
+    const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapStreamService->gridWidth();
+    const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapStreamService->gridHeight();
     if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         static QElapsedTimer renderDebugTimer;
         static bool renderDebugTimerStarted = false;
@@ -598,7 +558,9 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                    framePendingTpoUploads);
 
     m_chartTextRenderer.beginFrame(texNode, window(), m_chartTextAtlas);
-    submitAxisText();
+    if (m_axisTextService) {
+        m_axisTextService->submitAxisText(m_chartTextRenderer, m_chartTextAtlas, width(), height());
+    }
     if (drawHeatmap) {
         updateLabelGeometry(texNode, frame, snapshot, gridWidth, gridHeight);
     } else {

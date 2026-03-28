@@ -10,6 +10,23 @@
 #include <cmath>
 #include <cstring>
 
+void FootprintOverlayRenderer::enqueue(PendingUpload upload) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingUploads.push_back(std::move(upload));
+}
+
+void FootprintOverlayRenderer::drainPending(std::vector<PendingUpload>& out) {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (!m_pendingUploads.empty()) {
+        out.swap(m_pendingUploads);
+    }
+}
+
+void FootprintOverlayRenderer::clearPending() {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingUploads.clear();
+}
+
 void FootprintOverlayRenderer::onRootRebuilt() {
     m_node = nullptr;
     m_lastWriteColumn = -1;
