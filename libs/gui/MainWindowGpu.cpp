@@ -523,6 +523,11 @@ void MainWindowGPU::startScreenerServer() {
         return;
     }
 
+    // Kill any stale process holding port 17200 from a previous run.
+    QProcess::execute(QStringLiteral("sh"),
+        {QStringLiteral("-c"),
+         QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
+
     // Use 'uv run' so Python deps are automatically resolved from the venv.
     const QString uvBin = QStringLiteral("uv");
     QStringList args;
@@ -547,18 +552,29 @@ void MainWindowGPU::startScreenerServer() {
                 this, [this, scriptsDir, uvBin, args](int exitCode, QProcess::ExitStatus status) {
                     sLog_App("Screener server exited: code=" << exitCode
                              << " status=" << static_cast<int>(status));
-                    // Auto-restart on unexpected exit (not during shutdown).
-                    if (m_screenerProcess) {
-                        QTimer::singleShot(2000, this, [this, scriptsDir, uvBin, args]() {
-                            if (!m_screenerProcess) return;
-                            sLog_App("Screener server restarting...");
-                            m_screenerProcess->setWorkingDirectory(scriptsDir);
-                            m_screenerProcess->start(uvBin, args);
-                        });
+                    if (!m_screenerProcess) return;  // deliberate shutdown
+                    ++m_screenerRestartCount;
+                    if (m_screenerRestartCount > kMaxScreenerRestarts) {
+                        sLog_App("Screener server failed " << m_screenerRestartCount
+                                 << " times in a row — giving up. Kill port 17200 and restart the app.");
+                        return;
                     }
+                    const int delayMs = 2000 * m_screenerRestartCount;  // back off: 2s, 4s, 6s
+                    sLog_App("Screener server restarting (attempt " << m_screenerRestartCount
+                             << "/" << kMaxScreenerRestarts << ") in " << delayMs << "ms...");
+                    QTimer::singleShot(delayMs, this, [this, scriptsDir, uvBin, args]() {
+                        if (!m_screenerProcess) return;
+                        // Kill stale process before retrying too.
+                        QProcess::execute(QStringLiteral("sh"),
+                            {QStringLiteral("-c"),
+                             QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
+                        m_screenerProcess->setWorkingDirectory(scriptsDir);
+                        m_screenerProcess->start(uvBin, args);
+                    });
                 });
     }
 
+    m_screenerRestartCount = 0;
     m_screenerProcess->setWorkingDirectory(scriptsDir);
     m_screenerProcess->start(uvBin, args);
     if (m_screenerProcess->waitForStarted(2000)) {

@@ -136,6 +136,8 @@ private:
 
     // Screener Python server subprocess (owned lifetime = window lifetime)
     QProcess* m_screenerProcess = nullptr;
+    int       m_screenerRestartCount = 0;
+    static constexpr int kMaxScreenerRestarts = 3;
     void startScreenerServer();
     void stopScreenerServer();
 };
