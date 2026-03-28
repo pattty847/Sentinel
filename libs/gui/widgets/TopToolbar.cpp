@@ -75,8 +75,9 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoButton->setEnabled(false);
     m_tpoButton->setAutoExclusive(false);
 
-    m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Volume Profile");
-    m_volumeProfileButton->setCheckable(true);
+    m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Coming Soon!");
+    m_volumeProfileButton->setCheckable(false);
+    m_volumeProfileButton->setEnabled(false);
     m_volumeProfileButton->setAutoExclusive(false);
 
     connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
