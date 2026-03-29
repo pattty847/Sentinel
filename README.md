@@ -102,7 +102,7 @@ The system combines:
 
 ## Recent Platform Expansion
 
-The latest integration introduced a major expansion across rendering, trading, and system architecture. :contentReference[oaicite:0]{index=0}
+The latest integration introduced a major expansion across rendering, trading, and system architecture.
 
 Highlights:
 
