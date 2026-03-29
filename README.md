@@ -1,59 +1,137 @@
-# Sentinel v2.1.0-alpha
+# Sentinel
 
-Open Source GPU-accelerated Orderbook Heatmap trading terminal. Written in C++20, Qt 6, and with sub-millisecond rendering.
+High-performance **GPU-accelerated trading terminal** built with **C++20** and **Qt 6**.
+
+A desktop workstation for visualizing market structure, order flow, and real-time data — powered by a custom rendering pipeline and a client/server architecture designed for speed.
 
 <div align="center">
-  <img src="https://img.shields.io/badge/C++-20-blue" />
+  <img src="https://img.shields.io/badge/C%2B%2B-20-blue" />
   <img src="https://img.shields.io/badge/Qt-6-green" />
   <img src="https://img.shields.io/badge/GPU-Accelerated-purple" />
-  <img src="https://img.shields.io/badge/Platform-Cross--Platform-lightgrey" />
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" />
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
-## Live Demos
+---
 
-### Heatmap Render
+## Showcase
 
-High-frequency 1s timeframe heatmap population on the main chart.
+### GPU Heatmap Rendering
+
+High-density order book visualization with real-time updates and smooth interaction.
 
 ![Heatmap render demo](docs/assets/gifs/heatmap-render.gif)
 
-### Stock Chart + Insider Signals
+---
 
-Daily stock chart with SEC insider transaction overlays and hover detail.
+### Stock Chart + SEC Insider Signals
+
+Integrated equity charting with insider transaction overlays and contextual signals.
 
 ![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif)
 
-### TV Screener
+---
 
-Quick pass through the stock screener workflow.
+### Screener Workflow
+
+Fast symbol discovery and routing into the charting system.
 
 ![Stock screener demo](docs/assets/gifs/stock-screener.gif)
 
-## Recent Screens
+---
 
-<img width="2559" height="1388" alt="Screenshot 2026-02-02 141503" src="https://github.com/user-attachments/assets/b0d32701-816d-4508-aa1b-9753eeb7b601" />
-<img width="2559" height="1392" alt="image" src="https://github.com/user-attachments/assets/4e100ad3-4da9-42d1-b75b-22f71b9f0c07" />
+## Overview
 
-### Features
-- Full Server Client architecture
-- Entirely GPU based heatmap rasterization and rendering
-- One quad, texture sampling
-- **110+ FPS with live axis updates during pan/zoom**
-- Zero-allocation axis rendering (fixed-capacity models, no QML object churn)
-- Nice ticks with hysteresis on price and time axes
-- 8192 x 8192 - 67M Cells, easily can push higher
-- TWAP Heatmap Cell Aggregation
-- Full Docking Framework
-- Qt RHI backend for any OS
+Sentinel is built around a single constraint:
+
+> dense market data should remain fluid, interactive, and interpretable under load
+
+The system combines:
+
+- GPU-first rendering (no per-frame allocations)
+- Real-time streaming data pipelines
+- Desktop workstation UI (Qt + QML + Scene Graph)
+- Trading and simulation infrastructure
 
 ---
 
-## Build
+## Core Capabilities
 
-**Windows:**
+### Rendering & Charting
 
-```
+- GPU-accelerated heatmap (single-quad texture sampling)
+- ~110+ FPS during pan/zoom with live axis updates
+- Zero-allocation axis rendering
+- Candle, hollow, and line chart modes
+- Consistent viewport mapping across overlays
+- High-density grid support
+
+---
+
+### Market Tools
+
+- Live heatmap chart
+- Candle overlays aligned to heatmap mapping
+- Stock chart workspace
+- SEC insider signal overlays
+- Watchlists with smart routing
+- TradingView screener integration
+- Order book / DOM ladder
+
+---
+
+### Trading & Simulation
+
+- Paper trading infrastructure
+- TP/SL bracket handling (server-backed)
+- Replay and backtesting groundwork
+- Shared simulation core
+- Algo integration foundation
+
+---
+
+### Platform Architecture
+
+- Client/server split
+- Custom stream protocol
+- TLS / WSS transport support
+- Config-driven runtime
+- Deterministic render/data flow
+
+---
+
+## Recent Platform Expansion
+
+The latest integration introduced a major expansion across rendering, trading, and system architecture. :contentReference[oaicite:0]{index=0}
+
+Highlights:
+
+- Unified chart rendering architecture
+- Major `UnifiedGridRenderer` refactor
+- Paper trading + simulation vertical slice
+- Stock chart + SEC overlays
+- Watchlist, screener, and DOM improvements
+- Transport security (TLS / WSS)
+
+TPO, Footprint, and Volume Profile are implemented at a foundational level but remain disabled in the UI until complete.
+
+---
+
+## Quick Start
+
+### Run a Release
+
+Download the latest build:
+
+https://github.com/pattty847/Sentinel-Trading-Terminal/releases
+
+---
+
+### Build from Source
+
+#### Windows
+
+```powershell
 setx QT_MSVC C:\Qt\6.9.3\msvc2022_64
 setx VCPKG_ROOT C:\dev\vcpkg
 
@@ -61,28 +139,40 @@ git clone https://github.com/pattty847/Sentinel.git
 cd Sentinel
 cmake --preset windows-msvc
 cmake --build --preset windows-msvc -j
+````
+
+Run:
+
+```powershell
+build/windows-msvc/apps/sentinel_gui/Release/sentinel_gui.exe
 ```
 
-Run: `build/windows-msvc/apps/sentinel_gui/Release/sentinel_gui.exe`
+---
 
-**macOS:**
+#### macOS
 
-```
+```bash
 brew install qt cmake ninja
 export QT_MAC=/opt/homebrew/opt/qt
 export VCPKG_ROOT=$HOME/vcpkg
 
+git clone https://github.com/pattty847/Sentinel.git
+cd Sentinel
 cmake --preset mac-clang
 cmake --build --preset mac-clang -j
 ```
 
-**Linux:**
+---
 
-```
+#### Linux
+
+```bash
 sudo apt install build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev
 export QT_LINUX=/usr/lib/qt6
 export VCPKG_ROOT=$HOME/vcpkg
 
+git clone https://github.com/pattty847/Sentinel.git
+cd Sentinel
 cmake --preset linux-gcc
 cmake --build --preset linux-gcc -j
 ```
@@ -91,15 +181,15 @@ cmake --build --preset linux-gcc -j
 
 ## Run
 
-Server:
+Start server:
 
-```
+```bash
 ./build/linux-gcc/bin/sentinel-server
 ```
 
-GUI Client:
+Start GUI:
 
-```
+```bash
 ./build/linux-gcc/apps/sentinel_gui/sentinel_gui
 ```
 
@@ -107,24 +197,12 @@ GUI Client:
 
 ## Configuration
 
-Sentinel uses separate YAML configs for server-authoritative settings and client-only UI preferences.
-
-**Setup:**
-
 ```bash
-# Server config (authoritative)
 cp config/server_config.yaml config/.server_config.yaml
-
-# Client config (local UI prefs)
 cp config/client_config.yaml config/.client_config.yaml
 ```
 
-**Config Priority:**
-
-1. `config/.server_config.yaml` overrides `config/server_config.yaml`
-2. `config/.client_config.yaml` overrides `config/client_config.yaml`
-
-**Common settings:**
+Example:
 
 ```yaml
 heatmap:
@@ -137,67 +215,22 @@ server:
 
 gui:
   api_port: 17100
-  screenshot_dir: ./screenshots
 ```
-
-See `config/server_config.yaml` and `config/client_config.yaml` for all options. For a guided overview and ownership rules, see **`docs/CONFIG.md`**.
 
 ---
 
-## API Keys (optional)
-
-**Public market data** (order book, trades, candles, heartbeats) does **not** require an API key. You can run the server without any key file and stream level2/market_trades from Coinbase Advanced Trade WebSocket.
-
-For **authenticated channels** (e.g. user orders, futures balance) or future private features, add a `key.json` in the project root:
-
-```json
-{
-  "key": "your-coinbase-cdp-api-key-name",
-  "secret": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
-}
-```
-
-See [Advanced Trade WebSocket channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels) for which channels require authentication.
-
----
-
-## Project Structure
+## Architecture
 
 ```
-libs/core/    Pure C++ data layer (no Qt GUI)
-libs/gui/     Qt Quick, QSG rendering, widgets
-apps/         Executables (sentinel_gui, sentinel-server)
+libs/core/    Data layer (protocol, market data, simulation)
+libs/gui/     Qt rendering + UI system
+apps/         Client, server, tools
 ```
 
-Core handles market data, caching, and transforms. GUI handles all rendering and layout. They don't mix.
-
----
-
-## Documentation
-
-Structured outline of project docs (in `docs/`, excluding `docs/TODO.md` and `docs/private/` if present). Use these for architecture, setup, and behavior; keep them as the single source of truth.
-
-| Document | Purpose |
-|----------|---------|
-| **Architecture & pipeline** | |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System overview: client–server split, directory layout, data and rendering pipeline, TimeAxisMapping, protocol, threading, performance. Start here for how pieces fit together. |
-| [`docs/MARKETDATA.md`](docs/MARKETDATA.md) | Market data stack: MarketDataCoreEngine, transport, auth, dispatch, threading, TLS/WSS, and trading stream (paper). |
-| [`docs/UI_ARCHITECTURE.md`](docs/UI_ARCHITECTURE.md) | GUI architecture: QML/Widgets, dock layout, rendering pipeline, coordinate systems, and performance invariants. |
-| [`docs/COORDINATE_SYSTEMS.md`](docs/COORDINATE_SYSTEMS.md) | Chart coordinate spaces (world, grid, screen) and renderer contracts; when to use texture-quad vs geometry; forbidden cross-contract patterns. |
-| **Setup & configuration** | |
-| [`docs/CONFIG.md`](docs/CONFIG.md) | Server and client YAML config files, load order, ownership (server-authoritative vs client-only), and example snippets. |
-| [`docs/PAPER_TRADING_QUICKSTART.md`](docs/PAPER_TRADING_QUICKSTART.md) | Paper trading: config, run order, subscribe, hotkeys (B/S/F/C), UI feedback, troubleshooting. |
-| **Reference** | |
-| [`docs/FEATURES.md`](docs/FEATURES.md) | Feature overview and notable completed work (e.g. axis performance). |
-
-For task tracking and roadmap, see `docs/TODO.md` (not part of the canonical outline above).
+Single authoritative viewport shared across all rendering layers.
 
 ---
 
 ## License
 
 AGPL-3.0
-
-
-
-
