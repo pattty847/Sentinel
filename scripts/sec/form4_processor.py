@@ -1,7 +1,13 @@
 import logging
 import xml.etree.ElementTree as ET
-import pandas as pd
-from typing import List, Dict, Optional, TYPE_CHECKING, Callable, Awaitable
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, TYPE_CHECKING, Callable, Awaitable, Any
+
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover - optional dependency in lightweight environments
+    pd = None
 
 # Import FilingDocumentHandler for dependency injection
 from .document_handler import FilingDocumentHandler
@@ -49,6 +55,28 @@ class Form4Processor:
     # Define codes considered as 'Acquisition'/'Disposition'
     ACQUISITION_CODES = ['P', 'A', 'M', 'C', 'W', 'G', 'J', 'I']
     DISPOSITION_CODES = ['S', 'D', 'F', 'X', 'U', 'Z']
+    SIGNAL_CLASS_MAP = {
+        'P': 'open_market_buy',
+        'S': 'open_market_sell',
+        'F': 'tax_sale',
+        'M': 'option_exercise',
+        'A': 'award_or_grant',
+        'G': 'gift',
+        'D': 'gift',
+        'C': 'derivative_conversion',
+        'W': 'derivative_conversion',
+    }
+    ECONOMIC_INTENT_MAP = {
+        'open_market_buy': 'bullish',
+        'open_market_sell': 'bearish',
+        'tax_sale': 'neutral',
+        'option_exercise': 'neutral',
+        'award_or_grant': 'compensation',
+        'gift': 'neutral',
+        'derivative_conversion': 'neutral',
+        'planned_sale_10b5_1': 'bearish',
+        'other': 'neutral',
+    }
 
     def __init__(self, 
                  document_handler: FilingDocumentHandler, 
@@ -260,6 +288,418 @@ class Form4Processor:
         # Parse the XML
         return self.parse_form4_xml(xml_content)
 
+    def _classify_signal(self, transaction: Dict[str, Any]) -> str:
+        tx_code = str(transaction.get('transaction_code') or '').upper()
+        price = transaction.get('price_per_share')
+        is_derivative = bool(transaction.get('is_derivative'))
+        security_title = str(transaction.get('security_title') or '').lower()
+
+        if '10b5-1' in security_title:
+            return 'planned_sale_10b5_1'
+
+        if tx_code == 'P' and not is_derivative and price not in (None, 0, 0.0):
+            return 'open_market_buy'
+        if tx_code == 'S' and not is_derivative and price not in (None, 0, 0.0):
+            return 'open_market_sell'
+        if tx_code == 'F':
+            return 'tax_sale'
+        if tx_code == 'M':
+            return 'option_exercise'
+        if tx_code in ('A',):
+            return 'award_or_grant'
+        if tx_code in ('G', 'D'):
+            return 'gift'
+        if tx_code in ('C', 'W'):
+            return 'derivative_conversion'
+        return self.SIGNAL_CLASS_MAP.get(tx_code, 'other')
+
+    def _economic_intent(self, signal_class: str) -> str:
+        return self.ECONOMIC_INTENT_MAP.get(signal_class, 'neutral')
+
+    def _event_identity(self, transaction: Dict[str, Any]) -> str:
+        price = transaction.get('price_per_share')
+        if price is None:
+            price = transaction.get('conversion_exercise_price')
+        return "|".join([
+            str(transaction.get('issuer_cik') or ''),
+            str(transaction.get('owner_cik') or ''),
+            str(transaction.get('transaction_date') or ''),
+            str(transaction.get('transaction_code') or ''),
+            str(transaction.get('shares') or 0),
+            str(price or 0),
+        ])
+
+    def _base_event_identity(self, transaction: Dict[str, Any]) -> str:
+        return "|".join([
+            str(transaction.get('issuer_cik') or ''),
+            str(transaction.get('owner_cik') or ''),
+            str(transaction.get('transaction_date') or ''),
+            str(transaction.get('transaction_code') or ''),
+        ])
+
+    def _role_weight(self, role: str) -> float:
+        role_l = (role or '').lower()
+        if 'chief executive' in role_l or 'ceo' in role_l:
+            return 1.0
+        if 'chief financial' in role_l or 'cfo' in role_l:
+            return 0.9
+        if 'president' in role_l or 'chief operating' in role_l or 'coo' in role_l:
+            return 0.85
+        if 'director' in role_l:
+            return 0.7
+        if '10% owner' in role:
+            return 0.65
+        if 'officer' in role_l:
+            return 0.75
+        return 0.5
+
+    def _safe_date(self, value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value)[:10], '%Y-%m-%d')
+        except ValueError:
+            return None
+
+    def _normalize_signal_event(self, transaction: Dict[str, Any], filing_meta: Dict[str, Any], ticker: str) -> Dict[str, Any]:
+        signal_class = self._classify_signal(transaction)
+        price = transaction.get('price_per_share')
+        if price is None:
+            price = transaction.get('conversion_exercise_price')
+        gross_value = transaction.get('value')
+        if gross_value in (None, 0, 0.0) and price not in (None, 0, 0.0):
+            try:
+                gross_value = float(transaction.get('shares') or 0) * float(price)
+            except (TypeError, ValueError):
+                gross_value = 0.0
+
+        form_name = str(filing_meta.get('form') or '4')
+        is_amendment = form_name.endswith('/A')
+        filing_date = filing_meta.get('filing_date')
+        transaction_date = transaction.get('transaction_date') or filing_date
+        anchor_timestamp = filing_date or transaction_date
+
+        event = {
+            'ticker': ticker.upper(),
+            'issuer_cik': transaction.get('issuer_cik'),
+            'issuer_name': transaction.get('issuer_name'),
+            'owner_cik': transaction.get('owner_cik'),
+            'owner_name': transaction.get('owner_name'),
+            'owner_role': transaction.get('owner_position'),
+            'transaction_date': transaction_date,
+            'filing_date': filing_date,
+            'event_anchor_type': 'filing_date',
+            'event_anchor_timestamp': anchor_timestamp,
+            'transaction_code': transaction.get('transaction_code'),
+            'transaction_type': transaction.get('transaction_type'),
+            'shares': transaction.get('shares'),
+            'price_per_share': transaction.get('price_per_share'),
+            'gross_value': float(gross_value or 0.0),
+            'value': float(gross_value or 0.0),
+            'is_derivative': bool(transaction.get('is_derivative')),
+            'is_acquisition': bool(transaction.get('is_acquisition')),
+            'is_disposition': bool(transaction.get('is_disposition')),
+            'signal_class': signal_class,
+            'economic_intent': self._economic_intent(signal_class),
+            'accession_no': filing_meta.get('accession_no'),
+            'form_url': filing_meta.get('url'),
+            'primary_document': filing_meta.get('primary_document'),
+            'primary_document_description': filing_meta.get('primary_document_description'),
+            'form': form_name,
+            'is_amendment': is_amendment,
+            'amends_accession': None,
+            'event_identity': '',
+            'event_identity_base': '',
+            'direct_indirect': transaction.get('direct_indirect'),
+            'security_title': transaction.get('security_title'),
+        }
+        event['event_identity'] = self._event_identity(event)
+        event['event_identity_base'] = self._base_event_identity(event)
+        return event
+
+    def _dedupe_and_apply_amendments(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ordered = sorted(
+            events,
+            key=lambda event: (
+                event.get('filing_date') or '',
+                event.get('accession_no') or '',
+                event.get('transaction_date') or '',
+            )
+        )
+        effective: List[Dict[str, Any]] = []
+        seen_identity = set()
+
+        for event in ordered:
+            identity = event.get('event_identity')
+            if identity in seen_identity and not event.get('is_amendment'):
+                continue
+
+            if event.get('is_amendment'):
+                base_identity = event.get('event_identity_base')
+                effective = [existing for existing in effective if existing.get('event_identity_base') != base_identity]
+                seen_identity = {existing.get('event_identity') for existing in effective}
+
+            if identity in seen_identity:
+                continue
+
+            effective.append(event)
+            seen_identity.add(identity)
+
+        return effective
+
+    def _score_aggregate(self, aggregate: Dict[str, Any]) -> None:
+        net_open_market_value = float(aggregate.get('net_open_market_value') or 0.0)
+        unique_insiders = int(aggregate.get('unique_insiders') or 0)
+        avg_role_weight = float(aggregate.get('avg_role_weight') or 0.0)
+        clustered_buy_count = int(aggregate.get('clustered_buy_count') or 0)
+        derivative_count = int(aggregate.get('derivative_event_count') or 0)
+        tax_sale_count = int(aggregate.get('tax_sale_count') or 0)
+        total_event_count = max(1, int(aggregate.get('total_event_count') or 1))
+        open_market_activity = int(aggregate.get('open_market_buy_count') or 0) + int(aggregate.get('open_market_sell_count') or 0)
+
+        reasons: List[str] = []
+        score = 0.0
+
+        if net_open_market_value > 0:
+            positive = min(1.0, net_open_market_value / 1_000_000.0)
+            score += positive * 0.45
+            reasons.append(f"net_open_market_value={net_open_market_value:.0f}")
+        elif net_open_market_value < 0:
+            negative = min(1.0, abs(net_open_market_value) / 1_000_000.0)
+            score -= negative * 0.45
+            reasons.append(f"net_open_market_value={net_open_market_value:.0f}")
+
+        if unique_insiders > 0 and open_market_activity > 0:
+            insider_bonus = min(1.0, unique_insiders / 4.0) * 0.2
+            score += insider_bonus if net_open_market_value >= 0 else -insider_bonus
+            reasons.append(f"unique_insiders={unique_insiders}")
+
+        if avg_role_weight > 0 and open_market_activity > 0:
+            role_bonus = avg_role_weight * 0.15
+            score += role_bonus if net_open_market_value >= 0 else -role_bonus
+            reasons.append(f"role_weight={avg_role_weight:.2f}")
+
+        if clustered_buy_count > 1:
+            cluster_bonus = min(0.15, clustered_buy_count * 0.05)
+            score += cluster_bonus
+            reasons.append(f"clustered_buys={clustered_buy_count}")
+
+        derivative_ratio = derivative_count / total_event_count
+        if derivative_ratio > 0.5:
+            score -= 0.1
+            reasons.append('derivative_heavy')
+
+        if tax_sale_count == total_event_count:
+            score = min(score - 0.15, -0.05)
+            reasons.append('tax_only')
+
+        aggregate['signal_strength_score'] = round(max(-1.0, min(1.0, score)), 3)
+        aggregate['signal_strength_reason'] = reasons
+
+    def _build_daily_aggregates(self, ticker: str, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        events_by_anchor: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        events_by_owner: Dict[str, List[datetime]] = defaultdict(list)
+
+        for event in events:
+            if event.get('signal_class') == 'open_market_buy':
+                key = f"{event.get('owner_cik') or event.get('owner_name')}"
+                event_date = self._safe_date(event.get('transaction_date'))
+                if event_date:
+                    events_by_owner[key].append(event_date)
+
+        for event in events:
+            anchor = str(event.get('event_anchor_timestamp') or '')[:10]
+            if anchor:
+                events_by_anchor[anchor].append(event)
+
+        aggregates: List[Dict[str, Any]] = []
+        for anchor_date, day_events in sorted(events_by_anchor.items()):
+            open_buy = [event for event in day_events if event.get('signal_class') == 'open_market_buy']
+            open_sell = [event for event in day_events if event.get('signal_class') == 'open_market_sell']
+            tax_sales = [event for event in day_events if event.get('signal_class') == 'tax_sale']
+            option_events = [event for event in day_events if event.get('signal_class') == 'option_exercise']
+            gifts = [event for event in day_events if event.get('signal_class') == 'gift']
+            non_economic = [event for event in day_events if event.get('economic_intent') in ('neutral', 'compensation')]
+
+            unique_filing_links = []
+            filing_seen = set()
+            for event in day_events:
+                link = event.get('form_url')
+                if link and link not in filing_seen:
+                    unique_filing_links.append(link)
+                    filing_seen.add(link)
+
+            event_date = self._safe_date(anchor_date)
+            clustered_buys = 0
+            if event_date:
+                for event in open_buy:
+                    owner_key = f"{event.get('owner_cik') or event.get('owner_name')}"
+                    owner_dates = events_by_owner.get(owner_key, [])
+                    clustered_buys += sum(1 for candidate in owner_dates if abs((candidate - event_date).days) <= 3)
+
+            key_events = sorted(
+                day_events,
+                key=lambda event: (
+                    abs(float(event.get('gross_value') or 0.0)),
+                    self._role_weight(str(event.get('owner_role') or '')),
+                ),
+                reverse=True,
+            )[:3]
+
+            aggregate = {
+                'ticker': ticker,
+                'event_anchor_type': 'filing_date',
+                'event_anchor_timestamp': anchor_date,
+                'transaction_date': anchor_date,
+                'filing_date': anchor_date,
+                'total_event_count': len(day_events),
+                'open_market_buy_count': len(open_buy),
+                'open_market_sell_count': len(open_sell),
+                'tax_sale_count': len(tax_sales),
+                'option_exercise_count': len(option_events),
+                'gift_count': len(gifts),
+                'non_economic_event_count': len(non_economic),
+                'derivative_event_count': sum(1 for event in day_events if event.get('is_derivative')),
+                'unique_insiders': len({event.get('owner_cik') or event.get('owner_name') for event in day_events}),
+                'net_open_market_value': sum(float(event.get('gross_value') or 0.0) for event in open_buy)
+                    - sum(float(event.get('gross_value') or 0.0) for event in open_sell),
+                'net_value': sum(float(event.get('gross_value') or 0.0) for event in open_buy)
+                    - sum(float(event.get('gross_value') or 0.0) for event in open_sell),
+                'net_shares': sum(float(event.get('shares') or 0.0) for event in open_buy)
+                    - sum(float(event.get('shares') or 0.0) for event in open_sell),
+                'avg_role_weight': (
+                    sum(self._role_weight(str(event.get('owner_role') or '')) for event in day_events) / len(day_events)
+                    if day_events else 0.0
+                ),
+                'clustered_buy_count': clustered_buys,
+                'signal_strength_score': 0.0,
+                'signal_strength_reason': [],
+                'key_events': [
+                    {
+                        'owner_name': event.get('owner_name'),
+                        'role': event.get('owner_role'),
+                        'signal_class': event.get('signal_class'),
+                        'gross_value': event.get('gross_value'),
+                        'importance_score': round(
+                            abs(float(event.get('gross_value') or 0.0)) / 1_000_000.0
+                            + self._role_weight(str(event.get('owner_role') or '')),
+                            3,
+                        ),
+                        'reason': [
+                            f"signal_class={event.get('signal_class')}",
+                            f"gross_value={float(event.get('gross_value') or 0.0):.0f}",
+                        ],
+                        'filing_url': event.get('form_url'),
+                    }
+                    for event in key_events
+                ],
+                'filing_links': unique_filing_links[:3],
+            }
+            self._score_aggregate(aggregate)
+            aggregates.append(aggregate)
+
+        return aggregates
+
+    def _build_llm_digest(self, ticker: str, events: List[Dict[str, Any]], aggregates: List[Dict[str, Any]], anchor_type: str) -> Dict[str, Any]:
+        open_buy_events = [event for event in events if event.get('signal_class') == 'open_market_buy']
+        open_sell_events = [event for event in events if event.get('signal_class') == 'open_market_sell']
+        total_filings = len({event.get('accession_no') for event in events if event.get('accession_no')})
+        unique_insiders = len({event.get('owner_cik') or event.get('owner_name') for event in events})
+        total_open_buy_value = sum(float(event.get('gross_value') or 0.0) for event in open_buy_events)
+        total_open_sell_value = sum(float(event.get('gross_value') or 0.0) for event in open_sell_events)
+        buy_sell_ratio = round(total_open_buy_value / total_open_sell_value, 3) if total_open_sell_value > 0 else None
+
+        ranked_events = sorted(
+            events,
+            key=lambda event: (
+                abs(float(event.get('gross_value') or 0.0)),
+                self._role_weight(str(event.get('owner_role') or '')),
+            ),
+            reverse=True,
+        )[:5]
+
+        anomalies: List[str] = []
+        if sum(1 for aggregate in aggregates if aggregate.get('open_market_buy_count', 0) > 0) >= 2:
+            anomalies.append('clustered_buying')
+        if len({event.get('owner_name') for event in open_buy_events + open_sell_events}) >= 3:
+            anomalies.append('repeated_insider_activity')
+        if ranked_events and abs(float(ranked_events[0].get('gross_value') or 0.0)) >= 1_000_000.0:
+            anomalies.append('unusually_large_trade')
+
+        caveats: List[str] = []
+        if events and sum(1 for event in events if event.get('is_derivative')) / max(1, len(events)) > 0.5:
+            caveats.append('derivative_heavy_period')
+        if events and all(event.get('signal_class') == 'tax_sale' for event in events):
+            caveats.append('mostly_tax_sales')
+        if not open_buy_events and not open_sell_events:
+            caveats.append('limited_open_market_activity')
+
+        return {
+            'summary': {
+                'ticker': ticker,
+                'total_filings': total_filings,
+                'net_value': round(total_open_buy_value - total_open_sell_value, 2),
+                'unique_insiders': unique_insiders,
+                'buy_sell_ratio': buy_sell_ratio,
+                'as_of': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'anchor_type': anchor_type,
+            },
+            'key_events': [
+                {
+                    'owner_name': event.get('owner_name'),
+                    'role': event.get('owner_role'),
+                    'signal_class': event.get('signal_class'),
+                    'gross_value': round(float(event.get('gross_value') or 0.0), 2),
+                    'importance_score': round(
+                        abs(float(event.get('gross_value') or 0.0)) / 1_000_000.0
+                        + self._role_weight(str(event.get('owner_role') or '')),
+                        3,
+                    ),
+                    'reason': [
+                        f"signal_class={event.get('signal_class')}",
+                        f"transaction_type={event.get('transaction_type')}",
+                    ],
+                    'filing_url': event.get('form_url'),
+                }
+                for event in ranked_events
+            ],
+            'anomalies': anomalies,
+            'caveats': caveats,
+        }
+
+    async def get_insider_signal_payload(self, ticker: str, days_back: int = 180,
+                                         use_cache: bool = True, filing_limit: int = 40,
+                                         anchor_type: str = 'filing_date') -> Dict[str, Any]:
+        ticker = ticker.upper()
+        filings_meta = await self.fetch_filings_metadata(ticker, days_back=days_back, use_cache=use_cache)
+        if filing_limit > 0:
+            filings_meta = filings_meta[:filing_limit]
+
+        normalized_events: List[Dict[str, Any]] = []
+        for filing_meta in filings_meta:
+            accession_no = filing_meta.get('accession_no')
+            if not accession_no:
+                continue
+            parsed_transactions = await self.process_form4_filing(accession_no, ticker=ticker)
+            for transaction in parsed_transactions:
+                normalized_events.append(self._normalize_signal_event(transaction, filing_meta, ticker))
+
+        effective_events = self._dedupe_and_apply_amendments(normalized_events)
+        daily_aggregates = self._build_daily_aggregates(ticker, effective_events)
+        llm_digest = self._build_llm_digest(ticker, effective_events, daily_aggregates, anchor_type)
+
+        return {
+            'symbol': ticker,
+            'window': {
+                'days_back': days_back,
+                'filing_limit': filing_limit,
+            },
+            'as_of': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'events': effective_events,
+            'daily_aggregates': daily_aggregates,
+            'llm_digest': llm_digest,
+        }
+
     async def get_recent_insider_transactions(self, ticker: str, days_back: int = 90,
                                          use_cache: bool = True, filing_limit: int = 10) -> List[Dict]:
         """
@@ -419,6 +859,13 @@ class Form4Processor:
                 'error': "No transactions found in filings.",
                 'total_transactions': 0
              }
+
+        if pd is None:
+            return {
+                'ticker': ticker,
+                'error': "pandas is required for transaction analysis.",
+                'total_transactions_parsed': len(all_parsed_transactions),
+            }
 
         df = pd.DataFrame(all_parsed_transactions)
 

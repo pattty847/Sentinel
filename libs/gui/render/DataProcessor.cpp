@@ -10,16 +10,28 @@ Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
-#include "GridViewState.hpp"
+#include "FootprintStreamState.hpp"
+#include "TpoStreamState.hpp"
+#include "VolumeProfileState.hpp"
+#include "TpoDebugTrace.hpp"
 #include "SentinelLogging.hpp"
+#include "../../core/protocol/VolumeProfileSlice.hpp"
 #include <algorithm>
 #include <QtGlobal>
 #include <limits>
 #include <cstring>
 #include <bit>
+#include <sstream>
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
+    qRegisterMetaType<IGridDataSource::HeatmapHistoryColumn>("IGridDataSource::HeatmapHistoryColumn");
+    qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
+    m_footprintStream = std::make_unique<FootprintStreamState>();
+    m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
+    m_tpoStream = std::make_unique<TpoStreamState>();
+    m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
+    m_vpStream = std::make_unique<VolumeProfileState>();
 }
 
 DataProcessor::~DataProcessor() {
@@ -45,6 +57,15 @@ void DataProcessor::clearData() {
     m_heatmapHasLastColumn = false;
     m_heatmapLastColumn.clear();
     m_heatmapCache.clear();
+    if (m_footprintStream) {
+        m_footprintStream->clear();
+    }
+    if (m_tpoStream) {
+        m_tpoStream->clear();
+    }
+    if (m_vpStream) {
+        m_vpStream->clear();
+    }
 }
 
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
@@ -114,7 +135,8 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     m_heatmapGridHeight = height;
     const double effectiveTick = slice.tickSize;
     if (lastSliceStart != std::numeric_limits<int64_t>::min()) {
-        if (slice.bucketStartMs <= lastSliceStart) {
+        // Same bucket start means an in-progress update for the active bucket; allow in-place refresh.
+        if (slice.bucketStartMs < lastSliceStart) {
             forceReset = true;
         } else if (slice.timeframeMs > 0 && resolvedWidth > 0) {
             const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * slice.timeframeMs;
@@ -148,31 +170,194 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
                             slice.liquidityScale,
                             bytesPerCell);
 
-    HeatmapGridKey key;
-    key.symbol = slice.symbol.toStdString();
-    key.gridWidth = m_heatmapGridWidth;
-    key.gridHeight = m_heatmapGridHeight;
-    key.timeframeMs = slice.timeframeMs;
-    key.minPrice = slice.minPrice;
-    key.maxPrice = slice.maxPrice;
-    key.tickSize = effectiveTick;
-
-    auto& cache = m_heatmapCache[key];
-    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : m_heatmapGridWidth;
-    if (cache.capacity != capacity) {
-        cache.reset(capacity);
-    }
-    IGridDataSource::HeatmapHistoryColumn entry;
-    entry.bucketStartMs = slice.bucketStartMs;
-    entry.bucketEndMs = slice.bucketEndMs;
-    entry.minPrice = slice.minPrice;
-    entry.maxPrice = slice.maxPrice;
-    entry.tickSize = effectiveTick;
-    entry.intensity = expanded;
-    entry.liquidity = slice.liquidityColumn;
-    entry.liquidityScale = slice.liquidityScale;
-    cache.push(std::move(entry));
+    // Week 0 guardrail: client-side heatmap cache writes are disabled.
+    // This map is currently unused by any read path and can grow unbounded under live flow.
+    // Long-term caching should live in server-side chunk/history serving, not ad-hoc client accumulation.
     m_heatmapLastSliceStart = slice.bucketStartMs;
+}
+
+void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_footprintStream) {
+        return;
+    }
+    if (slice.deltaLevelsQ16.isEmpty()) {
+        return;
+    }
+    if (slice.format.trimmed().compare(QStringLiteral("q16_delta"), Qt::CaseInsensitive) != 0) {
+        return;
+    }
+
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_footprintGridWidth;
+    const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_footprintGridHeight;
+    if (resolvedWidth <= 0 || resolvedHeight <= 0) {
+        return;
+    }
+
+    if (resolvedWidth != m_footprintGridWidth || resolvedHeight != m_footprintGridHeight) {
+        m_footprintGridWidth = resolvedWidth;
+        m_footprintGridHeight = resolvedHeight;
+        m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
+    }
+
+    const bool ok = m_footprintStream->ingestSlice(slice.bucketStartMs,
+                                                   slice.bucketEndMs,
+                                                   slice.timeframeMs,
+                                                   m_footprintGridWidth,
+                                                   m_footprintGridHeight,
+                                                   slice.minPrice,
+                                                   slice.maxPrice,
+                                                   slice.tickSize,
+                                                   slice.deltaLevelsQ16);
+    if (!ok && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Footprint slice dropped at staging: symbol=%1 start=%2 end=%3 tfMs=%4 grid=%5x%6 bytes=%7")
+                       .arg(slice.symbol)
+                       .arg(slice.bucketStartMs)
+                       .arg(slice.bucketEndMs)
+                       .arg(slice.timeframeMs)
+                       .arg(m_footprintGridWidth)
+                       .arg(m_footprintGridHeight)
+                       .arg(slice.deltaLevelsQ16.size()));
+        return;
+    }
+    if (!ok) {
+        return;
+    }
+
+    std::vector<FootprintStreamState::PendingUpload> pendingUploads;
+    m_footprintStream->takePendingUploads(pendingUploads);
+    if (pendingUploads.empty()) {
+        return;
+    }
+
+    const auto snap = m_footprintStream->snapshot();
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Footprint staged: pending=%1 grid=%2x%3 write=%4 filled=%5")
+                       .arg(static_cast<int>(pendingUploads.size()))
+                       .arg(snap.gridWidth)
+                       .arg(snap.gridHeight)
+                       .arg(snap.writeColumn)
+                       .arg(snap.filledColumns));
+    }
+    for (const auto& upload : pendingUploads) {
+        QByteArray columnQ16;
+        if (!m_footprintStream->copyColumnForUpload(upload.x, columnQ16)) {
+            continue;
+        }
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+            sLog_Debug(QString("Footprint upload ready: x=%1 bytes=%2")
+                           .arg(upload.x)
+                           .arg(columnQ16.size()));
+        }
+        emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16));
+    }
+}
+
+void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_tpoStream || slice.letters.isEmpty()) {
+        return;
+    }
+
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_tpoGridWidth;
+    const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_tpoGridHeight;
+    if (resolvedWidth <= 0 || resolvedHeight <= 0 || slice.letters.size() != resolvedHeight) {
+        return;
+    }
+    if (slice.bucketStartMs <= 0 || slice.bucketEndMs <= slice.bucketStartMs || slice.timeframeMs <= 0) {
+        return;
+    }
+    if (slice.format.trimmed().compare(QStringLiteral("tpo_ascii"), Qt::CaseInsensitive) != 0) {
+        return;
+    }
+
+    if (tpo_debug::enabled()) {
+        std::ostringstream payload;
+        payload << "{"
+                << "\"symbol\":\"" << slice.symbol.toStdString() << "\""
+                << ",\"bucketStartMs\":" << slice.bucketStartMs
+                << ",\"bucketEndMs\":" << slice.bucketEndMs
+                << ",\"timeframeMs\":" << slice.timeframeMs
+                << ",\"sessionType\":" << slice.sessionType
+                << ",\"gridWidth\":" << resolvedWidth
+                << ",\"gridHeight\":" << resolvedHeight
+                << ",\"lettersBytes\":" << slice.letters.size()
+                << "}";
+        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
+                          "tpo_slice_ingest",
+                          "H1",
+                          payload.str());
+    }
+
+    m_tpoStream->setSessionType(slice.sessionType);
+
+    if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
+        m_tpoGridWidth = resolvedWidth;
+        m_tpoGridHeight = resolvedHeight;
+        m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
+    }
+
+    // Track price range for POC/VAH/VAL → price conversion downstream.
+    if (slice.maxPrice > 0.0 && slice.tickSize > 0.0) {
+        m_tpoMaxPrice = slice.maxPrice;
+        m_tpoTickSize = slice.tickSize;
+    }
+
+    const bool ok = m_tpoStream->ingestSlice(slice.bucketStartMs,
+                                             slice.bucketEndMs,
+                                             slice.timeframeMs,
+                                             m_tpoGridWidth,
+                                             m_tpoGridHeight,
+                                             slice.letters);
+    if (!ok) {
+        return;
+    }
+
+    // Emit POC/VAH/VAL after each successful ingest.
+    if (m_tpoMaxPrice > 0.0 && m_tpoTickSize > 0.0) {
+        const auto pvv = m_tpoStream->computePocVahVal();
+        if (pvv.valid) {
+            emit tpoPocVahValReady(pvv.pocRow, pvv.vahRow, pvv.valRow,
+                                   m_tpoGridHeight,
+                                   m_tpoMaxPrice, m_tpoTickSize);
+        }
+    }
+
+    std::vector<TpoStreamState::PendingUpload> pendingUploads;
+    m_tpoStream->takePendingUploads(pendingUploads);
+    if (pendingUploads.empty()) {
+        return;
+    }
+
+    const auto snap = m_tpoStream->snapshot();
+    if (tpo_debug::enabled()) {
+        std::ostringstream payload;
+        payload << "{"
+                << "\"sessionStartMs\":" << snap.sessionStartMs
+                << ",\"sessionEndMs\":" << snap.sessionEndMs
+                << ",\"timeframeMs\":" << snap.timeframeMs
+                << ",\"gridWidth\":" << snap.gridWidth
+                << ",\"gridHeight\":" << snap.gridHeight
+                << ",\"pendingUploads\":" << pendingUploads.size()
+                << "}";
+        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
+                          "tpo_snapshot_after_ingest",
+                          "H2",
+                          payload.str());
+    }
+    for (auto& upload : pendingUploads) {
+        emit tpoColumnReady(upload.x,
+                            snap.gridWidth,
+                            snap.gridHeight,
+                            std::move(upload.data),
+                            snap.sessionStartMs,
+                            snap.sessionEndMs,
+                            snap.timeframeMs);
+    }
 }
 
 void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
@@ -180,6 +365,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int gridWidth,
                                              int gridHeight,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
+    Q_UNUSED(symbol);
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
                     << " grid=" << gridWidth << "x" << gridHeight
@@ -205,37 +391,10 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
         ? bytesPerCellGuess
         : 1;
 
-    HeatmapGridKey key;
-    key.symbol = symbol.toStdString();
-    key.gridWidth = gridWidth;
-    key.gridHeight = gridHeight;
-    key.timeframeMs = timeframeMs;
-    key.minPrice = first.minPrice;
-    key.maxPrice = first.maxPrice;
-    key.tickSize = first.tickSize;
-
-    auto& cache = m_heatmapCache[key];
-    const int capacity = (m_cacheCapacityOverride > 0) ? m_cacheCapacityOverride : gridWidth;
-    if (cache.capacity != capacity) {
-        cache.reset(capacity);
-    }
-
-    emit heatmapRangeReset(first.minPrice, first.maxPrice, first.tickSize, gridWidth, gridHeight);
-
-    for (const auto& col : columns) {
-        IGridDataSource::HeatmapHistoryColumn entry = col;
-        cache.push(entry);
-        emit heatmapColumnReady(col.bucketStartMs,
-                                col.bucketEndMs,
-                                timeframeMs,
-                                col.minPrice,
-                                col.maxPrice,
-                                col.tickSize,
-                                col.intensity,
-                                col.liquidity,
-                                col.liquidityScale,
-                                bytesPerCell);
-    }
+    // Do NOT emit heatmapRangeReset here — that stomps the viewport back to "now"
+    // every time a history batch arrives (e.g. scroll-past-cache fetch).
+    // heatmapRangeReset is for live slice initialisation only (onHeatmapSliceReceived).
+    emit heatmapHistoryBatchReady(timeframeMs, gridWidth, gridHeight, columns, bytesPerCell);
 }
 
 size_t DataProcessor::HeatmapGridKeyHash::operator()(const HeatmapGridKey& key) const noexcept {
@@ -280,6 +439,24 @@ void DataProcessor::HeatmapColumnCache::push(IGridDataSource::HeatmapHistoryColu
     columns[static_cast<size_t>(writeIndex)] = std::move(column);
     writeIndex = (writeIndex + 1) % capacity;
     count = std::min(count + 1, capacity);
+}
+
+void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_vpStream) {
+        return;
+    }
+    if (!m_vpStream->ingestSlice(slice)) {
+        return;
+    }
+    std::vector<float> bins;
+    VolumeProfileState::Snapshot snap;
+    if (!m_vpStream->takePendingBins(bins, snap)) {
+        return;
+    }
+    emit volumeProfileReady(std::move(bins), std::move(snap));
 }
 
 void DataProcessor::setHeatmapGridHeight(int height) {

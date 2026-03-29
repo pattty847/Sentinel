@@ -6,6 +6,8 @@ set(GRID_CORE_SOURCES
     ChartModeController.h
     PerformanceMonitor.cpp
     PerformanceMonitor.hpp
+    TradeInputManager.hpp
+    TradeInputManager.cpp
     config/GuiConfigStore.cpp
     config/GuiConfigStore.hpp
 
@@ -22,7 +24,7 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     mainwindow/GuiApiServer.cpp
     mainwindow/GuiApiServer.h
-    
+
     # Grid system components
     datasources/IGridDataSource.hpp
     datasources/RemoteGridDataSource.hpp
@@ -30,11 +32,13 @@ set(GRID_CORE_SOURCES
     datasources/CandleSeriesBuffer.hpp
     datasources/CandleSeriesBuffer.cpp
     UnifiedGridRenderer.cpp
+    UnifiedGridRenderer.Init.cpp
+    UnifiedGridRenderer.Render.cpp
     UnifiedGridRenderer.h
     CoordinateSystem.cpp
     CoordinateSystem.h
     ChartMode.h
-    
+
     # Axis models for QML integration
     models/AxisModel.hpp
     models/AxisModel.cpp
@@ -42,7 +46,7 @@ set(GRID_CORE_SOURCES
     models/TimeAxisModel.cpp
     models/PriceAxisModel.hpp
     models/PriceAxisModel.cpp
-    
+
     # New modular render architecture (V2)
     render/GridViewState.hpp
     render/GridViewState.cpp
@@ -50,13 +54,53 @@ set(GRID_CORE_SOURCES
     render/DataProcessor.cpp
     render/HeatmapStreamState.hpp
     render/HeatmapStreamState.cpp
+    render/FootprintStreamState.hpp
+    render/FootprintStreamState.cpp
+    render/TpoStreamState.hpp
+    render/TpoStreamState.cpp
+    render/FootprintOverlayRenderer.hpp
+    render/FootprintOverlayRenderer.cpp
+    render/TpoOverlayRenderer.hpp
+    render/TpoOverlayRenderer.cpp
+    render/VolumeProfileState.hpp
+    render/VolumeProfileState.cpp
+    render/VolumeProfileRenderer.hpp
+    render/VolumeProfileRenderer.cpp
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
+    render/ITimeAxisMappingProvider.hpp
+    render/TimeAuthority.hpp
+    render/TimeAuthority.cpp
     render/ViewportAutoScrollController.hpp
     render/ViewportAutoScrollController.cpp
     render/TimeAxisMapping.hpp
+    render/UgrFrameMath.hpp
+    render/UgrFrameMath.cpp
     render/HeatmapLabelRenderer.hpp
     render/HeatmapLabelRenderer.cpp
+    render/AxisLayout.hpp
+    render/AxisLayout.cpp
+    render/AxisTextService.hpp
+    render/AxisTextService.cpp
+    render/HeatmapStreamService.hpp
+    render/HeatmapStreamService.cpp
+    render/IOverlayRenderer.hpp
+    render/FrameContext.hpp
+    render/FrameContextBuilder.hpp
+    render/FrameContextBuilder.cpp
+    render/ChartTextPrimitives.hpp
+    render/ChartTextAtlas.hpp
+    render/ChartTextAtlas.cpp
+    render/ChartTextLayout.hpp
+    render/ChartTextLayout.cpp
+    render/ChartTextDebugNode.hpp
+    render/ChartTextDebugNode.cpp
+    render/ChartTextNode.hpp
+    render/ChartTextNode.cpp
+    render/ChartTextRenderer.hpp
+    render/ChartTextRenderer.cpp
+    render/HeatmapOverlayRenderer.hpp
+    render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp
     render/CandlestickBatched.cpp
     render/MsdfAtlas.hpp
@@ -67,8 +111,18 @@ set(GRID_CORE_SOURCES
     render/LabTextItem.cpp
     render/HeatmapIntensityNode.hpp
     render/HeatmapIntensityNode.cpp
+    render/FootprintIntensityNode.hpp
+    render/FootprintIntensityNode.cpp
     widgets/LabDock.hpp
     widgets/LabDock.cpp
+    render/AlgoOverlayRenderer.hpp
+    render/AlgoOverlayRenderer.cpp
+    render/PaperTradeOverlayRenderer.hpp
+    render/PaperTradeOverlayRenderer.cpp
+    render/PaperTradeOverlayModel.hpp
+    render/PaperTradeOverlayModel.cpp
+    render/PnlCurveItem.hpp
+    render/PnlCurveItem.cpp
 )
 
 set(WIDGET_SOURCES
@@ -77,17 +131,23 @@ set(WIDGET_SOURCES
     "widgets/CopenetFeedDock.cpp"
     "widgets/DockablePanel.cpp"
     "widgets/FontSettingsDialog.cpp"
-    "widgets/HeatmapDock.cpp"
+    "widgets/ChartDock.cpp"
     "widgets/LayoutManager.cpp"
     "marketdata/MarketDataCoreQt.cpp"
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"
+    "widgets/ScreenerDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
     "widgets/HeatmapSettingsDialog.cpp"
     "widgets/TopToolbar.cpp"
     "widgets/WatchlistDock.cpp"
+    "widgets/StockChartDock.cpp"
+    "widgets/TradeBlotterDock.cpp"
+    "widgets/TradeBlotterDock.hpp"
+    "widgets/PaperTradingDock.hpp"
+    "widgets/PaperTradingDock.cpp"
 )
 
 set(THEME_SOURCES
@@ -110,6 +170,12 @@ qt6_add_qml_module(sentinel_gui_lib
     SOURCES
         render/CandlestickOverlayItem.hpp
         render/CandlestickOverlayItem.cpp
+        render/AlgoOverlayRenderer.hpp
+        render/AlgoOverlayRenderer.cpp
+        render/PaperTradeOverlayRenderer.hpp
+        render/PaperTradeOverlayRenderer.cpp
+        render/PaperTradeOverlayModel.hpp
+        render/PaperTradeOverlayModel.cpp
     QML_FILES
         qml/DepthChartView.qml
         qml/LabView.qml
@@ -122,6 +188,7 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/controls/NavigationControls.qml
         qml/controls/LiquidityThresholdFilter.qml
         qml/controls/ChartToolRail.qml
+        qml/StockChartView.qml
 )
 
 set(SENTINEL_SVG_DIR "${CMAKE_SOURCE_DIR}/resources/svg")
@@ -139,6 +206,9 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/search.svg"
     "${SENTINEL_SVG_DIR}/settings.svg"
     "${SENTINEL_SVG_DIR}/tpo_chart.svg"
+    "${SENTINEL_SVG_DIR}/footprint.svg"
+    "${SENTINEL_SVG_DIR}/refresh.svg"
+    "${SENTINEL_SVG_DIR}/auto-refresh.svg"
 )
 
 set(SENTINEL_FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts/RobotoMono")
@@ -187,6 +257,9 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/reset_settings.svg" PROPERTIES 
 set_source_files_properties("${SENTINEL_SVG_DIR}/search.svg" PROPERTIES QT_RESOURCE_ALIAS "search.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/settings.svg" PROPERTIES QT_RESOURCE_ALIAS "settings.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/tpo_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "tpo_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/footprint.svg" PROPERTIES QT_RESOURCE_ALIAS "footprint.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "refresh.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/auto-refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "auto-refresh.svg")
 
 qt_add_resources(sentinel_gui_lib sentinel_svg_resources
     PREFIX "/svg"
@@ -213,9 +286,11 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_intensity.frag
         render/shaders/heatmap_msdf.vert
         render/shaders/heatmap_msdf.frag
+        render/shaders/footprint_intensity.vert
+        render/shaders/footprint_intensity.frag
 )
 
-target_include_directories(sentinel_gui_lib 
+target_include_directories(sentinel_gui_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/render
 )
@@ -231,6 +306,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Widgets
         Qt6::Charts
         Qt6::Network
+        Qt6::WebSockets
         Qt6::Quick
         Qt6::Qml
         Qt6::QuickControls2

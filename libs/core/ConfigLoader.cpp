@@ -35,6 +35,30 @@ std::vector<std::string> parseSymbolList(const std::string& spec) {
     return out;
 }
 
+std::vector<std::string> parseSymbolList(const YAML::Node& node) {
+    std::vector<std::string> out;
+    if (!node) {
+        return out;
+    }
+    if (node.IsSequence()) {
+        out.reserve(node.size());
+        for (const auto& item : node) {
+            if (!item.IsScalar()) {
+                continue;
+            }
+            const auto symbol = item.as<std::string>();
+            if (!symbol.empty()) {
+                out.push_back(symbol);
+            }
+        }
+        return out;
+    }
+    if (node.IsScalar()) {
+        return parseSymbolList(node.as<std::string>());
+    }
+    return out;
+}
+
 std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
     std::vector<int64_t> out;
     if (!node) {
@@ -100,7 +124,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     if (serverRoot) {
         readScalar(serverRoot, "stream_port", cfg.streamPort);
         if (serverRoot["default_symbols"]) {
-            const auto symbols = parseSymbolList(serverRoot["default_symbols"].as<std::string>());
+            const auto symbols = parseSymbolList(serverRoot["default_symbols"]);
             if (!symbols.empty()) {
                 cfg.defaultSymbols = symbols;
             }
@@ -121,6 +145,16 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(candles, "update_volume_fast", cfg.candles.volumeFast);
             readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
             readScalar(candles, "update_tick_size", cfg.candles.tickSize);
+        }
+        if (serverRoot["trading"]) {
+            auto trading = serverRoot["trading"];
+            readScalar(trading, "mode", cfg.trading.mode);
+            readScalar(trading, "slippage_bps", cfg.trading.slippageBps);
+        }
+        if (serverRoot["tls"]) {
+            auto tls = serverRoot["tls"];
+            readScalar(tls, "cert_file", cfg.tls.certFile);
+            readScalar(tls, "key_file",  cfg.tls.keyFile);
         }
     }
 
@@ -156,6 +190,8 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "shader_floor", cfg.heatmap.shaderFloor);
         readScalar(heatmapNode, "label_px", cfg.heatmap.labelPx);
         readScalar(heatmapNode, "client_cache_columns", cfg.heatmap.clientCacheColumns);
+        readScalar(heatmapNode, "initial_viewport_pct", cfg.heatmap.initialViewportPct);
+        readScalar(heatmapNode, "initial_price_pct", cfg.heatmap.initialPricePct);
     }
 
     YAML::Node guiNode;
@@ -169,12 +205,15 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(guiNode, "api_port", cfg.gui.apiPort);
         readScalar(guiNode, "screenshot_dir", cfg.gui.screenshotDir);
         readScalar(guiNode, "msdf_font", cfg.gui.msdfFontPath);
+        readScalar(guiNode, "axis_label_px", cfg.gui.axisLabelPx);
+        readScalar(guiNode, "default_order_qty", cfg.gui.defaultOrderQty);
     }
 
     if (clientNode && clientNode["server"]) {
         auto server = clientNode["server"];
-        readScalar(server, "host", cfg.server.host);
-        readScalar(server, "port", cfg.server.port);
+        readScalar(server, "host",    cfg.server.host);
+        readScalar(server, "port",    cfg.server.port);
+        readScalar(server, "ca_file", cfg.server.caFile);
     }
 }
 }

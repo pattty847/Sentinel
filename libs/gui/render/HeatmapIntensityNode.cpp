@@ -1,4 +1,5 @@
 #include "HeatmapIntensityNode.hpp"
+#include "../PerformanceMonitor.hpp"
 #include <QMatrix4x4>
 #include <QVector4D>
 #include <QOpenGLContext>
@@ -66,6 +67,7 @@ public:
                         gl->glBindTexture(GL_TEXTURE_2D, glTex->nativeTexture());
                         const int height = (*texture)->textureSize().height();
                         const int width = (*texture)->textureSize().width();
+                        qint64 totalUploadBytes = 0;
                         for (const auto& upload : uploads) {
                             const int x = upload.first;
                             if (x < 0 || x >= width) {
@@ -77,17 +79,23 @@ public:
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_RED, GL_UNSIGNED_BYTE,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             } else if (byteCount == height * 2) {
                                 gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_RED, GL_UNSIGNED_SHORT,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             } else if (byteCount == height * 4) {
                                 gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
                                 gl->glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, 1, height,
                                                     GL_BGRA, GL_UNSIGNED_BYTE,
                                                     upload.second.constData());
+                                totalUploadBytes += byteCount;
                             }
+                        }
+                        if (totalUploadBytes > 0) {
+                            PerformanceMonitor::instance().addUploadBytes(totalUploadBytes);
                         }
                     }
                 }
@@ -219,7 +227,13 @@ void HeatmapIntensityNode::enqueueColumn(int x, QByteArray data) {
 }
 
 void HeatmapIntensityNode::updateGeometry() {
-    if (m_rect.isNull() || m_textureSize.isEmpty()) {
+    auto* vertices = m_geometry.vertexDataAsTexturedPoint2D();
+    if (m_rect.isNull() || m_rect.isEmpty() || m_textureSize.isEmpty() || m_sourceRect.isEmpty()) {
+        vertices[0].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[1].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[2].set(0.0f, 0.0f, 0.0f, 0.0f);
+        vertices[3].set(0.0f, 0.0f, 0.0f, 0.0f);
+        markDirty(QSGNode::DirtyGeometry);
         return;
     }
 
@@ -234,7 +248,6 @@ void HeatmapIntensityNode::updateGeometry() {
     const float u1 = static_cast<float>(m_sourceRect.x() + m_sourceRect.width()) / texW;
     const float v1 = static_cast<float>(m_sourceRect.y() + m_sourceRect.height()) / texH;
 
-    auto* vertices = m_geometry.vertexDataAsTexturedPoint2D();
     vertices[0].set(m_rect.left(), m_rect.top(), u0, v0);
     vertices[1].set(m_rect.left(), m_rect.bottom(), u0, v1);
     vertices[2].set(m_rect.right(), m_rect.top(), u1, v0);

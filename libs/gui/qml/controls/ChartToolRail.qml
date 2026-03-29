@@ -108,7 +108,7 @@ Item {
                 TimeframeSelector { target: root.target }
                 PriceResolutionSelector { target: root.target }
                 VolumeFilter { target: root.target; maxVolumeRange: root.maxVolumeRange }
-                LiquidityThresholdFilter { target: root.target; maxLiquidityRange: root.maxVolumeRange }
+                LiquidityThresholdFilter { target: root.target }
                 GridResolutionSelector { target: root.target }
             }
         }

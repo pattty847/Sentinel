@@ -32,7 +32,8 @@ void configureGraphicsBackend() {
         // Force OpenGL on Windows for heatmap texture uploads.
         qputenv("QSG_RHI_BACKEND", "opengl");
     #elif defined(Q_OS_MACOS)
-        qputenv("QSG_RHI_BACKEND", "metal");
+        // Default to Metal on macOS; non-OpenGL upload fallback handles heatmap/footprint updates.
+        qputenv("QSG_RHI_BACKEND", "metal"); 
     #else
         qputenv("QSG_RHI_BACKEND", "opengl");
         if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
@@ -52,9 +53,12 @@ void configureGraphicsBackend() {
 // --- Surface format configuration ---
 void configureSurfaceFormat() {
     QSurfaceFormat fmt;
-    fmt.setRenderableType(QSurfaceFormat::OpenGL);
-    fmt.setVersion(3, 3);
-    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    const QByteArray backend = qgetenv("QSG_RHI_BACKEND").toLower();
+    if (backend == "opengl") {
+        fmt.setRenderableType(QSurfaceFormat::OpenGL);
+        fmt.setVersion(3, 3);
+        fmt.setProfile(QSurfaceFormat::CoreProfile);
+    }
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     fmt.setSwapInterval(0); // disable vsync for realtime charts
     fmt.setSamples(4);

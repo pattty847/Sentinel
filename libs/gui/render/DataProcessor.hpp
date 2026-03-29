@@ -5,12 +5,16 @@
 #include <QVector>
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
 
-class GridViewState;
+class FootprintStreamState;
+class TpoStreamState;
+#include "VolumeProfileState.hpp"   // for VolumeProfileState::Snapshot in signal
+struct VolumeProfileSlice;
 
 class DataProcessor : public QObject {
     Q_OBJECT
@@ -21,6 +25,9 @@ public:
 
 public slots:
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
+    void onFootprintSliceReceived(const FootprintSlice& slice);
+    void onTpoSliceReceived(const TpoSlice& slice);
+    void onVolumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
                                   int gridWidth,
@@ -28,8 +35,6 @@ public slots:
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     
 public:
-    void setGridViewState(GridViewState* viewState) { m_viewState = viewState; }
-    
     void clearData();
     void startProcessing();
     void stopProcessing();
@@ -61,7 +66,26 @@ signals:
                             const QByteArray& liquidityColumn,
                             double liquidityScale,
                             int intensityBytesPerCell);
+    void heatmapHistoryBatchReady(int64_t timeframeMs,
+                                  int gridWidth,
+                                  int gridHeight,
+                                  const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
+                                  int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
+    void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
+    void tpoColumnReady(int x,
+                        int gridWidth,
+                        int gridHeight,
+                        QByteArray letters,
+                        int64_t sessionStartMs,
+                        int64_t sessionEndMs,
+                        int64_t timeframeMs);
+    // Emitted after session data changes; row indices in grid space (0 = highest price).
+    // maxPrice and tickSize let the receiver convert row → price without heatmap coupling.
+    void tpoPocVahValReady(int pocRow, int vahRow, int valRow,
+                           int gridHeight,
+                           double maxPrice, double tickSize);
+    void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:
     struct HeatmapGridKey {
@@ -92,8 +116,6 @@ private:
         void push(IGridDataSource::HeatmapHistoryColumn column);
     };
     
-    GridViewState* m_viewState = nullptr;
-    
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
     int64_t m_currentTimeframe_ms = 100;
@@ -112,7 +134,17 @@ private:
     bool m_heatmapHasLastColumn = false;
     std::atomic<bool> m_shuttingDown{false};
 
+    // Week 0: writes disabled to prevent unbounded client growth; reserved for future bounded cache design.
     std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;
     int m_cacheCapacityOverride = 0;
+    int m_footprintGridWidth = 5120;
+    int m_footprintGridHeight = 2048;
+    std::unique_ptr<FootprintStreamState> m_footprintStream;
+    int m_tpoGridWidth = 5120;
+    int m_tpoGridHeight = 2048;
+    double m_tpoMaxPrice = 0.0;
+    double m_tpoTickSize = 0.0;
+    std::unique_ptr<TpoStreamState> m_tpoStream;
+    std::unique_ptr<VolumeProfileState> m_vpStream;
 
 };

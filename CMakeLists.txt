@@ -36,7 +36,7 @@ if (MSVC)
     add_compile_options(/EHsc /bigobj)
 
     # Release flags
-    # (/O2 /GL /DNDEBUG) sets MSVC release optimizations: /O2 enables maximum optimization, /GL enables whole-program optimization, 
+    # (/O2 /GL /DNDEBUG) sets MSVC release optimizations: /O2 enables maximum optimization, /GL enables whole-program optimization,
     # and /DNDEBUG disables debug code to produce efficient release binaries.
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL /DNDEBUG")
 endif()
@@ -86,7 +86,7 @@ endif()
 FetchContent_MakeAvailable(googletest)
 
 # Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network Quick Qml QuickWidgets QuickControls2 ShaderTools Svg Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Network WebSockets Quick Qml QuickWidgets QuickControls2 ShaderTools Svg Test)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -106,11 +106,13 @@ endif()
 # ────────────────────────────────────────────────────────────────
 add_subdirectory(libs/core)
 add_subdirectory(libs/gui)
-add_subdirectory(apps/sentinel_gui)
+add_subdirectory(apps/sentinel_gui apps/sentinel-gui)
 add_subdirectory(apps/sentinel-server)
+add_subdirectory(apps/sentinel-backtest)
 enable_testing()
 add_subdirectory(tests/marketdata)
 add_subdirectory(tests/render)
+add_subdirectory(tests/trading)
 
 # ────────────────────────────────────────────────────────────────
 # LOG

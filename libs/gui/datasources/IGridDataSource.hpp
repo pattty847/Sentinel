@@ -7,6 +7,11 @@
 #include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/protocol/HeatmapSlice.hpp"
+#include "../../core/protocol/FootprintSlice.hpp"
+#include "../../core/protocol/TpoSlice.hpp"
+#include "../../core/protocol/VolumeProfileSlice.hpp"
+#include "../../core/trading/TradingTypes.hpp"
+#include "../../core/trading/AlgoEngine.hpp"
 
 // Abstract interface for supplying market data to the grid; supports remote client-server access via WebSocket.
 class IGridDataSource : public QObject {
@@ -32,10 +37,21 @@ public:
                                        int64_t timeframeMs,
                                        int64_t endTimeMs,
                                        int count) = 0;
+    virtual void requestFootprintHistory(const QString& symbol,
+                                         int64_t timeframeMs,
+                                         int64_t endTimeMs,
+                                         int count) = 0;
+    virtual void requestTpoHistory(const QString& symbol,
+                                   int64_t timeframeMs,
+                                   int sessionType,
+                                   int64_t endTimeMs,
+                                   int count) = 0;
     virtual void requestCandleHistory(const QString& symbol,
                                       int64_t timeframeSec,
                                       int64_t endTimeSec,
                                       int limit) = 0;
+    virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
+    virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;
 
     // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
@@ -46,6 +62,9 @@ signals:
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void orderBookUpdated(std::shared_ptr<const OrderBook> book);
     void heatmapSliceReceived(const HeatmapSlice& slice);
+    void footprintSliceReceived(const FootprintSlice& slice);
+    void tpoSliceReceived(const TpoSlice& slice);
+    void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
                                 int gridWidth,
@@ -54,8 +73,17 @@ signals:
     
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
+    void orderUpdated(const trading::OrderUpdate& update);
+    void positionUpdated(const trading::PositionUpdate& update);
+    void riskOrderUpdated(const trading::RiskOrderUpdate& update);
+    void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
+    void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 };
 
 Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
 Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
-
+Q_DECLARE_METATYPE(trading::OrderUpdate)
+Q_DECLARE_METATYPE(trading::PositionUpdate)
+Q_DECLARE_METATYPE(trading::RiskOrderUpdate)
+Q_DECLARE_METATYPE(trading::AlgoOrderEvent)
+Q_DECLARE_METATYPE(trading::PnlSnapshot)

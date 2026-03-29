@@ -1,0 +1,715 @@
+// UnifiedGridRenderer render-thread hot path split from main TU.
+#include "UnifiedGridRenderer.h"
+
+#include "SentinelLogging.hpp"
+#include "render/FrameContextBuilder.hpp"
+#include "render/HeatmapIntensityNode.hpp"
+#include "render/HeatmapStreamState.hpp"
+#include "render/UgrFrameMath.hpp"
+#include "render/VolumeProfileState.hpp"
+#include "render/TpoDebugTrace.hpp"
+
+#include <QDateTime>
+#include <QElapsedTimer>
+#include <QSGFlatColorMaterial>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
+#include <QTimeZone>
+#include <QtEndian>
+#include <algorithm>
+#include <cmath>
+#include <sstream>
+
+HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNode) {
+    auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
+    if (!texNode) {
+        texNode = new HeatmapIntensityNode();
+        for (auto* overlay : m_overlays)
+            overlay->onRootRebuilt();
+        m_chartTextRenderer.onRootRebuilt();
+        m_pvvLineNodes[0] = m_pvvLineNodes[1] = m_pvvLineNodes[2] = nullptr;
+    }
+    return texNode;
+}
+
+void UnifiedGridRenderer::computeAndApplyFrameMapping(FrameContext& frame,
+                                                       HeatmapIntensityNode* texNode,
+                                                       int64_t cadenceMs,
+                                                       int gridWidth,
+                                                       int gridHeight) {
+    const auto& snapshot = frame.heatmapSnapshot;
+    m_heatmapOverlay.setGridDimensions(gridWidth, gridHeight);
+    m_heatmapOverlay.setIntensityBytesPerCell(m_heatmapStreamService->intensityBytesPerCell());
+    m_heatmapOverlay.setBackgroundColor(m_heatmapBackgroundColor);
+
+    const QRectF bounds = frame.surfaceBounds;
+    UgrFrameMath::ViewportState viewportState;
+    viewportState.valid = frame.viewport.valid;
+    viewportState.timeStart = static_cast<double>(frame.viewport.timeStart);
+    viewportState.timeEnd = static_cast<double>(frame.viewport.timeEnd);
+    viewportState.minPrice = frame.viewport.minPrice;
+    viewportState.maxPrice = frame.viewport.maxPrice;
+    viewportState.panVisualOffset = frame.viewport.panVisualOffset;
+    viewportState.dragging = frame.viewport.dragging;
+    viewportState = UgrFrameMath::applyDragPan(viewportState, bounds);
+
+    UgrFrameMath::GridState gridState;
+    gridState.gridWidth = gridWidth;
+    gridState.gridHeight = gridHeight;
+    gridState.cadenceMs = cadenceMs;
+    gridState.timeOriginMs = snapshot.timeOriginMs;
+    gridState.lastSliceStartMs = snapshot.lastSliceStartMs;
+    gridState.filledColumns = snapshot.filledColumns;
+    gridState.tickSize = snapshot.tickSize;
+    gridState.dataMinPrice = snapshot.minPrice;
+    gridState.dataMaxPrice = snapshot.maxPrice;
+    gridState.forceFull = frame.forceFull;
+
+    const UgrFrameMath::RenderRects renderRects =
+        UgrFrameMath::computeRenderRects(bounds, viewportState, gridState);
+    texNode->setRect(renderRects.drawRect);
+    texNode->setSourceRect(renderRects.srcRect);
+    if (!frame.forceFull) {
+        texNode->setTimeOffset(snapshot.timeOffset);
+    }
+
+    frame.mapping.viewStartMs = renderRects.viewTimeStart;
+    frame.mapping.viewEndMs = renderRects.viewTimeEnd;
+    frame.mapping.viewMinPrice = renderRects.viewMinPrice;
+    frame.mapping.viewMaxPrice = renderRects.viewMaxPrice;
+    frame.mapping.drawRect = renderRects.drawRect;
+    frame.mapping.srcRect = renderRects.srcRect;
+    frame.mapping.dataStartMs = renderRects.dataStart;
+    frame.mapping.dataEndMs = renderRects.dataEnd;
+    frame.mapping.actualDataStartMs = renderRects.actualDataStart;
+    frame.mapping.actualDataEndMs = renderRects.actualDataEnd;
+    frame.mapping.dataMinPrice = snapshot.minPrice;
+    frame.mapping.dataMaxPrice = snapshot.maxPrice;
+    frame.mapping.appendMs = static_cast<double>(cadenceMs);
+    frame.mapping.tickSize = snapshot.tickSize;
+    frame.mapping.gridWidth = gridWidth;
+    frame.mapping.gridHeight = gridHeight;
+    frame.mapping.filledColumns = snapshot.filledColumns;
+    frame.mapping.timeOffset = frame.forceFull ? 0.0f : snapshot.timeOffset;
+    frame.mapping.valid = (renderRects.dataStartValid &&
+                           snapshot.timeOriginMs != 0 &&
+                           cadenceMs > 0 &&
+                           gridWidth > 0 &&
+                           renderRects.drawRect.width() > 0.0 &&
+                           renderRects.srcRect.width() > 0.0);
+    frame.mapping.cellW = frame.mapping.valid
+        ? (renderRects.drawRect.width() / renderRects.srcRect.width()) : 0.0;
+    frame.mapping.cellH = frame.mapping.valid && renderRects.srcRect.height() > 0.0
+        ? (renderRects.drawRect.height() / renderRects.srcRect.height()) : 0.0;
+    m_lastTimeAxisMapping = frame.mapping;
+}
+
+void UnifiedGridRenderer::publishFrameContext(const FrameContext& frame) {
+    MappingFrameContext published;
+    published.surfaceBounds = frame.surfaceBounds;
+    published.surfaceDpr = frame.surfaceDpr;
+    published.presentationTimeMs = frame.presentationTimeMs;
+    published.activeTimeframeMs = frame.time.activeTimeframeMs;
+    published.nowEventTimeMs = frame.time.nowEventMs;
+    published.currentBoundaryStartMs = frame.time.currentBoundaryStartMs;
+    published.nextBoundaryStartMs = frame.time.nextBoundaryStartMs;
+    published.boundarySequence = frame.time.boundarySequence;
+    published.hasEventTime = frame.time.hasEvent;
+    published.viewportValid = frame.viewport.valid;
+    published.viewportTimeStart = frame.viewport.timeStart;
+    published.viewportTimeEnd = frame.viewport.timeEnd;
+    published.viewportMinPrice = frame.viewport.minPrice;
+    published.viewportMaxPrice = frame.viewport.maxPrice;
+    published.viewportPanVisualOffset = frame.viewport.panVisualOffset;
+    published.viewportDragging = frame.viewport.dragging;
+    published.viewportAutoScrollEnabled = frame.viewport.autoScrollEnabled;
+    published.heatmapGeneration = frame.streamGenerations.heatmap;
+    published.footprintGeneration = frame.streamGenerations.footprint;
+    published.candleGeneration = frame.streamGenerations.candle;
+    published.mapping = frame.mapping;
+    std::lock_guard<std::mutex> lock(m_frameContextMutex);
+    m_lastFrameContext = published;
+}
+
+void UnifiedGridRenderer::drainFrameUploads(
+    std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+    std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads) {
+    m_footprintOverlay.drainPending(footprintUploads);
+    // TPO drain is handled in renderOverlays where session metadata is needed.
+    (void)tpoUploads;
+
+    if (!m_heatmapStreamService->stream()) {
+        return;
+    }
+    std::vector<HeatmapStreamState::PendingColumn> pendingUploads;
+    m_heatmapStreamService->stream()->takePendingUploads(pendingUploads);
+    heatmapUploads.reserve(pendingUploads.size());
+    const double threshold = m_heatmapLiquidityThreshold;
+    const int bytesPerCell = m_heatmapStreamService->intensityBytesPerCell();
+    const int gridHeight = m_heatmapStreamService->gridHeight();
+    const int labelMode = m_liquidityLabelMode;
+    const auto streamSnap = m_heatmapStreamService->stream()->snapshot();
+    for (auto& upload : pendingUploads) {
+        if (threshold > 0.0 && !upload.liquidity.isEmpty() && upload.liquidityScale > 0.0) {
+            const int expectedLiq = gridHeight * static_cast<int>(sizeof(uint16_t));
+            if (upload.liquidity.size() == expectedLiq &&
+                upload.data.size() == gridHeight * bytesPerCell) {
+                const auto* liqRaw = reinterpret_cast<const uint16_t*>(upload.liquidity.constData());
+                if (bytesPerCell == 1) {
+                    auto* dst = reinterpret_cast<uint8_t*>(upload.data.data());
+                    for (int y = 0; y < gridHeight; ++y) {
+                        const uint16_t packed = qFromLittleEndian(liqRaw[y]);
+                        if (packed == 0) { dst[y] = 0; continue; }
+                        double val = static_cast<double>(packed) * upload.liquidityScale;
+                        if (labelMode != 0 && streamSnap.tickSize > 0.0)
+                            val *= (streamSnap.maxPrice - static_cast<double>(y) * streamSnap.tickSize);
+                        if (val < threshold) dst[y] = 0;
+                    }
+                } else if (bytesPerCell == 2) {
+                    auto* dst = reinterpret_cast<uint16_t*>(upload.data.data());
+                    for (int y = 0; y < gridHeight; ++y) {
+                        const uint16_t packed = qFromLittleEndian(liqRaw[y]);
+                        if (packed == 0) { dst[y] = 0; continue; }
+                        double val = static_cast<double>(packed) * upload.liquidityScale;
+                        if (labelMode != 0 && streamSnap.tickSize > 0.0)
+                            val *= (streamSnap.maxPrice - static_cast<double>(y) * streamSnap.tickSize);
+                        if (val < threshold) dst[y] = 0;
+                    }
+                }
+            }
+        }
+        heatmapUploads.push_back({upload.x, std::move(upload.data)});
+    }
+}
+
+void UnifiedGridRenderer::renderOverlays(
+    HeatmapIntensityNode* texNode,
+    const FrameContext& frame,
+    bool drawHeatmap,
+    bool drawFootprint,
+    bool drawTpo,
+    int gridWidth,
+    int gridHeight,
+    std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+    std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads) {
+    const auto& snapshot = frame.heatmapSnapshot;
+    const QRectF drawRect = frame.mapping.drawRect;
+    const QRectF srcRect = frame.mapping.srcRect;
+    m_heatmapOverlay.applyToNode(window(),
+                                 texNode,
+                                 drawHeatmap,
+                                 static_cast<float>(m_heatmapGamma),
+                                 static_cast<float>(m_heatmapContrast),
+                                 static_cast<float>(m_heatmapShaderFloor),
+                                 frame.forceFull,
+                                 snapshot.timeOffset,
+                                 drawRect,
+                                 srcRect,
+                                 heatmapUploads);
+    m_footprintOverlay.render(window(),
+                              texNode,
+                              drawFootprint,
+                              frame.forceFull,
+                              snapshot.timeOffset,
+                              drawRect,
+                              srcRect,
+                              gridWidth,
+                              gridHeight,
+                              footprintUploads);
+    // ── TPO / VP dispatch ──────────────────────────────────────────────────
+    std::vector<float> localBins;
+    VolumeProfileState::Snapshot localSnap;
+    m_vpRenderer.drainPending(localBins, localSnap);
+
+    m_vpRenderer.render(texNode,
+                        m_volumeProfileLayerEnabled && !localBins.empty(),
+                        drawRect,
+                        frame.viewport.minPrice,
+                        frame.viewport.maxPrice,
+                        localBins,
+                        localSnap);
+
+    int64_t tpoSessionStart = 0;
+    int64_t tpoSessionEnd = 0;
+    int64_t tpoBracketMs = 0;
+    int tpoSessionColumns = 0;
+    m_tpoOverlay.drainPending(tpoUploads,
+                              tpoSessionStart, tpoSessionEnd,
+                              tpoBracketMs, tpoSessionColumns);
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG") &&
+        drawTpo &&
+        tpoSessionStart > 0 &&
+        tpoSessionEnd > tpoSessionStart &&
+        tpoBracketMs > 0) {
+        static QElapsedTimer tpoSessionLogTimer;
+        static bool tpoSessionLogTimerStarted = false;
+        if (!tpoSessionLogTimerStarted) {
+            tpoSessionLogTimer.start();
+            tpoSessionLogTimerStarted = true;
+        }
+        if (tpoSessionLogTimer.elapsed() > 1000) {
+            const int computedColumns = static_cast<int>(
+                std::max<int64_t>(1, (tpoSessionEnd - tpoSessionStart) / tpoBracketMs));
+            const QDateTime startDt = QDateTime::fromMSecsSinceEpoch(tpoSessionStart, QTimeZone::utc());
+            const QDateTime endDt = QDateTime::fromMSecsSinceEpoch(tpoSessionEnd, QTimeZone::utc());
+            sLog_Debug(QString("TPO session: %1-%2 UTC | Bracket: %3m | Columns: %4")
+                           .arg(startDt.toString(QStringLiteral("HH:mm")))
+                           .arg(endDt.toString(QStringLiteral("HH:mm")))
+                           .arg(tpoBracketMs / 60000)
+                           .arg((tpoSessionColumns > 0) ? tpoSessionColumns : computedColumns));
+            tpoSessionLogTimer.restart();
+        }
+    }
+    if (tpo_debug::enabled() && drawTpo) {
+        static QElapsedTimer tpoFileLogTimer;
+        static bool tpoFileLogTimerStarted = false;
+        if (!tpoFileLogTimerStarted) {
+            tpoFileLogTimer.start();
+            tpoFileLogTimerStarted = true;
+        }
+        if (tpoFileLogTimer.elapsed() > 250) {
+            std::ostringstream payload;
+            payload << "{"
+                    << "\"sessionStartMs\":" << tpoSessionStart
+                    << ",\"sessionEndMs\":" << tpoSessionEnd
+                    << ",\"bracketMs\":" << tpoBracketMs
+                    << ",\"sessionColumns\":" << tpoSessionColumns
+                    << ",\"viewStartMs\":" << frame.mapping.viewStartMs
+                    << ",\"viewEndMs\":" << frame.mapping.viewEndMs
+                    << ",\"drawRectX\":" << drawRect.x()
+                    << ",\"drawRectW\":" << drawRect.width()
+                    << ",\"srcRectX\":" << srcRect.x()
+                    << ",\"srcRectW\":" << srcRect.width()
+                    << ",\"mappingValid\":" << (frame.mapping.valid ? "true" : "false")
+                    << "}";
+            tpo_debug::append("UnifiedGridRenderer.Render.cpp:renderOverlays",
+                              "tpo_render_context",
+                              "H4",
+                              payload.str());
+            tpoFileLogTimer.restart();
+        }
+    }
+    m_tpoOverlay.render(window(),
+                        texNode,
+                        drawTpo,
+                        frame.forceFull,
+                        snapshot.timeOffset,
+                        drawRect,
+                        srcRect,
+                        gridWidth,
+                        gridHeight,
+                        tpoUploads,
+                        tpoSessionStart,
+                        tpoSessionEnd,
+                        frame.mapping.viewStartMs,
+                        frame.mapping.viewEndMs,
+                        frame.surfaceBounds); // world→screen base; must match candle/label mapping
+}
+
+void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
+                                              const FrameContext& frame,
+                                              const HeatmapStreamState::Snapshot& snapshot,
+                                              int gridWidth,
+                                              int gridHeight) {
+    if ((m_labelRingGridWidth != gridWidth || m_labelRingGridHeight != gridHeight) &&
+        gridWidth > 0 && gridHeight > 0) {
+        m_labelRingGridWidth = gridWidth;
+        m_labelRingGridHeight = gridHeight;
+        m_labelLiquidityRing.assign(static_cast<size_t>(gridWidth) * gridHeight, 0);
+        m_labelIntensityRing.assign(static_cast<size_t>(gridWidth) * gridHeight, 0);
+        m_labelLiquidityScales.assign(gridWidth, 1.0);
+    }
+
+    if (m_heatmapStreamService->stream()) {
+        std::vector<HeatmapStreamState::PendingLabelColumn> pendingLabelUploads;
+        m_heatmapStreamService->stream()->takePendingLabelUploads(pendingLabelUploads);
+        if (!pendingLabelUploads.empty()) {
+            applyLabelUploads(pendingLabelUploads, gridWidth, gridHeight);
+        }
+    }
+
+    const QRectF drawRect = frame.mapping.drawRect;
+    const QRectF srcRectCurrent = texNode->getSourceRect();
+    const bool labelVisible = (!drawRect.isEmpty() && !frame.surfaceBounds.isEmpty() &&
+                               srcRectCurrent.width() > 0.0 && srcRectCurrent.height() > 0.0 &&
+                               snapshot.liquidityAvailable &&
+                               m_labelRingGridWidth == gridWidth &&
+                               m_labelRingGridHeight == gridHeight);
+    const float cellH = (srcRectCurrent.height() > 0.0f)
+        ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
+        : 0.0f;
+    const float cellW = (srcRectCurrent.width() > 0.0f)
+        ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRectCurrent.width())
+        : 0.0f;
+
+    // Only render labels when we are zoomed in enough for both height and width to support text
+    const float minCellH = 11.0f;
+    const float minCellW = 24.0f;
+
+    if (!(labelVisible && cellH >= minCellH && cellW >= minCellW && m_chartTextAtlasBuilt && window())) {
+        if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
+            static QElapsedTimer labelDebugTimer;
+            static bool labelDebugStarted = false;
+            if (!labelDebugStarted) {
+                labelDebugTimer.start();
+                labelDebugStarted = true;
+            }
+            if (labelDebugTimer.elapsed() > 1000) {
+                sLog_Debug(QString("Heatmap text gated: visible=%1 cellH=%2 cellW=%3 atlas=%4 window=%5")
+                               .arg(labelVisible ? 1 : 0)
+                               .arg(cellH, 0, 'f', 2)
+                               .arg(cellW, 0, 'f', 2)
+                               .arg(m_chartTextAtlasBuilt ? 1 : 0)
+                               .arg(window() ? 1 : 0));
+                labelDebugTimer.restart();
+            }
+        }
+        clearLabelGeometry();
+        return;
+    }
+
+    const float fontPx = static_cast<float>(m_chartTextAtlas.fontPx());
+    
+    // Smooth ramp for legible text scaling based on cell size
+    const float appearMinPx = 11.0f;
+    const float fullSizePx = 22.0f;
+    const float maxScale = 0.95f; 
+    const float minScale = 0.45f;
+    const float cellMin = std::min(cellW, cellH);
+    
+    // Smoothstep interpolation (t * t * (3 - 2t))
+    const float t = std::clamp((cellMin - appearMinPx) / (fullSizePx - appearMinPx), 0.0f, 1.0f);
+    const float eased = t * t * (3.0f - 2.0f * t);
+    const float easedScale = minScale + (maxScale - minScale) * eased;
+    
+    // Guaranteed hard bounds limit so text NEVER crosses the cell walls regardless of the S-curve
+    const float vertScale = (cellH * 0.75f) / fontPx;
+    const float horizScale = (cellW * 0.85f) / (fontPx * 2.5f);
+    const float safeScale = std::min(vertScale, horizScale);
+    
+    const float scale = (fontPx > 0.0f) ? std::min(easedScale, safeScale) : 1.0f;
+
+    if (m_heatmapLabelGlyphs.capacity() < 32000) {
+        m_heatmapLabelGlyphs.reserve(32000);
+    }
+
+    const bool dollars = (m_liquidityLabelMode != 0);
+    HeatmapLabelRenderer::buildLabelGlyphs(frame.mapping,
+                                           snapshot,
+                                           m_chartTextAtlas,
+                                           m_labelLiquidityRing,
+                                           m_labelIntensityRing,
+                                           m_labelLiquidityScales,
+                                           scale,
+                                           dollars,
+                                           m_heatmapLabelGlyphs);
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
+        static QElapsedTimer labelSubmitTimer;
+        static bool labelSubmitStarted = false;
+        if (!labelSubmitStarted) {
+            labelSubmitTimer.start();
+            labelSubmitStarted = true;
+        }
+        if (labelSubmitTimer.elapsed() > 1000) {
+            sLog_Debug(QString("Heatmap text submit: glyphs=%1 cellH=%2 cellW=%3 scale=%4")
+                           .arg(static_cast<int>(m_heatmapLabelGlyphs.size()))
+                           .arg(cellH, 0, 'f', 2)
+                           .arg(cellW, 0, 'f', 2)
+                           .arg(scale, 0, 'f', 2));
+            labelSubmitTimer.restart();
+        }
+    }
+    m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
+}
+
+void UnifiedGridRenderer::applyLabelUploads(
+    const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
+    int gridWidth,
+    int gridHeight) {
+    if (gridWidth <= 0 || gridHeight <= 0 || uploads.empty()) {
+        return;
+    }
+    const size_t expectedSize = static_cast<size_t>(gridWidth) * gridHeight;
+    if (m_labelLiquidityRing.size() != expectedSize) {
+        m_labelLiquidityRing.assign(expectedSize, 0);
+    }
+    if (m_labelIntensityRing.size() != expectedSize) {
+        m_labelIntensityRing.assign(expectedSize, 0);
+    }
+    if (m_labelLiquidityScales.size() != static_cast<size_t>(gridWidth)) {
+        m_labelLiquidityScales.assign(gridWidth, 1.0);
+    }
+
+    const int expectedLiquidityBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
+    const int expectedIntensityBytes = gridHeight * m_heatmapStreamService->intensityBytesPerCell();
+    for (const auto& upload : uploads) {
+        const int column = upload.x;
+        if (column < 0 || column >= gridWidth) {
+            continue;
+        }
+        if (upload.intensity.size() == expectedIntensityBytes) {
+            if (m_heatmapStreamService->intensityBytesPerCell() == 1) {
+                const auto* src = reinterpret_cast<const uint8_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridHeight; ++y) {
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridWidth + column] =
+                        static_cast<uint16_t>(src[y]) * 257;
+                }
+            } else if (m_heatmapStreamService->intensityBytesPerCell() == 2) {
+                const auto* src = reinterpret_cast<const uint16_t*>(upload.intensity.constData());
+                for (int y = 0; y < gridHeight; ++y) {
+                    const uint16_t raw = qFromLittleEndian(src[y]);
+                    m_labelIntensityRing[static_cast<size_t>(y) * gridWidth + column] = raw;
+                }
+            }
+        }
+        if (upload.liquidity.size() == expectedLiquidityBytes) {
+            const auto* src = reinterpret_cast<const uint16_t*>(upload.liquidity.constData());
+            for (int y = 0; y < gridHeight; ++y) {
+                const uint16_t raw = qFromLittleEndian(src[y]);
+                m_labelLiquidityRing[static_cast<size_t>(y) * gridWidth + column] = raw;
+            }
+            m_labelLiquidityScales[column] = upload.liquidityScale;
+        }
+    }
+}
+
+void UnifiedGridRenderer::clearLabelGeometry() {
+    m_heatmapLabelGlyphs.clear();
+}
+
+void UnifiedGridRenderer::updateFpsEstimate() {
+    if (!m_fpsTimer.isValid()) {
+        m_fpsTimer.start();
+        m_fpsFrameCount = 0;
+    }
+
+    ++m_fpsFrameCount;
+    const qint64 elapsedMs = m_fpsTimer.elapsed();
+    if (elapsedMs >= 1000) {
+        m_currentFps.store((static_cast<double>(m_fpsFrameCount) * 1000.0) / elapsedMs);
+        m_fpsFrameCount = 0;
+        m_fpsTimer.restart();
+    }
+}
+
+QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
+    Q_UNUSED(data)
+    if (width() <= 0 || height() <= 0 || !m_useGpuHeatmap) {
+        return oldNode;
+    }
+
+    FrameContext frame = FrameContextBuilder::build(
+        boundingRect(), window(),
+        m_heatmapStreamService->clock(), m_heatmapStreamService->timeAuthority(),
+        m_heatmapStreamService->stream(), m_viewState.get(),
+        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
+        m_heatmapStreamService->streamGeneration(),
+        m_footprintStreamGeneration.load(std::memory_order_acquire),
+        m_candleStreamGeneration.load(std::memory_order_acquire));
+    const auto& snapshot = frame.heatmapSnapshot;
+    const int64_t cadenceMs = (frame.time.activeTimeframeMs > 0)
+        ? frame.time.activeTimeframeMs
+        : static_cast<int64_t>(snapshot.appendMs);
+    const bool drawHeatmap = frame.overlays.heatmap;
+    const bool textOnlyDebug = qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_ONLY");
+    const bool drawFootprint = frame.overlays.footprint;
+    const bool drawTpo = frame.overlays.tpo;
+    const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapStreamService->gridWidth();
+    const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapStreamService->gridHeight();
+    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        static QElapsedTimer renderDebugTimer;
+        static bool renderDebugTimerStarted = false;
+        if (!renderDebugTimerStarted) {
+            renderDebugTimer.start();
+            renderDebugTimerStarted = true;
+        }
+        if (renderDebugTimer.elapsed() > 1000) {
+            const int64_t incomingTfMs = m_lastIncomingHeatmapSliceTimeframeMs.load(std::memory_order_relaxed);
+            sLog_Debug(QString("Render frame: overlays[h=%1 fp=%2 tpo=%3] primary=%4 active_tf=%5ms incoming_slice_tf=%6ms append=%7ms grid=%8x%9")
+                           .arg(drawHeatmap ? 1 : 0)
+                           .arg(drawFootprint ? 1 : 0)
+                           .arg(drawTpo ? 1 : 0)
+                           .arg(m_primaryField)
+                           .arg(cadenceMs)
+                           .arg(incomingTfMs)
+                           .arg(snapshot.appendMs)
+                           .arg(gridWidth)
+                           .arg(gridHeight));
+            renderDebugTimer.restart();
+        }
+    }
+
+    auto* texNode = ensureHeatmapRootNode(oldNode);
+    computeAndApplyFrameMapping(frame, texNode, cadenceMs, gridWidth, gridHeight);
+    publishFrameContext(frame);
+
+    std::vector<HeatmapOverlayRenderer::PendingUpload> framePendingHeatmapUploads;
+    std::vector<FootprintOverlayRenderer::PendingUpload> framePendingFootprintUploads;
+    std::vector<TpoOverlayRenderer::PendingUpload> framePendingTpoUploads;
+    drainFrameUploads(framePendingHeatmapUploads,
+                      framePendingFootprintUploads,
+                      framePendingTpoUploads);
+    renderOverlays(texNode,
+                   frame,
+                   drawHeatmap && !textOnlyDebug,
+                   drawFootprint,
+                   drawTpo,
+                   gridWidth,
+                   gridHeight,
+                   framePendingHeatmapUploads,
+                   framePendingFootprintUploads,
+                   framePendingTpoUploads);
+
+    m_chartTextRenderer.beginFrame(texNode, window(), m_chartTextAtlas);
+    if (m_axisTextService) {
+        m_axisTextService->submitAxisText(m_chartTextRenderer, m_chartTextAtlas, width(), height());
+    }
+    if (drawHeatmap) {
+        updateLabelGeometry(texNode, frame, snapshot, gridWidth, gridHeight);
+    } else {
+        clearLabelGeometry();
+    }
+    m_chartTextRenderer.endFrame();
+    if (m_chartTextRenderer.droppedGlyphs() > 0 && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+        sLog_Debug(QString("Chart text dropped glyphs: total=%1 high=%2 low=%3")
+                       .arg(m_chartTextRenderer.droppedGlyphs())
+                       .arg(m_chartTextRenderer.droppedHighGlyphs())
+                       .arg(m_chartTextRenderer.droppedLowGlyphs()));
+    }
+    updateFpsEstimate();
+
+    // ── TPO POC/VAH/VAL horizontal lines ────────────────────────────────────
+    renderTpoPocVahValLines(texNode, frame, m_tpoLayerEnabled);
+
+    return texNode;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TPO POC / VAH / VAL horizontal line overlay
+// ─────────────────────────────────────────────────────────────────────────────
+// Draws three lines anchored to price levels:
+//   POC  — gold  (#F5C518, 2.5px)
+//   VAH  — cyan  (#4FC3F7, 1.2px)
+//   VAL  — cyan  (#4FC3F7, 1.2px)
+//
+// Each line is a separate QSGGeometryNode (flat-color quad) child of texNode.
+// show=false hides all three lines without deleting the nodes.
+void UnifiedGridRenderer::renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
+                                                   const FrameContext& frame,
+                                                   bool show) {
+    if (!texNode) {
+        return;
+    }
+
+    // Static per-line config: {color, halfHeight}.
+    struct LineConfig {
+        QColor color;
+        float  halfH;
+    };
+    static const LineConfig kConfigs[3] = {
+        { QColor(245, 197,  24, 220), 1.25f },  // POC: gold, 2.5px
+        { QColor( 79, 195, 247, 180), 0.6f  },  // VAH: cyan, 1.2px
+        { QColor( 79, 195, 247, 180), 0.6f  },  // VAL: cyan, 1.2px
+    };
+
+    // Ensure all three nodes exist as children of texNode.
+    for (int i = 0; i < 3; ++i) {
+        if (!m_pvvLineNodes[i]) {
+            auto* node = new QSGGeometryNode();
+            auto* mat  = new QSGFlatColorMaterial();
+            mat->setColor(kConfigs[i].color);
+            node->setMaterial(mat);
+            node->setFlag(QSGNode::OwnsMaterial, true);
+            // Empty geometry until we have data.
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            node->setGeometry(geom);
+            node->setFlag(QSGNode::OwnsGeometry, true);
+            texNode->appendChildNode(node);
+            m_pvvLineNodes[i] = node;
+        }
+    }
+
+    if (!show || !frame.mapping.valid) {
+        // Hide: set empty geometry on all nodes.
+        for (int i = 0; i < 3; ++i) {
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            m_pvvLineNodes[i]->setGeometry(geom);
+            m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+            m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+        }
+        return;
+    }
+
+    // Capture poc/vah/val under lock.
+    int pocRow = -1, vahRow = -1, valRow = -1;
+    double pvvMaxPrice = 0.0, pvvTickSize = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
+        pocRow     = m_tpoPocRow;
+        vahRow     = m_tpoVahRow;
+        valRow     = m_tpoValRow;
+        pvvMaxPrice = m_tpoPvvMaxPrice;
+        pvvTickSize = m_tpoPvvTickSize;
+    }
+
+    if (pocRow < 0 || pvvMaxPrice <= 0.0 || pvvTickSize <= 0.0) {
+        return;
+    }
+
+    // Row → price (row 0 = highest price in the grid).
+    auto rowToPrice = [&](int row) -> double {
+        return pvvMaxPrice - row * pvvTickSize;
+    };
+
+    const float prices[3] = {
+        static_cast<float>(rowToPrice(pocRow)),
+        static_cast<float>(rowToPrice(vahRow)),
+        static_cast<float>(rowToPrice(valRow)),
+    };
+
+    const float left  = static_cast<float>(frame.mapping.drawRect.left());
+    const float right = static_cast<float>(frame.mapping.drawRect.right());
+    if (right <= left) {
+        return;
+    }
+
+    struct Vert { float x, y; };
+
+    for (int i = 0; i < 3; ++i) {
+        const float cy    = static_cast<float>(frame.mapping.priceToScreenY(prices[i]));
+        const float halfH = kConfigs[i].halfH;
+
+        // Skip if off-screen vertically.
+        const float top    = static_cast<float>(frame.surfaceBounds.top());
+        const float bottom = static_cast<float>(frame.surfaceBounds.bottom());
+        if (cy + halfH < top || cy - halfH > bottom) {
+            auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+            geom->setDrawingMode(QSGGeometry::DrawTriangles);
+            m_pvvLineNodes[i]->setGeometry(geom);
+            m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+            m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+            continue;
+        }
+
+        // 2-triangle quad for the line.
+        auto* geom = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 6);
+        geom->setDrawingMode(QSGGeometry::DrawTriangles);
+        auto* v = static_cast<Vert*>(geom->vertexData());
+        v[0] = {left,  cy - halfH};
+        v[1] = {right, cy - halfH};
+        v[2] = {left,  cy + halfH};
+        v[3] = {left,  cy + halfH};
+        v[4] = {right, cy - halfH};
+        v[5] = {right, cy + halfH};
+
+        m_pvvLineNodes[i]->setGeometry(geom);
+        m_pvvLineNodes[i]->setFlag(QSGNode::OwnsGeometry, true);
+        m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
+    }
+}
+
+

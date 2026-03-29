@@ -7,6 +7,7 @@
 *~
 
 # Build artifacts and directories
+vcpkg/
 vcpkg_installed/
 build/
 build-windows/
@@ -44,6 +45,9 @@ config.json
 *.pem
 *.p12
 *.pfx
+# Generated TLS certs (use certs/gen-certs.ps1 or gen-certs.sh to recreate)
+certs/*.crt
+certs/*.key
 .env
 .env.local
 .env.*.local
@@ -120,21 +124,24 @@ venv/
 .venv/
 ENV/
 .python-version
+.mcp.json
+package-lock.json
+.code-review-graph/
 
 # AI settings
-.cursor/
 .claude/
 CLAUDE.md
 # AGENTS.md
 GEMINI.md
 _agent/
+.cursor/
 
 # Documentation subdirectories (keep only base docs/)
 /docs/private/
 /docs/TODO.md
+/docs/FEATURE_ARCHIVE.md
+docs/REFACTOR_PLAN.md
+/_agent/
 
 data/
-/screenshots/
-
-# Random files
-liquidity_timeseries_log.txt
+screenshots/

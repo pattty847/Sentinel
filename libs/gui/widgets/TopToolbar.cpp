@@ -1,4 +1,5 @@
 #include "TopToolbar.hpp"
+#include "SentinelLogging.hpp"
 #include <QAction>
 #include <QToolButton>
 #include <QWidget>
@@ -6,8 +7,14 @@
 #include <QLabel>
 #include <QIcon>
 #include <QSlider>
+#include <QSignalBlocker>
 
 namespace {
+bool chartDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
+    return enabled;
+}
+
 const char* labelForTimeframeMs(int64_t ms) {
     switch (ms) {
         case 1000: return "1s";
@@ -48,18 +55,68 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     addSeparator();
 
-    // Chart mode toggles (all independent, can combine)
+    // Layer toggles: one primary field + independent overlays.
     auto* candleAction = addAction(QIcon(":/svg/candlestick_chart.svg"), "Candles");
     candleAction->setCheckable(true);
-    auto* heatmapAction = addAction(QIcon(":/svg/grid_view.svg"), "Heatmap");
-    heatmapAction->setCheckable(true);
-    heatmapAction->setChecked(true);
-    auto* tpoAction = addAction(QIcon(":/svg/tpo_chart.svg"), "TPO");
-    tpoAction->setCheckable(true);
+    candleAction->setChecked(true);
 
-    connect(candleAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::TRADITIONAL_CANDLES); });
-    connect(heatmapAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::ORDER_BOOK_HEATMAP); });
-    connect(tpoAction, &QAction::triggered, this, [this]() { emit chartModeSelected(ChartMode::HYBRID_CANDLES_TRADES); });
+    m_heatmapButton = addIconButton(":/svg/grid_view.svg", "Heatmap");
+    m_heatmapButton->setCheckable(true);
+    m_heatmapButton->setChecked(true);
+    m_heatmapButton->setAutoExclusive(false);
+
+    m_footprintButton = addIconButton(":/svg/footprint.svg", "Coming Soon!");
+    m_footprintButton->setCheckable(false);
+    m_footprintButton->setEnabled(false);
+    m_footprintButton->setAutoExclusive(false);
+
+    m_tpoButton = addIconButton(":/svg/tpo_chart.svg", "Coming Soon!");
+    m_tpoButton->setCheckable(false);
+    m_tpoButton->setEnabled(false);
+    m_tpoButton->setAutoExclusive(false);
+
+    m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Coming Soon!");
+    m_volumeProfileButton->setCheckable(false);
+    m_volumeProfileButton->setEnabled(false);
+    m_volumeProfileButton->setAutoExclusive(false);
+
+    connect(candleAction, &QAction::toggled, this, [this](bool enabled) { emit candlesToggled(enabled); });
+    connect(m_heatmapButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled heatmap=%1").arg(enabled ? 1 : 0));
+        }
+        emit heatmapToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(0);
+        }
+    });
+    connect(m_footprintButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled footprint=%1").arg(enabled ? 1 : 0));
+        }
+        emit footprintToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(1);
+        }
+    });
+    connect(m_tpoButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled tpo=%1").arg(enabled ? 1 : 0));
+        }
+        emit tpoToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(2);
+        }
+    });
+    connect(m_volumeProfileButton, &QToolButton::toggled, this, [this](bool enabled) {
+        if (chartDebugEnabled()) {
+            sLog_Debug(QString("TopToolbar toggled volume_profile=%1").arg(enabled ? 1 : 0));
+        }
+        emit volumeProfileToggled(enabled);
+        if (enabled) {
+            emit primaryFieldRequested(3);
+        }
+    });
 
     addSeparator();
 
@@ -74,6 +131,13 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_chartTypeCombo->setFixedWidth(90);
     addWidget(m_chartTypeCombo);
     connect(m_chartTypeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::chartTypeSelected);
+
+    m_colorPresetCombo = new QComboBox(this);
+    m_colorPresetCombo->addItems({"Electric", "Fire", "Ocean", "Monochrome", "Matrix"});
+    m_colorPresetCombo->setFixedWidth(100);
+    m_colorPresetCombo->setToolTip("Heatmap color palette");
+    addWidget(m_colorPresetCombo);
+    connect(m_colorPresetCombo, &QComboBox::currentTextChanged, this, &TopToolbar::colorPresetSelected);
 
     addSeparator();
 
@@ -147,5 +211,34 @@ void TopToolbar::setTimeframeMs(int64_t ms) {
         if (idx >= 0 && idx != m_timeframeCombo->currentIndex()) {
             m_timeframeCombo->setCurrentIndex(idx);
         }
+    }
+}
+
+void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
+                                      bool footprintEnabled,
+                                      bool tpoEnabled,
+                                      bool volumeProfileEnabled) {
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("TopToolbar sync states hm=%1 fp=%2 tpo=%3 vp=%4")
+                       .arg(heatmapEnabled ? 1 : 0)
+                       .arg(footprintEnabled ? 1 : 0)
+                       .arg(tpoEnabled ? 1 : 0)
+                       .arg(volumeProfileEnabled ? 1 : 0));
+    }
+    if (m_heatmapButton) {
+        const QSignalBlocker blocker(*m_heatmapButton);
+        m_heatmapButton->setChecked(heatmapEnabled);
+    }
+    if (m_footprintButton) {
+        const QSignalBlocker blocker(*m_footprintButton);
+        m_footprintButton->setChecked(footprintEnabled);
+    }
+    if (m_tpoButton) {
+        const QSignalBlocker blocker(*m_tpoButton);
+        m_tpoButton->setChecked(tpoEnabled);
+    }
+    if (m_volumeProfileButton) {
+        const QSignalBlocker blocker(*m_volumeProfileButton);
+        m_volumeProfileButton->setChecked(volumeProfileEnabled);
     }
 }

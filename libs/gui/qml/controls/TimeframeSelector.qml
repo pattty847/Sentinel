@@ -4,191 +4,80 @@ Column {
     id: root
     spacing: 5
     z: 10
-    
-    // Standard interface for all controls
-    property var target: null  // UnifiedGridRenderer instance
+
+    property var target: null
     property bool enabled: true
-    property int currentTimeframe: target ? target.timeframeMs : 100
-    
-    // Signals
+    property int currentTimeframe: target ? target.timeframeMs : 1000
+
     signal valueChanged(var newValue)
-    
-    // Update current timeframe when target changes
+
+    property var timeframes: [
+        { text: "1s",  value: 1000      },
+        { text: "1m",  value: 60000     },
+        { text: "5m",  value: 300000    },
+        { text: "15m", value: 900000    },
+        { text: "1h",  value: 3600000   },
+        { text: "4h",  value: 14400000  },
+        { text: "1D",  value: 86400000  }
+    ]
+
     Connections {
         target: root.target
         function onTimeframeChanged() {
             root.currentTimeframe = root.target.timeframeMs
         }
     }
-    
-    Text { 
-        text: "Timeframe (ms)"
+
+    Text {
+        text: "Timeframe"
         color: "white"
-        font.pixelSize: 12 
+        font.pixelSize: 12
     }
-    
-    Text { 
-        text: "Select aggregation timeframe:"
-        color: "#CCCCCC"
-        font.pixelSize: 10
-        visible: true 
+
+    // Button template instantiated by each Repeater below.
+    // modelData is the JS object { text, value } from the timeframes array.
+    Component {
+        id: timeframeButton
+        Rectangle {
+            width: 40; height: 25
+            radius: 3
+            color: root.currentTimeframe === modelData.value
+                   ? Qt.rgba(0, 0.8, 0, 0.9)
+                   : Qt.rgba(0, 0, 0.4, 0.8)
+            border.color: "white"
+            border.width: root.currentTimeframe === modelData.value ? 2 : 1
+            enabled: root.enabled && root.target
+
+            Text {
+                anchors.centerIn: parent
+                color: "white"
+                font.pixelSize: 9
+                font.bold: root.currentTimeframe === modelData.value
+                text: modelData.text
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.enabled && root.target
+                onClicked: {
+                    if (root.target) {
+                        root.target.setTimeframe(modelData.value)
+                        root.valueChanged(modelData.value)
+                    }
+                }
+            }
+        }
     }
-    
+
+    // Row 1: 1s  1m  5m  15m
     Row {
         spacing: 3
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 100 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 100 ? "white" : "white"
-            border.width: root.currentTimeframe === 100 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "100"
-                font.bold: root.currentTimeframe === 100 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(100)
-                        root.valueChanged(100)
-                    }
-                }
-            }
-        }
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 250 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 250 ? "white" : "white"
-            border.width: root.currentTimeframe === 250 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "250"
-                font.bold: root.currentTimeframe === 250 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(250)
-                        root.valueChanged(250)
-                    }
-                }
-            }
-        }
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 500 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 500 ? "white" : "white"
-            border.width: root.currentTimeframe === 500 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "500"
-                font.bold: root.currentTimeframe === 500 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(500)
-                        root.valueChanged(500)
-                    }
-                }
-            }
-        }
+        Repeater { model: root.timeframes.slice(0, 4); delegate: timeframeButton }
     }
-    
+
+    // Row 2: 1h  4h  1D
     Row {
         spacing: 3
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 1000 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 1000 ? "white" : "white"
-            border.width: root.currentTimeframe === 1000 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "1s"
-                font.bold: root.currentTimeframe === 1000 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(1000)
-                        root.valueChanged(1000)
-                    }
-                }
-            }
-        }
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 2000 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 2000 ? "white" : "white"
-            border.width: root.currentTimeframe === 2000 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "2s"
-                font.bold: root.currentTimeframe === 2000 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(2000)
-                        root.valueChanged(2000)
-                    }
-                }
-            }
-        }
-        Rectangle {
-            width: 40; height: 25
-            color: root.currentTimeframe === 5000 ? Qt.rgba(0, 0.8, 0, 0.9) : Qt.rgba(0, 0, 0.4, 0.8)
-            border.color: root.currentTimeframe === 5000 ? "white" : "white"
-            border.width: root.currentTimeframe === 5000 ? 2 : 1
-            radius: 3
-            enabled: root.enabled && root.target
-            Text { 
-                anchors.centerIn: parent
-                color: "white"
-                font.pixelSize: 9
-                text: "5s"
-                font.bold: root.currentTimeframe === 5000 
-            }
-            MouseArea { 
-                anchors.fill: parent
-                enabled: root.enabled && root.target
-                onClicked: {
-                    if (root.target) {
-                        root.target.setTimeframe(5000)
-                        root.valueChanged(5000)
-                    }
-                }
-            }
-        }
+        Repeater { model: root.timeframes.slice(4, 7); delegate: timeframeButton }
     }
 }

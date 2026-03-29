@@ -7,18 +7,21 @@ heatmap:
   gamma: 1.05
   contrast: 1.15
   shader_floor: 0.01
-  label_px: 9999  # Disable labels
+  label_px: 13  # Enable labels
   client_cache_columns: 0
 
   # Initial viewport (client only)
-  initial_viewport_pct: 10
-  # initial_price_pct: auto
+  initial_viewport_pct: 10   # Time zoom (% of grid width)
+  initial_price_pct: 5      # Price zoom (% of full range); 0 = full
 
 gui:
   api_port: 17100
   screenshot_dir: ./screenshots
-  # msdf_font: resources/fonts/YourFont.ttf
+  msdf_font: resources/fonts/RobotoMono/RobotoMono-Regular.ttf
+  axis_label_px: 0  # <= 0 uses automatic monitor-scaled sizing
+  default_order_qty: 1.0
 
 server:
   host: 127.0.0.1
   port: 8080
+  ca_file: certs/sentinel-server.crt

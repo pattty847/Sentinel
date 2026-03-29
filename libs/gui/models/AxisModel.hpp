@@ -14,6 +14,13 @@ class AxisModel : public QAbstractListModel {
     Q_PROPERTY(int labelCount READ labelCount NOTIFY labelCountChanged)
     
 public:
+    struct TickSnapshot {
+        double value = 0.0;
+        double position = 0.0;
+        QString label;
+        bool isMajorTick = false;
+    };
+
     enum Role {
         PositionRole = Qt::UserRole + 1,    // Screen position of tick (double)
         LabelRole,                          // Formatted label text (QString)
@@ -35,6 +42,7 @@ public:
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
     int labelCount() const { return m_labelCapacity; }
+    void copyTicks(std::vector<TickSnapshot>& out) const;
     
     void setGridViewState(GridViewState* viewState);
     void setViewportSize(double width, double height);
@@ -76,6 +84,7 @@ private slots:
 protected:
     GridViewState* m_viewState = nullptr;
     std::vector<TickInfo> m_ticks;
+    std::vector<TickInfo> m_ticksScratch;  // swap buffer — avoids heap alloc in hot path
     UnifiedGridRenderer* m_renderer = nullptr;
     UnifiedGridRenderer* renderer() const { return m_renderer; }
     int m_labelCapacity = 32;

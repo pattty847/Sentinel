@@ -10,4 +10,3 @@ enum class ChartMode {
     HYBRID_DEPTH_PRICE,
     MULTI_TIMEFRAME
 };
-

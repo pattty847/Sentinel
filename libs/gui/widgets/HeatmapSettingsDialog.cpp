@@ -7,6 +7,7 @@
 #include <QSlider>
 #include <QLabel>
 #include <QPushButton>
+#include <QComboBox>
 #include <QDialogButtonBox>
 
 namespace {
@@ -64,15 +65,15 @@ void HeatmapSettingsDialog::buildUi() {
     form->setHorizontalSpacing(12);
     form->setVerticalSpacing(12);
 
-    // Gamma: 0.1-5.0, step 0.05, default 1.05
-    auto [gammaSlider, gammaLabel] = makeSlider(this, 10, 500, 105);
+    // Gamma: 0.1-5.0, step 0.01, default 0.85
+    auto [gammaSlider, gammaLabel] = makeSlider(this, 10, 500, 85);
     m_gammaSlider = gammaSlider;
     m_gammaLabel = gammaLabel;
     auto* gammaRow = new QHBoxLayout();
     gammaRow->addWidget(m_gammaSlider);
     gammaRow->addWidget(m_gammaLabel);
     form->addRow("Gamma", gammaRow);
-    auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 115);
+    auto [contrastSlider, contrastLabel] = makeSlider(this, 10, 500, 160);
     m_contrastSlider = contrastSlider;
     m_contrastLabel = contrastLabel;
     auto* contrastRow = new QHBoxLayout();
@@ -80,14 +81,28 @@ void HeatmapSettingsDialog::buildUi() {
     contrastRow->addWidget(m_contrastLabel);
     form->addRow("Contrast", contrastRow);
 
-    // Floor: 0.0-0.5, step 0.01, default 0.01
-    auto [floorSlider, floorLabel] = makeSlider(this, 0, 50, 1);
+    // Floor: 0.0-0.5, step 0.01, default 0.005 (shown as 0)
+    auto [floorSlider, floorLabel] = makeSlider(this, 0, 50, 0);
     m_floorSlider = floorSlider;
     m_floorLabel = floorLabel;
     auto* floorRow = new QHBoxLayout();
     floorRow->addWidget(m_floorSlider);
     floorRow->addWidget(m_floorLabel);
     form->addRow("Shader Floor", floorRow);
+
+    m_tpoTimeframeCombo = new QComboBox(this);
+    m_tpoTimeframeCombo->addItem("15m", 900000);
+    m_tpoTimeframeCombo->addItem("30m", 1800000);
+    form->addRow("TPO Bracket", m_tpoTimeframeCombo);
+
+    m_tpoSessionCombo = new QComboBox(this);
+    m_tpoSessionCombo->addItem("New York", 0);
+    m_tpoSessionCombo->addItem("London", 1);
+    m_tpoSessionCombo->addItem("Asia", 2);
+    m_tpoSessionCombo->addItem("Australia", 3);
+    m_tpoSessionCombo->addItem("24H", 4);
+    m_tpoSessionCombo->addItem("1W", 5);
+    form->addRow("TPO Session", m_tpoSessionCombo);
 
     layout->addLayout(form);
 
@@ -104,6 +119,24 @@ void HeatmapSettingsDialog::buildUi() {
     connect(m_gammaSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyGamma);
     connect(m_contrastSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyContrast);
     connect(m_floorSlider, &QSlider::valueChanged, this, &HeatmapSettingsDialog::applyShaderFloor);
+    connect(m_tpoTimeframeCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+                if (!m_renderer || idx < 0) {
+                    return;
+                }
+                m_renderer->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
+            });
+    connect(m_tpoSessionCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int idx) {
+                if (!m_renderer || idx < 0) {
+                    return;
+                }
+                m_renderer->setTpoSessionType(m_tpoSessionCombo->itemData(idx).toInt());
+            });
     connect(m_logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
@@ -122,6 +155,18 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
     m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
     m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
+    if (m_tpoTimeframeCombo) {
+        const int tfIdx = m_tpoTimeframeCombo->findData(m_renderer->tpoTimeframeMs());
+        if (tfIdx >= 0) {
+            m_tpoTimeframeCombo->setCurrentIndex(tfIdx);
+        }
+    }
+    if (m_tpoSessionCombo) {
+        const int sessionIdx = m_tpoSessionCombo->findData(m_renderer->tpoSessionType());
+        if (sessionIdx >= 0) {
+            m_tpoSessionCombo->setCurrentIndex(sessionIdx);
+        }
+    }
 }
 
 void HeatmapSettingsDialog::applyGamma(int sliderValue) {

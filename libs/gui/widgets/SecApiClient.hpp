@@ -7,7 +7,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcess>
-#include <QTimer>
 
 /**
  * Direct Python SEC API client that runs helper scripts via subprocess.
@@ -46,11 +45,13 @@ public:
 public slots:
     void fetchFilings(const QString& ticker, const QString& formType = QString());
     void fetchInsiderTransactions(const QString& ticker);
+    void fetchInsiderSignals(const QString& ticker, int daysBack = 180);
     void fetchFinancialSummary(const QString& ticker);
 
 signals:
     void filingsReady(const QList<Filing>& filings);
     void transactionsReady(const QList<Transaction>& transactions);
+    void insiderSignalsReady(const QJsonObject& payload);
     void financialsReady(const QList<FinancialMetric>& metrics);
     void apiError(const QString& error);
     void statusUpdate(const QString& message);
@@ -60,18 +61,14 @@ private slots:
     void onPythonError(QProcess::ProcessError error);
 
 private:
-    void initializePython();
-    void executePythonCommand(const QString& command, const QString& operation);
     void runSecScript(const QString& scriptName, const QStringList& args, const QString& operation);
-    QString getPythonExecutable() const;
-    QString getSecModulePath() const;
     QString getScriptsPath() const;
     void parseFilingsData(const QString& jsonStr);
     void parseTransactionsData(const QString& jsonStr);
+    void parseInsiderSignalsData(const QString& jsonStr);
     void parseFinancialsData(const QString& jsonStr);
 
     QProcess* m_pythonProcess;
     QString m_currentOperation;
     bool m_pythonReady;
-    QTimer* m_initTimer;
 };

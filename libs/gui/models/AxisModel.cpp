@@ -7,6 +7,7 @@
 AxisModel::AxisModel(QObject* parent)
     : QAbstractListModel(parent) {
     m_ticks.assign(static_cast<size_t>(m_labelCapacity), TickInfo());
+    m_ticksScratch.assign(static_cast<size_t>(m_labelCapacity), TickInfo());
 }
 
 void AxisModel::setTarget(QQuickItem* target) {
@@ -101,6 +102,17 @@ QHash<int, QByteArray> AxisModel::roleNames() const {
     return roles;
 }
 
+void AxisModel::copyTicks(std::vector<AxisModel::TickSnapshot>& out) const {
+    out.clear();
+    out.reserve(m_ticks.size());
+    for (const TickInfo& tick : m_ticks) {
+        if (tick.label.isEmpty()) {
+            continue;
+        }
+        out.push_back(TickSnapshot{tick.value, tick.position, tick.label, tick.isMajorTick});
+    }
+}
+
 void AxisModel::onViewportChanged() {
     updateTicksAndNotify();
 }
@@ -175,22 +187,20 @@ void AxisModel::addTick(double value, double position, const QString& label, boo
 
 void AxisModel::updateTicksAndNotify() {
     if (!m_viewState || !isViewportValid()) return;
+    if (m_labelCapacity <= 0) return;
 
-    const std::vector<TickInfo> previousTicks = m_ticks;
+    // Snapshot previous state without heap allocation — swap into scratch buffer
+    m_ticksScratch.swap(m_ticks);
     calculateTicks();
-
-    if (m_labelCapacity <= 0) {
-        return;
-    }
 
     bool positionChanged = false;
     bool labelChanged = false;
     bool majorChanged = false;
-    const double kPosEps = 0.01;
+    const double kPosEps = 0.5;  // Half-pixel: sub-pixel position changes don't need a redraw
 
-    const size_t count = std::min(previousTicks.size(), m_ticks.size());
+    const size_t count = std::min(m_ticksScratch.size(), m_ticks.size());
     for (size_t i = 0; i < count; ++i) {
-        const TickInfo& before = previousTicks[i];
+        const TickInfo& before = m_ticksScratch[i];
         const TickInfo& after = m_ticks[i];
         if (std::abs(before.position - after.position) > kPosEps) {
             positionChanged = true;
@@ -204,19 +214,15 @@ void AxisModel::updateTicksAndNotify() {
     }
 
     if (!positionChanged && !labelChanged && !majorChanged) {
+        // Nothing visible changed — restore previous state, skip emission
+        m_ticksScratch.swap(m_ticks);
         return;
     }
 
     QVector<int> roles;
-    if (positionChanged) {
-        roles << PositionRole;
-    }
-    if (labelChanged) {
-        roles << LabelRole;
-    }
-    if (majorChanged) {
-        roles << IsMajorTickRole;
-    }
+    if (positionChanged) roles << PositionRole;
+    if (labelChanged)    roles << LabelRole;
+    if (majorChanged)    roles << IsMajorTickRole;
 
     emit dataChanged(index(0, 0), index(m_labelCapacity - 1, 0), roles);
 }

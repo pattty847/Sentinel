@@ -15,7 +15,7 @@ target_link_libraries(sentinel_server
 
 # Standardize output
 set_target_properties(sentinel_server PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps/sentinel-server/$<CONFIG>"
     OUTPUT_NAME "sentinel-server"
 )
 
@@ -25,7 +25,6 @@ if (WIN32)
         COMMAND "$ENV{QT_MSVC}/bin/windeployqt.exe"
                 --no-opengl
                 --no-system-d3d-compiler
-                --no-compiler-runtime
                 --no-translations
                 "$<TARGET_FILE:sentinel_server>"
         COMMENT "Running windeployqt for sentinel-server"

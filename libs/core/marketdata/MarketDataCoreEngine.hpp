@@ -86,7 +86,6 @@ private:
     void handleHeartbeats(const nlohmann::json& message);
     void startHeartbeatWatchdog();
     void triggerImmediateReconnect(const char* reason);
-    void sendHeartbeatSubscribe();
 
     void emitError(std::string msg);
     void emitConnectionStatus(bool connected);

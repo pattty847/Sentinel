@@ -8,63 +8,41 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QElapsedTimer>
-#include <QByteArray>
-#include <QSizeF>
 #include <QColor>
 #include <cstdint>
 #include <vector>
-#include <array>
 #include <memory>
 #include <atomic>
 #include <mutex>
-#include <limits>
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
+// ── Core rendering types (needed by inline members) ──────────────────────────
 #include "render/GridViewState.hpp"
-#include "render/MsdfAtlas.hpp"
+#include "render/AxisLayout.hpp"
+#include "render/ChartTextAtlas.hpp"
+#include "render/ChartTextRenderer.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
-#include "render/HeatmapStreamState.hpp"
 #include "render/TimeAxisMapping.hpp"
+#include "render/ITimeAxisMappingProvider.hpp"
+// ── Extracted services ───────────────────────────────────────────────────────
+#include "render/AxisTextService.hpp"
+#include "render/HeatmapStreamService.hpp"
+#include "render/FrameContext.hpp"
+// ── Overlay renderers (owned inline) ─────────────────────────────────────────
+#include "render/IOverlayRenderer.hpp"
+#include "render/HeatmapOverlayRenderer.hpp"
+#include "render/FootprintOverlayRenderer.hpp"
+#include "render/TpoOverlayRenderer.hpp"
+#include "render/VolumeProfileRenderer.hpp"
 
 class DataProcessor;
-class MsdfGlyphNode;
+class HeatmapIntensityNode;
+class QQuickWindow;
+class QScreen;
 
-struct ColorStop {
-    float position;
-    QColor color;
-
-    ColorStop(float pos, const QColor& col) : position(pos), color(col) {}
-};
-
-struct ColorGradient {
-    std::vector<ColorStop> stops;
-
-    ColorGradient() = default;
-    ColorGradient(std::initializer_list<ColorStop> stopList) : stops(stopList) {}
-
-    QColor interpolate(float t) const {
-        if (stops.empty()) return QColor(0, 0, 0);
-        if (stops.size() == 1 || t <= stops.front().position) return stops.front().color;
-        if (t >= stops.back().position) return stops.back().color;
-
-        for (size_t i = 0; i < stops.size() - 1; ++i) {
-            if (t >= stops[i].position && t <= stops[i + 1].position) {
-                const float localT = (t - stops[i].position) / (stops[i + 1].position - stops[i].position);
-                const QColor& c0 = stops[i].color;
-                const QColor& c1 = stops[i + 1].color;
-                return QColor(
-                    c0.red() + (c1.red() - c0.red()) * localT,
-                    c0.green() + (c1.green() - c0.green()) * localT,
-                    c0.blue() + (c1.blue() - c0.blue()) * localT
-                );
-            }
-        }
-        return stops.back().color;
-    }
-};
-
-class UnifiedGridRenderer : public QQuickItem {
+class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_OBJECT
+    Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
     
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
@@ -79,6 +57,13 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
+    Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
+    Q_PROPERTY(bool heatmapLayerEnabled READ heatmapLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintLayerEnabled READ footprintLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool tpoLayerEnabled READ tpoLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileLayerEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(int tpoTimeframeMs READ tpoTimeframeMs WRITE setTpoTimeframeMs NOTIFY tpoConfigChanged)
+    Q_PROPERTY(int tpoSessionType READ tpoSessionType WRITE setTpoSessionType NOTIFY tpoConfigChanged)
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
@@ -98,7 +83,15 @@ class UnifiedGridRenderer : public QQuickItem {
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
+    Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
+    Q_PROPERTY(double heatmapMaxObservedLiquidity READ heatmapMaxObservedLiquidity NOTIFY heatmapMaxObservedLiquidityChanged)
+    Q_PROPERTY(double heatmapMinObservedLiquidity READ heatmapMinObservedLiquidity NOTIFY heatmapMinObservedLiquidityChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
+    Q_PROPERTY(QObject* priceAxisSource READ priceAxisSource WRITE setPriceAxisSource NOTIFY axisSourcesChanged)
+    Q_PROPERTY(QObject* timeAxisSource READ timeAxisSource WRITE setTimeAxisSource NOTIFY axisSourcesChanged)
+    Q_PROPERTY(double effectiveAxisLabelPx READ effectiveAxisLabelPx NOTIFY axisLayoutChanged)
+    Q_PROPERTY(int priceAxisWidthPx READ priceAxisWidthPx NOTIFY axisLayoutChanged)
+    Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
 
 private:
     double m_intensityScale = 1.0;
@@ -114,25 +107,19 @@ private:
     bool m_showModeFlagsOverlay = false;
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
-    double m_heatmapTickSize = 0.0;
+    int m_candleStyle = 0;
+    QTimer* m_thresholdRebuildTimer = nullptr;
 
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
-    
+
     bool m_panSyncPending = false;
+    bool m_historyFetchPending = false;  // debounce for scroll-past-cache history fetch
 
     bool m_useGpuHeatmap = false;
-    int m_heatmapGridWidth = 5120;
-    int m_heatmapGridHeight = 2048;
-    bool m_heatmapTextureDirty = true;
-    QImage m_heatmapImage;
-    QImage m_heatmapPaletteImage;
+    HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
-    bool m_heatmapViewportInitialized = false;
-    int m_intensityBytesPerCell = 1;
-    QElapsedTimer m_heatmapClock;
-    std::unique_ptr<class HeatmapStreamState> m_heatmapStream;
-    std::unique_ptr<class ViewportAutoScrollController> m_autoScrollController;
+    std::unique_ptr<HeatmapStreamService> m_heatmapStreamService;
     double m_autoScrollPaddingFrac = 0.08;
     bool m_smoothAutoScrollEnabled = true;
     QColor m_heatmapBackgroundColor = QColor(18, 20, 24);
@@ -140,24 +127,44 @@ private:
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
     int m_heatmapLabelPx = 14;
+    int m_primaryField = 0;
+    bool m_heatmapLayerEnabled = true;
+    bool m_footprintLayerEnabled = false;
+    bool m_tpoLayerEnabled = false;
+    bool m_volumeProfileLayerEnabled = false;
 
-    double m_heatmapPaletteGamma = 2.0;
-    ColorGradient m_bidGradient;
-    ColorGradient m_askGradient;
-    bool m_heatmapPaletteDirty = true;
     TimeAxisMapping m_lastTimeAxisMapping;
+    mutable std::mutex m_frameContextMutex;
+    MappingFrameContext m_lastFrameContext;
 
-    MsdfAtlas m_msdfAtlas;
-    bool m_msdfAtlasBuilt = false;
+    ChartTextAtlas m_chartTextAtlas;
+    bool m_chartTextAtlasBuilt = false;
+    ChartTextRenderer m_chartTextRenderer;
+    std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
     int m_labelRingGridWidth = 0;
     int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
-    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelWhiteQuads;
-    std::vector<HeatmapLabelRenderer::GlyphQuad> m_labelBlackQuads;
-    class MsdfGlyphNode* m_whiteGlyphNode = nullptr;
-    class MsdfGlyphNode* m_blackGlyphNode = nullptr;
+    std::unique_ptr<AxisTextService> m_axisTextService;
+    FootprintOverlayRenderer m_footprintOverlay;
+    TpoOverlayRenderer m_tpoOverlay;
+    VolumeProfileRenderer m_vpRenderer;
+    std::vector<IOverlayRenderer*> m_overlays;  // non-owning; points to inline members above
+    // POC/VAH/VAL profile markers — written on main thread, read on render thread under m_tpoPendingMutex.
+    mutable std::mutex m_tpoPendingMutex;
+    int m_tpoPocRow = -1;
+    int m_tpoVahRow = -1;
+    int m_tpoValRow = -1;
+    int m_tpoPvvGridHeight = 0;
+    double m_tpoPvvMaxPrice = 0.0;
+    double m_tpoPvvTickSize = 0.0;
+    bool m_tpoPvvDirty = false;
+    // QSG nodes for POC/VAH/VAL horizontal lines — owned by render tree, nulled in onRootRebuilt.
+    // [0] = POC (gold), [1] = VAH (cyan), [2] = VAL (cyan)
+    QSGGeometryNode* m_pvvLineNodes[3] = {nullptr, nullptr, nullptr};
+    int m_tpoTimeframeMs = 900000;            // standard 15m
+    int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
     QElapsedTimer m_fpsTimer;
     int m_fpsFrameCount = 0;
@@ -167,6 +174,9 @@ private:
     std::atomic<qint64> m_totalBytesUploaded{0};
     std::atomic<double> m_uploadBandwidthMBps{0.0};
     qint64 m_lastBandwidthUpdate = 0;
+    std::atomic<uint64_t> m_footprintStreamGeneration{0};
+    std::atomic<uint64_t> m_candleStreamGeneration{0};
+    std::atomic<int64_t> m_lastIncomingHeatmapSliceTimeframeMs{0};
 
 public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
@@ -181,13 +191,32 @@ public:
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
+    int candleStyle() const { return m_candleStyle; }
+    void setCandleStyle(int style);
+    double heatmapMaxObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->maxObservedLiquidity() : 0.0; }
+    double heatmapMinObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->minObservedLiquidity() : 0.0; }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
     double heatmapGamma() const { return m_heatmapGamma; }
     double heatmapContrast() const { return m_heatmapContrast; }
     double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
+    int primaryField() const { return m_primaryField; }
+    bool heatmapLayerEnabled() const { return m_heatmapLayerEnabled; }
+    bool footprintLayerEnabled() const { return m_footprintLayerEnabled; }
+    bool tpoLayerEnabled() const { return m_tpoLayerEnabled; }
+    bool volumeProfileLayerEnabled() const { return m_volumeProfileLayerEnabled; }
+    int tpoTimeframeMs() const { return m_tpoTimeframeMs; }
+    int tpoSessionType() const { return m_tpoSessionType; }
+    Q_INVOKABLE void setVolumeProfileLayerEnabled(bool enabled);
+    Q_INVOKABLE void setTpoTimeframeMs(int timeframeMs);
+    Q_INVOKABLE void setTpoSessionType(int sessionType);
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
+    QObject* priceAxisSource() const { return m_axisTextService ? m_axisTextService->priceAxisSource() : nullptr; }
+    QObject* timeAxisSource() const { return m_axisTextService ? m_axisTextService->timeAxisSource() : nullptr; }
+    double effectiveAxisLabelPx() const { return m_axisTextService ? m_axisTextService->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
+    int priceAxisWidthPx() const { return m_axisTextService ? m_axisTextService->priceAxisWidthPx() : 90; }
+    int timeAxisHeightPx() const { return m_axisTextService ? m_axisTextService->timeAxisHeightPx() : 30; }
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -204,7 +233,7 @@ public:
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     Q_INVOKABLE QPointF getPanVisualOffset() const;
-    double heatmapTickSize() const { return m_heatmapTickSize; }
+    double heatmapTickSize() const { return m_heatmapStreamService ? m_heatmapStreamService->tickSize() : 0.0; }
 
     bool heatmapDataPriceRange(double& outMin, double& outMax) const;
     bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
@@ -212,6 +241,7 @@ public:
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
+    Q_INVOKABLE void setHeatmapColorPreset(const QString& preset);
     
     Q_INVOKABLE void setPriceResolution(double resolution);
     Q_INVOKABLE int getCurrentTimeResolution() const;
@@ -243,18 +273,30 @@ public:
     Q_INVOKABLE int getDirtyRegionCount() const;
     Q_INVOKABLE QString getLabelRingMemory() const;
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
-    TimeAxisMapping lastTimeAxisMapping() const { return m_lastTimeAxisMapping; }
+    TimeAxisMapping lastTimeAxisMapping() const { return currentTimeAxisMapping(); }
+    MappingFrameContext currentFrameContext() const override;
+    TimeAxisMapping currentTimeAxisMapping() const override;
     void applyClientConfig(const ClientConfig& config);
     void applyServerConfig(const ServerConfig& config);
 
-    Q_INVOKABLE void setGridMode(int mode);
+    Q_INVOKABLE void setGridResolutionPreset(int preset);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     Q_INVOKABLE void setLiquidityLabelMode(int mode);
     
     
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
+    Q_INVOKABLE void zoomAt(double rawDelta, double centerX, double centerY,
+                            double viewportWidth = -1.0,
+                            double viewportHeight = -1.0);
+    Q_INVOKABLE void zoomTimeAt(double rawDelta, double centerX,
+                                double viewportWidth = -1.0);
+    Q_INVOKABLE void zoomPriceAt(double rawDelta, double centerY,
+                                 double viewportHeight = -1.0);
     Q_INVOKABLE void resetZoom();
+    Q_INVOKABLE void beginPanAt(double x, double y);
+    Q_INVOKABLE void updatePanAt(double x, double y);
+    Q_INVOKABLE void endPanAt();
     Q_INVOKABLE void panLeft();
     Q_INVOKABLE void panRight();
     Q_INVOKABLE void panUp();
@@ -269,6 +311,10 @@ public:
     void setHeatmapGamma(double gamma);
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
+    void setPrimaryField(int field);
+    Q_INVOKABLE void setHeatmapLayerEnabled(bool enabled);
+    Q_INVOKABLE void setFootprintLayerEnabled(bool enabled);
+    Q_INVOKABLE void setTpoLayerEnabled(bool enabled);
 
 public:
     void onTradeReceived(const Trade& trade);
@@ -292,14 +338,26 @@ signals:
     void showModeFlagsOverlayChanged();
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
+    void candleStyleChanged();
+    void heatmapMaxObservedLiquidityChanged();
+    void heatmapMinObservedLiquidityChanged();
     void heatmapBackgroundColorChanged();
     void heatmapGammaChanged();
     void heatmapContrastChanged();
     void heatmapShaderFloorChanged();
+    void primaryFieldChanged();
+    void layerVisibilityChanged();
+    void tpoConfigChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
+    void axisSourcesChanged();
+    void axisLayoutChanged();
+    void liveRenderTick();
+    // Emitted when the viewport has scrolled past the oldest cached heatmap data.
+    // Receiver should call IGridDataSource::requestHeatmapHistory with these params.
+    void heatmapHistoryNeeded(int64_t timeframeMs, int64_t endTimeMs, int count);
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -312,12 +370,45 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
-    void ensureHeatmapImage();
-    void ensureHeatmapPaletteImage();
     void buildMsdfAtlas();
+    bool ingestHeatmapColumn(const HeatmapStreamService::HeatmapColumnEvent& event);
+    void connectDataProcessorSignals();
+    void startHeatmapRenderLoop();
+    HeatmapIntensityNode* ensureHeatmapRootNode(QSGNode* oldNode);
+    void computeAndApplyFrameMapping(FrameContext& frame,
+                                     HeatmapIntensityNode* texNode,
+                                     int64_t cadenceMs,
+                                     int gridWidth,
+                                     int gridHeight);
+    void publishFrameContext(const FrameContext& frame);
+    void drainFrameUploads(std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+                           std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
+    void renderOverlays(HeatmapIntensityNode* texNode,
+                        const FrameContext& frame,
+                        bool drawHeatmap,
+                        bool drawFootprint,
+                        bool drawTpo,
+                        int gridWidth,
+                        int gridHeight,
+                        std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
+                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
+                        std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
+    void renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
+                                 const FrameContext& frame,
+                                 bool show);
+    void updateLabelGeometry(HeatmapIntensityNode* texNode,
+                             const FrameContext& frame,
+                             const HeatmapStreamState::Snapshot& snapshot,
+                             int gridWidth,
+                             int gridHeight);
     void applyLabelUploads(const std::vector<HeatmapStreamState::PendingLabelColumn>& uploads,
                            int gridWidth,
                            int gridHeight);
+    void clearLabelGeometry();
+    void updateFpsEstimate();
+    void setPriceAxisSource(QObject* source);
+    void setTimeAxisSource(QObject* source);
 
 private:
     void setIntensityScale(double scale);
@@ -332,6 +423,7 @@ private:
     void setAutoScrollPaddingFrac(double fraction);
     void setAutoScrollSmoothEnabled(bool enabled);
     void setHeatmapLiquidityThreshold(double threshold);
+    void rebuildHeatmapTextureFromRing();
     void setHeatmapBackgroundColor(const QColor& color);
 
     std::unique_ptr<GridViewState> m_viewState;

@@ -1,28 +1,36 @@
 /*
 Sentinel — ChartModeController
-Role: Implements the logic for the chart mode and settings controller.
-Inputs/Outputs: Implements property setters that update state and emit signals on change.
+Role: Implements primary field selection and overlay toggles for the chart.
 Threading: All code is executed on the main GUI thread.
-Performance: Not applicable; consists of simple property setters.
 Integration: The concrete implementation of the bridge between QML UI and C++ settings.
-Observability: No internal logging.
 Related: ChartModeController.h.
-Assumptions: '...Changed' signals are connected to slots in other components.
 */
 #include "ChartModeController.h"
 
-void ChartModeController::setMode(ChartMode mode) {
-    if (m_currentMode == mode) return;
-    m_currentMode = mode;
-    emit modeChanged(mode);
-    updateComponentVisibility();
+int ChartModeController::primaryField() const {
+    return static_cast<int>(m_primaryField);
 }
 
-void ChartModeController::updateComponentVisibility() {
-    emit componentVisibilityChanged("tradeScatter", m_currentMode == ChartMode::TRADE_SCATTER);
-    emit componentVisibilityChanged("candles", m_currentMode == ChartMode::HIGH_FREQ_CANDLES ||
-                                        m_currentMode == ChartMode::TRADITIONAL_CANDLES ||
-                                        m_currentMode == ChartMode::HYBRID_CANDLES_TRADES);
-    emit componentVisibilityChanged("orderBook", m_currentMode == ChartMode::ORDER_BOOK_HEATMAP ||
-                                        m_currentMode == ChartMode::HYBRID_CANDLES_TRADES);
+void ChartModeController::setPrimaryField(PrimaryField field) {
+    if (m_primaryField == field) {
+        return;
+    }
+    m_primaryField = field;
+    emit primaryFieldChanged(static_cast<int>(m_primaryField));
+}
+
+void ChartModeController::setPrimaryField(int field) {
+    if (field < static_cast<int>(PrimaryField::Heatmap) ||
+        field > static_cast<int>(PrimaryField::VolumeProfile)) {
+        return;
+    }
+    setPrimaryField(static_cast<PrimaryField>(field));
+}
+
+void ChartModeController::setCandlesEnabled(bool enabled) {
+    if (m_candlesEnabled == enabled) {
+        return;
+    }
+    m_candlesEnabled = enabled;
+    emit candlesEnabledChanged(m_candlesEnabled);
 }

@@ -2,260 +2,120 @@
 
 ## Overview
 
-The market data module features a high-performance, thread-safe pipeline for processing real-time WebSocket data feeds. The design emphasizes a clean separation of concerns, with a pure C++ core engine and a distinct adapter for Qt GUI integration.
+The market data stack is a thread-safe pipeline for real-time WebSocket feeds. The core is pure C++; Qt is used only in a thin GUI adapter.
 
-- **`MarketDataCoreEngine`**: The heart of the pipeline. A pure C++, non-GUI component that manages the WebSocket connection, authentication, message parsing, and data dispatching. It operates on a dedicated worker thread and uses `std::function` callbacks to emit data, making it reusable in any context (GUI, server, CLI).
+- **MarketDataCoreEngine** — Pure C++ orchestrator: WebSocket connection, authentication, message parsing, and dispatch. Runs on a dedicated worker thread and uses `std::function` callbacks so it can be used from GUI, server, or CLI.
+- **MarketDataCoreQt** — Thin Qt adapter around the engine. Receives callbacks on the worker thread and re-emits Qt signals on the GUI thread via `Qt::QueuedConnection`.
 
-- **`MarketDataCoreQt`**: A thin Qt adapter that wraps `MarketDataCoreEngine`. It consumes the engine's callbacks on the worker thread and uses `Qt::QueuedConnection` to safely emit Qt signals to the GUI thread.
+## High-level architecture
 
----
-
-## High-Level Architecture
-
-The architecture clearly separates the I/O worker thread from the GUI thread.
+I/O runs on the worker thread; GUI runs on the Qt thread.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          Application Layer                            │
-│                                                                         │
-│  ┌──────────────────────────┐         ┌───────────────────────────────┐ │
-│  │   MarketDataCoreQt       │         │      MarketDataCoreEngine     │ │
-│  │    (GUI Thread)          │◀───┐    │       (Worker Thread)         │ │
-│  │                          │    │    │                               │ │
-│  │ Signals:                 │    │    │ Callbacks:                    │ │
-│  │  • tradeReceived()       │    │    │  • onTrade()                  │ │
-│  │  • bookUpdates()         │    │    │  • onLiveOrderBook...()       │ │
-│  │  • connectionStatus()    │    │    │  • onConnectionStatus()       │ │
-│  │                          │    │    │  • onError()                  │ │
-│  └──────────────────────────┘    │    └───────────────────────────────┘ │
-│                                  │                                      │
-│                Cross-Thread Communication (Qt::QueuedConnection)        │
-│                                                                         │
+│  MarketDataCoreQt (GUI thread)     MarketDataCoreEngine (worker thread)  │
+│  Signals: tradeReceived(),         Callbacks: onTrade(),                 │
+│  bookUpdates(), connectionStatus()  onLiveOrderBook...(), onError()      │
+│         ◀────────── Qt::QueuedConnection ──────────                      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+The engine is stateless with respect to history; consumers are responsible for caching and state.
 
-## Layered Component Architecture
+## Pipeline layers
 
-The data pipeline consists of three primary layers within the `MarketDataCoreEngine`.
+Three layers inside `MarketDataCoreEngine`:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                     DATA FLOW PIPELINE                         │
-└────────────────────────────────────────────────────────────────┘
-
-┌─────────────┐      ┌──────────────┐      ┌─────────────┐
-│  Exchange   │─────▶│   Transport  │─────▶│   Dispatch  │
-│  WebSocket  │      │    Layer     │      │   Layer     │
-└─────────────┘      └──────────────┘      └─────────────┘
-                            │                      │
-                            │                      │
-                            ▼                      ▼
-                     ┌──────────────┐      ┌─────────────┐
-                     │     Auth     │      │  Callbacks  │
-                     │   Manager    │      │  (std::function)
-                     └──────────────┘      └─────────────┘
-```
-The engine is now stateless regarding historical data. Consumers of the engine are responsible for caching and state management.
-
----
-
-## Component Details
-
-### 1. Transport Layer (`ws/`)
-
-#### **WsTransport** (Abstract Interface)
-- **Purpose**: A pure virtual interface for WebSocket communication, decoupled from any specific implementation.
-- **Responsibilities**: Connection lifecycle, message transport, and status/error reporting via callbacks.
-
-#### **BeastWsTransport** (Concrete Implementation)
-- **Technology**: Boost.Beast WebSocket over SSL, running on a Boost.Asio `io_context`.
-- **Threading**: All operations are executed on a Boost.Asio `strand` to ensure serial access to the WebSocket stream, guaranteeing thread safety without explicit locks.
-- **Features**: Asynchronous operations, automatic reconnection with exponential backoff, and a keep-alive ping timer.
-
-### 2. Authentication Layer (`auth/`)
-
-#### **Authenticator**
-- **Purpose**: Creates signed JSON Web Tokens (JWTs) for the Coinbase Advanced Trade API using the ES256 algorithm.
-- **Thread Safety**: `createJwt()` is stateless and thread-safe.
-- **Error Handling**: JWT creation is wrapped in `try/catch` blocks to prevent exceptions from crashing the I/O thread, a critical resilience improvement.
-
-### 3. Dispatch Layer (`dispatch/`)
-
-#### **MessageDispatcher**
-- **Purpose**: Parses incoming JSON messages from the WebSocket and normalizes them into strongly-typed event structs (`TradeEvent`, `BookSnapshotEvent`, etc.).
-- **Implementation**: A static `parse` method provides a stateless, functional approach to message processing.
-
-**Parsing Flow**:
-```
-JSON Message ─────┬─→ channel="market_trades" ─→ TradeEvent[]
-                  │
-                  ├─→ channel="l2_data" ───────┬─→ type="snapshot" ─→ BookSnapshotEvent
-                  │                             └─→ type="update" ───→ BookUpdateEvent
-                  │
-                  └─→ (other channels/types)
+Exchange WebSocket → Transport → Auth (optional) → Dispatch → Callbacks (std::function)
 ```
 
-### 4. Callback Emitters
-- **Purpose**: The `MarketDataCoreEngine` uses `std::function` members to provide data to its owner.
-- **Callbacks**:
-  ```cpp
-  using TradeCb = std::function<void(const Trade&)>;
-  using OrderBookLevelUpdatesCb = std::function<void(...)>;
-  using OrderBookInitializedCb = std::function<void(...)>;
-  using ConnectionStatusCb = std::function<void(bool)>;
-  using ErrorCb = std::function<void(const std::string&)>;
-  ```
-- **Integration**: The client (e.g., `MarketDataCoreQt`) provides implementations for these callbacks to receive data.
+### 1. Transport (`ws/`)
 
-### 5. Data Models (`model/`)
+- **WsTransport** — Abstract interface: connection lifecycle, send/receive, status/error callbacks.
+- **BeastWsTransport** — Boost.Beast over SSL on a Boost.Asio `io_context`. All operations run on a single strand (serialized, no mutex). Supports async I/O, reconnection with backoff, and keep-alive ping.
 
-The `model/` directory contains the core data structures used throughout the pipeline.
+### 2. Authentication (`auth/`)
 
-#### **Trade**
-- Represents a single market trade, containing `product_id`, `price`, `size`, `side`, and `timestamp`.
+- **Authenticator** — Loads CDP API keys from `key.json` (optional) and builds signed JWTs (ES256) for authenticated channels. **Public channels** (level2, market_trades, heartbeats, candles) do not require auth; subscribe messages are sent without a `jwt` field when no key is present. Only channels such as `user` and `futures_balance_summary` need auth. Use `hasCredentials()` before `createJwt()` when keys are optional. Stateless and thread-safe.
 
-#### **OrderBook-related Structs**
-- `OrderBookLevel`: A simple `price`/`size` pair.
-- `BookLevelUpdate`: Represents an incremental update to the order book (`isBid`, `price`, `quantity`).
-- `OrderBook`: A sparse representation used for initial snapshots.
+### 3. Dispatch (`dispatch/`)
 
-#### **LiveOrderBook**
-The `LiveOrderBook` implements a **dense, fixed-range order book** optimized for high-performance visualization and GPU rendering.
-- **Key Feature**: It maps a continuous price range to a `std::vector`, allowing for O(1) updates of price levels.
-- **Management**: This class is a data structure provided to consumers. The `MarketDataCoreEngine` **does not** manage `LiveOrderBook` instances itself; it only provides the raw snapshot and update data required to maintain one. The consumer is responsible for instantiating and updating it.
+- **MessageDispatcher** — Parses JSON from the WebSocket into typed events (`Event` variant containing `TradeEvent`, `BookSnapshotEvent`, `BookUpdateEvent`, etc.). Stateless `parse` entry point. It handles DTO transformations such as fast string-to-double parsing (`Cpp20Utils::fastStringToDouble`) and ISO8601 timestamp conversion.
 
----
+**Flow:** `channel=market_trades` → array of `TradeEvent`; `channel=l2_data` + `type=snapshot` → `BookSnapshotEvent`; `type=update` → `BookUpdateEvent`.
 
-## Threading Model
+### 4. Callbacks
 
-### Worker Thread (Boost.Asio)
-The `MarketDataCoreEngine` spawns a dedicated `m_ioThread` that runs `m_ioc.run()`. This thread handles all network I/O, message parsing, and callback invocation. A `while (m_running)` loop with `try/catch` ensures the thread and `io_context` are resilient to exceptions thrown by handlers.
+The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpdatesCb`, `OrderBookInitializedCb`, `ConnectionStatusCb`, `ErrorCb`). The owner (e.g. `MarketDataCoreQt`) supplies implementations and forwards to the GUI thread via `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`.
 
-### GUI Thread (Qt)
-The `MarketDataCoreQt` object lives on the GUI thread. It receives data from the engine's callbacks (which execute on the worker thread) and safely transfers it to the GUI thread by emitting signals via `Qt::QueuedConnection`.
+### 5. Data models (`model/`)
 
-### Cross-Thread Communication
-```
- Worker Thread (MarketDataCoreEngine)      GUI Thread (MarketDataCoreQt)
-      │                                          │
- 1. Parse trade, invoke callback               │
-    m_onTrade(trade)                             │
-      │                                          │
-      └───────invokes lambda set by adapter──────┼──→ 2. Lambda is invoked on worker thread.
-               (captures QPointer<self>)         │      It calls QMetaObject::invokeMethod()
-                                                 │      with Qt::QueuedConnection.
-                                                 │
-                                                 ▼
-                                           3. Qt Event Loop processes the event
-                                              and emits tradeReceived(trade)
-                                              safely on the GUI thread.
-                                                 │
-                                                 ▼
-                                           4. UI components update.
-```
-This model ensures a clean separation, preventing the core engine from having any dependency on Qt while providing a safe, idiomatic integration pattern for the GUI.
+- **Trade** — `product_id`, `price`, `size`, `side` (`AggressorSide` enum), `timestamp`.
+- **BookLevelUpdate**, **BookDelta** — Incremental update structures.
+- **LiveOrderBook** — Dense, fixed-range order book for visualization and GPU. Maps a continuous price range to pre-allocated `std::vector<double>` arrays for `O(1)` updates using `price_to_index`. It uses `std::mutex` to ensure thread-safety on aggregations and structural mutations. The engine does **not** own `LiveOrderBook` instances; it only delivers snapshot and update data. The consumer creates and updates the book.
 
----
+## Threading & Pure C++ Boundary
 
-## Message Processing Flow
+- **Worker thread (Boost.Asio)** — `MarketDataCoreEngine` runs `m_ioc.run()` on a dedicated thread. All network I/O, parsing, and `std::function` callback invocation happen there. A `while (m_running)` loop with try/catch keeps the thread and `io_context` resilient to handler exceptions.
+- **GUI thread Boundary (Qt)** — `MarketDataCoreQt` acts as the pure C++ boundary buffer. It lives on the GUI thread and registers C++ DTOs with Qt's MetaObject system (`qRegisterMetaType`). When a callback fires on the worker thread, the adapter uses `QMetaObject::invokeMethod` with `Qt::QueuedConnection` to safely copy DTO payloads (e.g., `std::move(updatesCopy)`) and emit signals on the GUI thread, protecting the core from Qt object leaks and keeping UI updates safe.
 
-### Trade Message Flow
-```
-1. WebSocket receives JSON.
-        │
-        ▼
-2. BeastWsTransport::onRead() passes payload to engine.
-        │
-        ▼
-3. MarketDataCoreEngine::dispatch() calls MessageDispatcher::parse().
-        │
-        ▼
-4. A Trade is created from the parsed data.
-        │
-        ▼
-5. m_onTrade(trade) callback is invoked.
-        │
-        ▼
-6. MarketDataCoreQt's handler queues a signal emission to the GUI thread.
-```
+## Message flow
 
-### Order Book Flow
-```
-1. WebSocket receives `l2_data` message.
-        │
-        ▼
-2. MessageDispatcher identifies `BookSnapshotEvent` or `BookUpdateEvent`.
-        │
-        ▼
-3. MarketDataCoreEngine calls the appropriate handler:
-   │
-   ├─→ [Snapshot] handleOrderBookSnapshot()
-   │   └─→ Invokes m_onLiveOrderBookInitialized() with bid/ask vectors.
-   │
-   └─→ [Update] handleOrderBookUpdate()
-       └─→ Invokes m_onLiveOrderBookLevelUpdates() with incremental changes.
-        │
-        ▼
-4. MarketDataCoreQt receives the data and emits signals for the GUI.
-```
+**Trades:** WebSocket → BeastWsTransport::onRead() → engine → MessageDispatcher::parse() → Trade → `m_onTrade(trade)` → adapter queues signal → GUI thread emits `tradeReceived(trade)`.
 
----
+**Order book:** WebSocket → parse → `BookSnapshotEvent` or `BookUpdateEvent` → `handleOrderBookSnapshot()` or `handleOrderBookUpdate()` → `m_onLiveOrderBookInitialized()` or `m_onLiveOrderBookLevelUpdates()` → adapter queues signals → GUI updates.
 
-## File Organization
+## File layout
 
 ```
 libs/core/marketdata/
-├── MarketDataCoreEngine.hpp   # Main orchestrator (pure C++)
-├── MarketDataCoreEngine.cpp
-│
-├── ws/                        # WebSocket transport layer
-│   ├── WsTransport.hpp        # Abstract transport interface
-│   ├── BeastWsTransport.hpp   # Boost.Beast implementation
-│   ├── BeastWsTransport.cpp
-│   └── SubscriptionManager.hpp
-│
-├── auth/                      # Authentication layer
-│   ├── Authenticator.hpp
-│   └── Authenticator.cpp
-│
-├── dispatch/                  # Message parsing layer
-│   ├── MessageDispatcher.hpp  # JSON → Event parser
-│   └── Channels.hpp
-│
-└── model/                     # Data models
-    ├── TradeData.h            # Trade, OrderBook, LiveOrderBook, etc.
-    └── LiveOrderBook.cpp
+├── MarketDataCoreEngine.hpp / .cpp
+├── ws/           WsTransport, BeastWsTransport, SubscriptionManager
+├── auth/         Authenticator
+├── dispatch/     MessageDispatcher, Channels
+└── model/        TradeData.h, LiveOrderBook.cpp
 
 libs/gui/marketdata/
-├── MarketDataCoreQt.hpp       # Qt adapter for the engine
+├── MarketDataCoreQt.hpp
 └── MarketDataCoreQt.cpp
 ```
 
----
+## Design decisions
 
-## Key Design Decisions
-
-### 1. **Why was the Cache Layer removed?**
-The original `MarketDataCore` included a `DataCache`. This was removed to improve separation of concerns and reusability. By emitting data via callbacks, `MarketDataCoreEngine` is now a stateless processor. Consumers can implement any caching strategy they need (or none at all). This allows the same engine to be used in the GUI (which needs caches for visualization) and the `sentinel-server` (which might have different caching or forwarding logic).
-
-### 2. **Why a separate `MarketDataCoreQt` adapter?**
-To keep the core C++ library free of Qt dependencies. `MarketDataCoreEngine` can be used in any C++ project, while `MarketDataCoreQt` provides a clean, idiomatic bridge to the Qt world, handling cross-thread communication safely.
-
-### 3. **Why strand instead of mutex in transport?**
-A `strand` serializes asynchronous operations within the `io_context`, preventing concurrent access to the WebSocket without blocking the I/O thread. Using a `mutex` would introduce blocking calls and defeat the purpose of an asynchronous networking model.
+- **No cache in the engine** — Cache was removed so the engine stays a stateless processor. Consumers (GUI, server) implement their own caching. Same engine can drive both.
+- **Separate Qt adapter** — Keeps `libs/core` free of Qt. The engine is reusable in any C++ context; the adapter handles thread crossing and signals.
+- **Strand instead of mutex in transport** — The strand serializes async operations on the `io_context` without blocking the I/O thread; a mutex would introduce blocking and complicate the async model.
 
 ---
 
-## Conclusion
+## Transport security (TLS / WSS)
 
-The refactored market data architecture achieves:
-- **Decoupling**: The core engine is fully independent of the GUI and caching logic.
-- **Reusability**: `MarketDataCoreEngine` can be used for servers, CLIs, or other applications.
-- **Low Latency**: Sub-millisecond message processing.
-- **Thread Safety**: Clean boundaries and safe cross-thread communication patterns.
-- **Maintainability**: Clear separation of concerns makes the system easier to understand and extend.
-- **Reliability**: Resilient I/O thread and robust error handling.
+The internal stream server (`SentinelStreamServer`) defaults to `ws://127.0.0.1:8080`. Without TLS, all traffic (market data, server config, and eventually trade commands) is plaintext. TLS upgrades to `wss://` so the stream is encrypted and the client can verify the server.
 
+**Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and footprint/TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
+**Handshake:** TCP connect → TLS 1.3 ClientHello/ServerHello (server uses self-signed EC cert with SANs for localhost/127.0.0.1) → TLS Finished → HTTP WebSocket upgrade → JSON subscribe/server_config/heatmap_slice.
+
+**Certificates:** Generate with `certs/gen-certs.ps1` (Windows) or `certs/gen-certs.sh` (Linux/macOS). Outputs `certs/sentinel-server.crt` and `certs/sentinel-server.key` (gitignored). Configure in `server_config.yaml` under `tls.cert_file` / `tls.key_file` and in `client_config.yaml` under `server.ca_file`. If `ca_file` is missing or invalid, the client falls back to `verify_none` with a log warning (acceptable for local dev only).
+
+**Future:** Client authentication (e.g. HMAC-SHA256 of server nonce) can gate `trade_command` after the WSS handshake; the existing `Authenticator` in `libs/core/marketdata/auth/` can be used for signing.
+
+---
+
+## Trading stream (paper mode)
+
+The stream protocol includes a paper-trading vertical:
+
+- **Client → Server:** `trade_command` — `PLACE_ORDER`, `CANCEL_ORDER`, `CANCEL_ALL`, `FLATTEN`.
+- **Server → Client:** `order_update` (order lifecycle), `position_update` (position and unrealized PnL).
+
+The server runs paper execution (no real broker); fills use last trade price plus optional `trading.slippage_bps` from `server_config.yaml`. For setup and usage, see **`docs/PAPER_TRADING_QUICKSTART.md`**.
+
+---
+
+## Related documentation
+
+- **`docs/ARCHITECTURE.md`** — System overview, client–server pipeline, rendering.
+- **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading configuration and hotkeys.
+- **`docs/CONFIG.md`** — Server and client YAML options.

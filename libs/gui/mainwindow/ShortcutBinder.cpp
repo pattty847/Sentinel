@@ -1,5 +1,5 @@
 #include "ShortcutBinder.h"
-#include "../widgets/HeatmapDock.hpp"
+#include "../widgets/ChartDock.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include <QShortcut>
 #include <QKeySequence>
@@ -39,7 +39,7 @@ void ShortcutBinder::bindShortcuts(const Callbacks& callbacks, const DockWidgets
     });
     
     QShortcut* f2Shortcut = new QShortcut(QKeySequence("F2"), m_parent);
-    QObject::connect(f2Shortcut, &QShortcut::activated, [docks]() {
+    QObject::connect(f2Shortcut, &QShortcut::activated, []() {
     });
     
     QShortcut* f3Shortcut = new QShortcut(QKeySequence("F3"), m_parent);

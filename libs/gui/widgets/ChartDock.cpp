@@ -1,4 +1,4 @@
-#include "HeatmapDock.hpp"
+#include "ChartDock.hpp"
 #include <QQuickView>
 #include <QSurfaceFormat>
 #include <QSGRendererInterface>
@@ -8,17 +8,17 @@
 #include <QHBoxLayout>
 #include <QFrame>
 
-HeatmapDock::HeatmapDock(QWidget* parent)
-    : DockablePanel("HeatmapDock", "Charts", parent)
+ChartDock::ChartDock(QWidget* parent)
+    : DockablePanel("ChartDock", "Charts", parent)
 {
     buildUi();
 }
 
-QSize HeatmapDock::minimumSizeHint() const {
+QSize ChartDock::minimumSizeHint() const {
     return QSize(420, 300);
 }
 
-void HeatmapDock::buildUi() {
+void ChartDock::buildUi() {
     QVBoxLayout* mainLayout = new QVBoxLayout(m_contentWidget);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
@@ -27,13 +27,17 @@ void HeatmapDock::buildUi() {
     m_toolbar->setObjectName("HeatmapToolbar");
     mainLayout->addWidget(m_toolbar, 0);
 
+    const QByteArray backend = qgetenv("QSG_RHI_BACKEND").toLower();
+    if (backend == "opengl") {
+        QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+        format.setRenderableType(QSurfaceFormat::OpenGL);
+        QSurfaceFormat::setDefaultFormat(format);
+    }
+
     m_qquickView = new QQuickView;
     m_qquickView->setPersistentSceneGraph(true);
     m_qquickView->setResizeMode(QQuickView::SizeRootObjectToView);
     m_qquickView->setColor(Qt::black);
-
-    QSurfaceFormat format = QSurfaceFormat::defaultFormat();
-    m_qquickView->setFormat(format);
 
     m_qmlContainer = QWidget::createWindowContainer(m_qquickView, m_contentWidget);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
@@ -56,7 +60,7 @@ void HeatmapDock::buildUi() {
     }
 }
 
-QObject* HeatmapDock::rootObject() const {
+QObject* ChartDock::rootObject() const {
     if (m_qquickView) {
         return m_qquickView->rootObject();
     }

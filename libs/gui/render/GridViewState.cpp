@@ -7,6 +7,11 @@
 
 namespace {
 constexpr bool kTraceZoomInteractions = false;
+
+double clampProcessedZoomDelta(double rawDelta, double sensitivity, double maxDelta) {
+    const double processed = rawDelta * sensitivity;
+    return std::max(-maxDelta, std::min(maxDelta, processed));
+}
 }
 
 GridViewState::GridViewState(QObject* parent) 
@@ -212,9 +217,90 @@ void GridViewState::handlePanEnd(bool applyViewport) {
 
 void GridViewState::handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
-    double processedDelta = rawDelta * ZOOM_SENSITIVITY;
-    processedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, processedDelta));
+    double processedDelta = clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
     handleZoomWithViewport(processedDelta, center, viewportSize);
+}
+
+void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double centerX, double viewportWidth) {
+    if (!m_timeWindowValid || viewportWidth <= 0.0) {
+        return;
+    }
+
+    const double processedDelta =
+        clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
+    const double zoomMultiplier = 1.0 + processedDelta;
+    if (zoomMultiplier <= 0.0) {
+        return;
+    }
+
+    int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
+    if (currentTimeRange <= 0) {
+        currentTimeRange = 1;
+    }
+
+    double centerRatio = centerX / viewportWidth;
+    centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+
+    const double timeRangeD = static_cast<double>(currentTimeRange) / zoomMultiplier;
+    const bool zoomingOut = (processedDelta < 0.0);
+    const int64_t newTimeRange = std::max<int64_t>(
+        1, static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD)
+                                           : std::floor(timeRangeD)));
+    const int64_t currentCenterTime =
+        m_visibleTimeStart_ms +
+        static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio);
+    const double newTimeStartD =
+        static_cast<double>(currentCenterTime) -
+        static_cast<double>(newTimeRange) * centerRatio;
+    int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
+    int64_t newTimeEnd = newTimeStart + newTimeRange;
+    if (newTimeEnd <= newTimeStart) {
+        newTimeEnd = newTimeStart + 1;
+    }
+
+    setViewport(newTimeStart, newTimeEnd, m_minPrice, m_maxPrice);
+    m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
+    if (m_autoScrollEnabled) {
+        m_autoScrollEnabled = false;
+        emit autoScrollEnabledChanged();
+    }
+}
+
+void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double centerY, double viewportHeight) {
+    if (!m_timeWindowValid || viewportHeight <= 0.0) {
+        return;
+    }
+
+    const double processedDelta =
+        clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
+    const double zoomMultiplier = 1.0 + processedDelta;
+    if (zoomMultiplier <= 0.0) {
+        return;
+    }
+
+    double currentPriceRange = m_maxPrice - m_minPrice;
+    if (currentPriceRange <= 0.0) {
+        currentPriceRange = 1.0;
+    }
+
+    double centerRatio = 1.0 - (centerY / viewportHeight);
+    centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+
+    const double newPriceRange = std::max(1e-6, currentPriceRange / zoomMultiplier);
+    const double currentCenterPrice = m_minPrice + currentPriceRange * centerRatio;
+    const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
+    const double newMaxPrice =
+        currentCenterPrice + newPriceRange * (1.0 - centerRatio);
+    if (newMaxPrice <= newMinPrice) {
+        return;
+    }
+
+    setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, newMinPrice, newMaxPrice);
+    m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
+    if (m_autoScrollEnabled) {
+        m_autoScrollEnabled = false;
+        emit autoScrollEnabledChanged();
+    }
 }
 
 void GridViewState::enableAutoScroll(bool enabled) {

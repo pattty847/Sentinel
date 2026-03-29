@@ -56,13 +56,23 @@ std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bi
 }
 }
 
-RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& port, QObject* parent)
+RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& port,
+                                           const QString& caFile, QObject* parent)
     : IGridDataSource(parent)
-    , m_client(host.toStdString(), port.toStdString())
+    , m_client(host.toStdString(), port.toStdString(), caFile.toStdString())
 {
     qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
     qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
     qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
+    qRegisterMetaType<FootprintSlice>("FootprintSlice");
+    qRegisterMetaType<TpoSlice>("TpoSlice");
+    qRegisterMetaType<BookDelta>("BookDelta");
+    qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
+    qRegisterMetaType<trading::OrderUpdate>("trading::OrderUpdate");
+    qRegisterMetaType<trading::PositionUpdate>("trading::PositionUpdate");
+    qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
+    qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
+    qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
@@ -72,6 +82,12 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onL2UpdateReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapSliceReceived,
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
+            this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
+            this, &RemoteGridDataSource::onTpoSliceReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::volumeProfileSliceReceived,
+            this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
@@ -82,7 +98,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onCandleHistoryReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::serverConfigReceived,
             this, &RemoteGridDataSource::onServerConfigReceived, Qt::QueuedConnection);
-    
+
     connect(&m_client, &SentinelStreamClient::connected,
             this,
             [this]{ emit connectionStatusChanged(true); },
@@ -93,6 +109,16 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::errorOccurred,
             this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::orderUpdated,
+            this, &IGridDataSource::orderUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::algoOrderEventReceived,
+            this, &RemoteGridDataSource::onAlgoOrderEventReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::pnlSnapshotReceived,
+            this, &RemoteGridDataSource::onPnlSnapshotReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::positionUpdated,
+            this, &IGridDataSource::positionUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::riskOrderUpdated,
+            this, &IGridDataSource::riskOrderUpdated, Qt::QueuedConnection);
 }
 
 void RemoteGridDataSource::connectToServer() {
@@ -101,7 +127,7 @@ void RemoteGridDataSource::connectToServer() {
 
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
-    
+
     // Initialize replica on snapshot for authoritative range.
     std::string s = symbol.toStdString();
     if (m_replicaBooks.find(s) == m_replicaBooks.end()) {
@@ -121,6 +147,13 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
+void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
+                                                   int64_t timeframeMs,
+                                                   int64_t endTimeMs,
+                                                   int count) {
+    m_client.requestFootprintHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
 void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
                                                 int64_t timeframeSec,
                                                 int64_t endTimeSec,
@@ -128,6 +161,18 @@ void RemoteGridDataSource::requestCandleHistory(const QString& symbol,
     m_client.requestCandleHistory(symbol.toStdString(), timeframeSec, endTimeSec, limit);
 }
 
+void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
+                                             int64_t timeframeMs,
+                                             int sessionType,
+                                             int64_t endTimeMs,
+                                             int count) {
+    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, sessionType, endTimeMs, count);
+}
+
+
+void RemoteGridDataSource::sendTradeCommand(const trading::TradeCommand& command) {
+    m_client.sendTradeCommand(command);
+}
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
     auto it = m_replicaBooks.find(productId);
     if (it != m_replicaBooks.end() && it->second) {
@@ -139,37 +184,37 @@ const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::str
 
 void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
     std::string symbol = productId.toStdString();
-    
+
     // Create or reset replica
     if (m_replicaBooks.find(symbol) == m_replicaBooks.end()) {
         m_replicaBooks.emplace(symbol, std::make_unique<LiveOrderBook>(symbol));
     }
-    
+
     auto& book = *m_replicaBooks[symbol];
-    
+
     // Re-initialize using banded range around best bid/ask.
     const double tickSize = m_serverConfig.orderbook.tickSize;
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     book.initialize(minPrice, maxPrice, tickSize);
-    
+
     std::vector<BookLevelUpdate> updates;
     updates.reserve(bids.size() + asks.size());
-    
+
     for (const auto& level : bids) {
         updates.push_back({true, level.price, level.size});
     }
     for (const auto& level : asks) {
         updates.push_back({false, level.price, level.size});
     }
-    
+
     auto now = std::chrono::system_clock::now();
     std::vector<BookDelta> deltas;
     book.applyUpdates(updates, now, &deltas);
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }
-    
+
     sLog_Data(QString("RemoteGridDataSource: Snapshot applied for %1 (%2 bids, %3 asks)")
               .arg(productId).arg(bids.size()).arg(asks.size()));
 }
@@ -183,15 +228,15 @@ void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const st
     std::string symbol = productId.toStdString();
     auto it = m_replicaBooks.find(symbol);
     if (it == m_replicaBooks.end()) return;
-    
+
     auto& book = *it->second;
-    
+
     thread_local std::vector<BookDelta> deltas;
     deltas.clear();
-    
+
     auto now = std::chrono::system_clock::now();
     book.applyUpdates(updates, now, &deltas);
-    
+
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }
@@ -199,6 +244,18 @@ void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const st
 
 void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     emit heatmapSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice) {
+    emit footprintSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onTpoSliceReceived(const TpoSlice& slice) {
+    emit tpoSliceReceived(slice);
+}
+
+void RemoteGridDataSource::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
+    emit volumeProfileSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
@@ -295,4 +352,19 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
                    .arg(endTimeSec)
                    .arg(candles.size()));
     }
+}
+
+void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,
+                                            const std::string& action,
+                                            const std::string& symbol,
+                                            const trading::AlgoParams& params) {
+    m_client.sendAlgoCommand(algoId, action, symbol, params);
+}
+
+void RemoteGridDataSource::onAlgoOrderEventReceived(const trading::AlgoOrderEvent& event) {
+    emit algoOrderEventReceived(event);
+}
+
+void RemoteGridDataSource::onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot) {
+    emit pnlSnapshotReceived(snapshot);
 }

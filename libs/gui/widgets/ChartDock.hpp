@@ -16,11 +16,11 @@
  * Includes embedded symbol control bar at the bottom that stays attached.
  * Ensures threaded render loop for optimal GPU performance.
  */
-class HeatmapDock : public DockablePanel {
+class ChartDock : public DockablePanel {
     Q_OBJECT
 
 public:
-    explicit HeatmapDock(QWidget* parent = nullptr);
+    explicit ChartDock(QWidget* parent = nullptr);
     void buildUi() override;
     QSize minimumSizeHint() const override;
     

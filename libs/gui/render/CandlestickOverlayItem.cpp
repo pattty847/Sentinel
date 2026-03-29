@@ -3,9 +3,7 @@ Sentinel — CandlestickOverlayItem
 GPU-batched candlestick overlay (demo data only).
 */
 #include "CandlestickOverlayItem.hpp"
-#include "GridViewState.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
-#include "../UnifiedGridRenderer.h"
 #include "SentinelLogging.hpp"
 
 #include <QSGGeometryNode>
@@ -65,12 +63,98 @@ inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
     v += 6;
 }
 
+// Draws a diagonal line segment as a thin quad (2 triangles).
+inline void addLineSegment(QSGGeometry::ColoredPoint2D*& v,
+                           float x1, float y1, float x2, float y2,
+                           float thickness,
+                           uchar r, uchar g, uchar b, uchar a) {
+    const float dx = x2 - x1;
+    const float dy = y2 - y1;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 0.5f) {
+        // Degenerate segment — emit invisible (collapsed) verts
+        for (int i = 0; i < 6; ++i) v[i].set(x1, y1, r, g, b, 0);
+        v += 6;
+        return;
+    }
+    const float ht = thickness * 0.5f;
+    const float px = -dy / len * ht;
+    const float py =  dx / len * ht;
+    v[0].set(x1 + px, y1 + py, r, g, b, a);
+    v[1].set(x1 - px, y1 - py, r, g, b, a);
+    v[2].set(x2 + px, y2 + py, r, g, b, a);
+    v[3].set(x1 - px, y1 - py, r, g, b, a);
+    v[4].set(x2 - px, y2 - py, r, g, b, a);
+    v[5].set(x2 + px, y2 + py, r, g, b, a);
+    v += 6;
+}
+
 bool candleDebugEnabled() {
     static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
     return enabled;
 }
 
+std::vector<CandleOverlayBar> buildContinuousBars(const std::vector<CandleOverlayBar>& source,
+                                                  int64_t timeframeMs,
+                                                  qint64 boundaryStartMs,
+                                                  int maxColumns) {
+    if (source.empty() || timeframeMs <= 0 || maxColumns <= 0) {
+        return source;
+    }
+
+    std::vector<CandleOverlayBar> out;
+    out.reserve(static_cast<size_t>(maxColumns));
+
+    int syntheticBudget = std::max(0, maxColumns - static_cast<int>(source.size()));
+    auto pushBar = [&out, maxColumns](const CandleOverlayBar& bar) {
+        if (static_cast<int>(out.size()) < maxColumns) {
+            out.push_back(bar);
+        }
+    };
+
+    pushBar(source.front());
+    for (size_t i = 1; i < source.size() && static_cast<int>(out.size()) < maxColumns; ++i) {
+        const CandleOverlayBar& prev = source[i - 1];
+        const CandleOverlayBar& cur = source[i];
+        for (qint64 t = prev.timeStartMs + timeframeMs;
+             t < cur.timeStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
+             t += timeframeMs) {
+            CandleOverlayBar synthetic;
+            synthetic.timeStartMs = t;
+            synthetic.timeEndMs = t + timeframeMs;
+            synthetic.open = prev.close;
+            synthetic.high = prev.close;
+            synthetic.low = prev.close;
+            synthetic.close = prev.close;
+            out.push_back(synthetic);
+            --syntheticBudget;
+        }
+        pushBar(cur);
+    }
+
+    if (boundaryStartMs > 0 && !out.empty() && syntheticBudget > 0) {
+        const CandleOverlayBar anchor = out.back();
+        for (qint64 t = anchor.timeStartMs + timeframeMs;
+             t < boundaryStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
+             t += timeframeMs) {
+            CandleOverlayBar synthetic;
+            synthetic.timeStartMs = t;
+            synthetic.timeEndMs = t + timeframeMs;
+            synthetic.open = anchor.close;
+            synthetic.high = anchor.close;
+            synthetic.low = anchor.close;
+            synthetic.close = anchor.close;
+            out.push_back(synthetic);
+            --syntheticBudget;
+        }
+    }
+
+    return out;
+}
+
 bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
+    // INV-005: timeOffset is shader-only ring wrap for heatmap sampling.
+    // Candle geometry uses mapping helpers (world->screen), so timeOffset must not drive dirty.
     return a.valid != b.valid ||
         a.drawRect != b.drawRect ||
         a.srcRect != b.srcRect ||
@@ -80,7 +164,6 @@ bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
         a.appendMs != b.appendMs ||
         a.gridWidth != b.gridWidth ||
         a.filledColumns != b.filledColumns ||
-        a.timeOffset != b.timeOffset ||
         a.cellW != b.cellW ||
         a.viewStartMs != b.viewStartMs ||
         a.viewEndMs != b.viewEndMs ||
@@ -95,27 +178,12 @@ CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
     setFlag(ItemHasContents, true);
 }
 
-QObject* CandlestickOverlayItem::viewState() const {
-    return static_cast<QObject*>(m_viewState.data());
-}
-
 QObject* CandlestickOverlayItem::candleBuffer() const {
     return static_cast<QObject*>(m_candleBuffer.data());
 }
 
-QObject* CandlestickOverlayItem::heatmapRenderer() const {
-    return static_cast<QObject*>(m_heatmapRenderer.data());
-}
-
-void CandlestickOverlayItem::setViewState(QObject* viewState) {
-    if (m_viewState == viewState) {
-        return;
-    }
-    disconnectViewStateSignals();
-    m_viewState = qobject_cast<GridViewState*>(viewState);
-    connectViewStateSignals();
-    markGeometryDirty();
-    emit viewStateChanged();
+QObject* CandlestickOverlayItem::mappingProvider() const {
+    return m_mappingProviderObject.data();
 }
 
 void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
@@ -129,27 +197,38 @@ void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
     emit candleBufferChanged();
 }
 
-void CandlestickOverlayItem::setHeatmapRenderer(QObject* renderer) {
-    if (m_heatmapRenderer == renderer) {
+void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
+    if (m_mappingProviderObject == provider) {
         return;
     }
-    if (m_rendererViewportConn) {
-        disconnect(m_rendererViewportConn);
+    if (m_mappingViewportConn) {
+        disconnect(m_mappingViewportConn);
     }
-    if (m_rendererTimeframeConn) {
-        disconnect(m_rendererTimeframeConn);
+    if (m_mappingPanConn) {
+        disconnect(m_mappingPanConn);
     }
-    m_heatmapRenderer = qobject_cast<UnifiedGridRenderer*>(renderer);
-    if (m_heatmapRenderer) {
-        m_rendererViewportConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
-            markGeometryDirty();
-        });
-        m_rendererTimeframeConn = connect(m_heatmapRenderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
-            markGeometryDirty();
-        });
+    if (m_mappingTimeframeConn) {
+        disconnect(m_mappingTimeframeConn);
+    }
+    m_mappingProviderObject = provider;
+    m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
+    m_lastBoundarySequence = std::numeric_limits<qint64>::min();
+    if (m_mappingProviderObject) {
+        m_mappingViewportConn = QObject::connect(m_mappingProviderObject.data(),
+                                                 SIGNAL(viewportChanged()),
+                                                 this,
+                                                 SLOT(update()));
+        m_mappingPanConn = QObject::connect(m_mappingProviderObject.data(),
+                                            SIGNAL(panVisualOffsetChanged()),
+                                            this,
+                                            SLOT(onPanVisualOffsetChanged()));
+        m_mappingTimeframeConn = QObject::connect(m_mappingProviderObject.data(),
+                                                  SIGNAL(timeframeChanged()),
+                                                  this,
+                                                  SLOT(update()));
     }
     markGeometryDirty();
-    emit heatmapRendererChanged();
+    emit mappingProviderChanged();
 }
 
 void CandlestickOverlayItem::setSymbol(const QString& symbol) {
@@ -166,29 +245,17 @@ void CandlestickOverlayItem::setTimeframeSec(int sec) {
         return;
     }
     m_timeframeSec = sec;
+    m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     markGeometryDirty();
     emit timeframeSecChanged();
 }
 
-void CandlestickOverlayItem::connectViewStateSignals() {
-    if (!m_viewState) {
-        return;
-    }
-    m_viewportChangedConn = connect(m_viewState, &GridViewState::viewportChanged, this, [this]() {
-        markGeometryDirty();
-    });
-    m_panChangedConn = connect(m_viewState, &GridViewState::panVisualOffsetChanged, this, [this]() {
-        markGeometryDirty();
-    });
-}
-
-void CandlestickOverlayItem::disconnectViewStateSignals() {
-    if (m_viewportChangedConn) {
-        disconnect(m_viewportChangedConn);
-    }
-    if (m_panChangedConn) {
-        disconnect(m_panChangedConn);
-    }
+void CandlestickOverlayItem::setCandleStyle(int style) {
+    style = std::clamp(style, 0, 2);
+    if (m_candleStyle == style) return;
+    m_candleStyle = style;
+    markGeometryDirty();
+    emit candleStyleChanged();
 }
 
 void CandlestickOverlayItem::connectCandleSignals() {
@@ -204,11 +271,15 @@ void CandlestickOverlayItem::connectCandleSignals() {
                                     if (symbol != m_symbol || timeframeSec != m_timeframeSec) {
                                         return;
                                     }
-                                    if (!m_viewState || !m_viewState->isTimeWindowValid()) {
+                                    if (!m_mappingProvider) {
                                         return;
                                     }
-                                    const qint64 viewStart = m_viewState->getVisibleTimeStart();
-                                    const qint64 viewEnd = m_viewState->getVisibleTimeEnd();
+                                    const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
+                                    if (!frame.viewportValid) {
+                                        return;
+                                    }
+                                    const qint64 viewStart = frame.viewportTimeStart;
+                                    const qint64 viewEnd = frame.viewportTimeEnd;
                                     if (dirtyEndMs < viewStart || dirtyStartMs > viewEnd) {
                                         return;
                                     }
@@ -234,13 +305,17 @@ void CandlestickOverlayItem::markGeometryDirty() {
     update();
 }
 
+void CandlestickOverlayItem::onPanVisualOffsetChanged() {
+    markGeometryDirty();
+}
+
 QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     auto* root = static_cast<CandleOverlayNode*>(oldNode);
     if (!root) {
         root = new CandleOverlayNode();
     }
 
-    if (!m_viewState || !m_viewState->isTimeWindowValid() || !m_heatmapRenderer) {
+    if (!m_mappingProvider) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -248,12 +323,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const TimeAxisMapping mapping = m_heatmapRenderer->lastTimeAxisMapping();
+    const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
+    const TimeAxisMapping mapping = frame.mapping;
     if (mappingChanged(mapping, m_lastMapping)) {
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
-    if (!mapping.valid) {
+    if (!mapping.valid || !frame.viewportValid) {
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -262,17 +338,27 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     }
 
     const QSizeF currentSize(width(), height());
-    const uint64_t viewportVersion = m_viewState->getViewportVersion();
-    if (!m_geometryDirty && m_lastViewportVersion == viewportVersion && m_lastSize == currentSize) {
+    const uint64_t candleGeneration = frame.candleGeneration;
+    const qint64 expectedTfMs = static_cast<qint64>(m_timeframeSec) * 1000;
+    const bool cadenceMatches = (expectedTfMs > 0 && frame.activeTimeframeMs == expectedTfMs);
+    if (cadenceMatches && frame.boundarySequence != m_lastBoundarySequence) {
+        // Boundary progression comes from TimeAuthority and may advance with sparse/no-event windows.
+        // Treat it as a geometry-affecting trigger for candle cadence continuity.
+        m_geometryDirty = true;
+    }
+    if (cadenceMatches) {
+        m_lastBoundarySequence = frame.boundarySequence;
+    }
+    if (!m_geometryDirty && m_lastCandleGeneration == candleGeneration && m_lastSize == currentSize) {
         return root;
     }
 
-    m_lastViewportVersion = viewportVersion;
+    m_lastCandleGeneration = candleGeneration;
     m_lastSize = currentSize;
     m_geometryDirty = false;
 
-    const qint64 timeStart = m_viewState->getVisibleTimeStart();
-    const qint64 timeEnd = m_viewState->getVisibleTimeEnd();
+    const qint64 timeStart = frame.viewportTimeStart;
+    const qint64 timeEnd = frame.viewportTimeEnd;
     if (timeEnd <= timeStart) {
         return root;
     }
@@ -328,7 +414,14 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
         filtered.push_back(c);
     }
+    const int baseVisibleCount = static_cast<int>(filtered.size());
+    const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
+    const int maxColumns = std::max(0, mapping.gridWidth);
+    if (cadenceMatches && tfMs > 0 && maxColumns > 0) {
+        filtered = buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns);
+    }
     const int visibleCount = static_cast<int>(filtered.size());
+    const int syntheticCount = std::max(0, visibleCount - baseVisibleCount);
 
     if (candleDebugEnabled()) {
         static QElapsedTimer timer;
@@ -340,18 +433,23 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         if (timer.elapsed() > 1000) {
             const double spanMs = static_cast<double>(timeEnd - timeStart);
             const double msPerPixel = (width() > 0.0) ? (spanMs / width()) : 0.0;
-            const QPointF pan = m_viewState ? m_viewState->getPanVisualOffset() : QPointF();
-            const bool dragging = m_viewState ? m_viewState->isDragging() : false;
+            const QPointF pan = frame.viewportPanVisualOffset;
+            const bool dragging = frame.viewportDragging;
             const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
-            const bool autoScroll = m_viewState ? m_viewState->isAutoScrollEnabled() : false;
-            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 source=%6")
+            const bool autoScroll = frame.viewportAutoScrollEnabled;
+            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
                        .arg(m_symbol)
                        .arg(m_timeframeSec)
                        .arg(timeStart)
                        .arg(timeEnd)
                        .arg(visibleCount)
-                       .arg(hasData ? "live" : "none"));
+                       .arg(baseVisibleCount)
+                       .arg(syntheticCount)
+                       .arg(hasData ? "live" : "none")
+                       .arg(cadenceMatches ? "true" : "false")
+                       .arg(frame.boundarySequence)
+                       .arg(frame.currentBoundaryStartMs));
             sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 srcX=%4 srcW=%5 drawX=%6 drawW=%7")
                        .arg(static_cast<qint64>(mapping.dataStartMs))
                        .arg(static_cast<qint64>(mapping.appendMs))
@@ -383,53 +481,104 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
+    const bool isHollow = (m_candleStyle == 1);
+    const bool isLine   = (m_candleStyle == 2);
+
+    const uchar wickR = 240, wickG = 240, wickB = 240, wickA = 200;
+    const uchar bullR = 60,  bullG = 210, bullB = 110, bullA = 220;
+    const uchar bearR = 230, bearG = 80,  bearB = 80,  bearA = 220;
+
+    // ── Line mode: continuous line connecting all close prices, no candle shapes ─
+    if (isLine) {
+        struct ClosePoint { float cx, cy; uchar r, g, b, a; };
+        std::vector<ClosePoint> pts;
+        pts.reserve(static_cast<size_t>(visibleCount));
+        for (const auto& c : filtered) {
+            const bool bullish = c.close >= c.open;
+            const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
+            const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
+            const double cw   = xEnd - x;
+            const float cx    = static_cast<float>(x + cw * 0.5);
+            pts.push_back({cx,
+                           static_cast<float>(mapping.priceToScreenY(c.close)),
+                           bullish ? bullR : bearR,
+                           bullish ? bullG : bearG,
+                           bullish ? bullB : bearB,
+                           bullish ? bullA : bearA});
+        }
+        const int segCount = std::max(0, visibleCount - 1);
+        root->wickGeometry->allocate(0);
+        root->bodyGeometry->allocate(segCount * 6);
+        auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
+
+        for (int i = 0; i < segCount; ++i) {
+            addLineSegment(bodyVerts,
+                           pts[i].cx, pts[i].cy, pts[i + 1].cx, pts[i + 1].cy,
+                           1.5f, pts[i].r, pts[i].g, pts[i].b, pts[i].a);
+        }
+
+        root->wickNode->markDirty(QSGNode::DirtyGeometry);
+        root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
+
+    // ── Candle / Hollow mode ───────────────────────────────────────────────────
+    // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
     root->wickGeometry->allocate(visibleCount * 6);
-    root->bodyGeometry->allocate(visibleCount * 6);
+    root->bodyGeometry->allocate(isHollow ? visibleCount * 24 : visibleCount * 6);
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
-
-    const uchar wickR = 240;
-    const uchar wickG = 240;
-    const uchar wickB = 240;
-    const uchar wickA = 200;
-    const uchar bullR = 60;
-    const uchar bullG = 210;
-    const uchar bullB = 110;
-    const uchar bullA = 220;
-    const uchar bearR = 230;
-    const uchar bearG = 80;
-    const uchar bearB = 80;
-    const uchar bearA = 220;
 
     for (const auto& c : filtered) {
         const bool bullish = c.close >= c.open;
 
-        // X: world time → screen via TimeAxisMapping (no timeOffset, no manual column math)
-        const double x = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
+        const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
         const double candleW = xEnd - x;
         float bodyWidth = std::max(1.0f, static_cast<float>(candleW) * 0.7f);
         const float centerX = static_cast<float>(x + candleW * 0.5);
-        const float bodyX0 = centerX - bodyWidth * 0.5f;
-        const float bodyX1 = centerX + bodyWidth * 0.5f;
+        const float bodyX0  = centerX - bodyWidth * 0.5f;
+        const float bodyX1  = centerX + bodyWidth * 0.5f;
 
         const float wickWidth = std::max(1.0f, bodyWidth * 0.2f);
         const float wickX0 = centerX - wickWidth * 0.5f;
         const float wickX1 = centerX + wickWidth * 0.5f;
 
-        // Y: price → screen via TimeAxisMapping (pan already baked in)
-        const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
-        const float yLowF  = static_cast<float>(mapping.priceToScreenY(c.low));
-        const float yOpenF = static_cast<float>(mapping.priceToScreenY(c.open));
+        const float yHighF  = static_cast<float>(mapping.priceToScreenY(c.high));
+        const float yLowF   = static_cast<float>(mapping.priceToScreenY(c.low));
+        const float yOpenF  = static_cast<float>(mapping.priceToScreenY(c.open));
         const float yCloseF = static_cast<float>(mapping.priceToScreenY(c.close));
-        const float bodyY0 = std::min(yOpenF, yCloseF);
-        const float bodyY1 = std::max(yOpenF, yCloseF);
+        float bodyY0 = std::min(yOpenF, yCloseF);
+        float bodyY1 = std::max(yOpenF, yCloseF);
+        if ((bodyY1 - bodyY0) < 1.5f) {
+            const float mid = 0.5f * (bodyY0 + bodyY1);
+            bodyY0 = mid - 0.75f;
+            bodyY1 = mid + 0.75f;
+        }
+
+        const uchar br = bullish ? bullR : bearR;
+        const uchar bg = bullish ? bullG : bearG;
+        const uchar bb = bullish ? bullB : bearB;
+        const uchar ba = bullish ? bullA : bearA;
 
         addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickR, wickG, wickB, wickA);
-        if (bullish) {
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bullR, bullG, bullB, bullA);
+
+        if (isHollow && bullish) {
+            // Hollow bullish: border outline only (4 quads)
+            const float bw = std::max(1.0f, bodyWidth * 0.12f);
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
+            addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left
+            addQuad(bodyVerts, bodyX1 - bw, bodyY0, bodyX1, bodyY1, br, bg, bb, ba); // right
         } else {
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bearR, bearG, bearB, bearA);
+            // Normal filled body (also bearish candles in Hollow mode)
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
+            if (isHollow) {
+                // Pad 3 unused body quads with collapsed (invisible) entries
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+            }
         }
     }
 

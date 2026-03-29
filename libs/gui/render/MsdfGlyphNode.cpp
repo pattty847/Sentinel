@@ -35,7 +35,7 @@ public:
         color.setW(color.w() * state.opacity());
         memcpy(data->data() + 64, &color, sizeof(QVector4D));
 
-        const QVector4D params(material->pxRange(), 0.0f, 0.0f, 0.0f);
+        const QVector4D params(material->pxRange(), 0.0f, -1.0f, 2.0f);
         memcpy(data->data() + 80, &params, sizeof(QVector4D));
         changed = true;
 

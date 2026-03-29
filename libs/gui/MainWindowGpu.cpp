@@ -13,21 +13,30 @@
 #include <QStatusBar>
 #include <QElapsedTimer>
 #include <QThread>
+#include <QDateTime>
+#include <QUuid>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
+#include "../core/servermodel/SessionManager.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
-#include "widgets/HeatmapDock.hpp"
+#include "widgets/ChartDock.hpp"
 #include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
+#include "widgets/ScreenerDock.hpp"
 #include "widgets/CopenetFeedDock.hpp"
 #include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/WatchlistDock.hpp"
+#include "widgets/StockChartDock.hpp"
+#include "widgets/OrderBookDock.hpp"
+#include "widgets/PaperTradingDock.hpp"
 #include "widgets/FontSettingsDialog.hpp"
+#include "render/AlgoOverlayRenderer.hpp"
+#include "render/PaperTradeOverlayModel.hpp"
 #include "widgets/LayoutManager.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
@@ -38,6 +47,7 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "TradeInputManager.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
 #include "themes/ThemeManager.hpp"
@@ -56,7 +66,11 @@
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
+#include <QCoreApplication>
+#include <QProcess>
 #include <QtGlobal>
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace {
@@ -87,7 +101,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     const auto& clientConfig = GuiConfigStore::instance().clientConfig();
     auto remote = std::make_unique<RemoteGridDataSource>(
         QString::fromStdString(clientConfig.server.host),
-        QString::fromStdString(clientConfig.server.port));
+        QString::fromStdString(clientConfig.server.port),
+        QString::fromStdString(clientConfig.server.caFile));
     remote->connectToServer();
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
@@ -137,7 +152,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
         connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
         connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
-        sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency)");
+        connect(&perfMon, &PerformanceMonitor::uploadBandwidthChanged, m_statusBar, &StatusBar::setUploadBandwidth);
+        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
+            connect(remote->streamClient(), &SentinelStreamClient::coinbaseLatencyReceived,
+                    m_statusBar, &StatusBar::setCoinbaseLatency, Qt::QueuedConnection);
+        }
+        sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency, Upload)");
     }
     
     m_modeController = new ChartModeController(this);
@@ -147,7 +167,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }
-    m_modeController->setMode(ChartMode::HYBRID_CANDLES_TRADES);
+    m_modeController->setPrimaryField(ChartModeController::PrimaryField::Heatmap);
+    m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -184,6 +205,22 @@ void MainWindowGPU::setupUI() {
     m_aiCommentaryDock = docks.aiCommentaryDock;
     m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
+    m_screenerDock = docks.screenerDock;
+    m_stockChartDock = docks.stockChartDock;
+    m_orderBookDock = docks.orderBookDock;
+    m_paperTradingDock = new PaperTradingDock(this);
+    m_paperTradingDock->setDataSource(m_dataSource.get());
+    if (m_screenerDock) {
+        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
+            m_screenerDock->setStreamClient(remote->streamClient());
+        }
+        connect(m_screenerDock, &ScreenerDock::rowSelected,
+                this, &MainWindowGPU::onAssetSymbolSelected);
+    }
+    if (m_watchlistDock) {
+        connect(m_watchlistDock, &WatchlistDock::symbolSelected,
+                this, &MainWindowGPU::onAssetSymbolSelected);
+    }
     
     m_qquickView = m_heatmapDock->qquickView();
     m_qmlContainer = m_heatmapDock->qmlContainer();
@@ -197,18 +234,89 @@ void MainWindowGPU::setupUI() {
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
+    if (m_orderBookDock) {
+        connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
+    }
+    if (m_paperTradingDock) {
+        connect(this, &MainWindowGPU::symbolChanged, m_paperTradingDock, &PaperTradingDock::setSymbol, Qt::QueuedConnection);
+    }
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
-        connect(m_heatmapDock->toolbar(), &TopToolbar::chartModeSelected, this, [this](ChartMode mode) {
+        connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Primary field request: %1").arg(field));
+            }
             if (m_modeController) {
-                m_modeController->setMode(mode);
+                m_modeController->setPrimaryField(field);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::heatmapToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar heatmap toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setHeatmapLayerEnabled(enabled);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::footprintToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar footprint toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setFootprintLayerEnabled(enabled);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::tpoToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar TPO toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setTpoLayerEnabled(enabled);
+            }
+            if (enabled && m_connected && m_userSubscribed) {
+                requestTpoHistoryForSymbol(m_currentSymbol);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::volumeProfileToggled, this, [this](bool enabled) {
+            if (chartDebugEnabled()) {
+                sLog_Debug(QString("Toolbar volume profile toggled: %1").arg(enabled));
+            }
+            if (!m_qmlController) return;
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                renderer->setVolumeProfileLayerEnabled(enabled);
+            }
+            if (enabled && m_connected && m_userSubscribed) {
+                requestTpoHistoryForSymbol(m_currentSymbol);
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::candlesToggled, this, [this](bool enabled) {
+            if (m_modeController) {
+                m_modeController->setCandlesEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityThresholdChanged, this, [this](double value) {
             if (!m_qmlController) return;
             auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (renderer) {
-                renderer->setProperty("heatmapLiquidityThreshold", value);
+            if (!renderer) return;
+            // value is raw 0–1000 slider position.
+            // Convert to log-scaled threshold using the observed data range.
+            // Dead zone: bottom 4% of slider (value < 40) = threshold 0 (off).
+            constexpr double kSliderMax = 1000.0;
+            constexpr double kDeadZone  = 0.04;
+            const double ratio = value / kSliderMax;
+            double threshold = 0.0;
+            if (ratio >= kDeadZone) {
+                const double obsMin = renderer->heatmapMinObservedLiquidity();
+                const double obsMax = renderer->heatmapMaxObservedLiquidity();
+                const double minVal = (obsMin > 0.0 && obsMin < obsMax) ? obsMin : (obsMax > 0.0 ? obsMax / 1000.0 : 1e-9);
+                const double maxVal = obsMax > 0.0 ? obsMax : 1e-6;
+                const double r = (ratio - kDeadZone) / (1.0 - kDeadZone);
+                const double logSpan = std::log(maxVal / minVal);
+                threshold = minVal * std::exp(r * logSpan);
             }
+            renderer->setProperty("heatmapLiquidityThreshold", threshold);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityLabelModeChanged, this, [this](int mode) {
             if (!m_qmlController) return;
@@ -216,6 +324,18 @@ void MainWindowGPU::setupUI() {
             if (renderer) {
                 renderer->setProperty("liquidityLabelMode", mode);
             }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (renderer) renderer->setHeatmapColorPreset(preset);
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::chartTypeSelected, this, [this](const QString& type) {
+            if (!m_qmlController) return;
+            auto* renderer = m_qmlController->getUnifiedGridRenderer();
+            if (!renderer) return;
+            const int style = (type == "Hollow") ? 1 : (type == "Line") ? 2 : 0;
+            renderer->setCandleStyle(style);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
@@ -250,6 +370,12 @@ void MainWindowGPU::setupUI() {
             if (m_connected && m_userSubscribed) {
                 requestHeatmapHistoryForSymbol(m_currentSymbol);
                 requestCandleHistoryForSymbol(m_currentSymbol);
+                if (m_modeController && m_modeController->primaryField() == 1) {
+                    requestFootprintHistoryForSymbol(m_currentSymbol);
+                } else if (m_modeController && (m_modeController->primaryField() == 2 ||
+                                                m_modeController->primaryField() == 3)) {
+                    requestTpoHistoryForSymbol(m_currentSymbol);
+                }
             }
         });
     }
@@ -274,6 +400,53 @@ void MainWindowGPU::setupConnections() {
         });
     }
     connectMarketDataSignals();
+    if (m_paperTradingDock) {
+        connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                m_paperTradingDock, &PaperTradingDock::onTradeReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                m_paperTradingDock, &PaperTradingDock::onOrderUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                m_paperTradingDock, &PaperTradingDock::onPositionUpdated, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                m_paperTradingDock, &PaperTradingDock::onAlgoOrderEvent, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::pnlSnapshotReceived,
+                m_paperTradingDock, &PaperTradingDock::onPnlSnapshot, Qt::QueuedConnection);
+    }
+
+    if (m_qquickView && m_qquickView->rootObject()) {
+        if (auto* overlay = m_qquickView->rootObject()->findChild<AlgoOverlayRenderer*>("algoOverlayRenderer")) {
+            connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
+                    overlay, &AlgoOverlayRenderer::onAlgoOrderEvent, Qt::QueuedConnection);
+        }
+        if (auto* overlayModel = m_qquickView->rootObject()->findChild<PaperTradeOverlayModel*>("paperTradeOverlayModel")) {
+            connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
+                    overlayModel, &PaperTradeOverlayModel::onTradeReceived, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::orderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onOrderUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::positionUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onPositionUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::riskOrderUpdated,
+                    overlayModel, &PaperTradeOverlayModel::onRiskOrderUpdated, Qt::QueuedConnection);
+            connect(overlayModel, &PaperTradeOverlayModel::applyAttachedRiskRequested,
+                    this,
+                    [this](bool hasTakeProfit, double takeProfitPrice, bool hasStopLoss, double stopLossPrice) {
+                        if (!m_dataSource || m_currentSymbol.isEmpty()) {
+                            return;
+                        }
+                        trading::TradeCommand cmd;
+                        cmd.commandId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+                        cmd.action = trading::TradeAction::SetAttachedRisk;
+                        cmd.symbol = m_currentSymbol.toStdString();
+                        cmd.timestamp = QDateTime::currentMSecsSinceEpoch();
+                        cmd.hasTakeProfit = hasTakeProfit;
+                        cmd.takeProfitPrice = takeProfitPrice;
+                        cmd.hasStopLoss = hasStopLoss;
+                        cmd.stopLossPrice = stopLossPrice;
+                        m_dataSource->sendTradeCommand(cmd);
+                    },
+                    Qt::QueuedConnection);
+        }
+    }
 }
 
 void MainWindowGPU::setupGuiApiServer() {
@@ -319,6 +492,123 @@ void MainWindowGPU::setupGuiApiServer() {
     }
 }
 
+void MainWindowGPU::startScreenerServer() {
+    if (m_screenerProcess && m_screenerProcess->state() != QProcess::NotRunning) {
+        return;  // already running
+    }
+
+    // Locate scripts/screener/screener_server.py relative to the running binary.
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates;
+    for (const QString& rel : {
+             QStringLiteral("../../../../scripts"),         // dev: build/mac-clang/apps/sentinel-gui/ -> repo/scripts
+             QStringLiteral("../../../scripts"),
+             QStringLiteral("../../scripts"),
+             QStringLiteral("../scripts"),
+             QStringLiteral("scripts"),
+         }) {
+        candidates << QDir(appDir).absoluteFilePath(rel);
+    }
+
+    QString scriptsDir;
+    for (const QString& candidate : candidates) {
+        if (QFileInfo(candidate + QStringLiteral("/screener/screener_server.py")).exists()) {
+            scriptsDir = candidate;
+            break;
+        }
+    }
+
+    if (scriptsDir.isEmpty()) {
+        sLog_App("Screener server not started: scripts/screener/screener_server.py not found near " << appDir);
+        return;
+    }
+
+    // Kill any stale process holding port 17200 from a previous run.
+    QProcess::execute(QStringLiteral("sh"),
+        {QStringLiteral("-c"),
+         QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
+
+    // Use 'uv run' so Python deps are automatically resolved from the venv.
+    const QString uvBin = QStringLiteral("uv");
+    QStringList args;
+    args << QStringLiteral("run")
+         << QStringLiteral("python")
+         << QStringLiteral("screener/screener_server.py");
+
+    if (!m_screenerProcess) {
+        m_screenerProcess = new QProcess(this);
+        // Capture both stdout and stderr so we see Python tracebacks.
+        auto logOutput = [this]() {
+            const QString out = QString::fromUtf8(m_screenerProcess->readAllStandardOutput()).trimmed();
+            if (!out.isEmpty()) sLog_App("[screener_server] " << out);
+        };
+        auto logErr = [this]() {
+            const QString err = QString::fromUtf8(m_screenerProcess->readAllStandardError()).trimmed();
+            if (!err.isEmpty()) sLog_App("[screener_server] " << err);
+        };
+        connect(m_screenerProcess, &QProcess::readyReadStandardOutput, this, logOutput);
+        connect(m_screenerProcess, &QProcess::readyReadStandardError,  this, logErr);
+        connect(m_screenerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, scriptsDir, uvBin, args](int exitCode, QProcess::ExitStatus status) {
+                    sLog_App("Screener server exited: code=" << exitCode
+                             << " status=" << static_cast<int>(status));
+                    if (!m_screenerProcess) return;  // deliberate shutdown
+                    ++m_screenerRestartCount;
+                    if (m_screenerRestartCount > kMaxScreenerRestarts) {
+                        sLog_App("Screener server failed " << m_screenerRestartCount
+                                 << " times in a row — giving up. Kill port 17200 and restart the app.");
+                        return;
+                    }
+                    const int delayMs = 2000 * m_screenerRestartCount;  // back off: 2s, 4s, 6s
+                    sLog_App("Screener server restarting (attempt " << m_screenerRestartCount
+                             << "/" << kMaxScreenerRestarts << ") in " << delayMs << "ms...");
+                    QTimer::singleShot(delayMs, this, [this, scriptsDir, uvBin, args]() {
+                        if (!m_screenerProcess) return;
+                        // Kill stale process before retrying too.
+                        QProcess::execute(QStringLiteral("sh"),
+                            {QStringLiteral("-c"),
+                             QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
+                        m_screenerProcess->setWorkingDirectory(scriptsDir);
+                        m_screenerProcess->start(uvBin, args);
+                    });
+                });
+    }
+
+    m_screenerRestartCount = 0;
+    m_screenerProcess->setWorkingDirectory(scriptsDir);
+    m_screenerProcess->start(uvBin, args);
+    if (m_screenerProcess->waitForStarted(2000)) {
+        sLog_App("Screener server started (pid=" << m_screenerProcess->processId() << ")");
+    } else {
+        sLog_App("Screener server failed to start: " << m_screenerProcess->errorString());
+    }
+}
+
+void MainWindowGPU::stopScreenerServer() {
+    if (!m_screenerProcess || m_screenerProcess->state() == QProcess::NotRunning) {
+        m_screenerProcess = nullptr;
+        return;
+    }
+    // Null first so the finished() handler doesn't schedule an auto-restart.
+    QProcess* proc = m_screenerProcess;
+    m_screenerProcess = nullptr;
+    proc->terminate();
+    if (!proc->waitForFinished(2000)) {
+        proc->kill();
+    }
+}
+
+void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& assetType) {
+    if (assetType == QLatin1String("crypto") && m_symbolInput) {
+        m_symbolInput->setText(symbol);
+        onSubscribe();
+    } else if (assetType == QLatin1String("stock") && m_stockChartDock) {
+        m_stockChartDock->show();
+        m_stockChartDock->raise();
+        m_stockChartDock->loadSymbol(symbol);
+    }
+}
+
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty() || !symbol.contains('-')) {
@@ -336,6 +626,8 @@ void MainWindowGPU::onSubscribe() {
     }
     if (m_connected) {
         requestHeatmapHistoryForSymbol(symbol);
+        requestFootprintHistoryForSymbol(symbol);
+        requestTpoHistoryForSymbol(symbol);
         requestCandleHistoryForSymbol(symbol);
     }
 }
@@ -378,6 +670,70 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
                    .arg(count));
     }
     m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
+}
+
+void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeMs = 0;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->getCurrentTimeframe();
+        }
+    }
+    if (timeframeMs <= 0) {
+        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
+        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+            timeframeMs = serverConfig.heatmap.timeframesMs.front();
+        }
+    }
+    if (timeframeMs <= 0) {
+        timeframeMs = 1000;
+    }
+    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
+    const int gridWidth = serverConfig.heatmap.gridWidth;
+    const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("Footprint history request: symbol=%1 tfMs=%2 count=%3")
+                   .arg(symbol)
+                   .arg(timeframeMs)
+                   .arg(count));
+    }
+    m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);
+}
+
+void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
+    if (!m_dataSource || symbol.isEmpty()) {
+        return;
+    }
+    int64_t timeframeMs = 900000;
+    int sessionType = 4;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            timeframeMs = renderer->tpoTimeframeMs();
+            sessionType = renderer->tpoSessionType();
+        }
+    }
+    if (timeframeMs != 900000 && timeframeMs != 1800000) {
+        timeframeMs = 900000;
+    }
+    if (sessionType < static_cast<int>(SessionManager::SessionType::NY) ||
+        sessionType > static_cast<int>(SessionManager::SessionType::W1)) {
+        sessionType = 4;
+    }
+    const int64_t sessionMs = SessionManager::sessionDurationMs(
+        static_cast<SessionManager::SessionType>(sessionType));
+    const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
+    if (chartDebugEnabled()) {
+        sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 sessionType=%3 count=%4")
+                   .arg(symbol)
+                   .arg(timeframeMs)
+                   .arg(sessionType)
+                   .arg(count));
+    }
+    m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, 0, count);
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -451,6 +807,7 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
+    stopScreenerServer();
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
@@ -460,6 +817,8 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 
     if (m_firstShow) {
         m_firstShow = false;
+
+        startScreenerServer();
 
         if (const auto screen = QApplication::primaryScreen()) {
             setGeometry(screen->availableGeometry());
@@ -484,14 +843,18 @@ void MainWindowGPU::setupMenuBar() {
     docks.copenetDock = m_copenetDock;
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
-    
+    docks.watchlistDock = m_watchlistDock;
+    docks.screenerDock = m_screenerDock;
+    docks.stockChartDock = m_stockChartDock;
+    docks.orderBookDock = m_orderBookDock;
+
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
     callbacks.restoreLayout = [this]() { onRestoreLayout(); };
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
-    m_menuBuilder->setHeatmapDock(m_heatmapDock);
+    m_menuBuilder->setChartDock(m_heatmapDock);
 
     m_menuBuilder->buildMenus(docks, callbacks);
 }
@@ -536,7 +899,63 @@ void MainWindowGPU::connectMarketDataSignals() {
                        .arg(tf)
                        .arg(unifiedGridRenderer->getCurrentTimeframe()));
         }
+        auto* toolbar = m_heatmapDock->toolbar();
+        toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
+                                      unifiedGridRenderer->footprintLayerEnabled(),
+                                      unifiedGridRenderer->tpoLayerEnabled(),
+                                      unifiedGridRenderer->volumeProfileLayerEnabled());
+        connect(unifiedGridRenderer,
+                &UnifiedGridRenderer::layerVisibilityChanged,
+                this,
+                [toolbar, unifiedGridRenderer]() {
+                    toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
+                                                  unifiedGridRenderer->footprintLayerEnabled(),
+                                                  unifiedGridRenderer->tpoLayerEnabled(),
+                                                  unifiedGridRenderer->volumeProfileLayerEnabled());
+                },
+                Qt::QueuedConnection);
     }
+
+    if (m_modeController) {
+        connect(m_modeController,
+                &ChartModeController::primaryFieldChanged,
+                unifiedGridRenderer,
+                &UnifiedGridRenderer::setPrimaryField,
+                Qt::QueuedConnection);
+        unifiedGridRenderer->setPrimaryField(m_modeController->primaryField());
+    }
+
+    connect(unifiedGridRenderer,
+            &UnifiedGridRenderer::tpoConfigChanged,
+            this,
+            [this]() {
+                if (!m_connected || !m_userSubscribed) {
+                    return;
+                }
+                if (m_currentSymbol.isEmpty()) {
+                    return;
+                }
+                requestTpoHistoryForSymbol(m_currentSymbol);
+            },
+            Qt::QueuedConnection);
+
+    // Scroll-past-cache: fetch older heatmap history when the user pans past the edge.
+    connect(unifiedGridRenderer,
+            &UnifiedGridRenderer::heatmapHistoryNeeded,
+            this,
+            [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
+                if (!m_dataSource || m_currentSymbol.isEmpty()) return;
+                if (!m_connected) return;
+                if (chartDebugEnabled()) {
+                    sLog_Debug(QString("Heatmap scroll-past-cache fetch: symbol=%1 tf=%2 end=%3 count=%4")
+                               .arg(m_currentSymbol)
+                               .arg(timeframeMs)
+                               .arg(endTimeMs)
+                               .arg(count));
+                }
+                m_dataSource->requestHeatmapHistory(m_currentSymbol, timeframeMs, endTimeMs, count);
+            },
+            Qt::QueuedConnection);
 
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {
@@ -547,6 +966,12 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,
+                dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived,
+                dataProcessor, &DataProcessor::onTpoSliceReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::volumeProfileSliceReceived,
+                dataProcessor, &DataProcessor::onVolumeProfileSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }
@@ -557,22 +982,6 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
-    connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
-            this, [this](bool connected) {
-                if (!connected || !m_dataSource) {
-                    return;
-                }
-                if (!m_userSubscribed) {
-                    return;
-                }
-                const QString symbol = m_currentSymbol;
-                if (symbol.isEmpty()) {
-                    return;
-                }
-                m_dataSource->subscribe(symbol);
-                requestHeatmapHistoryForSymbol(symbol);
-                requestCandleHistoryForSymbol(symbol);
-            });
 
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [](const QString& error) {
@@ -582,13 +991,40 @@ void MainWindowGPU::connectMarketDataSignals() {
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     if (m_statusBar) {
-        m_statusBar->setConnectionStatus(connected);
+        if (connected) {
+            m_statusBar->setConnectionStatus(true);
+        } else {
+            // Show "Connecting..." immediately on disconnect — we always attempt reconnect.
+            m_statusBar->setConnectionConnecting();
+        }
     }
     m_connected = connected;
 
     if (m_subscribeButton) {
         m_subscribeButton->setText(connected ? "Subscribe" : "Connect");
         m_subscribeButton->setEnabled(true);
+    }
+
+    if (connected) {
+        // Auto-subscribe to default symbol on first connection if user hasn't done so manually.
+        if (!m_userSubscribed && !m_currentSymbol.isEmpty()) {
+            m_userSubscribed = true;
+            if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
+            sLog_App(QString("Auto-subscribed to %1 on first connect").arg(m_currentSymbol));
+        }
+
+        // (Re)send subscription and request history for active symbol.
+        if (m_userSubscribed && !m_currentSymbol.isEmpty() && m_dataSource) {
+            // Notify all docks/widgets of the active symbol so they can
+            // filter incoming data (e.g. OrderBookDock sets m_currentSymbol).
+            emit symbolChanged(m_currentSymbol);
+            m_dataSource->subscribe(m_currentSymbol);
+            requestHeatmapHistoryForSymbol(m_currentSymbol);
+            requestFootprintHistoryForSymbol(m_currentSymbol);
+            requestTpoHistoryForSymbol(m_currentSymbol);
+            requestCandleHistoryForSymbol(m_currentSymbol);
+            sLog_App(QString("Subscribed and requested history on connect: %1").arg(m_currentSymbol));
+        }
     }
 }
 
@@ -660,6 +1096,9 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.labDock = m_labDock;
     docks.watchlistDock = m_watchlistDock;
-    docks.watchlistDock = m_watchlistDock;
+    docks.screenerDock = m_screenerDock;
+    docks.stockChartDock = m_stockChartDock;
+    docks.orderBookDock = m_orderBookDock;
+    docks.paperTradingDock = m_paperTradingDock;
     return docks;
 }

@@ -33,6 +33,38 @@ add_library(sentinel_core
     protocol/SentinelStreamServer.cpp
     protocol/SentinelStreamClient.hpp
     protocol/SentinelStreamClient.cpp
+    protocol/SentinelStreamClientParseHelpers.hpp
+    protocol/SentinelStreamClientParseHelpers.cpp
+    trading/TradingTypes.hpp
+    trading/TradingTypes.cpp
+    trading/OrderStore.hpp
+    trading/OrderStore.cpp
+    trading/PositionManager.hpp
+    trading/PositionManager.cpp
+    trading/PaperExecutionAdapter.hpp
+    trading/PaperExecutionAdapter.cpp
+    trading/TradingEngine.hpp
+    trading/TradingEngine.cpp
+    trading/IAlgo.hpp
+    trading/AlgoEngine.hpp
+    trading/AlgoEngine.cpp
+    trading/AvendellaMM.hpp
+    trading/AvendellaMM.cpp
+    trading/BacktestTypes.hpp
+    trading/IExecutionModel.hpp
+    trading/IBacktestStrategy.hpp
+    trading/MarketEventSource.hpp
+    trading/MarketEventSource.cpp
+    trading/TradeDrivenExecutionModel.hpp
+    trading/TradeDrivenExecutionModel.cpp
+    trading/SimulationBroker.hpp
+    trading/SimulationBroker.cpp
+    trading/ReplayEngine.hpp
+    trading/ReplayEngine.cpp
+    trading/AlgoBacktestAdapter.hpp
+    trading/AlgoBacktestAdapter.cpp
+    trading/LiveTradingSession.hpp
+    trading/LiveTradingSession.cpp
 )
 
 # Find required packages
@@ -80,4 +112,4 @@ endif()
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON) 
+set(CMAKE_AUTORCC ON)

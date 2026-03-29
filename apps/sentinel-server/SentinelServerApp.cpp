@@ -72,14 +72,11 @@ bool SentinelServerApp::initialize() {
             sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort);
         }
 
-        // 1. Authenticator
-        try {
-            m_authenticator = std::make_unique<Authenticator>();
-        } catch (const std::exception& e) {
-            sLog_Error("Authenticator init failed: " << e.what());
-            return false;
-        }
-        
+        // 1. Authenticator (optional: public channels work without key.json)
+        m_authenticator = std::make_unique<Authenticator>();
+        // Only send JWT when we have credentials and config enables it (user/futures channels need auth)
+        m_serverConfig.mdc.useJwt = m_authenticator->hasCredentials() && m_serverConfig.mdc.useJwt;
+
         // 2. Market Data Core
         try {
             m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, m_serverConfig.mdc);
@@ -143,7 +140,7 @@ bool SentinelServerApp::initialize() {
             sLog_Error("MarketDataCore Error: " << error);
         });
 
-        m_marketDataCore->onLatency([](int latencyMs) {
+        m_marketDataCore->onLatency([this](int latencyMs) {
             // Log Coinbase WebSocket latency (server time - Coinbase timestamp)
             // This runs frequently, so throttle logging
             static int lastLoggedLatency = -1;
@@ -156,6 +153,16 @@ bool SentinelServerApp::initialize() {
                 sLog_Data("Coinbase WebSocket Latency: " << latencyMs << " ms");
                 lastLoggedLatency = latencyMs;
                 lastLogTime = now;
+            }
+            if (m_server) {
+                static int lastBroadcastMs = -1;
+                static auto lastBroadcastTime = std::chrono::steady_clock::now();
+                const auto sinceBroadcast = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBroadcastTime).count();
+                if (sinceBroadcast >= 1000 || std::abs(latencyMs - lastBroadcastMs) > 5) {
+                    m_server->broadcastCoinbaseLatency(latencyMs);
+                    lastBroadcastMs = latencyMs;
+                    lastBroadcastTime = now;
+                }
             }
         });
 

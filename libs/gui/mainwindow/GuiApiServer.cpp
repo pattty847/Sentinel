@@ -174,6 +174,7 @@ void GuiApiServer::respond(QTcpSocket* socket, int statusCode, const QByteArray&
     response.append(body);
 
     socket->write(response);
+    disconnect(socket, &QTcpSocket::readyRead, nullptr, nullptr);
     socket->disconnectFromHost();
 }
 

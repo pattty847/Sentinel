@@ -1,9 +1,9 @@
 schema_version: 1
-timeframes_ms: [1000, 60000, 3600000, 86400000]
+timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
 heatmap:
-  grid_width: 5120
+  grid_width: 8192
   grid_height: 2048
-  tick_size: 0
+  tick_size: 5
   recenter_delta: 0.01
 orderbook:
   tick_size: 0.1

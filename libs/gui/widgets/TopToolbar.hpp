@@ -1,9 +1,9 @@
 #pragma once
 #include <QToolBar>
+#include <QToolButton>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSlider>
-#include "ChartMode.h"
 
 class TopToolbar : public QToolBar {
     Q_OBJECT
@@ -15,10 +15,19 @@ public:
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
+    void setLayerToggleStates(bool heatmapEnabled,
+                              bool footprintEnabled,
+                              bool tpoEnabled,
+                              bool volumeProfileEnabled = false);
 
 signals:
     void subscribeRequested();
-    void chartModeSelected(ChartMode mode);
+    void primaryFieldRequested(int field);
+    void heatmapToggled(bool enabled);
+    void footprintToggled(bool enabled);
+    void tpoToggled(bool enabled);
+    void volumeProfileToggled(bool enabled);
+    void candlesToggled(bool enabled);
     void timeframeSelected(const QString& timeframe);
     void chartTypeSelected(const QString& chartType);
     void indicatorsRequested();
@@ -29,6 +38,7 @@ signals:
     void screenshotRequested();
     void liquidityThresholdChanged(double threshold);
     void liquidityLabelModeChanged(int mode);
+    void colorPresetSelected(const QString& preset);
 
 private:
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
@@ -37,7 +47,12 @@ private:
     QLineEdit* m_symbolSearch = nullptr;
     QComboBox* m_timeframeCombo = nullptr;
     QComboBox* m_chartTypeCombo = nullptr;
+    QComboBox* m_colorPresetCombo = nullptr;
     QSlider* m_liquiditySlider = nullptr;
     QComboBox* m_liquidityModeCombo = nullptr;
     QToolButton* m_subscribeButton = nullptr;
+    QToolButton* m_heatmapButton = nullptr;
+    QToolButton* m_footprintButton = nullptr;
+    QToolButton* m_tpoButton = nullptr;
+    QToolButton* m_volumeProfileButton = nullptr;
 };

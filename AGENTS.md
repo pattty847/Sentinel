@@ -1,343 +1,140 @@
-## **AGENTS.md — Sentinel Unified Assistant Prompt (v5.2)**
+# AGENTS.md — Sentinel Agent Operating Rules (Slim)
 
-**Source of truth for all AI assistants working on Sentinel.**
-Claude, Gemini, Cursor, ChatGPT must follow this file.
+Do not flatter, validate, or agree by default.
+Your job is to be correct, not agreeable.
+Challenge assumptions, point out errors, and highlight weak reasoning immediately.
+If the user is wrong, say it plainly and explain why.
+If uncertain, state uncertainty instead of guessing.
+Avoid praise unless it is explicitly earned and relevant.
+Optimize for truth, clarity, and usefulness—never for likability.
 
-Machine: Windows 11
-Build: cmake --build --preset windows-msvc-vs
+Source of truth for coding agents working on Sentinel.
+Default goal: make the requested change safely.
 
----
+## 0) Fast Start (Read Minimum First)
 
-# **0. Agent Notes (Local Memory)**
+Use the smallest context that can solve the task.
 
-Path: `_agent/` (AI-only scratchpad; keep short and standardized).
-This folder is gitignored by default.
+Modes:
+- **Lite** (questions, docs, tooling, no code edits): do not preload `_agent/` or `docs/TODO.md`
+- **CodeChange** (implement/refactor): read `_agent/INVARIANTS.md`
+- **Debug/Perf/Regression**: read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`
 
-**Rules**
-* Read `_agent/INVARIANTS.md` and `_agent/FAILURE_MODES.md` at session start.
-* Update notes at session end if a new invariant, guardrail, or decision was discovered.
-* Keep entries one line; no paragraphs; ASCII only.
-* Do not add new files unless explicitly requested.
+Rules:
+- Start with targeted search (`rg -n`, `rg --files`), not broad file reads.
+- Before first concrete action, read at most ~200 lines total unless user asks for deep review.
+- If request is ambiguous, start in Lite mode and escalate only if needed.
+- If you discover a durable invariant/failure mode/decision, update `_agent/` before stopping.
 
-**Files + expected format**
-* File: `_agent/INVARIANTS.md` | Format: `- INV-### | <statement>`
-* File: `_agent/FAILURE_MODES.md` | Format: `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
-* File: `_agent/REPO_MAP.md` | Format: `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
-* File: `_agent/DECISIONS.md` | Format: `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
+## 1) Sentinel Non-Negotiables (Core Identity)
 
----
+Protect these at all times:
+- **Core stays pure C++** (no Qt contamination in core, except explicitly tolerated utility types if already established)
+- **GUI owns Qt/QML/QSG behavior**
+- **Rendering is GPU-first, deterministic, and low-lag**
 
-# **0a. Mandatory Agent Behaviors (Low-Ceremony)**
+Prefer simpler/faster designs over preserving weak legacy patterns unless compatibility is explicitly required.
 
-**Invariant Check‑In (start of non‑trivial sessions)**
-* Read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`.
-* State which invariants this task relies on and which might be at risk.
+## 2) Critical Invariants
 
-**Invariant Check‑Out (end of session)**
-* Did we discover a new invariant, failure mode, or decision? If yes, update `_agent/` before stopping.
+- **Viewport updates must go through `setViewport()`** so `viewportVersion` increments.
+  Do not mutate viewport fields directly. If `viewportVersion` does not change, rebuild logic can fail.
 
-**Failure‑Mode‑First Debugging**
-* Assume the bug is a known failure mode until falsified.
-* Scan `_agent/FAILURE_MODES.md` before inventing new theories.
+- **Threading**
+  - Network and data processing stay off GUI thread
+  - Cross-thread communication uses `Qt::QueuedConnection`
+  - QSG/render-thread code must not touch GUI `QObject` graphs
 
-**Decision Crystallization Trigger**
-* Log in `_agent/DECISIONS.md` when we choose X over Y, reject a tempting alternative, or freeze a previously flexible choice.
+- **Render path behavior**
+  - Preallocate/reuse QSG geometry and nodes where practical
+  - Validate inputs (skip NaN/inf)
+  - Avoid unnecessary node/geometry churn in hot paths
 
-**Performance Tripwire (hot paths)**
-* Before coding, state potential per‑frame costs: allocations, object creation, signal emissions, binding re‑evals.
-* If uncertain, treat it as a risk and reduce scope or add guardrails.
+## 3) Where Things Belong (Ownership Boundaries)
 
-**System Context (Sentinel)**
-* Goal: GPU‑first, deterministic, zero‑lag trading terminal (ExoCharts + TradingView + SierraCharts + Bookmap + TradingLite vibes).
-* Future: AI commentary (CopeNet), equity/crypto data (including free sources like yfinance), and richer overlays.
-* Constraint: do not derail for token usage; keep prompts and notes short and enforceable.
+- `libs/core`: market data transport, dispatchers, order books, DTOs, transforms (non-UI logic)
+- `libs/gui`: Qt/QML/QSG, rendering strategies, window/widget behavior
+- `apps/`: thin bootstraps only (no business logic)
 
----
+If a change crosses these boundaries, stop and justify it before proceeding.
 
-# **1. Mission**
+## 4) Commands (Use These First)
 
-Sentinel is a GPU-accelerated trading terminal.
-Its identity rests on three pillars:
+Build:
+- `cmake --build --preset windows-msvc-vs/mac-clang`
 
-* **Core stays pure C++ (no Qt contamination).**
-* **GUI owns all Qt/QML/QSG behavior.**
-* **Rendering is GPU-first, zero-lag, and deterministic.**
+Runtime/testing:
+- Prefer targeted validation for touched area first
+- Full-suite or long-running passes only if requested or clearly necessary
 
-Everything the AI does must protect those three truths.
+Cheap verification ladder:
+1. Format/lint touched scope only
+2. Build affected target(s)
+3. Run targeted tests / targeted repro
+4. Ask before broad/full runs unless user asked for it
 
----
+## 5) Hot Paths (Treat Like Live Wires)
 
-# **2. Architecture Overview (Simple & Honest)**
+Changes here require performance caution and small diffs:
+- `DataProcessor`
+- `HeatmapTwapStreamer`
+- `HeatmapLabelRenderer`
+- QSG geometry updates
 
-### **Core Layer (`libs/core`)**
+Before editing hot paths, explicitly check for per-frame risk:
+- allocations
+- object creation/destruction
+- signal emissions
+- binding churn / unnecessary recomputation
 
-* No Qt except QString/QDateTime if needed.
-* Handles: market data transport, dispatchers, order books, protocol DTOs, transforms.
+## 6) Agent Memory (`_agent/`) — Durable, Minimal, One-Line
 
-### **GUI Layer (`libs/gui`)**
+Path: `_agent/` (gitignored AI scratchpad)
 
-* Owns Qt, QML, QSG, rendering strategies, widget layouts.
-* Contains the docking system & communication between widgets.
+Files:
+- `_agent/INVARIANTS.md` → `- INV-### | <statement>`
+- `_agent/FAILURE_MODES.md` → `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
+- `_agent/REPO_MAP.md` → `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
+- `_agent/DECISIONS.md` → `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
 
-### **Apps (`apps/`)**
+Rules:
+- One line per entry, ASCII only
+- Do not add new `_agent` files unless user asks
+- Prefer durable guardrails over session chatter
+- Qdrant indexing is directory-targeted only (`libs/`, `docs/`, optional source dirs), never repo root, never `build/`
 
-* Thin bootstraps. No business logic.
+## 7) Task Tracking (`docs/TODO.md`) — Only When Relevant
 
-### **Render Path**
+Read/update `docs/TODO.md` only when:
+- user asks for TODO / feature / session-log work
+- task changes scope or priorities
+- ending session and log update is needed
 
-```
-Server: Transport → Dispatch → MarketDataCoreEngine → ServerDataModel → HeatmapTwapStreamer
-        → SentinelStreamServer → WebSocket
-Client: SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer
-        → HeatmapIntensityNode + MsdfGlyphNode → GPU
-```
+Use targeted reads, not full dumps.
+Do not reorder or renumber feature blocks.
 
-### **Invariant**
+## 8) Canonical Docs to Update When Needed
 
-**Zoom/pan must always update via `setViewport()` so viewportVersion increments.**
-Never mutate viewport fields directly.
-If viewportVersion doesn’t change, the grid won’t rebuild.
+Update only the relevant canonical doc in the same change:
+- Protocol / wire / DTO semantics → `docs/MARKETDATA.md`
+- Architecture / ownership / dependency direction → `docs/ARCHITECTURE.md`
+- Feature scope/progress → `docs/TODO.md`
+- Config keys/defaults/semantics → config docs (if present)
+- New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
+- Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
 
----
-
-# **3. Coding Standards (Realistic Solo-Dev Edition)**
-
-### **Musts**
-
-* Use modern C++20: RAII, smart pointers, no naked new/delete.
-* Prefer explicit types for public APIs.
-* Use expressive names; comment only where intent is subtle.
-* **Comments:** Prefer code as documentation. When you do comment, explain *why* (decisions, invariants, protocol quirks), not *what* (the code already shows that). No COT, filler, or meta-commentary in the codebase. File headers: one short line (role/threading) if needed; no essays.
-* Separate concerns: logic in core, visuals in gui.
-* Prefer config files over new ENV VARs; only add env vars when truly necessary.
-* Qt resources: when adding SVGs/icons via CMake, use `QT_RESOURCE_ALIAS` (or explicit aliases) so runtime paths are stable (e.g., `:/icons/icon-*.svg`). Avoid absolute path aliases.
-* Backwards compatibility is optional unless explicitly required in this doc. If a simpler or faster design is better, propose it.
-* Performance invariants (GPU-first, `setViewport()`, minimal churn) matter more than preserving legacy patterns.
-
-# **3a. Planning Checklist (New Features & Refactors)**
-### **Musts**
-  - Before adding a feature or refactoring a file/module, answer these:
-
-  1. Purpose
-     What system capability does this enable? What breaks if it’s removed?
-  2. Invariant
-     “This file guarantees that ___ always ___, even when ___.”
-  3. Ownership
-     What it owns (time/state/GPU/threading/I/O/etc) and what it explicitly does not.
-  4. Contract
-     Inputs (trusted?) and outputs (guarantees?).
-  5. Dependency Direction
-     Who depends on it, and who it depends on. Any inversion/leak?
-  6. Design Choice
-     One plausible alternative + why this design wins.
-     If unclear: UNKNOWN — REVISIT.
-  7. Hot vs Cold
-     Identify hot path blocks vs setup/glue paths.
-  8. State Flow
-     Who mutates state, who observes it, where it is cached/derived/authoritative.
-  9. Smell Tags
-     Tag anything “sloppy poopy” as
-     SMELL — NEEDS CONTEXT or SMELL — PROBABLY WRONG.
-  10. Confidence
-     Can I explain it from memory? If not, list gaps.
-
-### **Threading Rules**
+## 8a) Commit Checkpoints
 
-* Network & data processing off GUI thread.
-* Cross-thread communication only via Qt::QueuedConnection.
-* QSG strategies never touch QObject graph.
+- Prefer manual git commits after a coherent batch of logic lands and verifies cleanly.
+- Group commits by feature or infrastructure slice, not by file type.
+- Default checkpoint rule: if a meaningful feature seam is implemented and targeted validation passed, make a commit unless the user says not to.
+- Do not sweep unrelated modified files into the same commit; leave unrelated worktree changes alone.
+- Commit messages should say what changed and why at the feature level, not just "fix stuff".
 
-### **File Size**
-
-* No arbitrary LOC limit.
-* If file feels unwieldy, split when *you* feel it’s time.
+## 9) References (Read on Demand Not By Default)
 
----
+- `docs/ARCHITECTURE.md`
+- `docs/MARKETDATA.md`
+- `docs/TODO.md`
 
-# **4. Branch Workflow (Non-Bureaucratic)**
-
-### **Branches**
-
-* `main` — stable, demo-ready.
-* `dev` — messy high-velocity work.
-* `feature/<name>` — only for large refactors.
-
-### **Rules**
-
-* Rebase feature onto dev frequently.
-* Don’t stack branches.
-* Commit groups of logical feats; clean history optional.
-
-If you can understand your commit messages tomorrow morning, they’re good.
-
-**GUI Screenshot API**  
-Exposes a local HTTP endpoint for automated screenshots of the UI.
-
-- **Endpoint:** `GET http://127.0.0.1:<PORT>/screenshot`
-- **Params:**
-    - `target`: What to capture—`main` (default), `heatmap`, or `lab`
-    - `name`: (Optional) Filename override
-- **Env Vars:**
-    - `SENTINEL_GUI_API_PORT` (default: 17100)
-    - `SENTINEL_GUI_SCREENSHOT_DIR` (default: `./screenshots`)
-- **Examples:**
-    - Full window:  
-      `curl "http://127.0.0.1:17100/screenshot"`
-    - Heatmap only:  
-      `curl "http://127.0.0.1:17100/screenshot?target=heatmap"`
-- **Flow:**  
-  Run app → modify UI → call screenshot API → PNG saved → review.
-
----
-
-# **5. Dockable Framework**
-
-### **Core Pattern**
-
-* All docks inherit `DockablePanel` (libs/gui/widgets/).
-* Implement `buildUi()` pure virtual + `onSymbolChanged()` hook.
-* Register in `MainWindowGPU` constructor + menu + default layout.
-* Persistent state via `LayoutManager` (QSettings-based).
-
-### **Widget Communication**
-
-* Hub-and-spoke via `MainWindowGPU` signals.
-* `ServiceLocator` for shared services (MarketDataCoreQt, IGridDataSource).
-* All cross-thread: Qt::QueuedConnection only.
-* No direct widget-to-widget calls.
-
-### **Current Widgets**
-
-* `HeatmapDock` - QML GPU rendering + embedded symbol controls
-* `OrderBookDock` - Placeholder (inert; wired later via server)
-* `SecFilingDock` - SEC filings viewer
-* `CopenetFeedDock` / `AICommentaryFeedDock` - Commentary feeds
-* `StatusBar` - Bottom metrics bar (CPU/GPU/Latency)
-
-### **Thread Safety**
-
-* GUI widgets on main thread only.
-* MarketDataCoreEngine on worker threads.
-* QML rendering on separate render thread.
-
-### **Remote Heatmap Invariants**
-
-* Server is the only producer of heatmap columns.
-* Client must not emit local LTSE columns in remote mode.
-* Timeframe is locked by server_config (server authoritative).
-* Heatmap grid height and tick size are authoritative from server.
-* Client requires server connection (no local-only mode).
-
----
-
-# **6. Rendering Strategies (You Only Need These Laws)**
-
-* Runs on render thread → never touch GUI QObjects.
-* Preallocate QSGGeometry; reuse nodes.
-* Validate inputs; skip NaNs/infinite.
-* Respect viewportVersion for rebuild logic.
-* Keep geometry minimal; avoid child-node explosions.
-
----
-
-# **7. Testing & Performance (Realistic)**
-
-### **Real Expectations**
-
-* Run the app.
-* Look for hitches, stalls, dropped frames.
-* Log suspicious behavior (`sentinel.debug`).
-* Add tests only where needed (cache & dispatch).
-
-### **Hot Paths**
-
-* DataProcessor
-* HeatmapTwapStreamer
-* HeatmapLabelRenderer
-* QSG Geometry updates
-
-These matter. Everything else is negotiable.
-
----
-
-# **8. AI Assistant Behavior**
-
-### **Assistants MUST:**
-
-* Follow these rules strictly.
-* Keep code clear, modern, and idiomatic.
-* Not introduce unnecessary abstractions or enterprise patterns.
-* Use your real architecture — never hallucinate systems.
-
-### **Assistants MUST NOT:**
-
-* Generate over-engineered patterns.
-* Escalate rules beyond what’s in THIS file.
-* Invent fake CI/CD steps or workflows you do not have.
-* Enforce pointless constraints (LOC ceilings, verbose PR formats).
-
-Your speed > their bureaucracy.
-
----
-
-# **9. Task Tracking (`docs/TODO.md`)**
-
-Single source of truth for open work. Read it at session start. Update it as you go.
-
-### **Structure**
-
-* Each feature is a block: `### F<N>: <Name>` with Status, Created, Updated fields.
-* Tasks are tiered: **Now** (active focus), **Next** (queued), **Later** (backlog).
-* **Done** section holds completed tasks with dates. Never delete finished tasks.
-* **Session log** is append-only — one line per session with what happened and what's next.
-
-### **Agent Rules**
-
-* If asked: read `docs/TODO.md`, identify active features relevant to current work.
-* When you finish a task: check the box `[x]`, move it to Done with today's date.
-* When pausing or ending a session: update the session log and set Updated date.
-* If the user pivots to a new feature: append a new `F<N>` block at the bottom.
-* Do NOT reorder, renumber, or restructure existing feature blocks.
-* Keep Now short (3–5 items). Promote from Next when Now is clear.
-* If a feature is fully complete, set its Status to `done`.
-
----
-
-# **10. Performance Lessons (QML/Axis)**
-
-### **What Worked**
-
-* Profile early (QML Profiler / CPU profiler) before guessing.
-* Keep axis labels pixel-density driven, not data-tick driven.
-* Stabilize label count across zoom (nice ticks).
-* Use fixed-capacity axis models + role-scoped `dataChanged` to avoid churn.
-* During drag, recompute axis range from visual pan, not QML offsets.
-
-### **Never Again**
-
-* Don’t `beginResetModel()` during pan/zoom for QML Repeaters.
-* Don’t tie label density directly to data tick size.
-* Don’t assume GPU bottleneck when QML churn is present.
-* Don’t bind per-label pan offsets in QML; move the math to the model.
-
----
-
-# **11. Coinbase API Implementation Notes**
-
-* REST candles (Advanced Trade): `GET /api/v3/brokerage/products/{product_id}/candles` with `start`, `end`, `granularity`, `limit` (max 350).
-* Granularity mapping is based on timeframe seconds (e.g., 60 -> ONE_MINUTE, 300 -> FIVE_MINUTE).
-* REST JWT `uri` claim uses: `METHOD + host + path` (no query string).
-* If auth endpoint returns 401, retry public candles endpoint: `/api/v3/brokerage/market/products/{product_id}/candles` (no auth).
-* TLS on Windows: load CA bundle from `resources/certs/ca-bundle.crt` or set `SENTINEL_CA_BUNDLE` env var.
-
----
-
-# **12. References**
-
-* `docs/ARCHITECTURE.md` - Overall system design
-* `docs/MARKETDATA.md` - MarketDataCoreEngine pipeline
-* `docs/TODO.md` - Feature tracker & session log
-
----
-
-# **End of AGENTS.md**
+Read these only if the task actually needs them.

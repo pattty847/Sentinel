@@ -12,23 +12,31 @@
 #include <QSGRendererInterface>
 #include <QCloseEvent>
 #include <QPointer>
+#include <QProcess>
 #include <memory>
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
+#include "../core/trading/TradingTypes.hpp"
 
 // Forward declarations
 class ChartModeController;
 class UnifiedGridRenderer;
-class HeatmapDock;
+class ChartDock;
 class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
+class ScreenerDock;
+class StockChartDock;
+class OrderBookDock;
+class PaperTradingDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
+class TradeInputManager;
+class TradeBlotterDock;
 
 class DockFactory;
 class QmlSceneController;
@@ -36,6 +44,7 @@ class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
+class QDoubleSpinBox;
 
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
@@ -55,6 +64,8 @@ private slots:
     void onSubscribe();
     void onConnectionStatusChanged(bool connected);
     void resetLayoutToDefault();
+    // Shared routing slot for screener and watchlist symbol selections.
+    void onAssetSymbolSelected(const QString& symbol, const QString& assetType);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -70,10 +81,12 @@ private:
     void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
     void requestHeatmapHistoryForSymbol(const QString& symbol);
+    void requestFootprintHistoryForSymbol(const QString& symbol);
+    void requestTpoHistoryForSymbol(const QString& symbol);
     void requestCandleHistoryForSymbol(const QString& symbol);
     bool validateComponents();
     LayoutOrchestrator::DockWidgets getDockWidgets() const;
-    
+
     // Callbacks for modular components
     void onSaveLayout();
     void onRestoreLayout();
@@ -82,15 +95,19 @@ private:
     void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
-    HeatmapDock* m_heatmapDock = nullptr;
+    ChartDock* m_heatmapDock = nullptr;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
     LabDock* m_labDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
-    
-    // UI Controls (accessed through HeatmapDock)
+    ScreenerDock* m_screenerDock = nullptr;
+    StockChartDock* m_stockChartDock = nullptr;
+    OrderBookDock* m_orderBookDock = nullptr;
+    PaperTradingDock* m_paperTradingDock = nullptr;
+
+    // UI Controls (accessed through ChartDock)
     QLineEdit* m_symbolInput = nullptr;
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
@@ -98,7 +115,7 @@ private:
     bool m_userSubscribed = false;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
-    
+
     // Controllers
     ChartModeController* m_modeController = nullptr;
     ThemeBridge* m_themeBridge = nullptr;
@@ -110,6 +127,17 @@ private:
     QPointer<class FontSettingsDialog> m_fontDialog;
     QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
     QMetaObject::Connection m_candleViewportConn;
+    std::unique_ptr<TradeInputManager> m_tradeInputManager;
+    TradeBlotterDock* m_tradeBlotterDock = nullptr;
+    QLabel* m_positionOverlayLabel = nullptr;
+    QDoubleSpinBox* m_orderQtyInput = nullptr;
 
     bool m_firstShow = true;
+
+    // Screener Python server subprocess (owned lifetime = window lifetime)
+    QProcess* m_screenerProcess = nullptr;
+    int       m_screenerRestartCount = 0;
+    static constexpr int kMaxScreenerRestarts = 3;
+    void startScreenerServer();
+    void stopScreenerServer();
 };

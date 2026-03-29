@@ -90,9 +90,9 @@ QStringList FontManager::loadResourceFonts() {
 QStringList FontManager::preferredSystemFonts() const {
     const QStringList preferred = {"Inter", "IBM Plex Sans", "Noto Sans", "Ubuntu", "DejaVu Sans", "Liberation Sans"};
     QStringList available;
-    QFontDatabase db;
+    const QStringList families = QFontDatabase::families();
     for (const auto& name : preferred) {
-        if (db.families().contains(name) && !available.contains(name)) {
+        if (families.contains(name) && !available.contains(name)) {
             available << name;
         }
         if (available.size() >= 3) break;

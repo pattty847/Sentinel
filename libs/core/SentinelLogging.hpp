@@ -2,8 +2,11 @@
 
 #include <QLoggingCategory>
 #include <QDebug>
+#include <QString>
 #include <string>
 #include <cstdlib>
+#include <fstream>
+#include <mutex>
 
 // Qt6: disambiguate QDebug << std::string
 inline QDebug operator<<(QDebug debug, const std::string& str) {
@@ -21,6 +24,18 @@ namespace sentinel::log_throttle {
     inline constexpr int kData   = 20;
     inline constexpr int kRender = 100;
     inline constexpr int kDebug  = 1;
+}
+
+namespace sentinel::log_file {
+    inline void appendLine(const char* path, const QString& line) {
+        static std::mutex ioMutex;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) {
+            return;
+        }
+        out << line.toStdString() << '\n';
+    }
 }
 
 // Throttle interval overridable via SENTINEL_LOG_<Cat>_INTERVAL

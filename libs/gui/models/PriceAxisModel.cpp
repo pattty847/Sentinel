@@ -36,33 +36,8 @@ bool PriceAxisModel::updateEffectiveViewport() {
     m_effectiveOffsetPx = 0.0;
     m_effectiveSpanPx = viewHeight;
     m_effectiveViewportValid = true;
-
-    if (qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_FORCE_FULL")) {
-        return true;
-    }
-
-    if (auto* grid = renderer()) {
-        double dataMin = 0.0;
-        double dataMax = 0.0;
-        if (grid->heatmapDataPriceRange(dataMin, dataMax)) {
-            const double overlapMin = std::max(viewMin, dataMin);
-            const double overlapMax = std::min(viewMax, dataMax);
-            if (overlapMax <= overlapMin) {
-                m_effectiveViewportValid = false;
-                return false;
-            }
-            if (overlapMin > viewMin || overlapMax < viewMax) {
-                const double ratioTop = (viewMax - overlapMax) / viewSpan;
-                const double ratioBottom = (viewMax - overlapMin) / viewSpan;
-                m_effectiveOffsetPx = viewHeight * ratioTop;
-                m_effectiveSpanPx = viewHeight * (ratioBottom - ratioTop);
-                m_effectiveMinPrice = overlapMin;
-                m_effectiveMaxPrice = overlapMax;
-                m_effectiveViewportValid = (m_effectiveSpanPx > 0.0);
-            }
-        }
-    }
-
+    // Price labels should reflect the current viewport even when the view extends
+    // beyond the filled heatmap rows during interaction.
     return m_effectiveViewportValid;
 }
 

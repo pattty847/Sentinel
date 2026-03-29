@@ -5,6 +5,11 @@ target_link_libraries(sentinel_gui
         sentinel_gui_lib
 )
 
+set_target_properties(sentinel_gui PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps/sentinel-gui/$<CONFIG>"
+    OUTPUT_NAME "sentinel-gui"
+)
+
 if (WIN32)
     # Automatically deploy Qt dependencies next to the executable,
     # and scan our QML sources so QtQuick.Controls and friends are included.

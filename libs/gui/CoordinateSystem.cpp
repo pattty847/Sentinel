@@ -23,7 +23,7 @@ QPointF CoordinateSystem::screenToWorld(const QPointF& screenPos, const Viewport
     if (!validateViewport(viewport)) {
         return QPointF(0, 0);
     }
-    
+
     double normalizedTime = screenPos.x() / viewport.width;
     double normalizedPrice = 1.0 - (screenPos.y() / viewport.height);
     

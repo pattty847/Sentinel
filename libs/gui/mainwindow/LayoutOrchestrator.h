@@ -15,22 +15,30 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <QApplication>
 
 // Forward declarations
-class HeatmapDock;
+class ChartDock;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
 class LabDock;
 class WatchlistDock;
+class ScreenerDock;
+class StockChartDock;
+class OrderBookDock;
+class PaperTradingDock;
 
 class LayoutOrchestrator {
 public:
     struct DockWidgets {
-        HeatmapDock* heatmapDock = nullptr;
+        ChartDock* heatmapDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         AICommentaryFeedDock* aiCommentaryDock = nullptr;
         LabDock* labDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
+        ScreenerDock* screenerDock = nullptr;
+        StockChartDock* stockChartDock = nullptr;
+        OrderBookDock* orderBookDock = nullptr;
+        PaperTradingDock* paperTradingDock = nullptr;
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);

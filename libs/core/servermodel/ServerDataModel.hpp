@@ -1,7 +1,9 @@
 #pragma once
 #include <unordered_map>
 #include <vector>
+#include <deque>
 #include <shared_mutex>
+#include <mutex>
 #include <string>
 #include <memory>
 #include <atomic>
@@ -20,6 +22,13 @@
 class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
 public:
+    struct FootprintTradeSample {
+        int64_t timestampMs = 0;
+        double price = 0.0;
+        double size = 0.0;
+        AggressorSide side = AggressorSide::Unknown;
+    };
+
     explicit ServerDataModel(const ServerConfig& config, QObject* parent = nullptr);
     ~ServerDataModel();
 
@@ -37,6 +46,10 @@ public:
                            int& outGridWidth,
                            int& outGridHeight,
                            std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const;
+    bool collectFootprintTrades(const std::string& symbol,
+                                int64_t startTimeMs,
+                                int64_t endTimeMs,
+                                std::vector<FootprintTradeSample>& out) const;
     int64_t exchangeNowMs() const override;
 
 public slots:
@@ -68,5 +81,8 @@ private:
     std::unique_ptr<TimeframeAggregator> m_aggregator;
     std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
     std::atomic<int64_t> m_exchangeOffsetMs{0};
+    mutable std::mutex m_footprintTradeMutex;
+    std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
+    int64_t m_footprintTradeRetentionMs = 300'000;
     QTimer m_candleTimer;
 };

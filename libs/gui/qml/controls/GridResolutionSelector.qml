@@ -38,7 +38,7 @@ Column {
                 enabled: root.enabled && root.target
                 onClicked: {
                     if (root.target) {
-                        root.target.setGridMode(0)
+                        root.target.setGridResolutionPreset(0)
                         root.valueChanged(0)
                     }
                 }
@@ -62,7 +62,7 @@ Column {
                 enabled: root.enabled && root.target
                 onClicked: {
                     if (root.target) {
-                        root.target.setGridMode(1)
+                        root.target.setGridResolutionPreset(1)
                         root.valueChanged(1)
                     }
                 }
@@ -86,7 +86,7 @@ Column {
                 enabled: root.enabled && root.target
                 onClicked: {
                     if (root.target) {
-                        root.target.setGridMode(2)
+                        root.target.setGridResolutionPreset(2)
                         root.valueChanged(2)
                     }
                 }

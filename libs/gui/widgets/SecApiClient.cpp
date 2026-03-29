@@ -9,10 +9,9 @@
 SecApiClient::SecApiClient(QObject* parent)
     : QObject(parent)
     , m_pythonProcess(nullptr)
-    , m_pythonReady(false)
-    , m_initTimer(new QTimer(this))
+    , m_pythonReady(true)   // uv handles venv activation — no init probe needed
 {
-    initializePython();
+    emit statusUpdate("SEC API ready");
 }
 
 SecApiClient::~SecApiClient() {
@@ -22,18 +21,6 @@ SecApiClient::~SecApiClient() {
     }
 }
 
-void SecApiClient::initializePython() {
-    emit statusUpdate("Initializing SEC API...");
-    QString testCommand = QString(
-        "import sys; "
-        "sys.path.insert(0, r'%1'); "
-        "from sec.sec_api import SECDataFetcher; "
-        "print('SEC_API_READY')"
-    ).arg(getSecModulePath());
-    
-    m_currentOperation = "init";
-    executePythonCommand(testCommand, "init");
-}
 
 void SecApiClient::fetchFilings(const QString& ticker, const QString& formType) {
     if (!m_pythonReady) {
@@ -66,6 +53,19 @@ void SecApiClient::fetchInsiderTransactions(const QString& ticker) {
     runSecScript("sec/sec_fetch_transactions.py", args, "transactions");
 }
 
+void SecApiClient::fetchInsiderSignals(const QString& ticker, int daysBack) {
+    if (!m_pythonReady) {
+        emit apiError("SEC API not ready");
+        return;
+    }
+
+    emit statusUpdate(QString("Fetching insider signals for %1...").arg(ticker));
+
+    QStringList args;
+    args << ticker << QString::number(daysBack);
+    runSecScript("sec/sec_fetch_signals.py", args, "insider_signals");
+}
+
 void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     if (!m_pythonReady) {
         emit apiError("SEC API not ready");
@@ -80,28 +80,6 @@ void SecApiClient::fetchFinancialSummary(const QString& ticker) {
     runSecScript("sec/sec_fetch_financials.py", args, "financials");
 }
 
-void SecApiClient::executePythonCommand(const QString& command, const QString& operation) {
-    if (m_pythonProcess && m_pythonProcess->state() != QProcess::NotRunning) {
-        m_pythonProcess->kill();
-        m_pythonProcess->waitForFinished(1000);
-    }
-    
-    if (m_pythonProcess) {
-        m_pythonProcess->deleteLater();
-    }
-    
-    m_pythonProcess = new QProcess(this);
-    connect(m_pythonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &SecApiClient::onPythonFinished);
-    connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
-    
-    QStringList args;
-    args << "-c" << command;
-
-    QString pythonExe = getPythonExecutable();
-    m_pythonProcess->start(pythonExe, args);
-}
-
 void SecApiClient::runSecScript(const QString& scriptName,
                                 const QStringList& args,
                                 const QString& operation) {
@@ -109,7 +87,6 @@ void SecApiClient::runSecScript(const QString& scriptName,
         m_pythonProcess->kill();
         m_pythonProcess->waitForFinished(1000);
     }
-
     if (m_pythonProcess) {
         m_pythonProcess->deleteLater();
     }
@@ -119,16 +96,16 @@ void SecApiClient::runSecScript(const QString& scriptName,
             this, &SecApiClient::onPythonFinished);
     connect(m_pythonProcess, &QProcess::errorOccurred, this, &SecApiClient::onPythonError);
 
-    QString pythonExe = getPythonExecutable();
-    QString scriptsPath = getScriptsPath();
-    QString scriptPath = QDir(scriptsPath).absoluteFilePath(scriptName);
+    const QString scriptsPath = getScriptsPath();
+    const QString scriptPath  = QDir(scriptsPath).absoluteFilePath(scriptName);
 
-    QStringList fullArgs;
-    fullArgs << scriptPath;
+    // uv run activates the venv from pyproject.toml automatically
+    QStringList fullArgs = {"run", "python", scriptPath};
     fullArgs << args;
 
     m_currentOperation = operation;
-    m_pythonProcess->start(pythonExe, fullArgs);
+    m_pythonProcess->setWorkingDirectory(scriptsPath);
+    m_pythonProcess->start("uv", fullArgs);
 }
 
 void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus) {
@@ -142,16 +119,6 @@ void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatu
 
     QString output = m_pythonProcess->readAllStandardOutput();
     
-    if (m_currentOperation == "init") {
-        if (output.contains("SEC_API_READY")) {
-            m_pythonReady = true;
-            emit statusUpdate("SEC API ready");
-        } else {
-            emit apiError("Failed to initialize SEC API: " + output);
-        }
-        return;
-    }
-    
     // Parse data outputs
     if (output.contains("FILINGS_DATA:")) {
         QString jsonStr = output.mid(output.indexOf("FILINGS_DATA:") + 13).trimmed();
@@ -161,9 +128,23 @@ void SecApiClient::onPythonFinished(int exitCode, QProcess::ExitStatus exitStatu
         QString jsonStr = output.mid(output.indexOf("TRANSACTIONS_DATA:") + 18).trimmed();
         parseTransactionsData(jsonStr);
     }
+    else if (output.contains("INSIDER_SIGNALS_DATA:")) {
+        QString jsonStr = output.mid(output.indexOf("INSIDER_SIGNALS_DATA:") + 21).trimmed();
+        parseInsiderSignalsData(jsonStr);
+    }
     else if (output.contains("FINANCIALS_DATA:")) {
         QString jsonStr = output.mid(output.indexOf("FINANCIALS_DATA:") + 16).trimmed();
         parseFinancialsData(jsonStr);
+    }
+    else if (output.contains("ERROR_DATA:")) {
+        QString jsonStr = output.mid(output.indexOf("ERROR_DATA:") + 11).trimmed();
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
+        if (error.error == QJsonParseError::NoError && doc.isObject()) {
+            emit apiError(doc.object().value("error").toString(jsonStr));
+        } else {
+            emit apiError(jsonStr);
+        }
     }
     else {
         emit apiError("Unexpected output: " + output);
@@ -175,26 +156,6 @@ void SecApiClient::onPythonError(QProcess::ProcessError error) {
                          .arg(error)
                          .arg(m_pythonProcess->errorString());
     emit apiError(errorString);
-}
-
-QString SecApiClient::getPythonExecutable() const {
-    QDir currentDir = QDir::current();
-    QString venvPython = currentDir.absoluteFilePath(".venv/Scripts/python.exe");
-    
-    if (QFileInfo::exists(venvPython)) {
-        return venvPython;
-    }
-    
-    // Fallback to system python
-    #ifdef Q_OS_WIN
-    return "python";
-    #else
-    return "python3";
-    #endif
-}
-
-QString SecApiClient::getSecModulePath() const {
-    return getScriptsPath();
 }
 
 QString SecApiClient::getScriptsPath() const {
@@ -258,9 +219,9 @@ void SecApiClient::parseTransactionsData(const QString& jsonStr) {
     for (const QJsonValue& value : array) {
         QJsonObject obj = value.toObject();
         Transaction tx;
-        tx.date = obj["transactionDate"].toString();
-        tx.insiderName = obj["insiderName"].toString();
-        tx.transactionType = obj["transactionType"].toString();
+        tx.date = obj["date"].toString();
+        tx.insiderName = obj["filer"].toString();
+        tx.transactionType = obj["type"].toString();
         tx.shares = obj["shares"].toDouble();
         tx.price = obj["price"].toDouble();
         transactions.append(tx);
@@ -268,6 +229,19 @@ void SecApiClient::parseTransactionsData(const QString& jsonStr) {
     
     emit transactionsReady(transactions);
     emit statusUpdate(QString("Loaded %1 transactions").arg(transactions.size()));
+}
+
+void SecApiClient::parseInsiderSignalsData(const QString& jsonStr) {
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &error);
+
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+        emit apiError("Failed to parse insider signals data: " + error.errorString());
+        return;
+    }
+
+    emit insiderSignalsReady(doc.object());
+    emit statusUpdate("Insider signals loaded");
 }
 
 void SecApiClient::parseFinancialsData(const QString& jsonStr) {

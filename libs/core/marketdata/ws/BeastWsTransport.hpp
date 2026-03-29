@@ -6,6 +6,7 @@
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core/tcp_stream.hpp>  // ensure tcp_stream is declared
 #include <boost/asio/ip/tcp.hpp>
+#include <memory>
 #include <deque>
 #include <string>
 #include <openssl/ssl.h>
@@ -18,10 +19,14 @@ using tcp = net::ip::tcp;
 
 class BeastWsTransport : public WsTransport {
 public:
+    using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+
     explicit BeastWsTransport(net::io_context& ioc, ssl::context& sslCtx)
         : strand_(ioc.get_executor())
+        , sslCtx_(sslCtx)
         , resolver_(strand_)
-        , ws_(strand_, sslCtx)
+        , ws_(std::make_unique<WsStream>(strand_, sslCtx_))
+        , firstFrameTimer_(strand_)
         , pingTimer_(strand_)
     {}
 
@@ -41,9 +46,11 @@ private:
 
     // Beast state
     net::strand<net::io_context::executor_type> strand_;
+    ssl::context& sslCtx_;
     tcp::resolver resolver_;
-    websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
+    std::unique_ptr<WsStream> ws_;
     beast::flat_buffer buf_;
+    net::steady_timer firstFrameTimer_;
     net::steady_timer pingTimer_;
     std::deque<std::string> writeQueue_;
     websocket::response_type handshakeResponse_;
@@ -52,6 +59,10 @@ private:
     std::string host_;
     std::string port_;
     std::string target_;
+    bool sawInboundFrame_ = false;
+
+    WsStream& stream() { return *ws_; }
+    void resetStream();
 
     // Handlers
     void onResolve(beast::error_code ec, tcp::resolver::results_type results);

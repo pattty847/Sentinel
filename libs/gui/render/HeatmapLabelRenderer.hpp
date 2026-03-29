@@ -11,25 +11,22 @@ Threading: Render thread only.
 #include <vector>
 
 #include "HeatmapStreamState.hpp"
-#include "MsdfAtlas.hpp"
-#include "MsdfGlyphNode.hpp"
+#include "ChartTextAtlas.hpp"
+#include "ChartTextPrimitives.hpp"
 #include "TimeAxisMapping.hpp"
 
 class HeatmapLabelRenderer {
 public:
-    using GlyphQuad = MsdfGlyphNode::GlyphQuad;
-
-    static void buildLabelQuads(const TimeAxisMapping& mapping,
-                                const HeatmapStreamState::Snapshot& snapshot,
-                                const MsdfAtlas& atlas,
-                                const std::vector<uint16_t>& liquidityRing,
-                                const std::vector<uint16_t>& intensityRing,
-                                const std::vector<double>& liquidityScales,
-                                float scale,
-                                bool dollars,
-                                std::vector<GlyphQuad>& whiteQuads,
-                                std::vector<GlyphQuad>& blackQuads,
-                                int onlyColumn = -1);
+    static void buildLabelGlyphs(const TimeAxisMapping& mapping,
+                                 const HeatmapStreamState::Snapshot& snapshot,
+                                 const ChartTextAtlas& atlas,
+                                 const std::vector<uint16_t>& liquidityRing,
+                                 const std::vector<uint16_t>& intensityRing,
+                                 const std::vector<double>& liquidityScales,
+                                 float scale,
+                                 bool dollars,
+                                 std::vector<ChartGlyphInstance>& glyphs,
+                                 int onlyColumn = -1);
 
 private:
     static QString formatLiquidityLabel(double value, bool dollars);

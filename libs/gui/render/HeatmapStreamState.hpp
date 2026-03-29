@@ -17,6 +17,8 @@ public:
     struct PendingColumn {
         int x = 0;
         QByteArray data;
+        QByteArray liquidity;       // raw uint16_t per row; empty if not available
+        double liquidityScale = 1.0;
     };
 
     struct PendingLabelColumn {
@@ -75,6 +77,7 @@ public:
     bool copyLabelSnapshot(LabelSnapshot& out) const;
 
     void takePendingUploads(std::vector<PendingColumn>& out);
+    void injectPendingUploads(std::vector<PendingColumn>&& columns);
     void takePendingLabelUploads(std::vector<PendingLabelColumn>& out);
     void copyLiquiditySnapshot(std::vector<uint16_t>& liquidityRing,
                                std::vector<uint16_t>& intensityRing,

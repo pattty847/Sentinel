@@ -6,7 +6,7 @@ import asyncio
 import re
 
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Union, Tuple, Any, Callable, Awaitable
+from typing import List, Dict, Optional, Union, Tuple, Any, Callable, Awaitable, Iterable
 from dotenv import load_dotenv
 from .http_client import SecHttpClient
 from .cache_manager import SecCacheManager
@@ -205,20 +205,29 @@ class SECDataFetcher:
             logging.error(f"Error fetching facts for {ticker}: {e}")
             return None
 
-    async def get_filings_by_form(self, ticker: str, form_type: str, days_back: int = 90, use_cache: bool = True) -> List[Dict]:
+    async def get_filings_by_form(self, ticker: str, form_type: Union[str, Iterable[str]], days_back: int = 90, use_cache: bool = True) -> List[Dict]:
         """ Fetches a list of filings of a specific form type within a given timeframe."""
         ticker = ticker.upper()
+        requested_forms = [form_type] if isinstance(form_type, str) else list(form_type)
+        requested_forms = [form for form in requested_forms if form]
+        if not requested_forms:
+            logging.warning(f"No form type provided for {ticker}.")
+            return []
+        cache_form_key = ",".join(requested_forms)
         logging.debug(f"Getting {form_type} filings for {ticker} (days back: {days_back}, cache: {use_cache})")
         if use_cache:
-            cache_data = await self.cache_manager.load_data(ticker, 'forms', form_type=form_type)
+            cache_data = await self.cache_manager.load_data(ticker, 'forms', form_type=cache_form_key)
             if cache_data:
                 cutoff_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
                 if isinstance(cache_data, list):
-                    filtered_cache = [f for f in cache_data if f.get('filing_date', '') >= cutoff_date]
-                    logging.debug(f"Found {len(filtered_cache)} fresh {form_type} filings in cache for {ticker}.")
+                    filtered_cache = [
+                        filing for filing in cache_data
+                        if filing.get('filing_date', '') >= cutoff_date and filing.get('form') in requested_forms
+                    ]
+                    logging.debug(f"Found {len(filtered_cache)} fresh {cache_form_key} filings in cache for {ticker}.")
                     return filtered_cache
                 else:
-                    logging.warning(f"Expected list from filings cache for {ticker} {form_type}, got {type(cache_data)}. Ignoring cache.")
+                    logging.warning(f"Expected list from filings cache for {ticker} {cache_form_key}, got {type(cache_data)}. Ignoring cache.")
 
         submissions = await self.get_company_submissions(ticker, use_cache=use_cache)
         if not submissions:
@@ -258,7 +267,7 @@ class SECDataFetcher:
                 accession_no = accession_number_list[i]
                 report_date = report_date_list[i]
 
-                if form == form_type and filing_date >= cutoff_date:
+                if form in requested_forms and filing_date >= cutoff_date:
                     accession_no_cleaned = accession_no.replace('-', '')
                     # Use CIK without leading zeros for URL path
                     filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{accession_no_cleaned}/"
@@ -277,9 +286,9 @@ class SECDataFetcher:
                     }
                     filings.append(filing_dict)
 
-            logging.info(f"Extracted {len(filings)} {form_type} filings for {ticker} within {days_back} days.")
+            logging.info(f"Extracted {len(filings)} {cache_form_key} filings for {ticker} within {days_back} days.")
             if filings:
-                 await self.cache_manager.save_data(ticker, 'forms', filings, form_type=form_type)
+                 await self.cache_manager.save_data(ticker, 'forms', filings, form_type=cache_form_key)
             return filings
         except Exception as e:
              logging.error(f"Error processing filings for {ticker}: {e}", exc_info=True)
@@ -288,7 +297,7 @@ class SECDataFetcher:
     # === CONVENIENCE FILING WRAPPERS ===
     async def fetch_insider_filings(self, ticker: str, days_back: int = 90, use_cache: bool = True) -> List[Dict]:
         """Convenience method to fetch Form 4 (insider trading) filings."""
-        return await self.get_filings_by_form(ticker, "4", days_back, use_cache)
+        return await self.get_filings_by_form(ticker, ["4", "4/A"], days_back, use_cache)
 
     async def fetch_annual_reports(self, ticker: str, days_back: int = 365*2, use_cache: bool = True) -> List[Dict]:
         """Convenience method to fetch Form 10-K (annual report) filings."""
@@ -320,6 +329,18 @@ class SECDataFetcher:
             ticker=ticker,
             days_back=days_back,
             use_cache=use_cache
+        )
+
+    async def get_insider_signal_payload(self, ticker: str, days_back: int = 180,
+                                         use_cache: bool = True, filing_limit: int = 40,
+                                         anchor_type: str = 'filing_date') -> Dict:
+        """Builds canonical insider events, daily aggregates, and LLM digest payload."""
+        return await self.form4_processor.get_insider_signal_payload(
+            ticker=ticker,
+            days_back=days_back,
+            use_cache=use_cache,
+            filing_limit=filing_limit,
+            anchor_type=anchor_type,
         )
 
     async def get_financial_summary(self, ticker: str, use_cache: bool = True) -> Optional[Dict]:

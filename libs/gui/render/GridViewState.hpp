@@ -31,6 +31,8 @@ public:
     void handleZoom(double delta, const QPointF& center);
     void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
     void handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize);
+    void handleTimeZoomWithSensitivity(double rawDelta, double centerX, double viewportWidth);
+    void handlePriceZoomWithSensitivity(double rawDelta, double centerY, double viewportHeight);
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd(bool applyViewport = true);

@@ -149,7 +149,7 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
             req.set(http::field::user_agent, "Sentinel/Rest");
             req.set(http::field::accept, "application/json");
 
-            if (!usePublic) {
+            if (!usePublic && m_auth.hasCredentials()) {
                 const std::string jwt = m_auth.createRestJwt("GET", m_host, path);
                 req.set(http::field::authorization, std::string("Bearer ") + jwt);
             }
@@ -178,10 +178,16 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
             return nlohmann::json::parse(res.body());
         };
 
-        auto jsonOpt = doRequest(false);
-        if (!jsonOpt && result.error.find("401") != std::string::npos) {
-            sLog_Warning("REST candles: auth failed, retrying public endpoint");
+        // When no API key: use public candles endpoint only. With key: try authenticated first, fallback to public on 401.
+        std::optional<nlohmann::json> jsonOpt;
+        if (!m_auth.hasCredentials()) {
             jsonOpt = doRequest(true);
+        } else {
+            jsonOpt = doRequest(false);
+            if (!jsonOpt && result.error.find("401") != std::string::npos) {
+                sLog_Warning("REST candles: auth failed, retrying public endpoint");
+                jsonOpt = doRequest(true);
+            }
         }
 
         if (!jsonOpt) {

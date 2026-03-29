@@ -34,6 +34,11 @@ public:
     float pxRange() const { return m_pxRange; }
     int paddingPx() const { return m_paddingPx; }
     QString fontFamily() const { return m_fontFamily; }
+    float ascentPx() const { return m_ascentPx; }
+    float descentPx() const { return m_descentPx; }
+    float lineHeightPx() const { return m_lineHeightPx; }
+    float glyphTopPx() const { return m_glyphTopPx; }
+    float glyphBottomPx() const { return m_glyphBottomPx; }
 
 private:
     QString resolveFontPath(const BuildParams& params) const;
@@ -48,4 +53,9 @@ private:
     int m_fontPx = 0;
     float m_pxRange = 4.0f;
     int m_paddingPx = 0;
+    float m_ascentPx = 0.0f;
+    float m_descentPx = 0.0f;
+    float m_lineHeightPx = 0.0f;
+    float m_glyphTopPx = 0.0f;
+    float m_glyphBottomPx = 0.0f;
 };
