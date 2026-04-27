@@ -2,7 +2,7 @@
 
 ## Mac
 
-1. **Build release** (from repo root, in a terminal where `clang++` and vcpkg are available):
+1. **Build release** (from repo root, same env as CMake preset `mac-clang-release`):
    ```bash
    export VCPKG_ROOT=$HOME/vcpkg
    export QT_MAC=/opt/homebrew/opt/qt
@@ -10,19 +10,21 @@
    cmake --build --preset mac-clang-release -j
    ```
 
-2. **Package** (copies binaries, config, certs, README, creates `Sentinel.app` and `run.sh`):
+2. **Package** — primary entry points:
    ```bash
-   ./scripts/release/mac-package-release.sh
+   ./scripts/release_macos.sh
    ```
-   Default output: `~/Desktop/Sentinel`. Override with:
-   ```bash
-   ./scripts/release/mac-package-release.sh /path/to/output
-   ```
+   - Default staging: **`dist/Sentinel-macos-YYYYMMDD/`** (+ zip sibling).
+   - Optional: `./scripts/release_macos.sh [--build] [--no-zip] [STAGING_DIR]`  
+     (`scripts/release/mac-package-release.sh` delegates here for backwards compatibility.)
 
-3. **macdeployqt**: The script looks for `macdeployqt` (Homebrew Qt: `/opt/homebrew/opt/qt/bin/macdeployqt`) and runs it on `Sentinel.app` to bundle Qt frameworks so the app is self-contained. It then runs **`codesign --force --deep --sign - Sentinel.app`** so macOS accepts the copied frameworks (otherwise you get "Code Signature Invalid" when launching). If macdeployqt is not found, the app is still created but may need Qt in `DYLD_LIBRARY_PATH` or the user must have Qt installed. Install Qt with `brew install qt` if needed.
+3. **Contents:** GUI **`Sentinel.app`**, **`SentinelServer.app`**, **`config/`**, **`certs/`**, **`resources/certs/ca-bundle.crt`**, **`libs/gui/qml`**, **`scripts/`** (+ `uv sync` when **`uv`** is installed), **`LICENSE`**, **`README_RELEASE.md`** (user onboarding), **`MANIFEST.txt`** (git revision + bundled layout hints), **`LAUNCH_README.md`**, copy of **`README.md`**, **`run.sh`** (sets **`cwd`**, **`SENTINEL_QML_PATH`**, server **`logs/sentinel-server.log`**).
 
-4. **Run**: User can `cd ~/Desktop/Sentinel && ./run.sh` to start server and client in one go.
+4. **macdeployqt**: Looks for `/opt/homebrew/opt/qt/bin/macdeployqt`, then `$PATH`; runs against both app bundles so **GUI and server ship Qt frameworks**. Ad-hoc `codesign --force --deep --sign - …` follows (required after copying frameworks).
 
+5. **Smoke tests:** `./scripts/smoke_macos.sh [STAGED_DIR]` (default newest `dist/Sentinel-macos-*`). **Clean-room unzip:** `./scripts/smoke_macos.sh --clean-room [/path/to/zip]` — expands under `/tmp/Sentinel-release-test.*`; fails if bundle text/binary embed the **checkout path** (`SENTINEL_IGNORE_BINARY_PATH_SCAN=1` optional). Details: **`docs/RELEASE_CHECKLIST.md`**.
+
+6. **Run:** From the unpacked folder, **`README_RELEASE.md`** first, then `./run.sh` (or launchers under `SentinelServer.app` / `Sentinel.app` per **`LAUNCH_README.md`**).
 ## Windows
 
 1. **Build release** (from repo root, in a VS Developer PowerShell or terminal with MSVC env):
