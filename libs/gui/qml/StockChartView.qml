@@ -25,8 +25,9 @@ Rectangle {
     property int    hoveredSignalIndex: -1
     property var    hoveredSignal: ({})
 
-    // Convenience: fraction of candleChart height used for volume bars (mirrors C++ kVolFraction)
-    readonly property real volFraction: candleChart.volumeHeightFraction
+    // Mirrors CandlestickBatched.kVolFraction — do not bind to candleChart here: id resolves after
+    // children complete; early binding yielded undefined→double warnings in packaged runs.
+    readonly property real volFraction: 0.18
 
     // ── Data API (called by C++) ───────────────────────────────────────────────
 
