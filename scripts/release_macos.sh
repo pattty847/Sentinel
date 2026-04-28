@@ -107,6 +107,21 @@ if [[ -f "$REPO_ROOT/certs/gen-certs.sh" ]]; then
   chmod +x "$STAGE/certs/gen-certs.sh"
 fi
 
+# Stream server requires a matching cert+key pair; dev trees often have a stale .crt paired with a rotated .key (or vice versa).
+sentinel_tls_pubkey_match() {
+  local crt="$1" key="$2"
+  command -v openssl >/dev/null 2>&1 || return 1
+  [[ -f "$crt" && -f "$key" ]] || return 1
+  diff -q <(openssl x509 -noout -pubkey -in "$crt" 2>/dev/null) \
+          <(openssl pkey -pubout -in "$key" 2>/dev/null) >/dev/null 2>&1
+}
+CRT_ST="${STAGE}/certs/sentinel-server.crt"
+KEY_ST="${STAGE}/certs/sentinel-server.key"
+if ! sentinel_tls_pubkey_match "$CRT_ST" "$KEY_ST"; then
+  echo "[release] sentinel-server.crt/key missing or mismatched — regenerating self-signed pair (localhost / 127.0.0.1)…"
+  (cd "$STAGE/certs" && bash ./gen-certs.sh)
+fi
+
 # QML beside package (override with SENTINEL_QML_PATH in run.sh)
 mkdir -p "$STAGE/libs/gui"
 cp -R "$REPO_ROOT/libs/gui/qml" "$STAGE/libs/gui/"
@@ -296,18 +311,38 @@ if [[ ! -x "$GUI_EXE" ]]; then
   exit 1
 fi
 
+CRT="${ROOT}/certs/sentinel-server.crt"
+KEY="${ROOT}/certs/sentinel-server.key"
+sentinel_tls_pubkey_match() {
+  command -v openssl >/dev/null 2>&1 || return 1
+  [[ -f "$CRT" && -f "$KEY" ]] || return 1
+  diff -q <(openssl x509 -noout -pubkey -in "$CRT" 2>/dev/null) \
+          <(openssl pkey -pubout -in "$KEY" 2>/dev/null) >/dev/null 2>&1
+}
+if ! sentinel_tls_pubkey_match; then
+  echo "[Sentinel] TLS: sentinel-server.crt and .key missing or do not match — the stream port will not open. Regenerating matching files (OpenSSL)…" >&2
+  if [[ ! -x "${ROOT}/certs/gen-certs.sh" ]]; then
+    echo "[Sentinel] ERROR: ${ROOT}/certs/gen-certs.sh not found or not executable." >&2
+    exit 1
+  fi
+  (cd "${ROOT}/certs" && bash ./gen-certs.sh)
+fi
+
 echo "[Sentinel] Starting server (background) → logging to ${SERVER_LOG}"
 : >"$SERVER_LOG"
 "$SERVER_EXE" >>"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
-sleep 1
+sleep 2
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then
   echo "[Sentinel] ERROR: sentinel-server exited immediately. Last 80 lines of ${SERVER_LOG}:" >&2
   tail -80 "$SERVER_LOG" >&2 || true
   exit 1
 fi
-
-echo "[Sentinel] Starting GUI (foreground). Close the window to exit the client; then this script stops the server."
+if grep -q "SentinelStreamServer start failed" "$SERVER_LOG" 2>/dev/null; then
+  echo "[Sentinel] ERROR: stream server did not start (see ${SERVER_LOG}). Common cause: TLS cert/key mismatch — run: bash \"${ROOT}/certs/gen-certs.sh\"" >&2
+  tail -40 "$SERVER_LOG" >&2 || true
+  exit 1
+fi
 "$GUI_EXE" || true
 echo "[Sentinel] Stopping server (PID ${SERVER_PID})…"
 kill "$SERVER_PID" 2>/dev/null || true

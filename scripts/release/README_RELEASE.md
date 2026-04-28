@@ -31,6 +31,14 @@ Live **Coinbase Advance / Exchange REST and public websocket** feeds use **symbo
 
 ---
 
+## TLS (GUI ↔ sentinel-server on port **8080**)
+
+The client connects over **TLS** to **`127.0.0.1:8080`**. Files **`certs/sentinel-server.crt`** and **`certs/sentinel-server.key`** must be one **matching** keypair. **`run.sh`** checks this with OpenSSL and runs **`bash certs/gen-certs.sh`** to replace a bad pair automatically.
+
+If the stream server never accepts connections (**Connection refused**), open **`logs/sentinel-server.log`** — a line like **`SentinelStreamServer start failed`** with an OpenSSL hint usually means the cert/key were out of sync (common after copying halves from different machines).
+
+---
+
 ## Where logs go
 
 | Output | Location |
