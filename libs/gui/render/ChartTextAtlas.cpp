@@ -18,7 +18,16 @@ bool ChartTextAtlas::build(const BuildParams& params) {
 
 QString ChartTextAtlas::ensureFontFile(const BuildParams& params) const {
     if (!params.fontPath.isEmpty()) {
-        return params.fontPath;
+        QFileInfo fi(params.fontPath);
+        if (fi.exists() && fi.isReadable()) {
+            return fi.absoluteFilePath();
+        }
+        // Portable bundles often omit repo-relative resources/fonts — fall back to embedded Qt resource font.
+        qWarning(
+            "ChartTextAtlas: msdf font path \"%s\" not found; extracting embedded MSDF font from \"%s\"",
+            qPrintable(params.fontPath),
+            qPrintable(params.resourceFont.isEmpty() ? QStringLiteral("(none)")
+                                                     : params.resourceFont));
     }
     if (params.resourceFont.isEmpty()) {
         return {};
