@@ -121,6 +121,113 @@ void HeatmapTwapStreamer::stop() {
     m_timer.stop();
 }
 
+int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
+    if (!m_columnStore || m_activeTimeframeMs <= 0 || m_defaultWidth <= 0) {
+        return 0;
+    }
+
+    std::vector<HeatmapColumnStore::LoadedColumn> loaded;
+    if (!m_columnStore->loadRecent(symbol, m_activeTimeframeMs,
+                                   m_defaultWidth, loaded) || loaded.empty()) {
+        return 0;
+    }
+
+    // Decide gridHeight from the on-disk record; refuse to prime if the disk
+    // shape doesn't match what this server is configured to emit (config drift
+    // since the columns were written). The data stays on disk for later use.
+    const int diskGridHeight = loaded.back().gridHeight;
+    if (diskGridHeight <= 0) {
+        return 0;
+    }
+    if (m_defaultHeight > 0 && diskGridHeight != m_defaultHeight) {
+        sLog_Warning("HeatmapTwapStreamer: skipping primeRing for "
+                     << QString::fromStdString(symbol)
+                     << " — disk gridHeight=" << diskGridHeight
+                     << " does not match configured gridHeight=" << m_defaultHeight);
+        return 0;
+    }
+
+    SymbolState& state = m_symbols[symbol];
+
+    // Initialize SymbolState consistently with the band that wrote these columns.
+    // Use the most-recent column's price band so live accumulation starts with
+    // the band we ended on.
+    const auto& latest = loaded.back();
+    state.height = diskGridHeight;
+    state.tickSize = (latest.tickSize > 0.0) ? latest.tickSize : state.tickSize;
+    state.minPrice = latest.minPrice;
+    state.maxPrice = latest.maxPrice;
+    state.lastRecenterMid = (latest.minPrice + latest.maxPrice) * 0.5;
+    state.lastSampleMs = latest.bucketEndMs;
+    state.lastMidPrice = state.lastRecenterMid;
+    state.rowValuesBid.assign(static_cast<size_t>(state.height), 0.0);
+    state.rowValuesAsk.assign(static_cast<size_t>(state.height), 0.0);
+    state.runningMaxBid = 0.0;
+    state.runningMaxAsk = 0.0;
+
+    // Initialize the active-timeframe frame so the first live sample slots in.
+    state.frames.clear();
+    TimeframeState frame;
+    frame.timeframeMs = m_activeTimeframeMs;
+    // Forming bucket starts at the next bucket after latest.bucketEndMs.
+    frame.bucketStartMs = latest.bucketEndMs;
+    frame.bucketEndMs   = frame.bucketStartMs + m_activeTimeframeMs;
+    frame.accumBid.assign(static_cast<size_t>(state.height), 0.0);
+    frame.accumAsk.assign(static_cast<size_t>(state.height), 0.0);
+    state.frames.push_back(std::move(frame));
+    state.initialized = true;
+
+    // Push columns into the in-RAM ring in chronological order so writeIndex
+    // ends at the slot AFTER the latest record, matching live append order.
+    int primed = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_historyMutex);
+        auto& ring = state.historyByTf[m_activeTimeframeMs];
+        if (ring.capacity != m_defaultWidth) {
+            ring.capacity = m_defaultWidth;
+            ring.columns.assign(static_cast<size_t>(ring.capacity), HistoryColumn{});
+            ring.writeIndex = 0;
+            ring.count = 0;
+        }
+        for (const auto& src : loaded) {
+            HistoryColumn entry;
+            entry.bucketStartMs = src.bucketStartMs;
+            entry.bucketEndMs   = src.bucketEndMs;
+            entry.minPrice      = src.minPrice;
+            entry.maxPrice      = src.maxPrice;
+            entry.tickSize      = src.tickSize;
+            entry.intensity     = QByteArray(reinterpret_cast<const char*>(src.intensity.data()),
+                                             static_cast<int>(src.intensity.size()));
+            if (!src.liquidity.empty()) {
+                entry.liquidity = QByteArray(reinterpret_cast<const char*>(src.liquidity.data()),
+                                             static_cast<int>(src.liquidity.size()));
+            }
+            entry.liquidityScale = src.liquidityScale;
+
+            ring.columns[static_cast<size_t>(ring.writeIndex)] = std::move(entry);
+            ring.writeIndex = (ring.writeIndex + 1) % ring.capacity;
+            ring.count = std::min(ring.count + 1, ring.capacity);
+            ++primed;
+        }
+    }
+
+    sLog_App("HeatmapTwapStreamer: primed " << primed
+             << " column(s) for " << QString::fromStdString(symbol)
+             << " tf=" << m_activeTimeframeMs
+             << " from " << QString::fromStdString(m_config.persistenceDir));
+
+    return primed;
+}
+
+int HeatmapTwapStreamer::bootstrapFromDisk(const std::vector<std::string>& symbols) {
+    if (!m_columnStore) return 0;
+    int total = 0;
+    for (const auto& s : symbols) {
+        total += primeRingFromDisk(s);
+    }
+    return total;
+}
+
 int64_t HeatmapTwapStreamer::alignBucketStart(int64_t nowMs, int64_t timeframeMs) {
     if (timeframeMs <= 0) return nowMs;
     return (nowMs / timeframeMs) * timeframeMs;

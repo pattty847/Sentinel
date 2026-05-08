@@ -384,6 +384,164 @@ TEST(HeatmapColumnStoreAppend, RejectsBadInputs) {
               HeatmapColumnStore::AppendResult::BadInput);
 }
 
+// ---------- loadRecent (Phase 2 reader) ----------
+
+TEST(HeatmapColumnStoreLoad, EmptyDirReturnsFalse) {
+    const auto dir = makeTempDir("load-empty");
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    EXPECT_FALSE(store.loadRecent("BTC-USD", kMs1m, 10, out));
+    EXPECT_TRUE(out.empty());
+    EXPECT_FALSE(store.hasAnyFile("BTC-USD", kMs1m));
+}
+
+TEST(HeatmapColumnStoreLoad, ReturnsMostRecentInChronologicalOrder) {
+    const auto dir = makeTempDir("load-order");
+    constexpr int32_t gridHeight = 8;
+    const int64_t day = 1'714'176'000'000;
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    // Write five columns at slots 100, 105, 110, 115, 120 with distinct payloads.
+    const int slots[] = {100, 105, 110, 115, 120};
+    for (int s : slots) {
+        auto cells = patternBuffer(gridHeight, static_cast<uint16_t>(s));
+        const int64_t bs = day + s * kMs1m;
+        ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight,
+                               bs, bs + kMs1m,
+                               1000.0, 1008.0, 1.0,
+                               cells.data(), nullptr, 1.0),
+                  HeatmapColumnStore::AppendResult::Written);
+    }
+
+    EXPECT_TRUE(store.hasAnyFile("BTC-USD", kMs1m));
+
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    ASSERT_TRUE(store.loadRecent("BTC-USD", kMs1m, /*maxCount=*/3, out));
+    ASSERT_EQ(out.size(), 3u);
+
+    // Should be the three latest in chronological order: 110, 115, 120.
+    EXPECT_EQ(out[0].bucketStartMs, day + 110 * kMs1m);
+    EXPECT_EQ(out[1].bucketStartMs, day + 115 * kMs1m);
+    EXPECT_EQ(out[2].bucketStartMs, day + 120 * kMs1m);
+
+    // Payload for slot 110 should match patternBuffer(gridHeight, 110).
+    auto expected = patternBuffer(gridHeight, 110);
+    ASSERT_EQ(out[0].intensity.size(), expected.size() * sizeof(uint16_t));
+    EXPECT_EQ(std::memcmp(out[0].intensity.data(), expected.data(),
+                          expected.size() * sizeof(uint16_t)), 0);
+
+    // gridHeight + price band metadata round-trip.
+    EXPECT_EQ(out[0].gridHeight, gridHeight);
+    EXPECT_DOUBLE_EQ(out[0].minPrice, 1000.0);
+    EXPECT_DOUBLE_EQ(out[0].maxPrice, 1008.0);
+}
+
+TEST(HeatmapColumnStoreLoad, MaxCountLargerThanAvailableReturnsAll) {
+    const auto dir = makeTempDir("load-overshoot");
+    constexpr int32_t gridHeight = 4;
+    const int64_t day = 1'714'176'000'000;
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    auto cells = patternBuffer(gridHeight, 1);
+    for (int s : {0, 7, 14}) {
+        const int64_t bs = day + s * kMs1m;
+        ASSERT_EQ(store.append("X", kMs1m, gridHeight,
+                               bs, bs + kMs1m, 0.0, 4.0, 1.0,
+                               cells.data(), nullptr, 1.0),
+                  HeatmapColumnStore::AppendResult::Written);
+    }
+
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    ASSERT_TRUE(store.loadRecent("X", kMs1m, /*maxCount=*/100, out));
+    EXPECT_EQ(out.size(), 3u);
+    EXPECT_EQ(out[0].bucketStartMs, day + 0 * kMs1m);
+    EXPECT_EQ(out[1].bucketStartMs, day + 7 * kMs1m);
+    EXPECT_EQ(out[2].bucketStartMs, day + 14 * kMs1m);
+}
+
+TEST(HeatmapColumnStoreLoad, RoundTripWithLiquidity) {
+    const auto dir = makeTempDir("load-liq");
+    constexpr int32_t gridHeight = 16;
+    const int64_t day = 1'714'176'000'000;
+    auto intensity = patternBuffer(gridHeight, 0xA5A5);
+    auto liquidity = patternBuffer(gridHeight, 0x5A5A);
+    const int64_t bs = day + 42 * kMs1m;
+
+    {
+        HeatmapColumnStore store(dir);
+        ASSERT_TRUE(store.acquireLock());
+        ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight,
+                               bs, bs + kMs1m, 1.0, 17.0, 1.0,
+                               intensity.data(), liquidity.data(), 3.5),
+                  HeatmapColumnStore::AppendResult::Written);
+    }
+
+    HeatmapColumnStore reader(dir);
+    ASSERT_TRUE(reader.acquireLock());
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    ASSERT_TRUE(reader.loadRecent("BTC-USD", kMs1m, 10, out));
+    ASSERT_EQ(out.size(), 1u);
+
+    EXPECT_EQ(out[0].bucketStartMs, bs);
+    EXPECT_DOUBLE_EQ(out[0].liquidityScale, 3.5);
+    ASSERT_EQ(out[0].liquidity.size(), liquidity.size() * sizeof(uint16_t));
+    EXPECT_EQ(std::memcmp(out[0].liquidity.data(), liquidity.data(),
+                          liquidity.size() * sizeof(uint16_t)), 0);
+    EXPECT_EQ(std::memcmp(out[0].intensity.data(), intensity.data(),
+                          intensity.size() * sizeof(uint16_t)), 0);
+}
+
+TEST(HeatmapColumnStoreLoad, SkipsRecordsWithBadCrc) {
+    const auto dir = makeTempDir("load-corrupt");
+    constexpr int32_t gridHeight = 4;
+    const int64_t day = 1'714'176'000'000;
+    auto cells = patternBuffer(gridHeight, 7);
+
+    // Write three records.
+    {
+        HeatmapColumnStore store(dir);
+        ASSERT_TRUE(store.acquireLock());
+        for (int s : {1, 2, 3}) {
+            const int64_t bs = day + s * kMs1m;
+            ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight,
+                                   bs, bs + kMs1m, 0.0, 4.0, 1.0,
+                                   cells.data(), nullptr, 1.0),
+                      HeatmapColumnStore::AppendResult::Written);
+        }
+    }
+
+    // Corrupt the intensity payload of slot 2 (so its CRC no longer matches).
+    fs::path file;
+    for (auto& p : fs::recursive_directory_iterator(dir)) {
+        if (p.path().extension() == ".hmcol") { file = p.path(); break; }
+    }
+    ASSERT_FALSE(file.empty());
+    {
+        std::fstream f(file, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(f.is_open());
+        const auto offset = hmcol::slotOffset(2, gridHeight, hmcol::kLiquidityFormatNone);
+        // Skip the 56-byte record header, hit the first byte of intensity.
+        f.seekp(static_cast<std::streamoff>(offset + sizeof(hmcol::RecordHeader)));
+        const uint16_t flipped = 0xDEAD;
+        f.write(reinterpret_cast<const char*>(&flipped), sizeof(flipped));
+    }
+
+    HeatmapColumnStore reader(dir);
+    ASSERT_TRUE(reader.acquireLock());
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    ASSERT_TRUE(reader.loadRecent("BTC-USD", kMs1m, 10, out));
+    // Slot 2 corrupted; only 1 and 3 should come back.
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0].bucketStartMs, day + 1 * kMs1m);
+    EXPECT_EQ(out[1].bucketStartMs, day + 3 * kMs1m);
+}
+
 // ---------- Stats ----------
 
 TEST(HeatmapColumnStoreStats, CountsResultsCorrectly) {

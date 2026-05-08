@@ -24,6 +24,17 @@ public:
     void start();
     void stop();
 
+    // Phase 2: prime the in-RAM HistoryRing for `symbol` on the active timeframe
+    // from the most recent disk-resident records. Must be called BEFORE start().
+    // Returns the number of columns primed (0 if persistence is disabled, the
+    // symbol has no on-disk history, or the recovered gridHeight does not match
+    // the current configured gridHeight).
+    int primeRingFromDisk(const std::string& symbol);
+
+    // Convenience: call primeRingFromDisk for every symbol. Safe to call when
+    // persistence is disabled (no-op in that case).
+    int bootstrapFromDisk(const std::vector<std::string>& symbols);
+
     struct HistoryColumn {
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;

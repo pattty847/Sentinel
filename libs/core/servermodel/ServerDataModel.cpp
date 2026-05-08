@@ -107,6 +107,10 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     connect(m_heatmapStreamer.get(), &HeatmapTwapStreamer::heatmapSliceReady,
             this, &ServerDataModel::heatmapSliceReady);
 
+    // F1 phase 2: prime the in-RAM heatmap rings from any persisted columns
+    // before the streamer starts sampling. No-op when persistence is disabled.
+    m_heatmapStreamer->bootstrapFromDisk(m_serverConfig.defaultSymbols);
+
     m_heatmapStreamer->start();
 
     m_candleTimer.setTimerType(Qt::PreciseTimer);

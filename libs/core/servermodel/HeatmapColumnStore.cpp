@@ -353,6 +353,147 @@ HeatmapColumnStore::append(const std::string& symbol,
     return AppendResult::Written;
 }
 
+fs::path HeatmapColumnStore::latestFileFor(const std::string& symbol, int64_t timeframeMs) const {
+    const fs::path dir = m_baseDir / symbol / std::to_string(timeframeMs) / "v1";
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return {};
+
+    fs::path best;
+    for (auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() != ".hmcol") continue;
+        // Filenames are YYYY-MM-DD.hmcol — lexicographic order == chronological.
+        if (best.empty() || entry.path().filename() > best.filename()) {
+            best = entry.path();
+        }
+    }
+    return best;
+}
+
+bool HeatmapColumnStore::hasAnyFile(const std::string& symbol, int64_t timeframeMs) const {
+    return !latestFileFor(symbol, timeframeMs).empty();
+}
+
+bool HeatmapColumnStore::loadRecent(const std::string& symbol,
+                                    int64_t timeframeMs,
+                                    int maxCount,
+                                    std::vector<LoadedColumn>& out) const {
+    out.clear();
+    if (timeframeMs <= 0 || maxCount <= 0 || symbol.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Flush any open writer for this symbol/timeframe so we see all buffered
+    // appends from the current process. Writers keyed by (symbol, tf, day);
+    // matching just (symbol, tf) is enough — their flushes are cheap.
+    for (auto& [key, w] : m_writers) {
+        if (key.symbol == symbol && key.timeframeMs == timeframeMs && w.stream.is_open()) {
+            w.stream.flush();
+            w.recordsSinceFlush = 0;
+            w.lastFlush = std::chrono::steady_clock::now();
+        }
+    }
+
+    const fs::path file = latestFileFor(symbol, timeframeMs);
+    if (file.empty()) return false;
+
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        sLog_Error("HeatmapColumnStore: cannot open " << file << " for reading");
+        return false;
+    }
+
+    hmcol::FileHeader header{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!in) {
+        sLog_Error("HeatmapColumnStore: header read short in " << file);
+        return false;
+    }
+    if (!hmcol::verifyFileHeader(header)) {
+        sLog_Error("HeatmapColumnStore: header invalid in " << file
+                   << " — skipping bootstrap from this file");
+        return false;
+    }
+    if (header.timeframeMs != timeframeMs) {
+        sLog_Error("HeatmapColumnStore: timeframe mismatch in " << file
+                   << " expected=" << timeframeMs << " got=" << header.timeframeMs);
+        return false;
+    }
+
+    const std::size_t stride = hmcol::recordStride(header.gridHeight, header.liquidityFormat);
+    const int64_t slotsPerDay = kMsPerDay / header.timeframeMs;
+    const std::size_t intensityBytes = static_cast<std::size_t>(header.gridHeight) * sizeof(uint16_t);
+    const std::size_t liquidityBytes = (header.liquidityFormat == hmcol::kLiquidityFormatU16)
+        ? intensityBytes : 0;
+
+    int crcFailures = 0;
+    std::vector<LoadedColumn> reverseAccum; // newest -> oldest, then reversed at end
+    reverseAccum.reserve(static_cast<std::size_t>(std::min<int64_t>(maxCount, slotsPerDay)));
+
+    for (int64_t slot = slotsPerDay - 1; slot >= 0; --slot) {
+        const std::size_t offset = hmcol::slotOffset(slot, header.gridHeight, header.liquidityFormat);
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(offset));
+
+        hmcol::RecordHeader rec{};
+        in.read(reinterpret_cast<char*>(&rec), sizeof(rec));
+        if (!in) {
+            // Hitting EOF before the full slot range means the file is shorter
+            // than a full day. That's fine — earlier slots simply don't exist.
+            break;
+        }
+        if (rec.bucketStartMs == hmcol::kEmptySlotSentinel) continue;
+
+        LoadedColumn col;
+        col.intensity.resize(intensityBytes);
+        in.read(reinterpret_cast<char*>(col.intensity.data()),
+                static_cast<std::streamsize>(intensityBytes));
+        if (!in) break;
+        if (liquidityBytes > 0) {
+            col.liquidity.resize(liquidityBytes);
+            in.read(reinterpret_cast<char*>(col.liquidity.data()),
+                    static_cast<std::streamsize>(liquidityBytes));
+            if (!in) break;
+        }
+
+        // Verify per-record CRC (intensity + liquidity together).
+        uint32_t crc = hmcol::crc32Update(0, col.intensity.data(), intensityBytes);
+        if (liquidityBytes > 0) {
+            crc = hmcol::crc32Update(crc, col.liquidity.data(), liquidityBytes);
+        }
+        if (crc != rec.recordCrc32) {
+            ++crcFailures;
+            sLog_Warning("HeatmapColumnStore: record CRC mismatch in " << file
+                         << " slot=" << slot << " — skipping");
+            continue;
+        }
+
+        col.bucketStartMs = rec.bucketStartMs;
+        col.bucketEndMs   = rec.bucketEndMs;
+        col.minPrice      = rec.minPrice;
+        col.maxPrice      = rec.maxPrice;
+        col.tickSize      = rec.tickSize;
+        col.liquidityScale = rec.liquidityScale;
+        col.gridHeight    = header.gridHeight;
+        reverseAccum.push_back(std::move(col));
+
+        if (static_cast<int>(reverseAccum.size()) >= maxCount) break;
+    }
+
+    // Caller wants oldest first.
+    out.assign(reverseAccum.rbegin(), reverseAccum.rend());
+
+    if (crcFailures > 0) {
+        sLog_Warning("HeatmapColumnStore: " << crcFailures
+                     << " record(s) skipped due to CRC failure in " << file);
+    }
+
+    return !out.empty();
+}
+
 void HeatmapColumnStore::flush() {
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& [key, w] : m_writers) {

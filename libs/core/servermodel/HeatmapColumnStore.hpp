@@ -43,6 +43,21 @@ public:
         BadInput,        // gridHeight mismatch / null pointer / out-of-range bucket
     };
 
+    // Phase 2: column read back from disk. Raw u16 cell bytes are kept opaque
+    // here so this header stays Qt-free. Streamers can wrap them in QByteArray
+    // when priming an in-RAM ring.
+    struct LoadedColumn {
+        int64_t bucketStartMs = 0;
+        int64_t bucketEndMs = 0;
+        double  minPrice = 0.0;
+        double  maxPrice = 0.0;
+        double  tickSize = 0.0;
+        double  liquidityScale = 1.0;
+        int32_t gridHeight = 0;
+        std::vector<uint8_t> intensity; // gridHeight * 2 bytes
+        std::vector<uint8_t> liquidity; // empty when the column had no liquidity row
+    };
+
     explicit HeatmapColumnStore(std::filesystem::path baseDir, Config cfg = Config{});
     ~HeatmapColumnStore();
 
@@ -72,6 +87,23 @@ public:
                         const uint16_t* intensity,
                         const uint16_t* liquidity,
                         double liquidityScale);
+
+    // Phase 2: read the most-recent populated columns for (symbol, timeframeMs)
+    // from the latest day file present on disk. Output is in chronological order
+    // (oldest first) and capped at maxCount. Returns true if at least one valid
+    // record was loaded; false if no file exists, header is invalid, or no
+    // populated slots were found. Records with bad per-record CRC are skipped
+    // and logged; they don't fail the call.
+    //
+    // Phase 2 reads only the latest day file. Day-spanning reads land in phase 3.
+    bool loadRecent(const std::string& symbol,
+                    int64_t timeframeMs,
+                    int maxCount,
+                    std::vector<LoadedColumn>& out) const;
+
+    // True if a file exists for (symbol, timeframeMs) — useful for bootstrap
+    // logic that wants to skip symbols with no persisted history.
+    bool hasAnyFile(const std::string& symbol, int64_t timeframeMs) const;
 
     // Force fsync on every open day-writer.
     void flush();
@@ -129,6 +161,10 @@ private:
                                              int64_t timeframeMs,
                                              int64_t dayStartMs);
 
+    // Returns the path to the lexicographically-latest "*.hmcol" file under
+    // <baseDir>/<symbol>/<timeframeMs>/v1/, or empty if none exists.
+    std::filesystem::path latestFileFor(const std::string& symbol, int64_t timeframeMs) const;
+
     void maybeFlush(DayWriter& w);
 
     Config m_config;
@@ -137,6 +173,8 @@ private:
     int m_lockFd = -1;
 
     mutable std::mutex m_mutex;
-    std::unordered_map<DayWriterKey, DayWriter, DayWriterKeyHash> m_writers;
+    // Writers are mutable so const reads (loadRecent / fetchRange) can flush
+    // buffered appends before opening an independent ifstream on the same file.
+    mutable std::unordered_map<DayWriterKey, DayWriter, DayWriterKeyHash> m_writers;
     Stats m_stats;
 };
