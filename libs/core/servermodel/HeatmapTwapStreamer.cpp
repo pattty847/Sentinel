@@ -678,43 +678,95 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(m_historyMutex);
-    auto it = m_symbols.find(symbol);
-    if (it == m_symbols.end()) {
-        return false;
-    }
-    const auto& state = it->second;
-    auto ringIt = state.historyByTf.find(timeframeMs);
-    if (ringIt == state.historyByTf.end()) {
-        return false;
-    }
-    const auto& ring = ringIt->second;
-    if (ring.count <= 0 || ring.capacity <= 0) {
-        return false;
-    }
-
-    const int requested = std::min(count, ring.count);
     out.clear();
-    out.reserve(static_cast<size_t>(requested));
-    outGridWidth = ring.capacity;
-    outGridHeight = state.height;
 
-    const int latestIndex = (ring.writeIndex - 1 + ring.capacity) % ring.capacity;
-    int collected = 0;
-    for (int i = 0; i < ring.count && collected < requested; ++i) {
-        const int idx = (latestIndex - i + ring.capacity) % ring.capacity;
-        const auto& col = ring.columns[static_cast<size_t>(idx)];
-        if (endTimeMs > 0 && col.bucketStartMs > endTimeMs) {
-            continue;
+    // Step 1: scan the in-RAM ring under m_historyMutex. Reverse-walk newest
+    // -> oldest, collect into a reverse-order buffer.
+    std::vector<HistoryColumn> ringReverse;
+    int ringHeight = 0;
+    int ringCapacity = 0;
+    int64_t ringOldestBucketStart = std::numeric_limits<int64_t>::max();
+    bool ringHadAny = false;
+    {
+        std::lock_guard<std::mutex> lock(m_historyMutex);
+        auto it = m_symbols.find(symbol);
+        if (it != m_symbols.end()) {
+            const auto& state = it->second;
+            auto ringIt = state.historyByTf.find(timeframeMs);
+            if (ringIt != state.historyByTf.end()) {
+                const auto& ring = ringIt->second;
+                if (ring.count > 0 && ring.capacity > 0) {
+                    ringHeight = state.height;
+                    ringCapacity = ring.capacity;
+                    ringHadAny = true;
+                    const int latestIndex =
+                        (ring.writeIndex - 1 + ring.capacity) % ring.capacity;
+                    for (int i = 0; i < ring.count && static_cast<int>(ringReverse.size()) < count; ++i) {
+                        const int idx = (latestIndex - i + ring.capacity) % ring.capacity;
+                        const auto& col = ring.columns[static_cast<size_t>(idx)];
+                        if (endTimeMs > 0 && col.bucketStartMs > endTimeMs) continue;
+                        ringReverse.push_back(col);
+                        if (col.bucketStartMs > 0 &&
+                            col.bucketStartMs < ringOldestBucketStart) {
+                            ringOldestBucketStart = col.bucketStartMs;
+                        }
+                    }
+                }
+            }
         }
-        out.push_back(col);
-        ++collected;
     }
 
-    if (out.empty()) {
+    // Step 2: disk fallthrough — only if (a) we have a store, (b) we still need
+    // more columns, (c) we have a real lower bound to query before. The lower
+    // bound is one full bucket before the ring's oldest matching column (so we
+    // never duplicate a row that's already in `ringReverse`).
+    const int needFromDisk = count - static_cast<int>(ringReverse.size());
+    std::vector<HistoryColumn> diskChrono;
+    if (m_columnStore && needFromDisk > 0) {
+        int64_t diskEndMs = endTimeMs;
+        if (ringHadAny && ringOldestBucketStart != std::numeric_limits<int64_t>::max()) {
+            diskEndMs = ringOldestBucketStart - timeframeMs;
+        }
+        if (diskEndMs > 0) {
+            std::vector<HeatmapColumnStore::LoadedColumn> loaded;
+            if (m_columnStore->fetchRange(symbol, timeframeMs, diskEndMs,
+                                          needFromDisk, loaded)) {
+                diskChrono.reserve(loaded.size());
+                for (auto& src : loaded) {
+                    HistoryColumn entry;
+                    entry.bucketStartMs = src.bucketStartMs;
+                    entry.bucketEndMs   = src.bucketEndMs;
+                    entry.minPrice      = src.minPrice;
+                    entry.maxPrice      = src.maxPrice;
+                    entry.tickSize      = src.tickSize;
+                    entry.intensity     = QByteArray(reinterpret_cast<const char*>(src.intensity.data()),
+                                                     static_cast<int>(src.intensity.size()));
+                    if (!src.liquidity.empty()) {
+                        entry.liquidity = QByteArray(reinterpret_cast<const char*>(src.liquidity.data()),
+                                                     static_cast<int>(src.liquidity.size()));
+                    }
+                    entry.liquidityScale = src.liquidityScale;
+                    if (ringHeight == 0) ringHeight = src.gridHeight;
+                    diskChrono.push_back(std::move(entry));
+                }
+            }
+        }
+    }
+
+    if (ringReverse.empty() && diskChrono.empty()) {
         return false;
     }
-    std::reverse(out.begin(), out.end());
+
+    // Step 3: stitch. Disk results are chronological (oldest first); ring
+    // results are newest-first. Final order: disk + reverse(ring).
+    out.reserve(diskChrono.size() + ringReverse.size());
+    for (auto& c : diskChrono) out.push_back(std::move(c));
+    for (auto it = ringReverse.rbegin(); it != ringReverse.rend(); ++it) {
+        out.push_back(std::move(*it));
+    }
+
+    outGridWidth = (ringCapacity > 0) ? ringCapacity : m_defaultWidth;
+    outGridHeight = ringHeight;
     return true;
 }
 

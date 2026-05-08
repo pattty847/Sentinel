@@ -89,20 +89,28 @@ public:
                         double liquidityScale);
 
     // Phase 2: read the most-recent populated columns for (symbol, timeframeMs)
-    // from the latest day file present on disk. Output is in chronological order
-    // (oldest first) and capped at maxCount. Returns true if at least one valid
-    // record was loaded; false if no file exists, header is invalid, or no
-    // populated slots were found. Records with bad per-record CRC are skipped
-    // and logged; they don't fail the call.
-    //
-    // Phase 2 reads only the latest day file. Day-spanning reads land in phase 3.
+    // across the latest day file. Output is chronological (oldest first), capped
+    // at maxCount. Returns true if at least one valid record was loaded.
     bool loadRecent(const std::string& symbol,
                     int64_t timeframeMs,
                     int maxCount,
                     std::vector<LoadedColumn>& out) const;
 
-    // True if a file exists for (symbol, timeframeMs) — useful for bootstrap
-    // logic that wants to skip symbols with no persisted history.
+    // Phase 3: read the most-recent populated columns whose bucketStartMs <=
+    // endMs, walking back across day files until either maxCount is reached or
+    // no older day files exist (capped by kMaxDaysScanned for safety). Output
+    // is chronological (oldest first), capped at maxCount.
+    bool fetchRange(const std::string& symbol,
+                    int64_t timeframeMs,
+                    int64_t endMs,
+                    int maxCount,
+                    std::vector<LoadedColumn>& out) const;
+
+    // Phase 3: earliest bucketStartMs persisted for (symbol, tf), or 0 if none.
+    // Used by phase 4 to populate the protocol's oldest_available_ms hint.
+    int64_t oldestPersistedMs(const std::string& symbol, int64_t timeframeMs) const;
+
+    // True if any day file exists for (symbol, timeframeMs).
     bool hasAnyFile(const std::string& symbol, int64_t timeframeMs) const;
 
     // Force fsync on every open day-writer.
@@ -164,6 +172,26 @@ private:
     // Returns the path to the lexicographically-latest "*.hmcol" file under
     // <baseDir>/<symbol>/<timeframeMs>/v1/, or empty if none exists.
     std::filesystem::path latestFileFor(const std::string& symbol, int64_t timeframeMs) const;
+
+    // Same dir scan; returns the earliest file by name (== earliest UTC day),
+    // or empty if none.
+    std::filesystem::path earliestFileFor(const std::string& symbol, int64_t timeframeMs) const;
+
+    // Scan one day file backwards from `untilSlotInclusive` to slot 0, pushing
+    // up to `maxCount` valid records into `accum` (newest first). Returns the
+    // number pushed. CRC-failed records are skipped and counted in *crcFails.
+    int scanFileBackwards(const std::filesystem::path& file,
+                          int64_t untilSlotInclusive,
+                          int maxCount,
+                          std::vector<LoadedColumn>& accum,
+                          int* crcFails) const;
+
+    static constexpr int kMaxDaysScanned = 90; // safety bound on multi-day walks
+
+    // Flush any open writer stream for (symbol, timeframeMs) so const reads
+    // from the same process see all buffered appends. Mutates writers, hence
+    // the mutable member.
+    void flushOpenWritersFor(const std::string& symbol, int64_t timeframeMs) const;
 
     void maybeFlush(DayWriter& w);
 
