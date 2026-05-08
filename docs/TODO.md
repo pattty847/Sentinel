@@ -60,17 +60,25 @@ Each feature is a self-contained block. Use this template:
 ---
 
 ### F1: Heatmap / Caching
-**Status:** active
+**Status:** v1 shipped (2026-05-08); follow-ups queued
 **Created:** 2026-01-30
-**Updated:** 2026-03-26
+**Updated:** 2026-05-08
 
 #### Now
 - [x] Auto history request on symbol change / reconnect (2026-03-19)
 - [x] Scroll-past-cache fetch (request older history) (2026-03-26)
-- [ ] Preserve historical heatmap columns across band recenter instead of clearing visual history
-- [ ] Persist derived heatmap history to disk and reload on startup with explicit gap handling for dev/offline periods
+- [x] Persist derived heatmap history to disk + reload on startup with gap handling (2026-05-08)
+- [x] Disk fallthrough on `heatmap_history_request` past in-RAM ring (2026-05-08)
+- [x] Protocol additive fields: `start_time`, `oldest_available_ms` (2026-05-08)
+- [x] Retention policy: delete day files older than N days at startup (2026-05-08)
+- [ ] Preserve historical heatmap columns across band recenter — falls out of F1 once client-side ColumnStore (INFINITE_CANVAS_V2) lands
 
 #### Next
+- [ ] Phase 5b: zstd-compress rotated day files + streaming decompressed reader (deferred from F1 v1)
+- [ ] Periodic retention sweep (currently runs only at startup)
+- [ ] Client-side surface of `oldest_available_ms` to suppress redundant scroll-left fetches at the floor
+- [ ] Apply the F1 template to footprint persistence
+- [ ] Apply the F1 template to TPO persistence
 - [ ] Derived timeframe rollups (non-anchor TFs from 1s/1m/1h/1d)
 - [ ] Per-client TF stream (client asks for derived TF)
 - [x] StatusBar metrics wiring — upload bandwidth MB/s wired (FPS/CPU/GPU already done) (2026-03-19)
@@ -82,7 +90,15 @@ Each feature is a self-contained block. Use this template:
 - [ ] Candlestick overlay Phase 1 (viewport-driven candles)
 
 #### Done
-_(nothing yet)_
+- [x] HMCL v1 on-disk format: fixed-stride slots, header + per-record CRC32 (2026-05-08, `5789f0c`)
+- [x] HeatmapColumnStore writer: slot-addressed idempotent appends, POSIX `flock` exclusive lock (2026-05-08, `33105c3`)
+- [x] Streamer integration behind `heatmap.persistence_enabled` config flag (2026-05-08, `c6c6135`)
+- [x] `scripts/inspect_hmcol.py` read-only inspector (2026-05-08, `c6c6135`)
+- [x] HeatmapColumnStore reader half + bootstrap: kill/rebuild/restart resume validated on real BTC-USD data (2026-05-08, `70e8fd6`)
+- [x] `data/` added to `.gitignore` (2026-05-08, `ecaa654`)
+- [x] Day-spanning `fetchRange` + disk fallthrough in `fetchHistory` (2026-05-08, `a237cdd`)
+- [x] Protocol: `start_time` on request, `oldest_available_ms` on chunk (additive, schema_version unchanged) (2026-05-08, `fa901e2`)
+- [x] Retention policy: per-startup deletion of day files older than `persistence_retention_days` (2026-05-08, `4eeadd9`)
 
 #### Session log
 - **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
@@ -90,6 +106,7 @@ _(nothing yet)_
 - **2026-03-26** - Implemented scroll-past-cache fetch: UGR.onViewportChanged detects when visibleTimeStart < oldest cached slice, debounces 300ms, emits heatmapHistoryNeeded(tfMs, endTimeMs, count). MainWindowGpu wires it to requestHeatmapHistory with current symbol. Full project builds clean.
 - **2026-05-07** - Drafted full persistence design: `docs/private/plans/F1_HEATMAP_PERSISTENCE.md`. 6-phase plan covering on-disk `.hmcol` format (fixed-stride per (symbol,tf,day), per-record CRC, additive over existing protocol), writer hook into `HeatmapTwapStreamer::storeHistory`, server bootstrap via `primeRing`, range-query disk fallthrough in `getHeatmapHistory`, restart story for hot iteration. Existing `TickBinaryLogger` left untouched as raw-tape audit source. Awaiting review before any code change.
 - **2026-05-08** - Owner clarified scope: v1 is 1m-only, no rollup engine, no compression. Slot-addressed idempotent writes (not pure append). OS-level exclusive lock for single-writer enforcement. Recenter explicitly handled by per-column self-describing price range — no transform at persistence. First milestone: kill server, rebuild, restart, see yesterday's 1m heatmap. Plan updated.
+- **2026-05-08** - F1 v1 shipped end-to-end across phases 1-5a (commits `5789f0c`, `33105c3`, `c6c6135`, `70e8fd6`, `a237cdd`, `fa901e2`, `4eeadd9`). 42 servermodel tests green. First milestone validated by user on real BTC-USD data: kill server, restart, log shows "primed 6 column(s) for BTC-USD tf=60000 from data/heatmap" before live timer fires; `heatmap_history_request` now falls through to disk past the in-RAM ring; protocol additions are backward-compatible. zstd compression (phase 5b) deferred — adds external dep + reader-path rewrite, not worth taking on autonomously.
 
 ---
 
