@@ -25,6 +25,15 @@ struct ServerHeatmapConfig {
     double intensityPower = 0.4;
     double intensityFloor = 0.001;
     bool debugSliceLog = false;
+
+    // F1 phase 1.3: derived heatmap column persistence (slot-addressed .hmcol files).
+    // Default OFF until validated in real-world soak testing. When enabled, every
+    // finalized bucket on the active timeframe is appended to disk via
+    // HeatmapColumnStore. See docs/private/plans/F1_HEATMAP_PERSISTENCE.md.
+    bool persistenceEnabled = false;
+    std::string persistenceDir{"data/heatmap"};
+    int persistenceFsyncEveryNRecords = 5;
+    int persistenceFsyncEveryMs = 1000;
 };
 
 struct ServerOrderBookConfig {

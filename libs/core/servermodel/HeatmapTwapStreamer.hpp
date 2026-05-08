@@ -9,7 +9,10 @@
 #include <mutex>
 #include "../protocol/HeatmapSlice.hpp"
 #include "IHeatmapDataSource.hpp"
+#include "HeatmapColumnStore.hpp"
 #include "../config/ConfigTypes.hpp"
+
+#include <memory>
 
 class HeatmapTwapStreamer : public QObject {
     Q_OBJECT
@@ -105,7 +108,8 @@ private:
                            const TimeframeState& frame,
                            int64_t nowMs,
                            double lastTrade);
-    void storeHistory(SymbolState& state,
+    void storeHistory(const std::string& symbol,
+                      SymbolState& state,
                       int64_t timeframeMs,
                       const QByteArray& column,
                       const QByteArray& liquidityColumn,
@@ -115,6 +119,16 @@ private:
                       double tickSize,
                       int64_t bucketStartMs,
                       int64_t bucketEndMs);
+    void persistColumn(const std::string& symbol,
+                       int64_t timeframeMs,
+                       const QByteArray& column,
+                       const QByteArray& liquidityColumn,
+                       double liquidityScale,
+                       double minPrice,
+                       double maxPrice,
+                       double tickSize,
+                       int64_t bucketStartMs,
+                       int64_t bucketEndMs);
     QByteArray toIntensityColumnSigned(SymbolState& state,
                                        const std::vector<double>& bidValues,
                                        const std::vector<double>& askValues,
@@ -148,4 +162,6 @@ private:
     std::vector<int64_t> m_timeframesMs;
     std::unordered_map<std::string, SymbolState> m_symbols;
     mutable std::mutex m_historyMutex;
+
+    std::unique_ptr<HeatmapColumnStore> m_columnStore; // null when persistence disabled or lock failed
 };

@@ -58,6 +58,25 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
     }
 
     m_intensity = parseIntensityConfig();
+
+    // F1 phase 1.3: optional persistence layer. When enabled, finalize the disk
+    // store now so we fail fast if the lock can't be acquired (another server
+    // process holds it). On failure we degrade silently — live stream continues.
+    if (m_config.persistenceEnabled) {
+        HeatmapColumnStore::Config storeCfg;
+        storeCfg.fsyncEveryNRecords = std::max(1, m_config.persistenceFsyncEveryNRecords);
+        storeCfg.fsyncEveryMs = std::max(1, m_config.persistenceFsyncEveryMs);
+        auto store = std::make_unique<HeatmapColumnStore>(m_config.persistenceDir, storeCfg);
+        if (store->acquireLock()) {
+            sLog_App("HeatmapTwapStreamer: persistence enabled at "
+                     << QString::fromStdString(m_config.persistenceDir)
+                     << " (active tf=" << m_activeTimeframeMs << " ms)");
+            m_columnStore = std::move(store);
+        } else {
+            sLog_Warning("HeatmapTwapStreamer: persistence requested but lock "
+                         "could not be acquired; running without disk persistence");
+        }
+    }
 }
 
 HeatmapTwapStreamer::IntensityConfig HeatmapTwapStreamer::parseIntensityConfig() const {
@@ -351,7 +370,8 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
                  << " reset=" << reset);
     }
 
-    storeHistory(state,
+    storeHistory(symbol,
+                 state,
                  frame.timeframeMs,
                  column,
                  liquidityColumn,
@@ -436,7 +456,8 @@ void HeatmapTwapStreamer::emitFormingBucket(const std::string& symbol,
     emit heatmapSliceReady(slice);
 }
 
-void HeatmapTwapStreamer::storeHistory(SymbolState& state,
+void HeatmapTwapStreamer::storeHistory(const std::string& symbol,
+                                       SymbolState& state,
                                        int64_t timeframeMs,
                                        const QByteArray& column,
                                        const QByteArray& liquidityColumn,
@@ -477,6 +498,66 @@ void HeatmapTwapStreamer::storeHistory(SymbolState& state,
     ring.columns[static_cast<size_t>(ring.writeIndex)] = std::move(entry);
     ring.writeIndex = (ring.writeIndex + 1) % ring.capacity;
     ring.count = std::min(ring.count + 1, ring.capacity);
+
+    // F1 phase 1.3: persist active-timeframe columns to disk if enabled.
+    // Only the active timeframe is persisted in v1 (typically 1m).
+    if (m_columnStore &&
+        m_activeTimeframeMs > 0 &&
+        timeframeMs == m_activeTimeframeMs) {
+        persistColumn(symbol,
+                      timeframeMs,
+                      column,
+                      liquidityColumn,
+                      liquidityScale,
+                      minPrice,
+                      maxPrice,
+                      tickSize,
+                      bucketStartMs,
+                      bucketEndMs);
+    }
+}
+
+void HeatmapTwapStreamer::persistColumn(const std::string& symbol,
+                                        int64_t timeframeMs,
+                                        const QByteArray& column,
+                                        const QByteArray& liquidityColumn,
+                                        double liquidityScale,
+                                        double minPrice,
+                                        double maxPrice,
+                                        double tickSize,
+                                        int64_t bucketStartMs,
+                                        int64_t bucketEndMs) {
+    if (!m_columnStore || column.isEmpty() || (column.size() % sizeof(uint16_t)) != 0) {
+        return;
+    }
+    const auto bytesPerCell = static_cast<int>(sizeof(uint16_t));
+    const int gridHeight = static_cast<int>(column.size()) / bytesPerCell;
+    if (gridHeight <= 0) {
+        return;
+    }
+
+    const auto* intensity = reinterpret_cast<const uint16_t*>(column.constData());
+    const uint16_t* liquidity = nullptr;
+    if (!liquidityColumn.isEmpty() && liquidityColumn.size() == column.size()) {
+        liquidity = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
+    }
+
+    const auto result = m_columnStore->append(symbol,
+                                              timeframeMs,
+                                              gridHeight,
+                                              bucketStartMs,
+                                              bucketEndMs,
+                                              minPrice,
+                                              maxPrice,
+                                              tickSize,
+                                              intensity,
+                                              liquidity,
+                                              liquidityScale);
+    using R = HeatmapColumnStore::AppendResult;
+    if (result != R::Written && result != R::AlreadyPresent) {
+        // Conflict / IO error / bad input were already logged inside the store.
+        // Fall through; we never block the live stream on persistence failures.
+    }
 }
 
 bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,

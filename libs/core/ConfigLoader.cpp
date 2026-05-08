@@ -108,6 +108,10 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         readScalar(heatmapNode, "intensity_power", cfg.heatmap.intensityPower);
         readScalar(heatmapNode, "intensity_floor", cfg.heatmap.intensityFloor);
         readScalar(heatmapNode, "debug_slice_log", cfg.heatmap.debugSliceLog);
+        readScalar(heatmapNode, "persistence_enabled", cfg.heatmap.persistenceEnabled);
+        readScalar(heatmapNode, "persistence_dir", cfg.heatmap.persistenceDir);
+        readScalar(heatmapNode, "persistence_fsync_every_n_records", cfg.heatmap.persistenceFsyncEveryNRecords);
+        readScalar(heatmapNode, "persistence_fsync_every_ms", cfg.heatmap.persistenceFsyncEveryMs);
         if (heatmapNode["timeframes"]) {
             auto parsed = parseTimeframes(heatmapNode["timeframes"]);
             if (!parsed.empty()) {
