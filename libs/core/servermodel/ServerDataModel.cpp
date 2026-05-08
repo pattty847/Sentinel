@@ -170,12 +170,19 @@ bool ServerDataModel::getHeatmapHistory(const std::string& symbol,
                                         int count,
                                         int& outGridWidth,
                                         int& outGridHeight,
-                                        std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const {
+                                        std::vector<HeatmapTwapStreamer::HistoryColumn>& out,
+                                        int64_t startTimeMs) const {
     if (!m_heatmapStreamer) {
         return false;
     }
     return m_heatmapStreamer->fetchHistory(symbol, timeframeMs, endTimeMs, count,
-                                           outGridWidth, outGridHeight, out);
+                                           outGridWidth, outGridHeight, out, startTimeMs);
+}
+
+int64_t ServerDataModel::oldestHeatmapPersistedMs(const std::string& symbol,
+                                                  int64_t timeframeMs) const {
+    if (!m_heatmapStreamer) return 0;
+    return m_heatmapStreamer->oldestPersistedMs(symbol, timeframeMs);
 }
 
 bool ServerDataModel::collectFootprintTrades(const std::string& symbol,

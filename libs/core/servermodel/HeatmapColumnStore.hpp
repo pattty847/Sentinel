@@ -96,15 +96,17 @@ public:
                     int maxCount,
                     std::vector<LoadedColumn>& out) const;
 
-    // Phase 3: read the most-recent populated columns whose bucketStartMs <=
-    // endMs, walking back across day files until either maxCount is reached or
-    // no older day files exist (capped by kMaxDaysScanned for safety). Output
-    // is chronological (oldest first), capped at maxCount.
+    // Phase 3 (with phase-4 startMs): read populated columns whose bucketStartMs
+    // is in [startMs, endMs] (startMs == 0 means "no lower bound"), walking back
+    // across day files until either maxCount is reached, the floor is crossed,
+    // or no older day files exist (capped by kMaxDaysScanned for safety).
+    // Output is chronological (oldest first), capped at maxCount.
     bool fetchRange(const std::string& symbol,
                     int64_t timeframeMs,
                     int64_t endMs,
                     int maxCount,
-                    std::vector<LoadedColumn>& out) const;
+                    std::vector<LoadedColumn>& out,
+                    int64_t startMs = 0) const;
 
     // Phase 3: earliest bucketStartMs persisted for (symbol, tf), or 0 if none.
     // Used by phase 4 to populate the protocol's oldest_available_ms hint.
@@ -177,14 +179,22 @@ private:
     // or empty if none.
     std::filesystem::path earliestFileFor(const std::string& symbol, int64_t timeframeMs) const;
 
+    struct ScanResult {
+        int pushed = 0;
+        bool hitFloor = false; // true if we saw a record with bucketStart < startMs
+    };
+
     // Scan one day file backwards from `untilSlotInclusive` to slot 0, pushing
-    // up to `maxCount` valid records into `accum` (newest first). Returns the
-    // number pushed. CRC-failed records are skipped and counted in *crcFails.
-    int scanFileBackwards(const std::filesystem::path& file,
-                          int64_t untilSlotInclusive,
-                          int maxCount,
-                          std::vector<LoadedColumn>& accum,
-                          int* crcFails) const;
+    // up to `maxCount` valid records into `accum` (newest first). When startMs
+    // > 0, stops early on the first populated record whose bucketStart < startMs
+    // and returns hitFloor=true so the caller can abandon older days. CRC-failed
+    // records are skipped and counted in *crcFails.
+    ScanResult scanFileBackwards(const std::filesystem::path& file,
+                                 int64_t untilSlotInclusive,
+                                 int maxCount,
+                                 std::vector<LoadedColumn>& accum,
+                                 int* crcFails,
+                                 int64_t startMs = 0) const;
 
     static constexpr int kMaxDaysScanned = 90; // safety bound on multi-day walks
 

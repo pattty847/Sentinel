@@ -389,17 +389,20 @@ fs::path HeatmapColumnStore::earliestFileFor(const std::string& symbol, int64_t 
     return best;
 }
 
-int HeatmapColumnStore::scanFileBackwards(const fs::path& file,
-                                          int64_t untilSlotInclusive,
-                                          int maxCount,
-                                          std::vector<LoadedColumn>& accum,
-                                          int* crcFails) const {
-    if (file.empty() || maxCount <= 0) return 0;
+HeatmapColumnStore::ScanResult
+HeatmapColumnStore::scanFileBackwards(const fs::path& file,
+                                      int64_t untilSlotInclusive,
+                                      int maxCount,
+                                      std::vector<LoadedColumn>& accum,
+                                      int* crcFails,
+                                      int64_t startMs) const {
+    ScanResult result;
+    if (file.empty() || maxCount <= 0) return result;
 
     std::ifstream in(file, std::ios::binary);
     if (!in) {
         sLog_Error("HeatmapColumnStore: cannot open " << file << " for reading");
-        return 0;
+        return result;
     }
 
     hmcol::FileHeader header{};
@@ -407,7 +410,7 @@ int HeatmapColumnStore::scanFileBackwards(const fs::path& file,
     if (!in || !hmcol::verifyFileHeader(header)) {
         sLog_Error("HeatmapColumnStore: header invalid in " << file
                    << " — skipping");
-        return 0;
+        return result;
     }
 
     const int64_t slotsPerDay = kMsPerDay / header.timeframeMs;
@@ -416,7 +419,6 @@ int HeatmapColumnStore::scanFileBackwards(const fs::path& file,
     const std::size_t liquidityBytes = (header.liquidityFormat == hmcol::kLiquidityFormatU16)
         ? intensityBytes : 0;
 
-    int pushed = 0;
     for (int64_t slot = startSlot; slot >= 0; --slot) {
         const std::size_t offset = hmcol::slotOffset(slot, header.gridHeight, header.liquidityFormat);
         in.clear();
@@ -426,6 +428,12 @@ int HeatmapColumnStore::scanFileBackwards(const fs::path& file,
         in.read(reinterpret_cast<char*>(&rec), sizeof(rec));
         if (!in) break;
         if (rec.bucketStartMs == hmcol::kEmptySlotSentinel) continue;
+
+        // Phase 4 floor: stop early once we cross below startMs.
+        if (startMs > 0 && rec.bucketStartMs < startMs) {
+            result.hitFloor = true;
+            break;
+        }
 
         LoadedColumn col;
         col.intensity.resize(intensityBytes);
@@ -458,11 +466,11 @@ int HeatmapColumnStore::scanFileBackwards(const fs::path& file,
         col.liquidityScale = rec.liquidityScale;
         col.gridHeight     = header.gridHeight;
         accum.push_back(std::move(col));
-        ++pushed;
+        ++result.pushed;
 
         if (static_cast<int>(accum.size()) >= maxCount) break;
     }
-    return pushed;
+    return result;
 }
 
 bool HeatmapColumnStore::hasAnyFile(const std::string& symbol, int64_t timeframeMs) const {
@@ -512,7 +520,8 @@ bool HeatmapColumnStore::fetchRange(const std::string& symbol,
                                     int64_t timeframeMs,
                                     int64_t endMs,
                                     int maxCount,
-                                    std::vector<LoadedColumn>& out) const {
+                                    std::vector<LoadedColumn>& out,
+                                    int64_t startMs) const {
     out.clear();
     if (timeframeMs <= 0 || maxCount <= 0 || symbol.empty() || endMs < 0) return false;
 
@@ -528,6 +537,13 @@ bool HeatmapColumnStore::fetchRange(const std::string& symbol,
     for (int day = 0;
          day < kMaxDaysScanned && static_cast<int>(reverseAccum.size()) < maxCount;
          ++day, dayMs -= kMsPerDay) {
+        // Day-boundary floor optimization: if startMs is set and even the
+        // newest possible bucket on this day is older than startMs, stop.
+        if (startMs > 0) {
+            const int64_t latestOnDay = dayMs + (kMsPerDay - timeframeMs);
+            if (latestOnDay < startMs) break;
+        }
+
         const fs::path file = filePathFor(m_baseDir, symbol, timeframeMs, dayMs);
         std::error_code ec;
         if (!fs::exists(file, ec)) {
@@ -546,7 +562,9 @@ bool HeatmapColumnStore::fetchRange(const std::string& symbol,
         }
 
         const int needed = maxCount - static_cast<int>(reverseAccum.size());
-        scanFileBackwards(file, untilSlot, needed, reverseAccum, &totalCrcFails);
+        const ScanResult sr = scanFileBackwards(file, untilSlot, needed,
+                                                reverseAccum, &totalCrcFails, startMs);
+        if (sr.hitFloor) break; // no point in scanning older days
     }
 
     out.assign(reverseAccum.rbegin(), reverseAccum.rend());

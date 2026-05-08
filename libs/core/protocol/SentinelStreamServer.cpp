@@ -1063,13 +1063,16 @@ public:
                 std::string symbol = j.value("symbol", "");
                 const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
                 const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
+                // Phase 4: optional start_time. 0 (or absent) means no lower bound.
+                const int64_t startTimeMs = j.value("start_time", static_cast<int64_t>(0));
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
                     std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
                     int gridWidth = 0;
                     int gridHeight = 0;
                     const bool ok = model_.getHeatmapHistory(symbol, timeframeMs, endTimeMs, count,
-                                                            gridWidth, gridHeight, columns);
+                                                            gridWidth, gridHeight, columns,
+                                                            startTimeMs);
                     nlohmann::json payload;
                     payload["type"] = "heatmap_history_chunk";
                     payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
@@ -1081,6 +1084,11 @@ public:
                     payload["encoding"] = "base64";
                     payload["liquidity_format"] = "u16";
                     payload["liquidity_encoding"] = "base64";
+                    // Phase 4: tell client the floor of available history. 0 means
+                    // no persisted data (or persistence disabled) — client should
+                    // treat the ring as the only source.
+                    payload["oldest_available_ms"] =
+                        model_.oldestHeatmapPersistedMs(symbol, timeframeMs);
                     auto arr = nlohmann::json::array();
                     if (ok) {
                         for (const auto& col : columns) {

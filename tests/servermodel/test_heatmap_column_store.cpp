@@ -660,6 +660,35 @@ TEST(HeatmapColumnStoreFetchRange, MultiDayWalk) {
     EXPECT_EQ(out[2].bucketStartMs, bs2b);
 }
 
+TEST(HeatmapColumnStoreFetchRange, StartMsFloorStopsScan) {
+    const auto dir = makeTempDir("range-floor");
+    constexpr int32_t gridHeight = 8;
+    const int64_t day = 1'714'176'000'000;
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    auto cells = patternBuffer(gridHeight, 0xCAFE);
+    for (int s : {10, 20, 30, 40, 50}) {
+        const int64_t bs = day + s * kMs1m;
+        ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight,
+                               bs, bs + kMs1m, 0.0, 8.0, 1.0,
+                               cells.data(), nullptr, 1.0),
+                  HeatmapColumnStore::AppendResult::Written);
+    }
+
+    // startMs cuts off slots 10 and 20 — only 30, 40, 50 should come back.
+    std::vector<HeatmapColumnStore::LoadedColumn> out;
+    ASSERT_TRUE(store.fetchRange("BTC-USD", kMs1m,
+                                 /*endMs=*/day + 100 * kMs1m,
+                                 /*maxCount=*/100, out,
+                                 /*startMs=*/day + 25 * kMs1m));
+    ASSERT_EQ(out.size(), 3u);
+    EXPECT_EQ(out[0].bucketStartMs, day + 30 * kMs1m);
+    EXPECT_EQ(out[1].bucketStartMs, day + 40 * kMs1m);
+    EXPECT_EQ(out[2].bucketStartMs, day + 50 * kMs1m);
+}
+
 TEST(HeatmapColumnStoreFetchRange, SkipsCorruptedRecordsInsideRange) {
     const auto dir = makeTempDir("range-corrupt");
     constexpr int32_t gridHeight = 4;

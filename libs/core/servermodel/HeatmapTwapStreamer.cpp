@@ -219,6 +219,12 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
     return primed;
 }
 
+int64_t HeatmapTwapStreamer::oldestPersistedMs(const std::string& symbol,
+                                               int64_t timeframeMs) const {
+    if (!m_columnStore) return 0;
+    return m_columnStore->oldestPersistedMs(symbol, timeframeMs);
+}
+
 int HeatmapTwapStreamer::bootstrapFromDisk(const std::vector<std::string>& symbols) {
     if (!m_columnStore) return 0;
     int total = 0;
@@ -673,7 +679,8 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
                                        int count,
                                        int& outGridWidth,
                                        int& outGridHeight,
-                                       std::vector<HistoryColumn>& out) const {
+                                       std::vector<HistoryColumn>& out,
+                                       int64_t startTimeMs) const {
     if (timeframeMs <= 0 || count <= 0) {
         return false;
     }
@@ -705,6 +712,7 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
                         const int idx = (latestIndex - i + ring.capacity) % ring.capacity;
                         const auto& col = ring.columns[static_cast<size_t>(idx)];
                         if (endTimeMs > 0 && col.bucketStartMs > endTimeMs) continue;
+                        if (startTimeMs > 0 && col.bucketStartMs < startTimeMs) continue;
                         ringReverse.push_back(col);
                         if (col.bucketStartMs > 0 &&
                             col.bucketStartMs < ringOldestBucketStart) {
@@ -730,7 +738,7 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         if (diskEndMs > 0) {
             std::vector<HeatmapColumnStore::LoadedColumn> loaded;
             if (m_columnStore->fetchRange(symbol, timeframeMs, diskEndMs,
-                                          needFromDisk, loaded)) {
+                                          needFromDisk, loaded, startTimeMs)) {
                 diskChrono.reserve(loaded.size());
                 for (auto& src : loaded) {
                     HistoryColumn entry;

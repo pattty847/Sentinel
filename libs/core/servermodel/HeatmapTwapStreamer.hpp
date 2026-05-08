@@ -52,7 +52,13 @@ public:
                       int count,
                       int& outGridWidth,
                       int& outGridHeight,
-                      std::vector<HistoryColumn>& out) const;
+                      std::vector<HistoryColumn>& out,
+                      int64_t startTimeMs = 0) const;
+
+    // Phase 4: lowest bucketStartMs persisted on disk for (symbol, tf), or 0
+    // if persistence is disabled or no records exist. Used to populate the
+    // protocol's oldest_available_ms hint.
+    int64_t oldestPersistedMs(const std::string& symbol, int64_t timeframeMs) const;
 
 signals:
     void heatmapSliceReady(const HeatmapSlice& slice);

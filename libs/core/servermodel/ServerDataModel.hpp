@@ -45,7 +45,13 @@ public:
                            int count,
                            int& outGridWidth,
                            int& outGridHeight,
-                           std::vector<HeatmapTwapStreamer::HistoryColumn>& out) const;
+                           std::vector<HeatmapTwapStreamer::HistoryColumn>& out,
+                           int64_t startTimeMs = 0) const;
+
+    // Phase 4: lowest persisted bucketStartMs for (symbol, tf), or 0 if no
+    // persistence / no records. Surfaced to clients as oldest_available_ms.
+    int64_t oldestHeatmapPersistedMs(const std::string& symbol,
+                                     int64_t timeframeMs) const;
     bool collectFootprintTrades(const std::string& symbol,
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,
