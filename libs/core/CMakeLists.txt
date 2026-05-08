@@ -27,6 +27,8 @@ add_library(sentinel_core
     servermodel/SymbolHotData.hpp
     servermodel/TickBinaryLogger.hpp
     servermodel/TickBinaryLogger.cpp
+    servermodel/HmcolFormat.hpp
+    servermodel/HmcolFormat.cpp
     servermodel/TimeframeAggregator.hpp
     servermodel/TimeframeAggregator.cpp
     protocol/SentinelStreamServer.hpp

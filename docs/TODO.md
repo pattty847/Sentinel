@@ -88,6 +88,8 @@ _(nothing yet)_
 - **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
 - **2026-03-17** - Captured the next architectural issue explicitly: chart layers need a larger persisted world-history model with a bounded GPU window, so long-range heatmap/TPO browsing can feel infinite without fixed-grid hard stops.
 - **2026-03-26** - Implemented scroll-past-cache fetch: UGR.onViewportChanged detects when visibleTimeStart < oldest cached slice, debounces 300ms, emits heatmapHistoryNeeded(tfMs, endTimeMs, count). MainWindowGpu wires it to requestHeatmapHistory with current symbol. Full project builds clean.
+- **2026-05-07** - Drafted full persistence design: `docs/private/plans/F1_HEATMAP_PERSISTENCE.md`. 6-phase plan covering on-disk `.hmcol` format (fixed-stride per (symbol,tf,day), per-record CRC, additive over existing protocol), writer hook into `HeatmapTwapStreamer::storeHistory`, server bootstrap via `primeRing`, range-query disk fallthrough in `getHeatmapHistory`, restart story for hot iteration. Existing `TickBinaryLogger` left untouched as raw-tape audit source. Awaiting review before any code change.
+- **2026-05-08** - Owner clarified scope: v1 is 1m-only, no rollup engine, no compression. Slot-addressed idempotent writes (not pure append). OS-level exclusive lock for single-writer enforcement. Recenter explicitly handled by per-column self-describing price range — no transform at persistence. First milestone: kill server, rebuild, restart, see yesterday's 1m heatmap. Plan updated.
 
 ---
 
