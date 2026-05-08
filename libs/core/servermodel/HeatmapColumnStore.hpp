@@ -118,6 +118,17 @@ public:
     // Force fsync on every open day-writer.
     void flush();
 
+    // Phase 5 retention. Delete every day file under <baseDir> whose UTC date
+    // is strictly older than (today UTC midnight - retentionDays * 1 day). Pass
+    // retentionDays <= 0 to disable (no-op). Returns the number of files
+    // deleted. Intended to run once at server startup before any writes.
+    int enforceRetention(int retentionDays);
+
+    // Same as enforceRetention but with an explicit "now" reference (UTC ms
+    // somewhere within the day to use as the cutoff anchor). Exposed for
+    // deterministic testing without clock dependencies.
+    int enforceRetentionAt(int64_t nowMs, int retentionDays);
+
     // Lightweight observability for tests / logging.
     struct Stats {
         uint64_t written = 0;

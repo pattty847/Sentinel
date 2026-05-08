@@ -112,6 +112,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         readScalar(heatmapNode, "persistence_dir", cfg.heatmap.persistenceDir);
         readScalar(heatmapNode, "persistence_fsync_every_n_records", cfg.heatmap.persistenceFsyncEveryNRecords);
         readScalar(heatmapNode, "persistence_fsync_every_ms", cfg.heatmap.persistenceFsyncEveryMs);
+        readScalar(heatmapNode, "persistence_retention_days", cfg.heatmap.persistenceRetentionDays);
         if (heatmapNode["timeframes"]) {
             auto parsed = parseTimeframes(heatmapNode["timeframes"]);
             if (!parsed.empty()) {

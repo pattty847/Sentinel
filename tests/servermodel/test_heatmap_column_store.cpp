@@ -734,6 +734,124 @@ TEST(HeatmapColumnStoreFetchRange, SkipsCorruptedRecordsInsideRange) {
     EXPECT_EQ(out[3].bucketStartMs, day + 5 * kMs1m);
 }
 
+// ---------- Retention (Phase 5) ----------
+
+namespace {
+// Helper: create an empty .hmcol stub at the v1 path for (symbol, tf, dayStartMs).
+// Mirrors the retention layout without going through append() so no DayWriter
+// is left open in the store's internal map.
+fs::path makeStubFile(const fs::path& baseDir,
+                      const std::string& symbol,
+                      int64_t timeframeMs,
+                      const std::string& dayName) {
+    const fs::path vDir = baseDir / symbol / std::to_string(timeframeMs) / "v1";
+    fs::create_directories(vDir);
+    const fs::path file = vDir / (dayName + ".hmcol");
+    std::ofstream f(file, std::ios::binary);
+    f << "stub";
+    return file;
+}
+} // namespace
+
+TEST(HeatmapColumnStoreRetention, ZeroRetentionIsNoOp) {
+    const auto dir = makeTempDir("ret-noop");
+    makeStubFile(dir, "BTC-USD", kMs1m, "2024-04-27");
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    constexpr int64_t kDay = 86'400'000;
+    const int64_t nowMs = 1'714'176'000'000 + 30 * kDay;
+    EXPECT_EQ(store.enforceRetentionAt(nowMs, /*retentionDays=*/0), 0);
+    EXPECT_EQ(store.enforceRetentionAt(nowMs, /*retentionDays=*/-5), 0);
+
+    int hmcolCount = 0;
+    for (auto& p : fs::recursive_directory_iterator(dir)) {
+        if (p.path().extension() == ".hmcol") ++hmcolCount;
+    }
+    EXPECT_EQ(hmcolCount, 1);
+}
+
+TEST(HeatmapColumnStoreRetention, DeletesOlderKeepsNewer) {
+    const auto dir = makeTempDir("ret-prune");
+    makeStubFile(dir, "BTC-USD", kMs1m, "2024-04-27"); // day 0
+    makeStubFile(dir, "BTC-USD", kMs1m, "2024-04-28"); // day 1
+    makeStubFile(dir, "BTC-USD", kMs1m, "2024-04-30"); // day 3
+    makeStubFile(dir, "BTC-USD", kMs1m, "2024-05-04"); // day 7
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    constexpr int64_t kDay = 86'400'000;
+    const int64_t nowMs = 1'714'176'000'000 + 7 * kDay + 5 * 3'600'000; // day7 mid-day
+
+    const int removed = store.enforceRetentionAt(nowMs, /*retentionDays=*/3);
+    EXPECT_EQ(removed, 3);
+
+    int afterCount = 0;
+    fs::path remaining;
+    for (auto& p : fs::recursive_directory_iterator(dir)) {
+        if (p.path().extension() == ".hmcol") {
+            ++afterCount;
+            remaining = p.path();
+        }
+    }
+    EXPECT_EQ(afterCount, 1);
+    EXPECT_EQ(remaining.stem().string(), "2024-05-04");
+}
+
+TEST(HeatmapColumnStoreRetention, IgnoresNonHmcolFiles) {
+    const auto dir = makeTempDir("ret-junk");
+    const fs::path real = makeStubFile(dir, "X", kMs1m, "2024-04-27");
+    const fs::path vDir = real.parent_path();
+    {
+        std::ofstream junk(vDir / "README.txt");
+        junk << "ignore me";
+    }
+    {
+        std::ofstream weird(vDir / "not-a-date.hmcol", std::ios::binary);
+        weird << "garbage";
+    }
+
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+    constexpr int64_t kDay = 86'400'000;
+    const int64_t nowMs = 1'714'176'000'000 + 60 * kDay;
+
+    const int removed = store.enforceRetentionAt(nowMs, /*retentionDays=*/3);
+    EXPECT_EQ(removed, 1);
+
+    EXPECT_TRUE(fs::exists(vDir / "README.txt"));
+    EXPECT_TRUE(fs::exists(vDir / "not-a-date.hmcol"));
+    EXPECT_FALSE(fs::exists(real));
+}
+
+TEST(HeatmapColumnStoreRetention, SkipsFileWithOpenWriter) {
+    // Append (which opens a DayWriter) — retention must NOT delete this file
+    // even if it's stale, because the writer would be ripped out from under
+    // an active server.
+    const auto dir = makeTempDir("ret-openwriter");
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    constexpr int32_t gridHeight = 4;
+    const int64_t day = 1'714'176'000'000;
+    auto cells = patternBuffer(gridHeight, 1);
+    ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight, day, day + kMs1m,
+                           0.0, 4.0, 1.0, cells.data(), nullptr, 1.0),
+              HeatmapColumnStore::AppendResult::Written);
+
+    constexpr int64_t kDay = 86'400'000;
+    const int64_t nowMs = day + 60 * kDay;
+    EXPECT_EQ(store.enforceRetentionAt(nowMs, /*retentionDays=*/3), 0);
+
+    int hmcolCount = 0;
+    for (auto& p : fs::recursive_directory_iterator(dir)) {
+        if (p.path().extension() == ".hmcol") ++hmcolCount;
+    }
+    EXPECT_EQ(hmcolCount, 1);
+}
+
 // ---------- Stats ----------
 
 TEST(HeatmapColumnStoreStats, CountsResultsCorrectly) {

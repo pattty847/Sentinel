@@ -34,6 +34,9 @@ struct ServerHeatmapConfig {
     std::string persistenceDir{"data/heatmap"};
     int persistenceFsyncEveryNRecords = 5;
     int persistenceFsyncEveryMs = 1000;
+    // F1 phase 5: per-(symbol, tf) day-file retention. 0 = keep forever; N>0
+    // means delete any day file older than today UTC - N days at server start.
+    int persistenceRetentionDays = 0;
 };
 
 struct ServerOrderBookConfig {

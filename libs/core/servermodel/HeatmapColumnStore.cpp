@@ -619,6 +619,91 @@ void HeatmapColumnStore::flush() {
     }
 }
 
+int HeatmapColumnStore::enforceRetention(int retentionDays) {
+    using namespace std::chrono;
+    const int64_t nowMs = duration_cast<milliseconds>(
+        system_clock::now().time_since_epoch()).count();
+    return enforceRetentionAt(nowMs, retentionDays);
+}
+
+int HeatmapColumnStore::enforceRetentionAt(int64_t nowMs, int retentionDays) {
+    if (retentionDays <= 0) return 0;
+
+    const int64_t cutoff = hmcol::dayStartForEpoch(nowMs)
+                           - static_cast<int64_t>(retentionDays) * kMsPerDay;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    int removed = 0;
+    std::error_code ec;
+    if (!fs::is_directory(m_baseDir, ec)) return 0;
+
+    // Walk <baseDir>/<symbol>/<tf>/v1/*.hmcol.
+    for (auto& symDir : fs::directory_iterator(m_baseDir, ec)) {
+        if (ec) break;
+        if (!symDir.is_directory()) continue;
+        for (auto& tfDir : fs::directory_iterator(symDir.path(), ec)) {
+            if (ec) break;
+            if (!tfDir.is_directory()) continue;
+            const fs::path versionDir = tfDir.path() / "v1";
+            if (!fs::is_directory(versionDir, ec)) continue;
+            for (auto& fileEntry : fs::directory_iterator(versionDir, ec)) {
+                if (ec) break;
+                if (!fileEntry.is_regular_file()) continue;
+                const fs::path& file = fileEntry.path();
+                if (file.extension() != ".hmcol") continue;
+
+                // Skip files matching an open writer — should not happen at
+                // startup but we never want to yank one out from under one.
+                bool hasOpenWriter = false;
+                for (auto& [key, w] : m_writers) {
+                    if (w.path == file) { hasOpenWriter = true; break; }
+                }
+                if (hasOpenWriter) continue;
+
+                // Parse YYYY-MM-DD from filename stem.
+                const std::string stem = file.stem().string();
+                if (stem.size() < 10 || stem[4] != '-' || stem[7] != '-') {
+                    continue;
+                }
+                int year = 0, month = 0, day = 0;
+                try {
+                    year  = std::stoi(stem.substr(0, 4));
+                    month = std::stoi(stem.substr(5, 2));
+                    day   = std::stoi(stem.substr(8, 2));
+                } catch (...) {
+                    continue;
+                }
+                if (year < 1970 || year > 9999 || month < 1 || month > 12 ||
+                    day < 1 || day > 31) continue;
+
+                std::chrono::year_month_day ymd{
+                    std::chrono::year{year},
+                    std::chrono::month{static_cast<unsigned>(month)},
+                    std::chrono::day{static_cast<unsigned>(day)}};
+                if (!ymd.ok()) continue;
+                std::chrono::sys_days sd{ymd};
+                const int64_t fileDayMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        sd.time_since_epoch()).count();
+
+                if (fileDayMs < cutoff) {
+                    std::error_code rmEc;
+                    fs::remove(file, rmEc);
+                    if (!rmEc) {
+                        ++removed;
+                        sLog_App("HeatmapColumnStore: retention removed " << file);
+                    } else {
+                        sLog_Warning("HeatmapColumnStore: retention failed to "
+                                     "remove " << file << ": " << rmEc.message());
+                    }
+                }
+            }
+        }
+    }
+    return removed;
+}
+
 HeatmapColumnStore::Stats HeatmapColumnStore::stats() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_stats;

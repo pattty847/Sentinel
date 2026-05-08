@@ -71,6 +71,16 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
             sLog_App("HeatmapTwapStreamer: persistence enabled at "
                      << QString::fromStdString(m_config.persistenceDir)
                      << " (active tf=" << m_activeTimeframeMs << " ms)");
+            // Phase 5: enforce retention up front so disk doesn't grow
+            // unbounded across long server runs. retentionDays <= 0 disables.
+            if (m_config.persistenceRetentionDays > 0) {
+                const int removed = store->enforceRetention(m_config.persistenceRetentionDays);
+                if (removed > 0) {
+                    sLog_App("HeatmapTwapStreamer: retention deleted " << removed
+                             << " day file(s) older than "
+                             << m_config.persistenceRetentionDays << " days");
+                }
+            }
             m_columnStore = std::move(store);
         } else {
             sLog_Warning("HeatmapTwapStreamer: persistence requested but lock "
