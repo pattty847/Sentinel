@@ -10,6 +10,7 @@
 vcpkg/
 vcpkg_installed/
 build/
+data/
 build-windows/
 out/
 .cache/
