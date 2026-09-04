@@ -26,10 +26,20 @@ target_link_libraries(test_heatmap_column_store PRIVATE
 add_test(NAME HeatmapColumnStoreTests COMMAND test_heatmap_column_store)
 set_tests_properties(HeatmapColumnStoreTests PROPERTIES LABELS "servermodel")
 
+add_executable(test_session_manager test_session_manager.cpp)
+target_include_directories(test_session_manager PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/core
+)
+target_link_libraries(test_session_manager PRIVATE
+    GTest::gtest_main
+)
+add_test(NAME SessionManagerTests COMMAND test_session_manager)
+set_tests_properties(SessionManagerTests PROPERTIES LABELS "servermodel")
+
 add_custom_target(servermodel_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L servermodel
-    DEPENDS test_hmcol_format test_heatmap_column_store
+    DEPENDS test_hmcol_format test_heatmap_column_store test_session_manager
     COMMENT "Running servermodel persistence tests"
 )
 
-message(STATUS "Servermodel tests configured (2 test suites)")
+message(STATUS "Servermodel tests configured (3 test suites)")

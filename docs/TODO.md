@@ -227,7 +227,7 @@ Each feature is a self-contained block. Use this template:
 ### F8: TPO / Market Profile
 **Status:** active
 **Created:** 2026-02-02
-**Updated:** 2026-03-26
+**Updated:** 2026-09-04
 
 #### Now
 - [ ] Finalize TPO letter assignment per timeframe/session slice (stable sequence and rollover)
@@ -241,10 +241,12 @@ Each feature is a self-contained block. Use this template:
 - [x] POC/VAH/VAL computation in TpoStreamState::computePocVahVal() (2026-03-26)
 - [x] DataProcessor emits tpoPocVahValReady after each slice ingest (2026-03-26)
 - [x] UGR stores and renders POC (gold 2.5px) + VAH/VAL (cyan 1.2px) as horizontal lines (2026-03-26)
+- [x] Correct W1 and Australia session rollover arithmetic with focused boundary tests (2026-09-04)
 
 #### Session log
 - **2026-03-17** — Re-activated F8 as the primary delivery lane. Goal tonight: finish TPO/footprint behavior and session correctness before new feature work.
 - **2026-03-26** — Implemented full POC/VAH/VAL pipeline: TpoStreamState computes histogram + 70% value area expansion, DataProcessor emits per-slice, UGR renders 3 colored horizontal line nodes (gold POC, cyan VAH/VAL) on the render thread under m_tpoPendingMutex.
+- **2026-09-04** — SessionManager now selects the latest open at or before the query for all daily and weekly sessions; W1 Sunday-before-open and Australia-after-open regressions are covered by pure-core tests.
 
 ---
 

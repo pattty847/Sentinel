@@ -39,7 +39,6 @@ struct SessionBoundary {
 namespace detail {
 
 // Offset from UTC midnight to session open, expressed in milliseconds.
-// Australia crosses midnight → handled specially below.
 static constexpr int64_t kMsPerDay  = 86'400'000LL;
 static constexpr int64_t kMsPerWeek = 7LL * kMsPerDay;
 
@@ -57,7 +56,7 @@ static constexpr SessionSpec kSpecs[] = {
     {  8LL * 3600'000LL, 8LL  * 3600'000LL },
     // Asia:      00:00 UTC, 9 h
     {  0LL * 3600'000LL, 9LL  * 3600'000LL },
-    // Australia: 22:00 UTC (prev day), 9 h
+    // Australia: 22:00 UTC, 9 h (closes on the following UTC day)
     { 22LL * 3600'000LL, 9LL  * 3600'000LL },
     // H24:       00:00 UTC, 24 h
     {  0LL * 3600'000LL, 24LL * 3600'000LL },
@@ -88,9 +87,8 @@ inline int utcWeekday(int64_t epochMs) {
  * Returns the session window [startMs, endMs) that either contains epochMs
  * or is the most-recent completed session before epochMs.
  *
- * For W1: returns the Sunday–Friday week that contains epochMs.
- * For all others: returns the daily session on the UTC calendar day of epochMs,
- * or (for Australia) the session whose open most recently preceded epochMs.
+ * For W1: returns the latest Sunday–Friday week whose open is at or before epochMs.
+ * For all others: returns the daily session whose open is latest at or before epochMs.
  */
 inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
     using namespace detail;
@@ -102,31 +100,18 @@ inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
         // How many days back to Sunday?
         const int daysBack = (dow + 7) % 7; // 0 if today is Sunday
         const int64_t sundayMidnight = midnight - static_cast<int64_t>(daysBack) * kMsPerDay;
-        const int64_t weekOpen  = sundayMidnight + 21LL * 3600'000LL;
+        int64_t weekOpen = sundayMidnight + 21LL * 3600'000LL;
+        if (epochMs < weekOpen) {
+            weekOpen -= kMsPerWeek;
+        }
         const int64_t weekClose = weekOpen + 5LL * kMsPerDay; // Fri 21:00 UTC
         return { weekOpen, weekClose, true };
     }
 
     const SessionSpec& spec = kSpecs[static_cast<int>(type)];
 
-    if (type == SessionType::Australia) {
-        // Open at 22:00 UTC, so the session for calendar day D opens on day D-1.
-        // Find the 22:00 UTC anchor most recently ≤ epochMs.
-        const int64_t midnight = utcMidnightBefore(epochMs);
-        // Session open on the current UTC day context: midnight - 1 day + 22h
-        const int64_t openToday = midnight - kMsPerDay + spec.openOffsetMs;
-        // If epochMs is before today's 22:00 window we are in the previous cycle.
-        const int64_t openPrev  = openToday - kMsPerDay;
-
-        int64_t sessionStart = openToday;
-        if (epochMs < openToday) {
-            sessionStart = openPrev;
-        }
-        return { sessionStart, sessionStart + spec.durationMs, true };
-    }
-
-    // Standard sessions: if epochMs lands before today's open, resolve to the
-    // most recent completed session instead of a future one.
+    // Daily sessions: if epochMs lands before today's open, resolve to the
+    // previous day's session. This also handles sessions that cross midnight.
     const int64_t midnight = utcMidnightBefore(epochMs);
     int64_t sessionStart = midnight + spec.openOffsetMs;
     if (epochMs < sessionStart) {
