@@ -12,6 +12,8 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include <condition_variable>
+#include <unordered_map>
 #include "../servermodel/ServerDataModel.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
@@ -19,6 +21,7 @@
 
 class Authenticator;
 class CoinbaseRestClient;
+class Session;
 
 namespace net = boost::asio;
 namespace ssl = net::ssl;
@@ -66,7 +69,11 @@ public:
     void unregisterLatencySender(uint64_t id);
 
 private:
+    friend class Session;
+
     void doAccept();
+    void registerSession(const std::shared_ptr<Session>& session);
+    void unregisterSession(const Session* session);
 
     ServerDataModel& m_model;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
@@ -79,6 +86,13 @@ private:
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::unique_ptr<trading::LiveTradingSession> m_tradingSession;
+
+    std::mutex m_sessionsMutex;
+    std::condition_variable m_sessionsDrained;
+    std::unordered_set<std::shared_ptr<Session>> m_sessions;
+
+    std::mutex m_symbolSubscriptionsMutex;
+    std::unordered_map<std::string, size_t> m_symbolSubscriptions;
 
     std::mutex m_latencySendersMutex;
     std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;

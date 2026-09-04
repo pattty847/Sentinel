@@ -8,6 +8,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/strand.hpp>
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <deque>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -146,8 +148,11 @@ class Session : public std::enable_shared_from_this<Session> {
     ServerDataModel& model_;
     SentinelStreamServer* owner_ = nullptr;
     std::unordered_set<std::string> subscriptions_;
-    std::vector<std::string> write_queue_;
-    std::mutex queue_mutex_;
+    std::deque<std::string> write_queue_;
+    std::atomic_size_t pendingWriteBytes_{0};
+    std::atomic_size_t pendingModelEvents_{0};
+    std::atomic_bool closing_{false};
+    std::atomic_bool closePosted_{false};
     QByteArray footprintDeltaScratch_;
     std::vector<double> footprintRowDeltaScratch_;
     
@@ -171,6 +176,105 @@ class Session : public std::enable_shared_from_this<Session> {
     uint64_t m_latencySenderId = 0;
     uint64_t m_tradingBroadcasterId = 0;
     bool m_tradingBroadcasterRegistered = false;
+
+    static constexpr size_t kMaxPendingWriteBytes = 16U * 1024U * 1024U;
+    static constexpr size_t kMaxPendingModelEvents = 2048U;
+
+    void releasePendingWriteBytes(size_t bytes) {
+        size_t current = pendingWriteBytes_.load(std::memory_order_relaxed);
+        while (!pendingWriteBytes_.compare_exchange_weak(
+            current,
+            (bytes >= current) ? 0U : current - bytes,
+            std::memory_order_relaxed)) {
+        }
+    }
+
+    void disconnectModelSignals() {
+        QObject::disconnect(tradeConn_);
+        QObject::disconnect(bookConn_);
+        QObject::disconnect(heatmapConn_);
+        QObject::disconnect(barUpdatedConn_);
+        QObject::disconnect(barClosedConn_);
+        tradeConn_ = {};
+        bookConn_ = {};
+        heatmapConn_ = {};
+        barUpdatedConn_ = {};
+        barClosedConn_ = {};
+    }
+
+    void requestClose(const char* reason) {
+        if (closing_.load(std::memory_order_acquire) || closePosted_.exchange(true)) {
+            return;
+        }
+        auto self = shared_from_this();
+        net::post(ws_.get_executor(), [self, reason = std::string(reason)] {
+            self->beginClose(reason.c_str());
+        });
+    }
+
+    template <typename Callback>
+    void postModelEvent(Callback&& callback) {
+        if (closing_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const size_t queued = pendingModelEvents_.fetch_add(1, std::memory_order_relaxed);
+        if (queued >= kMaxPendingModelEvents) {
+            pendingModelEvents_.fetch_sub(1, std::memory_order_relaxed);
+            requestClose("model event backlog exceeded");
+            return;
+        }
+
+        auto weak = weak_from_this();
+        net::post(ws_.get_executor(),
+                  [weak, callback = std::forward<Callback>(callback)]() mutable {
+                      if (auto self = weak.lock()) {
+                          self->pendingModelEvents_.fetch_sub(1, std::memory_order_relaxed);
+                          if (!self->closing_.load(std::memory_order_acquire)) {
+                              callback(*self);
+                          }
+                      }
+                  });
+    }
+
+    void beginClose(const char* reason) {
+        if (closing_.exchange(true)) {
+            return;
+        }
+
+        disconnectModelSignals();
+        if (owner_ && m_latencySenderId != 0) {
+            owner_->unregisterLatencySender(m_latencySenderId);
+            m_latencySenderId = 0;
+        }
+        if (owner_ && m_tradingBroadcasterRegistered) {
+            owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
+            m_tradingBroadcasterRegistered = false;
+        }
+        if (owner_) {
+            for (const auto& symbol : subscriptions_) {
+                owner_->notifyClientUnsubscribed(symbol);
+            }
+            subscriptions_.clear();
+        }
+
+        beast::error_code ignored;
+        beast::get_lowest_layer(ws_).cancel();
+        beast::get_lowest_layer(ws_).socket().shutdown(tcp::socket::shutdown_both, ignored);
+        beast::get_lowest_layer(ws_).socket().close(ignored);
+
+        if (write_queue_.size() > 1) {
+            for (auto it = std::next(write_queue_.begin()); it != write_queue_.end(); ++it) {
+                releasePendingWriteBytes(it->size());
+            }
+            write_queue_.erase(std::next(write_queue_.begin()), write_queue_.end());
+        }
+
+        if (owner_) {
+            owner_->unregisterSession(this);
+        }
+        sLog_App("Sentinel client session closed: " << reason);
+    }
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
         if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
@@ -865,19 +969,7 @@ public:
     }
 
     ~Session() {
-        QObject::disconnect(tradeConn_);
-        QObject::disconnect(bookConn_);
-        QObject::disconnect(heatmapConn_);
-        QObject::disconnect(barUpdatedConn_);
-        QObject::disconnect(barClosedConn_);
-        if (owner_ && m_latencySenderId != 0) {
-            owner_->unregisterLatencySender(m_latencySenderId);
-            m_latencySenderId = 0;
-        }
-        if (owner_ && m_tradingBroadcasterRegistered) {
-            owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
-            m_tradingBroadcasterRegistered = false;
-        }
+        disconnectModelSignals();
     }
 
     void run() {
@@ -885,6 +977,10 @@ public:
             beast::bind_front_handler(
                 &Session::on_run,
                 shared_from_this()));
+    }
+
+    void stop() {
+        requestClose("server stopping");
     }
 
     void on_run() {
@@ -925,6 +1021,7 @@ public:
 
         sLog_App("Sentinel client connected");
         auto self = shared_from_this();
+        auto weak = std::weak_ptr<Session>(self);
 
         if (owner_) {
             auto configPayload = buildServerConfigPayload(owner_->serverConfig());
@@ -932,45 +1029,67 @@ public:
         }
         
         tradeConn_ = QObject::connect(&model_, &ServerDataModel::tradeBroadcast, 
-            [self](const Trade& trade) {
-                self->on_trade(trade);
+            [weak](const Trade& trade) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([trade](Session& session) {
+                        session.on_trade(trade);
+                    });
+                }
             });
             
         bookConn_ = QObject::connect(&model_, &ServerDataModel::bookUpdateBroadcast,
-            [self](const QString& productId, const std::vector<BookDelta>& deltas) {
-                self->on_book_update(productId, deltas);
+            [weak](const QString& productId, const std::vector<BookDelta>& deltas) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([productId, deltas](Session& session) {
+                        session.on_book_update(productId, deltas);
+                    });
+                }
             });
 
         heatmapConn_ = QObject::connect(&model_, &ServerDataModel::heatmapSliceReady,
-            [self](const HeatmapSlice& slice) {
-                self->on_heatmap_slice(slice);
+            [weak](const HeatmapSlice& slice) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([slice](Session& session) {
+                        session.on_heatmap_slice(slice);
+                    });
+                }
             });
 
         barUpdatedConn_ = QObject::connect(&model_, &ServerDataModel::barUpdated,
-            [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
-                self->on_bar_updated(symbol, tf, bar);
+            [weak](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([symbol, tf, bar](Session& session) {
+                        session.on_bar_updated(symbol, tf, bar);
+                    });
+                }
             });
 
         barClosedConn_ = QObject::connect(&model_, &ServerDataModel::barClosed,
-            [self](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
-                self->on_bar_closed(symbol, tf, bar);
+            [weak](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([symbol, tf, bar](Session& session) {
+                        session.on_bar_closed(symbol, tf, bar);
+                    });
+                }
             });
         if (owner_) {
             m_latencySenderId = owner_->registerLatencySender(
-                [weak_this = std::weak_ptr<Session>(self), exec = ws_.get_executor()](int ms) {
-                    net::post(exec, [weak_this, ms]() {
-                        if (auto s = weak_this.lock())
-                            s->sendCoinbaseLatency(ms);
-                    });
+                [weak](int ms) {
+                    if (auto self = weak.lock()) {
+                        self->postModelEvent([ms](Session& session) {
+                            session.sendCoinbaseLatency(ms);
+                        });
+                    }
                 });
 
             // Register for trading/algo broadcast messages
             m_tradingBroadcasterId = owner_->registerTradingBroadcaster(
-                [weak_this = std::weak_ptr<Session>(self), exec = ws_.get_executor()](const std::string& json) {
-                    net::post(exec, [weak_this, json]() {
-                        if (auto s = weak_this.lock())
-                            s->do_write(json);
-                    });
+                [weak](const std::string& json) {
+                    if (auto self = weak.lock()) {
+                        self->postModelEvent([json](Session& session) {
+                            session.do_write(json);
+                        });
+                    }
                 });
             m_tradingBroadcasterRegistered = true;
         }
@@ -997,6 +1116,7 @@ public:
 
         if(ec == websocket::error::closed) {
             sLog_App("Sentinel client disconnected");
+            beginClose("peer closed");
             return;
         }
 
@@ -1017,8 +1137,8 @@ public:
             if (type == "subscribe") {
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
-                    subscriptions_.insert(symbol);
-                    if (owner_) {
+                    const bool inserted = subscriptions_.insert(symbol).second;
+                    if (inserted && owner_) {
                         owner_->notifyClientSubscribed(symbol);
                     }
                     
@@ -1318,8 +1438,8 @@ public:
                 }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
-                 subscriptions_.erase(symbol);
-                 if (!symbol.empty() && owner_) {
+                 const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 if (removed && owner_) {
                      owner_->notifyClientUnsubscribed(symbol);
                  }
             } else if (type == "screener_request") {
@@ -1775,6 +1895,23 @@ public:
     }
 
     void do_write(std::string payload) {
+        if (payload.empty() || closing_.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const size_t bytes = payload.size();
+        size_t pending = pendingWriteBytes_.load(std::memory_order_relaxed);
+        while (true) {
+            if (bytes > kMaxPendingWriteBytes || pending > kMaxPendingWriteBytes - bytes) {
+                requestClose("write backlog exceeded");
+                return;
+            }
+            if (pendingWriteBytes_.compare_exchange_weak(
+                    pending, pending + bytes, std::memory_order_relaxed)) {
+                break;
+            }
+        }
+
         net::post(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_write_post,
@@ -1794,7 +1931,10 @@ public:
     }
     
     void on_write_post(std::string payload) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (closing_.load(std::memory_order_acquire)) {
+            releasePendingWriteBytes(payload.size());
+            return;
+        }
         write_queue_.push_back(std::move(payload));
         
         if (write_queue_.size() > 1) {
@@ -1813,10 +1953,13 @@ public:
     }
     
     void on_write_complete(beast::error_code ec, std::size_t) {
-        if (ec) return fail(ec, "write");
-        
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        write_queue_.erase(write_queue_.begin());
+        if (!write_queue_.empty()) {
+            releasePendingWriteBytes(write_queue_.front().size());
+            write_queue_.pop_front();
+        }
+        if (ec) {
+            return fail(ec, "write");
+        }
         
         if (!write_queue_.empty()) {
             internal_async_write();
@@ -1824,13 +1967,10 @@ public:
     }
 
     void fail(beast::error_code ec, char const* what) {
-        if (owner_ && m_latencySenderId != 0) {
-            owner_->unregisterLatencySender(m_latencySenderId);
-            m_latencySenderId = 0;
-        }
         if (ec != websocket::error::closed && ec != net::error::operation_aborted) {
              sLog_Error("Session error: " << what << ": " << ec.message().c_str());
         }
+        beginClose(what);
     }
 };
 
@@ -1860,6 +2000,7 @@ void SentinelStreamServer::start() {
     if (m_running) return;
 
     try {
+        m_ioc.restart();
         m_running = true;
 
         const auto& tls = m_serverConfig.tls;
@@ -1912,14 +2053,42 @@ void SentinelStreamServer::start() {
 }
 
 void SentinelStreamServer::stop() {
-    m_running = false;
-    if (m_acceptor) {
-        m_acceptor->close();
+    const bool wasRunning = m_running.exchange(false);
+    if (!wasRunning && !m_thread.joinable()) {
+        return;
     }
+
+    net::post(m_ioc, [this] {
+        if (m_acceptor) {
+            beast::error_code ignored;
+            m_acceptor->close(ignored);
+        }
+    });
+
+    std::vector<std::shared_ptr<Session>> sessions;
+    {
+        std::lock_guard<std::mutex> lock(m_sessionsMutex);
+        sessions.assign(m_sessions.begin(), m_sessions.end());
+    }
+    for (const auto& session : sessions) {
+        session->stop();
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(m_sessionsMutex);
+        if (!m_sessionsDrained.wait_for(lock, std::chrono::seconds(2), [this] {
+                return m_sessions.empty();
+            })) {
+            sLog_Warning("Timed out waiting for " << m_sessions.size()
+                                                   << " Sentinel client session(s) to close");
+        }
+    }
+
     m_ioc.stop();
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    m_acceptor.reset();
 }
 
 void SentinelStreamServer::doAccept() {
@@ -1927,8 +2096,10 @@ void SentinelStreamServer::doAccept() {
         net::make_strand(m_ioc),
         [this](beast::error_code ec, tcp::socket socket) {
             if (!ec) {
-                std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this)->run();
-            } else {
+                auto session = std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this);
+                registerSession(session);
+                session->run();
+            } else if (m_running) {
                 sLog_Error("Accept error: " << ec.message().c_str());
             }
             if (m_running) {
@@ -1937,12 +2108,50 @@ void SentinelStreamServer::doAccept() {
         });
 }
 
+void SentinelStreamServer::registerSession(const std::shared_ptr<Session>& session) {
+    std::lock_guard<std::mutex> lock(m_sessionsMutex);
+    m_sessions.insert(session);
+}
+
+void SentinelStreamServer::unregisterSession(const Session* session) {
+    {
+        std::lock_guard<std::mutex> lock(m_sessionsMutex);
+        std::erase_if(m_sessions, [session](const std::shared_ptr<Session>& candidate) {
+            return candidate.get() == session;
+        });
+    }
+    m_sessionsDrained.notify_all();
+}
+
 void SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
-    emit clientSubscribed(QString::fromStdString(symbol));
+    bool firstSubscriber = false;
+    {
+        std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
+        auto& count = m_symbolSubscriptions[symbol];
+        firstSubscriber = count == 0;
+        ++count;
+    }
+    if (firstSubscriber) {
+        emit clientSubscribed(QString::fromStdString(symbol));
+    }
 }
 
 void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
-    emit clientUnsubscribed(QString::fromStdString(symbol));
+    bool lastSubscriber = false;
+    {
+        std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
+        auto it = m_symbolSubscriptions.find(symbol);
+        if (it == m_symbolSubscriptions.end()) {
+            return;
+        }
+        if (--it->second == 0) {
+            m_symbolSubscriptions.erase(it);
+            lastSubscriber = true;
+        }
+    }
+    if (lastSubscriber) {
+        emit clientUnsubscribed(QString::fromStdString(symbol));
+    }
 }
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {

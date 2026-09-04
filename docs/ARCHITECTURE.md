@@ -51,7 +51,7 @@ Exchange → MarketDataCoreEngine → ServerDataModel → Persistence + Sentinel
 - **ServerDataModel** — Central hub for all symbols; coordinates persistence and streaming.
 - **TickBinaryLogger** — Append-only binary logging with hourly rotation.
 - **TimeframeAggregator** — Timer-driven aggregation (e.g. 100 ms, 1 s) into GPU-ready slices.
-- **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients.
+- **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Upstream symbol subscriptions are reference-counted across clients.
 
 ### Client
 
