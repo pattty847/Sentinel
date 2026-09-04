@@ -3,6 +3,9 @@
 #include "HeatmapIntensityNode.hpp"
 #include "SentinelLogging.hpp"
 
+#include <QSGFlatColorMaterial>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
 #include <QSGRendererInterface>
 #include <QSGTexture>
 #include <algorithm>
@@ -85,12 +88,23 @@ void HeatmapOverlayRenderer::setAskGradient(const std::vector<ColorStop>& stops)
     m_textureDirty = true;
 }
 
+void HeatmapOverlayRenderer::setHistoryCoverage(QByteArray coverage) {
+    std::lock_guard<std::mutex> lock(m_historyCoverageMutex);
+    if (m_pendingHistoryCoverage == coverage) {
+        return;
+    }
+    m_pendingHistoryCoverage = std::move(coverage);
+    m_historyCoverageDirty.store(true, std::memory_order_release);
+}
+
 void HeatmapOverlayRenderer::requestFullTextureRebuild() {
     m_rebuildPending.store(true, std::memory_order_release);
 }
 
 void HeatmapOverlayRenderer::onRootRebuilt() {
     m_textureDirty = true;
+    m_historyGapNode = nullptr;
+    m_gapGeometryDirty = true;
 }
 
 void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
@@ -106,6 +120,25 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
                                          std::vector<PendingUpload>& pendingUploads) {
     if (!window || !node) {
         return;
+    }
+
+    if (m_historyCoverageDirty.exchange(false, std::memory_order_acq_rel)) {
+        {
+            std::lock_guard<std::mutex> lock(m_historyCoverageMutex);
+            m_historyCoverage = m_pendingHistoryCoverage;
+        }
+        m_historyGapRuns.clear();
+        int runStart = -1;
+        for (int x = 0; x <= m_historyCoverage.size(); ++x) {
+            const bool missing = x < m_historyCoverage.size() && m_historyCoverage.at(x) == 0;
+            if (missing && runStart < 0) {
+                runStart = x;
+            } else if (!missing && runStart >= 0) {
+                m_historyGapRuns.emplace_back(runStart, x);
+                runStart = -1;
+            }
+        }
+        m_gapGeometryDirty = true;
     }
     const auto* rendererInterface = window->rendererInterface();
     const bool useIncrementalGlUploads = rendererInterface &&
@@ -208,6 +241,85 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         }
     }
 
+    updateHistoryGapNode(node,
+                         drawHeatmap && m_historyCoverage.size() == m_gridWidth &&
+                             !m_historyGapRuns.empty(),
+                         drawRect,
+                         srcRect);
+
+}
+
+void HeatmapOverlayRenderer::updateHistoryGapNode(HeatmapIntensityNode* root,
+                                                   bool visible,
+                                                   const QRectF& drawRect,
+                                                   const QRectF& srcRect) {
+    if (!root) {
+        return;
+    }
+    if (!m_historyGapNode) {
+        m_historyGapNode = new QSGGeometryNode();
+        auto* material = new QSGFlatColorMaterial();
+        material->setColor(QColor(82, 94, 112, 0));
+        m_historyGapNode->setMaterial(material);
+        m_historyGapNode->setFlag(QSGNode::OwnsMaterial, true);
+        auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+        geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+        m_historyGapNode->setGeometry(geometry);
+        m_historyGapNode->setFlag(QSGNode::OwnsGeometry, true);
+        root->appendChildNode(m_historyGapNode);
+        m_gapGeometryDirty = true;
+        m_gapVisible = false;
+    }
+
+    const bool show = visible && !drawRect.isEmpty() && srcRect.width() > 0.0;
+    if (show != m_gapVisible) {
+        auto* material = static_cast<QSGFlatColorMaterial*>(m_historyGapNode->material());
+        material->setColor(show ? QColor(82, 94, 112, 72) : QColor(82, 94, 112, 0));
+        m_historyGapNode->markDirty(QSGNode::DirtyMaterial);
+        m_gapVisible = show;
+    }
+    if (!show) {
+        return;
+    }
+
+    const int vertexCount = static_cast<int>(m_historyGapRuns.size()) * 6;
+    auto* geometry = m_historyGapNode->geometry();
+    if (m_gapGeometryDirty || geometry->vertexCount() != vertexCount) {
+        geometry->allocate(vertexCount);
+        m_gapGeometryDirty = true;
+    }
+    if (!m_gapGeometryDirty && drawRect == m_lastGapDrawRect && srcRect == m_lastGapSourceRect) {
+        return;
+    }
+
+    auto* vertices = geometry->vertexDataAsPoint2D();
+    const double sourceLeft = srcRect.left();
+    const double sourceRight = srcRect.right();
+    const float top = static_cast<float>(drawRect.top());
+    const float bottom = static_cast<float>(drawRect.bottom());
+    int vertex = 0;
+    for (const auto& run : m_historyGapRuns) {
+        const double clippedStart = std::clamp(static_cast<double>(run.first),
+                                               sourceLeft, sourceRight);
+        const double clippedEnd = std::clamp(static_cast<double>(run.second),
+                                             sourceLeft, sourceRight);
+        const float left = static_cast<float>(drawRect.left() +
+            ((clippedStart - sourceLeft) / srcRect.width()) * drawRect.width());
+        const float right = clippedEnd > clippedStart
+            ? static_cast<float>(drawRect.left() +
+                ((clippedEnd - sourceLeft) / srcRect.width()) * drawRect.width())
+            : left;
+        vertices[vertex++].set(left, top);
+        vertices[vertex++].set(right, top);
+        vertices[vertex++].set(left, bottom);
+        vertices[vertex++].set(left, bottom);
+        vertices[vertex++].set(right, top);
+        vertices[vertex++].set(right, bottom);
+    }
+    m_lastGapDrawRect = drawRect;
+    m_lastGapSourceRect = srcRect;
+    m_gapGeometryDirty = false;
+    m_historyGapNode->markDirty(QSGNode::DirtyGeometry);
 }
 
 void HeatmapOverlayRenderer::ensureHeatmapImage() {

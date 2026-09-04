@@ -129,6 +129,7 @@ bool buildWindow(const QVector<Column>& source,
     }
 
     out.columns.resize(capacity);
+    out.coverage = QByteArray(capacity, 0);
     out.intensityBytesPerCell = bytesPerCell;
     out.gridHeight = gridHeight;
     out.minPrice = targetMin;
@@ -164,6 +165,7 @@ bool buildWindow(const QVector<Column>& source,
         }
 
         auto& targetColumn = out.columns[x];
+        out.coverage[x] = 1;
         const bool sourceHasLiquidity = sourceColumn.liquidity.size() == liquidityBytes;
         const auto* sourceLiquidity = sourceHasLiquidity
             ? reinterpret_cast<const uint16_t*>(sourceColumn.liquidity.constData())

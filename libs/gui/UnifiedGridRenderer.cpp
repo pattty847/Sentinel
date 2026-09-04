@@ -412,7 +412,8 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     m_lastHistoryRequestEndMs = 0;
     m_currentTimeframe_ms = timeframe_ms;
     if (m_useGpuHeatmap && timeframe_ms > 0 && m_heatmapStreamService) {
-      m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms));
+      m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms),
+                                                    m_heatmapOverlay);
     }
     m_manualTimeframeSet = true;
     m_manualTimeframeTimer.start();

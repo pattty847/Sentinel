@@ -153,6 +153,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
             [this](const QString& symbol, int64_t timeframeMs, int gridWidth, int gridHeight,
                    int64_t requestEndMs, int64_t oldestAvailableMs, int64_t oldestReturnedMs,
                    const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
+                   const QByteArray& coverage,
                    int intensityBytesPerCell) {
                 Q_UNUSED(gridWidth);
                 Q_UNUSED(gridHeight);
@@ -192,7 +193,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     events.push_back(std::move(event));
                 }
                 const auto result = m_heatmapStreamService->ingestHistoryWindow(
-                    events, m_viewState.get(), m_heatmapOverlay);
+                    events, coverage, m_viewState.get(), m_heatmapOverlay);
                 if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
                     sLog_Debug(QString("Heatmap history window applied: columns=%1 accepted=%2 manual=%3")
                                    .arg(columns.size())

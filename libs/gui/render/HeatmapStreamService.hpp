@@ -100,6 +100,7 @@ public:
                               int liquidityLabelMode,
                               int64_t currentTimeframeMs);
     IngestResult ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
+                                     const QByteArray& coverage,
                                      GridViewState* viewState,
                                      HeatmapOverlayRenderer& overlay);
     bool historyViewActive() const { return m_historyViewActive; }
@@ -108,7 +109,7 @@ public:
     RenderTickResult handleRenderTick(GridViewState* viewState);
 
     // ── Timeframe change ─────────────────────────────────────────────────────
-    void handleTimeframeChange(int64_t timeframeMs);
+    void handleTimeframeChange(int64_t timeframeMs, HeatmapOverlayRenderer& overlay);
 
     // ── Range reset ──────────────────────────────────────────────────────────
     RangeResetResult handleRangeReset(double minPrice, double maxPrice, double tickSize,
@@ -149,4 +150,5 @@ private:
     double m_maxObservedLiquidity = 0.0;
     double m_minObservedLiquidity = std::numeric_limits<double>::max();
     bool m_historyViewActive = false;
+    bool m_historyCoverageActive = false;
 };

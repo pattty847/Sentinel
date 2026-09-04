@@ -75,6 +75,10 @@ HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
         }
         m_viewportInitialized = false;
     }
+    if (m_historyCoverageActive) {
+        overlay.setHistoryCoverage({});
+        m_historyCoverageActive = false;
+    }
 
     // ── Intensity format update ──────────────────────────────────────────────
     const int bytesPerCell = (event.intensityBytesPerCell > 0) ? event.intensityBytesPerCell : 1;
@@ -277,6 +281,7 @@ HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
 
 HeatmapStreamService::IngestResult
 HeatmapStreamService::ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
+                                          const QByteArray& coverage,
                                           GridViewState* viewState,
                                           HeatmapOverlayRenderer& overlay) {
     IngestResult result;
@@ -294,7 +299,7 @@ HeatmapStreamService::ingestHistoryWindow(const std::vector<HeatmapColumnEvent>&
     }
     const int gridHeight = first.column.size() / bytesPerCell;
     const int gridWidth = static_cast<int>(events.size());
-    if (gridWidth <= 0 || gridHeight <= 0 ||
+    if (gridWidth <= 0 || gridHeight <= 0 || coverage.size() != gridWidth ||
         first.maxPrice <= first.minPrice || first.tickSize <= 0.0) {
         return result;
     }
@@ -338,6 +343,8 @@ HeatmapStreamService::ingestHistoryWindow(const std::vector<HeatmapColumnEvent>&
     if (!m_stream->replaceWindow(static_cast<int>(cadenceMs), windowColumns, nowMs)) {
         return result;
     }
+    overlay.setHistoryCoverage(coverage);
+    m_historyCoverageActive = true;
 
     if (first.tickSize != m_tickSize) {
         m_tickSize = first.tickSize;
@@ -411,8 +418,13 @@ HeatmapStreamService::handleRenderTick(GridViewState* viewState) {
 
 // ── Timeframe change ─────────────────────────────────────────────────────────
 
-void HeatmapStreamService::handleTimeframeChange(int64_t timeframeMs) {
+void HeatmapStreamService::handleTimeframeChange(int64_t timeframeMs,
+                                                 HeatmapOverlayRenderer& overlay) {
     m_historyViewActive = false;
+    if (m_historyCoverageActive) {
+        overlay.setHistoryCoverage({});
+        m_historyCoverageActive = false;
+    }
     m_timeAuthority.setActiveTimeframeMs(timeframeMs);
     if (m_stream) {
         const auto snap = m_stream->snapshot();
@@ -442,6 +454,10 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
         return result;
     }
     m_historyViewActive = false;
+    if (m_historyCoverageActive) {
+        overlay.setHistoryCoverage({});
+        m_historyCoverageActive = false;
+    }
 
     if (gridWidth > 0) m_gridWidth = gridWidth;
     if (gridHeight > 0) m_gridHeight = gridHeight;

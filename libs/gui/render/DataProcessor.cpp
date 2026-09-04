@@ -413,7 +413,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                       window)) {
         emit heatmapHistoryBatchReady(symbol, timeframeMs, gridWidth, gridHeight,
                                       requestEndMs, oldestAvailableMs, oldestReturnedMs,
-                                      {}, 0);
+                                      {}, QByteArray{}, 0);
         return;
     }
 
@@ -428,6 +428,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                   oldestAvailableMs,
                                   oldestReturnedMs,
                                   window.columns,
+                                  window.coverage,
                                   window.intensityBytesPerCell);
 }
 

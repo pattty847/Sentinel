@@ -54,6 +54,10 @@ TEST(HeatmapHistoryWindow, RepresentsMissingBucketsAsBlankColumns) {
     EXPECT_EQ(window.columns[0].bucketStartMs, 60'000);
     EXPECT_EQ(window.columns[1].bucketStartMs, 120'000);
     EXPECT_EQ(window.columns[2].bucketStartMs, 180'000);
+    ASSERT_EQ(window.coverage.size(), 3);
+    EXPECT_EQ(static_cast<int>(window.coverage[0]), 1);
+    EXPECT_EQ(static_cast<int>(window.coverage[1]), 0);
+    EXPECT_EQ(static_cast<int>(window.coverage[2]), 1);
     EXPECT_TRUE(hasNonZero(window.columns[0].intensity));
     EXPECT_FALSE(hasNonZero(window.columns[1].intensity));
     EXPECT_TRUE(hasNonZero(window.columns[2].intensity));
@@ -105,6 +109,19 @@ TEST(HeatmapHistoryWindow, AnchorsBlankOutageAtRequestedEnd) {
     for (const auto& result : window.columns) {
         EXPECT_FALSE(hasNonZero(result.intensity));
     }
+    EXPECT_EQ(window.coverage, QByteArray(3, 0));
+}
+
+TEST(HeatmapHistoryWindow, MarksRecordedZeroColumnAsCovered) {
+    QVector<Column> source{
+        column(60'000, 0.0, 4.0, 1.0, {0, 0, 0, 0}),
+    };
+
+    heatmap_history::Window window;
+    ASSERT_TRUE(heatmap_history::buildWindow(source, 60'000, 1, 4, 0, window));
+    ASSERT_EQ(window.coverage.size(), 1);
+    EXPECT_EQ(static_cast<int>(window.coverage[0]), 1);
+    EXPECT_FALSE(hasNonZero(window.columns[0].intensity));
 }
 
 TEST(HeatmapStreamState, ReplacesHistoricalWindowInLinearSizedBatch) {

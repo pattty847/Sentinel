@@ -9,6 +9,7 @@ namespace heatmap_history {
 
 struct Window {
     QVector<IGridDataSource::HeatmapHistoryColumn> columns;
+    QByteArray coverage;
     int intensityBytesPerCell = 0;
     int gridHeight = 0;
     double minPrice = 0.0;
@@ -17,8 +18,9 @@ struct Window {
 };
 
 // Builds one dense, chronological GPU window. Missing buckets become zero
-// columns and source price bands are resampled into one range so recentering
-// does not reinterpret row indices from older columns.
+// columns with coverage[x] == 0; recorded columns use coverage[x] == 1.
+// Source price bands are resampled into one range so recentering does not
+// reinterpret row indices from older columns.
 bool buildWindow(const QVector<IGridDataSource::HeatmapHistoryColumn>& source,
                  int64_t timeframeMs,
                  int capacity,

@@ -78,6 +78,7 @@ signals:
                                   int64_t oldestAvailableMs,
                                   int64_t oldestReturnedMs,
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
+                                  const QByteArray& coverage,
                                   int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
     void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);

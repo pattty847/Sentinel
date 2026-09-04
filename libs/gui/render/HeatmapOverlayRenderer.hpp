@@ -8,9 +8,12 @@
 #include <QImage>
 #include <QRectF>
 #include <atomic>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 class QQuickWindow;
+class QSGGeometryNode;
 class HeatmapIntensityNode;
 
 class HeatmapOverlayRenderer : public IOverlayRenderer {
@@ -31,6 +34,7 @@ public:
     void setPaletteGamma(double gamma);
     void setBidGradient(const std::vector<ColorStop>& stops);
     void setAskGradient(const std::vector<ColorStop>& stops);
+    void setHistoryCoverage(QByteArray coverage);
     void requestFullTextureRebuild();
     void onRootRebuilt() override;
     int zOrder() const override { return 0; }
@@ -55,6 +59,10 @@ private:
 
     void ensureHeatmapImage();
     void ensurePaletteImage();
+    void updateHistoryGapNode(HeatmapIntensityNode* root,
+                              bool visible,
+                              const QRectF& drawRect,
+                              const QRectF& srcRect);
 
     int m_gridWidth = 5120;
     int m_gridHeight = 2048;
@@ -66,6 +74,17 @@ private:
     double m_paletteGamma = 2.0;
     QImage m_heatmapImage;
     QImage m_paletteImage;
+
+    std::mutex m_historyCoverageMutex;
+    QByteArray m_pendingHistoryCoverage;
+    std::atomic<bool> m_historyCoverageDirty{false};
+    QByteArray m_historyCoverage;
+    std::vector<std::pair<int, int>> m_historyGapRuns;
+    QSGGeometryNode* m_historyGapNode = nullptr;
+    QRectF m_lastGapDrawRect;
+    QRectF m_lastGapSourceRect;
+    bool m_gapGeometryDirty = true;
+    bool m_gapVisible = false;
 
     ColorGradient m_bidGradient;
     ColorGradient m_askGradient;
