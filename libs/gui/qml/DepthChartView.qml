@@ -93,6 +93,52 @@ Rectangle {
         }
     }
 
+    Rectangle {
+        id: heatmapHistoryStatus
+        anchors.top: unifiedGridRenderer.top
+        anchors.right: unifiedGridRenderer.right
+        anchors.topMargin: 10
+        anchors.rightMargin: 10
+        width: historyStatusRow.implicitWidth + 18
+        height: 26
+        radius: 4
+        color: unifiedGridRenderer.heatmapHistoryLoading
+            ? Qt.rgba(0.12, 0.16, 0.20, 0.94)
+            : Qt.rgba(0.10, 0.12, 0.15, 0.90)
+        border.width: 1
+        border.color: unifiedGridRenderer.heatmapHistoryLoading ? "#58758f" : "#46505d"
+        visible: unifiedGridRenderer.heatmapHistoryLoading ||
+                 (unifiedGridRenderer.heatmapHistoryAtFloor &&
+                  !unifiedGridRenderer.autoScrollEnabled &&
+                  unifiedGridRenderer.heatmapHistoryFloorMs > 0 &&
+                  unifiedGridRenderer.visibleTimeStart <=
+                      unifiedGridRenderer.heatmapHistoryFloorMs + unifiedGridRenderer.timeframeMs)
+        z: 9
+
+        Row {
+            id: historyStatusRow
+            anchors.centerIn: parent
+            spacing: 7
+
+            Rectangle {
+                width: 7
+                height: 7
+                radius: 3.5
+                anchors.verticalCenter: parent.verticalCenter
+                color: unifiedGridRenderer.heatmapHistoryLoading ? "#72b7e8" : "#8b98a8"
+            }
+
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                color: "#d8e1ea"
+                font.pixelSize: 11
+                text: unifiedGridRenderer.heatmapHistoryLoading
+                    ? "Loading heatmap history…"
+                    : "Start of recorded history"
+            }
+        }
+    }
+
     CandlestickOverlayItem {
         id: candleOverlay
         anchors.fill: unifiedGridRenderer

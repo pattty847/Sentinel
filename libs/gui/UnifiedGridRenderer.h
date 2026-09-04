@@ -48,6 +48,9 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(double intensityScale READ intensityScale WRITE setIntensityScale NOTIFY intensityScaleChanged)
     Q_PROPERTY(int maxCells READ maxCells WRITE setMaxCells NOTIFY maxCellsChanged)
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
+    Q_PROPERTY(bool heatmapHistoryLoading READ heatmapHistoryLoading NOTIFY heatmapHistoryStatusChanged)
+    Q_PROPERTY(bool heatmapHistoryAtFloor READ heatmapHistoryAtFloor NOTIFY heatmapHistoryStatusChanged)
+    Q_PROPERTY(qint64 heatmapHistoryFloorMs READ heatmapHistoryFloorMs NOTIFY heatmapHistoryStatusChanged)
     
     Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
@@ -194,6 +197,9 @@ public:
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
     double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
+    bool heatmapHistoryLoading() const { return m_historyRequestInFlight; }
+    bool heatmapHistoryAtFloor() const { return m_historyExhausted; }
+    qint64 heatmapHistoryFloorMs() const { return m_oldestHeatmapAvailableMs; }
     double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int liquidityLabelMode() const { return m_liquidityLabelMode; }
@@ -334,6 +340,7 @@ signals:
     void maxCellsChanged();
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
+    void heatmapHistoryStatusChanged();
     void minVolumeFilterChanged();
     void priceResolutionChanged();
     void autoScrollPaddingFracChanged();
@@ -417,6 +424,10 @@ private:
     void updateFpsEstimate();
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);
+    void setHistoryRequestInFlight(bool inFlight);
+    void setHistoryExhausted(bool exhausted);
+    void setOldestHeatmapAvailableMs(int64_t oldestMs);
+    void resetHeatmapHistoryStatus();
 
 private:
     void setIntensityScale(double scale);

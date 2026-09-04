@@ -168,12 +168,12 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     return;
                 }
                 m_historyAvailabilityKnown = true;
-                m_oldestHeatmapAvailableMs = oldestAvailableMs;
+                setOldestHeatmapAvailableMs(oldestAvailableMs);
                 if (m_lastHistoryRequestEndMs > 0) {
-                    m_historyExhausted = columns.isEmpty() || oldestReturnedMs <= 0 ||
-                        oldestReturnedMs >= m_lastHistoryRequestEndMs;
+                    setHistoryExhausted(columns.isEmpty() || oldestReturnedMs <= 0 ||
+                                        oldestReturnedMs >= m_lastHistoryRequestEndMs);
                 }
-                m_historyRequestInFlight = false;
+                setHistoryRequestInFlight(false);
                 m_lastHistoryRequestEndMs = 0;
 
                 std::vector<Event> events;
