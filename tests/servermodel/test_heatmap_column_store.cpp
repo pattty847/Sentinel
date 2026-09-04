@@ -852,6 +852,26 @@ TEST(HeatmapColumnStoreRetention, SkipsFileWithOpenWriter) {
     EXPECT_EQ(hmcolCount, 1);
 }
 
+TEST(HeatmapColumnStoreRetention, DayRotationClosesPreviousWriter) {
+    const auto dir = makeTempDir("ret-rotated-writer");
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    constexpr int32_t gridHeight = 4;
+    constexpr int64_t kDay = 86'400'000;
+    const int64_t day = 1'714'176'000'000;
+    auto cells = patternBuffer(gridHeight, 1);
+
+    ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight, day, day + kMs1m,
+                           0.0, 4.0, 1.0, cells.data(), nullptr, 1.0),
+              HeatmapColumnStore::AppendResult::Written);
+    ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight, day + kDay, day + kDay + kMs1m,
+                           0.0, 4.0, 1.0, cells.data(), nullptr, 1.0),
+              HeatmapColumnStore::AppendResult::Written);
+
+    EXPECT_EQ(store.enforceRetentionAt(day + 10 * kDay, /*retentionDays=*/3), 1);
+}
+
 // ---------- Stats ----------
 
 TEST(HeatmapColumnStoreStats, CountsResultsCorrectly) {
@@ -877,4 +897,19 @@ TEST(HeatmapColumnStoreStats, CountsResultsCorrectly) {
     EXPECT_EQ(s.slotConflicts, 0u);
     EXPECT_EQ(s.ioErrors, 0u);
     EXPECT_EQ(s.badInputs, 0u);
+}
+
+TEST(HeatmapColumnStoreStats, DefaultPolicySyncsEachWrittenRecord) {
+    const auto dir = makeTempDir("sync-each-record");
+    HeatmapColumnStore store(dir);
+    ASSERT_TRUE(store.acquireLock());
+
+    constexpr int32_t gridHeight = 8;
+    const int64_t day = 1'714'176'000'000;
+    auto cells = patternBuffer(gridHeight, 0x4321);
+
+    ASSERT_EQ(store.append("X", kMs1m, gridHeight, day, day + kMs1m,
+                           0, 8.0, 1.0, cells.data(), nullptr, 1.0),
+              HeatmapColumnStore::AppendResult::Written);
+    EXPECT_EQ(store.stats().flushes, 1u);
 }

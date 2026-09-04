@@ -10,9 +10,14 @@
 #include <sstream>
 #include <system_error>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -38,6 +43,47 @@ void copySymbolField(const std::string& symbol, char (&dst)[24]) noexcept {
     std::memcpy(dst, symbol.data(), n);
 }
 
+bool syncFilePath(const fs::path& path, int& errorCode) {
+#ifdef _WIN32
+    HANDLE file = CreateFileW(path.c_str(),
+                              GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        errorCode = static_cast<int>(GetLastError());
+        return false;
+    }
+    const bool ok = FlushFileBuffers(file) != 0;
+    if (!ok) {
+        errorCode = static_cast<int>(GetLastError());
+    }
+    CloseHandle(file);
+    return ok;
+#else
+    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        errorCode = errno;
+        return false;
+    }
+#ifdef __APPLE__
+    int result = ::fcntl(fd, F_FULLFSYNC);
+    if (result != 0) {
+        result = ::fsync(fd);
+    }
+#else
+    const int result = ::fsync(fd);
+#endif
+    if (result != 0) {
+        errorCode = errno;
+    }
+    ::close(fd);
+    return result == 0;
+#endif
+}
+
 } // namespace
 
 HeatmapColumnStore::HeatmapColumnStore(fs::path baseDir, Config cfg)
@@ -52,25 +98,66 @@ HeatmapColumnStore::~HeatmapColumnStore() {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (auto& [key, writer] : m_writers) {
             if (writer.stream.is_open()) {
-                writer.stream.flush();
+                syncWriter(writer);
                 writer.stream.close();
             }
         }
         m_writers.clear();
     }
+#ifdef _WIN32
+    if (m_lockHandle != nullptr) {
+        OVERLAPPED overlapped{};
+        UnlockFileEx(static_cast<HANDLE>(m_lockHandle), 0, MAXDWORD, MAXDWORD, &overlapped);
+        CloseHandle(static_cast<HANDLE>(m_lockHandle));
+        m_lockHandle = nullptr;
+    }
+#else
     if (m_lockFd >= 0) {
         // Closing the fd releases the flock implicitly.
         ::close(m_lockFd);
         m_lockFd = -1;
     }
+#endif
 }
 
 bool HeatmapColumnStore::acquireLock() {
+#ifdef _WIN32
+    if (m_lockHandle != nullptr) return true;
+#else
     if (m_lockFd >= 0) return true;
+#endif
 
     std::error_code ec;
     fs::create_directories(m_baseDir, ec);
 
+#ifdef _WIN32
+    HANDLE file = CreateFileW(m_lockPath.c_str(),
+                              GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ,
+                              nullptr,
+                              OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        sLog_Error("HeatmapColumnStore: cannot open lock file " << m_lockPath
+                  << " error=" << GetLastError());
+        return false;
+    }
+    OVERLAPPED overlapped{};
+    if (!LockFileEx(file,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    MAXDWORD,
+                    MAXDWORD,
+                    &overlapped)) {
+        const DWORD error = GetLastError();
+        CloseHandle(file);
+        sLog_Warning("HeatmapColumnStore: lock " << m_lockPath
+                     << " unavailable, error=" << error);
+        return false;
+    }
+    m_lockHandle = file;
+#else
     const int fd = ::open(m_lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) {
         sLog_Error("HeatmapColumnStore: cannot open lock file " << m_lockPath
@@ -89,7 +176,16 @@ bool HeatmapColumnStore::acquireLock() {
         return false;
     }
     m_lockFd = fd;
+#endif
     return true;
+}
+
+bool HeatmapColumnStore::isLocked() const noexcept {
+#ifdef _WIN32
+    return m_lockHandle != nullptr;
+#else
+    return m_lockFd >= 0;
+#endif
 }
 
 fs::path HeatmapColumnStore::filePathFor(const fs::path& baseDir,
@@ -119,6 +215,27 @@ HeatmapColumnStore::openOrGet(const DayWriterKey& key,
             return nullptr;
         }
         return &it->second;
+    }
+
+    // A long-running process needs at most one open UTC day per symbol and
+    // timeframe. Sync and close the previous day before rotating forward (or
+    // reopening an older day during a repair/backfill).
+    for (auto writerIt = m_writers.begin(); writerIt != m_writers.end();) {
+        const auto& openKey = writerIt->first;
+        if (openKey.symbol == key.symbol &&
+            openKey.timeframeMs == key.timeframeMs &&
+            openKey.dayStartMs != key.dayStartMs) {
+            if (writerIt->second.stream.is_open()) {
+                if (!syncWriter(writerIt->second)) {
+                    ++m_stats.ioErrors;
+                    return nullptr;
+                }
+                writerIt->second.stream.close();
+            }
+            writerIt = m_writers.erase(writerIt);
+        } else {
+            ++writerIt;
+        }
     }
 
     DayWriter w;
@@ -221,18 +338,37 @@ HeatmapColumnStore::openOrGet(const DayWriterKey& key,
     return &insertedIt->second;
 }
 
-void HeatmapColumnStore::maybeFlush(DayWriter& w) {
+bool HeatmapColumnStore::syncWriter(DayWriter& w) {
+    w.stream.flush();
+    if (!w.stream) {
+        sLog_Error("HeatmapColumnStore: stream flush failed for " << w.path);
+        return false;
+    }
+
+    int errorCode = 0;
+    if (!syncFilePath(w.path, errorCode)) {
+        sLog_Error("HeatmapColumnStore: durable sync failed for " << w.path
+                   << " error=" << errorCode);
+        return false;
+    }
+    return true;
+}
+
+bool HeatmapColumnStore::maybeFlush(DayWriter& w) {
     ++w.recordsSinceFlush;
     const auto now = std::chrono::steady_clock::now();
     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - w.lastFlush).count();
     const bool byCount = w.recordsSinceFlush >= m_config.fsyncEveryNRecords;
     const bool byTime = since >= m_config.fsyncEveryMs;
     if (byCount || byTime) {
-        w.stream.flush();
+        if (!syncWriter(w)) {
+            return false;
+        }
         w.recordsSinceFlush = 0;
         w.lastFlush = now;
         ++m_stats.flushes;
     }
+    return true;
 }
 
 HeatmapColumnStore::AppendResult
@@ -247,7 +383,7 @@ HeatmapColumnStore::append(const std::string& symbol,
                            const uint16_t* intensity,
                            const uint16_t* liquidity,
                            double liquidityScale) {
-    if (m_lockFd < 0) {
+    if (!isLocked()) {
         ++m_stats.badInputs;
         return AppendResult::IoError;
     }
@@ -349,7 +485,10 @@ HeatmapColumnStore::append(const std::string& symbol,
         return AppendResult::IoError;
     }
 
-    maybeFlush(*w);
+    if (!maybeFlush(*w)) {
+        ++m_stats.ioErrors;
+        return AppendResult::IoError;
+    }
     ++m_stats.written;
     return AppendResult::Written;
 }
@@ -611,7 +750,10 @@ void HeatmapColumnStore::flush() {
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& [key, w] : m_writers) {
         if (w.stream.is_open()) {
-            w.stream.flush();
+            if (!syncWriter(w)) {
+                ++m_stats.ioErrors;
+                continue;
+            }
             w.recordsSinceFlush = 0;
             w.lastFlush = std::chrono::steady_clock::now();
             ++m_stats.flushes;

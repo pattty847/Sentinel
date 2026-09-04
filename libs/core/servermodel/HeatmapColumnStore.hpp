@@ -27,8 +27,8 @@
 #include "HmcolFormat.hpp"
 
 struct HeatmapColumnStoreConfig {
-    int fsyncEveryNRecords = 5;     // upper bound between fsyncs
-    int fsyncEveryMs = 1000;        // wall-clock upper bound between fsyncs
+    int fsyncEveryNRecords = 1;     // upper bound between fsyncs
+    int fsyncEveryMs = 1000;        // time threshold checked when a record arrives
 };
 
 class HeatmapColumnStore {
@@ -70,7 +70,7 @@ public:
     bool acquireLock();
 
     // True between successful acquireLock() and the destructor.
-    bool isLocked() const noexcept { return m_lockFd >= 0; }
+    bool isLocked() const noexcept;
 
     // Persist a finalized heatmap column.
     //   intensity: gridHeight u16 cells (must not be null).
@@ -214,12 +214,17 @@ private:
     // the mutable member.
     void flushOpenWritersFor(const std::string& symbol, int64_t timeframeMs) const;
 
-    void maybeFlush(DayWriter& w);
+    bool maybeFlush(DayWriter& w);
+    bool syncWriter(DayWriter& w);
 
     Config m_config;
     std::filesystem::path m_baseDir;
     std::filesystem::path m_lockPath;
+#ifdef _WIN32
+    void* m_lockHandle = nullptr;
+#else
     int m_lockFd = -1;
+#endif
 
     mutable std::mutex m_mutex;
     // Writers are mutable so const reads (loadRecent / fetchRange) can flush

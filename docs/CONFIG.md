@@ -35,11 +35,17 @@ Copy the defaults to the override names to customize; override values take prece
 ```yaml
 stream_port: 8080
 heatmap:
-  timeframe: 1000
+  timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
+  timeframe: 60000
   grid_width: 2048
   grid_height: 1024
   intensity_mode: log
   intensity_max_mode: running
+  persistence_enabled: true
+  persistence_dir: data/heatmap
+  persistence_fsync_every_n_records: 1
+  persistence_fsync_every_ms: 1000
+  persistence_retention_days: 0  # keep all day files
 
 server:
   mdc:

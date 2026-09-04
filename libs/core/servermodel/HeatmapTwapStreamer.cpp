@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <stdexcept>
 
 namespace {
 constexpr int64_t kMsPerSecond = 1000;
@@ -59,9 +60,9 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
 
     m_intensity = parseIntensityConfig();
 
-    // F1 phase 1.3: optional persistence layer. When enabled, finalize the disk
-    // store now so we fail fast if the lock can't be acquired (another server
-    // process holds it). On failure we degrade silently — live stream continues.
+    // Persistence is an explicit runtime contract. Refuse startup when another
+    // process owns the store; continuing would report a healthy server while
+    // silently dropping every finalized column.
     if (m_config.persistenceEnabled) {
         HeatmapColumnStore::Config storeCfg;
         storeCfg.fsyncEveryNRecords = std::max(1, m_config.persistenceFsyncEveryNRecords);
@@ -83,8 +84,9 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
             }
             m_columnStore = std::move(store);
         } else {
-            sLog_Warning("HeatmapTwapStreamer: persistence requested but lock "
-                         "could not be acquired; running without disk persistence");
+            throw std::runtime_error(
+                "Heatmap persistence is enabled but the data-directory lock could not be acquired: " +
+                m_config.persistenceDir);
         }
     }
 }
