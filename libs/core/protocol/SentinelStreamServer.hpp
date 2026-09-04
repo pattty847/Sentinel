@@ -5,13 +5,16 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <memory>
 #include <unordered_set>
 #include <mutex>
 #include <thread>
 #include <functional>
+#include <string>
 #include <vector>
 #include <atomic>
+#include <cstddef>
 #include <condition_variable>
 #include <unordered_map>
 #include "../servermodel/ServerDataModel.hpp"
@@ -74,6 +77,12 @@ private:
     void doAccept();
     void registerSession(const std::shared_ptr<Session>& session);
     void unregisterSession(const Session* session);
+    bool submitHistoryTask(std::function<void()> task);
+    std::string buildHeatmapHistoryChunk(const std::string& symbol,
+                                         int64_t timeframeMs,
+                                         int64_t endTimeMs,
+                                         int64_t startTimeMs,
+                                         int count) const;
 
     ServerDataModel& m_model;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
@@ -86,6 +95,12 @@ private:
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::unique_ptr<trading::LiveTradingSession> m_tradingSession;
+
+    static constexpr size_t kHistoryWorkerCount = 2;
+    static constexpr size_t kMaxPendingHistoryTasks = 8;
+    std::mutex m_historyWorkersMutex;
+    std::unique_ptr<net::thread_pool> m_historyWorkers;
+    std::atomic_size_t m_pendingHistoryTasks{0};
 
     std::mutex m_sessionsMutex;
     std::condition_variable m_sessionsDrained;

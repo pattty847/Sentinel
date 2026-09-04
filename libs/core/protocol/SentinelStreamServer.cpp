@@ -1189,48 +1189,34 @@ public:
                 const int count = std::min(requestedCount,
                     protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
-                    std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
-                    int gridWidth = 0;
-                    int gridHeight = 0;
-                    const bool ok = model_.getHeatmapHistory(symbol, timeframeMs, endTimeMs, count,
-                                                            gridWidth, gridHeight, columns,
-                                                            startTimeMs);
-                    nlohmann::json payload;
-                    payload["type"] = "heatmap_history_chunk";
-                    payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
-                    payload["symbol"] = symbol;
-                    payload["timeframe_ms"] = timeframeMs;
-                    payload["request_end_time"] = endTimeMs;
-                    payload["grid_width"] = gridWidth;
-                    payload["grid_height"] = gridHeight;
-                    payload["format"] = "u16";
-                    payload["encoding"] = "base64";
-                    payload["liquidity_format"] = "u16";
-                    payload["liquidity_encoding"] = "base64";
-                    // Phase 4: tell client the floor of available history. 0 means
-                    // no persisted data (or persistence disabled) — client should
-                    // treat the ring as the only source.
-                    payload["oldest_available_ms"] =
-                        model_.oldestHeatmapPersistedMs(symbol, timeframeMs);
-                    auto arr = nlohmann::json::array();
-                    if (ok) {
-                        for (const auto& col : columns) {
-                            nlohmann::json item;
-                            item["time_start"] = col.bucketStartMs;
-                            item["time_end"] = col.bucketEndMs;
-                            item["min_price"] = col.minPrice;
-                            item["max_price"] = col.maxPrice;
-                            item["tick_size"] = col.tickSize;
-                            item["column"] = col.intensity.toBase64().toStdString();
-                            if (!col.liquidity.isEmpty()) {
-                                item["liquidity_column"] = col.liquidity.toBase64().toStdString();
-                                item["liquidity_scale"] = col.liquidityScale;
-                            }
-                            arr.push_back(std::move(item));
-                        }
+                    if (!owner_) {
+                        send_error("heatmap_history_request", symbol, "server unavailable");
+                        return;
                     }
-                    payload["columns"] = std::move(arr);
-                    do_write(payload.dump());
+                    auto weak = weak_from_this();
+                    auto* owner = owner_;
+                    const bool queued = owner->submitHistoryTask(
+                        [weak, owner, symbol, timeframeMs, endTimeMs, startTimeMs, count] {
+                            try {
+                                auto response = owner->buildHeatmapHistoryChunk(
+                                    symbol, timeframeMs, endTimeMs, startTimeMs, count);
+                                if (auto self = weak.lock()) {
+                                    self->do_write(std::move(response));
+                                }
+                            } catch (const std::exception& ex) {
+                                if (auto self = weak.lock()) {
+                                    self->send_error("heatmap_history_request", symbol,
+                                                     std::string("history build failed: ") + ex.what());
+                                }
+                            }
+                        });
+                    if (!queued) {
+                        sLog_Warning("Rejecting heatmap history request for "
+                                     << QString::fromStdString(symbol)
+                                     << ": history worker queue is full or stopping");
+                        send_error("heatmap_history_request", symbol,
+                                   "history worker queue is full");
+                    }
                 }
             } else if (type == "footprint_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -1999,6 +1985,89 @@ SentinelStreamServer::~SentinelStreamServer() {
     stop();
 }
 
+bool SentinelStreamServer::submitHistoryTask(std::function<void()> task) {
+    if (!task || !m_running.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    const size_t pending = m_pendingHistoryTasks.fetch_add(1, std::memory_order_acq_rel);
+    if (pending >= kMaxPendingHistoryTasks) {
+        m_pendingHistoryTasks.fetch_sub(1, std::memory_order_acq_rel);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
+    if (!m_running.load(std::memory_order_acquire) || !m_historyWorkers) {
+        m_pendingHistoryTasks.fetch_sub(1, std::memory_order_acq_rel);
+        return false;
+    }
+
+    try {
+        net::post(*m_historyWorkers, [this, task = std::move(task)]() mutable {
+            try {
+                task();
+            } catch (const std::exception& ex) {
+                sLog_Error("History worker task failed: " << ex.what());
+            } catch (...) {
+                sLog_Error("History worker task failed with an unknown exception");
+            }
+            m_pendingHistoryTasks.fetch_sub(1, std::memory_order_acq_rel);
+        });
+    } catch (...) {
+        m_pendingHistoryTasks.fetch_sub(1, std::memory_order_acq_rel);
+        return false;
+    }
+    return true;
+}
+
+std::string SentinelStreamServer::buildHeatmapHistoryChunk(const std::string& symbol,
+                                                           int64_t timeframeMs,
+                                                           int64_t endTimeMs,
+                                                           int64_t startTimeMs,
+                                                           int count) const {
+    std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
+    int gridWidth = 0;
+    int gridHeight = 0;
+    const bool ok = m_model.getHeatmapHistory(symbol, timeframeMs, endTimeMs, count,
+                                              gridWidth, gridHeight, columns, startTimeMs);
+
+    nlohmann::json payload;
+    payload["type"] = "heatmap_history_chunk";
+    payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
+    payload["symbol"] = symbol;
+    payload["timeframe_ms"] = timeframeMs;
+    payload["request_end_time"] = endTimeMs;
+    payload["grid_width"] = gridWidth;
+    payload["grid_height"] = gridHeight;
+    payload["format"] = "u16";
+    payload["encoding"] = "base64";
+    payload["liquidity_format"] = "u16";
+    payload["liquidity_encoding"] = "base64";
+    // 0 means no persisted data (or persistence disabled); the client should
+    // treat the in-memory ring as the only source.
+    payload["oldest_available_ms"] =
+        m_model.oldestHeatmapPersistedMs(symbol, timeframeMs);
+    auto arr = nlohmann::json::array();
+    if (ok) {
+        for (const auto& col : columns) {
+            nlohmann::json item;
+            item["time_start"] = col.bucketStartMs;
+            item["time_end"] = col.bucketEndMs;
+            item["min_price"] = col.minPrice;
+            item["max_price"] = col.maxPrice;
+            item["tick_size"] = col.tickSize;
+            item["column"] = col.intensity.toBase64().toStdString();
+            if (!col.liquidity.isEmpty()) {
+                item["liquidity_column"] = col.liquidity.toBase64().toStdString();
+                item["liquidity_scale"] = col.liquidityScale;
+            }
+            arr.push_back(std::move(item));
+        }
+    }
+    payload["columns"] = std::move(arr);
+    return payload.dump();
+}
+
 void SentinelStreamServer::start() {
     if (m_running) return;
 
@@ -2036,6 +2105,12 @@ void SentinelStreamServer::start() {
                 });
         }
 
+        {
+            std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
+            m_historyWorkers = std::make_unique<net::thread_pool>(kHistoryWorkerCount);
+        }
+        m_pendingHistoryTasks.store(0, std::memory_order_release);
+
         doAccept();
 
         m_thread = std::thread([this] {
@@ -2052,6 +2127,16 @@ void SentinelStreamServer::start() {
     } catch (const std::exception& e) {
         sLog_Error("SentinelStreamServer start failed: " << e.what());
         m_running = false;
+        std::unique_ptr<net::thread_pool> historyWorkers;
+        {
+            std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
+            historyWorkers = std::move(m_historyWorkers);
+        }
+        if (historyWorkers) {
+            historyWorkers->stop();
+            historyWorkers->join();
+        }
+        m_pendingHistoryTasks.store(0, std::memory_order_release);
     }
 }
 
@@ -2076,6 +2161,17 @@ void SentinelStreamServer::stop() {
     for (const auto& session : sessions) {
         session->stop();
     }
+
+    std::unique_ptr<net::thread_pool> historyWorkers;
+    {
+        std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
+        historyWorkers = std::move(m_historyWorkers);
+    }
+    if (historyWorkers) {
+        historyWorkers->stop();
+        historyWorkers->join();
+    }
+    m_pendingHistoryTasks.store(0, std::memory_order_release);
 
     {
         std::unique_lock<std::mutex> lock(m_sessionsMutex);

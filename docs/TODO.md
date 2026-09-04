@@ -2,7 +2,7 @@
 
 > Personal feature tracker. Append new features, check off tasks, keep moving.
 
-> FORGE re-entry initiative (2026-09-04): [Continuous History brief](initiatives/continuous-history/VISION.md) coordinates F1, F4, and F8. Baseline, server lifecycle, one-minute durability, bounded heatmap paging, coverage shading, and history status UI have landed; footprint, TPO, history workers, and overview rollups remain.
+> FORGE re-entry initiative (2026-09-04): [Continuous History brief](initiatives/continuous-history/VISION.md) coordinates F1, F4, and F8. Baseline, server lifecycle, one-minute durability, bounded heatmap paging, coverage/status UI, and off-I/O heatmap reads have landed; footprint, TPO, and overview rollups remain.
 
 ### Format guide (for agents & future-me)
 
@@ -76,6 +76,7 @@ Each feature is a self-contained block. Use this template:
 - [x] Preserve historical heatmap columns across band recenter with worker-side page resampling (2026-09-04)
 - [x] Shade missing historical buckets separately from recorded zero-liquidity columns (2026-09-04)
 - [x] Show heatmap history loading and storage-floor states on the chart (2026-09-04)
+- [x] Move persisted heatmap page reads/encoding off the single network I/O thread with a bounded worker queue (2026-09-04)
 
 #### Next
 - [ ] Phase 5b: zstd-compress rotated day files + streaming decompressed reader (deferred from F1 v1)
@@ -111,7 +112,7 @@ Each feature is a self-contained block. Use this template:
 - **2026-05-07** - Drafted full persistence design: `docs/private/plans/F1_HEATMAP_PERSISTENCE.md`. 6-phase plan covering on-disk `.hmcol` format (fixed-stride per (symbol,tf,day), per-record CRC, additive over existing protocol), writer hook into `HeatmapTwapStreamer::storeHistory`, server bootstrap via `primeRing`, range-query disk fallthrough in `getHeatmapHistory`, restart story for hot iteration. Existing `TickBinaryLogger` left untouched as raw-tape audit source. Awaiting review before any code change.
 - **2026-05-08** - Owner clarified scope: v1 is 1m-only, no rollup engine, no compression. Slot-addressed idempotent writes (not pure append). OS-level exclusive lock for single-writer enforcement. Recenter explicitly handled by per-column self-describing price range — no transform at persistence. First milestone: kill server, rebuild, restart, see yesterday's 1m heatmap. Plan updated.
 - **2026-05-08** - F1 v1 shipped end-to-end across phases 1-5a (commits `5789f0c`, `33105c3`, `c6c6135`, `70e8fd6`, `a237cdd`, `fa901e2`, `4eeadd9`). 42 servermodel tests green. First milestone validated by user on real BTC-USD data: kill server, restart, log shows "primed 6 column(s) for BTC-USD tf=60000 from data/heatmap" before live timer fires; `heatmap_history_request` now falls through to disk past the in-RAM ring; protocol additions are backward-compatible. zstd compression (phase 5b) deferred — adds external dep + reader-path rewrite, not worth taking on autonomously.
-- **2026-09-04** - FORGE re-entry restored a clean build, bounded server session lifetimes and queues, enabled durable one-minute collection, and added 1,024-column historical GPU paging. Older replies now use a separate page path, recentered price bands are resampled, history-floor and stale-response checks stop redundant or incorrect loads, and returning to auto-scroll reloads the newest page. A separate coverage mask shades missing buckets while leaving recorded zero-liquidity columns unshaded. The chart reports page loading and shows the storage floor only when the manual viewport reaches it. Full automated suite passes; live visual soak remains.
+- **2026-09-04** - FORGE re-entry restored a clean build, bounded server session lifetimes and queues, enabled durable one-minute collection, and added 1,024-column historical GPU paging. Older replies now use a separate page path, recentered price bands are resampled, history-floor and stale-response checks stop redundant or incorrect loads, and returning to auto-scroll reloads the newest page. A separate coverage mask shades missing buckets while leaving recorded zero-liquidity columns unshaded. The chart reports page loading and shows the storage floor only when the manual viewport reaches it. Persisted page reads and JSON/base64 encoding now run on a two-worker pool capped at eight pending jobs instead of the single network I/O thread. Full automated suite passes; live visual soak remains.
 
 ---
 

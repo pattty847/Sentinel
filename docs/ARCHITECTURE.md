@@ -62,6 +62,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 - **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
 - **RemoteGridDataSource** — Local buffers for received slices; emits `heatmapSliceReceived`.
 - **DataProcessor** — Validates live slices and prepares bounded historical heatmap pages off the GUI thread, including missing-time columns and price-band resampling.
+- **History workers** — SentinelStreamServer uses two bounded workers for persisted heatmap reads and response encoding; at most eight jobs may be queued or running, and completions re-enter the owning session through its Asio executor.
 - **UnifiedGridRenderer** — Viewport state, bounded ring-buffer uploads, history request identity, and `updatePaintNode()`; drives heatmap, footprint, TPO, candles, labels.
 - **HeatmapIntensityNode** — Single-quad QSG material; samples intensity and palette on GPU.
 - **MsdfGlyphNode** — QSG node for MSDF glyph quads from atlas textures.
