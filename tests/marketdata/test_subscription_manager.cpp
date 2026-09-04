@@ -35,9 +35,13 @@ TEST(SubscriptionManager, SubscribeToSingleProduct) {
         std::string channel = json["channel"];
         EXPECT_EQ(json["jwt"], "test_jwt");
         EXPECT_TRUE(channel == "level2" || channel == "market_trades" || channel == "heartbeats");
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 1);
-        EXPECT_EQ(product_ids[0], "BTC-USD");
+        if (channel == "heartbeats") {
+            EXPECT_FALSE(json.contains("product_ids"));
+        } else {
+            auto product_ids = json["product_ids"];
+            ASSERT_EQ(product_ids.size(), 1);
+            EXPECT_EQ(product_ids[0], "BTC-USD");
+        }
     }
 }
 
@@ -51,9 +55,6 @@ TEST(SubscriptionManager, SubscribeToMultipleProducts) {
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 3);
-
         std::vector<std::string> products;
         if (json.contains("product_ids")) {
             for (const auto& id : json["product_ids"]) {
@@ -61,7 +62,10 @@ TEST(SubscriptionManager, SubscribeToMultipleProducts) {
             }
         }
 
-        if (!products.empty()) {
+        if (json["channel"] == "heartbeats") {
+            EXPECT_FALSE(json.contains("product_ids"));
+        } else {
+            ASSERT_EQ(products.size(), 3);
             EXPECT_TRUE(std::find(products.begin(), products.end(), "BTC-USD") != products.end());
             EXPECT_TRUE(std::find(products.begin(), products.end(), "ETH-USD") != products.end());
             EXPECT_TRUE(std::find(products.begin(), products.end(), "SOL-USD") != products.end());
@@ -85,8 +89,12 @@ TEST(SubscriptionManager, UnsubscribeFromProducts) {
         auto json = nlohmann::json::parse(frame);
         EXPECT_EQ(json["type"], "unsubscribe");
         EXPECT_EQ(json["jwt"], "test_jwt");
-        auto product_ids = json["product_ids"];
-        ASSERT_EQ(product_ids.size(), 2);
+        if (json["channel"] == "heartbeats") {
+            EXPECT_FALSE(json.contains("product_ids"));
+        } else {
+            auto product_ids = json["product_ids"];
+            ASSERT_EQ(product_ids.size(), 2);
+        }
     }
 }
 
@@ -269,7 +277,11 @@ TEST(SubscriptionManager, LargeProductList) {
 
     for (const auto& frame : frames) {
         auto json = nlohmann::json::parse(frame);
-        EXPECT_EQ(json["product_ids"].size(), 50);
+        if (json["channel"] == "heartbeats") {
+            EXPECT_FALSE(json.contains("product_ids"));
+        } else {
+            EXPECT_EQ(json["product_ids"].size(), 50);
+        }
     }
 }
 

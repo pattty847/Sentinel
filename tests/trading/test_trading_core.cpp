@@ -82,7 +82,9 @@ TEST(TradingEngineTest, PartialAndFullFillsAndOutOfOrderProtection) {
     cmd.action = trading::TradeAction::PlaceOrder;
     cmd.symbol = "BTC-USD";
     cmd.side = trading::OrderSide::Buy;
-    cmd.orderType = trading::OrderType::Unknown; // non-market: stays NEW for tests
+    cmd.orderType = trading::OrderType::Limit;
+    cmd.hasPrice = true;
+    cmd.price = 99.0;
     cmd.qty = 10.0;
 
     auto placed = engine.onCommand(cmd);
