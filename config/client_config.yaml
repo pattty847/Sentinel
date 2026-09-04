@@ -8,7 +8,7 @@ heatmap:
   contrast: 1.15
   shader_floor: 0.01
   label_px: 13  # Enable labels
-  client_cache_columns: 0
+  client_cache_columns: 1024  # Bounded GPU/history page; older data loads on demand
 
   # Initial viewport (client only)
   initial_viewport_pct: 10   # Time zoom (% of grid width)

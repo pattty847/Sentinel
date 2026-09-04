@@ -69,6 +69,8 @@ signals:
                                 int64_t timeframeMs,
                                 int gridWidth,
                                 int gridHeight,
+                                int64_t requestEndMs,
+                                int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
     
     void connectionStatusChanged(bool connected);

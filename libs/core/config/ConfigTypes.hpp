@@ -92,7 +92,7 @@ struct ClientHeatmapConfig {
     double contrast = 1.6;
     double shaderFloor = 0.0;
     int labelPx = 14;
-    int clientCacheColumns = 0;
+    int clientCacheColumns = 1024;
     /// Time zoom on connect: % of grid width to show (1–100). Default 10 = zoomed in.
     int initialViewportPct = 10;
     /// Price zoom on connect: % of full range to show (1–100). 0 = use full range.

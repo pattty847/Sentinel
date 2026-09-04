@@ -115,6 +115,13 @@ private:
 
     bool m_panSyncPending = false;
     bool m_historyFetchPending = false;  // debounce for scroll-past-cache history fetch
+    bool m_historyRequestInFlight = false;
+    bool m_historyAvailabilityKnown = false;
+    bool m_historyExhausted = false;
+    int64_t m_oldestHeatmapAvailableMs = 0;
+    int64_t m_lastHistoryRequestEndMs = 0;
+    uint64_t m_historyRequestGeneration = 0;
+    QString m_activeSymbol;
 
     bool m_useGpuHeatmap = false;
     HeatmapOverlayRenderer m_heatmapOverlay;
@@ -241,6 +248,7 @@ public:
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
+    void setActiveSymbol(const QString& symbol);
     Q_INVOKABLE void setHeatmapColorPreset(const QString& preset);
     
     Q_INVOKABLE void setPriceResolution(double resolution);

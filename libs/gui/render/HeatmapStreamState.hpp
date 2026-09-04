@@ -29,6 +29,13 @@ public:
         bool haveLiquidity = false;
     };
 
+    struct WindowColumn {
+        int64_t sliceStartMs = 0;
+        QByteArray intensity;
+        QByteArray liquidity;
+        double liquidityScale = 1.0;
+    };
+
     struct Snapshot {
         int gridWidth = 0;
         int gridHeight = 0;
@@ -64,6 +71,12 @@ public:
                      const QByteArray& liquidityColumn,
                      double liquidityScale,
                      qint64 nowMs);
+
+    // Replaces a complete, chronological GPU page in one linear pass. This is
+    // used for historical paging so the live monotonic cursor is not involved.
+    bool replaceWindow(int timeframeMs,
+                       const std::vector<WindowColumn>& columns,
+                       qint64 nowMs);
 
     void setIntensityBytesPerCell(int bytesPerCell);
     int intensityBytesPerCell() const;

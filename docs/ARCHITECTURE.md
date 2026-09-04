@@ -61,8 +61,8 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 
 - **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
 - **RemoteGridDataSource** — Local buffers for received slices; emits `heatmapSliceReceived`.
-- **DataProcessor** — Validates slices and forwards to renderer; no local aggregation in remote mode.
-- **UnifiedGridRenderer** — Viewport state, ring-buffer uploads, `updatePaintNode()`; drives heatmap, footprint, TPO, candles, labels.
+- **DataProcessor** — Validates live slices and prepares bounded historical heatmap pages off the GUI thread, including missing-time columns and price-band resampling.
+- **UnifiedGridRenderer** — Viewport state, bounded ring-buffer uploads, history request identity, and `updatePaintNode()`; drives heatmap, footprint, TPO, candles, labels.
 - **HeatmapIntensityNode** — Single-quad QSG material; samples intensity and palette on GPU.
 - **MsdfGlyphNode** — QSG node for MSDF glyph quads from atlas textures.
 
@@ -71,7 +71,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 **Server:** LiveOrderBook → HeatmapTwapStreamer (TWAP, dense u8 column) → SentinelStreamServer (`heatmap_slice`).  
 **Client:** RemoteGridDataSource → DataProcessor → UnifiedGridRenderer → HeatmapIntensityNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
 
-The server produces dense u8 columns (bids 0–127, asks 128–255). The client uploads them to GPU textures; no per-cell CPU rendering. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
+The server produces dense live columns and self-describing u16 persisted columns. The client uploads live data incrementally and replaces historical GPU pages in bounded batches; no per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
 
 ### Coordinate system: TimeAxisMapping
 

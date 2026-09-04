@@ -281,12 +281,13 @@ void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
     if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
         return;
     }
+    const int boundedCount = std::min(count, protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
     nlohmann::json msg = {
         {"type", "heatmap_history_request"},
         {"symbol", symbol},
         {"timeframe_ms", timeframeMs},
         {"end_time", endTimeMs},
-        {"count", count}
+        {"count", boundedCount}
     };
 
     std::string str = msg.dump();
@@ -730,6 +731,8 @@ void SentinelStreamClient::handleHeatmapHistoryChunkMessage(const nlohmann::json
     const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
     const int gridWidth = msg.value("grid_width", 0);
     const int gridHeight = msg.value("grid_height", 0);
+    const int64_t requestEndMs = msg.value("request_end_time", static_cast<int64_t>(0));
+    const int64_t oldestAvailableMs = msg.value("oldest_available_ms", static_cast<int64_t>(0));
     const std::string encoding = msg.value("encoding", "base64");
     const std::string liquidityEncoding = msg.value("liquidity_encoding", "base64");
     const auto columns = msg.value("columns", nlohmann::json::array());
@@ -789,7 +792,8 @@ void SentinelStreamClient::handleHeatmapHistoryChunkMessage(const nlohmann::json
                        .arg(last));
     }
 
-    emit heatmapHistoryReceived(QString::fromStdString(symbol), timeframeMs, gridWidth, gridHeight, out);
+    emit heatmapHistoryReceived(QString::fromStdString(symbol), timeframeMs, gridWidth, gridHeight,
+                                requestEndMs, oldestAvailableMs, out);
 }
 
 void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json& msg) {

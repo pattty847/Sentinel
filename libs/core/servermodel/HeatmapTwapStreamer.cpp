@@ -785,7 +785,8 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         out.push_back(std::move(*it));
     }
 
-    outGridWidth = (ringCapacity > 0) ? ringCapacity : m_defaultWidth;
+    const int availableWidth = (ringCapacity > 0) ? ringCapacity : m_defaultWidth;
+    outGridWidth = std::min(availableWidth, count);
     outGridHeight = ringHeight;
     return true;
 }

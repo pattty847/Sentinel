@@ -15,6 +15,7 @@ constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
+constexpr int kMaxHeatmapHistoryColumns = 1024;
 }
 
 enum class MessageType {

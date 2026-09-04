@@ -126,10 +126,13 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 
     connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
             this,
-            [this](int64_t sliceStartMs, int64_t sliceEndMs, int64_t timeframeMs,
+            [this](const QString& symbol, int64_t sliceStartMs, int64_t sliceEndMs, int64_t timeframeMs,
                    double minPrice, double maxPrice, double tickSize,
                    const QByteArray& column, const QByteArray& liquidityColumn,
                    double liquidityScale, int intensityBytesPerCell) {
+                if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
+                    return;
+                }
                 Event event;
                 event.sliceStartMs = sliceStartMs;
                 event.sliceEndMs = sliceEndMs;
@@ -147,12 +150,33 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 
     connect(m_dataProcessor.get(), &DataProcessor::heatmapHistoryBatchReady,
             this,
-            [this](int64_t timeframeMs, int gridWidth, int gridHeight,
+            [this](const QString& symbol, int64_t timeframeMs, int gridWidth, int gridHeight,
+                   int64_t requestEndMs, int64_t oldestAvailableMs, int64_t oldestReturnedMs,
                    const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
                    int intensityBytesPerCell) {
                 Q_UNUSED(gridWidth);
                 Q_UNUSED(gridHeight);
-                bool anyApplied = false;
+                if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
+                    return;
+                }
+                const bool autoScroll = m_viewState && m_viewState->isAutoScrollEnabled();
+                if ((autoScroll && requestEndMs > 0) ||
+                    (!autoScroll && requestEndMs == 0 && !m_historyRequestInFlight) ||
+                    (m_historyRequestInFlight && requestEndMs != m_lastHistoryRequestEndMs) ||
+                    (!m_historyRequestInFlight && requestEndMs > 0)) {
+                    return;
+                }
+                m_historyAvailabilityKnown = true;
+                m_oldestHeatmapAvailableMs = oldestAvailableMs;
+                if (m_lastHistoryRequestEndMs > 0) {
+                    m_historyExhausted = columns.isEmpty() || oldestReturnedMs <= 0 ||
+                        oldestReturnedMs >= m_lastHistoryRequestEndMs;
+                }
+                m_historyRequestInFlight = false;
+                m_lastHistoryRequestEndMs = 0;
+
+                std::vector<Event> events;
+                events.reserve(static_cast<size_t>(columns.size()));
                 for (const auto& col : columns) {
                     Event event;
                     event.sliceStartMs = col.bucketStartMs;
@@ -165,13 +189,18 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     event.liquidityColumn = col.liquidity;
                     event.liquidityScale = col.liquidityScale;
                     event.intensityBytesPerCell = intensityBytesPerCell;
-                    anyApplied = ingestHeatmapColumn(event) || anyApplied;
+                    events.push_back(std::move(event));
                 }
+                const auto result = m_heatmapStreamService->ingestHistoryWindow(
+                    events, m_viewState.get(), m_heatmapOverlay);
                 if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-                    sLog_Debug(QString("Heatmap history batch ingested: columns=%1")
-                                   .arg(columns.size()));
+                    sLog_Debug(QString("Heatmap history window applied: columns=%1 accepted=%2 manual=%3")
+                                   .arg(columns.size())
+                                   .arg(result.accepted ? 1 : 0)
+                                   .arg(m_heatmapStreamService->historyViewActive() ? 1 : 0));
                 }
-                if (anyApplied) update();
+                if (result.tickSizeChanged) emit heatmapTickSizeChanged();
+                if (result.accepted) update();
             },
             Qt::QueuedConnection);
 

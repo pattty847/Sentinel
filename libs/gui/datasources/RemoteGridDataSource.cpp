@@ -262,6 +262,8 @@ void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
                                                     int64_t timeframeMs,
                                                     int gridWidth,
                                                     int gridHeight,
+                                                    int64_t requestEndMs,
+                                                    int64_t oldestAvailableMs,
                                                     const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns) {
     QVector<HeatmapHistoryColumn> converted;
     converted.reserve(columns.size());
@@ -277,7 +279,8 @@ void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
         out.liquidityScale = col.liquidityScale;
         converted.push_back(std::move(out));
     }
-    emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight, converted);
+    emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight,
+                                requestEndMs, oldestAvailableMs, converted);
 }
 
 void RemoteGridDataSource::onCandleBarUpdateReceived(const QString& symbol,

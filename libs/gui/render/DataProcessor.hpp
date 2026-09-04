@@ -24,6 +24,7 @@ public:
     ~DataProcessor();
 
 public slots:
+    void setActiveSymbol(const QString& symbol);
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
@@ -32,6 +33,8 @@ public slots:
                                   int64_t timeframeMs,
                                   int gridWidth,
                                   int gridHeight,
+                                  int64_t requestEndMs,
+                                  int64_t oldestAvailableMs,
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     
 public:
@@ -56,7 +59,8 @@ public:
     void setServerTimeframe(int64_t timeframeMs);
     
 signals:
-    void heatmapColumnReady(int64_t sliceStartMs,
+    void heatmapColumnReady(const QString& symbol,
+                            int64_t sliceStartMs,
                             int64_t sliceEndMs,
                             int64_t timeframeMs,
                             double minPrice,
@@ -66,9 +70,13 @@ signals:
                             const QByteArray& liquidityColumn,
                             double liquidityScale,
                             int intensityBytesPerCell);
-    void heatmapHistoryBatchReady(int64_t timeframeMs,
+    void heatmapHistoryBatchReady(const QString& symbol,
+                                  int64_t timeframeMs,
                                   int gridWidth,
                                   int gridHeight,
+                                  int64_t requestEndMs,
+                                  int64_t oldestAvailableMs,
+                                  int64_t oldestReturnedMs,
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
                                   int intensityBytesPerCell);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
@@ -133,6 +141,7 @@ private:
     QByteArray m_heatmapLastColumn;
     bool m_heatmapHasLastColumn = false;
     std::atomic<bool> m_shuttingDown{false};
+    QString m_activeSymbol;
 
     // Week 0: writes disabled to prevent unbounded client growth; reserved for future bounded cache design.
     std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;

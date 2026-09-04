@@ -634,6 +634,11 @@ void MainWindowGPU::onSubscribe() {
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     m_currentSymbol = symbol;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            renderer->setActiveSymbol(symbol);
+        }
+    }
     emit symbolChanged(symbol);
 }
 
@@ -963,6 +968,7 @@ void MainWindowGPU::connectMarketDataSignals() {
     }
     
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
+    unifiedGridRenderer->setActiveSymbol(m_currentSymbol);
     if (dataProcessor) {
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);

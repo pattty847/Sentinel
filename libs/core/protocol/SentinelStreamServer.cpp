@@ -1185,7 +1185,9 @@ public:
                 const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
                 // Phase 4: optional start_time. 0 (or absent) means no lower bound.
                 const int64_t startTimeMs = j.value("start_time", static_cast<int64_t>(0));
-                const int count = j.value("count", 0);
+                const int requestedCount = j.value("count", 0);
+                const int count = std::min(requestedCount,
+                    protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
                     std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
                     int gridWidth = 0;
@@ -1198,6 +1200,7 @@ public:
                     payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
                     payload["symbol"] = symbol;
                     payload["timeframe_ms"] = timeframeMs;
+                    payload["request_end_time"] = endTimeMs;
                     payload["grid_width"] = gridWidth;
                     payload["grid_height"] = gridHeight;
                     payload["format"] = "u16";

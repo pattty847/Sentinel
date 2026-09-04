@@ -121,7 +121,8 @@ void UnifiedGridRenderer::onViewportChanged() {
   // Scroll-past-cache: when the left edge of the viewport moves before the
   // oldest cached heatmap data, request an older history batch from the server.
   // Debounced with a 300ms single-shot timer to avoid flooding while panning.
-  if (!m_historyFetchPending && m_heatmapStreamService && m_heatmapStreamService->stream()) {
+  if (!m_historyFetchPending && !m_historyRequestInFlight && !m_historyExhausted &&
+      m_heatmapStreamService && m_heatmapStreamService->stream()) {
     const auto snap = m_heatmapStreamService->stream()->snapshot();
     const bool haveData = (snap.filledColumns > 0 &&
                            snap.appendMs > 0 &&
@@ -129,6 +130,10 @@ void UnifiedGridRenderer::onViewportChanged() {
     if (haveData) {
       const int64_t oldestDataMs = snap.lastSliceStartMs -
           static_cast<int64_t>(snap.filledColumns - 1) * snap.appendMs;
+      if (m_historyAvailabilityKnown && m_oldestHeatmapAvailableMs > 0 &&
+          oldestDataMs <= m_oldestHeatmapAvailableMs) {
+        return;
+      }
       if (m_viewState->getVisibleTimeStart() < oldestDataMs) {
         m_historyFetchPending = true;
         QTimer::singleShot(300, this, [this]() {
@@ -140,9 +145,22 @@ void UnifiedGridRenderer::onViewportChanged() {
           if (!still) return;
           const int64_t oldestMs = s.lastSliceStartMs -
               static_cast<int64_t>(s.filledColumns - 1) * s.appendMs;
+          if (m_historyAvailabilityKnown && m_oldestHeatmapAvailableMs > 0 &&
+              oldestMs <= m_oldestHeatmapAvailableMs) return;
           if (m_viewState->getVisibleTimeStart() >= oldestMs) return;
           const int count = (s.gridWidth > 0) ? s.gridWidth : 1024;
+          m_lastHistoryRequestEndMs = oldestMs;
+          m_historyRequestInFlight = true;
+          const uint64_t requestGeneration = m_historyRequestGeneration;
           emit heatmapHistoryNeeded(m_currentTimeframe_ms, oldestMs, count);
+          QTimer::singleShot(5000, this, [this, oldestMs, requestGeneration]() {
+            if (m_historyRequestGeneration != requestGeneration ||
+                !m_historyRequestInFlight || m_lastHistoryRequestEndMs != oldestMs) {
+              return;
+            }
+            m_historyRequestInFlight = false;
+            onViewportChanged();
+          });
         });
       }
     }
@@ -287,7 +305,13 @@ void UnifiedGridRenderer::setShowModeFlagsOverlay(bool show) {
 }
 
 void UnifiedGridRenderer::clearData() {
+  ++m_historyRequestGeneration;
   m_historyFetchPending = false;
+  m_historyRequestInFlight = false;
+  m_historyAvailabilityKnown = false;
+  m_historyExhausted = false;
+  m_oldestHeatmapAvailableMs = 0;
+  m_lastHistoryRequestEndMs = 0;
   if (m_viewState) {
     m_viewState->resetZoom();
   }
@@ -301,6 +325,22 @@ void UnifiedGridRenderer::clearData() {
   m_heatmapStreamService->incrementGeneration();
   m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
   update();
+}
+
+void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
+  const QString normalized = symbol.trimmed().toUpper();
+  if (m_activeSymbol == normalized) {
+    return;
+  }
+  m_activeSymbol = normalized;
+  clearData();
+  if (m_dataProcessor) {
+    QMetaObject::invokeMethod(m_dataProcessor.get(),
+                              [processor = m_dataProcessor.get(), normalized]() {
+                                processor->setActiveSymbol(normalized);
+                              },
+                              Qt::QueuedConnection);
+  }
 }
 
 void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
@@ -364,6 +404,12 @@ void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
 
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   if (m_currentTimeframe_ms != timeframe_ms) {
+    ++m_historyRequestGeneration;
+    m_historyRequestInFlight = false;
+    m_historyAvailabilityKnown = false;
+    m_historyExhausted = false;
+    m_oldestHeatmapAvailableMs = 0;
+    m_lastHistoryRequestEndMs = 0;
     m_currentTimeframe_ms = timeframe_ms;
     if (m_useGpuHeatmap && timeframe_ms > 0 && m_heatmapStreamService) {
       m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms));
@@ -649,6 +695,8 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
   if (m_viewState) {
+    const bool returningFromHistory = enabled && m_heatmapStreamService &&
+                                      m_heatmapStreamService->historyViewActive();
     m_viewState->enableAutoScroll(enabled);
     update();
     emit autoScrollEnabledChanged();
@@ -657,6 +705,21 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
       m_heatmapStreamService->updateAutoScrollLag(
           *m_viewState,
           m_heatmapStreamService->timeAuthority().activeTimeframeMs());
+    }
+    if (returningFromHistory && m_heatmapStreamService->stream()) {
+      m_historyExhausted = false;
+      m_lastHistoryRequestEndMs = 0;
+      m_historyRequestInFlight = true;
+      const auto snapshot = m_heatmapStreamService->stream()->snapshot();
+      const int count = snapshot.gridWidth > 0 ? snapshot.gridWidth : 1024;
+      const uint64_t requestGeneration = m_historyRequestGeneration;
+      emit heatmapHistoryNeeded(m_currentTimeframe_ms, 0, count);
+      QTimer::singleShot(5000, this, [this, requestGeneration]() {
+        if (m_historyRequestGeneration == requestGeneration &&
+            m_historyRequestInFlight && m_lastHistoryRequestEndMs == 0) {
+          m_historyRequestInFlight = false;
+        }
+      });
     }
   }
 }

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <vector>
 
 class GridViewState;
 class HeatmapOverlayRenderer;
@@ -98,6 +99,10 @@ public:
                               HeatmapOverlayRenderer& overlay,
                               int liquidityLabelMode,
                               int64_t currentTimeframeMs);
+    IngestResult ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
+                                     GridViewState* viewState,
+                                     HeatmapOverlayRenderer& overlay);
+    bool historyViewActive() const { return m_historyViewActive; }
 
     // ── Render loop tick ─────────────────────────────────────────────────────
     RenderTickResult handleRenderTick(GridViewState* viewState);
@@ -143,4 +148,5 @@ private:
     double m_tickSize = 0.0;
     double m_maxObservedLiquidity = 0.0;
     double m_minObservedLiquidity = std::numeric_limits<double>::max();
+    bool m_historyViewActive = false;
 };

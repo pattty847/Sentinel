@@ -49,6 +49,8 @@ private slots:
                                   int64_t timeframeMs,
                                   int gridWidth,
                                   int gridHeight,
+                                  int64_t requestEndMs,
+                                  int64_t oldestAvailableMs,
                                   const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns);
     void onCandleBarUpdateReceived(const QString& symbol,
                                    int64_t timeframeSec,

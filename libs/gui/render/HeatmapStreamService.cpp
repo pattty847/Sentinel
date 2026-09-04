@@ -57,6 +57,25 @@ HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
         return result;
     }
 
+    // A manually selected historical page owns the display ring. Live events
+    // continue through the network and processor, but do not overwrite that
+    // page until the user returns to auto-scroll.
+    if (m_historyViewActive && viewState && !viewState->isAutoScrollEnabled()) {
+        return result;
+    }
+    if (m_historyViewActive) {
+        m_historyViewActive = false;
+        if (m_stream) {
+            m_stream->reset(m_gridWidth, m_gridHeight,
+                            event.minPrice, event.maxPrice, event.tickSize);
+        }
+        overlay.requestFullTextureRebuild();
+        if (m_autoScrollController) {
+            m_autoScrollController->resetSpan();
+        }
+        m_viewportInitialized = false;
+    }
+
     // ── Intensity format update ──────────────────────────────────────────────
     const int bytesPerCell = (event.intensityBytesPerCell > 0) ? event.intensityBytesPerCell : 1;
     if (bytesPerCell != m_intensityBytesPerCell) {
@@ -256,6 +275,95 @@ HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
     return result;
 }
 
+HeatmapStreamService::IngestResult
+HeatmapStreamService::ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
+                                          GridViewState* viewState,
+                                          HeatmapOverlayRenderer& overlay) {
+    IngestResult result;
+    if (events.empty() || !m_stream) {
+        return result;
+    }
+
+    const auto& first = events.front();
+    const int bytesPerCell = first.intensityBytesPerCell;
+    const int64_t cadenceMs = first.timeframeMs;
+    if ((bytesPerCell != 1 && bytesPerCell != 2) ||
+        cadenceMs <= 0 || first.column.isEmpty() ||
+        first.column.size() % bytesPerCell != 0) {
+        return result;
+    }
+    const int gridHeight = first.column.size() / bytesPerCell;
+    const int gridWidth = static_cast<int>(events.size());
+    if (gridWidth <= 0 || gridHeight <= 0 ||
+        first.maxPrice <= first.minPrice || first.tickSize <= 0.0) {
+        return result;
+    }
+
+    int64_t previousStart = std::numeric_limits<int64_t>::min();
+    for (const auto& event : events) {
+        if (event.timeframeMs != cadenceMs ||
+            event.intensityBytesPerCell != bytesPerCell ||
+            event.column.size() != gridHeight * bytesPerCell ||
+            event.minPrice != first.minPrice ||
+            event.maxPrice != first.maxPrice ||
+            event.tickSize != first.tickSize ||
+            event.sliceStartMs <= previousStart ||
+            (previousStart != std::numeric_limits<int64_t>::min() &&
+             event.sliceStartMs - previousStart != cadenceMs)) {
+            return result;
+        }
+        previousStart = event.sliceStartMs;
+    }
+
+    m_gridWidth = gridWidth;
+    m_gridHeight = gridHeight;
+    m_intensityBytesPerCell = bytesPerCell;
+    overlay.setGridDimensions(gridWidth, gridHeight);
+    overlay.setIntensityBytesPerCell(bytesPerCell);
+    overlay.requestFullTextureRebuild();
+
+    m_stream->reset(gridWidth, gridHeight,
+                    first.minPrice, first.maxPrice, first.tickSize);
+    m_stream->setAppendMs(static_cast<int>(cadenceMs));
+    m_stream->setIntensityBytesPerCell(bytesPerCell);
+    const qint64 nowMs = m_clock.elapsed();
+    std::vector<HeatmapStreamState::WindowColumn> windowColumns;
+    windowColumns.reserve(events.size());
+    for (const auto& event : events) {
+        windowColumns.push_back({event.sliceStartMs,
+                                 event.column,
+                                 event.liquidityColumn,
+                                 event.liquidityScale});
+    }
+    if (!m_stream->replaceWindow(static_cast<int>(cadenceMs), windowColumns, nowMs)) {
+        return result;
+    }
+
+    if (first.tickSize != m_tickSize) {
+        m_tickSize = first.tickSize;
+        result.tickSizeChanged = true;
+        result.newTickSize = m_tickSize;
+    }
+
+    m_historyViewActive = viewState && !viewState->isAutoScrollEnabled();
+    if (!m_historyViewActive) {
+        const auto& last = events.back();
+        m_timeAuthority.observeEventTime(
+            (last.sliceEndMs > last.sliceStartMs)
+                ? last.sliceEndMs
+                : last.sliceStartMs + cadenceMs,
+            nowMs);
+        if (!m_viewportInitialized && viewState && m_autoScrollController) {
+            m_viewportInitialized = m_autoScrollController->initializeViewport(
+                *viewState, *m_stream, last.sliceStartMs, static_cast<int>(cadenceMs));
+        }
+    }
+
+    m_streamGeneration.fetch_add(1, std::memory_order_acq_rel);
+    result.accepted = true;
+    return result;
+}
+
 // ── Render loop tick ─────────────────────────────────────────────────────────
 
 HeatmapStreamService::RenderTickResult
@@ -304,6 +412,7 @@ HeatmapStreamService::handleRenderTick(GridViewState* viewState) {
 // ── Timeframe change ─────────────────────────────────────────────────────────
 
 void HeatmapStreamService::handleTimeframeChange(int64_t timeframeMs) {
+    m_historyViewActive = false;
     m_timeAuthority.setActiveTimeframeMs(timeframeMs);
     if (m_stream) {
         const auto snap = m_stream->snapshot();
@@ -328,6 +437,11 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
     RangeResetResult result;
 
     ensureClockStarted();
+
+    if (m_historyViewActive && viewState && !viewState->isAutoScrollEnabled()) {
+        return result;
+    }
+    m_historyViewActive = false;
 
     if (gridWidth > 0) m_gridWidth = gridWidth;
     if (gridHeight > 0) m_gridHeight = gridHeight;

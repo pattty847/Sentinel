@@ -65,6 +65,7 @@ heatmap:
   gamma: 1.05
   contrast: 1.15
   label_px: 9999
+  client_cache_columns: 1024  # history/GPU page; protocol maximum is 1024
 
 gui:
   api_port: 17100

@@ -66,6 +66,12 @@ The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpd
 
 **Order book:** WebSocket → parse → `BookSnapshotEvent` or `BookUpdateEvent` → `handleOrderBookSnapshot()` or `handleOrderBookUpdate()` → `m_onLiveOrderBookInitialized()` or `m_onLiveOrderBookLevelUpdates()` → adapter queues signals → GUI updates.
 
+## Heatmap history transport
+
+Clients request `heatmap_history_request` with `symbol`, `timeframe_ms`, `end_time`, and `count`. The server limits a page to 1,024 columns so a 2,048-row u16 intensity-and-liquidity response stays below the per-session write budget. The response echoes the requested boundary as `request_end_time`, reports the storage floor as `oldest_available_ms`, and carries chronological self-describing columns.
+
+`DataProcessor` prepares each page on its worker thread. It inserts zero columns for missing timestamps and resamples every recorded price band into one page range. `UnifiedGridRenderer` replaces the bounded GPU ring in one linear batch. Live traffic continues while a historical page is displayed, but it does not move the manual viewport. Returning to auto-scroll requests the newest page. Symbol, timeframe, and request-boundary checks prevent late replies from replacing the active view.
+
 ## File layout
 
 ```

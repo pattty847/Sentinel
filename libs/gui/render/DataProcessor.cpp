@@ -10,6 +10,7 @@ Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
+#include "HeatmapHistoryWindow.hpp"
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
@@ -68,13 +69,24 @@ void DataProcessor::clearData() {
     }
 }
 
+void DataProcessor::setActiveSymbol(const QString& symbol) {
+    const QString normalized = symbol.trimmed().toUpper();
+    if (m_activeSymbol == normalized) {
+        return;
+    }
+    m_activeSymbol = normalized;
+    clearData();
+}
+
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
-    Q_UNUSED(slice.symbol);
     Q_UNUSED(slice.midPrice);
     Q_UNUSED(slice.lastTrade);
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
 
     if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) {
         return;
     }
 
@@ -159,7 +171,8 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     }
 
     m_heatmapRangeValid = true;
-    emit heatmapColumnReady(slice.bucketStartMs,
+    emit heatmapColumnReady(slice.symbol,
+                            slice.bucketStartMs,
                             slice.bucketEndMs,
                             slice.timeframeMs,
                             slice.minPrice,
@@ -364,37 +377,58 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int64_t timeframeMs,
                                              int gridWidth,
                                              int gridHeight,
+                                             int64_t requestEndMs,
+                                             int64_t oldestAvailableMs,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
-    Q_UNUSED(symbol);
+    if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
+        return;
+    }
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
                     << " grid=" << gridWidth << "x" << gridHeight
                     << " tf=" << timeframeMs);
     }
 
-    if (columns.isEmpty() || gridWidth <= 0 || gridHeight <= 0) {
-        return;
-    }
     if (m_forcedTimeframeMs > 0 && timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
         return;
     }
 
-    const auto& first = columns.front();
-    if (gridHeight <= 0 || first.intensity.isEmpty()) {
+    int64_t oldestReturnedMs = std::numeric_limits<int64_t>::max();
+    for (const auto& column : columns) {
+        if (column.bucketStartMs > 0) {
+            oldestReturnedMs = std::min(oldestReturnedMs, column.bucketStartMs);
+        }
+    }
+    if (oldestReturnedMs == std::numeric_limits<int64_t>::max()) {
+        oldestReturnedMs = 0;
+    }
+
+    heatmap_history::Window window;
+    if (gridWidth <= 0 || gridHeight <= 0 ||
+        !heatmap_history::buildWindow(columns,
+                                      timeframeMs,
+                                      gridWidth,
+                                      gridHeight,
+                                      requestEndMs,
+                                      window)) {
+        emit heatmapHistoryBatchReady(symbol, timeframeMs, gridWidth, gridHeight,
+                                      requestEndMs, oldestAvailableMs, oldestReturnedMs,
+                                      {}, 0);
         return;
     }
-    if ((first.intensity.size() % gridHeight) != 0) {
-        return;
-    }
-    const int bytesPerCellGuess = first.intensity.size() / gridHeight;
-    const int bytesPerCell = (bytesPerCellGuess == 1 || bytesPerCellGuess == 2 || bytesPerCellGuess == 4)
-        ? bytesPerCellGuess
-        : 1;
 
     // Do NOT emit heatmapRangeReset here — that stomps the viewport back to "now"
     // every time a history batch arrives (e.g. scroll-past-cache fetch).
     // heatmapRangeReset is for live slice initialisation only (onHeatmapSliceReceived).
-    emit heatmapHistoryBatchReady(timeframeMs, gridWidth, gridHeight, columns, bytesPerCell);
+    emit heatmapHistoryBatchReady(symbol,
+                                  timeframeMs,
+                                  gridWidth,
+                                  gridHeight,
+                                  requestEndMs,
+                                  oldestAvailableMs,
+                                  oldestReturnedMs,
+                                  window.columns,
+                                  window.intensityBytesPerCell);
 }
 
 size_t DataProcessor::HeatmapGridKeyHash::operator()(const HeatmapGridKey& key) const noexcept {
