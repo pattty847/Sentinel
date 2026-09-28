@@ -139,6 +139,21 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(ob, "tick_size", cfg.orderbook.tickSize);
             readScalar(ob, "band_pct", cfg.orderbook.bandPct);
         }
+        if (serverRoot["recording"]) {
+            auto rec = serverRoot["recording"];
+            readScalar(rec, "enabled", cfg.recording.enabled);
+            readScalar(rec, "dir", cfg.recording.dir);
+            readScalar(rec, "fallback_dir", cfg.recording.fallbackDir);
+            readScalar(rec, "price_scale", cfg.recording.priceScale);
+            readScalar(rec, "size_floor", cfg.recording.sizeFloor);
+            readScalar(rec, "codes_per_octave", cfg.recording.codesPerOctave);
+            readScalar(rec, "near_tick", cfg.recording.nearTick);
+            readScalar(rec, "near_pct", cfg.recording.nearPct);
+            readScalar(rec, "deep_tick", cfg.recording.deepTick);
+            readScalar(rec, "deep_low_frac", cfg.recording.deepLowFrac);
+            readScalar(rec, "deep_high_mult", cfg.recording.deepHighMult);
+            readScalar(rec, "lateness_ms", cfg.recording.latenessMs);
+        }
         if (serverRoot["candles"]) {
             auto candles = serverRoot["candles"];
             readScalar(candles, "update_bps_fast", cfg.candles.bpsFast);

@@ -49,6 +49,13 @@ public:
                          qint64 timeEndMs,
                          std::vector<CandleBar>& out) const;
 
+    // Copies at most limit bars for API pagination. The end is exclusive.
+    // Returns false when this symbol/timeframe has no local series.
+    bool getBoundedSlice(const QString& symbol, int64_t timeframeSec,
+                         qint64 startMs, qint64 endMs, size_t limit,
+                         std::vector<CandleBar>& out, bool& hasMore,
+                         qint64& nextStartMs) const;
+
 signals:
     void candlesDirty(const QString& symbol,
                       int64_t timeframeSec,

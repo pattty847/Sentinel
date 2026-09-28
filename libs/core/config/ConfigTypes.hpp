@@ -77,6 +77,23 @@ struct ServerTlsConfig {
     std::string keyFile  = "certs/sentinel-server.key";
 };
 
+// Recording v2 (docs/research/2026-09-recording-v2.md). Ticks are in quote
+// currency; one set of values for now (BTC-USD). Per-asset ticks come later.
+struct ServerRecordingConfig {
+    bool enabled = false;
+    std::string dir = "data/recording";
+    std::string fallbackDir;          // used when dir's volume is not mounted; empty = do not record
+    double priceScale = 100.0;        // price units per 1.0 quote (0.01 increment)
+    double sizeFloor = 1e-6;
+    double codesPerOctave = 819.0;
+    double nearTick = 1.0;
+    double nearPct = 0.05;
+    double deepTick = 10.0;
+    double deepLowFrac = 0.25;
+    double deepHighMult = 4.0;
+    int64_t latenessMs = 2000;
+};
+
 struct ServerConfig {
     // Client-side wire presence: absent capabilities must not appear as defaults.
     std::set<std::string> advertisedFields;
@@ -87,6 +104,7 @@ struct ServerConfig {
     ServerMdcConfig mdc;
     ServerTradingConfig trading;
     ServerTlsConfig tls;
+    ServerRecordingConfig recording;
     uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };

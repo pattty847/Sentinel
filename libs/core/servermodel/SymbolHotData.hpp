@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
 #include <mutex>
 #include "../marketdata/model/TradeData.h"
 
@@ -30,6 +31,9 @@ struct SymbolHotData {
     std::string symbol;
     LiveOrderBook liveBook;
     double lastTradePrice = 0.0;
+    // False after a disconnect, sequence gap or malformed L2 until the next
+    // snapshot. Consumers must not treat an invalid book as observed liquidity.
+    std::atomic<bool> bookValid{true};
     
     // Recent history for immediate client snapshots
     // RingBuffer<TickSnapshot, N_TICKS> recentTicks; // TODO: Define TickSnapshot

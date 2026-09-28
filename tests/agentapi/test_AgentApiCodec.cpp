@@ -1,4 +1,7 @@
 #include "AgentApiCodec.hpp"
+#include "AgentApiSnapshots.hpp"
+#include "CandleSeriesBuffer.hpp"
+#include "marketdata/model/TradeData.h"
 #include "config/ConfigTypes.hpp"
 #include <gtest/gtest.h>
 #include <QJsonDocument>
@@ -127,4 +130,120 @@ TEST(AgentApiCodec, AdvertisedCapabilitiesOnly) {
     EXPECT_FALSE(state.configuredTimeframesMs.has_value());
     EXPECT_FALSE(state.gridHeight.has_value());
     EXPECT_FALSE(state.defaultSymbols.has_value());
+}
+
+TEST(AgentApiCodec, CandleHalfOpenAndPageLimit) {
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> fixture;
+    for (qint64 t : {1000, 2000, 3000}) {
+        CandleSeriesBuffer::CandleBar b;
+        b.timeStartMs = t; b.timeEndMs = t + 1000;
+        b.open = b.high = b.low = b.close = 10;
+        b.volume = 2; b.isClosed = true; b.seq = t;
+        fixture.push_back(b);
+    }
+    buffer.applyHistory("BTC-USD", 1, fixture);
+    Metadata meta{"s", "BTC-USD", 1, 4000, false, "unknown", false};
+    auto first = captureCandles(buffer, "BTC-USD", 1000, 3000, 1000, 1, meta);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->bars.size(), 1);
+    EXPECT_EQ(first->bars[0].startMs, 1000);
+    EXPECT_EQ(first->nextStartMs, 2000);
+    EXPECT_TRUE(first->meta.truncated);
+    auto second = captureCandles(buffer, "BTC-USD", *first->nextStartMs, 3000, 1000, 10, meta);
+    ASSERT_TRUE(second);
+    ASSERT_EQ(second->bars.size(), 1);
+    EXPECT_EQ(second->bars[0].startMs, 2000);
+    EXPECT_FALSE(second->nextStartMs);
+    EXPECT_FALSE(captureCandles(buffer, "BTC-USD", 0, 4000, 60000, 10, meta));
+    EXPECT_EQ(candlesJson(*first).value("data").toObject().value("bars").toArray().size(), 1);
+}
+
+TEST(AgentApiCodec, BookTopNEmptySidesAndScanBudget) {
+    LiveOrderBook book("BTC-USD");
+    book.initialize(90, 110, 1);
+    const std::vector<BookLevelUpdate> updates{{true, 99, 2}, {true, 98, 3},
+                                               {false, 101, 4}, {false, 102, 5}};
+    book.applyUpdates(updates, {}, nullptr);
+    Metadata meta{"s", "BTC-USD", 1, 1000, false, "unknown", false};
+    auto snapshot = captureBook(book, 1, 900, meta);
+    ASSERT_EQ(snapshot.bids.size(), 1);
+    ASSERT_EQ(snapshot.asks.size(), 1);
+    EXPECT_DOUBLE_EQ(*snapshot.bestBid, 99);
+    EXPECT_DOUBLE_EQ(*snapshot.bestAsk, 101);
+    EXPECT_DOUBLE_EQ(*snapshot.spread, 2);
+    EXPECT_FALSE(snapshot.scanLimited);
+    EXPECT_EQ(bookJson(snapshot).value("data").toObject().value("band").toArray().size(), 2);
+    LiveOrderBook emptySide("BTC-USD");
+    emptySide.initialize(90, 110, 1);
+    emptySide.applyUpdates(std::vector<BookLevelUpdate>{{false, 100, 1}}, {}, nullptr);
+    const auto oneSide = captureBook(emptySide, 20, 900, meta);
+    EXPECT_FALSE(oneSide.bestBid);
+    EXPECT_FALSE(oneSide.spread);
+    EXPECT_TRUE(bookJson(oneSide).value("data").toObject().value("bestBid").isNull());
+    emptySide.applyUpdates(std::vector<BookLevelUpdate>{{false, 100, 0}}, {}, nullptr);
+    const auto empty = captureBook(emptySide, 20, 900, meta);
+    EXPECT_FALSE(empty.bestBid);
+    EXPECT_FALSE(empty.bestAsk);
+    EXPECT_TRUE(empty.bids.empty());
+    EXPECT_TRUE(empty.asks.empty());
+    LiveOrderBook wide("BTC-USD");
+    wide.initialize(1, 100000, 1);
+    wide.applyUpdates(std::vector<BookLevelUpdate>{{true, 2, 1}}, {}, nullptr);
+    std::vector<std::pair<uint32_t, double>> bidScratch, askScratch;
+    const auto limited = wide.captureDenseNonZero(bidScratch, askScratch, 20, 1);
+    EXPECT_TRUE(limited.scanLimited);
+    const auto indexed = captureBook(wide, 20, 900, meta);
+    ASSERT_TRUE(indexed.bestBid);
+    EXPECT_DOUBLE_EQ(*indexed.bestBid, 2);
+}
+
+TEST(AgentApiCodec, TradeTapeRetentionEpochAndSummary) {
+    TradeTape tape;
+    tape.append({1000, 1, "a", "buy", 10, 2});
+    tape.append({2000, 1, "b", "sell", 20, 1});
+    tape.append({3000, 1, {}, "unknown", 30, 1});
+    Metadata meta{"s", "BTC-USD", 1, 3000, false, "unknown", false};
+    auto snapshot = tape.snapshot(meta, 3000, 1);
+    EXPECT_EQ(snapshot.summary.count, 3);
+    EXPECT_DOUBLE_EQ(snapshot.summary.buyQty, 2);
+    EXPECT_DOUBLE_EQ(snapshot.summary.sellQty, 1);
+    EXPECT_DOUBLE_EQ(snapshot.summary.unknownQty, 1);
+    EXPECT_DOUBLE_EQ(snapshot.summary.deltaQty, 1);
+    ASSERT_TRUE(snapshot.summary.vwap);
+    EXPECT_DOUBLE_EQ(*snapshot.summary.vwap, 17.5);
+    EXPECT_EQ(snapshot.trades.size(), 1);
+    EXPECT_EQ(snapshot.trades[0].receivedAtMs, 3000);
+    EXPECT_TRUE(snapshot.meta.truncated);
+    auto json = tradesJson(snapshot).value("data").toObject();
+    EXPECT_EQ(json.value("timeBasis").toString(), "received");
+    EXPECT_TRUE(json.value("trades").toArray()[0].toObject().value("eventTimeMs").isNull());
+    meta.selectionEpoch = 2;
+    EXPECT_EQ(tape.snapshot(meta, 3000, 100).summary.count, 0);
+    tape.append({4000, 2, {}, "buy", 10, 1});
+    meta.observedAtMs = 4000;
+    EXPECT_EQ(tape.snapshot(meta, 3000, 100).summary.count, 1);
+    for (int i = 0; i <= 10000; ++i) tape.append({5000 + i, 2, {}, "buy", 10, 1});
+    meta.observedAtMs = 15000;
+    auto capped = tape.snapshot(meta, 20000, 1000);
+    EXPECT_EQ(capped.summary.count, 10000);
+    EXPECT_TRUE(capped.retentionLimited);
+    meta.observedAtMs = 1000000;
+    EXPECT_EQ(tape.snapshot(meta, 60000, 1000).summary.count, 0);
+    tape.append({1000000, 2, {}, "sell", 11, 2});
+    EXPECT_EQ(tape.snapshot(meta, 900000, 1000).summary.count, 1);
+}
+
+TEST(AgentApiCodec, SnapshotQueryValidation) {
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=1&timeframeMs=1000"}, "BTC-USD").code, "invalid_range");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2"}, "BTC-USD").code, "missing_parameter");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2&timeframeMs=1001"}, "BTC-USD").code, "invalid_timeframe");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2&timeframeMs=1000&limit=2001"}, "BTC-USD").code, "invalid_limit");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/book", "levels=201"}, "BTC-USD").code, "invalid_levels");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/trades", "windowMs=900001"}, "BTC-USD").code, "invalid_window");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/trades", "limit=1001"}, "BTC-USD").code, "invalid_limit");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/book", "symbol=ETH-USD"}, "BTC-USD").status, 409);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/book", "levels=1&levels=2"}, "BTC-USD").status, 400);
+    RequestParser parser;
+    EXPECT_EQ(parser.feed(request("/api/v1/book?levels=1")).kind, ParseResult::Kind::Complete);
 }

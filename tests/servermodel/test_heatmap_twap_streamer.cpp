@@ -139,6 +139,31 @@ TEST(HeatmapTwapStreamerGaps, SleepGapClosesObservedBucketOnly) {
     EXPECT_EQ(cols.front().bucketStartMs, minute);
 }
 
+// An invalid book (disconnect, sequence gap) is unobserved time: minutes it
+// covers stay missing and the minute before it keeps only its valid time.
+TEST(HeatmapTwapStreamerGaps, InvalidBookMinutesStayMissing) {
+    app();
+    const int64_t minute = 1'700'000'000'000 / kMs1m * kMs1m;
+    SymbolHotData* hot = nullptr;
+    FakeSource source([&](int i) {
+        if (hot) hot->bookValid = (i < 8 || i >= 53);  // invalid from +32 s to +208 s
+        return minute + i * 4000;                       // 4 s steps, below the sleep-gap limit
+    });
+    hot = &source.ensureSymbol(kSymbol);
+    HeatmapTwapStreamer streamer(source, baseConfig());
+
+    runUntilCalls(streamer, source, 76);  // reaches +300 s
+
+    const auto cols = history(streamer);
+    ASSERT_GE(cols.size(), 2u);
+    EXPECT_EQ(cols[0].bucketStartMs, minute);             // valid 0-28 s
+    EXPECT_EQ(cols[1].bucketStartMs, minute + 3 * kMs1m);  // resumed at +212 s
+    for (const auto& c : cols) {                          // the invalid minutes never appear
+        EXPECT_NE(c.bucketStartMs, minute + 1 * kMs1m);
+        EXPECT_NE(c.bucketStartMs, minute + 2 * kMs1m);
+    }
+}
+
 TEST(HeatmapTwapStreamerRollup, MissingBucketsAndSignedMean) {
     app();
     const auto dir = makeTempDir("rollup");

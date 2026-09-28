@@ -34,7 +34,13 @@ public:
                                                        int64_t exchangeMs)>;
     using OrderBookInitializedCb = std::function<void(const std::string&,
                                                       const std::vector<OrderBookLevel>&,
-                                                      const std::vector<OrderBookLevel>&)>;
+                                                      const std::vector<OrderBookLevel>&,
+                                                      int64_t envelopeMs)>;
+    // The book for productId (empty = every product) is no longer trustworthy:
+    // disconnect, sequence gap or malformed L2. It becomes valid again only at
+    // the next snapshot for that product.
+    using OrderBookInvalidatedCb = std::function<void(const std::string& productId,
+                                                      const std::string& reason)>;
     using ConnectionStatusCb = std::function<void(bool)>;
     using ErrorCb = std::function<void(const std::string&)>;
     using LatencyCb = std::function<void(int)>;
@@ -57,6 +63,7 @@ public:
     void onTrade(TradeCb cb) { m_onTrade = std::move(cb); }
     void onLiveOrderBookLevelUpdates(OrderBookLevelUpdatesCb cb) { m_onLiveOrderBookLevelUpdates = std::move(cb); }
     void onLiveOrderBookInitialized(OrderBookInitializedCb cb) { m_onLiveOrderBookInitialized = std::move(cb); }
+    void onLiveOrderBookInvalidated(OrderBookInvalidatedCb cb) { m_onLiveOrderBookInvalidated = std::move(cb); }
     void onConnectionStatus(ConnectionStatusCb cb) { m_onConnectionStatus = std::move(cb); }
     void onError(ErrorCb cb) { m_onError = std::move(cb); }
     void onLatency(LatencyCb cb) { m_onLatency = std::move(cb); }
@@ -89,6 +96,7 @@ private:
 
     void emitError(std::string msg);
     void emitConnectionStatus(bool connected);
+    void emitBookInvalidated(const std::string& productId, const std::string& reason);
 
     void replaySubscriptionsOnConnect();
     std::string                     m_host;
@@ -119,11 +127,15 @@ private:
     std::unordered_map<std::string, uint64_t> m_lastSeqByProduct;
     std::mutex                      m_seqMutex;
     std::atomic<int64_t>            m_lastHeartbeatMs{0};
+    // Coinbase sequence_num is per connection and contiguous across every
+    // channel, starting at 0 (measured 2026-09-28). Only touched on the io strand.
+    int64_t                         m_lastSequenceNum = -1;
     bool                            m_loggedEmptySubscriptionAck = false;
 
     TradeCb                          m_onTrade;
     OrderBookLevelUpdatesCb          m_onLiveOrderBookLevelUpdates;
     OrderBookInitializedCb           m_onLiveOrderBookInitialized;
+    OrderBookInvalidatedCb           m_onLiveOrderBookInvalidated;
     ConnectionStatusCb               m_onConnectionStatus;
     ErrorCb                          m_onError;
     LatencyCb                        m_onLatency;
