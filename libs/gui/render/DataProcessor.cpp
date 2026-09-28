@@ -750,6 +750,9 @@ void DataProcessor::applyRecordingBand() {
 void DataProcessor::sendRecordingRequest(int64_t endMs, bool finalRepair) {
     if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty() ||
         !m_recordingBand.valid() || m_recordingInFlight) return;
+    // A final repair can supersede a pending 250ms history budget retry. Do not
+    // let that stale timer send an extra repair outside the per-bucket budget.
+    m_recordingRetry->stop();
     protocol::recordingwire::Request request;
     request.symbol = m_activeSymbol.toStdString();
     request.timeframeMs = m_forcedTimeframeMs;

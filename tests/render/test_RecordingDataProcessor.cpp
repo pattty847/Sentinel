@@ -368,3 +368,37 @@ TEST_F(RecordingDataProcessor, UnrepairableBucketStopsAfterThreeAttemptsAndNextB
     processor.onRecordingHistoryReceived(final);
     processor.setRecordingConnected(false);
 }
+
+TEST_F(RecordingDataProcessor, FinalRepairCancelsASupersededHistoryBudgetTimer) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    processor.onRecordingHistoryReceived(history); // starts an ordinary continuation
+    ASSERT_EQ(requests.size(), 2);
+    auto live = history;
+    live.status = "complete";
+    live.columns[0].observedMs = 59000;
+    live.columns[0].flags = recording::kProvisional;
+    live.columns[0].bucketStartMs = 12'060'000;
+    processor.onRecordingLiveReceived(live);
+    live.columns[0].bucketStartMs += 60000;
+    processor.onRecordingLiveReceived(live);
+    auto budget = page(requests.back());
+    budget.columns.clear();
+    budget.scannedStartMs = budget.scannedEndMs = 0;
+    processor.onRecordingHistoryReceived(budget); // schedules 250ms retry
+    // Deliver the final-repair timeout in that 250ms gap, without wall-clock races.
+    QTimer* finalTimer = nullptr;
+    for (auto* timer : processor.findChildren<QTimer*>())
+        if (timer->isActive() && timer->interval() == 2000) finalTimer = timer;
+    ASSERT_NE(finalTimer, nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(finalTimer, "timeout", Qt::DirectConnection));
+    ASSERT_EQ(requests.size(), 3);
+    ASSERT_EQ(requests.back().count, 1);
+    auto failed = page(requests.back());
+    failed.status = "io_error";
+    processor.onRecordingHistoryReceived(failed);
+    events(350);
+    EXPECT_EQ(requests.size(), 3); // stale 250ms timer cannot bypass repair backoff
+    processor.setRecordingConnected(false);
+}
