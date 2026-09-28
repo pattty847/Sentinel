@@ -97,6 +97,8 @@ struct ClientHeatmapConfig {
     int initialColumnPx = 8;
     /// Price zoom on connect: % of full range to show (1–100). 0 = use full range.
     int initialPricePct = 5;
+    /// Display tick: merge recorded rows until each heatmap row is at least this tall.
+    int targetRowPx = 12;
 };
 
 struct ClientGuiConfig {

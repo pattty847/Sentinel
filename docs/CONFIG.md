@@ -68,6 +68,7 @@ heatmap:
   client_cache_columns: 1024  # history/GPU page; protocol maximum is 1024
   initial_column_px: 8        # time zoom on connect: screen pixels per heatmap column
   initial_price_pct: 5        # price zoom on connect: % of the band; 0 = full
+  target_row_px: 12           # display tick: merge recorded rows (1-2-5 steps) until a row is this tall
 
 gui:
   api_port: 17100

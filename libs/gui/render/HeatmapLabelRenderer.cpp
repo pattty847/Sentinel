@@ -2,6 +2,7 @@
 Sentinel — HeatmapLabelRenderer
 */
 #include "HeatmapLabelRenderer.hpp"
+#include "HeatmapRowGrouping.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +19,9 @@ void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
                                             float scale,
                                             bool dollars,
                                             std::vector<ChartGlyphInstance>& glyphs,
-                                            int onlyColumn) {
+                                            int onlyColumn,
+                                            int rowGroup,
+                                            int rowPhase) {
     glyphs.clear();
 
     if (!mapping.valid || !atlas.isBuilt() ||
@@ -63,16 +66,23 @@ void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
         }
     }
 
+    // Display tick: one label per group of rowGroup base rows, showing the
+    // group's total liquidity (HeatmapRowGrouping.hpp).
+    const int group = std::max(1, rowGroup);
+    int lastGroupFirst = std::numeric_limits<int>::min();
     for (int j = 0; j < cellsY; ++j) {
-        int texY = startY + j;
-        if (texY < 0) {
-            texY = gridHeight + (texY % gridHeight);
-        }
-        texY = texY % gridHeight;
+        const int texY = startY + j;
         if (texY < 0 || texY >= gridHeight) {
             continue;
         }
-        const double price = snapshot.maxPrice - (static_cast<double>(texY) * snapshot.tickSize);
+        const int groupFirst = heatmap_rows::groupFirstRow(texY, group, rowPhase);
+        if (groupFirst == lastGroupFirst) {
+            continue;
+        }
+        lastGroupFirst = groupFirst;
+        const int rowLo = std::max(groupFirst, 0);
+        const int rowHi = std::min(groupFirst + group - 1, gridHeight - 1);
+        const double price = snapshot.maxPrice - (static_cast<double>(groupFirst) * snapshot.tickSize);
         const int iStart = (onlyI >= 0) ? onlyI : 0;
         const int iEnd = (onlyI >= 0) ? (onlyI + 1) : cellsX;
         for (int i = iStart; i < iEnd; ++i) {
@@ -80,30 +90,29 @@ void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
             if (texX < 0 || texX >= gridWidth) {
                 continue;
             }
-            const size_t ringIndex = static_cast<size_t>(texY) * gridWidth + texX;
-            const uint16_t raw = liquidityRing[ringIndex];
-            if (raw == 0) {
-                continue;
-            }
-
             const double scaleValue = haveScales
                 ? std::max(1e-12, liquidityScales[texX])
                 : 1.0;
-            double value = static_cast<double>(raw) * scaleValue;
-            if (dollars) {
-                value *= price;
+            double value = 0.0;
+            for (int row = rowLo; row <= rowHi; ++row) {
+                const size_t ringIndex = static_cast<size_t>(row) * gridWidth + texX;
+                const uint16_t raw = liquidityRing[ringIndex];
+                // Intensity 0 means the level was filtered out (below threshold).
+                if (raw == 0 || (haveIntensity && intensityRing[ringIndex] == 0)) {
+                    continue;
+                }
+                double rowValue = static_cast<double>(raw) * scaleValue;
+                if (dollars) {
+                    rowValue *= snapshot.maxPrice - static_cast<double>(row) * snapshot.tickSize;
+                }
+                value += rowValue;
+            }
+            if (value <= 0.0) {
+                continue;
             }
             const QString label = formatLiquidityLabel(value, dollars);
             if (label.isEmpty()) {
                 continue;
-            }
-
-            uint16_t encoded = 0xFFFFu;
-            if (haveIntensity) {
-                encoded = intensityRing[ringIndex];
-                if (encoded == 0) {
-                    continue;
-                }
             }
 
             float penX = 0.0f;
@@ -128,7 +137,7 @@ void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
             }
 
             const double cellW = mapping.drawRect.width() / mapping.srcRect.width();
-            const double cellH = mapping.drawRect.height() / mapping.srcRect.height();
+            const double cellH = group * mapping.drawRect.height() / mapping.srcRect.height();
             const double colFracOffset = static_cast<double>(baseX) - static_cast<double>(startX);
             
             const float centerX = static_cast<float>(mapping.drawRect.x() + (static_cast<double>(i) - colFracOffset + 0.5) * cellW);
@@ -137,6 +146,9 @@ void HeatmapLabelRenderer::buildLabelGlyphs(const TimeAxisMapping& mapping,
             const float originX = centerX - (minX + maxX) * 0.5f * scale;
             const float originY = centerY - (minY + maxY) * 0.5f * scale;
             
+            if (centerY < mapping.drawRect.top() || centerY > mapping.drawRect.bottom()) {
+                continue;
+            }
             // Clip labels that overflow past the draw rect (e.g. into the price axis)
             if (originX > mapping.drawRect.right() || originX + (maxX - minX) * scale > mapping.drawRect.right() + 4.0f) {
                 continue;

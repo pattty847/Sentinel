@@ -56,6 +56,16 @@ target_link_libraries(test_CandleSeriesBuffer PRIVATE
 add_test(NAME CandleSeriesBufferTests COMMAND test_CandleSeriesBuffer)
 set_tests_properties(CandleSeriesBufferTests PROPERTIES LABELS "render")
 
+add_executable(test_HeatmapRowGrouping test_HeatmapRowGrouping.cpp)
+target_include_directories(test_HeatmapRowGrouping PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/gui
+)
+target_link_libraries(test_HeatmapRowGrouping PRIVATE
+    GTest::gtest_main
+)
+add_test(NAME HeatmapRowGroupingTests COMMAND test_HeatmapRowGrouping)
+set_tests_properties(HeatmapRowGroupingTests PROPERTIES LABELS "render")
+
 add_executable(test_AxisLayout test_AxisLayout.cpp)
 target_include_directories(test_AxisLayout PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui
