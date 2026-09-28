@@ -419,3 +419,39 @@ Each feature is a self-contained block. Use this template:
 
 #### Session log
 - **2026-03-16** — Consolidated architectural refactors. Goal: decouple overlays and improve GUI thread throughput.
+
+---
+
+### F21: Recording mode — owner's first-look punch list
+**Status:** active
+**Created:** 2026-09-28
+**Updated:** 2026-09-28
+
+#### Now (tonight, together)
+- [ ] Zoom logging session: log viewport time span, price span, pixels, px per row, requested vs server-chosen tick, layer (near/deep) at every zoom step; owner zooms, agents read the log (`SENTINEL_PROBES=heatmap.recording` + a viewport-math probe)
+- [ ] Tick policy bug: zooming IN on the price axis raised the cell tick ($50 -> $100); close zoom showed $100-$200 cells where $1-$20 detail is wanted
+- [ ] Tick policy design: heatmaps want long thin order lines (~2 px rows), not square cells; do not group liquidity pockets too much; consider 1-2.5-5 steps ($25, $250) and whether the deep layer's native $10 grid should become $5 so $25 rows are possible; TapeSurf appears to hold ~$50 rows at every zoom
+- [ ] Price-axis tick labels vs heatmap cell size: make them agree (axis showed $20 and $200 steps; cells $20 and $100)
+- [ ] Candles overlap the price axis when panned next to it (clip to the plot area / draw behind the axis)
+- [ ] Smooth level-of-detail transitions: keep the previous band on screen until the new one arrives (no black flash), then crossfade
+
+#### Next
+- [ ] Make `heatmap.source: recording` the default; retire the legacy recorder (it only keeps a ~±1.2% window)
+- [ ] FPS readout: shows ~20 when idle (render-on-demand, frames only when data changes) and 110-125 while panning; show frame time or "idle" instead of a misleading FPS
+- [ ] Merge branch `lt-sol/label-style` (TapeSurf text: 3 significant figures, cell-tinted, value opacity, zoom fade) after the owner looks at it
+- [ ] Candles: body width as a fraction of the column (thin slivers when zoomed in), like TapeSurf
+- [ ] Look and feel vs TapeSurf: volume bars at the bottom, live depth edge on the right, visible high/low price tags, relative time axis
+- [ ] Learning session: how HFT-grade terminals structure data paths and rendering (C++ performance), applied to Sentinel
+
+#### Later
+- [ ] Multi-venue aggregation (Binance, others) into one book view
+- [ ] Relaunch post (GitHub, Reddit) with recording-mode screenshots / GIF (repo has ~20 stars, 3 forks)
+- [ ] CopeNet: short-horizon ledger claims scored on the recorded tape
+
+#### Done
+- [x] Recording v2 live: near +/-5% @ $1 and whole-book deep layer @ $10 on the T7, fixed size scale, ~5.5 GB/year (2026-09-28)
+- [x] Serving S1-S4: server-built LOD pages, client re-band, shader value mode, live provisional columns (2026-09-28)
+- [x] Agent API v1 (state, viewport, candles, book, trades, walls, controls, render-ordered screenshots) + CopeNet `sentinel.*` tools (2026-09-28)
+
+#### Session log
+- **2026-09-28** — Owner's first look at recording mode: "exactly how I want it"; the deep layer shows the resting order that stopped price near $83.9k. Live columns and MSDF text update. Items above captured from the owner's notes.
