@@ -330,3 +330,23 @@ TEST_F(RecorderTest, QueuedLongSymbolOwnsItsLifetime) {
     value(rows[0], 99, false, 4, 6);
 }
 } // namespace
+
+// Removing every level of a row must leave it exactly empty. A running sum of
+// float deltas (these three sizes added then removed leave +3.9e-16) leaves a residue, which would
+// keep writing a phantom underflow entry for the row every minute.
+TEST_F(RecorderTest, EmptiedRowHasNoResidueEntry) {
+    auto c = config();
+    c.layers[0].rowTickUnits = 1000;  // $10 rows
+    auto r = make(c);
+    snap(*r, 0, {{true, 50, 1}, {false, 101, 1}});
+    update(*r, 10000, {{true, 98.1, 1.95481376}, {true, 98.2, 2.36619118}, {true, 98.7, 0.28166937}});
+    update(*r, 20000, {{true, 98.1, 0}, {true, 98.2, 0}, {true, 98.7, 0}});
+    tick(*r, 120000);
+    auto rows = read();
+    ASSERT_EQ(rows.size(), 2u);
+    value(rows[0], 9, false, 4.60267431 * 10000 / 60000, 4.60267431);  // present in minute 0
+    for (const auto &e : rows[1].entries) {
+        EXPECT_FALSE(e.row == 9 && !e.isAsk) << "phantom entry for an emptied row";
+    }
+    EXPECT_EQ(rows[1].flags & kUnderflow, 0u);
+}

@@ -33,6 +33,10 @@ struct Row {
     long double size = 0, integral = 0, peak = 0;
     int64_t last = 0;
     uint64_t touched = 0;
+    // Nonzero price levels in this row. When it reaches 0 the size is exactly 0:
+    // a running sum of float deltas leaves residues (long double is double on
+    // arm64), which would keep phantom rows alive and flag underflow forever.
+    uint32_t levels = 0;
 };
 void accrue(Row &row, int64_t t) {
     if (t > row.last)
@@ -243,6 +247,7 @@ struct BookRecorder::Impl {
                 // A rejected resnapshot may have installed provisional levels
                 // while validity was already false. Never retain those levels.
                 row.size = 0;
+                row.levels = 0;
                 row.last = s.clock;
             }
         }
@@ -465,6 +470,7 @@ struct BookRecorder::Impl {
                 for (auto &[_, row] : layer.rows) {
                     accrue(row, s.clock);
                     row.size = 0;
+                    row.levels = 0;
                 }
             s.bids.clear();
             s.asks.clear();
@@ -481,6 +487,7 @@ struct BookRecorder::Impl {
             const long double delta = static_cast<long double>(level.size) - oldSize;
             if (delta == 0)
                 continue;
+            const int levelDelta = (level.size > 0 ? 1 : 0) - (oldSize > 0 ? 1 : 0);
             if (level.size == 0) {
                 if (old != book.end())
                     book.erase(old);
@@ -498,7 +505,8 @@ struct BookRecorder::Impl {
                     row.touched = s.serial;
                     l.touched.push_back(&row);
                 }
-                row.size = std::max(0.0L, row.size + delta);
+                row.levels = static_cast<uint32_t>(static_cast<int64_t>(row.levels) + levelDelta);
+                row.size = row.levels == 0 ? 0.0L : std::max(0.0L, row.size + delta);
             }
         }
         for (const auto &layer : s.layers) {
