@@ -175,7 +175,7 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         QJsonObject data = applied.data;
         data["operationId"] = op.id;
         data["status"] = op.status;
-        respond(socket, 200, AgentApi::jsonBytes(data), "application/json");
+        respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(m_stateSnapshot().meta, data)), "application/json");
         return;
     }
     if (path.startsWith("/api/v1/operations/")) {
@@ -287,7 +287,7 @@ void GuiApiServer::waitForOperation(QTcpSocket* socket, const QString& id, qint6
     QJsonObject payload{{"operationId", op->id}, {"status", op->status},
                         {"viewportVersion", QString::number(op->viewportVersion)}};
     if (op->status == "rendered") payload["frameId"] = QString::number(op->frameId);
-    respond(socket, 200, AgentApi::jsonBytes(payload), "application/json");
+    respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(m_stateSnapshot().meta, payload)), "application/json");
 }
 
 void GuiApiServer::sendScreenshot(QTcpSocket* socket, const QString& name, const QString& targetName,
