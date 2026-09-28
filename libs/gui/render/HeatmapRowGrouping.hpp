@@ -9,6 +9,7 @@ Threading: pure functions, any thread.
 */
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -36,6 +37,17 @@ inline int rowsPerDisplayRow(double pxPerBaseRow, double targetPx) {
         }
     }
     return kMaxRowGroup;
+}
+
+// Cells stay roughly square: the target row height follows the column width
+// (times aspect = row height / column width), never below minRowPx, so a wide
+// zoom-out reads as fine lines and a close zoom as big cells with room for text.
+inline double targetRowPx(double columnPx, double minRowPx, double aspect, double maxRowPx = 64.0) {
+    const double lo = (minRowPx > 0.0) ? minRowPx : 1.0;
+    if (!(columnPx > 0.0) || !std::isfinite(columnPx) || !(aspect > 0.0)) {
+        return lo;
+    }
+    return std::clamp(columnPx * aspect, lo, std::max(lo, maxRowPx));
 }
 
 // Texture row 0 is the top of the band (maxPrice); row r is price maxPrice - r * tick.

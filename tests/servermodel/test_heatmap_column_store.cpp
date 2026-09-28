@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <QtLogging>
+#include <QString>
 
 #include "servermodel/HeatmapColumnStore.hpp"
 #include "servermodel/HmcolFormat.hpp"
@@ -96,6 +98,43 @@ TEST(HeatmapColumnStoreLock, RejectsSecondHolder) {
     HeatmapColumnStore second(dir);
     EXPECT_FALSE(second.acquireLock());
     EXPECT_FALSE(second.isLocked());
+}
+
+namespace {
+struct LockMessageCapture {
+    static inline thread_local std::vector<QtMsgType>* active = nullptr;
+    std::vector<QtMsgType> types;
+    QtMessageHandler previous;
+    LockMessageCapture() {
+        active = &types;
+        previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& message) {
+            if (active && message.startsWith("HeatmapColumnStore:")) active->push_back(type);
+        });
+    }
+    ~LockMessageCapture() { qInstallMessageHandler(previous); active = nullptr; }
+};
+}
+
+TEST(HeatmapColumnStoreLock, ContentionWarnsButIoFailureIsAnError) {
+    const auto dir = makeTempDir("lock-severity");
+    HeatmapColumnStore first(dir);
+    ASSERT_TRUE(first.acquireLock());
+    HeatmapColumnStore second(dir);
+    {
+        LockMessageCapture capture;
+        EXPECT_FALSE(second.acquireLock());
+        ASSERT_EQ(capture.types.size(), 1u);
+        EXPECT_EQ(capture.types[0], QtWarningMsg);
+    }
+    const auto blocked = makeTempDir("lock-file-error");
+    fs::create_directory(blocked / ".lock");
+    HeatmapColumnStore broken(blocked);
+    {
+        LockMessageCapture capture;
+        EXPECT_FALSE(broken.acquireLock());
+        ASSERT_EQ(capture.types.size(), 1u);
+        EXPECT_EQ(capture.types[0], QtCriticalMsg);
+    }
 }
 
 TEST(HeatmapColumnStoreLock, AppendFailsWithoutLock) {
@@ -406,8 +445,8 @@ TEST(HeatmapColumnStoreLoad, ReturnsMostRecentInChronologicalOrder) {
     ASSERT_TRUE(store.acquireLock());
 
     // Write five columns at slots 100, 105, 110, 115, 120 with distinct payloads.
-    const int slots[] = {100, 105, 110, 115, 120};
-    for (int s : slots) {
+    const int slotIndices[] = {100, 105, 110, 115, 120};
+    for (int s : slotIndices) {
         auto cells = patternBuffer(gridHeight, static_cast<uint16_t>(s));
         const int64_t bs = day + s * kMs1m;
         ASSERT_EQ(store.append("BTC-USD", kMs1m, gridHeight,
