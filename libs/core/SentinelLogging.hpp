@@ -25,16 +25,19 @@ Q_DECLARE_LOGGING_CATEGORY(logData)
 Q_DECLARE_LOGGING_CATEGORY(logRender)
 Q_DECLARE_LOGGING_CATEGORY(logDebug)
 
-// Time-based throttle, per call site. The first call at a site always prints;
-// after that a site prints at most once per interval and appends
-// "(suppressed N)" when calls were dropped since its last printed line.
-// An interval <= 1 ms disables throttling for the site (so the legacy
-// sLog_*N(1, ...) "print every call" sites keep that meaning).
+// sLog_App/Data/Render/Debug print every call. To silence a noisy category use
+// Qt's category rules (QT_LOGGING_RULES="sentinel.render.debug=false").
+//
+// Opt-in rate limit for a line that really runs per frame or per message:
+// sLog_*N(ms, ...) is a time-based throttle per call site. The first call at a
+// site always prints; after that the site prints at most once per interval and
+// appends "(suppressed N)" when calls were dropped since its last printed line.
+// An interval <= 1 ms prints every call (legacy sLog_*N(1, ...) sites).
 namespace sentinel::log_throttle {
-    // Default per-category intervals in milliseconds.
+    // Default per-category intervals in milliseconds (0 = unthrottled).
     inline constexpr std::int64_t kApp    = 0;
-    inline constexpr std::int64_t kData   = 1000;
-    inline constexpr std::int64_t kRender = 1000;
+    inline constexpr std::int64_t kData   = 0;
+    inline constexpr std::int64_t kRender = 0;
     inline constexpr std::int64_t kDebug  = 0;
 
     // Override for one category from an environment, or nullopt if unset/invalid.
@@ -93,7 +96,8 @@ namespace sentinel::log_file {
     }
 }
 
-// Interval (ms) overridable via SENTINEL_LOG_<CAT>_INTERVAL_MS (case-insensitive).
+// Interval (ms) overridable per category via SENTINEL_LOG_<CAT>_INTERVAL_MS
+// (case-insensitive); the override applies to every site in the category.
 #define SLOG_THROTTLED(cat, defaultIntervalMs, ...)                                    \
     do {                                                                               \
         if (!log##cat().isDebugEnabled()) break;                                       \

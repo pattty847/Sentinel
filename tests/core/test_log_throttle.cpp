@@ -133,3 +133,14 @@ TEST(LogThrottleMacro, IntervalOfOnePrintsEveryCall) {
     // QDebug quotes the QString that the std::string overload produces.
     EXPECT_EQ(capture.lines[4], QStringLiteral("\"frame 4\""));
 }
+
+TEST(LogThrottleMacro, DefaultMacrosPrintEveryCall) {
+    if (lt::resolveIntervalMs("Render", lt::kRender) != 0) {
+        GTEST_SKIP() << "SENTINEL_LOG_RENDER_INTERVAL[_MS] is set in the environment";
+    }
+    CaptureLog capture;
+
+    for (int i = 0; i < 3; ++i) sLog_Render("layer toggled" << i);
+    ASSERT_EQ(capture.lines.size(), 3);
+    EXPECT_EQ(capture.lines[0], QStringLiteral("layer toggled 0"));
+}
