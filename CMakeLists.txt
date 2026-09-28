@@ -14,6 +14,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Compiler cache: shared by every checkout and agent worktree. base_dir makes
+# paths inside this checkout relative so identical sources hit across trees.
+option(SENTINEL_USE_CCACHE "Use ccache when it is installed" ON)
+find_program(SENTINEL_CCACHE_PROGRAM ccache)
+if(SENTINEL_USE_CCACHE AND SENTINEL_CCACHE_PROGRAM AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    set(CMAKE_CXX_COMPILER_LAUNCHER
+        "${SENTINEL_CCACHE_PROGRAM}" "base_dir=${CMAKE_SOURCE_DIR}" "hash_dir=false")
+    message(STATUS "ccache: ${SENTINEL_CCACHE_PROGRAM}")
+endif()
+
 # Platform detection
 if(WIN32)
     set(SENTINEL_PLATFORM "Windows")
