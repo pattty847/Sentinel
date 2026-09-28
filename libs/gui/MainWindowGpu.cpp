@@ -71,6 +71,7 @@
 #include <QTabWidget>
 #include <QCoreApplication>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QtGlobal>
 #include <algorithm>
 #include <cmath>
@@ -354,31 +355,12 @@ void MainWindowGPU::setupUI() {
             m_heatmapSettingsDialog->activateWindow();
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
-            if (!m_qmlController) {
-                return;
-            }
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (!renderer) {
-                return;
-            }
             const int ms = timeframeMsFromLabel(label);
             if (ms <= 0) {
                 sLog_Warning("Unknown timeframe label ignored: label=" << label);
                 return;
             }
-            sLog_App("ui: timeframe selected label=" << label << " tfMs=" << ms
-                     << " symbol=" << m_currentSymbol);
-            renderer->setTimeframe(ms);
-            if (m_connected && m_userSubscribed) {
-                requestHeatmapHistoryForSymbol(m_currentSymbol);
-                requestCandleHistoryForSymbol(m_currentSymbol);
-                if (m_modeController && m_modeController->primaryField() == 1) {
-                    requestFootprintHistoryForSymbol(m_currentSymbol);
-                } else if (m_modeController && (m_modeController->primaryField() == 2 ||
-                                                m_modeController->primaryField() == 3)) {
-                    requestTpoHistoryForSymbol(m_currentSymbol);
-                }
-            }
+            selectTimeframe(ms);
         });
     }
     
@@ -495,6 +477,17 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
                                                     [this](int levels) { return agentApiBookSnapshot(levels); },
                                                     [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
+                                                    [this](const QString& kind, const AgentApi::ControlBody& body) { return agentApiApplyControl(kind, body); },
+                                                    [this]() {
+                                                        auto* r = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+                                                        return std::pair<quint64, quint64>{r ? r->renderedControlRevision() : 0,
+                                                                                          r ? r->renderedFrameId() : 0};
+                                                    },
+                                                    [this](quint64 revision) {
+                                                        if (auto* r = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr)
+                                                            r->setAgentControlRevision(revision, m_agentApiSelectionEpoch,
+                                                                                       agentApiViewportSnapshot().viewportVersion.value_or(0));
+                                                    },
                                                     this);
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
@@ -627,12 +620,15 @@ void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& 
 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
-    if (symbol.isEmpty() || !symbol.contains('-')) {
+    if (!subscribeSymbol(symbol)) {
         sLog_App("ui: subscribe rejected, invalid symbol=" << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
-        return;
     }
+}
 
+bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
+    static const QRegularExpression pattern("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$");
+    if (!pattern.match(symbol).hasMatch()) return false;
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
              << " connected=" << m_connected);
     m_userSubscribed = true;
@@ -646,6 +642,23 @@ void MainWindowGPU::onSubscribe() {
     if (m_connected) {
         requestConfiguredHistoryForSymbol(symbol);
         requestTpoHistoryForSymbol(symbol);
+    }
+    if (m_symbolInput) m_symbolInput->setText(symbol);
+    return true;
+}
+
+void MainWindowGPU::selectTimeframe(int ms) {
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    if (!renderer) return;
+    sLog_App("ui: timeframe selected tfMs=" << ms << " symbol=" << m_currentSymbol);
+    renderer->setTimeframe(ms);
+    if (m_heatmapDock && m_heatmapDock->toolbar()) m_heatmapDock->toolbar()->setTimeframeMs(ms);
+    if (m_connected && m_userSubscribed) {
+        requestHeatmapHistoryForSymbol(m_currentSymbol);
+        requestCandleHistoryForSymbol(m_currentSymbol);
+        if (m_modeController && m_modeController->primaryField() == 1) requestFootprintHistoryForSymbol(m_currentSymbol);
+        else if (m_modeController && (m_modeController->primaryField() == 2 || m_modeController->primaryField() == 3))
+            requestTpoHistoryForSymbol(m_currentSymbol);
     }
 }
 
@@ -1230,6 +1243,63 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
     if (renderer->width() > 0) s.widthPx = renderer->width();
     if (renderer->height() > 0) s.heightPx = renderer->height();
     return s;
+}
+
+AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body) {
+    AgentApi::ControlApply out;
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    if (!renderer) {
+        out.status = 503; out.code = "chart_unavailable"; out.message = "Chart renderer is unavailable";
+        return out;
+    }
+    if (kind == "symbol") {
+        if (!subscribeSymbol(body.symbol)) {
+            out.status = 422; out.code = "invalid_symbol"; out.message = "Invalid symbol";
+            return out;
+        }
+        out.data["symbol"] = body.symbol;
+    } else if (kind == "timeframe") {
+        selectTimeframe(static_cast<int>(body.timeframeMs));
+        out.data["linked"] = true;
+        out.data["heatmapTimeframeMs"] = body.timeframeMs;
+        out.data["candleTimeframeMs"] = body.timeframeMs;
+    } else if (kind == "viewport") {
+        const auto current = agentApiViewportSnapshot();
+        if (!current.startMs || !current.endMs || !current.priceMin || !current.priceMax) {
+            out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
+            return out;
+        }
+        if (body.startMs) renderer->enableAutoScroll(false);
+        if (body.startMs || body.priceMin) {
+            renderer->setViewport(body.startMs.value_or(*current.startMs), body.endMs.value_or(*current.endMs),
+                                  body.priceMin.value_or(*current.priceMin), body.priceMax.value_or(*current.priceMax));
+        }
+        if (!body.startMs && body.followLive) renderer->enableAutoScroll(*body.followLive);
+        const auto after = agentApiViewportSnapshot();
+        out.viewportVersion = after.viewportVersion.value_or(0);
+        out.data["viewportVersion"] = QString::number(out.viewportVersion);
+        out.data["followLive"] = after.followLive.value_or(false);
+    } else if (kind == "layers") {
+        auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
+        for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
+            const bool enabled = it.value().toBool();
+            if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->setHeatmapLayerEnabled(enabled); }
+            else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->setFootprintLayerEnabled(enabled); }
+            else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->setTpoLayerEnabled(enabled); }
+            else if (it.key() == "volumeProfile") { if (toolbar) emit toolbar->volumeProfileToggled(enabled); else renderer->setVolumeProfileLayerEnabled(enabled); }
+            else if (it.key() == "candles" && m_modeController) m_modeController->setCandlesEnabled(enabled);
+        }
+        if (toolbar) toolbar->setLayerToggleStates(renderer->heatmapLayerEnabled(), renderer->footprintLayerEnabled(),
+                                                   renderer->tpoLayerEnabled(), renderer->volumeProfileLayerEnabled());
+        const auto state = agentApiStateSnapshot();
+        out.data["layers"] = QJsonObject{{"heatmap", state.heatmapLayer.value_or(false)},
+                                          {"candles", state.candlesLayer.value_or(false)},
+                                          {"footprint", state.footprintLayer.value_or(false)},
+                                          {"tpo", state.tpoLayer.value_or(false)},
+                                          {"volumeProfile", state.volumeProfileLayer.value_or(false)}};
+    }
+    if (!out.viewportVersion) out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
+    return out;
 }
 
 std::optional<AgentApi::CandleSnapshot> MainWindowGPU::agentApiCandlesSnapshot(

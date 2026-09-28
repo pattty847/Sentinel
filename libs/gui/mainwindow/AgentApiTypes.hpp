@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
+#include <QJsonObject>
 #include <QtGlobal>
 #include <optional>
 #include <array>
@@ -14,6 +15,7 @@ struct Request {
     QByteArray method;
     QString path;
     QString query;
+    QByteArray body;
 };
 
 struct ParseResult {
@@ -36,6 +38,15 @@ struct ValidationResult {
     qint64 windowMs = 60000;
     int limit = 100;
     int levels = 20;
+    QString afterOperation;
+    int waitMs = 0;
+};
+
+struct ControlApply {
+    int status = 200;
+    QString code, message;
+    QJsonObject data;
+    quint64 viewportVersion = 0;
 };
 
 struct Metadata {

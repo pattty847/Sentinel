@@ -456,6 +456,10 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         m_heatmapStreamService->streamGeneration(),
         m_footprintStreamGeneration.load(std::memory_order_acquire),
         m_candleStreamGeneration.load(std::memory_order_acquire));
+    frame.controlRevision = m_controlRevision.load(std::memory_order_acquire);
+    frame.selectionEpoch = m_controlSelectionEpoch.load(std::memory_order_acquire);
+    frame.viewportVersion = m_controlViewportVersion.load(std::memory_order_acquire);
+    frame.frameId = ++m_nextFrameId;
     const auto& snapshot = frame.heatmapSnapshot;
     const int64_t cadenceMs = (frame.time.activeTimeframeMs > 0)
         ? frame.time.activeTimeframeMs
@@ -478,6 +482,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     auto* texNode = ensureHeatmapRootNode(oldNode);
     computeAndApplyFrameMapping(frame, texNode, cadenceMs, gridWidth, gridHeight);
     publishFrameContext(frame);
+    m_pendingFrameRevision = frame.controlRevision;
+    m_pendingFrameId = frame.frameId;
     if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
 
     std::vector<HeatmapOverlayRenderer::PendingUpload> framePendingHeatmapUploads;
@@ -656,5 +662,3 @@ void UnifiedGridRenderer::renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
         m_pvvLineNodes[i]->markDirty(QSGNode::DirtyGeometry);
     }
 }
-
-

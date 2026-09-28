@@ -5,7 +5,9 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QSet>
+#include <QRegularExpression>
 #include <cmath>
+#include <climits>
 #include <limits>
 
 namespace AgentApi {
@@ -80,6 +82,7 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     }
     QByteArray host;
     bool hasLength = false;
+    bool jsonContent = false;
     qsizetype contentLength = 0;
     for (qsizetype i = 1; i < lines.size(); ++i) {
         QByteArray line = lines[i];
@@ -95,6 +98,7 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
             host = value;
         }
         if (key == "transfer-encoding") return fail(400, "bad_request", "Transfer encoding is unsupported");
+        if (key == "content-type") jsonContent = value.toLower() == "application/json";
         if (key == "content-length") {
             if (hasLength || value.isEmpty()) return fail(400, "bad_request", "Invalid Content-Length");
             hasLength = true;
@@ -113,16 +117,25 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     if (!url.isValid() || !parts[1].startsWith('/') || url.hasFragment())
         return fail(400, "bad_request", "Invalid request target");
     const QString path = url.path();
-    const bool known = path == "/api/v1/state" || path == "/api/v1/viewport" ||
+    const bool operation = path.startsWith("/api/v1/operations/") && path.size() > 19;
+    const bool control = path == "/api/v1/symbol" || path == "/api/v1/timeframe" ||
+                         path == "/api/v1/viewport" || path == "/api/v1/layers";
+    const bool known = operation || control || path == "/api/v1/state" ||
                        path == "/api/v1/candles" || path == "/api/v1/book" ||
                        path == "/api/v1/trades" ||
                        path == "/api/v1/screenshot" || path == "/screenshot";
     if (!known) return fail(404, "not_found", "Unknown route");
-    if (parts[0] != "GET") return fail(405, "method_not_allowed", "Only GET is supported");
-    if (contentLength != 0) return fail(400, "bad_request", "GET body is unsupported");
+    const bool readable = operation || path == "/api/v1/state" || path == "/api/v1/viewport" ||
+                          path == "/api/v1/candles" || path == "/api/v1/book" ||
+                          path == "/api/v1/trades" || path == "/api/v1/screenshot" || path == "/screenshot";
+    if (!((parts[0] == "GET" && readable) || (parts[0] == "POST" && control)))
+        return fail(405, "method_not_allowed", "Method not allowed");
+    if (parts[0] == "GET" && contentLength != 0) return fail(400, "bad_request", "GET body is unsupported");
+    if (parts[0] == "POST" && (!jsonContent || !contentLength))
+        return fail(400, "invalid_content_type", "POST requires an application/json body");
     ParseResult result;
     result.kind = ParseResult::Kind::Complete;
-    result.request = {parts[0], path, url.query(QUrl::FullyDecoded)};
+    result.request = {parts[0], path, url.query(QUrl::FullyDecoded), m_buffer.mid(headerEnd + 4, contentLength)};
     return result;
 }
 
@@ -192,13 +205,23 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
         return {};
     }
     if (request.path == "/api/v1/screenshot") {
-        for (const auto& item : query.queryItems()) {
-            if (item.first != "name" && item.first != "target")
-                return reject(422, "unsupported_parameter", "Screenshot operation waits are not available in slice 1");
-        }
-        if (query.allQueryItemValues("name").size() > 1 || query.allQueryItemValues("target").size() > 1)
-            return reject(400, "invalid_parameter", "Duplicate screenshot parameter");
         ValidationResult result;
+        QSet<QString> seen;
+        for (const auto& item : query.queryItems()) {
+            if (seen.contains(item.first)) return reject(400, "invalid_parameter", "Duplicate screenshot parameter");
+            seen.insert(item.first);
+            if (item.first != "name" && item.first != "target" && item.first != "afterOperation" && item.first != "waitMs")
+                return reject(400, "invalid_parameter", "Unknown screenshot parameter");
+        }
+        result.afterOperation = query.queryItemValue("afterOperation");
+        if (seen.contains("afterOperation") && !result.afterOperation.startsWith('o'))
+            return reject(422, "invalid_operation", "Invalid operation ID");
+        if (seen.contains("waitMs")) {
+            bool ok = false;
+            result.waitMs = query.queryItemValue("waitMs").toInt(&ok);
+            if (!ok || result.waitMs < 0 || result.waitMs > 5000)
+                return reject(422, "invalid_wait", "waitMs must be 0..5000");
+        }
         result.screenshotName = query.queryItemValue("name");
         result.screenshotTarget = query.queryItemValue("target");
         if (result.screenshotTarget.isEmpty()) result.screenshotTarget = "main";
@@ -217,7 +240,86 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
             return reject(422, "invalid_target", "Unknown screenshot target");
         return result;
     }
+    if (request.path.startsWith("/api/v1/operations/")) {
+        ValidationResult result;
+        if (query.queryItems().size() > 1 ||
+            (!query.queryItems().isEmpty() && query.queryItems().front().first != "waitMs"))
+            return reject(400, "invalid_parameter", "Only waitMs is supported");
+        if (query.hasQueryItem("waitMs")) {
+            bool ok = false;
+            result.waitMs = query.queryItemValue("waitMs").toInt(&ok);
+            if (!ok || result.waitMs < 0 || result.waitMs > 5000)
+                return reject(422, "invalid_wait", "waitMs must be 0..5000");
+        }
+        return result;
+    }
     return {};
+}
+
+ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& served) {
+    auto reject = [](const char* code, const char* message) {
+        ControlValidation r; r.status = 422; r.code = code; r.message = message; return r;
+    };
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+        return reject("invalid_body", "Body must be a JSON object");
+    const QJsonObject obj = doc.object();
+    if (obj.isEmpty()) return reject("invalid_body", "Body must contain a control");
+    const QString kind = request.path.mid(QStringLiteral("/api/v1/").size());
+    ControlValidation result;
+    for (auto it = obj.begin(); it != obj.end(); ++it) {
+        const QString key = it.key();
+        const QJsonValue v = it.value();
+        if (kind == "symbol") {
+            if (key != "symbol" || !v.isString()) return reject("invalid_symbol", "Expected symbol string");
+            result.body.symbol = v.toString();
+            static const QRegularExpression pattern("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$");
+            if (!pattern.match(result.body.symbol).hasMatch()) return reject("invalid_symbol", "Invalid symbol format");
+        } else if (kind == "timeframe") {
+            if (key != "heatmapTimeframeMs" && key != "candleTimeframeMs") return reject("invalid_field", "Unknown timeframe field");
+            if (!v.isDouble() || v.toDouble() <= 0 || v.toDouble() > INT_MAX || std::floor(v.toDouble()) != v.toDouble())
+                return reject("invalid_timeframe", "Timeframe must be a positive integer");
+            const qint64 ms = static_cast<qint64>(v.toDouble());
+            if (result.body.timeframeMs && result.body.timeframeMs != ms)
+                return reject("timeframe_mismatch", "Linked timeframes must be equal");
+            result.body.timeframeMs = ms;
+        } else if (kind == "viewport") {
+            if (key == "followLive") {
+                if (!v.isBool()) return reject("invalid_follow", "followLive must be boolean");
+                result.body.followLive = v.toBool();
+            } else if (key == "startMs" || key == "endMs") {
+                if (!v.isDouble() || v.toDouble() < 0 || v.toDouble() > 9007199254740991.0 || std::floor(v.toDouble()) != v.toDouble())
+                    return reject("invalid_range", "Time bounds must be nonnegative safe integers");
+                if (key == "startMs") result.body.startMs = static_cast<qint64>(v.toDouble());
+                else result.body.endMs = static_cast<qint64>(v.toDouble());
+            } else if (key == "priceMin" || key == "priceMax") {
+                if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() <= 0)
+                    return reject("invalid_range", "Price bounds must be finite positive numbers");
+                if (key == "priceMin") result.body.priceMin = v.toDouble();
+                else result.body.priceMax = v.toDouble();
+            } else return reject("invalid_field", "Unknown viewport field");
+        } else if (kind == "layers") {
+            if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile")
+                return reject("invalid_field", "Unknown layer");
+            if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
+            result.body.layers.insert(key, v);
+        }
+    }
+    if (kind == "timeframe" && (!served || !served->contains(result.body.timeframeMs)))
+        return reject("timeframe_unavailable", "Timeframe is not advertised as served");
+    if (kind == "viewport") {
+        const auto& b = result.body;
+        if (b.startMs.has_value() != b.endMs.has_value() || b.priceMin.has_value() != b.priceMax.has_value())
+            return reject("invalid_range", "Bounds must be paired");
+        if (b.startMs && *b.startMs >= *b.endMs)
+            return reject("invalid_range", "Time bounds must increase");
+        if (b.priceMin && *b.priceMin >= *b.priceMax)
+            return reject("invalid_range", "Price bounds must increase");
+        if (b.followLive.value_or(false) && (b.startMs || b.priceMin))
+            return reject("invalid_range", "Bounds cannot enable followLive");
+    }
+    return result;
 }
 
 void applyAdvertisedServerConfig(StateSnapshot& s, const ServerConfig& config) {
