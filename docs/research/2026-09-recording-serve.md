@@ -120,3 +120,149 @@ Updated timings after the review fixes, using the same unoptimized build and fix
 | Deep 4h, 4,096 hourly sources | 1,024 | 15,312 ms | — |
 
 The default 5,000 ms budget returned 348 complete 4h columns in 5,007 ms, status Budget, exhausted=false. Both optional timing fixtures passed. Cold deep-minute discovery remains similar; cache changes primarily avoid repeated filesystem work and whole-day reindexing after live appends. Deterministic diagnostics additionally verify that appending one frame indexes exactly one new frame, repeated visits reuse one directory listing, and eviction respects recent use rather than filename order.
+
+## S4 notes (Lt. Astra, 2026-09-28)
+
+Implemented names supersede the draft `heatmap_view` / `logcode` names above:
+`heatmap_recording_view` registers the exact history-confirmed band and layer;
+`heatmap_recording_live` uses the history `absolute_log_size` column encoding.
+
+- `RecorderConfig::publisher` is installed before the recorder worker starts. It receives
+  an immutable shared minute record after successful commit, a finished-but-pending
+  minute immediately at close, and a provisional open-minute
+  record at most once per 1,000 ms of integration-clock advance. The 250 ms recorder timer
+  drives idle-book publication. Provisional numerator = valid-time integral so far;
+  denominator = valid observed milliseconds so far. Peaks and mid-derived bounds are
+  accumulated so far. Invalid time contributes nothing, rejected snapshots cannot resume
+  observation, and zero-observation minutes are omitted. Publication flag bit 5 is never
+  persisted. Every publication carries a publication-only exclusive commit watermark.
+  The finished pending copy is frozen and flagged provisional until its commit replaces it.
+  Cold readers never scan/advance past that watermark. A provisional scan does not mutate
+  integrals or reset peaks. It is linear in tracked rows; it allocates one sparse record per layer and performs no sorting or I/O.
+  The committed publication copies only that record's entries. Existing persistence I/O
+  remains part of commit, preceding the publication callback.
+- `ServerDataModel` owns `LiveService`; the recorder callback only hands records to its
+  thread-safe `LiveCache`. Cache locks cover pointer replacement/copy and a bounded deque,
+  never disk reads, projection, encoding, or network operations. Limits: 128 symbol/layer
+  series, all provisional minutes at/after the commit watermark plus 16 committed records
+  per series, 262,144 entries per retained committed suffix (soft: the latest single record
+  is always retained). Default 2 s lateness needs at most two provisionals; the configured
+  maximum 1h lateness is bounded at 61 (60 pending + open). Thus cache memory is bounded by the
+  configured series count and source record size, with no minute-count growth. Stale
+  publications or new series beyond capacity are rejected with `recording.live.drop`;
+  old commits remain on disk. Series-cap overflow raises one warning on the live worker,
+  never under the recorder callback cache lock. Up to 64 active views globally,
+  one replacing view per session. Disconnection cancels the view; stale generation payloads
+  already in transit are harmless on the client.
+- One dedicated `recording-live` worker constructs, uses, and destroys its `Hmc2Reader`.
+  Identical symbol/layer/tf/band views share a builder and projected page, irrespective
+  of client generation. It maintains at most two output accumulators per distinct view:
+  the forming bucket
+  and the previous bucket awaiting its final lateness-delayed commit. On registration,
+  each accumulator reads its missing committed prefix once. Reads resume their proven
+  cursor after budget exhaustion (4,096 source work units, 2,000,000 entry work units,
+  100 ms per attempt; the reader's existing first-record admission exception applies).
+  A later mailbox overflow catches up only the missing prefix. Normal new commits are
+  integrated from immutable cache records exactly once, with no per-second disk reads.
+  No result is sent while warmup remains incomplete.
+- Projection shares the history `Aggregate` implementation, preserving per-native-row
+  coverage denominators before price aggregation. Each second it copies the accumulated
+  sparse numerators/coverage, adds every uncommitted provisional minute in the bucket,
+  and finishes at most two columns. Cost is O(U + E + R + B log B), independent of the number of elapsed minutes:
+  U = accumulated distinct native rows, E = provisional/new committed entries, R = display
+  rows, B = coverage edges. Native row span is capped at 262,144, display rows at 16,384,
+  and live tf at one day (all currently configured recording timeframes). Larger tf history
+  remains supported separately. One-day live warmup uses minute records; it may differ by
+  codec rounding from history rolled through quantized hourly records.
+- Work is coalesced by cache revision. Cadence is completion-based (no catch-up burst),
+  normally 1 s; rejected delivery or incomplete warmup doubles delay up to 5 s. Session
+  delivery has its own single in-flight payload slot (<=1 MiB), independent of the existing
+  16 MiB legacy/history budget, giving a hard combined ceiling of 17 MiB. The executor
+  inserts live immediately behind its currently active write, with stable buffers; a large
+  history response cannot occupy its admission slot or indefinitely queue ahead of it.
+  Congestion coalesces revisions instead of queueing live jobs. Encoding remains per client
+  on the live worker (generation differs); projection is shared. With many
+  views, traversal naturally lowers cadence. Payloads contain at most two columns.
+- The client registers only after the first valid history response confirms the layer,
+  native tick, and padded fixed band; every re-band and reconnect negotiates and registers
+  a fresh generation. `DataProcessor` runs ingestion on its existing worker. Live columns
+  are cached independently of history projections, including while the GPU window is away
+  from now. Matching-generation live values take precedence over concurrent history; a longer
+  observed history record may finalize a provisional whose closing update was missed.
+  Once live moves beyond a still-provisional cached bucket, a 2 s repair timer requests
+  that single bucket through history until it is finalized (serialized with ordinary
+  history requests). Thus congestion cannot make a missed final permanently authoritative.
+  Any output whose commit watermark is before its bucket end remains provisional, even
+  if it currently contains only committed minutes.
+  The latest timestamp is monotonic. Window placement uses the same pinned/manual-view
+  policy as history, and live updates set `liveBucketMs` for the presentation clock. No GUI
+  QObject access was added to the render thread; legacy slices/wire bytes remain unchanged.
+
+- Registrations are admitted at most once per 250 ms per session. Typed errors carry
+  symbol, generation, code, message, and retry delay for capacity, rate, availability,
+  invalid request, I/O, and incompatible grid failures. The client retries the current
+  confirmed view with exponential 1..30 s backoff and ignores errors from old generations.
+- `SentinelStreamServer::stop()` synchronously shuts down the live service before any
+  I/O executor stop, including the early/failed-start path. Shutdown deactivates every
+  subscription and joins in-flight delivery. The callback never acquires a strong Session
+  reference on the live worker: it posts a weak capture and only locks on the executor.
+  Recorder startup failure resets its orphan service. Publication allocation/callback
+  failures are isolated from the successful persistence try block and cannot skip rollup.
+
+Orchestrator live check (GUI and exchange-connected server are not exercised by unit tests):
+
+```sh
+SENTINEL_PROBES=recording.publish,recording.close,recording.live ./build/mac-clang/apps/sentinel-server/sentinel-server
+# Start GUI with heatmap.source: recording and SENTINEL_PROBES=heatmap.recording
+python3 scripts/dev/recording-history-probe.py --price-min 50000 --price-max 80000 --rows 2048 --count 1 --timeframe-ms 60000 --live-seconds 10
+python3 scripts/dev/recording-history-probe.py --price-min 50000 --price-max 80000 --rows 2048 --count 1 --timeframe-ms 300000 --live-seconds 10
+```
+
+Choose bounds around the current book. Expect `recording.publish` observed time to grow,
+`recording.live.view` to echo tf/generation, `recording.live.send accepted=1` with
+`diskRecords=0` after warmup, and `heatmap.recording.live` in the GUI log. At a minute
+boundary the commit corrects the prior bucket and the new provisional advances the edge.
+Pan away, let live advance, return to live; then re-band and reconnect. Confirm the band
+registration generation changes and the right edge/pinned behavior stays coherent. Extend
+`--live-seconds` to 75 to cross a minute boundary. The script validates payload shape and
+prints timestamps, observed duration, flags, nonzero rows, validity counts, and generation.
+
+### S4 review regressions and measured cost
+
+The boundary regressions now exercise 5m and 1h views with both the frozen pending minute
+and the next open minute present. Observed duration cannot decrease when the next provisional
+arrives or the pending record commits. A real recorder test starts a 5m view before its first
+commit and verifies 59,000 -> 61,000 -> 62,000 ms across the 2 s lateness interval. Other tests
+cover provisional output flags until the watermark, repairing a final lost to congestion,
+typed registration errors/backoff, eight generations sharing one projection, deferred
+series-cap warnings, publication allocation failure preserving minute/hour persistence,
+and `SentinelStreamServer::stop()` joining an active delivery while its executor is held
+beyond the old two-second drain timeout. The shutdown test uses the actual stop method with
+an isolated executor; it does not open sockets or contact an exchange.
+
+Reproduce cost measurements with:
+
+```sh
+cmake --build --preset mac-clang --target recording_live_bench
+build/mac-clang/tests/servermodel/recording_live_bench 5
+```
+
+Measured on local macOS arm64, the unoptimized `mac-clang` build, five steady updates after
+warmup per case. Fixture: 12,000 sparse source entries/minute, 2,048 display rows, ten native
+rows per display row, four committed minutes and an advancing provisional fifth minute.
+Clients are real live-service subscriptions with distinct generations and identical views;
+each delivery runs the actual JSON/base64 encoder. Projection and encoding run on the live
+worker. Socket/TLS transport, cold warmup, and service housekeeping are excluded from these
+instrumented times. The 1m result carries two columns (previous + current); 5m carries one.
+
+| TF | Identical clients | Builds/update | Projection ms/update | All-client encoding ms/update | Total measured ms/update | Cadence s/update | Measured work ms/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1m | 1 | 1 | 4.026 | 2.344 | 6.370 | 1.076 | 5.92 |
+| 1m | 8 | 1 | 3.732 | 14.372 | 18.104 | 1.086 | 16.67 |
+| 5m | 1 | 1 | 12.366 | 1.123 | 13.489 | 1.075 | 12.55 |
+| 5m | 8 | 1 | 12.842 | 7.429 | 20.271 | 1.085 | 18.68 |
+
+Per-update encoded bytes were 23,605 / 188,840 (1m, 1 / 8 clients) and 12,109 / 96,876
+(5m, 1 / 8 clients). Projection cost stays independent of identical-client count; encoding
+scales with clients because each envelope echoes its own generation. These are fixture
+means, not worst-case latency or production CPU measurements.

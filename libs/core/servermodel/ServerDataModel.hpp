@@ -1,4 +1,5 @@
 #pragma once
+#include "RecordingLive.hpp"
 #include <unordered_map>
 #include <vector>
 #include <deque>
@@ -60,6 +61,7 @@ public:
                                 int64_t endTimeMs,
                                 std::vector<FootprintTradeSample>& out) const;
     int64_t exchangeNowMs() const override;
+    recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
     bool recordingAvailable() const { return m_recorder != nullptr; }
     const std::optional<std::filesystem::path>& recordingDir() const { return m_recordingDir; }
 
@@ -99,6 +101,7 @@ private:
     int64_t m_footprintTradeRetentionMs = 300'000;
     QTimer m_candleTimer;
     // Recording v2 (null when recording.enabled is false or no usable dir).
+    std::shared_ptr<recording::LiveService> m_recordingLive;
     std::unique_ptr<recording::BookRecorder> m_recorder;
     std::optional<std::filesystem::path> m_recordingDir;
     QTimer m_recorderTimer;

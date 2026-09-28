@@ -3,6 +3,7 @@
 #include "SentinelStreamProtocol.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../servermodel/RecordingPage.hpp"
+#include "../servermodel/RecordingLive.hpp"
 #include <QByteArray>
 #include <QtEndian>
 #include <nlohmann/json.hpp>
@@ -171,6 +172,47 @@ inline nlohmann::json buildChunk(const Request& q, const recording::BuildResult&
             {"observed_ms", col.observedMs}, {"flags", col.flags}
         });
     }
+    return out;
+}
+
+inline nlohmann::json viewError(const recording::LiveView& v, const std::string& code,
+                                const std::string& message, int retryMs = 1000) {
+    return {{"type", "error"}, {"context", "heatmap_recording_view"}, {"symbol", v.symbol},
+        {"band_generation", v.generation}, {"code", code}, {"message", message}, {"retry_ms", retryMs}};
+}
+
+inline nlohmann::json viewMessage(const recording::LiveView& v) {
+    return {{"type", "heatmap_recording_view"}, {"symbol", v.symbol}, {"layer", v.layer},
+        {"timeframe_ms", v.tfMs}, {"band_lo", v.band.lo}, {"band_tick", v.band.tick},
+        {"band_rows", v.band.rows}, {"band_generation", v.generation}};
+}
+inline std::optional<recording::LiveView> parseView(const nlohmann::json& j) {
+    try {
+        recording::LiveView v;
+        v.symbol = j.at("symbol").get<std::string>();
+        v.layer = j.at("layer").get<std::string>();
+        v.tfMs = j.at("timeframe_ms").get<int64_t>();
+        v.band = {j.at("band_lo").get<double>(), j.at("band_tick").get<double>(),
+                  j.at("band_rows").get<uint32_t>()};
+        v.generation = j.at("band_generation").get<uint64_t>();
+        if (v.symbol.empty() || v.symbol.size() > 128 || (v.layer != "near" && v.layer != "deep") ||
+            v.tfMs < 60'000 || v.tfMs > 86'400'000 || v.tfMs % 60'000 ||
+            (v.tfMs >= 3'600'000 && (v.tfMs % 3'600'000 || v.layer != "deep")) ||
+            !v.band.rows || v.band.rows > 16384 || !std::isfinite(v.band.lo) || v.band.lo < 0 ||
+            !std::isfinite(v.band.tick) || v.band.tick <= 0 ||
+            !std::isfinite(v.band.lo + v.band.tick * v.band.rows) ||
+            v.band.lo + v.band.tick * v.band.rows > 1e12 ||
+            std::abs(v.band.lo / v.band.tick - std::round(v.band.lo / v.band.tick)) > 1e-6)
+            return std::nullopt;
+        return v;
+    } catch (const std::exception&) { return std::nullopt; }
+}
+inline nlohmann::json buildLive(const recording::LiveView& v, const recording::BuildResult& page) {
+    Request q;
+    q.symbol = v.symbol; q.timeframeMs = v.tfMs; q.rows = v.band.rows;
+    q.count = 2; q.bandGeneration = v.generation;
+    auto out = buildChunk(q, page);
+    out["type"] = "heatmap_recording_live";
     return out;
 }
 

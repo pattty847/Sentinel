@@ -1,4 +1,5 @@
 #include "RecordingPage.hpp"
+#include "RecordingLive.hpp"
 #include <array>
 #include <map>
 #include <unordered_map>
@@ -294,5 +295,112 @@ BuildResult buildPage(Hmc2Reader &reader, const BuildRequest &q, StopToken stop)
 BuildResult buildPage(const std::filesystem::path &root, const BuildRequest &q, StopToken stop) {
     Hmc2Reader reader(root);
     return buildPage(reader, q, stop);
+}
+
+struct LiveBuilder::Impl {
+    LiveView view;
+    struct Bucket {
+        Aggregate aggregate;
+        int64_t through = 0;
+    };
+    std::map<int64_t, Bucket> buckets;
+    explicit Impl(LiveView v) : view(std::move(v)) {}
+};
+LiveBuilder::LiveBuilder(LiveView view) : impl_(std::make_unique<Impl>(std::move(view))) {}
+LiveBuilder::~LiveBuilder() = default;
+BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &source) {
+    auto &v = impl_->view;
+    BuildResult out;
+    out.band = v.band;
+    out.layer = v.layer;
+    if (v.tfMs < minute || v.tfMs > 86'400'000 || v.tfMs % minute ||
+        !v.band.rows || v.band.rows > 16384 || !std::isfinite(v.band.lo) || v.band.lo < 0 ||
+        !std::isfinite(v.band.tick) || v.band.tick <= 0 ||
+        !std::isfinite(v.band.lo + v.band.rows * v.band.tick) ||
+        v.band.lo + v.band.rows * v.band.tick > 1e12) {
+        out.status = BuildStatus::InvalidRequest;
+        out.message = "invalid live timeframe or band";
+        return out;
+    }
+    const auto latestCommit = source.committed.empty() ? RecordPtr{} : source.committed.back();
+    const auto provisional = source.provisional.empty() ? RecordPtr{} : source.provisional.rbegin()->second;
+    const auto newest = provisional && (!latestCommit ||
+        provisional->bucketStartMs > latestCommit->bucketStartMs) ? provisional : latestCommit;
+    if (!newest) return out;
+    out.sizeScale = newest->header.sizeScale;
+    const double nativeTick = newest->header.rowTickUnits / newest->header.priceScale;
+    if (!(nativeTick > 0) || !std::isfinite(nativeTick) ||
+        (v.band.lo + v.band.rows * v.band.tick) / nativeTick > 0x1p52 ||
+        v.band.rows * v.band.tick / nativeTick > LiveCache::kMaxEntries) {
+        out.status = BuildStatus::InvalidRequest;
+        out.message = "live band exceeds 262144 native rows";
+        return out;
+    }
+    const auto current = newest->bucketStartMs / v.tfMs * v.tfMs;
+    out.latestAvailableMs = current;
+    // Also correct the preceding bucket when its delayed final commit arrives.
+    std::vector<int64_t> wanted;
+    if (current - v.tfMs >= kHmc2MinMs) wanted.push_back(current - v.tfMs);
+    wanted.push_back(current);
+    for (auto it = impl_->buckets.begin(); it != impl_->buckets.end();) {
+        if (std::find(wanted.begin(), wanted.end(), it->first) == wanted.end()) it = impl_->buckets.erase(it);
+        else ++it;
+    }
+    ReadControl control{{4096, 2'000'000, 100}};
+    try {
+        for (const auto start : wanted) {
+            auto [it, fresh] = impl_->buckets.try_emplace(start);
+            auto &b = it->second;
+            if (fresh) {
+                b.through = start;
+                b.aggregate.column.bucketStartMs = start;
+                b.aggregate.direct = v.tfMs == minute;
+            }
+            const auto end = std::max(start, std::min(start + v.tfMs, source.committedThroughMs));
+            // The retained suffix proves all commits since its first record. Older
+            // data is scanned once; a budget keeps the proven prefix and resumes.
+            const auto cachedStart = source.committed.empty() ? end : source.committed.front()->bucketStartMs;
+            const auto diskEnd = std::min(end, cachedStart);
+            if (b.through < diskEnd) {
+                const auto scan = reader.visit(v.symbol, v.layer, minute, b.through, diskEnd,
+                    [&](const Hmc2Record &r) {
+                        ReadControl atomic; // one admitted record is integrated completely
+                        b.aggregate.add(r, v.band, atomic);
+                    }, control);
+                b.through = scan.scannedEndMs;
+                if (scan.status != ReadStatus::Complete) {
+                    out.status = status(scan.status);
+                    return out; // no partial warmup is presented as a complete rollup
+                }
+            }
+            for (const auto &r : source.committed) {
+                if (r->bucketStartMs < b.through || r->bucketStartMs >= end) continue;
+                ReadControl atomic;
+                b.aggregate.add(*r, v.band, atomic);
+                b.through = r->bucketStartMs + minute;
+            }
+            b.through = std::max(b.through, end);
+            auto live = b.aggregate; // bounded by distinct native rows, not minute count
+            for (const auto &[time, pending] : source.provisional) {
+                if (time < b.through || time < start || time >= start + v.tfMs) continue;
+                ReadControl atomic;
+                live.add(*pending, v.band, atomic);
+            }
+            // Even a bucket with only committed source records is still forming
+            // until the recorder watermark proves its exclusive end.
+            if (b.through < start + v.tfMs) live.column.flags |= kProvisional;
+            if (live.column.observedMs) {
+                ReadControl atomic;
+                out.columns.push_back(live.finish(v.band, out.sizeScale, v.tfMs, atomic));
+            }
+        }
+    } catch (const GridError &e) {
+        out.status = BuildStatus::IncompatibleGrid; out.message = e.what();
+    } catch (const std::exception &e) {
+        out.status = BuildStatus::IoError; out.message = e.what();
+    }
+    out.sourceRecords = control.sourceRecords;
+    out.entriesVisited = control.entriesVisited;
+    return out;
 }
 } // namespace recording

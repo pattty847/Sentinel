@@ -73,6 +73,7 @@ public:
 
 private:
     friend class Session;
+    friend struct RecordingServerStopTest;
 
     void doAccept();
     void registerSession(const std::shared_ptr<Session>& session);

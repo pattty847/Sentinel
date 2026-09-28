@@ -317,6 +317,16 @@ void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
     });
 }
 
+void SentinelStreamClient::registerRecordingView(const recording::LiveView& view) {
+    auto msg = protocol::recordingwire::viewMessage(view);
+    if (!protocol::recordingwire::parseView(msg)) return;
+    net::post(m_strand, [this, payload = msg.dump()]() mutable {
+        if (!m_isConnected) return; // reconnect registers the newly confirmed band
+        m_writeQueue.push_back(std::move(payload));
+        if (m_writeQueue.size() == 1) doWrite();
+    });
+}
+
 void SentinelStreamClient::requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) {
     nlohmann::json msg = {{"type", "heatmap_history_request"}, {"source", "recording"},
                           {"symbol", request.symbol}, {"timeframe_ms", request.timeframeMs},
@@ -580,6 +590,13 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::HeatmapSlice:
                 handleHeatmapSliceMessage(msg);
                 return;
+            case protocol::MessageType::HeatmapRecordingLive:
+                if (validateFamilySchema(msg, "heatmap", protocol::SentinelProtocol::kHeatmapSchemaVersion,
+                                         DropReason::HeatmapSchema)) {
+                    if (auto page = parseRecordingHistoryChunk(msg); page && page->columns.size() <= 2)
+                        emit recordingHeatmapLiveReceived(*page);
+                }
+                return;
             case protocol::MessageType::HeatmapHistoryChunk:
                 handleHeatmapHistoryChunkMessage(msg);
                 return;
@@ -630,6 +647,11 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
+                if (msg.value("context", "") == "heatmap_recording_view") {
+                    emit recordingViewError(QString::fromStdString(msg.value("symbol", "")),
+                        msg.value("band_generation", uint64_t{0}), QString::fromStdString(msg.value("code", "")),
+                        QString::fromStdString(msg.value("message", "")), msg.value("retry_ms", 1000));
+                }
                 if (msg.value("context", "") == "heatmap_history_request" &&
                     msg.contains("request_id") && msg["request_id"].is_string()) {
                     emit recordingHeatmapHistoryError(

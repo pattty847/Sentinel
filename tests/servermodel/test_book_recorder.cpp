@@ -1,10 +1,12 @@
 #include "servermodel/BookRecorder.hpp"
 #include "servermodel/Hmc2Store.hpp"
+#include "servermodel/RecordingLive.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <thread>
 
 using namespace recording;
 namespace {
@@ -478,4 +480,109 @@ TEST_F(RecorderTest, RestartAcrossHourBoundaryRetainsSchemaThreeAndWritesSchemaF
     const auto generation = Hmc2Store::filePath(cfg.root, old.header, kEpoch, 1);
     std::ifstream current(generation, std::ios::binary); current.seekg(4); EXPECT_EQ(current.get(), 4);
     EXPECT_FALSE(std::filesystem::exists(Hmc2Store::filePath(cfg.root, old.header, kEpoch, 2)));
+}
+
+TEST_F(RecorderTest, PublicationIsWorkerOwnedAndConstantBookMatchesClose) {
+    std::vector<std::shared_ptr<const Hmc2Record>> publications;
+    const auto producer = std::this_thread::get_id();
+    auto c = config();
+    c.publisher = [&](auto record) {
+        EXPECT_NE(std::this_thread::get_id(), producer);
+        publications.push_back(std::move(record));
+    };
+    auto r = make(c);
+    snap(*r, 0);
+    tick(*r, 30'000);
+    ASSERT_EQ(publications.size(), 1);
+    const auto provisional = publications.back();
+    EXPECT_TRUE(provisional->flags & kProvisional);
+    EXPECT_EQ(provisional->observedMs, 30'000);
+    value(*provisional, 99, false, 2, 2);
+    value(*provisional, 101, true, 4, 4);
+    tick(*r, 30'250);
+    EXPECT_EQ(publications.size(), 1); // one-second coalescing
+    tick(*r, 60'000);
+    ASSERT_EQ(publications.size(), 3); // finished-pending publication, then commit
+    const auto committed = publications.back();
+    EXPECT_FALSE(committed->flags & kProvisional);
+    EXPECT_EQ(committed->observedMs, 60'000);
+    EXPECT_EQ(committed->bidRowLo, provisional->bidRowLo);
+    EXPECT_EQ(committed->bidRowHi, provisional->bidRowHi);
+    for (const auto& e : committed->entries) {
+        const auto found = std::find_if(provisional->entries.begin(), provisional->entries.end(),
+            [&](const auto& p) { return p.row == e.row && p.isAsk == e.isAsk; });
+        ASSERT_NE(found, provisional->entries.end());
+        EXPECT_EQ(found->twapCode, e.twapCode);
+        EXPECT_EQ(found->peakCode, e.peakCode);
+    }
+}
+
+TEST_F(RecorderTest, PublicationExcludesInvalidTimeAndResyncDoesNotInventLiquidity) {
+    std::vector<std::shared_ptr<const Hmc2Record>> publications;
+    auto c = config();
+    c.publisher = [&](auto record) { publications.push_back(std::move(record)); };
+    auto r = make(c);
+    snap(*r, 0);
+    local = 10'000;
+    r->onInvalid("BTC-USD", kEpoch + local, "test gap");
+    r->drainForTest();
+    tick(*r, 20'000);
+    ASSERT_FALSE(publications.empty());
+    EXPECT_EQ(publications.back()->observedMs, 10'000);
+    value(*publications.back(), 99, false, 2, 2);
+    snap(*r, 25'000, {{true, 99, 100}}); // rejected one-sided snapshot
+    tick(*r, 30'000);
+    EXPECT_EQ(publications.back()->observedMs, 10'000);
+    value(*publications.back(), 99, false, 2, 2);
+    snap(*r, 40'000, {{true, 99, 6}, {false, 101, 8}});
+    tick(*r, 50'000);
+    EXPECT_EQ(publications.back()->observedMs, 20'000);
+    EXPECT_TRUE(publications.back()->flags & kResynced);
+    value(*publications.back(), 99, false, 4, 6);
+    tick(*r, 60'000);
+    EXPECT_EQ(publications.back()->observedMs, 30'000);
+    EXPECT_FALSE(publications.back()->flags & kProvisional);
+    value(*publications.back(), 99, false, 14.0 / 3, 6);
+}
+
+TEST_F(RecorderTest, FirstCommitWatermarkPreservesPendingMinuteInColdLiveView) {
+    LiveCache cache;
+    auto c = config();
+    c.latenessMs = 2000;
+    c.publisher = [&](auto r) { cache.publish(std::move(r)); };
+    auto recorder = make(c);
+    Hmc2Reader reader(c.root);
+    LiveBuilder builder({"BTC-USD", "near", 300000, {90, 1, 20}, 1});
+    snap(*recorder, 0);
+    tick(*recorder, 59000);
+    auto before = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(before.columns.size(), 1);
+    EXPECT_EQ(before.columns[0].observedMs, 59000);
+    tick(*recorder, 61000);
+    const auto pending = cache.snapshot("BTC-USD", "near");
+    EXPECT_EQ(pending.committedThroughMs, kEpoch);
+    EXPECT_EQ(pending.provisional.size(), 2);
+    EXPECT_TRUE(pending.committed.empty());
+    auto atBoundary = builder.build(reader, pending);
+    ASSERT_EQ(atBoundary.columns.size(), 1);
+    EXPECT_EQ(atBoundary.columns[0].observedMs, 61000);
+    tick(*recorder, 62000);
+    auto after = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(after.columns.size(), 1);
+    EXPECT_EQ(after.columns[0].observedMs, 62000);
+    EXPECT_EQ(after.columns[0].cells, atBoundary.columns[0].cells);
+}
+
+TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
+    auto c = config();
+    c.layers[0].hourlyRollup = true;
+    c.publisher = [](auto) {};
+    c.beforePublicationForTest = [](bool provisional) { if (!provisional) throw std::bad_alloc(); };
+    auto recorder = make(c);
+    snap(*recorder, 3540000);
+    tick(*recorder, 3600000);
+    EXPECT_EQ(recorder->stats().diskErrors, 0);
+    EXPECT_EQ(recorder->stats().columnsWritten, 2);
+    EXPECT_EQ(read().size(), 1);
+    EXPECT_EQ(read(3600000).size(), 1);
 }

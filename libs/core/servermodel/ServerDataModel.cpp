@@ -182,9 +182,15 @@ void ServerDataModel::startRecorder() {
         {"deep", units(rc.deepTick), rc.deepLowFrac, rc.deepHighMult, true},
     };
     try {
+        m_recordingLive = std::make_shared<recording::LiveService>(dir);
+        cfg.publisher = [live = m_recordingLive](recording::RecordPtr record) {
+            if (!live->publish(std::move(record)))
+                sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
+        };
         m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
         m_recordingDir = dir;
     } catch (const std::exception& e) {
+        m_recordingLive.reset();
         sLog_Error("Recording v2 failed to start: dir=" << dir.string() << " error=" << e.what());
         return;
     }

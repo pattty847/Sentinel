@@ -22,6 +22,9 @@ inline constexpr uint32_t kLateEvents = 1u << 2;
 inline constexpr uint32_t kUnderflow = 1u << 3;
 inline constexpr uint32_t kApproximateCoverage = 1u << 4;
 
+// Publication/wire only; never persisted.
+inline constexpr uint32_t kProvisional = 1u << 5;
+
 struct Hmc2Header {
     std::string symbol, layer;
     int64_t tfMs = 60'000;
@@ -50,6 +53,7 @@ struct Hmc2Record {
     double midOpen = 0, midClose = 0, midMin = 0, midMax = 0;
     std::vector<Hmc2Entry> entries;
     std::vector<CoverageRun> coverage; // hours, including covered zero rows
+    int64_t committedThroughMs = 0; // publication only: exclusive closed/committed watermark; never serialized
 };
 
 using StopToken = std::stop_token;

@@ -2,6 +2,7 @@
 #include "HeatmapSlice.hpp"
 #include "SentinelStreamProtocol.hpp"
 #include "RecordingHistoryWire.hpp"
+#include <list>
 #include "SentinelLogging.hpp"
 #include "../servermodel/SessionManager.hpp"
 #include <boost/beast/core.hpp>
@@ -164,7 +165,11 @@ class Session : public std::enable_shared_from_this<Session> {
     SentinelStreamServer* owner_ = nullptr;
     std::string peer_;  // "ip:port" of the client, for log lines only
     std::unordered_set<std::string> subscriptions_;
-    std::deque<std::string> write_queue_;
+    struct PendingWrite { std::string payload; bool recording = false; };
+    std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
+    std::shared_ptr<recording::LiveWriteSlot> recordingWriteSlot_ = std::make_shared<recording::LiveWriteSlot>();
+    recording::LiveRegistrationGate recordingRegistrationGate_;
+    std::shared_ptr<recording::LiveService::Subscription> recordingView_;
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
@@ -263,6 +268,8 @@ class Session : public std::enable_shared_from_this<Session> {
         }
 
         disconnectModelSignals();
+        if (recordingView_) recordingView_->active.store(false);
+        recordingView_.reset();
         if (owner_ && m_latencySenderId != 0) {
             owner_->unregisterLatencySender(m_latencySenderId);
             m_latencySenderId = 0;
@@ -286,7 +293,8 @@ class Session : public std::enable_shared_from_this<Session> {
 
         if (write_queue_.size() > 1) {
             for (auto it = std::next(write_queue_.begin()); it != write_queue_.end(); ++it) {
-                releasePendingWriteBytes(it->size());
+                if (it->recording) recordingWriteSlot_->release();
+                else releasePendingWriteBytes(it->payload.size());
             }
             write_queue_.erase(std::next(write_queue_.begin()), write_queue_.end());
         }
@@ -994,6 +1002,7 @@ public:
     }
 
     ~Session() {
+        if (recordingView_) recordingView_->active.store(false);
         disconnectModelSignals();
     }
 
@@ -1207,6 +1216,48 @@ public:
                     do_write(snapshot.dump());
                     
                 }
+            } else if (type == "heatmap_recording_view") {
+                const auto view = protocol::recordingwire::parseView(j);
+                recording::LiveView identity;
+                identity.symbol = j.value("symbol", std::string{});
+                identity.generation = j.value("band_generation", uint64_t{0});
+                const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (!recordingRegistrationGate_.admit(now)) {
+                    do_write(protocol::recordingwire::viewError(identity, "rate_limited", "recording registration rate exceeded").dump());
+                    return;
+                }
+                if (!view || !model_.recordingLive()) {
+                    do_write(protocol::recordingwire::viewError(identity,
+                        view ? "unavailable" : "invalid_request", "invalid recording view or recording unavailable").dump());
+                    return;
+                }
+                if (recordingView_) recordingView_->active.store(false);
+                // The worker never locks a Session. All Session ownership and final
+                // releases stay on its executor; shutdown joins the worker first.
+                auto weak = weak_from_this();
+                const auto executor = ws_.get_executor();
+                recordingView_ = model_.recordingLive()->subscribe(*view,
+                    [weak, executor, slot = recordingWriteSlot_](const recording::LiveView& v,
+                                                               const recording::BuildResult& page) {
+                        if (!slot->tryAcquire()) return false;
+                        try {
+                            auto payload = (page.status == recording::BuildStatus::Complete
+                                ? protocol::recordingwire::buildLive(v, page)
+                                : protocol::recordingwire::viewError(v, protocol::recordingwire::statusName(page.status),
+                                                                    page.message)).dump();
+                            if (payload.size() > 1024 * 1024) { slot->release(); return false; }
+                            net::post(executor, [weak, slot, payload = std::move(payload)]() mutable {
+                                if (auto self = weak.lock()) self->onRecordingWritePost(std::move(payload));
+                                else slot->release();
+                            });
+                            return true;
+                        } catch (...) { slot->release(); throw; }
+                    });
+                if (!recordingView_) do_write(protocol::recordingwire::viewError(*view,
+                    "capacity", "recording live view capacity reached or service stopped").dump());
+                sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
+                    << " gen=" << view->generation << " layer=" << view->layer);
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const std::string source = j.value("source", std::string("legacy"));
@@ -2011,6 +2062,16 @@ public:
         do_write(payload.dump());
     }
 
+    void onRecordingWritePost(std::string payload) {
+        if (closing_.load()) { recordingWriteSlot_->release(); return; }
+        // One independent <=1 MiB live payload; put it immediately behind the
+        // write already in flight so history cannot indefinitely starve it.
+        if (write_queue_.empty()) {
+            write_queue_.push_back({std::move(payload), true});
+            internal_async_write();
+        } else write_queue_.insert(std::next(write_queue_.begin()), {std::move(payload), true});
+    }
+
     void do_write(std::string payload) {
         if (payload.empty() || closing_.load(std::memory_order_acquire)) {
             return;
@@ -2059,7 +2120,7 @@ public:
             releasePendingWriteBytes(payload.size());
             return;
         }
-        write_queue_.push_back(std::move(payload));
+        write_queue_.push_back({std::move(payload), false});
         
         if (write_queue_.size() > 1) {
             return;
@@ -2070,7 +2131,7 @@ public:
     
     void internal_async_write() {
         ws_.async_write(
-            net::buffer(write_queue_.front()),
+            net::buffer(write_queue_.front().payload),
             beast::bind_front_handler(
                 &Session::on_write_complete,
                 shared_from_this()));
@@ -2078,7 +2139,8 @@ public:
     
     void on_write_complete(beast::error_code ec, std::size_t) {
         if (!write_queue_.empty()) {
-            releasePendingWriteBytes(write_queue_.front().size());
+            if (write_queue_.front().recording) recordingWriteSlot_->release();
+            else releasePendingWriteBytes(write_queue_.front().payload.size());
             write_queue_.pop_front();
         }
         if (ec) {
@@ -2296,6 +2358,9 @@ void SentinelStreamServer::start() {
 }
 
 void SentinelStreamServer::stop() {
+    // Live delivery can hold a Session and post to its executor. Join it while
+    // that executor is alive, even when session drain will time out or start failed.
+    if (auto* live = m_model.recordingLive()) live->shutdown();
     const bool wasRunning = m_running.exchange(false);
     if (!wasRunning && !m_thread.joinable()) {
         return;

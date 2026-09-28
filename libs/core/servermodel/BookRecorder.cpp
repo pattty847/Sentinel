@@ -60,6 +60,7 @@ struct Symbol {
     bool initialized = false, valid = false;
     int64_t clock = 0, minute = 0, closedThrough = 0, offset = 0;
     uint32_t observed = 0, flags = 0;
+    int64_t lastPublish = 0;
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
@@ -275,6 +276,56 @@ struct BookRecorder::Impl {
         if (s.valid)
             trackMid(s);
     }
+    void publish(std::shared_ptr<const Hmc2Record> record) {
+        if (!cfg.publisher) return;
+        try {
+            cfg.publisher(std::move(record));
+        } catch (const std::exception &e) {
+            sLog_Error("BookRecorder: publisher failed error=" << e.what());
+        }
+    }
+    void publishCopy(const Hmc2Record &record, int64_t through, bool provisional) {
+        if (!cfg.publisher) return;
+        try {
+            if (cfg.beforePublicationForTest) cfg.beforePublicationForTest(provisional);
+            auto copy = std::make_shared<Hmc2Record>(record);
+            copy->committedThroughMs = through;
+            if (provisional) copy->flags |= kProvisional;
+            publish(std::move(copy));
+        } catch (const std::exception &e) {
+            sLog_Error("BookRecorder: publication failed bucket=" << record.bucketStartMs << " error=" << e.what());
+        }
+    }
+    void publishOpen(Symbol &s) {
+        if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < 1000) return;
+        s.lastPublish = s.clock;
+        for (size_t li = 0; li < s.layers.size(); ++li) {
+            const auto &layer = s.layers[li];
+            auto r = std::make_shared<Hmc2Record>();
+            r->header = layer.header;
+            r->bucketStartMs = s.minute;
+            r->committedThroughMs = s.closedThrough;
+            r->observedMs = s.observed;
+            r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
+            r->midOpen = s.midOpen; r->midClose = s.midClose;
+            r->midMin = s.midMin; r->midMax = s.midMax;
+            const auto [lo, hi] = bounds(s.midMin, s.midMax, cfg.layers[li], cfg.priceScale);
+            r->bidRowLo = r->askRowLo = lo;
+            r->bidRowHi = r->askRowHi = hi;
+            r->entries.reserve(layer.rows.size());
+            for (const auto &[key, row] : layer.rows) {
+                const auto integral = row.integral + (s.valid ? row.size * (s.clock - row.last) : 0);
+                if (key.first >= lo && key.first <= hi && (integral > 0 || row.peak > 0))
+                    r->entries.push_back({key.first, key.second,
+                        encode(integral / r->observedMs, cfg.sizeScale, r->flags),
+                        encode(row.peak, cfg.sizeScale, r->flags)});
+            }
+            sLog_Probe("recording.publish", "symbol=" << r->header.symbol << " layer=" << r->header.layer
+                << " bucket=" << r->bucketStartMs << " observed=" << r->observedMs
+                << " entries=" << r->entries.size() << " provisional=1");
+            publish(std::move(r));
+        }
+    }
     void finishMinute(Symbol &s) {
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &layer = s.layers[li];
@@ -310,6 +361,7 @@ struct BookRecorder::Impl {
                 std::sort(r.entries.begin(), r.entries.end(),
                           [](const auto &a, const auto &b) { return Key{a.row, a.isAsk} < Key{b.row, b.isAsk}; });
                 s.pending.push_back(std::move(r));
+                publishCopy(s.pending.back(), s.closedThrough, true);
             }
         }
     }
@@ -478,6 +530,7 @@ struct BookRecorder::Impl {
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
                 continue;
             }
+            publishCopy(r, r.bucketStartMs + kMinute, false);
             try {
                 rollup(s, r);
             } catch (const std::exception &e) {
@@ -599,6 +652,7 @@ struct BookRecorder::Impl {
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
                     invalidate(name, s, m.reason);
+                publishOpen(s);
             }
             return;
         }
@@ -633,6 +687,7 @@ struct BookRecorder::Impl {
         }
         if (m.kind == Kind::Snapshot || s.valid)
             apply(s, m);
+        publishOpen(s);
         sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());
     }

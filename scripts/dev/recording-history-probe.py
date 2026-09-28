@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Request one recording heatmap page from a running local Sentinel server."""
+"""Request recording history, optionally register its band and observe live columns."""
 
 import argparse
 import base64
@@ -21,15 +21,16 @@ def read_exact(sock, count):
     return bytes(data)
 
 
-def send_frame(sock, payload):
-    payload = payload.encode()
+def send_frame(sock, payload, opcode=1):
+    if isinstance(payload, str):
+        payload = payload.encode()
     mask = os.urandom(4)
     if len(payload) < 126:
-        head = bytes([0x81, 0x80 | len(payload)])
+        head = bytes([0x80 | opcode, 0x80 | len(payload)])
     elif len(payload) < 65536:
-        head = b"\x81\xfe" + struct.pack("!H", len(payload))
+        head = bytes([0x80 | opcode, 0xfe]) + struct.pack("!H", len(payload))
     else:
-        head = b"\x81\xff" + struct.pack("!Q", len(payload))
+        head = bytes([0x80 | opcode, 0xff]) + struct.pack("!Q", len(payload))
     sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
 
 
@@ -58,6 +59,54 @@ def read_message(sock):
     return opcode, payload
 
 
+def observe_live(sock, args, history):
+    view = {"type": "heatmap_recording_view", "symbol": args.symbol,
+            "timeframe_ms": args.timeframe_ms, "band_generation": 1,
+            **{key: history[key] for key in ("layer", "band_lo", "band_tick", "band_rows")}}
+    if history.get("status") != "complete" and not history.get("columns"):
+        raise RuntimeError("history has not established a band; retry with a smaller history count")
+    send_frame(sock, json.dumps(view))
+    print("registered " + json.dumps(view), flush=True)
+    started = time.monotonic()
+    messages = 0
+    while time.monotonic() - started < args.live_seconds:
+        sock.settimeout(max(0.01, args.live_seconds - (time.monotonic() - started)))
+        try:
+            opcode, payload = read_message(sock)
+        except socket.timeout:
+            break
+        if opcode == 9:
+            send_frame(sock, payload, opcode=10)
+            continue
+        if opcode == 8:
+            raise EOFError("server closed live probe")
+        if opcode != 1:
+            continue
+        reply = json.loads(payload)
+        if reply.get("type") == "error":
+            raise RuntimeError(reply.get("message", "server error"))
+        if reply.get("type") != "heatmap_recording_live":
+            continue
+        if reply.get("band_generation") != 1 or reply.get("symbol") != args.symbol:
+            raise ValueError("live view identity mismatch")
+        messages += 1
+        for col in reply["columns"]:
+            cells = base64.b64decode(col["column"], validate=True)
+            validity = base64.b64decode(col["validity"], validate=True)
+            if len(cells) != args.rows * 2 or len(validity) != (args.rows + 7) // 8:
+                raise ValueError("live column shape mismatch")
+            codes = struct.unpack(f"<{args.rows}H", cells)
+            print(json.dumps({"elapsed_s": round(time.monotonic() - started, 3),
+                              "bucket": col["time_start"], "observed_ms": col["observed_ms"],
+                              "flags": col["flags"], "provisional": bool(col["flags"] & 32),
+                              "nonzero_rows": sum(bool(x & 0x7fff) for x in codes),
+                              "valid_rows": sum(x.bit_count() for x in validity),
+                              "band_generation": reply["band_generation"]}), flush=True)
+    print(f"live_messages={messages} duration_s={time.monotonic() - started:.2f}")
+    if not messages:
+        raise RuntimeError("no live columns received; check recorder publications and view probes")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -69,6 +118,8 @@ def main():
     parser.add_argument("--rows", type=int, default=256)
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--display-tick", type=float)
+    parser.add_argument("--live-seconds", type=float, default=0,
+                        help="register the returned band and print live columns (use 10)")
     args = parser.parse_args()
     context = ssl._create_unverified_context()  # local development certificate
     with socket.create_connection((args.host, args.port), timeout=10) as raw:
@@ -97,6 +148,7 @@ def main():
             while time.monotonic() < deadline:
                 opcode, payload = read_message(sock)
                 if opcode == 9:
+                    send_frame(sock, payload, opcode=10)
                     continue
                 if opcode != 1:
                     continue
@@ -111,6 +163,8 @@ def main():
                                        "scanned_start", "scanned_end", "next_end", "exhausted",
                                        "oldest_available_ms", "latest_available_ms")}, indent=2))
                     print(f"columns={len(reply.get('columns', []))}")
+                    if args.live_seconds > 0:
+                        observe_live(sock, args, reply)
                     return
             raise TimeoutError("no matching recording history reply")
 
