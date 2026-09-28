@@ -4,6 +4,8 @@
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSlider>
+#include <cstdint>
+#include <vector>
 
 class TopToolbar : public QToolBar {
     Q_OBJECT
@@ -15,6 +17,7 @@ public:
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
+    void setAvailableTimeframes(const std::vector<int64_t>& servedTimeframesMs);
     void setLayerToggleStates(bool heatmapEnabled,
                               bool footprintEnabled,
                               bool tpoEnabled,

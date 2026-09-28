@@ -8,6 +8,8 @@
 #include <QIcon>
 #include <QSlider>
 #include <QSignalBlocker>
+#include <QStandardItemModel>
+#include <algorithm>
 
 namespace {
 const char* labelForTimeframeMs(int64_t ms) {
@@ -109,6 +111,10 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     m_timeframeCombo = new QComboBox(this);
     m_timeframeCombo->addItems({"1s", "1m", "5m", "15m", "1h", "4h", "1D"});
+    const int64_t timeframesMs[] = {1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    for (int i = 0; i < m_timeframeCombo->count(); ++i) {
+        m_timeframeCombo->setItemData(i, static_cast<qlonglong>(timeframesMs[i]), Qt::UserRole);
+    }
     m_timeframeCombo->setFixedWidth(70);
     addWidget(m_timeframeCombo);
     connect(m_timeframeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::timeframeSelected);
@@ -196,8 +202,33 @@ void TopToolbar::setTimeframeMs(int64_t ms) {
     if (const char* label = labelForTimeframeMs(ms)) {
         const int idx = m_timeframeCombo->findText(label);
         if (idx >= 0 && idx != m_timeframeCombo->currentIndex()) {
+            const QSignalBlocker blocker(*m_timeframeCombo);
             m_timeframeCombo->setCurrentIndex(idx);
         }
+    }
+}
+
+void TopToolbar::setAvailableTimeframes(const std::vector<int64_t>& servedTimeframesMs) {
+    if (!m_timeframeCombo) {
+        return;
+    }
+    const QSignalBlocker blocker(*m_timeframeCombo);
+    auto* model = qobject_cast<QStandardItemModel*>(m_timeframeCombo->model());
+    int firstAvailable = -1;
+    for (int i = 0; i < m_timeframeCombo->count(); ++i) {
+        const int64_t tf = m_timeframeCombo->itemData(i, Qt::UserRole).toLongLong();
+        const bool available = servedTimeframesMs.empty() ||
+            std::find(servedTimeframesMs.begin(), servedTimeframesMs.end(), tf) != servedTimeframesMs.end();
+        model->item(i)->setEnabled(available);
+        m_timeframeCombo->setItemData(i,
+            available ? QString() : QStringLiteral("Not built yet: larger timeframes will be rolled up from 1m"),
+            Qt::ToolTipRole);
+        if (available && firstAvailable < 0) {
+            firstAvailable = i;
+        }
+    }
+    if (firstAvailable >= 0 && !model->item(m_timeframeCombo->currentIndex())->isEnabled()) {
+        m_timeframeCombo->setCurrentIndex(firstAvailable);
     }
 }
 

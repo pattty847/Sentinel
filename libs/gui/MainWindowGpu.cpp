@@ -116,10 +116,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
 
     auto* configStore = &GuiConfigStore::instance();
     connect(configStore, &GuiConfigStore::serverConfigUpdated, this, [this](const ServerConfig& config) {
+        m_serverConfigReady = true;
         if (m_qmlController) {
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->applyServerConfig(config);
                 if (m_heatmapDock && m_heatmapDock->toolbar()) {
+                    m_heatmapDock->toolbar()->setAvailableTimeframes(config.heatmap.servedTimeframesMs);
                     m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
                 }
             }
@@ -135,6 +137,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 m_qmlController->updateSymbolInContext(defaultSymbol);
             }
             m_currentSymbol = defaultSymbol;
+        }
+        if (m_connected && m_userSubscribed) {
+            requestHeatmapHistoryForSymbol(m_currentSymbol);
         }
     });
 
@@ -642,6 +647,10 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
+    // The connect signal can arrive before server_config; wait for its active timeframe.
+    if (!m_serverConfigReady) {
+        return;
+    }
     int64_t timeframeMs = 0;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
@@ -868,14 +877,19 @@ void MainWindowGPU::connectMarketDataSignals() {
         return;
     }
 
+    const auto& configStore = GuiConfigStore::instance();
+    m_serverConfigReady = configStore.hasServerConfig();
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
-        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-        int64_t tf = serverConfig.heatmap.activeTimeframeMs;
-        if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
+        const auto& serverConfig = configStore.serverConfig();
+        int64_t tf = m_serverConfigReady ? serverConfig.heatmap.activeTimeframeMs : 0;
+        if (tf <= 0 && m_serverConfigReady && !serverConfig.heatmap.timeframesMs.empty()) {
             tf = serverConfig.heatmap.timeframesMs.front();
         }
         if (tf > 0) {
             unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
+        }
+        if (m_serverConfigReady) {
+            m_heatmapDock->toolbar()->setAvailableTimeframes(serverConfig.heatmap.servedTimeframesMs);
         }
         m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
         sLog_App("Chart timeframe init: serverTfMs=" << tf
@@ -926,6 +940,7 @@ void MainWindowGPU::connectMarketDataSignals() {
             this,
             [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
                 if (!m_dataSource || m_currentSymbol.isEmpty()) return;
+                if (!m_serverConfigReady) return;
                 if (!m_connected) {
                     sLog_Warning("Heatmap history fetch dropped, not connected: symbol=" << m_currentSymbol
                                  << " tfMs=" << timeframeMs << " endMs=" << endTimeMs
@@ -982,6 +997,9 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         }
     }
     m_connected = connected;
+    if (!connected) {
+        m_serverConfigReady = false;
+    }
 
     if (m_subscribeButton) {
         m_subscribeButton->setText(connected ? "Subscribe" : "Connect");

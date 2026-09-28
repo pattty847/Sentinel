@@ -66,6 +66,10 @@ The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpd
 
 **Order book:** WebSocket → parse → `BookSnapshotEvent` or `BookUpdateEvent` → `handleOrderBookSnapshot()` or `handleOrderBookUpdate()` → `m_onLiveOrderBookInitialized()` or `m_onLiveOrderBookLevelUpdates()` → adapter queues signals → GUI updates.
 
+## Heatmap timeframes
+
+In `server_config`, top-level `timeframes_ms` is the configured candidate list, kept for compatibility. `heatmap.served_timeframes_ms` lists the timeframes for which the server actually builds heatmap columns; currently it contains only the active timeframe. The client uses this list to disable unavailable chart timeframes. If the field is absent on an older server, availability is unknown and all toolbar timeframes stay enabled.
+
 ## Heatmap history transport
 
 Clients request `heatmap_history_request` with `symbol`, `timeframe_ms`, `end_time`, and `count`. The server limits a page to 1,024 columns so a 2,048-row u16 intensity-and-liquidity response stays below the per-session write budget. Persisted reads and JSON/base64 encoding run on a two-worker pool with a global eight-job admission cap; saturation returns a protocol error and does not block the single network I/O thread. The response echoes the requested boundary as `request_end_time`, reports the storage floor as `oldest_available_ms`, and carries chronological self-describing columns.
