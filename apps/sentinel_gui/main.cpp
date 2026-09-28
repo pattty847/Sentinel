@@ -23,12 +23,14 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
+#include "SentinelLogSink.hpp"
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
 #include "config/GuiConfigStore.hpp"
 #include <QResource>
 #include <QCoreApplication>
+#include <QDir>
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
     #ifdef Q_OS_WIN
@@ -93,13 +95,21 @@ void registerMetaTypesAndQml() {
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
+    sentinel::logging::installLogSink("sentinel-gui", argc, argv);
+
     ClientConfig clientConfig;
-    ConfigLoader::loadClientConfig("config/client_config.yaml", &clientConfig);
+    if (!ConfigLoader::loadClientConfig("config/client_config.yaml", &clientConfig)) {
+        sLog_Warning("Client config not loaded, using defaults: path=config/client_config.yaml"
+                     << " cwd=" << QDir::currentPath());
+    }
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
     GuiConfigStore::instance().setClientConfig(clientConfig);
 
     configureGraphicsBackend();
     configureSurfaceFormat();
+    sLog_App("GUI startup: server=" << clientConfig.server.host << ":" << clientConfig.server.port
+             << " rhiBackend=" << qgetenv("QSG_RHI_BACKEND")
+             << " renderLoop=" << qgetenv("QSG_RENDER_LOOP"));
 
     const int disableCompress = qEnvironmentVariableIntValue("SENTINEL_DISABLE_HF_EVENT_COMPRESSION");
     if (disableCompress == 1) {
@@ -117,7 +127,7 @@ int main(int argc, char *argv[])
     themeManager.initializeDefaults();
 
     if (!themeManager.applyTheme("dark", &app)) {
-        sLog_Error("Failed to apply default theme");
+        sLog_Warning("Failed to apply default theme: theme=dark");
     }
 
     FontManager::instance().initialize(&app);

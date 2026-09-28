@@ -19,6 +19,8 @@ add_library(sentinel_core
     marketdata/model/LiveOrderBook.cpp
     SentinelLogging.cpp
     SentinelLogging.hpp
+    SentinelLogSink.cpp
+    SentinelLogSink.hpp
     marketdata/model/TradeData.h
     servermodel/ServerDataModel.hpp
     servermodel/ServerDataModel.cpp
@@ -97,6 +99,9 @@ target_link_libraries(sentinel_core
         nlohmann_json::nlohmann_json
         jwt-cpp::jwt-cpp
 )
+
+# Keep file:line in Qt message context for release builds too (log sink prints it).
+target_compile_definitions(sentinel_core PUBLIC QT_MESSAGELOGCONTEXT)
 
 # Windows-specific libraries for networking
 if(WIN32)

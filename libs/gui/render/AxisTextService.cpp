@@ -191,6 +191,9 @@ void AxisTextService::refreshAxisLayout() {
     m_priceAxisWidthPx = nextPriceAxisWidth;
     m_timeAxisHeightPx = nextTimeAxisHeight;
     if (changed) {
+        sLog_Probe("axis.layout", "labelPx=" << resolvedLabelPx << " dpiY=" << logicalDpiY
+                   << " scale=" << axisScale << " priceAxisW=" << nextPriceAxisWidth
+                   << " timeAxisH=" << nextTimeAxisHeight << " atlasFontPx=" << m_atlas.fontPx());
         emit layoutChanged();
     }
     emit needsUpdate();
@@ -219,7 +222,9 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         axisLayout = m_axisLayoutSnapshot;
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
+    // Probe text.axis: axis snapshot + first glyph sample, at most once per second.
+    static const bool kAxisTextProbe = sentinel::logging::probeEnabled("text.axis");
+    if (kAxisTextProbe) {
         static QElapsedTimer chartTextDebugTimer;
         static bool chartTextDebugStarted = false;
         if (!chartTextDebugStarted) {
@@ -231,8 +236,8 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
                                                           : priceTicks.front().label;
             const QString firstTime = timeTicks.empty() ? QStringLiteral("<none>")
                                                         : timeTicks.front().label;
-            sLog_Debug(
-                QString("Chart text axis snapshot: price=%1 firstPrice=%2 time=%3 "
+            sLog_Probe("text.axis",
+                QString("snapshot: price=%1 firstPrice=%2 time=%3 "
                         "firstTime=%4 atlasFontPx=%5 pxRange=%6 padding=%7 "
                         "lineHeight=%8 scale=%9 snap=%10")
                     .arg(static_cast<int>(priceTicks.size()))
@@ -270,8 +275,8 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
                         sampleGlyph.rect.left() - std::floor(sampleGlyph.rect.left()));
                     const float fracY = static_cast<float>(
                         sampleGlyph.rect.top() - std::floor(sampleGlyph.rect.top()));
-                    sLog_Debug(
-                        QString("Chart text sample[%1]: text=%2 renderPx=%3 rect=[%4,%5 "
+                    sLog_Probe("text.axis",
+                        QString("sample[%1]: text=%2 renderPx=%3 rect=[%4,%5 "
                                 "%6x%7] frac=[%8,%9] uv=[%10,%11 %12x%13]")
                             .arg(QString::fromLatin1(label))
                             .arg(text)

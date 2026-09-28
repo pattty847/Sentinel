@@ -58,9 +58,12 @@ void QmlSceneController::loadQmlSource() {
     } else {
         m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
     }
-    
+    sLog_App("QML source: url=" << m_qquickView->source().toString()
+             << " localPathTried=" << qmlPath << " status=" << static_cast<int>(m_qquickView->status()));
+
     if (m_qquickView->status() == QQuickView::Error) {
-        sLog_Error("QML FAILED TO LOAD! Errors: " << m_qquickView->errors());
+        sLog_Error("QML failed to load: url=" << m_qquickView->source().toString()
+                   << " errors=" << m_qquickView->errors());
     }
 
     applyChartModeControllerToRoot();
@@ -71,7 +74,9 @@ void QmlSceneController::verifyGpuAcceleration() {
 
     auto* rhi = m_qquickView->rendererInterface();
     if (!rhi || rhi->graphicsApi() == QSGRendererInterface::Null) {
-        sLog_Error("No GPU acceleration available");
+        sLog_Error("No GPU acceleration available: rendererInterface=" << (rhi != nullptr));
+    } else {
+        sLog_App("QML scene graphics: api=" << static_cast<int>(rhi->graphicsApi()));
     }
 }
 

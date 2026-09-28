@@ -11,14 +11,12 @@
  * Threading: Ingest on data thread; snapshot / reads must take the internal lock.
  */
 #include "TpoStreamState.hpp"
-#include "TpoDebugTrace.hpp"
 #include "SentinelLogging.hpp"
 
 #include "../../core/servermodel/SessionManager.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <sstream>
 #include <unordered_set>
 
 namespace {
@@ -149,6 +147,9 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
     }
     if (sessionStartMs != m_sessionStartMs) {
         // New session → reset all accumulated data.
+        sLog_Data("TPO session changed: start=" << m_sessionStartMs << "->" << sessionStartMs
+                  << " end=" << sessionEndMs << " sessionType=" << m_sessionType
+                  << " bucket=" << bucketStartMs);
         resetLocked(m_gridWidth, gridHeight);
         m_sessionStartMs = sessionStartMs;
         m_sessionEndMs   = sessionEndMs;
@@ -156,6 +157,8 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
 
     const int periodIdx = static_cast<int>((bucketStartMs - m_sessionStartMs) / timeframeMs);
     if (periodIdx < 0) {
+        sLog_DataN(5000, "TPO bucket dropped: before session start bucket=" << bucketStartMs
+                   << " sessionStart=" << m_sessionStartMs << " tf=" << timeframeMs);
         return false;
     }
     const int boundedPeriod = std::min(periodIdx, m_gridWidth - 1);
@@ -174,16 +177,11 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         const RowStats beforeStats = summarizeRows(col);
         const RowStats incomingStats = summarizeRows(data);
         if (incomingStats.occupied == 0 && beforeStats.occupied > 0) {
-            sentinel::log_file::appendLine(
-                "/tmp/sentinel_tpo_client.log",
-                QString("TPO ingest bucket preserved existing rows: start=%1 end=%2 tfMs=%3 period=%4 incomingRows=0 prevRows=%5 prevSpan=[%6..%7]")
-                    .arg(bucketStartMs)
-                    .arg(bucketEndMs)
-                    .arg(timeframeMs)
-                    .arg(boundedPeriod)
-                    .arg(beforeStats.occupied)
-                    .arg(beforeStats.firstRow)
-                    .arg(beforeStats.lastRow));
+            sLog_Probe("tpo.ingest", "preserved existing rows: start=" << bucketStartMs
+                       << " end=" << bucketEndMs << " tf=" << timeframeMs
+                       << " period=" << boundedPeriod << " incomingRows=0"
+                       << " prevRows=" << beforeStats.occupied
+                       << " prevSpan=[" << beforeStats.firstRow << ".." << beforeStats.lastRow << "]");
             m_writeColumn = boundedPeriod;
             if (m_filledColumns < m_gridWidth) {
                 m_filledColumns = std::max(m_filledColumns, boundedPeriod + 1);
@@ -203,24 +201,20 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         if (changed) {
             touchedColumns.insert(boundedPeriod);
         }
-        const RowStats afterStats = summarizeRows(col);
-        sentinel::log_file::appendLine(
-            "/tmp/sentinel_tpo_client.log",
-            QString("TPO ingest bucket: start=%1 end=%2 tfMs=%3 period=%4 incomingRows=%5 incomingSpan=[%6..%7] prevRows=%8 prevSpan=[%9..%10] resultRows=%11 resultSpan=[%12..%13] shrank=%14")
-                .arg(bucketStartMs)
-                .arg(bucketEndMs)
-                .arg(timeframeMs)
-                .arg(boundedPeriod)
-                .arg(incomingStats.occupied)
-                .arg(incomingStats.firstRow)
-                .arg(incomingStats.lastRow)
-                .arg(beforeStats.occupied)
-                .arg(beforeStats.firstRow)
-                .arg(beforeStats.lastRow)
-                .arg(afterStats.occupied)
-                .arg(afterStats.firstRow)
-                .arg(afterStats.lastRow)
-                .arg((beforeStats.occupied > afterStats.occupied) ? 1 : 0));
+        static const bool kIngestProbe = sentinel::logging::probeEnabled("tpo.ingest");
+        if (kIngestProbe) {
+            const RowStats afterStats = summarizeRows(col);
+            sLog_Probe("tpo.ingest", "bucket: start=" << bucketStartMs
+                       << " end=" << bucketEndMs << " tf=" << timeframeMs
+                       << " period=" << boundedPeriod
+                       << " incomingRows=" << incomingStats.occupied
+                       << " incomingSpan=[" << incomingStats.firstRow << ".." << incomingStats.lastRow << "]"
+                       << " prevRows=" << beforeStats.occupied
+                       << " prevSpan=[" << beforeStats.firstRow << ".." << beforeStats.lastRow << "]"
+                       << " resultRows=" << afterStats.occupied
+                       << " resultSpan=[" << afterStats.firstRow << ".." << afterStats.lastRow << "]"
+                       << " shrank=" << (beforeStats.occupied > afterStats.occupied));
+        }
     } else {
         // ── Mode A: rank-indexed horizontal profile ──────────────────────────
         // Column[rank] holds all price levels that have been visited at least
@@ -268,26 +262,12 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
     m_timeframeMs      = timeframeMs;
     m_lastSliceStartMs = bucketStartMs;
 
-    if (tpo_debug::enabled()) {
-        std::ostringstream payload;
-        payload << "{"
-                << "\"bucketStartMs\":" << bucketStartMs
-                << ",\"bucketEndMs\":" << bucketEndMs
-                << ",\"timeframeMs\":" << timeframeMs
-                << ",\"sessionType\":" << m_sessionType
-                << ",\"sessionStartMs\":" << m_sessionStartMs
-                << ",\"sessionEndMs\":" << m_sessionEndMs
-                << ",\"periodIdx\":" << periodIdx
-                << ",\"boundedPeriod\":" << boundedPeriod
-                << ",\"gridWidth\":" << m_gridWidth
-                << ",\"gridHeight\":" << m_gridHeight
-                << ",\"filledColumns\":" << m_filledColumns
-                << "}";
-        tpo_debug::append("TpoStreamState.cpp:ingestSlice",
-                          "tpo_period_alignment",
-                          "H3",
-                          payload.str());
-    }
+    sLog_Probe("tpo.period", "start=" << bucketStartMs << " end=" << bucketEndMs
+               << " tf=" << timeframeMs << " sessionType=" << m_sessionType
+               << " session=[" << m_sessionStartMs << ".." << m_sessionEndMs << "]"
+               << " periodIdx=" << periodIdx << " boundedPeriod=" << boundedPeriod
+               << " grid=" << m_gridWidth << "x" << m_gridHeight
+               << " filled=" << m_filledColumns);
 
     {
         std::lock_guard<std::mutex> uploadLock(m_uploadMutex);

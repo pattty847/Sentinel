@@ -1,4 +1,5 @@
 #include "ChartTextRenderer.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QtGlobal>
 
@@ -100,12 +101,12 @@ void ChartTextRenderer::endFrame() {
     const float sdfBias = envFloatOrDefault("SENTINEL_CHART_TEXT_SDF_BIAS", 0.0f);
     const float distanceSign = envFloatOrDefault("SENTINEL_CHART_TEXT_DISTANCE_SIGN", -1.0f);
     const float sprFloor = envFloatOrDefault("SENTINEL_CHART_TEXT_SPR_FLOOR", 2.0f);
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
-        static int sprLogCount = 0;
-        if (++sprLogCount <= 3) {
-            qDebug("ChartTextRenderer::endFrame: sprFloor=%.2f sdfBias=%.2f distanceSign=%.1f pxRange=%.1f",
-                   sprFloor, sdfBias, distanceSign, m_atlas->pxRange());
-        }
+    static bool shaderParamsLogged = false;
+    if (!shaderParamsLogged) {
+        shaderParamsLogged = true;
+        sLog_Probe("text.shader", "sprFloor=" << sprFloor << " sdfBias=" << sdfBias
+                   << " distanceSign=" << distanceSign << " pxRange=" << m_atlas->pxRange()
+                   << " fontPx=" << m_atlas->fontPx());
     }
 
     for (Bucket& bucket : m_buckets) {

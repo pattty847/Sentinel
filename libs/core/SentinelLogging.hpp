@@ -9,8 +9,6 @@
 #include <limits>
 #include <optional>
 #include <string>
-#include <fstream>
-#include <mutex>
 
 class QProcessEnvironment;
 
@@ -24,8 +22,25 @@ Q_DECLARE_LOGGING_CATEGORY(logApp)
 Q_DECLARE_LOGGING_CATEGORY(logData)
 Q_DECLARE_LOGGING_CATEGORY(logRender)
 Q_DECLARE_LOGGING_CATEGORY(logDebug)
+Q_DECLARE_LOGGING_CATEGORY(logProbe)
 
-// sLog_App/Data/Render/Debug print every call. To silence a noisy category use
+// Probes: named, off-by-default value dumps for debugging a specific behavior.
+// Enable with SENTINEL_PROBES=<names> (comma separated, case-insensitive).
+// A name enables itself and every probe under it: "tpo" enables "tpo.ingest";
+// "all" enables every probe. Output: "[tpo.ingest] start=... rows=..." in the
+// probe category. Write values as key=value so a reader can grep them.
+namespace sentinel::logging {
+    // True if filter (a SENTINEL_PROBES value) enables probe name.
+    bool probeFilterMatches(const QString& filter, const char* name);
+    // True if the process SENTINEL_PROBES enables probe name. Env is read once.
+    bool probeEnabled(const char* name);
+    // Names the calling thread for the log's thread column (max 15 chars on
+    // Linux). Call at thread start, before the thread logs.
+    void setCurrentThreadName(const char* name);
+}
+
+// All macros stream in QDebug nospace+noquote mode: write separators yourself
+// ("k=" << v << " n=" << n). sLog_App/Data/Render/Debug print every call. To silence a noisy category use
 // Qt's category rules (QT_LOGGING_RULES="sentinel.render.debug=false").
 //
 // Opt-in rate limit for a line that really runs per frame or per message:
@@ -78,21 +93,9 @@ namespace sentinel::log_throttle {
     inline QDebug operator<<(QDebug debug, Suppressed s) {
         if (s.count != 0) {
             QDebugStateSaver saver(debug);
-            debug.nospace() << "(suppressed " << s.count << ')';
+            debug.nospace() << " (suppressed " << s.count << ')';
         }
         return debug;
-    }
-}
-
-namespace sentinel::log_file {
-    inline void appendLine(const char* path, const QString& line) {
-        static std::mutex ioMutex;
-        std::lock_guard<std::mutex> lock(ioMutex);
-        std::ofstream out(path, std::ios::app);
-        if (!out.is_open()) {
-            return;
-        }
-        out << line.toStdString() << '\n';
     }
 }
 
@@ -109,7 +112,7 @@ namespace sentinel::log_file {
             if (!_site.admit(_interval, sentinel::log_throttle::nowMs(), _suppressed)) \
                 break;                                                                 \
         }                                                                              \
-        qCDebug(log##cat) << __VA_ARGS__                                               \
+        qCDebug(log##cat).nospace().noquote() << __VA_ARGS__                           \
                           << sentinel::log_throttle::Suppressed{_suppressed};          \
     } while(false)
 
@@ -122,5 +125,14 @@ namespace sentinel::log_file {
 #define sLog_DataN(n, ...)   SLOG_THROTTLED(Data, n, __VA_ARGS__)
 #define sLog_RenderN(n, ...) SLOG_THROTTLED(Render, n, __VA_ARGS__)
 #define sLog_DebugN(n, ...)  SLOG_THROTTLED(Debug, n, __VA_ARGS__)
-#define sLog_Warning(...)  qCWarning(logApp) << __VA_ARGS__
-#define sLog_Error(...)    qCCritical(logApp) << __VA_ARGS__
+// name must be a string literal, e.g. sLog_Probe("tpo.ingest", "rows=" << rows).
+#define sLog_Probe(name, ...)                                                          \
+    do {                                                                               \
+        static const bool _probeOn = sentinel::logging::probeEnabled(name);            \
+        if (_probeOn) {                                                                \
+            qCDebug(logProbe).nospace().noquote() << "[" name "] " << __VA_ARGS__;    \
+        }                                                                              \
+    } while(false)
+
+#define sLog_Warning(...)  qCWarning(logApp).nospace().noquote() << __VA_ARGS__
+#define sLog_Error(...)    qCCritical(logApp).nospace().noquote() << __VA_ARGS__

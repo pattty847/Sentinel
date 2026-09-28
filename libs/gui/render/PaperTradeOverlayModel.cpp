@@ -1,46 +1,11 @@
 #include "PaperTradeOverlayModel.hpp"
-
-#include <QCoreApplication>
-#include <QDateTime>
-#include <QDir>
-#include <QFile>
-#include <QTextStream>
+#include "SentinelLogging.hpp"
 
 #include <cmath>
 #include <algorithm>
 
-namespace {
-bool paperTradeDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_PAPERTRADE_DEBUG");
-    return enabled;
-}
-
-QString jsonString(const QString& value) {
-    QString out = value;
-    out.replace("\\", "\\\\");
-    out.replace("\"", "\\\"");
-    out.replace("\n", "\\n");
-    return QString("\"%1\"").arg(out);
-}
-
-QString jsonNumber(double value) {
-    if (!std::isfinite(value)) {
-        return QStringLiteral("null");
-    }
-    return QString::number(value, 'f', 6);
-}
-
-QString jsonInteger(qint64 value) {
-    return QString::number(value);
-}
-}
-
 PaperTradeOverlayModel::PaperTradeOverlayModel(QObject* parent)
     : QObject(parent) {}
-
-qint64 PaperTradeOverlayModel::nowMs() {
-    return QDateTime::currentMSecsSinceEpoch();
-}
 
 double PaperTradeOverlayModel::priceFromScreenY(double screenY) const {
     if (!m_mappingProvider) {
@@ -66,77 +31,29 @@ void PaperTradeOverlayModel::emitRiskStateChanged() {
     }
 }
 
-bool PaperTradeOverlayModel::shouldLogOverlaySample(qint64& lastLogMs) const {
-    if (!paperTradeDebugEnabled()) {
-        return false;
-    }
-    const qint64 current = nowMs();
-    if (current - lastLogMs < 80) {
-        return false;
-    }
-    lastLogMs = current;
-    return true;
-}
-
-void PaperTradeOverlayModel::appendDebugLog(const char* hypothesisId,
-                                            const char* message,
-                                            const QString& dataJson) const {
-    if (!paperTradeDebugEnabled()) {
-        return;
-    }
-
-    const QString path = QDir::current().absoluteFilePath(".cursor/debug.log");
-    QFile out(path);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        return;
-    }
-
-    const QString runId = qEnvironmentVariableIsSet("SENTINEL_PAPERTRADE_DEBUG_RUN")
-        ? qEnvironmentVariable("SENTINEL_PAPERTRADE_DEBUG_RUN")
-        : QStringLiteral("default-run");
-
-    QTextStream stream(&out);
-    stream << "{\"sessionId\":\"papertrade-debug\""
-           << ",\"runId\":" << jsonString(runId)
-           << ",\"hypothesisId\":" << jsonString(QString::fromUtf8(hypothesisId))
-           << ",\"location\":\"PaperTradeOverlayModel\""
-           << ",\"message\":" << jsonString(QString::fromUtf8(message))
-           << ",\"data\":" << dataJson
-           << ",\"timestamp\":" << nowMs()
-           << "}\n";
-}
-
-QString PaperTradeOverlayModel::currentViewportJson() const {
+QString PaperTradeOverlayModel::mappingProbeText() const {
     if (!m_mappingProvider) {
-        return QStringLiteral("null");
+        return QStringLiteral("mapping=none");
     }
     const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
-    return QString("{\"valid\":%1,\"dragging\":%2,\"timeStart\":%3,\"timeEnd\":%4,"
-                   "\"minPrice\":%5,\"maxPrice\":%6,\"panX\":%7,\"panY\":%8}")
-        .arg(frame.viewportValid ? "true" : "false")
-        .arg(frame.viewportDragging ? "true" : "false")
-        .arg(jsonInteger(frame.viewportTimeStart))
-        .arg(jsonInteger(frame.viewportTimeEnd))
-        .arg(jsonNumber(frame.viewportMinPrice))
-        .arg(jsonNumber(frame.viewportMaxPrice))
-        .arg(jsonNumber(frame.viewportPanVisualOffset.x()))
-        .arg(jsonNumber(frame.viewportPanVisualOffset.y()));
-}
-
-QString PaperTradeOverlayModel::currentMappingJson() const {
-    if (!m_mappingProvider) {
-        return QStringLiteral("null");
-    }
     const TimeAxisMapping mapping = m_mappingProvider->currentTimeAxisMapping();
-    return QString("{\"valid\":%1,\"viewMinPrice\":%2,\"viewMaxPrice\":%3,"
-                   "\"drawY\":%4,\"drawH\":%5,\"srcY\":%6,\"srcH\":%7}")
-        .arg(mapping.valid ? "true" : "false")
-        .arg(jsonNumber(mapping.viewMinPrice))
-        .arg(jsonNumber(mapping.viewMaxPrice))
-        .arg(jsonNumber(mapping.drawRect.y()))
-        .arg(jsonNumber(mapping.drawRect.height()))
-        .arg(jsonNumber(mapping.srcRect.y()))
-        .arg(jsonNumber(mapping.srcRect.height()));
+    return QString("viewValid=%1 dragging=%2 view=[%3..%4] viewPrice=[%5..%6] pan=(%7,%8)"
+                   " mapValid=%9 mapPrice=[%10..%11] drawY=%12 drawH=%13 srcY=%14 srcH=%15")
+        .arg(frame.viewportValid ? 1 : 0)
+        .arg(frame.viewportDragging ? 1 : 0)
+        .arg(frame.viewportTimeStart)
+        .arg(frame.viewportTimeEnd)
+        .arg(frame.viewportMinPrice)
+        .arg(frame.viewportMaxPrice)
+        .arg(frame.viewportPanVisualOffset.x())
+        .arg(frame.viewportPanVisualOffset.y())
+        .arg(mapping.valid ? 1 : 0)
+        .arg(mapping.viewMinPrice)
+        .arg(mapping.viewMaxPrice)
+        .arg(mapping.drawRect.y())
+        .arg(mapping.drawRect.height())
+        .arg(mapping.srcRect.y())
+        .arg(mapping.srcRect.height());
 }
 
 void PaperTradeOverlayModel::setSymbol(const QString& symbol) {
@@ -263,22 +180,15 @@ void PaperTradeOverlayModel::onTradeReceived(const Trade& trade) {
     }
     m_lastTradePrice = trade.price;
     m_hasLastTrade = true;
-    appendDebugLog("PT1", "trade_received",
-                   QString("{\"symbol\":%1,\"tradePrice\":%2,\"tradeSize\":%3,\"side\":%4,"
-                           "\"hasPosition\":%5,\"positionQty\":%6,\"entryPrice\":%7,"
-                           "\"uPnl\":%8,\"viewport\":%9,\"mapping\":%10}")
-                       .arg(jsonString(QString::fromStdString(trade.product_id)))
-                       .arg(jsonNumber(trade.price))
-                       .arg(jsonNumber(trade.size))
-                       .arg(jsonString(trade.side == AggressorSide::Buy ? "BUY"
-                                       : trade.side == AggressorSide::Sell ? "SELL"
-                                                                          : "UNKNOWN"))
-                       .arg((m_hasPosition && std::abs(m_position.positionQty) > 1e-12) ? "true" : "false")
-                       .arg(jsonNumber(m_position.positionQty))
-                       .arg(jsonNumber(m_position.avgPrice))
-                       .arg(jsonNumber(m_position.unrealizedPnl))
-                       .arg(currentViewportJson())
-                       .arg(currentMappingJson()));
+    sLog_Probe("papertrade.trade", "symbol=" << trade.product_id
+               << " price=" << trade.price << " size=" << trade.size
+               << " side=" << (trade.side == AggressorSide::Buy ? "BUY"
+                               : trade.side == AggressorSide::Sell ? "SELL" : "UNKNOWN")
+               << " hasPosition=" << (m_hasPosition && std::abs(m_position.positionQty) > 1e-12)
+               << " positionQty=" << m_position.positionQty
+               << " entry=" << m_position.avgPrice
+               << " uPnl=" << m_position.unrealizedPnl
+               << " " << mappingProbeText());
     if (m_hasPosition && std::abs(m_position.positionQty) > 1e-12) {
         emit activePositionChanged();
     }
@@ -310,18 +220,13 @@ void PaperTradeOverlayModel::onOrderUpdated(const trading::OrderUpdate& update) 
     state.price = (update.limitPrice > 0.0) ? update.limitPrice : update.avgPrice;
     state.status = update.status;
     m_orders[update.orderId] = state;
-    appendDebugLog("PT1", "order_update",
-                   QString("{\"symbol\":%1,\"orderId\":%2,\"side\":%3,\"qty\":%4,"
-                           "\"filledQty\":%5,\"price\":%6,\"status\":%7,\"viewport\":%8,\"mapping\":%9}")
-                       .arg(jsonString(QString::fromStdString(update.symbol)))
-                       .arg(jsonString(QString::fromStdString(update.orderId)))
-                       .arg(jsonString(QString::fromUtf8(trading::toString(update.side))))
-                       .arg(jsonNumber(update.qty))
-                       .arg(jsonNumber(update.filledQty))
-                       .arg(jsonNumber(state.price))
-                       .arg(jsonString(QString::fromUtf8(trading::toString(update.status))))
-                       .arg(currentViewportJson())
-                       .arg(currentMappingJson()));
+    sLog_Probe("papertrade.order", "symbol=" << update.symbol
+               << " orderId=" << update.orderId
+               << " side=" << trading::toString(update.side)
+               << " qty=" << update.qty << " filled=" << update.filledQty
+               << " price=" << state.price
+               << " status=" << trading::toString(update.status)
+               << " " << mappingProbeText());
     emit openOrdersChanged();
 }
 
@@ -332,19 +237,12 @@ void PaperTradeOverlayModel::onPositionUpdated(const trading::PositionUpdate& up
     m_position = update;
     m_hasPosition = true;
     const double totalPnl = update.unrealizedPnl + update.realizedPnl;
-    appendDebugLog("PT1", "position_update",
-                   QString("{\"symbol\":%1,\"positionQty\":%2,\"entryPrice\":%3,"
-                           "\"lastTradePrice\":%4,\"uPnl\":%5,\"rPnl\":%6,\"totalPnl\":%7,"
-                           "\"viewport\":%8,\"mapping\":%9}")
-                       .arg(jsonString(QString::fromStdString(update.symbol)))
-                       .arg(jsonNumber(update.positionQty))
-                       .arg(jsonNumber(update.avgPrice))
-                       .arg(jsonNumber(m_lastTradePrice))
-                       .arg(jsonNumber(update.unrealizedPnl))
-                       .arg(jsonNumber(update.realizedPnl))
-                       .arg(jsonNumber(totalPnl))
-                       .arg(currentViewportJson())
-                       .arg(currentMappingJson()));
+    sLog_Probe("papertrade.position", "symbol=" << update.symbol
+               << " qty=" << update.positionQty << " entry=" << update.avgPrice
+               << " lastTrade=" << m_lastTradePrice
+               << " uPnl=" << update.unrealizedPnl << " rPnl=" << update.realizedPnl
+               << " totalPnl=" << totalPnl
+               << " " << mappingProbeText());
     if (std::abs(update.positionQty) < 1e-12) {
         m_activeRisk = RiskState{};
         m_stagedRisk = RiskState{};
@@ -461,10 +359,11 @@ void PaperTradeOverlayModel::confirmStagedRisk() {
 void PaperTradeOverlayModel::logPositionOverlaySample(double displayedEntryY,
                                                       double displayedMarkY,
                                                       const QString& source) {
-    if (!m_hasPosition || std::abs(m_position.positionQty) < 1e-12) {
+    static const bool kProbe = sentinel::logging::probeEnabled("papertrade.overlay");
+    if (!kProbe) {
         return;
     }
-    if (!shouldLogOverlaySample(m_lastPositionOverlayLogMs)) {
+    if (!m_hasPosition || std::abs(m_position.positionQty) < 1e-12) {
         return;
     }
     double markPrice = m_position.avgPrice;
@@ -486,29 +385,20 @@ void PaperTradeOverlayModel::logPositionOverlaySample(double displayedEntryY,
         }
     }
 
-    appendDebugLog("PT2", "position_overlay_sample",
-                   QString("{\"source\":%1,\"entryPrice\":%2,\"markPrice\":%3,"
-                           "\"displayedEntryY\":%4,\"displayedMarkY\":%5,"
-                           "\"authoritativeEntryY\":%6,\"authoritativeMarkY\":%7,"
-                           "\"entryDeltaY\":%8,\"markDeltaY\":%9,"
-                           "\"viewport\":%10,\"mapping\":%11}")
-                       .arg(jsonString(source))
-                       .arg(jsonNumber(m_position.avgPrice))
-                       .arg(jsonNumber(markPrice))
-                       .arg(jsonNumber(displayedEntryY))
-                       .arg(jsonNumber(displayedMarkY))
-                       .arg(jsonNumber(authoritativeEntryY))
-                       .arg(jsonNumber(authoritativeMarkY))
-                       .arg(jsonNumber(displayedEntryY - authoritativeEntryY))
-                       .arg(jsonNumber(displayedMarkY - authoritativeMarkY))
-                       .arg(currentViewportJson())
-                       .arg(currentMappingJson()));
+    sLog_Probe("papertrade.overlay", "position source=" << source
+               << " entry=" << m_position.avgPrice << " mark=" << markPrice
+               << " shownEntryY=" << displayedEntryY << " shownMarkY=" << displayedMarkY
+               << " mappedEntryY=" << authoritativeEntryY << " mappedMarkY=" << authoritativeMarkY
+               << " entryDeltaY=" << (displayedEntryY - authoritativeEntryY)
+               << " markDeltaY=" << (displayedMarkY - authoritativeMarkY)
+               << " " << mappingProbeText());
 }
 
 void PaperTradeOverlayModel::logOrderOverlaySample(const QString& orderId,
                                                    double displayedY,
                                                    const QString& source) {
-    if (!shouldLogOverlaySample(m_lastOrderOverlayLogMs)) {
+    static const bool kProbe = sentinel::logging::probeEnabled("papertrade.overlay");
+    if (!kProbe) {
         return;
     }
     const auto it = m_orders.find(orderId.toStdString());
@@ -523,17 +413,10 @@ void PaperTradeOverlayModel::logOrderOverlaySample(const QString& orderId,
         }
     }
 
-    appendDebugLog("PT3", "order_overlay_sample",
-                   QString("{\"source\":%1,\"orderId\":%2,\"price\":%3,\"side\":%4,"
-                           "\"displayedY\":%5,\"authoritativeY\":%6,\"deltaY\":%7,"
-                           "\"viewport\":%8,\"mapping\":%9}")
-                       .arg(jsonString(source))
-                       .arg(jsonString(orderId))
-                       .arg(jsonNumber(it->second.price))
-                       .arg(jsonString(QString::fromUtf8(trading::toString(it->second.side))))
-                       .arg(jsonNumber(displayedY))
-                       .arg(jsonNumber(authoritativeY))
-                       .arg(jsonNumber(displayedY - authoritativeY))
-                       .arg(currentViewportJson())
-                       .arg(currentMappingJson()));
+    sLog_Probe("papertrade.overlay", "order source=" << source
+               << " orderId=" << orderId << " price=" << it->second.price
+               << " side=" << trading::toString(it->second.side)
+               << " shownY=" << displayedY << " mappedY=" << authoritativeY
+               << " deltaY=" << (displayedY - authoritativeY)
+               << " " << mappingProbeText());
 }

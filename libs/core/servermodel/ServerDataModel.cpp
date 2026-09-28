@@ -74,6 +74,10 @@ void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
     const int64_t nowMs = localNowMs();
     const int64_t rawOffset = nowMs - exchangeMs;
     if (std::llabs(rawOffset) > 10000) {
+        // Local clock or exchange timestamp is off by >10 s; exchangeNowMs()
+        // keeps the previous offset. Can repeat per message; rate limited.
+        sLog_DataN(10000, "Exchange clock offset out of range, ignored: offsetMs=" << rawOffset
+                   << " exchangeMs=" << exchangeMs << " localMs=" << nowMs);
         return;
     }
     const int64_t prev = m_exchangeOffsetMs.load(std::memory_order_relaxed);
@@ -249,7 +253,9 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
 
     if (data.liveBook.getTickSize() <= 0.0) {
-        sLog_Warning("Order book update ignored - book not initialized for " << symbol);
+        // Can repeat per message until the snapshot arrives; rate limited.
+        sLog_DataN(1000, "Order book update ignored, book not initialized: symbol=" << symbol
+                   << " updates=" << updates.size());
         return;
     }
 
@@ -287,6 +293,8 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     auto now = std::chrono::system_clock::now();
     data.liveBook.applyUpdates(updates, now, nullptr);
     
-    sLog_Data(QString("ServerDataModel: Initialized book for %1 with %2 bids, %3 asks")
-              .arg(productId).arg(bids.size()).arg(asks.size()));
+    sLog_Data("ServerDataModel: Initialized book: symbol=" << symbol
+              << " bids=" << bids.size() << " asks=" << asks.size()
+              << " range=[" << minPrice << ".." << maxPrice << "]"
+              << " tick=" << tickSize << " bandPct=" << bandPct);
 }

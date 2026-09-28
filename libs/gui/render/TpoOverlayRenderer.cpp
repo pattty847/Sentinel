@@ -24,13 +24,11 @@
  */
 #include "TpoOverlayRenderer.hpp"
 #include "HeatmapIntensityNode.hpp"
-#include "TpoDebugTrace.hpp"
 
 #include "FootprintIntensityNode.hpp"
 #include "SentinelLogging.hpp"
 
 #include <QColor>
-#include <QElapsedTimer>
 #include <QQuickWindow>
 #include <QSGNode>
 #include <QSGRendererInterface>
@@ -197,30 +195,17 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
 
     const bool hasPending = !pendingUploads.empty();
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        static QElapsedTimer tpoDebugTimer;
-        static bool tpoDebugTimerStarted = false;
-        if (!tpoDebugTimerStarted) {
-            tpoDebugTimer.start();
-            tpoDebugTimerStarted = true;
-        }
-        if (tpoDebugTimer.elapsed() > 1000) {
-            sLog_Debug(
-                QString("TPO overlay: mode=%1 draw=%2 pending=%3 grid=%4x%5")
-                    .arg(static_cast<int>(m_displayMode))
-                    .arg(drawTpo ? 1 : 0)
-                    .arg(static_cast<int>(pendingUploads.size()))
-                    .arg(m_gridWidth)
-                    .arg(m_gridHeight));
-            tpoDebugTimer.restart();
-        }
-    }
+    sLog_Probe("tpo.overlay", "mode=" << static_cast<int>(m_displayMode)
+               << " draw=" << drawTpo << " pending=" << pendingUploads.size()
+               << " grid=" << m_gridWidth << "x" << m_gridHeight);
 
     // ── Grid dimension sync ─────────────────────────────────────────────────
     if (hasPending) {
         for (auto it = pendingUploads.rbegin(); it != pendingUploads.rend(); ++it) {
             if (it->gridWidth > 0 && it->gridHeight > 0) {
                 if (m_gridWidth != it->gridWidth || m_gridHeight != it->gridHeight) {
+                    sLog_Render("TPO overlay grid: " << m_gridWidth << "x" << m_gridHeight
+                                << "->" << it->gridWidth << "x" << it->gridHeight);
                     m_gridWidth    = it->gridWidth;
                     m_gridHeight   = it->gridHeight;
                     m_textureDirty = true;
@@ -266,6 +251,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                 }
                 if (upload.x < 0 || upload.x >= m_gridWidth ||
                     upload.letters.size() != m_gridHeight) {
+                    sLog_RenderN(1000, "TPO column upload dropped: x=" << upload.x
+                                 << " letters=" << upload.letters.size()
+                                 << " grid=" << m_gridWidth << "x" << m_gridHeight);
                     continue;
                 }
                 const bool uploadColumn = m_columnTexture && !m_textureDirty;
@@ -321,9 +309,13 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                 m_node->setTexture(tpoTexture);
                 m_textureDirty = false;
             } else {
+                sLog_RenderN(1000, "TPO texture create failed (retry next frame): grid="
+                             << m_gridWidth << "x" << m_gridHeight);
                 m_textureDirty = true;
             }
         } else {
+            sLog_RenderN(1000, "TPO image alloc failed (retry next frame): grid="
+                         << m_gridWidth << "x" << m_gridHeight);
             m_textureDirty = true;
         }
     }
@@ -398,38 +390,15 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         m_node->setSourceRect(QRectF());
     }
 
-    if (tpo_debug::enabled() && drawTpo) {
-        static QElapsedTimer tpoOverlayLogTimer;
-        static bool tpoOverlayLogTimerStarted = false;
-        if (!tpoOverlayLogTimerStarted) {
-            tpoOverlayLogTimer.start();
-            tpoOverlayLogTimerStarted = true;
-        }
-        if (tpoOverlayLogTimer.elapsed() > 250) {
-            std::ostringstream payload;
-            payload << "{"
-                    << "\"mode\":" << static_cast<int>(m_displayMode)
-                    << ",\"gridWidth\":" << m_gridWidth
-                    << ",\"gridHeight\":" << m_gridHeight
-                    << ",\"drawRectX\":" << drawRect.x()
-                    << ",\"drawRectW\":" << drawRect.width()
-                    << ",\"effectiveDrawRectX\":" << effectiveDrawRect.x()
-                    << ",\"effectiveDrawRectW\":" << effectiveDrawRect.width()
-                    << ",\"sourceRectX\":" << sourceRect.x()
-                    << ",\"sourceRectW\":" << sourceRect.width()
-                    << ",\"tpoSrcRectX\":" << tpoSrcRect.x()
-                    << ",\"tpoSrcRectW\":" << tpoSrcRect.width()
-                    << ",\"sessionStartMs\":" << sessionStartMs
-                    << ",\"sessionEndMs\":" << sessionEndMs
-                    << ",\"viewStartMs\":" << viewStartMs
-                    << ",\"viewEndMs\":" << viewEndMs
-                    << "}";
-            tpo_debug::append("TpoOverlayRenderer.cpp:render",
-                              "tpo_overlay_mapping",
-                              "H5",
-                              payload.str());
-            tpoOverlayLogTimer.restart();
-        }
+    if (drawTpo) {
+        sLog_Probe("tpo.mapping", "mode=" << static_cast<int>(m_displayMode)
+                   << " grid=" << m_gridWidth << "x" << m_gridHeight
+                   << " drawX=" << drawRect.x() << " drawW=" << drawRect.width()
+                   << " effX=" << effectiveDrawRect.x() << " effW=" << effectiveDrawRect.width()
+                   << " srcX=" << sourceRect.x() << " srcW=" << sourceRect.width()
+                   << " tpoSrcX=" << tpoSrcRect.x() << " tpoSrcW=" << tpoSrcRect.width()
+                   << " session=[" << sessionStartMs << ".." << sessionEndMs << "]"
+                   << " view=[" << viewStartMs << ".." << viewEndMs << "]");
     }
 
     // ── GL incremental column upload ────────────────────────────────────────
@@ -440,6 +409,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             }
             if (upload.x < 0 || upload.x >= m_gridWidth ||
                 upload.letters.size() != m_gridHeight) {
+                sLog_RenderN(1000, "TPO column upload dropped: x=" << upload.x
+                             << " letters=" << upload.letters.size()
+                             << " grid=" << m_gridWidth << "x" << m_gridHeight);
                 continue;
             }
             QByteArray encoded;

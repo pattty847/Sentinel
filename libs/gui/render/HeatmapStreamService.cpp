@@ -48,14 +48,21 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
     IngestResult result;
     if (!m_stream || update.width <= 0 || update.rows <= 0 || update.timeframeMs <= 0 ||
         (update.bytesPerCell != 1 && update.bytesPerCell != 2) || !update.band.valid()) {
+        sLog_RenderN(1000, "Heatmap window update rejected: stream=" << (m_stream != nullptr)
+                     << " grid=" << update.width << "x" << update.rows
+                     << " tf=" << update.timeframeMs << " bytesPerCell=" << update.bytesPerCell
+                     << " band=[" << update.band.minPrice << ".." << update.band.maxPrice << "]"
+                     << " tick=" << update.band.tickSize);
         return result;
     }
-    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
     const int64_t cadenceMs = update.timeframeMs;
 
     const bool reshape = update.width != m_gridWidth || update.rows != m_gridHeight ||
                          update.bytesPerCell != m_intensityBytesPerCell;
     if (reshape) {
+        sLog_Render("Heatmap texture reshape: grid=" << m_gridWidth << "x" << m_gridHeight
+                    << "->" << update.width << "x" << update.rows
+                    << " bytesPerCell=" << m_intensityBytesPerCell << "->" << update.bytesPerCell);
         m_gridWidth = update.width;
         m_gridHeight = update.rows;
         m_intensityBytesPerCell = update.bytesPerCell;
@@ -129,6 +136,9 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
     placement.liveEdge = update.pinnedToLive && update.liveBucketMs == update.windowEndMs;
     const qint64 nowMs = m_clock.elapsed();
     if (!m_stream->applyWindow(placement, std::move(slotColumns), nowMs)) {
+        sLog_RenderN(1000, "Heatmap window update dropped by ring: grid=" << update.width << "x"
+                     << update.rows << " newestSlot=" << update.newestSlot
+                     << " writes=" << update.writes.size() << " end=" << update.windowEndMs);
         return result;
     }
     m_stream->updateTimeOffset(0.0f);
@@ -142,13 +152,13 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
     if (update.liveBucketMs > 0) {
         m_timeAuthority.observeEventTime(update.liveBucketMs + cadenceMs, nowMs);
     }
-    if (debug) {
-        sLog_Render("GPU HEATMAP WINDOW: end=" << update.windowEndMs
-                    << " writes=" << update.writes.size()
-                    << " full=" << update.full
-                    << " pinned=" << update.pinnedToLive
-                    << " range=$" << update.band.minPrice << "-$" << update.band.maxPrice);
-    }
+    sLog_Probe("heatmap.window", "tf=" << cadenceMs << " end=" << update.windowEndMs
+               << " grid=" << update.width << "x" << update.rows
+               << " newestSlot=" << update.newestSlot << " writes=" << update.writes.size()
+               << " full=" << update.full << " pinned=" << update.pinnedToLive
+               << " live=" << update.liveBucketMs
+               << " band=[" << update.band.minPrice << ".." << update.band.maxPrice << "]"
+               << " tick=" << update.band.tickSize);
 
     // ── Viewport initialization and non-smooth follow ────────────────────────
     const int64_t anchorMs = update.liveBucketMs > 0 ? update.liveBucketMs : update.windowEndMs;
@@ -242,6 +252,8 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
                                         HeatmapOverlayRenderer& overlay) {
     RangeResetResult result;
 
+    sLog_Render("Heatmap range reset: band=[" << minPrice << ".." << maxPrice << "] tick=" << tickSize
+                << " grid=" << gridWidth << "x" << gridHeight);
     ensureClockStarted();
 
     overlay.setHistoryCoverage({});

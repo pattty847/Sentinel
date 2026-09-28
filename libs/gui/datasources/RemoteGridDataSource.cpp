@@ -215,8 +215,10 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
         emit liveOrderBookUpdated(productId, deltas);
     }
 
-    sLog_Data(QString("RemoteGridDataSource: Snapshot applied for %1 (%2 bids, %3 asks)")
-              .arg(productId).arg(bids.size()).arg(asks.size()));
+    sLog_Data("Book snapshot applied: symbol=" << productId
+              << " bids=" << bids.size() << " asks=" << asks.size()
+              << " band=[" << minPrice << ".." << maxPrice << "]"
+              << " tick=" << tickSize << " deltas=" << deltas.size());
 }
 
 void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
@@ -227,7 +229,11 @@ void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
 void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates) {
     std::string symbol = productId.toStdString();
     auto it = m_replicaBooks.find(symbol);
-    if (it == m_replicaBooks.end()) return;
+    if (it == m_replicaBooks.end()) {
+        sLog_DataN(5000, "L2 update dropped, no replica book: symbol=" << productId
+                   << " levels=" << updates.size());
+        return;
+    }
 
     auto& book = *it->second;
 
@@ -347,14 +353,10 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
         out.seq = ++seq;
         m_candleBuffer->applyUpdate(symbol, timeframeSec, out, out.seq, out.isClosed);
     }
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Candle history applied: symbol=%1 tfSec=%2 startSec=%3 endSec=%4 count=%5")
-                   .arg(symbol)
-                   .arg(timeframeSec)
-                   .arg(startTimeSec)
-                   .arg(endTimeSec)
-                   .arg(candles.size()));
-    }
+    sLog_Probe("candles.history",
+               "applied symbol=" << symbol << " tfSec=" << timeframeSec
+               << " t=[" << startTimeSec << ".." << endTimeSec << "]"
+               << " count=" << candles.size());
 }
 
 void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,

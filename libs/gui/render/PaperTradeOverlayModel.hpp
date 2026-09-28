@@ -103,17 +103,10 @@ private:
     bool m_hasStagedRisk = false;
     QString m_draggingLeg;
     bool m_lastRiskConfirmVisible = false;
-    qint64 m_lastPositionOverlayLogMs = 0;
-    qint64 m_lastOrderOverlayLogMs = 0;
 
-    static qint64 nowMs();
     double priceFromScreenY(double screenY) const;
     bool isLongPosition() const;
     void emitRiskStateChanged();
-    bool shouldLogOverlaySample(qint64& lastLogMs) const;
-    void appendDebugLog(const char* hypothesisId,
-                        const char* message,
-                        const QString& dataJson) const;
-    QString currentViewportJson() const;
-    QString currentMappingJson() const;
+    // key=value viewport + mapping summary for papertrade.* probes.
+    QString mappingProbeText() const;
 };

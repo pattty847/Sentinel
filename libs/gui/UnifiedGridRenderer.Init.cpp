@@ -58,6 +58,7 @@ void UnifiedGridRenderer::init() {
             this, [this]() { update(); });
     m_axisTextService->refreshAxisLayout();
     m_dataProcessorThread = std::make_unique<QThread>();
+    m_dataProcessorThread->setObjectName(QStringLiteral("DataProcessor"));
     m_dataProcessor = std::make_unique<DataProcessor>();
     m_dataProcessor->moveToThread(m_dataProcessorThread.get());
     applyClientConfig(store.clientConfig());
@@ -164,19 +165,21 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     m_useGpuHeatmap = true;
                     m_heatmapStreamService->ensureClockStarted();
                 }
-                if (gridWidth <= 0 || gridHeight <= 0) return;
-                if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) return;
-                const int expectedBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
-                if (columnQ16.size() != expectedBytes) return;
-                if (x < 0 || x >= gridWidth) return;
+                const bool validGrid = gridWidth > 0 && gridHeight > 0 &&
+                    gridHeight <= (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)));
+                const int expectedBytes = validGrid ? gridHeight * static_cast<int>(sizeof(uint16_t)) : 0;
+                if (!validGrid || columnQ16.size() != expectedBytes || x < 0 || x >= gridWidth) {
+                    sLog_RenderN(1000, "footprint column dropped: x=" << x
+                                 << " grid=" << gridWidth << "x" << gridHeight
+                                 << " bytes=" << columnQ16.size() << " expectedBytes=" << expectedBytes);
+                    return;
+                }
 
                 m_footprintOverlay.enqueue(
                     FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
                 m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
-                if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-                    sLog_Debug(QString("Footprint queued for render: x=%1 grid=%2x%3")
-                                   .arg(x).arg(gridWidth).arg(gridHeight));
-                }
+                sLog_Probe("footprint.queue",
+                           "x=" << x << " grid=" << gridWidth << "x" << gridHeight);
                 update();
             },
             Qt::QueuedConnection);
@@ -185,8 +188,13 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
             this,
             [this](int x, int gridWidth, int gridHeight, QByteArray letters,
                    int64_t sessionStartMs, int64_t sessionEndMs, int64_t timeframeMs) {
-                if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth) return;
-                if (letters.size() != gridHeight) return;
+                if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth ||
+                    letters.size() != gridHeight) {
+                    sLog_RenderN(1000, "tpo column dropped: x=" << x
+                                 << " grid=" << gridWidth << "x" << gridHeight
+                                 << " bytes=" << letters.size());
+                    return;
+                }
                 m_tpoOverlay.enqueue(
                     TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters)},
                     sessionStartMs, sessionEndMs, timeframeMs, gridWidth);

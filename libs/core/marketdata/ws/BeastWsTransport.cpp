@@ -21,6 +21,8 @@ void BeastWsTransport::connect(std::string host, std::string port, std::string t
         pingTimer_.cancel();
         resolver_.cancel();
         resetStream();
+        sLog_Data("MDC transport connecting: host=" << host_ << " port=" << port_
+                  << " target=" << target_);
 
         resolver_.async_resolve(host_, port_,
             [this](beast::error_code ec, tcp::resolver::results_type results){
@@ -126,13 +128,16 @@ void BeastWsTransport::onWsHandshake(beast::error_code ec) {
             }
         }
     });
+    sLog_Data("MDC transport WS handshake ok: host=" << host_ << " target=" << target_
+              << " status=" << handshakeResponse_.result_int());
     firstFrameTimer_.expires_after(std::chrono::seconds(5));
     firstFrameTimer_.async_wait([this](beast::error_code ec) {
         if (ec) {
             return;
         }
         if (!sawInboundFrame_) {
-            sLog_Warning("MDC transport: no inbound WS frames within 5s of handshake");
+            sLog_Warning("MDC transport: no inbound WS frames within 5s of handshake: host=" << host_
+                         << " target=" << target_);
         }
     });
     if (onStatus_) onStatus_(true);

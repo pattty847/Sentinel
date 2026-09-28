@@ -1,4 +1,5 @@
 #include "ChartTextAtlas.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -23,11 +24,9 @@ QString ChartTextAtlas::ensureFontFile(const BuildParams& params) const {
             return fi.absoluteFilePath();
         }
         // Portable bundles often omit repo-relative resources/fonts — fall back to embedded Qt resource font.
-        qWarning(
-            "ChartTextAtlas: msdf font path \"%s\" not found; extracting embedded MSDF font from \"%s\"",
-            qPrintable(params.fontPath),
-            qPrintable(params.resourceFont.isEmpty() ? QStringLiteral("(none)")
-                                                     : params.resourceFont));
+        sLog_Warning("Chart text atlas: MSDF font path not found, using embedded font: path="
+                     << params.fontPath << " resource="
+                     << (params.resourceFont.isEmpty() ? QStringLiteral("(none)") : params.resourceFont));
     }
     if (params.resourceFont.isEmpty()) {
         return {};
@@ -35,6 +34,7 @@ QString ChartTextAtlas::ensureFontFile(const BuildParams& params) const {
 
     QFile src(params.resourceFont);
     if (!src.open(QIODevice::ReadOnly)) {
+        sLog_Warning("Chart text atlas: embedded font open failed resource=" << params.resourceFont);
         return {};
     }
     const QByteArray bytes = src.readAll();
@@ -52,9 +52,11 @@ QString ChartTextAtlas::ensureFontFile(const BuildParams& params) const {
 
     QFile out(outPath);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        sLog_Warning("Chart text atlas: font extract open failed path=" << outPath << " error=" << out.errorString());
         return {};
     }
     if (out.write(bytes) != bytes.size()) {
+        sLog_Warning("Chart text atlas: font extract write failed path=" << outPath << " error=" << out.errorString());
         out.remove();
         return {};
     }

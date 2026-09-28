@@ -2,9 +2,9 @@
 Sentinel — ConfigLoader
 */
 #include "ConfigLoader.hpp"
+#include "SentinelLogging.hpp"
 
 #include <yaml-cpp/yaml.h>
-#include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <sstream>
@@ -239,10 +239,10 @@ bool ConfigLoader::loadServerConfig(const std::string& configPath, ServerConfig*
             *outConfig = cfg;
         }
         s_loadedFiles.push_back(configPath);
-        std::cout << "Loaded server config: " << configPath << std::endl;
+        sLog_App("Loaded server config: path=" << configPath);
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "ERROR: Failed to load server config " << configPath << ": " << e.what() << std::endl;
+        sLog_Error("Failed to load server config: path=" << configPath << " error=" << e.what());
         return false;
     }
 }
@@ -259,10 +259,10 @@ bool ConfigLoader::loadClientConfig(const std::string& configPath, ClientConfig*
     try {
         parseClientConfig(configPath, *outConfig);
         s_loadedFiles.push_back(configPath);
-        std::cout << "Loaded client config: " << configPath << std::endl;
+        sLog_App("Loaded client config: path=" << configPath);
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "ERROR: Failed to load client config " << configPath << ": " << e.what() << std::endl;
+        sLog_Error("Failed to load client config: path=" << configPath << " error=" << e.what());
         return false;
     }
 }

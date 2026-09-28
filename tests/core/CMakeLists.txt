@@ -12,3 +12,16 @@ target_link_libraries(test_log_throttle PRIVATE
 )
 add_test(NAME LogThrottleTests COMMAND test_log_throttle)
 set_tests_properties(LogThrottleTests PROPERTIES LABELS "core")
+
+# Test Target: test_log_sink (installs the process-wide message handler)
+add_executable(test_log_sink test_log_sink.cpp)
+target_include_directories(test_log_sink PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/core
+)
+target_link_libraries(test_log_sink PRIVATE
+    sentinel_core
+    GTest::gtest_main
+    Qt6::Core
+)
+add_test(NAME LogSinkTests COMMAND test_log_sink)
+set_tests_properties(LogSinkTests PROPERTIES LABELS "core")

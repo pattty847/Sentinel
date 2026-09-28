@@ -41,6 +41,10 @@ enum class DropReason : int {
     VolumeProfilePayloadEstimate,
     VolumeProfilePayloadDecoded,
     VolumeProfileBase64Decode,
+    VolumeProfileSliceMeta,
+    TpoSliceMeta,
+    TpoPayloadShape,
+    UnknownType,
     Count
 };
 
@@ -211,8 +215,10 @@ void SentinelStreamClient::connectToServer() {
 
     m_running = true;
     m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
-    
+    sLog_Data("SentinelStreamClient connecting: host=" << m_host << " port=" << m_port);
+
     m_thread = std::thread([this] {
+        sentinel::logging::setCurrentThreadName("stream-client");
         try {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
@@ -224,13 +230,18 @@ void SentinelStreamClient::connectToServer() {
             
             m_ioc.run();
         } catch (const std::exception& e) {
-            sLog_Error("Client thread exception: " << e.what());
+            sLog_Error("Client thread exception: host=" << m_host << " port=" << m_port
+                       << " error=" << e.what());
             emit errorOccurred(QString::fromStdString(e.what()));
         }
     });
 }
 
 void SentinelStreamClient::disconnectFromServer() {
+    if (m_running) {
+        sLog_Data("SentinelStreamClient disconnecting: host=" << m_host << " port=" << m_port
+                  << " connected=" << m_isConnected.load());
+    }
     m_running = false;
     if (m_work) m_work->reset();
     
@@ -245,6 +256,7 @@ void SentinelStreamClient::disconnectFromServer() {
 }
 
 void SentinelStreamClient::subscribe(const std::string& symbol) {
+    sLog_Data("Client subscribe: symbol=" << symbol);
     nlohmann::json msg = {
         {"type", "subscribe"},
         {"symbol", symbol}
@@ -260,6 +272,7 @@ void SentinelStreamClient::subscribe(const std::string& symbol) {
 }
 
 void SentinelStreamClient::unsubscribe(const std::string& symbol) {
+    sLog_Data("Client unsubscribe: symbol=" << symbol);
     nlohmann::json msg = {
         {"type", "unsubscribe"},
         {"symbol", symbol}
@@ -279,9 +292,13 @@ void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
                                                  int64_t endTimeMs,
                                                  int count) {
     if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        sLog_Warning("Heatmap history request not sent: invalid args symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " count=" << count);
         return;
     }
     const int boundedCount = std::min(count, protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
+    sLog_Data("Heatmap history request: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " end=" << endTimeMs << " count=" << boundedCount);
     nlohmann::json msg = {
         {"type", "heatmap_history_request"},
         {"symbol", symbol},
@@ -304,8 +321,12 @@ void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
                                                    int64_t endTimeMs,
                                                    int count) {
     if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        sLog_Warning("Footprint history request not sent: invalid args symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " count=" << count);
         return;
     }
+    sLog_Data("Footprint history request: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " end=" << endTimeMs << " count=" << count);
     nlohmann::json msg = {
         {"type", "footprint_history_request"},
         {"symbol", symbol},
@@ -329,8 +350,12 @@ void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
                                              int64_t endTimeMs,
                                              int count) {
     if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+        sLog_Warning("TPO history request not sent: invalid args symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " count=" << count);
         return;
     }
+    sLog_Data("TPO history request: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " sessionType=" << sessionType << " end=" << endTimeMs << " count=" << count);
     nlohmann::json msg = {
         {"type", "tpo_history_request"},
         {"symbol", symbol},
@@ -353,8 +378,12 @@ void SentinelStreamClient::requestCandleHistory(const std::string& symbol,
                                                 int64_t endTimeSec,
                                                 int limit) {
     if (symbol.empty() || timeframeSec <= 0) {
+        sLog_Warning("Candle history request not sent: invalid args symbol=" << symbol
+                     << " tfSec=" << timeframeSec);
         return;
     }
+    sLog_Data("Candle history request: symbol=" << symbol << " tfSec=" << timeframeSec
+              << " endSec=" << endTimeSec << " limit=" << limit);
     nlohmann::json msg = {
         {"type", "candle_history_request"},
         {"symbol", symbol},
@@ -421,7 +450,8 @@ void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command
 
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
     if (ec) {
-        sLog_Error("Connect failed: " << ec.message());
+        sLog_Error("Connect failed: host=" << m_host << " port=" << m_port
+                   << " error=" << ec.message());
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
@@ -433,7 +463,8 @@ void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint)
 
 void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
     if (ec) {
-        sLog_Error("SSL handshake failed: " << ec.message());
+        sLog_Error("SSL handshake failed: host=" << m_host << " port=" << m_port
+                   << " error=" << ec.message());
         emit errorOccurred(QString::fromStdString("SSL: " + ec.message()));
         return;
     }
@@ -443,11 +474,13 @@ void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
 
 void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     if (ec) {
-        sLog_Error("Handshake failed: " << ec.message());
+        sLog_Error("WebSocket handshake failed: host=" << m_host << " port=" << m_port
+                   << " error=" << ec.message());
         emit errorOccurred(QString::fromStdString(ec.message()));
         return;
     }
-    
+
+    sLog_Data("SentinelStreamClient connected: host=" << m_host << " port=" << m_port);
     m_isConnected = true;
     emit connected();
     
@@ -466,7 +499,13 @@ void SentinelStreamClient::doRead() {
 
 void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes_transferred) {
     if (ec) {
-        sLog_Error("Read failed: " << ec.message());
+        if (ec == boost::beast::websocket::error::closed || ec == net::error::operation_aborted) {
+            sLog_Data("SentinelStreamClient disconnected: host=" << m_host << " port=" << m_port
+                      << " reason=" << ec.message());
+        } else {
+            sLog_Error("Read failed: host=" << m_host << " port=" << m_port
+                       << " error=" << ec.message());
+        }
         m_isConnected = false;
         emit disconnected();
         return;
@@ -490,7 +529,9 @@ void SentinelStreamClient::doWrite() {
 
 void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t bytes_transferred) {
     if (ec) {
-        sLog_Error("Write failed: " << ec.message());
+        // The failed payload stays at the queue head; later writes wait behind it.
+        sLog_Error("Write failed: host=" << m_host << " port=" << m_port
+                   << " queued=" << m_writeQueue.size() << " error=" << ec.message());
         return;
     }
     
@@ -566,6 +607,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::PnlSnapshot:
                 handlePnlSnapshotMessage(msg);
                 return;
+            case protocol::MessageType::Error:
+                // Not surfaced to the GUI; log it so server-side refusals are visible.
+                sLog_Warning("Server error: context=" << msg.value("context", "")
+                             << " symbol=" << msg.value("symbol", "")
+                             << " message=" << msg.value("message", ""));
+                return;
             case protocol::MessageType::Unknown:
                 break;
             default:
@@ -580,9 +627,18 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             handleTradeMessage(msg);
             return;
         }
+        if (typeStr == "ack") {
+            sLog_Data("Server ack: symbol=" << msg.value("symbol", ""));
+            return;
+        }
+        logDroppedMessage(DropReason::UnknownType,
+                          QString("Dropping message with unhandled type=%1 bytes=%2")
+                              .arg(QString::fromStdString(typeStr))
+                              .arg(static_cast<qulonglong>(msgStr.size())));
 
     } catch (const std::exception& e) {
-        sLog_Error("Message parse error: " << e.what());
+        sLog_Error("Message parse error: bytes=" << msgStr.size()
+                   << " head=" << msgStr.substr(0, 120) << " error=" << e.what());
     }
 }
 
@@ -678,24 +734,13 @@ void SentinelStreamClient::handleHeatmapSliceMessage(const nlohmann::json& msg) 
         return;
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        static QElapsedTimer timer;
-        static bool started = false;
-        if (!started) {
-            timer.start();
-            started = true;
-        }
-        if (timer.elapsed() > 1000) {
-            sLog_Debug(QString("Heatmap slice recv: symbol=%1 tfMs=%2 start=%3 end=%4 grid=%5x%6")
-                           .arg(QString::fromStdString(symbol))
-                           .arg(timeframeMs)
-                           .arg(startMs)
-                           .arg(endMs)
-                           .arg(gridWidth)
-                           .arg(gridHeight));
-            timer.restart();
-        }
-    }
+    sLog_Probe("heatmap.recv",
+               "symbol=" << symbol
+               << " tfMs=" << timeframeMs
+               << " start=" << startMs << " end=" << endMs
+               << " grid=" << gridWidth << "x" << gridHeight
+               << " reset=" << reset
+               << " bytes=" << column.size() << " liqBytes=" << liquidityColumn.size());
 
     HeatmapSlice slice;
     slice.symbol = QString::fromStdString(symbol);
@@ -780,16 +825,14 @@ void SentinelStreamClient::handleHeatmapHistoryChunkMessage(const nlohmann::json
         }
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+    {
         const int count = out.size();
         const int64_t first = count > 0 ? out.front().bucketStartMs : 0;
         const int64_t last = count > 0 ? out.back().bucketStartMs : 0;
-        sLog_Debug(QString("Heatmap history recv: symbol=%1 tfMs=%2 count=%3 first=%4 last=%5")
-                       .arg(QString::fromStdString(symbol))
-                       .arg(timeframeMs)
-                       .arg(count)
-                       .arg(first)
-                       .arg(last));
+        sLog_Data("Heatmap history recv: symbol=" << symbol << " tfMs=" << timeframeMs
+                  << " count=" << count << " first=" << first << " last=" << last
+                  << " requestEnd=" << requestEndMs << " oldestAvailable=" << oldestAvailableMs
+                  << " grid=" << gridWidth << "x" << gridHeight);
     }
 
     emit heatmapHistoryReceived(QString::fromStdString(symbol), timeframeMs, gridWidth, gridHeight,
@@ -820,18 +863,13 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
         }
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
+    {
         const int count = out.size();
         const int64_t first = count > 0 ? out.front().timeStartMs : 0;
         const int64_t last = count > 0 ? out.back().timeStartMs : 0;
-        sLog_Debug(QString("Candle history recv: symbol=%1 tfSec=%2 count=%3 first=%4 last=%5 startSec=%6 endSec=%7")
-                       .arg(QString::fromStdString(symbol))
-                       .arg(timeframeSec)
-                       .arg(count)
-                       .arg(first)
-                       .arg(last)
-                       .arg(startTimeSec)
-                       .arg(endTimeSec));
+        sLog_Data("Candle history recv: symbol=" << symbol << " tfSec=" << timeframeSec
+                  << " count=" << count << " first=" << first << " last=" << last
+                  << " startSec=" << startTimeSec << " endSec=" << endTimeSec);
     }
 
     emit candleHistoryReceived(QString::fromStdString(symbol), timeframeSec, startTimeSec, endTimeSec, out);
@@ -943,16 +981,12 @@ void SentinelStreamClient::handleFootprintSliceMessage(const nlohmann::json& msg
     slice.quantScale = quantScale;
     slice.format = QString::fromStdString(format);
     slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Footprint recv: symbol=%1 t=[%2..%3] tfMs=%4 grid=%5x%6 bytes=%7")
-                       .arg(slice.symbol)
-                       .arg(slice.bucketStartMs)
-                       .arg(slice.bucketEndMs)
-                       .arg(slice.timeframeMs)
-                       .arg(slice.gridWidth)
-                       .arg(slice.gridHeight)
-                       .arg(slice.deltaLevelsQ16.size()));
-    }
+    sLog_Probe("footprint.recv",
+               "symbol=" << slice.symbol
+               << " t=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]"
+               << " tfMs=" << slice.timeframeMs
+               << " grid=" << slice.gridWidth << "x" << slice.gridHeight
+               << " bytes=" << slice.deltaLevelsQ16.size());
     emit footprintSliceReceived(slice);
 }
 
@@ -978,10 +1012,13 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
     }
 
     if (!columns.is_array()) {
+        sLog_Warning("Dropping footprint_history_chunk: columns is not an array, symbol=" << symbol
+                     << " tfMs=" << timeframeMs);
         return;
     }
 
     int emitted = 0;
+    int skipped = 0;
     for (const auto& item : columns) {
         const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
         const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
@@ -994,6 +1031,7 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
 
         if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 ||
             tickSize <= 0.0 || maxPrice <= minPrice || quantScale <= 0.0) {
+            ++skipped;
             continue;
         }
 
@@ -1011,6 +1049,7 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
         }
         const int expectedBytes = gridHeight * static_cast<int>(sizeof(int16_t));
         if (deltaLevelsQ16.size() != expectedBytes) {
+            ++skipped;
             continue;
         }
 
@@ -1031,11 +1070,12 @@ void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::js
         ++emitted;
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Footprint history recv: symbol=%1 tfMs=%2 count=%3")
-                       .arg(QString::fromStdString(symbol))
-                       .arg(timeframeMs)
-                       .arg(emitted));
+    sLog_Data("Footprint history recv: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " columns=" << columns.size() << " emitted=" << emitted);
+    if (skipped > 0) {
+        sLog_Warning("Footprint history recv: skipped " << skipped
+                     << " columns with invalid metadata or payload size, symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " gridHeight=" << gridHeight);
     }
 }
 
@@ -1115,6 +1155,15 @@ void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
         return;
     }
     if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 || maxPrice <= minPrice || tickSize <= 0.0) {
+        logDroppedMessage(DropReason::TpoSliceMeta,
+                          QString("Dropping tpo_slice: invalid metadata symbol=%1 start=%2 end=%3 tf=%4 tick=%5 range=[%6,%7]")
+                              .arg(QString::fromStdString(symbol))
+                              .arg(startMs)
+                              .arg(endMs)
+                              .arg(timeframeMs)
+                              .arg(tickSize, 0, 'g', 8)
+                              .arg(minPrice, 0, 'g', 8)
+                              .arg(maxPrice, 0, 'g', 8));
         return;
     }
 
@@ -1129,6 +1178,11 @@ void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
         return;
     }
     if (letters.size() != gridHeight) {
+        logDroppedMessage(DropReason::TpoPayloadShape,
+                          QString("Dropping tpo_slice: letters bytes=%1 expected=%2 symbol=%3")
+                              .arg(letters.size())
+                              .arg(gridHeight)
+                              .arg(QString::fromStdString(symbol)));
         return;
     }
 
@@ -1170,9 +1224,13 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         return;
     }
     if (!columns.is_array()) {
+        sLog_Warning("Dropping tpo_history_chunk: columns is not an array, symbol=" << symbol
+                     << " tfMs=" << timeframeMs);
         return;
     }
 
+    int emitted = 0;
+    int skipped = 0;
     for (const auto& item : columns) {
         const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
         const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
@@ -1182,6 +1240,7 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         const std::string format = item.value("format", "tpo_ascii");
         const std::string encoded = item.value("letters", "");
         if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 || maxPrice <= minPrice || tickSize <= 0.0) {
+            ++skipped;
             continue;
         }
         QByteArray letters;
@@ -1197,6 +1256,7 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
             }
         }
         if (letters.size() != gridHeight) {
+            ++skipped;
             continue;
         }
         TpoSlice slice;
@@ -1213,6 +1273,15 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.format = QString::fromStdString(format);
         slice.letters = std::move(letters);
         emit tpoSliceReceived(slice);
+        ++emitted;
+    }
+    sLog_Data("TPO history recv: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " sessionType=" << sessionType << " columns=" << columns.size()
+              << " emitted=" << emitted);
+    if (skipped > 0) {
+        sLog_Warning("TPO history recv: skipped " << skipped
+                     << " columns with invalid metadata or letter count, symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " gridHeight=" << gridHeight);
     }
 }
 
@@ -1244,6 +1313,14 @@ void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json&
         return;
     }
     if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs || maxPrice <= minPrice || tickSize <= 0.0) {
+        logDroppedMessage(DropReason::VolumeProfileSliceMeta,
+                          QString("Dropping volume_profile_slice: invalid metadata symbol=%1 session=[%2..%3] tick=%4 range=[%5,%6]")
+                              .arg(QString::fromStdString(symbol))
+                              .arg(sessionStartMs)
+                              .arg(sessionEndMs)
+                              .arg(tickSize, 0, 'g', 8)
+                              .arg(minPrice, 0, 'g', 8)
+                              .arg(maxPrice, 0, 'g', 8));
         return;
     }
 

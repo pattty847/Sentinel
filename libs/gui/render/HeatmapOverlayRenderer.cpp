@@ -182,6 +182,9 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
             const int bytesPerCell = m_intensityBytesPerCell;
             for (const auto& upload : pendingUploads) {
                 if (upload.x < 0 || upload.x >= width || upload.data.size() != height * bytesPerCell) {
+                    sLog_RenderN(1000, "Heatmap column upload dropped: x=" << upload.x
+                                 << " bytes=" << upload.data.size() << " image=" << width << "x" << height
+                                 << " bytesPerCell=" << bytesPerCell);
                     continue;
                 }
                 if (bytesPerCell == 1) {
@@ -235,6 +238,9 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
         }
         auto* paletteTexture = window->createTextureFromImage(m_paletteImage);
         if (!intensityTexture || !paletteTexture) {
+            sLog_RenderN(1000, "Heatmap texture create failed (retry next frame): intensity="
+                         << (intensityTexture != nullptr) << " palette=" << (paletteTexture != nullptr)
+                         << " image=" << m_heatmapImage.width() << "x" << m_heatmapImage.height());
             delete intensityTexture;
             delete paletteTexture;
         } else {

@@ -5,7 +5,7 @@ Inputs/Outputs: Receives heatmap slices; emits column and range reset signals fo
 Threading: Lives on a worker QThread; slots are invoked via queued connections.
 Performance: Minimal processing to preserve GPU upload cadence.
 Integration: Owned by UnifiedGridRenderer; participates in the GPU-only heatmap path.
-Observability: Logs heatmap ingest when debug flags are enabled.
+Observability: Logs window/timeframe/history transitions; per-slice detail via probes (heatmap.*, footprint.*, tpo.*).
 Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
@@ -13,7 +13,6 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
-#include "TpoDebugTrace.hpp"
 #include "SentinelLogging.hpp"
 #include "../../core/protocol/VolumeProfileSlice.hpp"
 #include <algorithm>
@@ -22,7 +21,6 @@ Assumptions: Server is authoritative for heatmap columns.
 #include <limits>
 #include <cstring>
 #include <bit>
-#include <sstream>
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
@@ -71,6 +69,7 @@ void DataProcessor::setActiveSymbol(const QString& symbol) {
     if (m_activeSymbol == normalized) {
         return;
     }
+    sLog_Data("DataProcessor symbol: " << m_activeSymbol << "->" << normalized << " (stream state cleared)");
     m_activeSymbol = normalized;
     clearData();
 }
@@ -82,29 +81,40 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
         return;
     }
     if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) {
+        sLog_Probe("heatmap.drop", "reason=symbol symbol=" << slice.symbol
+                   << " active=" << m_activeSymbol << " start=" << slice.bucketStartMs);
         return;
     }
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
 
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
-        sLog_Render("HEATMAP SLICE RX: tf=" << slice.timeframeMs
-                    << " rows=" << slice.column.size()
-                    << " grid=" << resolvedWidth << "x" << slice.gridHeight
-                    << " reset=" << slice.reset
-                    << " format=" << slice.format
-                    << " current=" << m_currentTimeframe_ms
-                    << " manual=" << m_manualTimeframeSet);
-    }
+    sLog_Probe("heatmap.slice", "symbol=" << slice.symbol
+               << " tf=" << slice.timeframeMs
+               << " start=" << slice.bucketStartMs
+               << " bytes=" << slice.column.size()
+               << " grid=" << resolvedWidth << "x" << slice.gridHeight
+               << " price=[" << slice.minPrice << ".." << slice.maxPrice << "]"
+               << " tick=" << slice.tickSize
+               << " reset=" << slice.reset
+               << " format=" << slice.format
+               << " current=" << m_currentTimeframe_ms
+               << " manual=" << m_manualTimeframeSet);
 
     if (m_forcedTimeframeMs > 0 && slice.timeframeMs > 0 && slice.timeframeMs != m_forcedTimeframeMs) {
+        sLog_Probe("heatmap.drop", "reason=timeframe tf=" << slice.timeframeMs
+                   << " forced=" << m_forcedTimeframeMs << " start=" << slice.bucketStartMs);
         return;
     }
     if (slice.timeframeMs > 0 && m_currentTimeframe_ms != slice.timeframeMs) {
+        sLog_Render("Heatmap timeframe from stream: tf=" << m_currentTimeframe_ms << "->"
+                    << slice.timeframeMs << " symbol=" << slice.symbol);
         m_currentTimeframe_ms = slice.timeframeMs;
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.restart();
     }
     if (slice.column.isEmpty() || slice.timeframeMs <= 0) {
+        sLog_DataN(5000, "Heatmap slice dropped: empty column or tf<=0 symbol=" << slice.symbol
+                   << " tf=" << slice.timeframeMs << " bytes=" << slice.column.size()
+                   << " start=" << slice.bucketStartMs);
         return;
     }
 
@@ -114,13 +124,17 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
         fmt == QStringLiteral("r16f")) {
         bytesPerCell = 2;
     } else if (fmt != QStringLiteral("u8") && fmt != QStringLiteral("r8")) {
-        return;  // f32 and unknown formats are not supported by the ring
-    }
-    if (slice.column.size() % bytesPerCell != 0) {
+        // f32 and unknown formats are not supported by the ring
+        sLog_DataN(5000, "Heatmap slice dropped: unsupported format=" << slice.format
+                   << " symbol=" << slice.symbol << " tf=" << slice.timeframeMs);
         return;
     }
     const int rows = (slice.gridHeight > 0) ? slice.gridHeight : slice.column.size() / bytesPerCell;
-    if (rows <= 0 || slice.column.size() / bytesPerCell != rows) {
+    if (slice.column.size() % bytesPerCell != 0 || rows <= 0 ||
+        slice.column.size() / bytesPerCell != rows) {
+        sLog_DataN(5000, "Heatmap slice dropped: size mismatch bytes=" << slice.column.size()
+                   << " bytesPerCell=" << bytesPerCell << " gridHeight=" << slice.gridHeight
+                   << " symbol=" << slice.symbol << " tf=" << slice.timeframeMs);
         return;
     }
 
@@ -137,6 +151,12 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     auto update = std::make_shared<heatmap_window::Update>();
     bool firstPlacement = false;
     if (!m_heatmapWindow.ingestLive(column, bytesPerCell, *update, firstPlacement)) {
+        // Normal when the live bucket is outside a manual window (kept in cache);
+        // also returned for a shape mismatch (rows, unaligned bucket, bad band).
+        sLog_Probe("heatmap.drop", "reason=window-rejected start=" << slice.bucketStartMs
+                   << " windowEnd=" << m_heatmapWindow.windowEndMs()
+                   << " rows=" << rows << " windowRows=" << m_heatmapWindow.rows()
+                   << " bytesPerCell=" << bytesPerCell);
         return;
     }
     publishHeatmapWindow(std::move(update), firstPlacement);
@@ -172,11 +192,10 @@ void DataProcessor::ensureHeatmapWindow(int64_t timeframeMs, int width, int rows
         (m_heatmapWindow.rows() == 0 || m_heatmapWindow.rows() == rows)) {
         return;
     }
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
-        sLog_Render("HEATMAP WINDOW CONFIGURE: tf=" << m_heatmapWindow.timeframeMs() << "->" << timeframeMs
-                    << " width=" << m_heatmapWindow.width() << "->" << boundedWidth
-                    << " rows=" << m_heatmapWindow.rows() << "->" << rows);
-    }
+    sLog_Render("Heatmap window configure: tf=" << m_heatmapWindow.timeframeMs() << "->" << timeframeMs
+                << " width=" << m_heatmapWindow.width() << "->" << boundedWidth
+                << " rows=" << m_heatmapWindow.rows() << "->" << rows
+                << " symbol=" << m_activeSymbol);
     m_heatmapWindow.configure(timeframeMs, boundedWidth,
                               boundedWidth + 4 * heatmap_window::ColumnWindow::kPageColumns);
     m_heatmapGridWidth = boundedWidth;
@@ -218,12 +237,18 @@ void DataProcessor::requestHeatmapFetch() {
     m_heatmapFetchEndMs = request.endMs;
     m_heatmapFetchCount = request.count;
     const uint64_t generation = ++m_heatmapFetchGeneration;
+    sLog_Data("Heatmap history request: symbol=" << m_activeSymbol
+              << " tf=" << m_heatmapWindow.timeframeMs() << " end=" << request.endMs
+              << " count=" << request.count << " gen=" << generation);
     emit heatmapHistoryFetchNeeded(m_heatmapWindow.timeframeMs(), request.endMs, request.count);
     emit heatmapHistoryStatus(true, m_heatmapWindow.oldestAvailableMs());
     QTimer::singleShot(5000, this, [this, generation]() {
         if (generation != m_heatmapFetchGeneration || !m_heatmapFetchInFlight) {
             return;
         }
+        sLog_Warning("Heatmap history request timed out after 5000 ms: symbol=" << m_activeSymbol
+                     << " tf=" << m_heatmapWindow.timeframeMs() << " end=" << m_heatmapFetchEndMs
+                     << " count=" << m_heatmapFetchCount << " gen=" << generation);
         m_heatmapFetchInFlight = false;
         emit heatmapHistoryStatus(false, m_heatmapWindow.oldestAvailableMs());
     });
@@ -240,16 +265,22 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
         return;
     }
     if (slice.format.trimmed().compare(QStringLiteral("q16_delta"), Qt::CaseInsensitive) != 0) {
+        sLog_DataN(5000, "Footprint slice dropped: unsupported format=" << slice.format
+                   << " symbol=" << slice.symbol << " tf=" << slice.timeframeMs);
         return;
     }
 
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_footprintGridWidth;
     const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_footprintGridHeight;
     if (resolvedWidth <= 0 || resolvedHeight <= 0) {
+        sLog_DataN(5000, "Footprint slice dropped: no grid size symbol=" << slice.symbol
+                   << " grid=" << resolvedWidth << "x" << resolvedHeight);
         return;
     }
 
     if (resolvedWidth != m_footprintGridWidth || resolvedHeight != m_footprintGridHeight) {
+        sLog_Render("Footprint grid resize: " << m_footprintGridWidth << "x" << m_footprintGridHeight
+                    << "->" << resolvedWidth << "x" << resolvedHeight << " symbol=" << slice.symbol);
         m_footprintGridWidth = resolvedWidth;
         m_footprintGridHeight = resolvedHeight;
         m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
@@ -264,18 +295,15 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
                                                    slice.maxPrice,
                                                    slice.tickSize,
                                                    slice.deltaLevelsQ16);
-    if (!ok && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Footprint slice dropped at staging: symbol=%1 start=%2 end=%3 tfMs=%4 grid=%5x%6 bytes=%7")
-                       .arg(slice.symbol)
-                       .arg(slice.bucketStartMs)
-                       .arg(slice.bucketEndMs)
-                       .arg(slice.timeframeMs)
-                       .arg(m_footprintGridWidth)
-                       .arg(m_footprintGridHeight)
-                       .arg(slice.deltaLevelsQ16.size()));
-        return;
-    }
     if (!ok) {
+        // ingestSlice rejects only malformed slices (bad times, size, price band).
+        sLog_DataN(5000, "Footprint slice dropped at staging: symbol=" << slice.symbol
+                   << " start=" << slice.bucketStartMs << " end=" << slice.bucketEndMs
+                   << " tf=" << slice.timeframeMs
+                   << " grid=" << m_footprintGridWidth << "x" << m_footprintGridHeight
+                   << " bytes=" << slice.deltaLevelsQ16.size()
+                   << " price=[" << slice.minPrice << ".." << slice.maxPrice << "]"
+                   << " tick=" << slice.tickSize);
         return;
     }
 
@@ -286,24 +314,20 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
     }
 
     const auto snap = m_footprintStream->snapshot();
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Footprint staged: pending=%1 grid=%2x%3 write=%4 filled=%5")
-                       .arg(static_cast<int>(pendingUploads.size()))
-                       .arg(snap.gridWidth)
-                       .arg(snap.gridHeight)
-                       .arg(snap.writeColumn)
-                       .arg(snap.filledColumns));
-    }
+    sLog_Probe("footprint.stage", "symbol=" << slice.symbol << " start=" << slice.bucketStartMs
+               << " tf=" << slice.timeframeMs << " pending=" << pendingUploads.size()
+               << " grid=" << snap.gridWidth << "x" << snap.gridHeight
+               << " write=" << snap.writeColumn << " filled=" << snap.filledColumns);
     for (const auto& upload : pendingUploads) {
         QByteArray columnQ16;
         if (!m_footprintStream->copyColumnForUpload(upload.x, columnQ16)) {
+            sLog_DataN(1000, "Footprint upload dropped: copy failed x=" << upload.x
+                       << " start=" << upload.bucketStartMs << " grid=" << snap.gridWidth
+                       << "x" << snap.gridHeight);
             continue;
         }
-        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-            sLog_Debug(QString("Footprint upload ready: x=%1 bytes=%2")
-                           .arg(upload.x)
-                           .arg(columnQ16.size()));
-        }
+        sLog_Probe("footprint.upload", "x=" << upload.x << " start=" << upload.bucketStartMs
+                   << " bytes=" << columnQ16.size());
         emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16));
     }
 }
@@ -318,37 +342,32 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
 
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_tpoGridWidth;
     const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_tpoGridHeight;
-    if (resolvedWidth <= 0 || resolvedHeight <= 0 || slice.letters.size() != resolvedHeight) {
-        return;
-    }
-    if (slice.bucketStartMs <= 0 || slice.bucketEndMs <= slice.bucketStartMs || slice.timeframeMs <= 0) {
+    if (resolvedWidth <= 0 || resolvedHeight <= 0 || slice.letters.size() != resolvedHeight ||
+        slice.bucketStartMs <= 0 || slice.bucketEndMs <= slice.bucketStartMs || slice.timeframeMs <= 0) {
+        sLog_DataN(5000, "TPO slice dropped: invalid shape symbol=" << slice.symbol
+                   << " grid=" << resolvedWidth << "x" << resolvedHeight
+                   << " letters=" << slice.letters.size()
+                   << " start=" << slice.bucketStartMs << " end=" << slice.bucketEndMs
+                   << " tf=" << slice.timeframeMs);
         return;
     }
     if (slice.format.trimmed().compare(QStringLiteral("tpo_ascii"), Qt::CaseInsensitive) != 0) {
+        sLog_DataN(5000, "TPO slice dropped: unsupported format=" << slice.format
+                   << " symbol=" << slice.symbol << " tf=" << slice.timeframeMs);
         return;
     }
 
-    if (tpo_debug::enabled()) {
-        std::ostringstream payload;
-        payload << "{"
-                << "\"symbol\":\"" << slice.symbol.toStdString() << "\""
-                << ",\"bucketStartMs\":" << slice.bucketStartMs
-                << ",\"bucketEndMs\":" << slice.bucketEndMs
-                << ",\"timeframeMs\":" << slice.timeframeMs
-                << ",\"sessionType\":" << slice.sessionType
-                << ",\"gridWidth\":" << resolvedWidth
-                << ",\"gridHeight\":" << resolvedHeight
-                << ",\"lettersBytes\":" << slice.letters.size()
-                << "}";
-        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
-                          "tpo_slice_ingest",
-                          "H1",
-                          payload.str());
-    }
+    sLog_Probe("tpo.slice", "symbol=" << slice.symbol
+               << " start=" << slice.bucketStartMs << " end=" << slice.bucketEndMs
+               << " tf=" << slice.timeframeMs << " sessionType=" << slice.sessionType
+               << " grid=" << resolvedWidth << "x" << resolvedHeight
+               << " letters=" << slice.letters.size());
 
     m_tpoStream->setSessionType(slice.sessionType);
 
     if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
+        sLog_Render("TPO grid resize: " << m_tpoGridWidth << "x" << m_tpoGridHeight
+                    << "->" << resolvedWidth << "x" << resolvedHeight << " symbol=" << slice.symbol);
         m_tpoGridWidth = resolvedWidth;
         m_tpoGridHeight = resolvedHeight;
         m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
@@ -387,21 +406,10 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
     }
 
     const auto snap = m_tpoStream->snapshot();
-    if (tpo_debug::enabled()) {
-        std::ostringstream payload;
-        payload << "{"
-                << "\"sessionStartMs\":" << snap.sessionStartMs
-                << ",\"sessionEndMs\":" << snap.sessionEndMs
-                << ",\"timeframeMs\":" << snap.timeframeMs
-                << ",\"gridWidth\":" << snap.gridWidth
-                << ",\"gridHeight\":" << snap.gridHeight
-                << ",\"pendingUploads\":" << pendingUploads.size()
-                << "}";
-        tpo_debug::append("DataProcessor.cpp:onTpoSliceReceived",
-                          "tpo_snapshot_after_ingest",
-                          "H2",
-                          payload.str());
-    }
+    sLog_Probe("tpo.snapshot", "session=[" << snap.sessionStartMs << ".." << snap.sessionEndMs << "]"
+               << " tf=" << snap.timeframeMs
+               << " grid=" << snap.gridWidth << "x" << snap.gridHeight
+               << " pending=" << pendingUploads.size());
     for (auto& upload : pendingUploads) {
         emit tpoColumnReady(upload.x,
                             snap.gridWidth,
@@ -424,16 +432,19 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
         return;
     }
     if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
+        sLog_Data("Heatmap history ignored: symbol=" << symbol << " active=" << m_activeSymbol
+                  << " tf=" << timeframeMs << " end=" << requestEndMs);
         return;
     }
-    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
-        sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
-                    << " grid=" << gridWidth << "x" << gridHeight
-                    << " tf=" << timeframeMs
-                    << " end=" << requestEndMs);
+    if (timeframeMs <= 0 || gridHeight <= 0) {
+        sLog_Warning("Heatmap history dropped: invalid page symbol=" << symbol << " tf=" << timeframeMs
+                     << " grid=" << gridWidth << "x" << gridHeight
+                     << " end=" << requestEndMs << " cols=" << columns.size());
+        return;
     }
-    if (timeframeMs <= 0 || gridHeight <= 0 ||
-        (m_forcedTimeframeMs > 0 && timeframeMs != m_forcedTimeframeMs)) {
+    if (m_forcedTimeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
+        sLog_Data("Heatmap history ignored: tf=" << timeframeMs << " forced=" << m_forcedTimeframeMs
+                  << " symbol=" << symbol << " end=" << requestEndMs);
         return;
     }
 
@@ -466,8 +477,14 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
 
     auto update = std::make_shared<heatmap_window::Update>();
     bool firstPlacement = false;
-    if (m_heatmapWindow.ingestHistory(page, bytesPerCell, requestEndMs, requested,
-                                      oldestAvailableMs, *update, firstPlacement)) {
+    const bool applied = m_heatmapWindow.ingestHistory(page, bytesPerCell, requestEndMs, requested,
+                                                       oldestAvailableMs, *update, firstPlacement);
+    sLog_Data("Heatmap history received: symbol=" << symbol << " tf=" << timeframeMs
+              << " end=" << requestEndMs << " cols=" << columns.size() << "/" << requested
+              << " grid=" << gridWidth << "x" << gridHeight << " oldest=" << oldestAvailableMs
+              << " ours=" << ours << " applied=" << applied
+              << " cached=" << m_heatmapWindow.cachedColumns());
+    if (applied) {
         publishHeatmapWindow(std::move(update), firstPlacement);
     }
     emit heatmapHistoryStatus(m_heatmapFetchInFlight, m_heatmapWindow.oldestAvailableMs());
@@ -482,6 +499,11 @@ void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice
         return;
     }
     if (!m_vpStream->ingestSlice(slice)) {
+        // ingestSlice rejects only malformed slices.
+        sLog_DataN(5000, "Volume profile slice dropped: symbol=" << slice.symbol
+                   << " session=[" << slice.sessionStartMs << ".." << slice.sessionEndMs << "]"
+                   << " gridHeight=" << slice.gridHeight << " tick=" << slice.tickSize
+                   << " bytes=" << slice.volumeBinsF32.size());
         return;
     }
     std::vector<float> bins;
@@ -515,6 +537,8 @@ void DataProcessor::setHeatmapIntensityScale(double scale) {
 
 void DataProcessor::setServerTimeframe(int64_t timeframeMs) {
     if (timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
+        sLog_Render("Heatmap server timeframe: tf=" << m_forcedTimeframeMs << "->" << timeframeMs
+                    << " (window reset)");
         m_forcedTimeframeMs = timeframeMs;
         resetHeatmapWindow();
     }
@@ -545,11 +569,11 @@ int DataProcessor::getDisplayMode() const {
 
 void DataProcessor::setTimeframe(int timeframe_ms) {
     if (timeframe_ms > 0) {
+        sLog_Render("Heatmap manual timeframe: tf=" << m_currentTimeframe_ms << "->" << timeframe_ms
+                    << " forced=" << m_forcedTimeframeMs);
         m_currentTimeframe_ms = timeframe_ms;
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.restart();
-        
-        sLog_Render("MANUAL TIMEFRAME SET: " << timeframe_ms << "ms");
     }
 }
 

@@ -108,9 +108,9 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 
   update();
 
-  sLog_Debug("UNIFIED RENDERER VIEWPORT Time:["
-             << startTimeMs << "-" << endTimeMs << "]"
-             << "Price:[$" << minPrice << "-$" << maxPrice << "]");
+  sLog_Probe("viewport.view",
+             "t=[" << startTimeMs << ".." << endTimeMs << "]"
+             << " price=[" << minPrice << ".." << maxPrice << "]");
 }
 
 void UnifiedGridRenderer::onViewportChanged() {
@@ -160,8 +160,9 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
   QQuickItem::geometryChange(newGeometry, oldGeometry);
 
   if (newGeometry.size() != oldGeometry.size()) {
-    sLog_Render("UNIFIED RENDERER GEOMETRY CHANGED: "
-                << newGeometry.width() << "x" << newGeometry.height());
+    sLog_Probe("viewport.resize",
+               "old=" << oldGeometry.width() << "x" << oldGeometry.height()
+               << " new=" << newGeometry.width() << "x" << newGeometry.height());
 
     if (m_viewState) {
       m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
@@ -335,6 +336,8 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   if (m_activeSymbol == normalized) {
     return;
   }
+  sLog_Render("active symbol changed, clearing chart data: prev=" << m_activeSymbol
+              << " symbol=" << normalized);
   m_activeSymbol = normalized;
   clearData();
   if (m_dataProcessor) {
@@ -380,6 +383,11 @@ void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
     m_footprintLayerEnabled = false;
     m_tpoLayerEnabled = false;
   }
+  sLog_Render("layers: set volumeProfile=" << enabled
+              << " -> heatmap=" << m_heatmapLayerEnabled
+              << " footprint=" << m_footprintLayerEnabled
+              << " tpo=" << m_tpoLayerEnabled
+              << " volumeProfile=" << m_volumeProfileLayerEnabled);
   update();
   emit layerVisibilityChanged();
 }
@@ -407,6 +415,8 @@ void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
 
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   if (m_currentTimeframe_ms != timeframe_ms) {
+    sLog_Render("timeframe changed: prevMs=" << m_currentTimeframe_ms
+                << " tfMs=" << timeframe_ms);
     resetHeatmapHistoryStatus();
     setOldestHeatmapAvailableMs(0);
     m_currentTimeframe_ms = timeframe_ms;
@@ -557,6 +567,7 @@ void UnifiedGridRenderer::setHeatmapColorPreset(const QString& preset) {
 
     auto it = kPresets.find(preset);
     if (it == kPresets.end()) {
+        sLog_Warning("Unknown heatmap color preset ignored: preset=" << preset);
         return;
     }
     m_heatmapOverlay.setBidGradient(it->bid);
@@ -589,9 +600,11 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
     m_heatmapLayerEnabled = false;
     m_footprintLayerEnabled = false;
   }
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Render("PrimaryField set to " << m_primaryField);
-  }
+  sLog_Render("layers: primaryField=" << m_primaryField
+              << " -> heatmap=" << m_heatmapLayerEnabled
+              << " footprint=" << m_footprintLayerEnabled
+              << " tpo=" << m_tpoLayerEnabled
+              << " volumeProfile=" << m_volumeProfileLayerEnabled);
   update();
   emit primaryFieldChanged();
   emit layerVisibilityChanged();
@@ -600,19 +613,9 @@ void UnifiedGridRenderer::setPrimaryField(int field) {
 void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
   const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
   const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Debug(QString("setHeatmapLayerEnabled request: enabled=%1 "
-                       "current_hm=%2 current_fp=%3 current_tpo=%4")
-                   .arg(enabled ? 1 : 0)
-                   .arg(m_heatmapLayerEnabled ? 1 : 0)
-                   .arg(m_footprintLayerEnabled ? 1 : 0)
-                   .arg(m_tpoLayerEnabled ? 1 : 0));
-  }
   if (m_heatmapLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled &&
       m_volumeProfileLayerEnabled == newVpEnabled) {
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-      sLog_Debug("setHeatmapLayerEnabled no-op");
-    }
+    sLog_Render("layers: set heatmap=" << enabled << " unchanged");
     return;
   }
   m_heatmapLayerEnabled = enabled;
@@ -620,9 +623,11 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
     m_tpoLayerEnabled = false;
     m_volumeProfileLayerEnabled = false;
   }
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Render("Heatmap layer " << (enabled ? "enabled" : "disabled"));
-  }
+  sLog_Render("layers: set heatmap=" << enabled
+              << " -> heatmap=" << m_heatmapLayerEnabled
+              << " footprint=" << m_footprintLayerEnabled
+              << " tpo=" << m_tpoLayerEnabled
+              << " volumeProfile=" << m_volumeProfileLayerEnabled);
   update();
   emit layerVisibilityChanged();
 }
@@ -630,20 +635,10 @@ void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
 void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
   const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
   const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Debug(QString("setFootprintLayerEnabled request: enabled=%1 "
-                       "current_hm=%2 current_fp=%3 current_tpo=%4")
-                   .arg(enabled ? 1 : 0)
-                   .arg(m_heatmapLayerEnabled ? 1 : 0)
-                   .arg(m_footprintLayerEnabled ? 1 : 0)
-                   .arg(m_tpoLayerEnabled ? 1 : 0));
-  }
   if (m_footprintLayerEnabled == enabled &&
       m_tpoLayerEnabled == newTpoEnabled &&
       m_volumeProfileLayerEnabled == newVpEnabled) {
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-      sLog_Debug("setFootprintLayerEnabled no-op");
-    }
+    sLog_Render("layers: set footprint=" << enabled << " unchanged");
     return;
   }
   m_footprintLayerEnabled = enabled;
@@ -651,9 +646,11 @@ void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
     m_tpoLayerEnabled = false;
     m_volumeProfileLayerEnabled = false;
   }
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Render("Footprint layer " << (enabled ? "enabled" : "disabled"));
-  }
+  sLog_Render("layers: set footprint=" << enabled
+              << " -> heatmap=" << m_heatmapLayerEnabled
+              << " footprint=" << m_footprintLayerEnabled
+              << " tpo=" << m_tpoLayerEnabled
+              << " volumeProfile=" << m_volumeProfileLayerEnabled);
   update();
   emit layerVisibilityChanged();
 }
@@ -663,21 +660,11 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
   const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
   const bool newVolumeProfileEnabled =
       enabled ? false : m_volumeProfileLayerEnabled;
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Debug(QString("setTpoLayerEnabled request: enabled=%1 current_hm=%2 "
-                       "current_fp=%3 current_tpo=%4")
-                   .arg(enabled ? 1 : 0)
-                   .arg(m_heatmapLayerEnabled ? 1 : 0)
-                   .arg(m_footprintLayerEnabled ? 1 : 0)
-                   .arg(m_tpoLayerEnabled ? 1 : 0));
-  }
   if (m_tpoLayerEnabled == enabled &&
       m_heatmapLayerEnabled == newHeatmapEnabled &&
       m_footprintLayerEnabled == newFootprintEnabled &&
       m_volumeProfileLayerEnabled == newVolumeProfileEnabled) {
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-      sLog_Debug("setTpoLayerEnabled no-op");
-    }
+    sLog_Render("layers: set tpo=" << enabled << " unchanged");
     return;
   }
   m_tpoLayerEnabled = enabled;
@@ -686,9 +673,11 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
     m_footprintLayerEnabled = false;
     m_volumeProfileLayerEnabled = false;
   }
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-    sLog_Render("TPO layer " << (enabled ? "enabled" : "disabled"));
-  }
+  sLog_Render("layers: set tpo=" << enabled
+              << " -> heatmap=" << m_heatmapLayerEnabled
+              << " footprint=" << m_footprintLayerEnabled
+              << " tpo=" << m_tpoLayerEnabled
+              << " volumeProfile=" << m_volumeProfileLayerEnabled);
   update();
   emit layerVisibilityChanged();
 }
@@ -698,7 +687,7 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     m_viewState->enableAutoScroll(enabled);
     update();
     emit autoScrollEnabledChanged();
-    sLog_Render("Auto-scroll: " << (enabled ? "ENABLED" : "DISABLED"));
+    sLog_Render("auto-scroll enabled=" << enabled << " reason=request");
     if (enabled && m_viewState->isTimeWindowValid() && m_heatmapStreamService) {
       m_heatmapStreamService->updateAutoScrollLag(
           *m_viewState,
@@ -764,14 +753,15 @@ void UnifiedGridRenderer::buildMsdfAtlas() {
   }
   envIntValue("SENTINEL_CHART_TEXT_FONT_PX", params.fontPx);
   envFloatValue("SENTINEL_CHART_TEXT_PX_RANGE", params.pxRange);
-  if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
-    sLog_Debug(
-        QString("Chart text atlas build: fontPx=%1 pxRange=%2 charset=%3")
-            .arg(params.fontPx)
-            .arg(params.pxRange, 0, 'f', 2)
-            .arg(params.charset.size()));
-  }
-  if (m_chartTextAtlas.build(params)) {
+  sLog_Probe("text.atlas",
+             "build fontPx=" << params.fontPx << " pxRange=" << params.pxRange
+             << " charset=" << params.charset.size()
+             << " fontPath=" << params.fontPath);
+  if (!m_chartTextAtlas.build(params)) {
+    sLog_Warning("Chart text atlas build failed; chart text disabled: fontPath="
+                 << params.fontPath << " resourceFont=" << params.resourceFont
+                 << " fontPx=" << params.fontPx);
+  } else {
     if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
       m_chartTextAtlas.image().save("/tmp/sentinel_msdf_atlas.png");
       const MsdfAtlas::Glyph &glyph = m_chartTextAtlas.glyph(QChar('$'));
@@ -807,8 +797,8 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;
   } else if (config.heatmap.labelPx > 128) {
-    qWarning("Heatmap labelPx=%d exceeds sane maximum (128), using default %d",
-             config.heatmap.labelPx, m_heatmapLabelPx);
+    sLog_Warning("Heatmap labelPx exceeds max 128, keeping current: labelPx="
+                 << config.heatmap.labelPx << " using=" << m_heatmapLabelPx);
   }
   update();
 }
@@ -938,6 +928,7 @@ void UnifiedGridRenderer::mousePressEvent(QMouseEvent *event) {
   if (m_viewState && isVisible() && event->button() == Qt::LeftButton) {
     if (m_viewState->isAutoScrollEnabled()) {
       m_viewState->enableAutoScroll(false);
+      sLog_Render("auto-scroll enabled=false reason=mouse_pan");
     }
     m_viewState->handlePanStart(event->position());
     event->accept();
@@ -1321,6 +1312,7 @@ void UnifiedGridRenderer::beginPanAt(double x, double y) {
   }
   if (m_viewState->isAutoScrollEnabled()) {
     m_viewState->enableAutoScroll(false);
+    sLog_Render("auto-scroll enabled=false reason=pan");
   }
   m_viewState->handlePanStart(QPointF(x, y));
   update();

@@ -89,11 +89,6 @@ inline void addLineSegment(QSGGeometry::ColoredPoint2D*& v,
     v += 6;
 }
 
-bool candleDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
-    return enabled;
-}
-
 std::vector<CandleOverlayBar> buildContinuousBars(const std::vector<CandleOverlayBar>& source,
                                                   int64_t timeframeMs,
                                                   qint64 boundaryStartMs,
@@ -235,6 +230,7 @@ void CandlestickOverlayItem::setSymbol(const QString& symbol) {
     if (m_symbol == symbol) {
         return;
     }
+    sLog_Render("Candle overlay symbol: " << m_symbol << "->" << symbol << " tfSec=" << m_timeframeSec);
     m_symbol = symbol;
     markGeometryDirty();
     emit symbolChanged();
@@ -244,6 +240,7 @@ void CandlestickOverlayItem::setTimeframeSec(int sec) {
     if (m_timeframeSec == sec || sec <= 0) {
         return;
     }
+    sLog_Render("Candle overlay timeframe: tfSec=" << m_timeframeSec << "->" << sec << " symbol=" << m_symbol);
     m_timeframeSec = sec;
     m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     markGeometryDirty();
@@ -387,6 +384,8 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
     }
     if (!hasData) {
+        sLog_Probe("candles.empty", "symbol=" << m_symbol << " tfSec=" << m_timeframeSec
+                   << " view=[" << timeStart << ".." << timeEnd << "] buffer=" << (m_candleBuffer != nullptr));
         root->wickGeometry->allocate(0);
         root->bodyGeometry->allocate(0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -423,7 +422,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const int visibleCount = static_cast<int>(filtered.size());
     const int syntheticCount = std::max(0, visibleCount - baseVisibleCount);
 
-    if (candleDebugEnabled()) {
+    // Probe candles.frame: overlay/mapping state, at most once per second.
+    static const bool kCandleProbe = sentinel::logging::probeEnabled("candles.frame");
+    if (kCandleProbe) {
         static QElapsedTimer timer;
         static bool started = false;
         if (!started) {
@@ -438,7 +439,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const qint64 visFirst = (visibleCount > 0) ? filtered.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? filtered.back().timeStartMs : 0;
             const bool autoScroll = frame.viewportAutoScrollEnabled;
-            sLog_Debug(QString("Candle overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
+            sLog_Probe("candles.frame", QString("overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
                        .arg(m_symbol)
                        .arg(m_timeframeSec)
                        .arg(timeStart)
@@ -450,7 +451,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                        .arg(cadenceMatches ? "true" : "false")
                        .arg(frame.boundarySequence)
                        .arg(frame.currentBoundaryStartMs));
-            sLog_Debug(QString("Candle mapping: dataStart=%1 appendMs=%2 gridWidth=%3 srcX=%4 srcW=%5 drawX=%6 drawW=%7")
+            sLog_Probe("candles.frame", QString("mapping: dataStart=%1 appendMs=%2 gridWidth=%3 srcX=%4 srcW=%5 drawX=%6 drawW=%7")
                        .arg(static_cast<qint64>(mapping.dataStartMs))
                        .arg(static_cast<qint64>(mapping.appendMs))
                        .arg(mapping.gridWidth)
@@ -458,12 +459,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                        .arg(mapping.srcRect.width(), 0, 'f', 3)
                        .arg(mapping.drawRect.x(), 0, 'f', 1)
                        .arg(mapping.drawRect.width(), 0, 'f', 1));
-            sLog_Debug(QString("Candle overlay scale: spanMs=%1 msPerPx=%2 width=%3 autoScroll=%4")
+            sLog_Probe("candles.frame", QString("overlay scale: spanMs=%1 msPerPx=%2 width=%3 autoScroll=%4")
                        .arg(spanMs, 0, 'f', 1)
                        .arg(msPerPixel, 0, 'f', 3)
                        .arg(width(), 0, 'f', 1)
                        .arg(autoScroll ? "true" : "false"));
-            sLog_Debug(QString("Candle overlay pan: dragging=%1 pan=(%2,%3) visFirst=%4 visLast=%5")
+            sLog_Probe("candles.frame", QString("overlay pan: dragging=%1 pan=(%2,%3) visFirst=%4 visLast=%5")
                        .arg(dragging ? "true" : "false")
                        .arg(pan.x(), 0, 'f', 1)
                        .arg(pan.y(), 0, 'f', 1)
