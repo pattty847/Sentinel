@@ -101,6 +101,16 @@ Write logs (`libs/core/SentinelLogging.hpp`):
 - Do not gate logging with ad-hoc env vars, and do not write side files (`/tmp/*.log`, `.cursor/debug.log`). Everything goes through Qt logging so it lands in the run log.
 - Too noisy: `QT_LOGGING_RULES="sentinel.render.debug=false"` silences a category.
 
+## 4b) See and Measure the Running App
+
+Look before you claim a visual or performance result.
+
+- Screenshot: with `sentinel-gui` running, `curl -s 'http://127.0.0.1:17100/screenshot?name=<name>'` returns `{"ok":true,"path":"./screenshots/<name>.png"}` (relative to the GUI's cwd, normally the repo root). Port is `gui.api_port` in `config/client_config.yaml`.
+- Viewing it: Claude Code reads the PNG directly; Codex opens local images mid-task on its own (verified 2026-09-27) or takes them up front with `codex exec -i <png>`.
+- Input: the dev build is a raw binary with no app bundle, so computer-use tools cannot drive it. Ask the owner to pan, zoom or click, then read the run log and screenshot.
+- Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log (section 4a).
+- CPU: `sample <pid> <seconds> -file <out>` (macOS). Work that happens outside `updatePaintNode` (Qt texture uploads, QML, other threads) only shows up here.
+
 ## 5) Hot Paths (Treat Like Live Wires)
 
 Changes here require performance caution and small diffs:
@@ -190,3 +200,9 @@ Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
 - Never pass `--dangerously-bypass-approvals-and-sandbox`.
 - Prompts must stand alone: point the agent at `AGENTS.md`, the files, the acceptance checks, and the build/test commands.
 - The delegating agent reviews the resulting diff and runs the verification ladder (section 4) before anything merges.
+
+Hand-off protocol (every delegated write task):
+1. Work in your own worktree and branch, created from current `main`.
+2. Before reporting ready, merge the latest `main` into your branch (`git merge main`), resolve any conflicts yourself, rebuild, and run `ctest` in `build/mac-clang`.
+3. Finish with a message whose first line is `READY: <branch>`, followed by: what changed and why, the tests you ran with their summary line, and anything you could not verify (visual checks, live runs). Say `BLOCKED: <branch>` with the reason instead if you cannot finish.
+4. The orchestrator reviews the diff with a different model, merges with `--no-ff`, and removes the worktree. Never merge your own branch.
