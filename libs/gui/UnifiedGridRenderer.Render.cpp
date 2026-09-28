@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include "render/FrameContextBuilder.hpp"
 #include "render/HeatmapIntensityNode.hpp"
+#include "render/HeatmapRowGrouping.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
@@ -204,6 +205,12 @@ void UnifiedGridRenderer::renderOverlays(
                                  drawRect,
                                  srcRect,
                                  heatmapUploads);
+    if (texNode) {
+        const int rowGroup = (drawHeatmap && srcRect.height() > 0.0)
+            ? heatmap_rows::rowsPerDisplayRow(drawRect.height() / srcRect.height(), m_heatmapTargetRowPx)
+            : 1;
+        texNode->setRowGrouping(rowGroup, heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup));
+    }
     m_footprintOverlay.render(window(),
                               texNode,
                               drawFootprint,
@@ -292,9 +299,13 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
                                snapshot.liquidityAvailable &&
                                m_labelRingGridWidth == gridWidth &&
                                m_labelRingGridHeight == gridHeight);
-    const float cellH = (srcRectCurrent.height() > 0.0f)
+    const float baseRowH = (srcRectCurrent.height() > 0.0f)
         ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
         : 0.0f;
+    // Display tick: labels follow the same row groups as the heatmap shader.
+    const int rowGroup = heatmap_rows::rowsPerDisplayRow(baseRowH, m_heatmapTargetRowPx);
+    const int rowPhase = heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup);
+    const float cellH = baseRowH * static_cast<float>(rowGroup);
     const float cellW = (srcRectCurrent.width() > 0.0f)
         ? static_cast<float>(drawRect.width()) / static_cast<float>(srcRectCurrent.width())
         : 0.0f;
@@ -348,10 +359,14 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
                                            m_labelLiquidityScales,
                                            scale,
                                            dollars,
-                                           m_heatmapLabelGlyphs);
+                                           m_heatmapLabelGlyphs,
+                                           -1,
+                                           rowGroup,
+                                           rowPhase);
     sLog_Probe("text.submit",
                "glyphs=" << m_heatmapLabelGlyphs.size()
-               << " cellH=" << cellH << " cellW=" << cellW << " scale=" << scale);
+               << " cellH=" << cellH << " cellW=" << cellW << " scale=" << scale
+               << " rowGroup=" << rowGroup);
     m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 

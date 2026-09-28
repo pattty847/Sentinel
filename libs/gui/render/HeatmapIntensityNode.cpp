@@ -34,7 +34,10 @@ public:
 
         const float opacity = state.opacity();
         const QVector4D params(opacity, material->gamma(), material->contrast(), material->timeOffset());
-        const QVector4D params2(material->shaderFloor(), 0.0f, 0.0f, 0.0f);
+        const QVector4D params2(material->shaderFloor(),
+                                static_cast<float>(material->rowGroup()),
+                                static_cast<float>(material->rowPhase()),
+                                0.0f);
         memcpy(data->data() + 64, &params, sizeof(QVector4D));
         memcpy(data->data() + 64 + sizeof(QVector4D), &params2, sizeof(QVector4D));
         changed = true;
@@ -210,6 +213,12 @@ int HeatmapIntensityMaterial::compare(const QSGMaterial* other) const {
     if (m_shaderFloor != rhs->m_shaderFloor) {
         return m_shaderFloor < rhs->m_shaderFloor ? -1 : 1;
     }
+    if (m_rowGroup != rhs->m_rowGroup) {
+        return m_rowGroup < rhs->m_rowGroup ? -1 : 1;
+    }
+    if (m_rowPhase != rhs->m_rowPhase) {
+        return m_rowPhase < rhs->m_rowPhase ? -1 : 1;
+    }
     return 0;
 }
 
@@ -281,6 +290,14 @@ void HeatmapIntensityNode::setTimeOffset(float offset) {
 
 void HeatmapIntensityNode::setShaderFloor(float floor) {
     m_material.setShaderFloor(floor);
+    markDirty(QSGNode::DirtyMaterial);
+}
+
+void HeatmapIntensityNode::setRowGrouping(int rowsPerDisplayRow, int phase) {
+    if (m_material.rowGroup() == rowsPerDisplayRow && m_material.rowPhase() == phase) {
+        return;
+    }
+    m_material.setRowGrouping(rowsPerDisplayRow, phase);
     markDirty(QSGNode::DirtyMaterial);
 }
 

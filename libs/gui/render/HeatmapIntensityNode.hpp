@@ -55,6 +55,10 @@ public:
     void setContrast(float contrast) { m_contrast = contrast; }
     void setTimeOffset(float offset) { m_timeOffset = offset; }
     void setShaderFloor(float floor) { m_shaderFloor = floor; }
+    void setRowGrouping(int rowsPerDisplayRow, int phase) {
+        m_rowGroup = rowsPerDisplayRow;
+        m_rowPhase = phase;
+    }
     void enqueueColumn(int x, QByteArray data);
     void takePendingUploads(std::vector<std::pair<int, QByteArray>>& out);
 
@@ -64,6 +68,8 @@ public:
     float contrast() const { return m_contrast; }
     float timeOffset() const { return m_timeOffset; }
     float shaderFloor() const { return m_shaderFloor; }
+    int rowGroup() const { return m_rowGroup; }
+    int rowPhase() const { return m_rowPhase; }
 
 private:
     QSGTexture* m_intensityTexture = nullptr;
@@ -72,6 +78,8 @@ private:
     float m_contrast = 1.0f;
     float m_timeOffset = 0.0f;
     float m_shaderFloor = 0.1f;
+    int m_rowGroup = 1;
+    int m_rowPhase = 0;
     std::mutex m_uploadMutex;
     std::vector<std::pair<int, QByteArray>> m_pendingUploads;
 };
@@ -88,6 +96,8 @@ public:
     void setContrast(float contrast);
     void setTimeOffset(float offset);
     void setShaderFloor(float floor);
+    // Display tick: merge N base rows per display row (HeatmapRowGrouping.hpp).
+    void setRowGrouping(int rowsPerDisplayRow, int phase);
     void enqueueColumn(int x, QByteArray data);
 
 private:

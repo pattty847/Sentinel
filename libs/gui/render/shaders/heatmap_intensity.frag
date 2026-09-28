@@ -12,9 +12,45 @@ layout(std140, binding = 0) uniform buf {
     vec4 params2;
 };
 
+// Display tick: params2.y = N base rows per display row, params2.z = row phase
+// (absolute tick index of texture row 0, mod N). See HeatmapRowGrouping.hpp.
+// A display row shows its strongest base row; the encoded values are
+// log-normalized, so they cannot be summed here.
+float sampleGroupedRows(vec2 uv) {
+    ivec2 size = textureSize(intensityTex, 0);
+    int x = clamp(int(floor(uv.x * float(size.x))), 0, size.x - 1);
+    int r = clamp(int(floor(uv.y * float(size.y))), 0, size.y - 1);
+    int n = int(params2.y + 0.5);
+    int phase = int(params2.z + 0.5);
+    if (n <= 1) {
+        return texelFetch(intensityTex, ivec2(x, r), 0).r;
+    }
+    int rel = phase - r;
+    int bucket = (rel >= 0) ? rel / n : -((-rel + n - 1) / n);
+    int first = phase - bucket * n - (n - 1);
+    int lo = max(first, 0);
+    int hi = min(first + n - 1, size.y - 1);
+    int stride = max(1, (hi - lo + 64) / 64);
+    float best = 0.0;
+    float bestEncoded = 0.0;
+    for (int i = 0; i < 64; ++i) {
+        int row = lo + i * stride;
+        if (row > hi) {
+            break;
+        }
+        float e = texelFetch(intensityTex, ivec2(x, row), 0).r;
+        float mag = (e >= 0.5) ? (e - 0.5) : e;
+        if (mag > best) {
+            best = mag;
+            bestEncoded = e;
+        }
+    }
+    return bestEncoded;
+}
+
 void main() {
     vec2 uv = vec2(fract(v_texcoord.x + params.w), v_texcoord.y);
-    float encoded = texture(intensityTex, uv).r;
+    float encoded = sampleGroupedRows(uv);
     if (encoded <= 0.0001) {
         fragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;

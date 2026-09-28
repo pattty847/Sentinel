@@ -26,7 +26,9 @@ public:
                                  float scale,
                                  bool dollars,
                                  std::vector<ChartGlyphInstance>& glyphs,
-                                 int onlyColumn = -1);
+                                 int onlyColumn = -1,
+                                 int rowGroup = 1,
+                                 int rowPhase = 0);
 
 private:
     static QString formatLiquidityLabel(double value, bool dollars);

@@ -134,6 +134,7 @@ private:
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
+    int m_heatmapTargetRowPx = 12;  // display tick target (heatmap.target_row_px)
     int m_heatmapLabelPx = 14;
     int m_primaryField = 0;
     bool m_heatmapLayerEnabled = true;
