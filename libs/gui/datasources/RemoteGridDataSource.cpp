@@ -90,6 +90,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::recordingHeatmapHistoryReceived,
+            this, &IGridDataSource::recordingHeatmapHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::recordingHeatmapHistoryError,
+            this, &IGridDataSource::recordingHeatmapHistoryError, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
             this, &RemoteGridDataSource::onCandleBarUpdateReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarClosedReceived,
@@ -149,6 +153,11 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
                                                  int64_t endTimeMs,
                                                  int count) {
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
+void RemoteGridDataSource::requestRecordingHeatmapHistory(
+    const protocol::recordingwire::Request& request) {
+    m_client.requestRecordingHeatmapHistory(request);
 }
 
 void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,

@@ -60,6 +60,12 @@ target_link_libraries(test_sentinel_stream_client_parse_helpers PRIVATE
 add_test(NAME SentinelStreamClientParseHelperTests COMMAND test_sentinel_stream_client_parse_helpers)
 set_tests_properties(SentinelStreamClientParseHelperTests PROPERTIES LABELS "marketdata")
 
+add_executable(test_recording_history_wire test_recording_history_wire.cpp)
+target_include_directories(test_recording_history_wire PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_recording_history_wire PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RecordingHistoryWireTests COMMAND test_recording_history_wire)
+set_tests_properties(RecordingHistoryWireTests PROPERTIES LABELS "marketdata")
+
 # Custom target to run all marketdata tests
 add_custom_target(marketdata_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L marketdata
@@ -68,6 +74,7 @@ add_custom_target(marketdata_tests
         test_subscription_manager
         test_protocol_validation
         test_sentinel_stream_client_parse_helpers
+        test_recording_history_wire
     COMMENT "Running market data refactor tests"
 )
 

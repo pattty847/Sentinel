@@ -17,6 +17,7 @@ public:
                                int64_t timeframeMs,
                                int64_t endTimeMs,
                                int count) override;
+    void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) override;
     void requestFootprintHistory(const QString& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
