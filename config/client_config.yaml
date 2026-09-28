@@ -3,7 +3,7 @@
 # User-specific overrides go in config/.client_config.yaml (not tracked in git).
 
 heatmap:
-  source: legacy # recording requires server recording.available
+  source: recording # recording requires server recording.available
   # Visual settings (client only)
   gamma: 1.05
   contrast: 1.15

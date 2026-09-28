@@ -434,6 +434,7 @@ Each feature is a self-contained block. Use this template:
 - [ ] Price-axis tick labels vs heatmap cell size: make them agree (axis showed $20 and $200 steps; cells $20 and $100)
 - [ ] Candles overlap the price axis when panned next to it (clip to the plot area / draw behind the axis)
 - [ ] Smooth level-of-detail transitions: keep the previous band on screen until the new one arrives (no black flash), then crossfade
+- [ ] Theme check: the colours seen in recording mode may come from the theme dropdown (owner may have switched themes); confirm which palette recording mode uses and that the dropdown applies to it
 
 #### Next
 - [ ] Make `heatmap.source: recording` the default; retire the legacy recorder (it only keeps a ~±1.2% window)
