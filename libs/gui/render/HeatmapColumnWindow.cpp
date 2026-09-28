@@ -72,9 +72,13 @@ WallsSnapshot ColumnWindow::captureWalls(const WallQuery& query) const {
     const int64_t first = align(start + m_timeframeMs - 1);
     if (first >= end) return out;
     const int64_t count = (end - first + m_timeframeMs - 1) / m_timeframeMs;
-    // Upper bound includes rows excluded by price filters. Keep the worker scan bounded.
+    // Only recorded columns are scanned (missing slots cost nothing), so budget on
+    // those: the default full-window request must work on a mostly empty window.
+    int64_t recorded = 0;
+    for (auto it = m_projected.lower_bound(first); it != m_projected.end() && it->first < end; ++it) ++recorded;
     constexpr int64_t kMaxExaminedCells = 16'000'000;
-    if (count > kMaxExaminedCells / m_rows) { out.status = 422; return out; }
+    if (recorded > kMaxExaminedCells / m_rows) { out.status = 422; return out; }
+    (void)count;
 
     const auto better = [](const Wall& a, const Wall& b) {
         if (a.qty != b.qty) return a.qty > b.qty;
@@ -82,7 +86,8 @@ WallsSnapshot ColumnWindow::captureWalls(const WallQuery& query) const {
         if (a.priceLow != b.priceLow) return a.priceLow < b.priceLow;
         return a.ask < b.ask;
     };
-    std::priority_queue<Wall, std::vector<Wall>, decltype(better)> ranked(better);
+    // Group by (price cell, side) across the range: a wall is a level, not a minute.
+    std::map<std::pair<int64_t, bool>, Wall> levels;
     for (int64_t bucket = first; bucket < end; bucket += m_timeframeMs) {
         const auto it = m_projected.find(bucket);
         if (it == m_projected.end()) { ++out.missingColumns; continue; }
@@ -107,13 +112,32 @@ WallsSnapshot ColumnWindow::captureWalls(const WallQuery& query) const {
             Wall wall{bucket, low, high, (encoded & 0x8000u) != 0, qty,
                       qty * (low + high) / 2.0, false};
             if (!std::isfinite(wall.notional)) continue;
-            if (ranked.size() < static_cast<size_t>(query.limit)) ranked.push(wall);
-            else if (better(wall, ranked.top())) { ranked.pop(); ranked.push(wall); }
+            const auto key = std::make_pair(static_cast<int64_t>(std::llround(low / column.tickSize)), wall.ask);
+            auto [lvl, added] = levels.try_emplace(key, wall);
+            Wall& w = lvl->second;
+            if (added) {
+                w.firstSeenMs = bucket;
+                w.meanQty = 0.0;
+            } else if (qty > w.qty) {
+                w.qty = qty;
+                w.notional = wall.notional;
+                w.bucketStartMs = bucket;
+            }
+            w.meanQty += qty;
+            w.lastSeenMs = bucket;
+            ++w.columns;
         }
     }
-    out.walls.reserve(ranked.size());
-    while (!ranked.empty()) { out.walls.push_back(ranked.top()); ranked.pop(); }
-    std::reverse(out.walls.begin(), out.walls.end());
+    std::vector<Wall> ranked;
+    ranked.reserve(levels.size());
+    for (auto& [key, w] : levels) {
+        w.meanQty = out.recordedColumns > 0 ? w.meanQty / out.recordedColumns : 0.0;
+        ranked.push_back(w);
+    }
+    const size_t keep = std::min(ranked.size(), static_cast<size_t>(query.limit));
+    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(keep), ranked.end(), better);
+    ranked.resize(keep);
+    out.walls = std::move(ranked);
     return out;
 }
 

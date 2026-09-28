@@ -483,7 +483,9 @@ QJsonObject wallsJson(const WallsSnapshot& s) {
     for (const auto& w : s.data.walls) rows.append(QJsonObject{
         {"bucketStartMs", w.bucketStartMs}, {"priceLow", w.priceLow},
         {"priceHigh", w.priceHigh}, {"side", w.ask ? "ask" : "bid"},
-        {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming}});
+        {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming},
+        {"meanQty", w.meanQty}, {"firstSeenMs", w.firstSeenMs}, {"lastSeenMs", w.lastSeenMs},
+        {"columns", w.columns}});
     return envelope(s.meta, {{"basis", "recording-twap-sum"},
         {"bandTick", s.data.bandTick > 0 ? QJsonValue(s.data.bandTick) : QJsonValue(QJsonValue::Null)},
         {"loadedRange", QJsonArray{s.data.loadedStartMs, s.data.loadedEndMs}},

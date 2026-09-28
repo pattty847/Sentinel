@@ -106,3 +106,5 @@ Check the API metadata across a symbol switch, timeframe switch and disconnect/r
 Book prices are dense-book bucket starts on `orderbook.tickSize` (see `/state`), not individual exchange price levels; sizes are the bucket totals rounded to 1e-8. Best bid and best ask are bucket prices too, so they can share a bucket and `spread` can read 0 when the real spread is under one tick.
 
 Control (`POST`) and `GET /api/v1/operations/<id>` responses use the standard envelope: read `operationId`, `status`, `viewportVersion` and `frameId` under `data`. The screenshot response keeps its legacy flat shape.
+
+Walls are price levels, not minutes: each (price cell, side) appears once with `qty` = its peak aggregated resting size in the range (`bucketStartMs` = when it peaked), `meanQty` = mean over recorded columns in the range (absent = 0), `firstSeenMs`/`lastSeenMs`, and `columns` = recorded minutes it was present. Use `priceMin`/`priceMax` to look away from the mid, where coarse cells otherwise sum the dense book near the price. The scan budget counts recorded columns only.

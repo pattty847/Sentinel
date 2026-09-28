@@ -488,7 +488,10 @@ TEST(HeatmapRecordingWindow, WallsRejectLegacyAndExcessiveScans) {
     bool first = false;
     ASSERT_TRUE(recording.ingestRecording({c}, 1, "budget", bucket(10), bucket(11), false,
                                           0, bucket(10), 1e-6, 819, u, first));
-    EXPECT_EQ(recording.captureWalls({}).status, 422);
+    // The budget counts recorded columns only: one column in a 9000-slot window is
+    // a small scan and must succeed (the default request covers the whole window).
+    // An over-budget case needs > 7812 recorded 2048-row columns; not built here.
+    EXPECT_EQ(recording.captureWalls({}).status, 200);
     WallQuery narrow;
     narrow.startMs = bucket(10);
     narrow.endMs = bucket(11);

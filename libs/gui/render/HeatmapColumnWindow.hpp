@@ -83,12 +83,17 @@ struct WallQuery {
     int limit = 20;
 };
 
+// One price cell and side over the scanned time range: a wall is a level, not a
+// minute. qty is its peak aggregated resting size; bucketStartMs is when it peaked.
 struct Wall {
     int64_t bucketStartMs = 0;
     double priceLow = 0, priceHigh = 0;
     bool ask = false;
     double qty = 0, notional = 0;
     bool forming = false;
+    double meanQty = 0;          // mean over recorded columns in range (absent = 0)
+    int64_t firstSeenMs = 0, lastSeenMs = 0;
+    int columns = 0;             // recorded columns where the cell held this side
 };
 
 struct WallsSnapshot {
