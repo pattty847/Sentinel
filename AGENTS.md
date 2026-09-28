@@ -169,6 +169,15 @@ Read these only if the task actually needs them.
 
 ## 10) Cross-Agent Delegation (Codex CLI)
 
+This is the single agent-instructions file: Claude Code and Codex both read it (`CLAUDE.md` only imports it). Edit rules here, never in a copy.
+
+Routing (starting defaults; the orchestrator recalibrates them as results come in):
+- **Orchestrator (Claude Code session the owner is talking to):** direction, cross-cutting design, audits, merges, anything touching hot paths or several subsystems at once.
+- **Codex `gpt-6-sol`, effort high:** a well-specified bug fix or small feature with clear acceptance checks, in its own worktree.
+- **Codex `gpt-6-astra`, effort high or above:** harder self-contained work: deeper reasoning, larger isolated refactors, second-opinion reviews (`-s read-only`).
+- **Read-only review before merge:** a different model from the one that wrote the change.
+- A delegated agent does not delegate further unless its prompt explicitly allows it, and never merges its own branch.
+
 The owner's ChatGPT subscription can run Codex agents headless, to spread work across subscriptions.
 Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
 
