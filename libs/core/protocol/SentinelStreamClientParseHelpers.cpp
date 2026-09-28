@@ -59,6 +59,17 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
     return cfg;
 }
 
+VolumeProfileSessionBounds parseVolumeProfileSessionBounds(const nlohmann::json& msg) {
+    return {
+        msg.contains("session_start_ms")
+            ? msg.value("session_start_ms", static_cast<int64_t>(0))
+            : msg.value("session_start", static_cast<int64_t>(0)),
+        msg.contains("session_end_ms")
+            ? msg.value("session_end_ms", static_cast<int64_t>(0))
+            : msg.value("session_end", static_cast<int64_t>(0))
+    };
+}
+
 SentinelStreamClient::CandleBar parseCandleBar(const nlohmann::json& item) {
     SentinelStreamClient::CandleBar bar;
     bar.timeStartMs = item.value("time_start_ms", static_cast<int64_t>(0));

@@ -72,6 +72,10 @@ Clients request `heatmap_history_request` with `symbol`, `timeframe_ms`, `end_ti
 
 `DataProcessor` keeps a bounded, time-keyed column cache on its worker thread; live slices and history pages both land in it and nothing is discarded because of what is on screen. The GPU ring is a window of `grid_width` consecutive buckets onto that cache: each bucket owns a fixed ring slot, so following live or panning slides the window by rewriting only the slots of buckets that enter it. While the window reaches the newest live bucket it keeps sliding with live data; when the view pans back, the window stays put, live columns go to the cache, and returning to the live edge restores them without a refetch. The worker requests pages for buckets near the view that are neither cached nor known missing; a short page marks everything older than its end as known, and `oldest_available_ms` marks the storage floor. Columns from other price bands are resampled into the window's band (merged rows keep the stronger magnitude), and server recenters rebuild the window instead of clearing it or moving the view. A per-column coverage mask shades missing buckets, live gaps included, while recorded all-zero columns stay unshaded. The chart shows an in-flight history state and reports the storage floor when a manual view reaches it. A history page's `grid_width` is its page size and never resizes the window.
 
+## Volume profile stream
+
+`volume_profile_slice` carries `schema_version` for the volume profile family. Session boundaries are Unix milliseconds in `session_start_ms` and `session_end_ms`. The client also accepts legacy `session_start` and `session_end` fields when the corresponding `*_ms` field is absent; the suffixed fields take precedence.
+
 ## File layout
 
 ```
