@@ -148,6 +148,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
                 return;
             }
             setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
+            emit priceInteracted();
         }
         m_zoomFactor = newZoom;
         if (m_autoScrollEnabled) {
@@ -200,6 +201,7 @@ void GridViewState::handlePanEnd(bool applyViewport) {
                    m_visibleTimeEnd_ms + timeDelta,
                    m_minPrice + priceDelta,
                    m_maxPrice + priceDelta);
+        if (priceDelta != 0.0) emit priceInteracted();
     }
 }
 
@@ -284,6 +286,7 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
     }
 
     setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, newMinPrice, newMaxPrice);
+    emit priceInteracted();
     m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
@@ -352,6 +355,7 @@ void GridViewState::panUp() {
         m_minPrice + panAmount,
         m_maxPrice + panAmount
     );
+    emit priceInteracted();
 }
 
 void GridViewState::panDown() {
@@ -365,6 +369,7 @@ void GridViewState::panDown() {
         m_minPrice - panAmount,
         m_maxPrice - panAmount
     );
+    emit priceInteracted();
 }
 
 double GridViewState::calculateOptimalPriceResolution() const {

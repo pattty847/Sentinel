@@ -80,6 +80,9 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
+    connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
+        if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
+    });
     
     QMetaObject::invokeMethod(
         m_dataProcessor.get(),

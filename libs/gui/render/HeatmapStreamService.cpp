@@ -9,6 +9,7 @@
 #include <QDateTime>
 #include <QtEndian>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 HeatmapStreamService::HeatmapStreamService(QObject* parent)
@@ -142,6 +143,7 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
         return result;
     }
     m_stream->updateTimeOffset(0.0f);
+    m_priceBandReady = true;
     overlay.setHistoryCoverage(update.coverage);
 
     if (update.band.tickSize != m_tickSize) {
@@ -162,7 +164,8 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
 
     // ── Viewport initialization and non-smooth follow ────────────────────────
     const int64_t anchorMs = update.liveBucketMs > 0 ? update.liveBucketMs : update.windowEndMs;
-    if (!m_viewportInitialized && viewState && m_autoScrollController) {
+    if (!m_viewportInitialized && viewState && m_autoScrollController &&
+        (viewState->isAutoScrollEnabled() || m_autoScrollController->priceCenterPending())) {
         m_viewportInitialized = m_autoScrollController->initializeViewport(
             *viewState, *m_stream, anchorMs, static_cast<int>(cadenceMs));
     }
@@ -274,13 +277,12 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
     if (m_stream) {
         m_stream->reset(m_gridWidth, m_gridHeight, minPrice, maxPrice, tickSize);
     }
+    m_priceBandReady = minPrice < maxPrice && std::isfinite(minPrice) && std::isfinite(maxPrice);
     if (m_autoScrollController) {
         m_autoScrollController->resetSpan();
     }
-    m_viewportInitialized = false;
-
-    // Set an initial viewport if data range is valid
-    if (viewState && minPrice < maxPrice && m_gridWidth > 0) {
+    // Preserve an established view through band changes, including manual price pans.
+    if (viewState && !viewState->isTimeWindowValid() && minPrice < maxPrice && m_gridWidth > 0) {
         const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
             ? m_timeAuthority.activeTimeframeMs()
             : 1000;
@@ -324,6 +326,51 @@ void HeatmapStreamService::setInitialPricePct(int pct) {
 void HeatmapStreamService::resetAutoScrollSpan() {
     if (m_autoScrollController) {
         m_autoScrollController->resetSpan();
+    }
+}
+
+void HeatmapStreamService::resetPriceCenter() {
+    if (m_autoScrollController) m_autoScrollController->resetPriceCenter();
+    m_viewportInitialized = false;
+    m_priceBandReady = false;
+}
+
+void HeatmapStreamService::setLiveBook(double bid, double ask, GridViewState* viewState) {
+    if (!m_autoScrollController) return;
+    m_autoScrollController->setLiveBook(bid, ask);
+    applyPendingPriceCenter(viewState);
+}
+
+void HeatmapStreamService::setLastTrade(double price, GridViewState* viewState) {
+    if (!m_autoScrollController) return;
+    m_autoScrollController->setLastTrade(price);
+    applyPendingPriceCenter(viewState);
+}
+
+void HeatmapStreamService::requestPriceCenter(GridViewState* viewState) {
+    if (!m_autoScrollController) return;
+    m_autoScrollController->requestPriceCenter();
+    applyPendingPriceCenter(viewState);
+}
+
+void HeatmapStreamService::cancelPriceCenter() {
+    if (m_autoScrollController) m_autoScrollController->cancelPriceCenter();
+}
+
+void HeatmapStreamService::applyPendingPriceCenter(GridViewState* viewState) {
+    if (!viewState || !m_autoScrollController || !m_priceBandReady ||
+        !m_autoScrollController->priceCenterPending()) return;
+    const auto snapshot = m_stream ? m_stream->snapshot() : HeatmapStreamState::Snapshot{};
+    double span = viewState->getMaxPrice() - viewState->getMinPrice();
+    if (m_autoScrollController->initialPriceCenterPending() && snapshot.maxPrice > snapshot.minPrice &&
+        std::isfinite(snapshot.maxPrice) && std::isfinite(snapshot.minPrice)) {
+        span = snapshot.maxPrice - snapshot.minPrice;
+        const int pct = m_autoScrollController->initialPricePct();
+        if (pct > 0 && pct < 100) span *= static_cast<double>(pct) / 100.0;
+    }
+    if (m_autoScrollController->applyPendingPriceCenter(*viewState, span)) {
+        sLog_Render("Price viewport centered: price=[" << viewState->getMinPrice() << ".."
+                    << viewState->getMaxPrice() << "] span=" << span);
     }
 }
 

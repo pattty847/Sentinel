@@ -102,7 +102,19 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
-  Q_UNUSED(trade);
+  if (QString::fromStdString(trade.product_id) == m_activeSymbol && m_heatmapStreamService) {
+    m_heatmapStreamService->setLastTrade(trade.price, m_viewState.get());
+  }
+}
+
+void UnifiedGridRenderer::setLiveBookTop(double bestBid, double bestAsk) {
+  if (m_heatmapStreamService) {
+    m_heatmapStreamService->setLiveBook(bestBid, bestAsk, m_viewState.get());
+  }
+}
+
+void UnifiedGridRenderer::resetLivePriceCenter() {
+  if (m_heatmapStreamService) m_heatmapStreamService->resetPriceCenter();
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
@@ -344,6 +356,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   sLog_Render("active symbol changed, clearing chart data: prev=" << m_activeSymbol
               << " symbol=" << normalized);
   m_activeSymbol = normalized;
+  resetLivePriceCenter();
   clearData();
   if (m_dataProcessor) {
     QMetaObject::invokeMethod(m_dataProcessor.get(),
@@ -689,7 +702,14 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
   if (m_viewState) {
+    const bool wasEnabled = m_viewState->isAutoScrollEnabled();
     m_viewState->enableAutoScroll(enabled);
+    if (!enabled && m_heatmapStreamService) {
+      m_heatmapStreamService->cancelPriceCenter();
+    }
+    if (enabled && !wasEnabled && m_heatmapStreamService) {
+      m_heatmapStreamService->requestPriceCenter(m_viewState.get());
+    }
     update();
     emit autoScrollEnabledChanged();
     sLog_Render("auto-scroll enabled=" << enabled << " reason=request");
@@ -1245,6 +1265,11 @@ void UnifiedGridRenderer::addTrade(const Trade &trade) {
 }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) {
+  if (m_viewState && (priceMin != m_viewState->getMinPrice() ||
+                      priceMax != m_viewState->getMaxPrice())) {
+    m_viewState->enableAutoScroll(false);
+    if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
+  }
   onViewChanged(timeStart, timeEnd, priceMin, priceMax);
 }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {

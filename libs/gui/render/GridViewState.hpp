@@ -52,6 +52,7 @@ signals:
     void viewportChanged();
     void panVisualOffsetChanged();
     void autoScrollEnabledChanged();
+    void priceInteracted();
 
 private:
     qint64 m_visibleTimeStart_ms = 0;

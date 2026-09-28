@@ -2,6 +2,12 @@
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
+add_executable(test_PriceCenteringPolicy test_PriceCenteringPolicy.cpp)
+target_include_directories(test_PriceCenteringPolicy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_PriceCenteringPolicy PRIVATE GTest::gtest_main)
+add_test(NAME PriceCenteringPolicyTests COMMAND test_PriceCenteringPolicy)
+set_tests_properties(PriceCenteringPolicyTests PROPERTIES LABELS "render")
+
 add_executable(test_TimeAxisMapping test_TimeAxisMapping.cpp)
 target_include_directories(test_TimeAxisMapping PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui

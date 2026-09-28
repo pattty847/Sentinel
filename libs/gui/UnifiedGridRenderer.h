@@ -271,6 +271,8 @@ public:
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     void setActiveSymbol(const QString& symbol);
+    void setLiveBookTop(double bestBid, double bestAsk);
+    void resetLivePriceCenter();
     Q_INVOKABLE void setHeatmapColorPreset(const QString& preset);
     
     Q_INVOKABLE void setPriceResolution(double resolution);
