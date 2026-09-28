@@ -1,11 +1,11 @@
 // Pure functions for world-to-screen coordinate transforms; assumes inverted Y-axis (0 at top).
 #include "CoordinateSystem.h"
-#include <QDebug>
+#include "SentinelLogging.hpp"
 #include <cmath>
 
 QPointF CoordinateSystem::worldToScreen(int64_t timestamp_ms, double price, const Viewport& viewport) {
     if (!validateViewport(viewport)) {
-        qWarning() << "Invalid viewport:" << viewportDebugString(viewport);
+        sLog_RenderN(1000, "worldToScreen: invalid viewport " << viewportDebugString(viewport));
         return QPointF(0, 0);
     }
     
@@ -21,6 +21,7 @@ QPointF CoordinateSystem::worldToScreen(int64_t timestamp_ms, double price, cons
 
 QPointF CoordinateSystem::screenToWorld(const QPointF& screenPos, const Viewport& viewport) {
     if (!validateViewport(viewport)) {
+        sLog_RenderN(1000, "screenToWorld: invalid viewport " << viewportDebugString(viewport));
         return QPointF(0, 0);
     }
 

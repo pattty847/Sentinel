@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include <QDir>
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
@@ -11,7 +12,10 @@ int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
     ServerConfig serverConfig;
-    ConfigLoader::loadServerConfig("config/server_config.yaml", &serverConfig);
+    if (!ConfigLoader::loadServerConfig("config/server_config.yaml", &serverConfig)) {
+        sLog_Warning("Server config not loaded, using defaults: path=config/server_config.yaml"
+                     << " cwd=" << QDir::currentPath());
+    }
     ConfigLoader::loadServerConfig("config/.server_config.yaml", &serverConfig);
     
     SentinelServerApp serverApp(serverConfig);

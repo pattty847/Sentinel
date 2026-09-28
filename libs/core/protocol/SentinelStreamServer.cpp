@@ -147,6 +147,7 @@ class Session : public std::enable_shared_from_this<Session> {
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
     SentinelStreamServer* owner_ = nullptr;
+    std::string peer_;  // "ip:port" of the client, for log lines only
     std::unordered_set<std::string> subscriptions_;
     std::deque<std::string> write_queue_;
     std::atomic_size_t pendingWriteBytes_{0};
@@ -221,6 +222,10 @@ class Session : public std::enable_shared_from_this<Session> {
         const size_t queued = pendingModelEvents_.fetch_add(1, std::memory_order_relaxed);
         if (queued >= kMaxPendingModelEvents) {
             pendingModelEvents_.fetch_sub(1, std::memory_order_relaxed);
+            if (!closePosted_.load(std::memory_order_relaxed)) {
+                sLog_Warning("Closing slow client: peer=" << peer_ << " model event backlog exceeded"
+                             << " queued=" << queued << " limit=" << kMaxPendingModelEvents);
+            }
             requestClose("model event backlog exceeded");
             return;
         }
@@ -251,6 +256,7 @@ class Session : public std::enable_shared_from_this<Session> {
             owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
             m_tradingBroadcasterRegistered = false;
         }
+        const size_t subscriptionCount = subscriptions_.size();
         if (owner_) {
             for (const auto& symbol : subscriptions_) {
                 owner_->notifyClientUnsubscribed(symbol);
@@ -273,7 +279,8 @@ class Session : public std::enable_shared_from_this<Session> {
         if (owner_) {
             owner_->unregisterSession(this);
         }
-        sLog_App("Sentinel client session closed: " << reason);
+        sLog_App("Sentinel client session closed: peer=" << peer_ << " reason=" << reason
+                 << " subscriptions=" << subscriptionCount);
     }
 
     bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
@@ -406,16 +413,13 @@ class Session : public std::enable_shared_from_this<Session> {
             outMinPrice = latest.minPrice;
             outMaxPrice = latest.maxPrice;
             if (outTickSize > 0.0 && outMaxPrice > outMinPrice) {
-                sentinel::log_file::appendLine(
-                    "/tmp/sentinel_tpo_server.log",
-                    QString("TPO bootstrap range from heatmap history: symbol=%1 tfMs=%2 grid=%3x%4 range=[%5..%6] tick=%7")
-                        .arg(QString::fromStdString(symbol))
-                        .arg(heatmapTfMs)
-                        .arg(outGridWidth)
-                        .arg(outGridHeight)
-                        .arg(outMinPrice, 0, 'f', 4)
-                        .arg(outMaxPrice, 0, 'f', 4)
-                        .arg(outTickSize, 0, 'g', 10));
+                sLog_Probe("tpo.bootstrap",
+                           "range source=heatmap_history symbol=" << symbol
+                           << " tfMs=" << heatmapTfMs
+                           << " grid=" << outGridWidth << "x" << outGridHeight
+                           << " range=[" << QString::number(outMinPrice, 'f', 4)
+                           << ".." << QString::number(outMaxPrice, 'f', 4) << "]"
+                           << " tick=" << QString::number(outTickSize, 'g', 10));
                 return true;
             }
         }
@@ -427,15 +431,12 @@ class Session : public std::enable_shared_from_this<Session> {
                                                      outMinPrice,
                                                      outMaxPrice);
         if (ok) {
-            sentinel::log_file::appendLine(
-                "/tmp/sentinel_tpo_server.log",
-                QString("TPO bootstrap range fallback to live book: symbol=%1 grid=%2x%3 range=[%4..%5] tick=%6")
-                    .arg(QString::fromStdString(symbol))
-                    .arg(outGridWidth)
-                    .arg(outGridHeight)
-                    .arg(outMinPrice, 0, 'f', 4)
-                    .arg(outMaxPrice, 0, 'f', 4)
-                    .arg(outTickSize, 0, 'g', 10));
+            sLog_Probe("tpo.bootstrap",
+                       "range source=live_book symbol=" << symbol
+                       << " grid=" << outGridWidth << "x" << outGridHeight
+                       << " range=[" << QString::number(outMinPrice, 'f', 4)
+                       << ".." << QString::number(outMaxPrice, 'f', 4) << "]"
+                       << " tick=" << QString::number(outTickSize, 'g', 10));
         }
         return ok;
     }
@@ -610,15 +611,12 @@ class Session : public std::enable_shared_from_this<Session> {
                              << " error=" << QString::fromStdString(res.error));
                 continue;
             }
-            sentinel::log_file::appendLine(
-                "/tmp/sentinel_tpo_server.log",
-                QString("TPO bootstrap candle chunk: symbol=%1 tfSec=%2 chunk=[%3..%4] limit=%5 returned=%6")
-                    .arg(QString::fromStdString(symbol))
-                    .arg(timeframeSec)
-                    .arg(cursorSec)
-                    .arg(chunkEndSec)
-                    .arg(limit)
-                    .arg(static_cast<int>(res.candles.size())));
+            sLog_Probe("tpo.bootstrap",
+                       "candle chunk symbol=" << symbol
+                       << " tfSec=" << timeframeSec
+                       << " chunk=[" << cursorSec << ".." << chunkEndSec << "]"
+                       << " limit=" << limit
+                       << " returned=" << res.candles.size());
             for (const auto& bar : res.candles) {
                 if (bar.timestamp_ms < startMs || bar.timestamp_ms >= endMs) {
                     continue;
@@ -640,14 +638,11 @@ class Session : public std::enable_shared_from_this<Session> {
                   [](const OHLCVBar& a, const OHLCVBar& b) {
                       return a.timestamp_ms < b.timestamp_ms;
                   });
-        sentinel::log_file::appendLine(
-            "/tmp/sentinel_tpo_server.log",
-            QString("TPO bootstrap candle summary: symbol=%1 tfSec=%2 window=[%3..%4] kept=%5")
-                .arg(QString::fromStdString(symbol))
-                .arg(timeframeSec)
-                .arg(startSec)
-                .arg(endSec)
-                .arg(static_cast<int>(out.size())));
+        sLog_Probe("tpo.bootstrap",
+                   "candle summary symbol=" << symbol
+                   << " tfSec=" << timeframeSec
+                   << " window=[" << startSec << ".." << endSec << "]"
+                   << " kept=" << out.size());
         return true;
     }
 
@@ -753,6 +748,8 @@ class Session : public std::enable_shared_from_this<Session> {
         double minPrice = 0.0;
         double maxPrice = 0.0;
         if (!resolveTpoGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
+            sLog_Warning("Footprint history not sent: no grid/price range for symbol=" << symbol
+                         << " tfMs=" << timeframeMs << " end=" << endTimeMs);
             return;
         }
 
@@ -811,6 +808,10 @@ class Session : public std::enable_shared_from_this<Session> {
             item["delta_levels_q16"] = deltaLevelsQ16.toBase64().toStdString();
             columns.push_back(std::move(item));
         }
+        sLog_Data("Footprint history sent: symbol=" << symbol << " tfMs=" << timeframeMs
+                  << " window=[" << firstStart << ".." << effectiveEnd << "]"
+                  << " requested=" << count << " columns=" << columns.size()
+                  << " grid=" << gridWidth << "x" << gridHeight);
         payload["columns"] = std::move(columns);
         do_write(payload.dump());
     }
@@ -828,6 +829,8 @@ class Session : public std::enable_shared_from_this<Session> {
         double minPrice = 0.0;
         double maxPrice = 0.0;
         if (!resolveFootprintGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
+            sLog_Warning("TPO history not sent: no grid/price range for symbol=" << symbol
+                         << " tfMs=" << timeframeMs << " end=" << endTimeMs);
             return;
         }
 
@@ -850,6 +853,8 @@ class Session : public std::enable_shared_from_this<Session> {
         const auto sessionBoundary = SessionManager::sessionContaining(
             std::max<int64_t>(0, anchorMs - 1), sessionType);
         if (!sessionBoundary.valid || sessionBoundary.endMs <= sessionBoundary.startMs) {
+            sLog_Warning("TPO history not sent: no valid session for symbol=" << symbol
+                         << " anchor=" << anchorMs << " sessionType=" << static_cast<int>(sessionType));
             return;
         }
 
@@ -885,19 +890,16 @@ class Session : public std::enable_shared_from_this<Session> {
                 candlesByBucket[bucketStart].push_back(bar);
             }
         }
-        sentinel::log_file::appendLine(
-            "/tmp/sentinel_tpo_server.log",
-            QString("TPO history bootstrap: symbol=%1 session=[%2..%3] tfMs=%4 periods=%5 requested=%6 firstStart=%7 availableEnd=%8 minuteCandles=%9 bucketsWithCandles=%10")
-                .arg(QString::fromStdString(symbol))
-                .arg(sessionStart)
-                .arg(sessionEnd)
-                .arg(timeframeMs)
-                .arg(payloadGridWidth)
-                .arg(effectiveCount)
-                .arg(firstStart)
-                .arg(availableEnd)
-                .arg(static_cast<int>(minuteCandles.size()))
-                .arg(static_cast<int>(candlesByBucket.size())));
+        sLog_Probe("tpo.bootstrap",
+                   "history symbol=" << symbol
+                   << " session=[" << sessionStart << ".." << sessionEnd << "]"
+                   << " tfMs=" << timeframeMs
+                   << " periods=" << payloadGridWidth
+                   << " requested=" << effectiveCount
+                   << " firstStart=" << firstStart
+                   << " availableEnd=" << availableEnd
+                   << " minuteCandles=" << minuteCandles.size()
+                   << " bucketsWithCandles=" << candlesByBucket.size());
 
         nlohmann::json payload;
         payload["type"] = "tpo_history_chunk";
@@ -932,19 +934,18 @@ class Session : public std::enable_shared_from_this<Session> {
                     fillTpoRowsFromBar(bar, gridHeight, maxPrice, tickSize, letter, letters);
                 }
             }
-            const auto stats = summarizeTpoLetters(letters);
-            const int minuteCount = (it != candlesByBucket.end()) ? static_cast<int>(it->second.size()) : 0;
-            sentinel::log_file::appendLine(
-                "/tmp/sentinel_tpo_server.log",
-                QString("TPO bootstrap bucket: symbol=%1 start=%2 end=%3 tfMs=%4 minuteCandles=%5 occupiedRows=%6 rowSpan=[%7..%8]")
-                    .arg(QString::fromStdString(symbol))
-                    .arg(bucketStart)
-                    .arg(bucketEnd)
-                    .arg(timeframeMs)
-                    .arg(minuteCount)
-                    .arg(stats.occupiedRows)
-                    .arg(stats.firstRow)
-                    .arg(stats.lastRow));
+            static const bool kProbeBucket = sentinel::logging::probeEnabled("tpo.bootstrap.bucket");
+            if (kProbeBucket) {
+                const auto stats = summarizeTpoLetters(letters);
+                const int minuteCount = (it != candlesByBucket.end()) ? static_cast<int>(it->second.size()) : 0;
+                sLog_Probe("tpo.bootstrap.bucket",
+                           "symbol=" << symbol
+                           << " start=" << bucketStart << " end=" << bucketEnd
+                           << " tfMs=" << timeframeMs
+                           << " minuteCandles=" << minuteCount
+                           << " occupiedRows=" << stats.occupiedRows
+                           << " rowSpan=[" << stats.firstRow << ".." << stats.lastRow << "]");
+            }
             nlohmann::json item;
             item["time_start"] = bucketStart;
             item["time_end"] = bucketEnd;
@@ -955,6 +956,11 @@ class Session : public std::enable_shared_from_this<Session> {
             item["letters"] = letters.toBase64().toStdString();
             columns.push_back(std::move(item));
         }
+        sLog_Data("TPO history sent: symbol=" << symbol << " tfMs=" << timeframeMs
+                  << " session=[" << sessionStart << ".." << sessionEnd << "]"
+                  << " requested=" << count << " columns=" << columns.size()
+                  << " minuteCandles=" << minuteCandles.size()
+                  << " grid=" << payloadGridWidth << "x" << gridHeight);
         payload["columns"] = std::move(columns);
         do_write(payload.dump());
     }
@@ -966,6 +972,10 @@ public:
         , model_(model)
         , owner_(owner)
     {
+        beast::error_code ec;
+        const auto endpoint = beast::get_lowest_layer(ws_).socket().remote_endpoint(ec);
+        peer_ = ec ? std::string("unknown")
+                   : endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
     }
 
     ~Session() {
@@ -1019,7 +1029,7 @@ public:
         if(ec)
             return fail(ec, "accept");
 
-        sLog_App("Sentinel client connected");
+        sLog_App("Sentinel client connected: peer=" << peer_);
         auto self = shared_from_this();
         auto weak = std::weak_ptr<Session>(self);
 
@@ -1115,7 +1125,7 @@ public:
         boost::ignore_unused(bytes_transferred);
 
         if(ec == websocket::error::closed) {
-            sLog_App("Sentinel client disconnected");
+            // beginClose logs the peer, reason and subscription count.
             beginClose("peer closed");
             return;
         }
@@ -1141,7 +1151,9 @@ public:
                     if (inserted && owner_) {
                         owner_->notifyClientSubscribed(symbol);
                     }
-                    
+                    sLog_Data("Client subscribe: peer=" << peer_ << " symbol=" << symbol
+                              << " new=" << inserted << " subscriptions=" << subscriptions_.size());
+
                     nlohmann::json ack;
                     ack["type"] = "ack";
                     ack["symbol"] = symbol;
@@ -1211,12 +1223,14 @@ public:
                             }
                         });
                     if (!queued) {
-                        sLog_Warning("Rejecting heatmap history request for "
-                                     << QString::fromStdString(symbol)
-                                     << ": history worker queue is full or stopping");
+                        // send_error logs the rejection.
                         send_error("heatmap_history_request", symbol,
                                    "history worker queue is full");
                     }
+                } else {
+                    sLog_Warning("Ignoring invalid heatmap_history_request: peer=" << peer_
+                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
+                                 << " count=" << requestedCount);
                 }
             } else if (type == "footprint_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -1225,6 +1239,10 @@ public:
                 const int count = j.value("count", 0);
                 if (!symbol.empty() && timeframeMs > 0 && count > 0) {
                     streamFootprintHistory(symbol, timeframeMs, endTimeMs, count);
+                } else {
+                    sLog_Warning("Ignoring invalid footprint_history_request: peer=" << peer_
+                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
+                                 << " count=" << count);
                 }
             } else if (type == "tpo_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -1259,6 +1277,10 @@ public:
                     tpoBucketMs_ = timeframeMs;
                     tpoSessionMs_ = SessionManager::sessionDurationMs(tpoSessionType_);
                     streamTpoHistory(symbol, timeframeMs, endTimeMs, count);
+                } else {
+                    sLog_Warning("Ignoring invalid tpo_history_request: peer=" << peer_
+                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
+                                 << " count=" << count);
                 }
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");
@@ -1329,6 +1351,9 @@ public:
                         item["is_closed"] = isClosed;
                         arr.push_back(std::move(item));
                     }
+                    sLog_Data("Candle history sent: symbol=" << symbol << " tfSec=1 source=memory"
+                              << " endSec=" << endTimeSec << " limit=" << limit
+                              << " candles=" << arr.size());
                     payload["candles"] = std::move(arr);
                     do_write(payload.dump());
                     return;
@@ -1348,6 +1373,7 @@ public:
 
                 auto self = shared_from_this();
                 std::thread([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit, granularity]() {
+                    sentinel::logging::setCurrentThreadName("candle-fetch");
                     CandleFetchResult res = self->owner_->restClient().fetchProductCandles(
                         symbol, startTimeSec, endTimeSec, *granularity, limit);
 
@@ -1388,6 +1414,9 @@ public:
                         item["is_closed"] = bar.is_closed;
                         arr.push_back(std::move(item));
                     }
+                    sLog_Data("Candle history sent: symbol=" << symbol << " tfSec=" << timeframeSec
+                              << " source=rest window=[" << startTimeSec << ".." << endTimeSec << "]"
+                              << " limit=" << limit << " candles=" << arr.size());
                     payload["candles"] = std::move(arr);
 
                     self->do_write(payload.dump());
@@ -1398,7 +1427,7 @@ public:
                         auto cmd = trading::parseTradeCommandJson(msg);
                         owner_->processTradeCommand(cmd);
                     } catch (const std::exception& ex) {
-                        sLog_Error("trade_command parse error: " << ex.what());
+                        sLog_Error("trade_command parse error: peer=" << peer_ << " error=" << ex.what());
                     }
                 }
             } else if (type == "algo_command") {
@@ -1415,14 +1444,23 @@ public:
                         params.skewBps         = paramsJ.value("skew_bps", 5.0);
                         if (action == "start") {
                             if (owner_->startAlgo(algoId, symbol, params)) {
-                                sLog_App("LiveTradingSession: started " << QString::fromStdString(algoId) << " on " << QString::fromStdString(symbol));
+                                sLog_App("LiveTradingSession: started algo=" << algoId << " symbol=" << symbol
+                                         << " spreadBps=" << params.spreadBps << " orderQty=" << params.orderQty
+                                         << " maxPositionQty=" << params.maxPositionQty
+                                         << " skewBps=" << params.skewBps);
+                            } else {
+                                sLog_Warning("LiveTradingSession: start refused algo=" << algoId
+                                             << " symbol=" << symbol);
                             }
                         } else if (action == "stop") {
                             owner_->stopAlgo(algoId);
-                            sLog_App("LiveTradingSession: stopped " << QString::fromStdString(algoId));
+                            sLog_App("LiveTradingSession: stopped algo=" << algoId);
+                        } else {
+                            sLog_Warning("algo_command ignored: unknown action=" << action
+                                         << " algo=" << algoId);
                         }
                     } catch (const std::exception& ex) {
-                        sLog_Error("algo_command error: " << ex.what());
+                        sLog_Error("algo_command error: peer=" << peer_ << " error=" << ex.what());
                     }
                 }
             } else if (type == "unsubscribe") {
@@ -1431,6 +1469,8 @@ public:
                  if (removed && owner_) {
                      owner_->notifyClientUnsubscribed(symbol);
                  }
+                 sLog_Data("Client unsubscribe: peer=" << peer_ << " symbol=" << symbol
+                           << " removed=" << removed << " subscriptions=" << subscriptions_.size());
             } else if (type == "screener_request") {
                 const std::string asset   = j.value("asset", "crypto");
                 const int         limit   = j.value("limit", 50);
@@ -1438,6 +1478,7 @@ public:
 
                 auto self = shared_from_this();
                 std::thread([self, asset, limit, minVol]() {
+                    sentinel::logging::setCurrentThreadName("screener");
                     // Locate scripts/ dir relative to the server binary.
                     // Binary is at <repo>/build/<preset>/apps/sentinel-server/Debug/
                     // scripts/ is at <repo>/scripts/  (5 levels up)
@@ -1532,7 +1573,8 @@ public:
                 }).detach();
             }
         } catch (const std::exception& e) {
-            sLog_Error("Server message parse error: " << e.what());
+            sLog_Error("Server message parse error: peer=" << peer_ << " bytes=" << msg.size()
+                       << " error=" << e.what());
         }
     }
     
@@ -1635,17 +1677,13 @@ public:
         footprint["encoding"] = "base64";
         footprint["delta_levels_q16"] = footprintDeltaScratch_.toBase64().toStdString();
 
-        if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-            sLog_Debug(QString("Footprint emit: symbol=%1 t=[%2..%3] tfMs=%4 grid=%5x%6 bytes=%7 q=%8")
-                           .arg(QString::fromStdString(sym))
-                           .arg(slice.bucketStartMs)
-                           .arg(slice.bucketEndMs)
-                           .arg(slice.timeframeMs)
-                           .arg(slice.gridWidth)
-                           .arg(slice.gridHeight)
-                           .arg(footprintDeltaScratch_.size())
-                           .arg(quantScale, 0, 'g', 8));
-        }
+        sLog_Probe("footprint.emit",
+                   "symbol=" << sym
+                   << " t=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]"
+                   << " tfMs=" << slice.timeframeMs
+                   << " grid=" << slice.gridWidth << "x" << slice.gridHeight
+                   << " bytes=" << footprintDeltaScratch_.size()
+                   << " q=" << QString::number(quantScale, 'g', 8));
 
         do_write(footprint.dump());
 
@@ -1667,19 +1705,17 @@ public:
                                   tpoLetters)) {
             return;
         }
-        const auto liveTpoStats = summarizeTpoLetters(tpoLetters);
-        sentinel::log_file::appendLine(
-            "/tmp/sentinel_tpo_server.log",
-            QString("TPO live bucket emit: symbol=%1 start=%2 end=%3 tfMs=%4 occupiedRows=%5 rowSpan=[%6..%7] heatmapSlice=[%8..%9]")
-                .arg(QString::fromStdString(sym))
-                .arg(tpoBucketStart)
-                .arg(tpoBucketEnd)
-                .arg(tpoTimeframeMs)
-                .arg(liveTpoStats.occupiedRows)
-                .arg(liveTpoStats.firstRow)
-                .arg(liveTpoStats.lastRow)
-                .arg(slice.bucketStartMs)
-                .arg(slice.bucketEndMs));
+        static const bool kProbeTpoLive = sentinel::logging::probeEnabled("tpo.live");
+        if (kProbeTpoLive) {
+            const auto liveTpoStats = summarizeTpoLetters(tpoLetters);
+            sLog_Probe("tpo.live",
+                       "symbol=" << sym
+                       << " start=" << tpoBucketStart << " end=" << tpoBucketEnd
+                       << " tfMs=" << tpoTimeframeMs
+                       << " occupiedRows=" << liveTpoStats.occupiedRows
+                       << " rowSpan=[" << liveTpoStats.firstRow << ".." << liveTpoStats.lastRow << "]"
+                       << " heatmapSlice=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]");
+        }
 
         nlohmann::json tpo;
         tpo["type"] = "tpo_slice";
@@ -1786,7 +1822,6 @@ public:
         const int64_t nowMs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
-        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
 
         CandleStreamState state;
         {
@@ -1802,14 +1837,14 @@ public:
             entry.hasLast = true;
             state = entry;
         }
-        if (logBars) {
-            sLog_App("Candle bar update: symbol=" << symbol
-                                                  << " tfSec=" << tfSec
-                                                  << " start=" << bar.timestamp_ms
-                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
-                                                  << " now=" << nowMs
-                                                  << " closed=" << (bar.is_closed ? "true" : "false"));
-        }
+        sLog_Probe("candles.update",
+                   "symbol=" << sym
+                   << " tfSec=" << tfSec
+                   << " start=" << bar.timestamp_ms
+                   << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                   << " now=" << nowMs
+                   << " seq=" << state.seq
+                   << " closed=" << (bar.is_closed ? "true" : "false"));
 
         nlohmann::json item;
         item["time_start_ms"] = bar.timestamp_ms;
@@ -1840,7 +1875,6 @@ public:
         const int64_t tfSec = static_cast<int64_t>(tf);
         const std::string key = sym + "|" + std::to_string(tfSec);
         CandleStreamState state;
-        const bool logBars = qEnvironmentVariableIsSet("SENTINEL_CANDLE_BAR_LOG");
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
@@ -1852,14 +1886,13 @@ public:
             entry.hasLast = true;
             state = entry;
         }
-        if (logBars) {
-            const int64_t nowMs = state.lastSentMs;
-            sLog_App("Candle bar closed: symbol=" << symbol
-                                                  << " tfSec=" << tfSec
-                                                  << " start=" << bar.timestamp_ms
-                                                  << " end=" << (bar.timestamp_ms + tfSec * 1000)
-                                                  << " now=" << nowMs);
-        }
+        sLog_Probe("candles.closed",
+                   "symbol=" << sym
+                   << " tfSec=" << tfSec
+                   << " start=" << bar.timestamp_ms
+                   << " end=" << (bar.timestamp_ms + tfSec * 1000)
+                   << " now=" << state.lastSentMs
+                   << " seq=" << state.seq);
 
         nlohmann::json item;
         item["time_start_ms"] = bar.timestamp_ms;
@@ -1892,6 +1925,11 @@ public:
         size_t pending = pendingWriteBytes_.load(std::memory_order_relaxed);
         while (true) {
             if (bytes > kMaxPendingWriteBytes || pending > kMaxPendingWriteBytes - bytes) {
+                if (!closePosted_.load(std::memory_order_relaxed)) {
+                    sLog_Warning("Closing slow client: peer=" << peer_ << " write backlog exceeded"
+                                 << " pendingBytes=" << pending << " payloadBytes=" << bytes
+                                 << " limit=" << kMaxPendingWriteBytes);
+                }
                 requestClose("write backlog exceeded");
                 return;
             }
@@ -1909,6 +1947,8 @@ public:
     }
 
     void send_error(const std::string& context, const std::string& symbol, const std::string& message) {
+        sLog_Warning("Sending error to client: peer=" << peer_ << " context=" << context
+                     << " symbol=" << symbol << " message=" << message);
         nlohmann::json err;
         err["type"] = "error";
         err["context"] = context;
@@ -1957,7 +1997,8 @@ public:
 
     void fail(beast::error_code ec, char const* what) {
         if (ec != websocket::error::closed && ec != net::error::operation_aborted) {
-             sLog_Error("Session error: " << what << ": " << ec.message().c_str());
+             sLog_Error("Session error: peer=" << peer_ << " op=" << what
+                        << " error=" << ec.message().c_str());
         }
         beginClose(what);
     }
@@ -2064,6 +2105,11 @@ std::string SentinelStreamServer::buildHeatmapHistoryChunk(const std::string& sy
             arr.push_back(std::move(item));
         }
     }
+    sLog_Data("Heatmap history built: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " start=" << startTimeMs << " end=" << endTimeMs << " requested=" << count
+              << " ok=" << ok << " columns=" << arr.size()
+              << " grid=" << gridWidth << "x" << gridHeight
+              << " oldestAvailable=" << payload["oldest_available_ms"].get<int64_t>());
     payload["columns"] = std::move(arr);
     return payload.dump();
 }
@@ -2112,8 +2158,12 @@ void SentinelStreamServer::start() {
         m_pendingHistoryTasks.store(0, std::memory_order_release);
 
         doAccept();
+        sLog_App("SentinelStreamServer listening: port=" << m_port
+                 << " cert=" << tls.certFile
+                 << " historyWorkers=" << kHistoryWorkerCount);
 
         m_thread = std::thread([this] {
+            sentinel::logging::setCurrentThreadName("stream-server");
             while (m_running) {
                 try {
                     m_ioc.run();
@@ -2125,7 +2175,10 @@ void SentinelStreamServer::start() {
         });
         
     } catch (const std::exception& e) {
-        sLog_Error("SentinelStreamServer start failed: " << e.what());
+        sLog_Error("SentinelStreamServer start failed: port=" << m_port
+                   << " cert=" << m_serverConfig.tls.certFile
+                   << " key=" << m_serverConfig.tls.keyFile
+                   << " error=" << e.what());
         m_running = false;
         std::unique_ptr<net::thread_pool> historyWorkers;
         {

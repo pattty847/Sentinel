@@ -1,6 +1,7 @@
 #include "FootprintOverlayRenderer.hpp"
 
 #include "FootprintIntensityNode.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QColor>
 #include <QSGNode>
@@ -110,6 +111,9 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
                     continue;
                 }
                 if (upload.x < 0 || upload.x >= m_gridWidth || upload.data.size() != expectedBytes) {
+                    sLog_RenderN(1000, "Footprint column upload dropped: x=" << upload.x
+                                 << " bytes=" << upload.data.size() << " expected=" << expectedBytes
+                                 << " grid=" << m_gridWidth << "x" << m_gridHeight);
                     continue;
                 }
                 const auto* src = reinterpret_cast<const uint8_t*>(upload.data.constData());
@@ -138,9 +142,13 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
                 m_node->setTexture(footprintTexture);
                 m_textureDirty = false;
             } else {
+                sLog_RenderN(1000, "Footprint texture create failed (retry next frame): grid="
+                             << m_gridWidth << "x" << m_gridHeight);
                 m_textureDirty = true;
             }
         } else {
+            sLog_RenderN(1000, "Footprint image alloc failed (retry next frame): grid="
+                         << m_gridWidth << "x" << m_gridHeight);
             m_textureDirty = true;
         }
     }

@@ -88,7 +88,7 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 2. Declare the coordinate contract in a header comment.
 3. If world-semantic, use `TimeAxisMapping` helpers only.
 4. If texture-semantic, document ring vs timeline semantics for X and Y separately.
-5. Add a single debug log line (behind `SENTINEL_CHART_DEBUG`) showing the active domains.
+5. Add a single probe (`sLog_Probe("viewport.domains", ...)`, enabled with `SENTINEL_PROBES`) showing the active domains.
 6. When introducing a new mapping rule, add or update an invariant in `_agent/INVARIANTS.md`.
 
 ## 7. Reference regression (TPO VerticalTimeline)

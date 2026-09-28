@@ -171,12 +171,13 @@ bool HeatmapColumnStore::acquireLock() {
             sLog_Warning("HeatmapColumnStore: lock " << m_lockPath
                          << " held by another process; refusing to start writer");
         } else {
-            sLog_Error("HeatmapColumnStore: flock failed errno=" << err);
+            sLog_Error("HeatmapColumnStore: flock " << m_lockPath << " failed errno=" << err);
         }
         return false;
     }
     m_lockFd = fd;
 #endif
+    sLog_Data("HeatmapColumnStore: writer lock acquired: path=" << m_lockPath);
     return true;
 }
 
@@ -232,6 +233,8 @@ HeatmapColumnStore::openOrGet(const DayWriterKey& key,
                 }
                 writerIt->second.stream.close();
             }
+            sLog_Data("HeatmapColumnStore: closed day file for rotation: path=" << writerIt->second.path
+                      << " nextDay=" << formatDayDir(key.dayStartMs));
             writerIt = m_writers.erase(writerIt);
         } else {
             ++writerIt;
@@ -327,10 +330,25 @@ HeatmapColumnStore::openOrGet(const DayWriterKey& key,
             header.gridHeight != gridHeight ||
             header.liquidityFormat != liquidityFormat ||
             header.dayStartMs != key.dayStartMs) {
-            sLog_Error("HeatmapColumnStore: header config mismatch in " << w.path);
+            sLog_Error("HeatmapColumnStore: header config mismatch in " << w.path
+                       << " — refusing to write: file tfMs=" << header.timeframeMs
+                       << " gridHeight=" << header.gridHeight
+                       << " liq=" << static_cast<int>(header.liquidityFormat)
+                       << " dayStart=" << header.dayStartMs
+                       << " wanted tfMs=" << key.timeframeMs
+                       << " gridHeight=" << gridHeight
+                       << " liq=" << static_cast<int>(liquidityFormat)
+                       << " dayStart=" << key.dayStartMs);
             return nullptr;
         }
     }
+
+    sLog_Data("HeatmapColumnStore: opened day file: path=" << w.path
+              << " new=" << isNew
+              << " tfMs=" << key.timeframeMs
+              << " gridHeight=" << gridHeight
+              << " liq=" << static_cast<int>(liquidityFormat)
+              << " slots=" << w.slotsPerDay);
 
     w.lastFlush = std::chrono::steady_clock::now();
 
@@ -592,8 +610,9 @@ HeatmapColumnStore::scanFileBackwards(const fs::path& file,
         }
         if (crc != rec.recordCrc32) {
             if (crcFails) ++(*crcFails);
-            sLog_Warning("HeatmapColumnStore: record CRC mismatch in " << file
-                         << " slot=" << slot << " — skipping");
+            // Callers log one summary warning per scan; per-record detail is a probe.
+            sLog_Probe("persist.crc", "file=" << file.string() << " slot=" << slot
+                       << " bucketStart=" << rec.bucketStartMs);
             continue;
         }
 
@@ -651,7 +670,8 @@ bool HeatmapColumnStore::loadRecent(const std::string& symbol,
     out.assign(reverseAccum.rbegin(), reverseAccum.rend());
     if (crcFails > 0) {
         sLog_Warning("HeatmapColumnStore: " << crcFails
-                     << " record(s) skipped due to CRC failure in " << file);
+                     << " record(s) skipped due to CRC failure in " << file
+                     << " (enable probe persist.crc for slots)");
     }
     return !out.empty();
 }
@@ -721,9 +741,16 @@ bool HeatmapColumnStore::fetchRange(const std::string& symbol,
     out.assign(reverseAccum.rbegin(), reverseAccum.rend());
     if (totalCrcFails > 0) {
         sLog_Warning("HeatmapColumnStore: " << totalCrcFails
-                     << " record(s) skipped due to CRC failure across "
-                     << kMaxDaysScanned << "-day fetchRange scan");
+                     << " record(s) skipped due to CRC failure in fetchRange: symbol=" << symbol
+                     << " tfMs=" << timeframeMs << " end=" << endMs << " start=" << startMs
+                     << " (enable probe persist.crc for slots)");
     }
+    sLog_Probe("persist.fetch",
+               "symbol=" << symbol << " tfMs=" << timeframeMs
+               << " start=" << startMs << " end=" << endMs << " maxCount=" << maxCount
+               << " returned=" << out.size()
+               << " first=" << (out.empty() ? 0 : out.front().bucketStartMs)
+               << " last=" << (out.empty() ? 0 : out.back().bucketStartMs));
     return !out.empty();
 }
 
@@ -846,7 +873,7 @@ int HeatmapColumnStore::enforceRetentionAt(int64_t nowMs, int retentionDays) {
                     fs::remove(file, rmEc);
                     if (!rmEc) {
                         ++removed;
-                        sLog_App("HeatmapColumnStore: retention removed " << file);
+                        sLog_Data("HeatmapColumnStore: retention removed " << file);
                     } else {
                         sLog_Warning("HeatmapColumnStore: retention failed to "
                                      "remove " << file << ": " << rmEc.message());

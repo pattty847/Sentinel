@@ -75,9 +75,9 @@ TEST(LogSink, WritesHeaderAndFormattedLinesAndPrunesOldRuns) {
               QFileInfo(path).canonicalFilePath());
 #endif
 
-    sLog_Render("render line" << 42);
+    sLog_Render("render line " << 42);
     sLog_Warning("warn line");
-    sLog_Probe("tpo.ingest", "rows=" << 7 << "span=" << std::string("[3..9]"));
+    sLog_Probe("tpo.ingest", "rows=" << 7 << " span=" << std::string("[3..9]") << " size=" << 3 << "x" << 4);
     sLog_Probe("heatmap.window", "should not print");
 
     const QStringList lines = readLines(path);
@@ -94,7 +94,7 @@ TEST(LogSink, WritesHeaderAndFormattedLinesAndPrunesOldRuns) {
     EXPECT_TRUE(warn.contains(QStringLiteral(" W app ")));
 
     const QString probe = findLine(lines, QStringLiteral("[tpo.ingest]"));
-    EXPECT_TRUE(probe.endsWith(QStringLiteral("| [tpo.ingest] rows= 7 span= [3..9]")));
+    EXPECT_TRUE(probe.endsWith(QStringLiteral("| [tpo.ingest] rows=7 span=[3..9] size=3x4")));
     EXPECT_TRUE(probe.contains(QStringLiteral(" D probe ")));
     EXPECT_TRUE(findLine(lines, QStringLiteral("should not print")).isEmpty());
 }

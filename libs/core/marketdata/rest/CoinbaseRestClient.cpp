@@ -185,7 +185,8 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         } else {
             jsonOpt = doRequest(false);
             if (!jsonOpt && result.error.find("401") != std::string::npos) {
-                sLog_Warning("REST candles: auth failed, retrying public endpoint");
+                sLog_Warning("REST candles: auth failed, retrying public endpoint: product=" << productId
+                             << " error=" << result.error);
                 jsonOpt = doRequest(true);
             }
         }
@@ -220,6 +221,10 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         }
 
         result.ok = true;
+        sLog_Probe("history.rest",
+                   "product=" << productId << " granularity=" << granularity
+                   << " range=[" << startSec << ".." << endSec << "] limit=" << limit
+                   << " received=" << arr.size() << " kept=" << result.candles.size());
         beast::error_code shutdownEc;
         stream.shutdown(shutdownEc);
         return result;

@@ -18,6 +18,16 @@ namespace {
     }
     // Coinbase can be slow to send first frames; 20s avoids aggressive reconnect loop.
     static constexpr int64_t kHeartbeatStaleThresholdMs = 20000;
+
+    // "A,B,C" for log lines.
+    std::string joinSymbols(const std::vector<std::string>& symbols) {
+        std::string out;
+        for (const auto& s : symbols) {
+            if (!out.empty()) out += ',';
+            out += s;
+        }
+        return out;
+    }
 }
 
 MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config)
@@ -31,19 +41,22 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
     const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
     const std::string bundlePath = !m_sslCaBundle.empty() ? m_sslCaBundle : defaultCaBundle;
     try {
-        sLog_Data(std::string("Using CA bundle: ") + bundlePath);
+        sLog_Data("Using CA bundle: path=" << bundlePath);
         m_sslCtx.load_verify_file(bundlePath);
     } catch (const std::exception& e) {
-        sLog_Error(std::string("Failed to load CA bundle from ") + bundlePath + ": " + e.what());
+        sLog_Error("Failed to load CA bundle, falling back to system paths: path=" << bundlePath
+                   << " error=" << e.what());
         m_sslCtx.set_default_verify_paths();
     }
     m_sslCtx.set_verify_mode(ssl::verify_peer);
-    
-    sLog_App("MarketDataCore initialized");
+
+    sLog_App("MarketDataCore initialized: host=" << m_host << " port=" << m_port
+             << " target=" << m_target << " jwt=" << m_useJwt);
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
         m_connected.store(up);
-        sLog_DataN(1, std::string("WebSocket transport status changed: ") + (up ? "UP" : "DOWN"));
+        sLog_Data("WebSocket transport status changed: " << (up ? "UP" : "DOWN")
+                  << " host=" << m_host);
         if (up) {
             m_lastHeartbeatMs.store(steadyClockMs());
             {
@@ -65,16 +78,17 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
             auto j = nlohmann::json::parse(payload);
             dispatch(j);
         } catch (const nlohmann::json::parse_error& e) {
-            sLog_Error(std::string("JSON parse error in transport message: ") + e.what());
+            sLog_Error("JSON parse error in transport message: bytes=" << payload.size()
+                       << " head=" << payload.substr(0, 200) << " error=" << e.what());
         } catch (const std::exception& e) {
-            sLog_Error(std::string("Error processing transport message: ") + e.what());
+            sLog_Error("Error processing transport message: bytes=" << payload.size()
+                       << " head=" << payload.substr(0, 200) << " error=" << e.what());
         }
     });
 }
 
 MarketDataCoreEngine::~MarketDataCoreEngine() {
     stop();
-    sLog_App("MarketDataCore destroyed");
 }
 
 inline void MarketDataCoreEngine::emitError(std::string msg) {
@@ -111,11 +125,8 @@ void MarketDataCoreEngine::subscribeToSymbols(const std::vector<std::string>& sy
     }
     if (!new_symbols.empty()) {
         m_subscriptions.setDesiredProducts(m_products);
-        sLog_DataN(1, std::string("subscribeToSymbols: ") +
-                          std::to_string(new_symbols.size()) +
-                          " new, " +
-                          std::to_string(m_products.size()) +
-                          " total products");
+        sLog_Data("subscribeToSymbols: new=" << joinSymbols(new_symbols)
+                  << " totalProducts=" << m_products.size());
     }
     if (!new_symbols.empty()) {
         sendSubscriptionMessage("subscribe", new_symbols);
@@ -133,13 +144,16 @@ void MarketDataCoreEngine::unsubscribeFromSymbols(const std::vector<std::string>
     }
     if (!removed_symbols.empty()) {
         m_subscriptions.setDesiredProducts(m_products);
+        sLog_Data("unsubscribeFromSymbols: removed=" << joinSymbols(removed_symbols)
+                  << " totalProducts=" << m_products.size());
         sendSubscriptionMessage("unsubscribe", removed_symbols);
     }
 }
 
 void MarketDataCoreEngine::start() {
     if (!m_running.exchange(true)) {
-        sLog_App("Starting MarketDataCore...");
+        sLog_App("Starting MarketDataCore: host=" << m_host << " port=" << m_port
+                 << " target=" << m_target);
         m_backoffDuration = std::chrono::seconds(1);
         m_workGuard.emplace(m_ioc.get_executor());
         m_ioc.restart();
@@ -166,6 +180,7 @@ void MarketDataCoreEngine::stop() {
 }
 
 void MarketDataCoreEngine::run() {
+    sentinel::logging::setCurrentThreadName("mdc-io");
     // io_context::run() can exit on unhandled handler exception; loop keeps I/O thread alive.
     while (m_running.load()) {
         try {
@@ -174,7 +189,7 @@ void MarketDataCoreEngine::run() {
                 m_ioc.restart();
             }
         } catch (const std::exception& e) {
-            sLog_Error(std::string("IO context thread exception: ") + e.what() + " - restarting I/O loop");
+            sLog_Error("IO context thread exception, restarting I/O loop: error=" << e.what());
             if (m_running.load()) {
                 m_ioc.restart();
             }
@@ -195,16 +210,15 @@ void MarketDataCoreEngine::scheduleReconnect() {
     std::uniform_int_distribution<> jitter(0, 250);
     auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
     
-    sLog_Data(std::string("Scheduling reconnect in ") +
-              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()) +
-              "ms (backoff: " +
-              std::to_string(m_backoffDuration.count()) +
-              "s)...");
+    sLog_Data("Scheduling reconnect: delayMs="
+              << std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()
+              << " backoffSec=" << m_backoffDuration.count()
+              << " host=" << m_host);
     m_reconnectTimer.expires_after(delay);
     m_reconnectTimer.async_wait([this](beast::error_code ec) {
         if (ec || !m_running) return;
         
-        sLog_Data("Attempting reconnection...");
+        sLog_Data("Attempting reconnection: host=" << m_host << " port=" << m_port);
         if (m_transport) {
             m_transport->close();
             m_transport->connect(m_host, m_port, m_target);
@@ -220,7 +234,9 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
     auto symbolsCopy = symbols;
     net::post(m_strand, [this, type, symbolsCopy]() {
         if (!m_connected.load()) {
-            sLog_Warning("Transport not connected, staging subscription request for replay on connect.");
+            // Routine before the first connect: the request replays on connect.
+            sLog_Data("Transport not connected, staging " << type << " for replay on connect: symbols="
+                      << joinSymbols(symbolsCopy));
             if (type == "subscribe") {
                 for (const auto& s : symbolsCopy) {
                     if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
@@ -241,7 +257,8 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
             try {
                 jwt = m_auth.createJwt();
             } catch (const std::exception& e) {
-                sLog_Error(std::string("JWT creation failed in subscription handler: ") + e.what());
+                sLog_Error("JWT creation failed in subscription handler: type=" << type
+                           << " symbols=" << joinSymbols(symbolsCopy) << " error=" << e.what());
                 emitError(std::string("Failed to create JWT for subscription: ") + e.what());
                 return;
             }
@@ -256,9 +273,9 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
                     if (j.contains("jwt")) {
                         j["jwt"] = "<redacted>";
                     }
-                    sLog_DataN(1, std::string("WS ") + type + " frame: " + j.dump());
+                    sLog_Data("WS " << type << " frame: " << j.dump());
                 } catch (const std::exception&) {
-                    sLog_DataN(1, std::string("WS ") + type + " frame (raw): " + frame);
+                    sLog_Data("WS " << type << " frame (raw): " << frame);
                 }
                 m_transport->send(frame);
             }
@@ -270,9 +287,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     auto arrival_time = std::chrono::system_clock::now();
     
-    static std::atomic<int> rawLogCount{0};
-    // RAW WS FEED LOGGING
-    // sLog_DataN(5, "MDC RX: " << message.dump());
+    sLog_Probe("ws.rx", message.dump());
 
     std::string channel = message.value("channel", "");
     m_lastHeartbeatMs.store(steadyClockMs());
@@ -290,9 +305,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
                     emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
                     if (!ev.productIds.empty()) {
-                        sLog_DataN(1, std::string("Subscription confirmed for ") +
-                                          std::to_string(ev.productIds.size()) +
-                                          " symbol(s)");
+                        sLog_Data("Subscription confirmed: symbols=" << joinSymbols(ev.productIds));
                     } else if (!m_loggedEmptySubscriptionAck) {
                         m_loggedEmptySubscriptionAck = true;
                         sLog_Data("Subscription confirmed with empty product list; raw payload: "
@@ -367,7 +380,8 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
         try {
             seq = message["sequence_num"].get<uint64_t>();
         } catch (const nlohmann::json::exception& e) {
-            sLog_Warning(std::string("sequence_num parse issue: ") + e.what());
+            sLog_Warning("sequence_num parse issue: value=" << message["sequence_num"].dump()
+                         << " error=" << e.what());
             seq = 0;
         }
     }
@@ -426,7 +440,8 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         try {
             m_onLiveOrderBookInitialized(product_id, sparse_bids, sparse_asks);
         } catch (const std::exception& e) {
-            sLog_Error(std::string("Order book init callback exception: ") + e.what());
+            sLog_Error("Order book init callback exception: product=" << product_id
+                       << " error=" << e.what());
         }
     }
 }
@@ -462,7 +477,8 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
             try {
                 m_onLiveOrderBookLevelUpdates(product_id, updatesPayload, exchangeMs);
             } catch (const std::exception& e) {
-                sLog_Error(std::string("Order book level updates callback exception: ") + e.what());
+                sLog_Error("Order book level updates callback exception: product=" << product_id
+                           << " updates=" << updatesPayload.size() << " error=" << e.what());
             }
         }
     }
@@ -487,7 +503,9 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
             const int64_t nowMs = steadyClockMs();
             const int64_t lastMs = m_lastHeartbeatMs.load();
             if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
-                sLog_Error("Heartbeat stale (>20s); reconnecting...");
+                sLog_Warning("Heartbeat stale, reconnecting: silenceMs=" << (nowMs - lastMs)
+                             << " thresholdMs=" << kHeartbeatStaleThresholdMs
+                             << " host=" << m_host);
                 triggerImmediateReconnect("stale heartbeat");
                 return;
             }
@@ -498,7 +516,7 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
 
 void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     net::post(m_strand, [this, r = std::string(reason)](){
-        sLog_Data(std::string("Immediate reconnect: ") + r);
+        sLog_Data("Immediate reconnect: reason=" << r);
         // Use 5s backoff for stale heartbeat to avoid hammering Coinbase when they're slow.
         m_backoffDuration = (r == "stale heartbeat")
             ? std::chrono::seconds(5)

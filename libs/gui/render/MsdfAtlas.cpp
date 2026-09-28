@@ -2,6 +2,7 @@
 Sentinel — MsdfAtlas
 */
 #include "MsdfAtlas.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -75,28 +76,34 @@ bool MsdfAtlas::build(const BuildParams& params) {
 
     const QString fontPath = resolveFontPath(params);
     if (fontPath.isEmpty()) {
-        qWarning("MsdfAtlas: font path not found for family '%s'", qPrintable(params.fontFamily));
+        sLog_Warning("MSDF atlas: font path not found family=" << params.fontFamily << " fontPx=" << params.fontPx);
         return false;
     }
 
     const QString key = cacheKey(fontPath, params.fontPx, params.charset, params.pxRange);
     const QString cacheBase = QDir(cacheDirPath()).filePath(key);
     if (loadFromCache(cacheBase, key)) {
+        sLog_Render("MSDF atlas loaded from cache: font=" << fontPath << " fontPx=" << m_fontPx
+                    << " pxRange=" << m_pxRange << " glyphs=" << m_glyphs.size()
+                    << " image=" << m_image.width() << "x" << m_image.height());
         return true;
     }
 
     msdfgen::FreetypeHandle* ft = msdfgen::initializeFreetype();
     if (!ft) {
+        sLog_Warning("MSDF atlas: FreeType init failed");
         return false;
     }
     msdfgen::FontHandle* font = msdfgen::loadFont(ft, fontPath.toUtf8().constData());
     if (!font) {
+        sLog_Warning("MSDF atlas: font load failed path=" << fontPath);
         msdfgen::deinitializeFreetype(ft);
         return false;
     }
 
     msdfgen::FontMetrics metrics;
     if (!msdfgen::getFontMetrics(metrics, font, msdfgen::FONT_SCALING_EM_NORMALIZED)) {
+        sLog_Warning("MSDF atlas: font metrics failed path=" << fontPath);
         msdfgen::destroyFont(font);
         msdfgen::deinitializeFreetype(ft);
         return false;
@@ -145,6 +152,8 @@ bool MsdfAtlas::build(const BuildParams& params) {
     const int cellW = static_cast<int>(std::ceil(std::max(maxAdvance, maxBoundsW))) + m_paddingPx * 2;
     const int cellH = static_cast<int>(std::ceil(std::max(maxBoundsH, metrics.lineHeight * scale))) + m_paddingPx * 2;
     if (cellW <= 0 || cellH <= 0) {
+        sLog_Warning("MSDF atlas: empty glyph cells cell=" << cellW << "x" << cellH
+                     << " glyphs=" << prepared.size() << "/" << params.charset.size() << " path=" << fontPath);
         msdfgen::destroyFont(font);
         msdfgen::deinitializeFreetype(ft);
         return false;
@@ -241,6 +250,9 @@ bool MsdfAtlas::build(const BuildParams& params) {
     m_descentPx = std::max(0.0f, m_glyphBottomPx);
     m_image = atlas;
     saveCache(cacheBase, key);
+    sLog_Render("MSDF atlas built: font=" << fontPath << " fontPx=" << m_fontPx << " pxRange=" << m_pxRange
+                << " glyphs=" << prepared.size() << "/" << params.charset.size()
+                << " image=" << atlasW << "x" << atlasH);
     return true;
 }
 
@@ -306,6 +318,7 @@ bool MsdfAtlas::loadFromCache(const QString& cacheBasePath, const QString& key) 
     }
     const QJsonDocument doc = QJsonDocument::fromJson(metaFile.readAll());
     if (!doc.isObject()) {
+        sLog_Warning("MSDF atlas cache unreadable, rebuilding: meta=" << metaPath);
         return false;
     }
     const QJsonObject root = doc.object();
@@ -315,6 +328,7 @@ bool MsdfAtlas::loadFromCache(const QString& cacheBasePath, const QString& key) 
 
     QImage image(imagePath);
     if (image.isNull()) {
+        sLog_Warning("MSDF atlas cache image unreadable, rebuilding: image=" << imagePath);
         return false;
     }
 

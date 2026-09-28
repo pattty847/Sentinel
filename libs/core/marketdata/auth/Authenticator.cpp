@@ -89,7 +89,7 @@ void Authenticator::loadKeyFile(const std::string& path) {
     try {
         key_file >> j;
     } catch (const std::exception& ex) {
-        sLog_App("Authenticator: Failed to parse key file [" + path + "]: " + ex.what() + " – using public only.");
+        sLog_Warning("Authenticator: Failed to parse key file [" + path + "]: " + ex.what() + " – using public only.");
         return;
     }
 
@@ -97,7 +97,7 @@ void Authenticator::loadKeyFile(const std::string& path) {
     m_privateKey = j.value("secret", "");
 
     if (m_keyId.empty() || m_privateKey.empty()) {
-        sLog_App("Authenticator: Key file missing 'key' or 'secret' – using public market data only.");
+        sLog_Warning("Authenticator: Key file [" + path + "] missing 'key' or 'secret' – using public market data only.");
         return;
     }
 

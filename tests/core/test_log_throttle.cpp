@@ -111,7 +111,7 @@ TEST(LogThrottleMacro, PrintsFirstThenAppendsSuppressedCount) {
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
     CaptureLog capture;
 
-    auto logTick = [](int i) { sLog_DataN(50, "tick" << i); };
+    auto logTick = [](int i) { sLog_DataN(50, "tick " << i); };
     for (int i = 0; i < 5; ++i) logTick(i);
     ASSERT_EQ(capture.lines.size(), 1);
     EXPECT_EQ(capture.lines[0], QStringLiteral("tick 0"));
@@ -130,8 +130,7 @@ TEST(LogThrottleMacro, IntervalOfOnePrintsEveryCall) {
 
     for (int i = 0; i < 5; ++i) sLog_DataN(1, std::string("frame ") + std::to_string(i));
     ASSERT_EQ(capture.lines.size(), 5);
-    // QDebug quotes the QString that the std::string overload produces.
-    EXPECT_EQ(capture.lines[4], QStringLiteral("\"frame 4\""));
+    EXPECT_EQ(capture.lines[4], QStringLiteral("frame 4"));
 }
 
 TEST(LogThrottleMacro, DefaultMacrosPrintEveryCall) {
@@ -140,7 +139,7 @@ TEST(LogThrottleMacro, DefaultMacrosPrintEveryCall) {
     }
     CaptureLog capture;
 
-    for (int i = 0; i < 3; ++i) sLog_Render("layer toggled" << i);
+    for (int i = 0; i < 3; ++i) sLog_Render("layer toggled " << i);
     ASSERT_EQ(capture.lines.size(), 3);
     EXPECT_EQ(capture.lines[0], QStringLiteral("layer toggled 0"));
 }

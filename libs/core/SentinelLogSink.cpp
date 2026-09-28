@@ -254,6 +254,16 @@ void writeHeader(std::FILE* file, const SinkOptions& options, int argc, char** a
 
 } // namespace
 
+void setCurrentThreadName(const char* name) {
+#if defined(__APPLE__)
+    pthread_setname_np(name);
+#elif defined(__linux__)
+    pthread_setname_np(pthread_self(), name);
+#else
+    Q_UNUSED(name);
+#endif
+}
+
 SinkOptions sinkOptionsFromEnv(const QString& appName) {
     SinkOptions options;
     options.appName = appName;
@@ -296,6 +306,7 @@ QString installLogSink(const SinkOptions& options, int argc, char** argv) {
 
     if (sink->file) {
         sink->flusher = std::thread([sink] {
+            setCurrentThreadName("log-flush");
             std::unique_lock<std::mutex> lk(sink->flushMutex);
             while (!sink->stopping) {
                 sink->flushCv.wait_for(lk, std::chrono::milliseconds(250));

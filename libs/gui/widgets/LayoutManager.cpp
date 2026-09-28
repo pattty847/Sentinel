@@ -1,7 +1,7 @@
 #include "LayoutManager.hpp"
 #include <QSettings>
 #include <QByteArray>
-#include <QDebug>
+#include "SentinelLogging.hpp"
 
 void LayoutManager::saveLayout(QMainWindow* window, const QString& layoutName) {
     if (!window) return;
@@ -29,8 +29,8 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     
     int savedVersion = settings.value("version", 0).toInt();
     if (savedVersion != APP_LAYOUT_VERSION) {
-        qWarning() << "Layout version mismatch:" << savedVersion << "vs" << APP_LAYOUT_VERSION
-                   << "- falling back to default layout";
+        sLog_Warning("Layout version mismatch, falling back to default layout: layout=" << layoutName
+                     << " savedVersion=" << savedVersion << " appVersion=" << APP_LAYOUT_VERSION);
         settings.endGroup();
         settings.beginGroup(layoutName);
         settings.remove(QString());
@@ -44,13 +44,14 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     settings.endGroup();
     
     if (state.isEmpty()) {
-        qWarning() << "Layout restore failed: empty state data";
+        sLog_Warning("Layout restore failed, empty state data: layout=" << layoutName);
         deleteLayout(layoutName);
         return false;
     }
     
     if (!window->restoreState(state)) {
-        qWarning() << "Layout restore failed: restoreState() returned false - falling back to default layout";
+        sLog_Warning("Layout restore failed, restoreState() returned false, falling back to default: layout="
+                     << layoutName << " stateBytes=" << state.size());
         deleteLayout(layoutName);
         return false;
     }

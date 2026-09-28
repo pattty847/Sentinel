@@ -69,18 +69,18 @@ HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
         storeCfg.fsyncEveryMs = std::max(1, m_config.persistenceFsyncEveryMs);
         auto store = std::make_unique<HeatmapColumnStore>(m_config.persistenceDir, storeCfg);
         if (store->acquireLock()) {
-            sLog_App("HeatmapTwapStreamer: persistence enabled at "
-                     << QString::fromStdString(m_config.persistenceDir)
-                     << " (active tf=" << m_activeTimeframeMs << " ms)");
+            sLog_Data("HeatmapTwapStreamer: persistence enabled: dir=" << m_config.persistenceDir
+                      << " activeTfMs=" << m_activeTimeframeMs
+                      << " fsyncEveryN=" << storeCfg.fsyncEveryNRecords
+                      << " fsyncEveryMs=" << storeCfg.fsyncEveryMs
+                      << " retentionDays=" << m_config.persistenceRetentionDays);
             // Phase 5: enforce retention up front so disk doesn't grow
             // unbounded across long server runs. retentionDays <= 0 disables.
             if (m_config.persistenceRetentionDays > 0) {
                 const int removed = store->enforceRetention(m_config.persistenceRetentionDays);
-                if (removed > 0) {
-                    sLog_App("HeatmapTwapStreamer: retention deleted " << removed
-                             << " day file(s) older than "
-                             << m_config.persistenceRetentionDays << " days");
-                }
+                sLog_Data("HeatmapTwapStreamer: retention pass: removed=" << removed
+                          << " day file(s) older than retentionDays="
+                          << m_config.persistenceRetentionDays);
             }
             m_columnStore = std::move(store);
         } else {
@@ -125,7 +125,9 @@ HeatmapTwapStreamer::IntensityConfig HeatmapTwapStreamer::parseIntensityConfig()
 void HeatmapTwapStreamer::start() {
     if (!m_timer.isActive()) {
         m_timer.start(m_sampleMs);
-        sLog_App("HeatmapTwapStreamer: timer started (" << m_sampleMs << " ms)");
+        sLog_App("HeatmapTwapStreamer: timer started: sampleMs=" << m_sampleMs
+                 << " activeTfMs=" << m_activeTimeframeMs
+                 << " grid=" << m_defaultWidth << "x" << m_defaultHeight);
     }
 }
 
@@ -141,6 +143,8 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
     std::vector<HeatmapColumnStore::LoadedColumn> loaded;
     if (!m_columnStore->loadRecent(symbol, m_activeTimeframeMs,
                                    m_defaultWidth, loaded) || loaded.empty()) {
+        sLog_Data("HeatmapTwapStreamer: primeRing found no persisted columns: symbol=" << symbol
+                  << " tfMs=" << m_activeTimeframeMs);
         return 0;
     }
 
@@ -149,6 +153,8 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
     // since the columns were written). The data stays on disk for later use.
     const int diskGridHeight = loaded.back().gridHeight;
     if (diskGridHeight <= 0) {
+        sLog_Warning("HeatmapTwapStreamer: skipping primeRing: symbol=" << symbol
+                     << " invalid disk gridHeight=" << diskGridHeight);
         return 0;
     }
     if (m_defaultHeight > 0 && diskGridHeight != m_defaultHeight) {
@@ -222,10 +228,11 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
         }
     }
 
-    sLog_App("HeatmapTwapStreamer: primed " << primed
-             << " column(s) for " << QString::fromStdString(symbol)
-             << " tf=" << m_activeTimeframeMs
-             << " from " << QString::fromStdString(m_config.persistenceDir));
+    sLog_Data("HeatmapTwapStreamer: primed ring from disk: symbol=" << symbol
+              << " tfMs=" << m_activeTimeframeMs
+              << " columns=" << primed
+              << " range=[" << loaded.front().bucketStartMs << ".." << loaded.back().bucketStartMs << "]"
+              << " dir=" << m_config.persistenceDir);
 
     return primed;
 }
@@ -344,9 +351,7 @@ void HeatmapTwapStreamer::onSample() {
     const int64_t nowMs = m_model.exchangeNowMs();
 
     const auto symbols = m_model.getSymbolsSnapshot();
-    if (m_config.debugSliceLog) {
-        sLog_App("Heatmap sample tick: symbols=" << symbols.size() << " t=" << nowMs);
-    }
+    sLog_Probe("heatmap.sample", "symbols=" << symbols.size() << " t=" << nowMs);
     for (const auto& symbol : symbols) {
         auto& state = m_symbols[symbol];
 
@@ -435,9 +440,10 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
             std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
             std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
         }
-        sLog_Warning("HeatmapTwapStreamer: " << QString::fromStdString(symbol)
-                     << " sample gap " << (intervalEnd - intervalStart)
-                     << " ms not integrated; buckets in the gap stay missing");
+        sLog_Warning("HeatmapTwapStreamer: sample gap not integrated, buckets in the gap stay missing:"
+                     << " symbol=" << symbol
+                     << " gapMs=" << (intervalEnd - intervalStart)
+                     << " from=" << intervalStart << " to=" << intervalEnd);
         state.lastSampleMs = nowMs;
         return;
     }
@@ -517,14 +523,15 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
     double liquidityScale = 1.0;
     const QByteArray liquidityColumn = toLiquidityColumn(twapBid, twapAsk, liquidityScale);
 
-    static int logCount = 0;
-    if (m_config.debugSliceLog && (++logCount % 10) == 0) {
-        sLog_App("Heatmap slice emit: " << QString::fromStdString(symbol)
-                 << " tf=" << frame.timeframeMs
-                 << " rows=" << column.size()
-                 << " grid=" << m_defaultWidth << "x" << state.height
-                 << " reset=" << reset);
-    }
+    sLog_Probe("heatmap.finalize",
+               "symbol=" << symbol
+               << " tfMs=" << frame.timeframeMs
+               << " start=" << frame.bucketStartMs << " end=" << frame.bucketEndMs
+               << " observedMs=" << frame.observedMs
+               << " bytes=" << column.size()
+               << " grid=" << m_defaultWidth << "x" << state.height
+               << " range=[" << state.minPrice << ".." << state.maxPrice << "]"
+               << " reset=" << reset);
 
     storeHistory(symbol,
                  state,
@@ -710,9 +717,15 @@ void HeatmapTwapStreamer::persistColumn(const std::string& symbol,
                                               liquidity,
                                               liquidityScale);
     using R = HeatmapColumnStore::AppendResult;
-    if (result != R::Written && result != R::AlreadyPresent) {
-        // Conflict / IO error / bad input were already logged inside the store.
-        // Fall through; we never block the live stream on persistence failures.
+    if (result == R::BadInput || result == R::IoError) {
+        // The store logs I/O detail (path, slot) but not bad input or a missing
+        // lock; this line names the column. We never block the live stream on
+        // persistence failures.
+        sLog_Warning("HeatmapTwapStreamer: column not persisted: result="
+                     << (result == R::BadInput ? "bad_input" : "io_error")
+                     << " symbol=" << symbol << " tfMs=" << timeframeMs
+                     << " start=" << bucketStartMs << " end=" << bucketEndMs
+                     << " gridHeight=" << gridHeight);
     }
 }
 
@@ -804,6 +817,14 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         }
     }
 
+    sLog_Probe("history.fetch",
+               "symbol=" << symbol << " tfMs=" << timeframeMs
+               << " start=" << startTimeMs << " end=" << endTimeMs << " count=" << count
+               << " ringCols=" << ringReverse.size()
+               << " ringOldest=" << (ringHadAny ? ringOldestBucketStart : 0)
+               << " diskCols=" << diskChrono.size()
+               << " needFromDisk=" << needFromDisk);
+
     if (ringReverse.empty() && diskChrono.empty()) {
         return false;
     }
@@ -868,13 +889,11 @@ QByteArray HeatmapTwapStreamer::toIntensityColumnSigned(SymbolState& state,
     const double safeDenomBid = (denomBid > 0.0) ? denomBid : 1.0;
     const double safeDenomAsk = (denomAsk > 0.0) ? denomAsk : 1.0;
 
-    static int logCount = 0;
-    if (m_config.debugSliceLog && (++logCount % 20) == 0) {
-        sLog_App("Heatmap column stats: bids=" << nonZeroBid
-                 << " asks=" << nonZeroAsk
-                 << " maxBid=" << maxBid
-                 << " maxAsk=" << maxAsk);
-    }
+    sLog_Probe("heatmap.column",
+               "final=" << updateRunningMax
+               << " bids=" << nonZeroBid << " asks=" << nonZeroAsk
+               << " maxBid=" << maxBid << " maxAsk=" << maxAsk
+               << " denomBid=" << safeDenomBid << " denomAsk=" << safeDenomAsk);
 
     QByteArray out;
     const size_t height = bidValues.size();

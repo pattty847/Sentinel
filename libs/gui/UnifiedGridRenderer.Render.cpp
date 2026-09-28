@@ -7,18 +7,14 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
-#include "render/TpoDebugTrace.hpp"
 
-#include <QDateTime>
 #include <QElapsedTimer>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
-#include <QTimeZone>
 #include <QtEndian>
 #include <algorithm>
 #include <cmath>
-#include <sstream>
 
 HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNode) {
     auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
@@ -238,58 +234,17 @@ void UnifiedGridRenderer::renderOverlays(
     m_tpoOverlay.drainPending(tpoUploads,
                               tpoSessionStart, tpoSessionEnd,
                               tpoBracketMs, tpoSessionColumns);
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG") &&
-        drawTpo &&
-        tpoSessionStart > 0 &&
-        tpoSessionEnd > tpoSessionStart &&
-        tpoBracketMs > 0) {
-        static QElapsedTimer tpoSessionLogTimer;
-        static bool tpoSessionLogTimerStarted = false;
-        if (!tpoSessionLogTimerStarted) {
-            tpoSessionLogTimer.start();
-            tpoSessionLogTimerStarted = true;
-        }
-        if (tpoSessionLogTimer.elapsed() > 1000) {
-            const int computedColumns = static_cast<int>(
-                std::max<int64_t>(1, (tpoSessionEnd - tpoSessionStart) / tpoBracketMs));
-            const QDateTime startDt = QDateTime::fromMSecsSinceEpoch(tpoSessionStart, QTimeZone::utc());
-            const QDateTime endDt = QDateTime::fromMSecsSinceEpoch(tpoSessionEnd, QTimeZone::utc());
-            sLog_Debug(QString("TPO session: %1-%2 UTC | Bracket: %3m | Columns: %4")
-                           .arg(startDt.toString(QStringLiteral("HH:mm")))
-                           .arg(endDt.toString(QStringLiteral("HH:mm")))
-                           .arg(tpoBracketMs / 60000)
-                           .arg((tpoSessionColumns > 0) ? tpoSessionColumns : computedColumns));
-            tpoSessionLogTimer.restart();
-        }
-    }
-    if (tpo_debug::enabled() && drawTpo) {
-        static QElapsedTimer tpoFileLogTimer;
-        static bool tpoFileLogTimerStarted = false;
-        if (!tpoFileLogTimerStarted) {
-            tpoFileLogTimer.start();
-            tpoFileLogTimerStarted = true;
-        }
-        if (tpoFileLogTimer.elapsed() > 250) {
-            std::ostringstream payload;
-            payload << "{"
-                    << "\"sessionStartMs\":" << tpoSessionStart
-                    << ",\"sessionEndMs\":" << tpoSessionEnd
-                    << ",\"bracketMs\":" << tpoBracketMs
-                    << ",\"sessionColumns\":" << tpoSessionColumns
-                    << ",\"viewStartMs\":" << frame.mapping.viewStartMs
-                    << ",\"viewEndMs\":" << frame.mapping.viewEndMs
-                    << ",\"drawRectX\":" << drawRect.x()
-                    << ",\"drawRectW\":" << drawRect.width()
-                    << ",\"srcRectX\":" << srcRect.x()
-                    << ",\"srcRectW\":" << srcRect.width()
-                    << ",\"mappingValid\":" << (frame.mapping.valid ? "true" : "false")
-                    << "}";
-            tpo_debug::append("UnifiedGridRenderer.Render.cpp:renderOverlays",
-                              "tpo_render_context",
-                              "H4",
-                              payload.str());
-            tpoFileLogTimer.restart();
-        }
+    if (drawTpo) {
+        sLog_Probe("tpo.render",
+                   "sessionStartMs=" << tpoSessionStart
+                   << " sessionEndMs=" << tpoSessionEnd
+                   << " bracketMs=" << tpoBracketMs
+                   << " sessionColumns=" << tpoSessionColumns
+                   << " viewStartMs=" << frame.mapping.viewStartMs
+                   << " viewEndMs=" << frame.mapping.viewEndMs
+                   << " drawRectX=" << drawRect.x() << " drawRectW=" << drawRect.width()
+                   << " srcRectX=" << srcRect.x() << " srcRectW=" << srcRect.width()
+                   << " mappingValid=" << frame.mapping.valid);
     }
     m_tpoOverlay.render(window(),
                         texNode,
@@ -349,23 +304,12 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
     const float minCellW = 24.0f;
 
     if (!(labelVisible && cellH >= minCellH && cellW >= minCellW && m_chartTextAtlasBuilt && window())) {
-        if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
-            static QElapsedTimer labelDebugTimer;
-            static bool labelDebugStarted = false;
-            if (!labelDebugStarted) {
-                labelDebugTimer.start();
-                labelDebugStarted = true;
-            }
-            if (labelDebugTimer.elapsed() > 1000) {
-                sLog_Debug(QString("Heatmap text gated: visible=%1 cellH=%2 cellW=%3 atlas=%4 window=%5")
-                               .arg(labelVisible ? 1 : 0)
-                               .arg(cellH, 0, 'f', 2)
-                               .arg(cellW, 0, 'f', 2)
-                               .arg(m_chartTextAtlasBuilt ? 1 : 0)
-                               .arg(window() ? 1 : 0));
-                labelDebugTimer.restart();
-            }
-        }
+        sLog_Probe("text.gated",
+                   "visible=" << labelVisible
+                   << " cellH=" << cellH << " cellW=" << cellW
+                   << " minCellH=" << minCellH << " minCellW=" << minCellW
+                   << " atlas=" << m_chartTextAtlasBuilt
+                   << " window=" << (window() != nullptr));
         clearLabelGeometry();
         return;
     }
@@ -405,22 +349,9 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
                                            scale,
                                            dollars,
                                            m_heatmapLabelGlyphs);
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_TEXT_DEBUG")) {
-        static QElapsedTimer labelSubmitTimer;
-        static bool labelSubmitStarted = false;
-        if (!labelSubmitStarted) {
-            labelSubmitTimer.start();
-            labelSubmitStarted = true;
-        }
-        if (labelSubmitTimer.elapsed() > 1000) {
-            sLog_Debug(QString("Heatmap text submit: glyphs=%1 cellH=%2 cellW=%3 scale=%4")
-                           .arg(static_cast<int>(m_heatmapLabelGlyphs.size()))
-                           .arg(cellH, 0, 'f', 2)
-                           .arg(cellW, 0, 'f', 2)
-                           .arg(scale, 0, 'f', 2));
-            labelSubmitTimer.restart();
-        }
-    }
+    sLog_Probe("text.submit",
+               "glyphs=" << m_heatmapLabelGlyphs.size()
+               << " cellH=" << cellH << " cellW=" << cellW << " scale=" << scale);
     m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 
@@ -518,28 +449,13 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     const bool drawTpo = frame.overlays.tpo;
     const int gridWidth = (snapshot.gridWidth > 0) ? snapshot.gridWidth : m_heatmapStreamService->gridWidth();
     const int gridHeight = (snapshot.gridHeight > 0) ? snapshot.gridHeight : m_heatmapStreamService->gridHeight();
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        static QElapsedTimer renderDebugTimer;
-        static bool renderDebugTimerStarted = false;
-        if (!renderDebugTimerStarted) {
-            renderDebugTimer.start();
-            renderDebugTimerStarted = true;
-        }
-        if (renderDebugTimer.elapsed() > 1000) {
-            const int64_t incomingTfMs = m_lastIncomingHeatmapSliceTimeframeMs.load(std::memory_order_relaxed);
-            sLog_Debug(QString("Render frame: overlays[h=%1 fp=%2 tpo=%3] primary=%4 active_tf=%5ms incoming_slice_tf=%6ms append=%7ms grid=%8x%9")
-                           .arg(drawHeatmap ? 1 : 0)
-                           .arg(drawFootprint ? 1 : 0)
-                           .arg(drawTpo ? 1 : 0)
-                           .arg(m_primaryField)
-                           .arg(cadenceMs)
-                           .arg(incomingTfMs)
-                           .arg(snapshot.appendMs)
-                           .arg(gridWidth)
-                           .arg(gridHeight));
-            renderDebugTimer.restart();
-        }
-    }
+    sLog_Probe("frame.state",
+               "heatmap=" << drawHeatmap << " footprint=" << drawFootprint << " tpo=" << drawTpo
+               << " cadenceMs=" << cadenceMs
+               << " incomingSliceTfMs="
+               << m_lastIncomingHeatmapSliceTimeframeMs.load(std::memory_order_relaxed)
+               << " appendMs=" << snapshot.appendMs
+               << " grid=" << gridWidth << "x" << gridHeight);
 
     auto* texNode = ensureHeatmapRootNode(oldNode);
     computeAndApplyFrameMapping(frame, texNode, cadenceMs, gridWidth, gridHeight);
@@ -572,11 +488,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         clearLabelGeometry();
     }
     m_chartTextRenderer.endFrame();
-    if (m_chartTextRenderer.droppedGlyphs() > 0 && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        sLog_Debug(QString("Chart text dropped glyphs: total=%1 high=%2 low=%3")
-                       .arg(m_chartTextRenderer.droppedGlyphs())
-                       .arg(m_chartTextRenderer.droppedHighGlyphs())
-                       .arg(m_chartTextRenderer.droppedLowGlyphs()));
+    if (m_chartTextRenderer.droppedGlyphs() > 0) {
+        sLog_Probe("text.dropped",
+                   "total=" << m_chartTextRenderer.droppedGlyphs()
+                   << " high=" << m_chartTextRenderer.droppedHighGlyphs()
+                   << " low=" << m_chartTextRenderer.droppedLowGlyphs());
     }
     updateFpsEstimate();
 

@@ -2,12 +2,10 @@
 #include "GridViewState.hpp"
 #include <QMatrix4x4>
 #include <QSizeF>
-#include <QDebug>
+#include "SentinelLogging.hpp"
 #include <algorithm>
 
 namespace {
-constexpr bool kTraceZoomInteractions = false;
-
 double clampProcessedZoomDelta(double rawDelta, double sensitivity, double maxDelta) {
     const double processed = rawDelta * sensitivity;
     return std::max(-maxDelta, std::min(maxDelta, processed));
@@ -44,6 +42,9 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
     m_timeWindowValid = true;
     if (changed) {
         ++m_viewportVersion;
+        sLog_Probe("viewport.set", "time=[" << timeStart << ".." << timeEnd << "]"
+                   << " price=[" << priceMin << ".." << priceMax << "]"
+                   << " version=" << m_viewportVersion);
         emit viewportChanged();
     }
 }
@@ -87,7 +88,6 @@ void GridViewState::handleZoom(double delta, const QPointF& center) {
 void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
 
-    static const bool kZoomDebug = qEnvironmentVariableIsSet("SENTINEL_ZOOM_DEBUG");
     double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
     double zoomMultiplier = 1.0 + clampedDelta;
     double newZoom = m_zoomFactor * zoomMultiplier;
@@ -110,19 +110,15 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             );
             const double newPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
             if (newTimeRange <= 0 || newPriceRange <= 0.0) {
-                qDebug() << "🚨 ZOOM ABORT: Invalid range calculated - TimeRange:" << newTimeRange << "PriceRange:" << newPriceRange;
+                sLog_Warning("Zoom aborted: invalid range timeRange=" << newTimeRange
+                             << " priceRange=" << newPriceRange << " zoom=" << m_zoomFactor << "->" << newZoom);
                 return;
             }
             double centerTimeRatio = center.x() / viewportSize.width();
             double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
             centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
             centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
-            
-            if constexpr (kTraceZoomInteractions) {
-                qDebug() << " ZOOM:" << "Delta:" << delta << "->" << clampedDelta
-                         << "Zoom:" << m_zoomFactor << "->" << newZoom
-                         << "Mouse(" << center.x() << "," << center.y() << ")";
-            }
+
             int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
             double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
             const double newTimeRangeD = static_cast<double>(newTimeRange);
@@ -137,29 +133,21 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
 
             double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
             double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
-            
-            if (kZoomDebug) {
-                qDebug() << "ZOOM DEBUG:"
-                         << "curTimeRange" << currentTimeRange
-                         << "curPriceRange" << currentPriceRange
-                         << "newTimeRange" << newTimeRange
-                         << "newPriceRange" << newPriceRange
-                         << "centerRatios" << centerTimeRatio << centerPriceRatio
-                         << "bounds" << m_visibleTimeStart_ms << m_visibleTimeEnd_ms
-                         << m_minPrice << m_maxPrice;
-            }
+
+            sLog_Probe("viewport.zoom", "delta=" << delta << "->" << clampedDelta
+                       << " zoom=" << m_zoomFactor << "->" << newZoom
+                       << " mouse=(" << center.x() << "," << center.y() << ")"
+                       << " centerRatio=(" << centerTimeRatio << "," << centerPriceRatio << ")"
+                       << " time=[" << m_visibleTimeStart_ms << ".." << m_visibleTimeEnd_ms << "]->["
+                       << newTimeStart << ".." << newTimeEnd << "]"
+                       << " price=[" << m_minPrice << ".." << m_maxPrice << "]->["
+                       << newMinPrice << ".." << newMaxPrice << "]");
             if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
-                qDebug() << "🚨 ZOOM ABORT: Invalid final bounds - Time[" << newTimeStart << "," << newTimeEnd << "] Price[" << newMinPrice << "," << newMaxPrice << "]";
+                sLog_Warning("Zoom aborted: invalid final bounds time=[" << newTimeStart << ".." << newTimeEnd
+                             << "] price=[" << newMinPrice << ".." << newMaxPrice << "]");
                 return;
             }
             setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
-            
-            if constexpr (kTraceZoomInteractions) {
-                qDebug() << " ZOOM RESULT:"
-                         << "OldTime[" << (m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)) << "]"
-                         << "NewTime[" << currentCenterTime << "]"
-                         << "TimeRange:" << currentTimeRange << "->" << newTimeRange;
-            }
         }
         m_zoomFactor = newZoom;
         if (m_autoScrollEnabled) {

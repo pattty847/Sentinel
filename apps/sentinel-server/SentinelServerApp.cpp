@@ -36,7 +36,9 @@ SentinelServerApp::~SentinelServerApp() {
 
 bool SentinelServerApp::initialize() {
     try {
-        sLog_App("Initializing Server Components...");
+        sLog_App("Initializing server components: streamPort=" << m_serverConfig.streamPort
+                 << " mdcHost=" << m_serverConfig.mdc.host
+                 << " defaultSymbols=" << m_serverConfig.defaultSymbols.size());
 
         // Health endpoint (HTTP over TCP)
         m_healthServer = new QTcpServer(this);
@@ -69,13 +71,16 @@ bool SentinelServerApp::initialize() {
                 }
             });
         } else {
-            sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort);
+            sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort
+                         << " error=" << m_healthServer->errorString());
         }
 
         // 1. Authenticator (optional: public channels work without key.json)
         m_authenticator = std::make_unique<Authenticator>();
         // Only send JWT when we have credentials and config enables it (user/futures channels need auth)
         m_serverConfig.mdc.useJwt = m_authenticator->hasCredentials() && m_serverConfig.mdc.useJwt;
+        sLog_App("Authenticator: credentials=" << m_authenticator->hasCredentials()
+                 << " useJwt=" << m_serverConfig.mdc.useJwt);
 
         // 2. Market Data Core
         try {
@@ -141,19 +146,11 @@ bool SentinelServerApp::initialize() {
         });
 
         m_marketDataCore->onLatency([this](int latencyMs) {
-            // Log Coinbase WebSocket latency (server time - Coinbase timestamp)
-            // This runs frequently, so throttle logging
-            static int lastLoggedLatency = -1;
-            static auto lastLogTime = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count();
-
-            // Log if latency changed significantly or every 10 seconds
-            if (std::abs(latencyMs - lastLoggedLatency) > 5 || elapsed >= 10) {
-                sLog_Data("Coinbase WebSocket Latency: " << latencyMs << " ms");
-                lastLoggedLatency = latencyMs;
-                lastLogTime = now;
-            }
+            // Coinbase WebSocket latency (server time - Coinbase timestamp) arrives
+            // per book message: one always-on line per 10 s, every sample as a probe.
+            sLog_DataN(10000, "Coinbase WebSocket latency: ms=" << latencyMs);
+            sLog_Probe("ws.latency", "ms=" << latencyMs);
+            const auto now = std::chrono::steady_clock::now();
             if (m_server) {
                 static int lastBroadcastMs = -1;
                 static auto lastBroadcastTime = std::chrono::steady_clock::now();
@@ -171,7 +168,7 @@ bool SentinelServerApp::initialize() {
                              if (!m_marketDataCore) {
                                  return;
                              }
-                             sLog_App("Client subscribe: " << symbol);
+                             sLog_Data("First client subscribed, acquiring upstream: symbol=" << symbol);
                              m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
                          }, Qt::QueuedConnection);
 
@@ -180,12 +177,13 @@ bool SentinelServerApp::initialize() {
                              if (!m_marketDataCore) {
                                  return;
                              }
-                             sLog_App("Client unsubscribe: " << symbol);
                              const std::string native = symbol.toStdString();
                              if (m_defaultSymbols.find(native) != m_defaultSymbols.end()) {
-                                 sLog_App("Skipping unsubscribe for pinned default symbol: " << symbol);
+                                 sLog_Data("Last client unsubscribed, keeping pinned default symbol upstream: symbol="
+                                           << symbol);
                                  return;
                              }
+                             sLog_Data("Last client unsubscribed, releasing upstream: symbol=" << symbol);
                              m_marketDataCore->unsubscribeFromSymbols({native});
                          }, Qt::QueuedConnection);
 
@@ -225,8 +223,11 @@ bool SentinelServerApp::initialize() {
                 if (!m_marketDataCore) {
                     return;
                 }
-                sLog_App("Server default subscribe: " << QString::fromStdString(symbolList.front())
-                             << (symbolList.size() > 1 ? " (+more)" : ""));
+                QStringList names;
+                for (const auto& sym : symbolList) {
+                    names << QString::fromStdString(sym);
+                }
+                sLog_Data("Server default subscribe: symbols=" << names.join(','));
                 m_marketDataCore->subscribeToSymbols(symbolList);
             });
         }

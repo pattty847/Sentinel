@@ -90,11 +90,6 @@ int timeframeMsFromLabel(const QString& label) {
     }
     return it->second;
 }
-
-bool chartDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
-    return enabled;
-}
 }
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
@@ -131,6 +126,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         }
         if (!config.defaultSymbols.empty() && !m_userSubscribed) {
             const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front());
+            sLog_App("Default symbol from server config: symbol=" << defaultSymbol
+                     << " prev=" << m_currentSymbol);
             if (m_symbolInput) {
                 m_symbolInput->setText(defaultSymbol);
             }
@@ -144,7 +141,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     // Attach PerformanceMonitor to QML window for FPS tracking
     if (m_qquickView) {
         PerformanceMonitor::instance().attachToWindow(m_qquickView);
-        sLog_App("PerformanceMonitor attached to QML window");
     }
     if (m_statusBar) {
         auto& perfMon = PerformanceMonitor::instance();
@@ -157,7 +153,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
             connect(remote->streamClient(), &SentinelStreamClient::coinbaseLatencyReceived,
                     m_statusBar, &StatusBar::setCoinbaseLatency, Qt::QueuedConnection);
         }
-        sLog_App("StatusBar connected to PerformanceMonitor (FPS, CPU, GPU, Latency, Upload)");
     }
     
     m_modeController = new ChartModeController(this);
@@ -181,7 +176,11 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     setupGuiApiServer();
     
     if (!validateComponents()) {
-        sLog_Error("Component validation failed - app may not function correctly");
+        sLog_Error("Component validation failed, app may not function: qmlController="
+                   << (m_qmlController != nullptr)
+                   << " qmlValid=" << (m_qmlController && m_qmlController->isValid())
+                   << " renderer=" << (m_qmlController && m_qmlController->getUnifiedGridRenderer())
+                   << " dataSource=" << (m_dataSource != nullptr));
         QMessageBox::critical(this, "Initialization Error", "Failed to initialize core components. Check logs.");
     }
 }
@@ -242,35 +241,23 @@ void MainWindowGPU::setupUI() {
     }
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         connect(m_heatmapDock->toolbar(), &TopToolbar::primaryFieldRequested, this, [this](int field) {
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Primary field request: %1").arg(field));
-            }
             if (m_modeController) {
                 m_modeController->setPrimaryField(field);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::heatmapToggled, this, [this](bool enabled) {
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Toolbar heatmap toggled: %1").arg(enabled));
-            }
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setHeatmapLayerEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::footprintToggled, this, [this](bool enabled) {
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Toolbar footprint toggled: %1").arg(enabled));
-            }
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setFootprintLayerEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::tpoToggled, this, [this](bool enabled) {
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Toolbar TPO toggled: %1").arg(enabled));
-            }
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setTpoLayerEnabled(enabled);
@@ -280,9 +267,6 @@ void MainWindowGPU::setupUI() {
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::volumeProfileToggled, this, [this](bool enabled) {
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Toolbar volume profile toggled: %1").arg(enabled));
-            }
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->setVolumeProfileLayerEnabled(enabled);
@@ -361,11 +345,11 @@ void MainWindowGPU::setupUI() {
             }
             const int ms = timeframeMsFromLabel(label);
             if (ms <= 0) {
+                sLog_Warning("Unknown timeframe label ignored: label=" << label);
                 return;
             }
-            if (chartDebugEnabled()) {
-                sLog_Debug(QString("Chart TF select: %1 -> %2ms").arg(label).arg(ms));
-            }
+            sLog_App("ui: timeframe selected label=" << label << " tfMs=" << ms
+                     << " symbol=" << m_currentSymbol);
             renderer->setTimeframe(ms);
             if (m_connected && m_userSubscribed) {
                 requestHeatmapHistoryForSymbol(m_currentSymbol);
@@ -459,7 +443,8 @@ void MainWindowGPU::setupGuiApiServer() {
         if (ok) {
             port = envPort;
         } else {
-            sLog_Error("Invalid SENTINEL_GUI_API_PORT value; using default " << defaultPort);
+            sLog_Warning("Invalid SENTINEL_GUI_API_PORT, using config port: value="
+                         << qEnvironmentVariable("SENTINEL_GUI_API_PORT") << " port=" << defaultPort);
         }
     }
 
@@ -468,7 +453,8 @@ void MainWindowGPU::setupGuiApiServer() {
         return;
     }
     if (port < 0 || port > 65535) {
-        sLog_Error("GUI API port out of range; using default " << defaultPort);
+        sLog_Warning("GUI API port out of range, using config port: port=" << port
+                     << " configPort=" << defaultPort);
         port = defaultPort;
     }
 
@@ -519,7 +505,8 @@ void MainWindowGPU::startScreenerServer() {
     }
 
     if (scriptsDir.isEmpty()) {
-        sLog_App("Screener server not started: scripts/screener/screener_server.py not found near " << appDir);
+        sLog_Warning("Screener server not started: scripts/screener/screener_server.py not found near appDir="
+                     << appDir);
         return;
     }
 
@@ -550,13 +537,17 @@ void MainWindowGPU::startScreenerServer() {
         connect(m_screenerProcess, &QProcess::readyReadStandardError,  this, logErr);
         connect(m_screenerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                 this, [this, scriptsDir, uvBin, args](int exitCode, QProcess::ExitStatus status) {
-                    sLog_App("Screener server exited: code=" << exitCode
-                             << " status=" << static_cast<int>(status));
-                    if (!m_screenerProcess) return;  // deliberate shutdown
+                    if (!m_screenerProcess) {  // deliberate shutdown
+                        sLog_App("Screener server stopped: code=" << exitCode
+                                 << " status=" << static_cast<int>(status));
+                        return;
+                    }
+                    sLog_Warning("Screener server exited: code=" << exitCode
+                                 << " status=" << static_cast<int>(status));
                     ++m_screenerRestartCount;
                     if (m_screenerRestartCount > kMaxScreenerRestarts) {
-                        sLog_App("Screener server failed " << m_screenerRestartCount
-                                 << " times in a row — giving up. Kill port 17200 and restart the app.");
+                        sLog_Warning("Screener server failed " << m_screenerRestartCount
+                                     << " times in a row, giving up. Kill port 17200 and restart the app.");
                         return;
                     }
                     const int delayMs = 2000 * m_screenerRestartCount;  // back off: 2s, 4s, 6s
@@ -578,9 +569,11 @@ void MainWindowGPU::startScreenerServer() {
     m_screenerProcess->setWorkingDirectory(scriptsDir);
     m_screenerProcess->start(uvBin, args);
     if (m_screenerProcess->waitForStarted(2000)) {
-        sLog_App("Screener server started (pid=" << m_screenerProcess->processId() << ")");
+        sLog_App("Screener server started: pid=" << m_screenerProcess->processId()
+                 << " dir=" << scriptsDir);
     } else {
-        sLog_App("Screener server failed to start: " << m_screenerProcess->errorString());
+        sLog_Warning("Screener server failed to start: program=" << uvBin
+                     << " dir=" << scriptsDir << " error=" << m_screenerProcess->errorString());
     }
 }
 
@@ -612,10 +605,13 @@ void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (symbol.isEmpty() || !symbol.contains('-')) {
+        sLog_App("ui: subscribe rejected, invalid symbol=" << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
         return;
     }
 
+    sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
+             << " connected=" << m_connected);
     m_userSubscribed = true;
     if (m_qmlController) {
         m_qmlController->updateSymbolInContext(symbol);
@@ -668,12 +664,8 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
         tf = serverConfig.heatmap.timeframesMs.front();
     }
-    if (chartDebugEnabled()) {
-        sLog_Debug(QString("Heatmap history request: symbol=%1 tfMs=%2 count=%3")
-                   .arg(symbol)
-                   .arg(tf)
-                   .arg(count));
-    }
+    sLog_Data("Heatmap history request: symbol=" << symbol << " tfMs=" << tf
+              << " count=" << count);
     m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
 }
 
@@ -700,12 +692,8 @@ void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
     const auto& serverConfig = GuiConfigStore::instance().serverConfig();
     const int gridWidth = serverConfig.heatmap.gridWidth;
     const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
-    if (chartDebugEnabled()) {
-        sLog_Debug(QString("Footprint history request: symbol=%1 tfMs=%2 count=%3")
-                   .arg(symbol)
-                   .arg(timeframeMs)
-                   .arg(count));
-    }
+    sLog_Data("Footprint history request: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " count=" << count);
     m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);
 }
 
@@ -731,13 +719,8 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     const int64_t sessionMs = SessionManager::sessionDurationMs(
         static_cast<SessionManager::SessionType>(sessionType));
     const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
-    if (chartDebugEnabled()) {
-        sLog_Debug(QString("TPO history request: symbol=%1 tfMs=%2 sessionType=%3 count=%4")
-                   .arg(symbol)
-                   .arg(timeframeMs)
-                   .arg(sessionType)
-                   .arg(count));
-    }
+    sLog_Data("TPO history request: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " sessionType=" << sessionType << " count=" << count);
     m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, 0, count);
 }
 
@@ -776,6 +759,8 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
             return;
         }
         if (!m_candleViewportConn) {
+            sLog_Data("Candle history request deferred until viewport is valid: symbol=" << symbol
+                      << " view=[" << viewStart << ".." << viewEnd << "]");
             m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this, symbol]() {
                 if (!m_qmlController) {
                     return;
@@ -798,16 +783,9 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
         }
         return;
     }
-    if (chartDebugEnabled()) {
-        sLog_Debug(QString("Candle history request: symbol=%1 tfMs=%2 tfSec=%3 limit=%4 endSec=%5 view=[%6..%7]")
-                   .arg(symbol)
-                   .arg(rendererTfMs)
-                   .arg(timeframeSec)
-                   .arg(limit)
-                   .arg(endTimeSec)
-                   .arg(viewStart)
-                   .arg(viewEnd));
-    }
+    sLog_Data("Candle history request: symbol=" << symbol << " tfMs=" << rendererTfMs
+              << " tfSec=" << timeframeSec << " limit=" << limit << " endSec=" << endTimeSec
+              << " view=[" << viewStart << ".." << viewEnd << "]");
     m_dataSource->requestCandleHistory(symbol, timeframeSec, endTimeSec, limit);
 }
 
@@ -885,7 +863,8 @@ void MainWindowGPU::connectMarketDataSignals() {
     }
     auto unifiedGridRenderer = m_qmlController->getUnifiedGridRenderer();
     if (!m_dataSource || !unifiedGridRenderer) {
-        sLog_Error("Cannot connect signals: Missing components");
+        sLog_Error("Cannot connect signals: missing components dataSource=" << (m_dataSource != nullptr)
+                   << " renderer=" << (unifiedGridRenderer != nullptr));
         return;
     }
 
@@ -899,11 +878,8 @@ void MainWindowGPU::connectMarketDataSignals() {
             unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
         }
         m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
-        if (chartDebugEnabled()) {
-            sLog_Debug(QString("Chart TF init: server=%1 renderer=%2")
-                       .arg(tf)
-                       .arg(unifiedGridRenderer->getCurrentTimeframe()));
-        }
+        sLog_App("Chart timeframe init: serverTfMs=" << tf
+                 << " rendererTfMs=" << unifiedGridRenderer->getCurrentTimeframe());
         auto* toolbar = m_heatmapDock->toolbar();
         toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
                                       unifiedGridRenderer->footprintLayerEnabled(),
@@ -950,13 +926,11 @@ void MainWindowGPU::connectMarketDataSignals() {
             this,
             [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
                 if (!m_dataSource || m_currentSymbol.isEmpty()) return;
-                if (!m_connected) return;
-                if (chartDebugEnabled()) {
-                    sLog_Debug(QString("Heatmap scroll-past-cache fetch: symbol=%1 tf=%2 end=%3 count=%4")
-                               .arg(m_currentSymbol)
-                               .arg(timeframeMs)
-                               .arg(endTimeMs)
-                               .arg(count));
+                if (!m_connected) {
+                    sLog_Warning("Heatmap history fetch dropped, not connected: symbol=" << m_currentSymbol
+                                 << " tfMs=" << timeframeMs << " endMs=" << endTimeMs
+                                 << " count=" << count);
+                    return;
                 }
                 m_dataSource->requestHeatmapHistory(m_currentSymbol, timeframeMs, endTimeMs, count);
             },
@@ -990,12 +964,15 @@ void MainWindowGPU::connectMarketDataSignals() {
             this, &MainWindowGPU::onConnectionStatusChanged);
 
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
-            this, [](const QString& error) {
-                sLog_Error("DataSource error: " << error);
+            this, [this](const QString& error) {
+                sLog_Warning("DataSource error: error=" << error << " symbol=" << m_currentSymbol
+                             << " connected=" << m_connected);
             });
 }
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {
+    sLog_Data("Server connection status: connected=" << connected << " wasConnected=" << m_connected
+              << " symbol=" << m_currentSymbol << " userSubscribed=" << m_userSubscribed);
     if (m_statusBar) {
         if (connected) {
             m_statusBar->setConnectionStatus(true);
@@ -1016,7 +993,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         if (!m_userSubscribed && !m_currentSymbol.isEmpty()) {
             m_userSubscribed = true;
             if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
-            sLog_App(QString("Auto-subscribed to %1 on first connect").arg(m_currentSymbol));
+            sLog_App("Auto-subscribed on first connect: symbol=" << m_currentSymbol);
         }
 
         // (Re)send subscription and request history for active symbol.
@@ -1029,7 +1006,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
             requestFootprintHistoryForSymbol(m_currentSymbol);
             requestTpoHistoryForSymbol(m_currentSymbol);
             requestCandleHistoryForSymbol(m_currentSymbol);
-            sLog_App(QString("Subscribed and requested history on connect: %1").arg(m_currentSymbol));
+            sLog_Data("Resubscribed and requested history on connect: symbol=" << m_currentSymbol);
         }
     }
 }

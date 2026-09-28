@@ -129,9 +129,18 @@ void TickBinaryLogger::rotateFile(LogFile& file, const std::string& symbol, uint
     bool isNew = !fs::exists(filePath);
     
     file.stream.open(filePath, std::ios::binary | std::ios::app);
+    // A failed open retries on every tick; warn once per path.
+    const bool retryingSamePath = (file.currentPath == filePath.string());
     file.currentPath = filePath.string();
     file.currentHour = hour;
-    
+    if (!file.stream.is_open()) {
+        if (!retryingSamePath) {
+            sLog_Warning("TickBinaryLogger: cannot open " << file.currentPath
+                         << " for symbol=" << symbol << "; ticks for this hour are not logged");
+        }
+        return;
+    }
+
     if (isNew) {
         LogFormat::FileHeader fh;
         fh.created_at_ms = timestamp_ms;
@@ -142,5 +151,6 @@ void TickBinaryLogger::rotateFile(LogFile& file, const std::string& symbol, uint
         file.stream.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
     }
     
-    sLog_Data("Rotated log file for " << symbol << " to " << file.currentPath);
+    sLog_Data("TickBinaryLogger: rotated tick log: symbol=" << symbol << " path=" << file.currentPath
+              << " new=" << isNew);
 }

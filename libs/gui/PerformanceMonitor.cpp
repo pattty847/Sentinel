@@ -181,7 +181,8 @@ void PerformanceMonitor::initWindowsCounters() {
 
     status = PdhOpenQuery(nullptr, 0, reinterpret_cast<PDH_HQUERY*>(&m_pdhQuery));
     if (status != ERROR_SUCCESS) {
-        sLog_Error("Failed to open PDH query for performance monitoring");
+        sLog_Warning("Failed to open PDH query, CPU/GPU monitoring disabled: status=0x"
+                     << QString::number(static_cast<quint32>(status), 16));
         return;
     }
 
@@ -192,7 +193,8 @@ void PerformanceMonitor::initWindowsCounters() {
         reinterpret_cast<PDH_HCOUNTER*>(&m_cpuCounter)
     );
     if (status != ERROR_SUCCESS) {
-        sLog_Warning("Failed to add CPU counter (PDH)");
+        sLog_Warning("Failed to add PDH CPU counter: status=0x"
+                     << QString::number(static_cast<quint32>(status), 16));
         m_cpuCounter = nullptr;
     } else {
         sLog_App("Windows CPU monitoring initialized (PDH API)");
@@ -205,7 +207,8 @@ void PerformanceMonitor::initWindowsCounters() {
         reinterpret_cast<PDH_HCOUNTER*>(&m_gpuCounter)
     );
     if (status != ERROR_SUCCESS) {
-        sLog_App("GPU monitoring not available (Windows 10+ required or no compatible GPU)");
+        sLog_App("GPU monitoring not available (Windows 10+ required or no compatible GPU): status=0x"
+                 << QString::number(static_cast<quint32>(status), 16));
         m_gpuCounter = nullptr;
     } else {
         sLog_App("Windows GPU monitoring initialized (PDH API)");

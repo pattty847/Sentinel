@@ -5,14 +5,6 @@ Sentinel — CandleSeriesBuffer
 #include "SentinelLogging.hpp"
 
 #include <algorithm>
-#include <QElapsedTimer>
-
-namespace {
-bool candleDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG");
-    return enabled;
-}
-}
 
 CandleSeriesBuffer::CandleSeriesBuffer(QObject* parent)
     : QObject(parent) {
@@ -77,6 +69,10 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
     }
 
     if (seq <= series.lastSeq) {
+        sLog_Probe("candles.drop",
+                   "stale seq symbol=" << symbol << " tfSec=" << timeframeSec
+                   << " seq=" << seq << " lastSeq=" << series.lastSeq
+                   << " barStartMs=" << bar.timeStartMs);
         return;
     }
     series.lastSeq = seq;
@@ -109,25 +105,13 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
 
     emit candlesDirty(symbol, timeframeSec, updated.timeStartMs, updated.timeEndMs);
 
-    if (candleDebugEnabled()) {
-        static QElapsedTimer timer;
-        static bool started = false;
-        if (!started) {
-            timer.start();
-            started = true;
-        }
-        if (timer.elapsed() > 1000 && series.count > 0) {
-            const auto& oldest = getAt(series, 0);
-            const auto& newest = getAt(series, series.count - 1);
-            sLog_Debug(QString("Candle buffer: symbol=%1 tfSec=%2 count=%3 oldest=%4 newest=%5")
-                       .arg(symbol)
-                       .arg(timeframeSec)
-                       .arg(static_cast<int>(series.count))
-                       .arg(oldest.timeStartMs)
-                       .arg(newest.timeStartMs));
-            timer.restart();
-        }
-    }
+    sLog_Probe("candles.buffer",
+               "symbol=" << symbol << " tfSec=" << timeframeSec
+               << " seq=" << seq << " barStartMs=" << updated.timeStartMs
+               << " replaced=" << updatedExisting
+               << " count=" << series.count
+               << " oldestMs=" << getAt(series, 0).timeStartMs
+               << " newestMs=" << getAt(series, series.count - 1).timeStartMs);
 }
 
 bool CandleSeriesBuffer::getVisibleSlice(const QString& symbol,
