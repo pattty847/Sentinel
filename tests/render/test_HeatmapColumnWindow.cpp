@@ -418,3 +418,29 @@ TEST(HeatmapRecordingWindow, LiveArrivalDuringProjectionIsCachedWithoutChangingB
     EXPECT_DOUBLE_EQ(u.band.minPrice, 300);
     EXPECT_EQ(w.cachedColumns(), 2);
 }
+
+TEST(HeatmapRecordingWindow, RecordingLiveRemainsCachedAwayFromGpuWindow) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 100 + kRows, 1}, 1, u);
+    auto column = makeColumn(10);
+    column.validity = QByteArray((kRows + 7) / 8, '\xff');
+    ASSERT_TRUE(w.ingestRecording({column}, 1, {}, 0, 0, false, 0, 0,
+                                  1e-6, 819, u, first, true));
+    ASSERT_TRUE(first);
+    EXPECT_EQ(u.liveBucketMs, bucket(10));
+    w.setViewport(bucket(0), bucket(3), false, u);
+    const auto manualEnd = w.windowEndMs();
+    column.bucketStartMs = bucket(20);
+    w.ingestRecording({column}, 1, {}, 0, 0, false, 0, 0, 1e-6, 819, u, first, true);
+    EXPECT_EQ(w.windowEndMs(), manualEnd);
+    ASSERT_TRUE(w.setViewport(bucket(17), bucket(20), true, u));
+    EXPECT_TRUE(u.pinnedToLive);
+    EXPECT_EQ(u.windowEndMs, bucket(20));
+    const auto* write = writeFor(u, bucket(20));
+    ASSERT_NE(write, nullptr);
+    EXPECT_TRUE(write->recorded);
+    EXPECT_EQ(write->intensity, column.intensity);
+    EXPECT_EQ(write->validity, column.validity);
+}

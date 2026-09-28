@@ -28,6 +28,7 @@ DataProcessor::DataProcessor(QObject* parent)
     qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
     qRegisterMetaType<heatmap_window::UpdatePtr>("heatmap_window::UpdatePtr");
     qRegisterMetaType<protocol::recordingwire::Request>();
+    qRegisterMetaType<recording::LiveView>();
     m_recordingClock.start();
     m_recordingBandTimer = new QTimer(this);
     m_recordingBandTimer->setSingleShot(true);
@@ -795,7 +796,7 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
         const heatmap_window::Band columnBand{c.minPrice, c.maxPrice, c.tickSize};
         if (!columnBand.sameAs(band) || c.bucketStartMs <= 0 || c.bucketStartMs % page.timeframeMs != 0 ||
             c.intensity.size() != page.bandRows * 2 || c.liquidity.size() != page.bandRows * 2 ||
-            c.validity.size() != (page.bandRows + 7) / 8 || !(c.liquidityScale > 0) ||
+            c.validity.size() != (page.bandRows + 7) / 8 || c.liquidityScale < 0 ||
             !std::isfinite(c.liquidityScale)) {
             onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration, "invalid recording column");
             return;
@@ -806,13 +807,19 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
     auto update = std::make_shared<heatmap_window::Update>();
     if (m_heatmapWindow.setDisplayBand(band, m_bandGeneration, *update))
         publishHeatmapWindow(std::move(update), false);
+    const bool registerView = !m_recordingBandConfirmed;
     m_recordingBandConfirmed = true;
     m_recordingDisplayBand = band;
+    if (registerView) {
+        emit recordingViewNeeded({page.symbol.toStdString(), page.layer.toStdString(), page.timeframeMs,
+            {page.bandLo, page.bandTick, static_cast<uint32_t>(page.bandRows)}, page.bandGeneration});
+    }
     std::vector<heatmap_window::Column> columns;
     columns.reserve(page.columns.size());
     for (const auto& c : page.columns) {
         columns.push_back({c.bucketStartMs, c.minPrice, c.maxPrice, c.tickSize,
-                           c.intensity, c.liquidity, c.liquidityScale, c.validity});
+                           c.intensity, c.liquidity, c.liquidityScale, c.validity,
+                           c.observedMs, (c.flags & recording::kProvisional) != 0});
     }
     update = std::make_shared<heatmap_window::Update>();
     bool first = false;
@@ -835,4 +842,33 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
         else if (page.scannedEndMs > page.scannedStartMs)
             sendRecordingRequest(missing.endMs);
     }
+}
+
+void DataProcessor::onRecordingLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page) {
+    if (!recordingMode() || !m_recordingConnected || !m_recordingBandConfirmed ||
+        page.symbol != m_activeSymbol || page.bandGeneration != m_bandGeneration ||
+        page.timeframeMs != m_forcedTimeframeMs || page.status != "complete" ||
+        page.valueEncoding != "absolute_log_size" || page.bandRows != recording_view::kRows ||
+        page.columns.size() > 2) return;
+    const heatmap_window::Band band{page.bandLo, page.bandLo + page.bandRows * page.bandTick, page.bandTick};
+    if (!band.sameAs(m_recordingDisplayBand)) return;
+    std::vector<heatmap_window::Column> columns;
+    columns.reserve(page.columns.size());
+    for (const auto& c : page.columns) {
+        if (!heatmap_window::Band{c.minPrice, c.maxPrice, c.tickSize}.sameAs(band) ||
+            c.bucketStartMs <= 0 || c.bucketStartMs % page.timeframeMs ||
+            c.intensity.size() != page.bandRows * 2 || c.liquidity.size() != page.bandRows * 2 ||
+            c.validity.size() != (page.bandRows + 7) / 8 || c.liquidityScale < 0 ||
+            !std::isfinite(c.liquidityScale)) return;
+        columns.push_back({c.bucketStartMs, c.minPrice, c.maxPrice, c.tickSize,
+            c.intensity, c.liquidity, c.liquidityScale, c.validity,
+                           c.observedMs, (c.flags & recording::kProvisional) != 0});
+    }
+    auto update = std::make_shared<heatmap_window::Update>();
+    bool first = false;
+    if (m_heatmapWindow.ingestRecording(columns, page.bandGeneration, {}, 0, 0, false, 0,
+        0, page.sizeFloor, page.codesPerOctave, *update, first, true))
+        publishHeatmapWindow(std::move(update), first);
+    sLog_Probe("heatmap.recording.live", "symbol=" << page.symbol << " gen=" << page.bandGeneration
+        << " columns=" << columns.size() << " bucket=" << (columns.empty() ? 0 : columns.back().bucketStartMs));
 }

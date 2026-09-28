@@ -216,3 +216,44 @@ I/O policy: discovery warns and skips permission-denied/corrupt files, continuin
 Rollups preserve numerator and denominator per native row and side before summing at the display tick. Covered absent entries contribute zero; uncovered rows contribute neither numerator nor denominator. Both sides remain separate until dominant-side projection, with bids winning ties. Columns carry absolute log cells, linear u16 dominant-side quantities with `quantityScale`, observedMs, flags, and an LSB-first validity mask in the same descending order. A row is valid only when **every native row on both sides** was covered for the column's total observed time. Partial observation sets `partial` without turning observed zeros into unknown rows. Legacy hours propagate `approximate coverage`. Incompatible native grid changes within a rollup return `IncompatibleGrid` rather than inventing finer detail.
 
 For tf >= 1h, persisted hours are combined with minutes from the latest unpersisted hour only. Minutes belonging to a persisted hour never participate. Result availability uses output bucket starts. `endMs=0` selects latest; nonzero end is inclusive and aligned down to output timeframe. The builder walks output buckets backward, then returns columns ascending. Only completed output buckets enter `[scannedStartMs,scannedEndMs)`; unfinished rollups are discarded on budget/cancellation. Gaps inside that interval have been scanned. `nextEnd` is the preceding output bucket; `exhausted` means the availability floor was reached, never merely that a page was short. An I/O failure returns a status without claiming the unread interval. Root overloads are one-shot; serving workers should reuse a reader.
+
+### Live recording columns (S4)
+
+A recording client registers one view per session after history confirms its exact band:
+
+```json
+{"type":"heatmap_recording_view","symbol":"BTC-USD","layer":"deep","timeframe_ms":300000,"band_lo":50000,"band_tick":20,"band_rows":2048,"band_generation":7}
+```
+
+Registration replaces the previous view. Required layer is `near` or `deep`; tf is an
+integer minute below 1h or integer hour thereafter, 1m through 1d inclusive (hours require
+`deep`). Band lo must be nonnegative and tick-aligned, tick positive, rows 1..16384, and
+upper bound <= 1e12. The native-row span is limited to 262144 during worker projection.
+The server returns `error` with context `heatmap_recording_view` for malformed registration,
+unavailable recording, or the 64-view global admission limit. Reconnect and every re-band
+must register anew; generations identify the projection and are echoed unchanged.
+
+`heatmap_recording_live` has the heatmap family `schema_version`, `source:"recording"`,
+`status:"complete"`, symbol, timeframe, layer, band, generation, size-code scale, and the
+same `columns` array/encoding as recording history: little-endian u16 base64 `column` and
+`liquidity_column`, `liquidity_scale`, packed LSB-first `validity`, `observed_ms`, and `flags`.
+`value_encoding` is `absolute_log_size`. Zero quantity scale is valid for all-zero columns.
+There are at most two columns (prior finalized bucket and current forming bucket). The
+history envelope fields retained for decoder reuse do not prove scanned history: live
+`scanned_start`/`scanned_end` are zero, request id is empty, and exhausted is false.
+
+`flags & 32` means provisional: the column contains the open minute's valid-time TWAP,
+peaks/bounds so far in the publication source. This bit is publication/wire-only, never an
+HMC2 disk flag. Existing partial/coverage/resync flags retain their meanings. A committed
+minute replaces its provisional contribution, never adds to it. For tf > 1m, committed
+minutes plus the provisional minute are aggregated by each native row's covered duration,
+then summed into display rows using the history projection math. Unknown time is excluded;
+zero-observation source minutes are omitted. Live multi-hour columns aggregate minute codes
+directly, so hourly-quantized history may differ by codec rounding at handover.
+
+Delivery normally follows publication at ~1 s, coalesces under load, and backs off to 5 s
+on budget/backpressure. It is latest-state streaming, not an event log. Committed minutes
+are recoverable through history. The recorder callback, disk read/projection/encoding
+worker, and network executor have separate ownership; session write limits still apply.
+Clients reject stale generations, preserve live columns while browsing history, advance
+latest time monotonically, and keep matching live data ahead of delayed history responses.

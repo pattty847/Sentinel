@@ -145,3 +145,47 @@ TEST(RecordingHistoryWire, ReaderIsOwnedByItsWorkerThread) {
     EXPECT_NE(a.get(), b.get());
     EXPECT_EQ(&threadReader(root), &threadReader(root));
 }
+
+TEST(RecordingHistoryWire, LiveViewRoundTripAndBounds) {
+    recording::LiveView view{"BTC-USD", "near", 300000, {9000, 2, 2048}, 77};
+    auto msg = protocol::recordingwire::viewMessage(view);
+    auto parsed = protocol::recordingwire::parseView(msg);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed->generation, 77);
+    EXPECT_EQ(parsed->band.rows, 2048);
+    msg["band_tick"] = 0;
+    EXPECT_FALSE(protocol::recordingwire::parseView(msg));
+    msg = protocol::recordingwire::viewMessage(view);
+    msg["band_rows"] = -1;
+    EXPECT_FALSE(protocol::recordingwire::parseView(msg));
+    msg = protocol::recordingwire::viewMessage(view);
+    msg["timeframe_ms"] = 86400001;
+    EXPECT_FALSE(protocol::recordingwire::parseView(msg));
+}
+
+TEST(RecordingHistoryWire, LiveUsesIdenticalColumnEncodingAndEchoesGeneration) {
+    recording::LiveView view{"BTC-USD", "near", 60000, {90, 1, 4}, 123};
+    recording::BuildResult page;
+    page.band = view.band;
+    page.layer = view.layer;
+    recording::ServedColumn column;
+    column.bucketStartMs = recording::kHmc2MinMs;
+    column.observedMs = 1234;
+    column.flags = recording::kProvisional | recording::kPartial;
+    column.cells = {1, 2, 0x8003, 0};
+    column.quantities = {10, 20, 30, 0};
+    column.validity = {0xf};
+    page.columns.push_back(column);
+    auto wire = buildLive(view, page);
+    EXPECT_EQ(wire["type"], "heatmap_recording_live");
+    EXPECT_EQ(wire["band_generation"], 123);
+    EXPECT_EQ(wire["scanned_start"], 0);
+    auto parsed = SentinelStreamClient::parseRecordingHistoryChunk(wire);
+    ASSERT_TRUE(parsed);
+    ASSERT_EQ(parsed->columns.size(), 1);
+    EXPECT_EQ(parsed->columns[0].observedMs, 1234);
+    EXPECT_EQ(parsed->columns[0].flags, column.flags);
+    EXPECT_EQ(parsed->columns[0].intensity.toHex(), "0100020003800000");
+    EXPECT_EQ(parsed->columns[0].validity.toHex(), "0f");
+    EXPECT_EQ(parsed->bandGeneration, 123);
+}

@@ -27,6 +27,8 @@ struct Column {
     QByteArray liquidity;   // rows * 2, or empty
     double liquidityScale = 1.0;
     QByteArray validity; // packed LSB-first row bits; empty for legacy
+    uint64_t observedMs = 0; // recording only: history may finalize a missed provisional
+    bool provisional = false;
 };
 
 struct Band {
@@ -109,7 +111,7 @@ public:
                          const std::string& requestId, int64_t scannedStartMs,
                          int64_t scannedEndMs, bool exhausted, int64_t oldestAvailableMs,
                          int64_t latestAvailableMs, double sizeFloor, double codesPerOctave,
-                         Update& out, bool& firstPlacement);
+                         Update& out, bool& firstPlacement, bool live = false);
 
     // Live forming/finalized bucket. Returns true and fills out when the GPU
     // window changes. firstPlacement is set when this created the window.
@@ -156,6 +158,8 @@ private:
     std::string m_requestId;
     double m_sizeFloor = 0.0, m_codesPerOctave = 0.0;
     int64_t m_latestRecordingMs = 0;
+    std::map<int64_t, Column> m_recordingLive;
+    uint64_t m_liveGeneration = 0;
     std::map<int64_t, Column> m_projected;
     std::map<int64_t, Column> m_cache;
     std::map<int64_t, int64_t> m_known;   // start -> end, inclusive, tf-aligned

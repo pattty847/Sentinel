@@ -20,8 +20,11 @@ protected:
     QCoreApplication app{argc, argv};
     DataProcessor processor;
     std::vector<protocol::recordingwire::Request> requests;
+    std::vector<recording::LiveView> views;
     std::vector<heatmap_window::UpdatePtr> updates;
     void SetUp() override {
+        QObject::connect(&processor, &DataProcessor::recordingViewNeeded, &processor,
+                         [this](const auto& view) { views.push_back(view); });
         QObject::connect(&processor, &DataProcessor::recordingHistoryFetchNeeded, &processor,
                          [this](const auto& request) { requests.push_back(request); });
         QObject::connect(&processor, &DataProcessor::heatmapWindowUpdated, &processor,
@@ -41,6 +44,7 @@ protected:
         p.timeframeMs = request.timeframeMs;
         p.requestEndMs = request.endTimeMs;
         p.status = "budget";
+        p.layer = "near";
         p.valueEncoding = "absolute_log_size";
         p.bandLo = 8000;
         p.bandTick = 2;
@@ -171,4 +175,88 @@ TEST(RecordingClientConfig, SourceDefaultsAndParsing) {
         ASSERT_TRUE(ConfigLoader::loadClientConfig(file.fileName().toStdString(), &config));
         EXPECT_EQ(config.heatmap.source, std::string(source) == "recording" ? "recording" : "legacy");
     }
+}
+
+TEST_F(RecordingDataProcessor, LiveAdvancesAndStaleGenerationCannotOverwriteIt) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    processor.onRecordingHistoryReceived(history);
+    ASSERT_EQ(views.size(), 1);
+    EXPECT_EQ(views.back().generation, history.bandGeneration);
+    EXPECT_EQ(views.back().band.tick, history.bandTick);
+    auto live = history;
+    live.status = "complete";
+    live.requestId.clear();
+    live.columns[0].bucketStartMs += 60'000;
+    live.columns[0].intensity.fill('\x55');
+    processor.onRecordingLiveReceived(live);
+    ASSERT_FALSE(updates.empty());
+    EXPECT_EQ(updates.back()->windowEndMs, live.columns[0].bucketStartMs);
+    EXPECT_EQ(updates.back()->liveBucketMs, live.columns[0].bucketStartMs);
+    EXPECT_TRUE(updates.back()->pinnedToLive);
+    auto count = updates.size();
+    auto stale = live;
+    --stale.bandGeneration;
+    stale.columns[0].bucketStartMs += 60'000;
+    processor.onRecordingLiveReceived(stale);
+    EXPECT_EQ(updates.size(), count);
+    // A queued history reply must neither rewind the edge nor replace live values.
+    auto lateHistory = page(requests.back());
+    lateHistory.columns[0].bucketStartMs = live.columns[0].bucketStartMs;
+    lateHistory.columns[0].intensity.fill('\x11');
+    processor.onRecordingHistoryReceived(lateHistory);
+    EXPECT_GE(updates.back()->windowEndMs, live.columns[0].bucketStartMs);
+    for (size_t i = count; i < updates.size(); ++i)
+        for (const auto& write : updates[i]->writes)
+            if (write.bucketStartMs == live.columns[0].bucketStartMs)
+                EXPECT_EQ(write.intensity, live.columns[0].intensity);
+}
+
+TEST_F(RecordingDataProcessor, RebandAndReconnectRegisterFreshConfirmedViews) {
+    processor.setRecordingCapability(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 1);
+    const auto generation = views.back().generation;
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 20000, 20100, 1000, 500);
+    events(180);
+    EXPECT_EQ(views.size(), 1); // wait for authoritative native grid before registering
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 2);
+    EXPECT_GT(views.back().generation, generation);
+    const auto beforeReconnect = views.back().generation;
+    processor.setRecordingConnected(false);
+    processor.setRecordingConnected(true);
+    processor.setRecordingCapability(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 3);
+    EXPECT_GT(views.back().generation, beforeReconnect);
+}
+
+TEST_F(RecordingDataProcessor, HistoryCanFinalizeMissedLiveCommit) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    processor.onRecordingHistoryReceived(history);
+    auto live = history;
+    live.status = "complete";
+    live.columns[0].bucketStartMs += 60'000;
+    live.columns[0].observedMs = 30000;
+    live.columns[0].flags = recording::kProvisional;
+    live.columns[0].intensity.fill('\x55');
+    processor.onRecordingLiveReceived(live);
+    auto final = page(requests.back());
+    final.columns[0].bucketStartMs = live.columns[0].bucketStartMs;
+    final.columns[0].observedMs = 60000;
+    final.columns[0].intensity.fill('\x33');
+    processor.onRecordingHistoryReceived(final);
+    ASSERT_FALSE(updates.empty());
+    const auto& writes = updates.back()->writes;
+    const auto found = std::find_if(writes.begin(), writes.end(), [&](const auto& w) {
+        return w.bucketStartMs == live.columns[0].bucketStartMs;
+    });
+    ASSERT_NE(found, writes.end());
+    EXPECT_EQ(found->intensity, final.columns[0].intensity);
 }

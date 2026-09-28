@@ -165,6 +165,7 @@ class Session : public std::enable_shared_from_this<Session> {
     std::string peer_;  // "ip:port" of the client, for log lines only
     std::unordered_set<std::string> subscriptions_;
     std::deque<std::string> write_queue_;
+    std::shared_ptr<recording::LiveService::Subscription> recordingView_;
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
@@ -263,6 +264,8 @@ class Session : public std::enable_shared_from_this<Session> {
         }
 
         disconnectModelSignals();
+        if (recordingView_) recordingView_->active.store(false);
+        recordingView_.reset();
         if (owner_ && m_latencySenderId != 0) {
             owner_->unregisterLatencySender(m_latencySenderId);
             m_latencySenderId = 0;
@@ -994,6 +997,7 @@ public:
     }
 
     ~Session() {
+        if (recordingView_) recordingView_->active.store(false);
         disconnectModelSignals();
     }
 
@@ -1207,6 +1211,26 @@ public:
                     do_write(snapshot.dump());
                     
                 }
+            } else if (type == "heatmap_recording_view") {
+                const auto view = protocol::recordingwire::parseView(j);
+                if (!view || !model_.recordingLive()) {
+                    send_error(type, "", "invalid recording view or recording unavailable");
+                    return;
+                }
+                if (recordingView_) recordingView_->active.store(false);
+                auto weak = weak_from_this();
+                recordingView_ = model_.recordingLive()->subscribe(*view,
+                    [weak](const recording::LiveView& v, const recording::BuildResult& page) {
+                        auto self = weak.lock();
+                        if (!self || self->closing_.load()) return false;
+                        // Encode off I/O, then atomically reserve a small share of the
+                        // session budget. Congestion drops this revision for retry.
+                        if (self->pendingWriteBytes_.load() >= 1024 * 1024) return false;
+                        return self->tryRecordingWrite(protocol::recordingwire::buildLive(v, page).dump());
+                    });
+                if (!recordingView_) send_error(type, view->symbol, "recording live view capacity reached");
+                sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
+                    << " gen=" << view->generation << " layer=" << view->layer);
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const std::string source = j.value("source", std::string("legacy"));
@@ -2009,6 +2033,17 @@ public:
         payload["candle"] = std::move(item);
 
         do_write(payload.dump());
+    }
+
+    bool tryRecordingWrite(std::string payload) {
+        const auto bytes = payload.size();
+        size_t pending = pendingWriteBytes_.load();
+        do {
+            if (closing_.load() || bytes > 1024 * 1024 || pending > 1024 * 1024 - bytes) return false;
+        } while (!pendingWriteBytes_.compare_exchange_weak(pending, pending + bytes));
+        net::post(ws_.get_executor(), beast::bind_front_handler(
+            &Session::on_write_post, shared_from_this(), std::move(payload)));
+        return true;
     }
 
     void do_write(std::string payload) {

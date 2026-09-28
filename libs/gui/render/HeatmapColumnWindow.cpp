@@ -111,6 +111,8 @@ void ColumnWindow::clear() {
     m_rows = 0;
     m_bytesPerCell = 0;
     m_cache.clear();
+    m_recordingLive.clear();
+    m_liveGeneration = 0;
     m_projected.clear();
     m_recording = false;
     m_bandGeneration = 0;
@@ -362,25 +364,44 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
                                    const std::string& requestId, int64_t scannedStartMs,
                                    int64_t scannedEndMs, bool exhausted, int64_t oldestAvailableMs,
                                    int64_t latestAvailableMs, double sizeFloor, double codesPerOctave,
-                                   Update& out, bool& firstPlacement) {
+                                   Update& out, bool& firstPlacement, bool live) {
     firstPlacement = false;
-    if (!m_recording || generation != m_bandGeneration || requestId != m_requestId ||
+    if (!m_recording || generation != m_bandGeneration || (!live && requestId != m_requestId) ||
         !(sizeFloor > 0) || !std::isfinite(sizeFloor) || !(codesPerOctave > 0) ||
         !std::isfinite(codesPerOctave)) return false;
     m_sizeFloor = sizeFloor;
     m_codesPerOctave = codesPerOctave;
     const auto previousLatest = m_latestRecordingMs;
-    if (latestAvailableMs > 0) m_latestRecordingMs = latestAvailableMs;
+    if (latestAvailableMs > 0) m_latestRecordingMs = std::max(m_latestRecordingMs, latestAvailableMs);
+    if (live && m_liveGeneration != generation) {
+        m_recordingLive.clear();
+        m_liveGeneration = generation;
+    }
     std::vector<int64_t> changed;
     changed.reserve(columns.size());
     for (const auto& column : columns) {
         if (!bandOf(column).sameAs(m_band) || !acceptShape(column, 2) ||
             column.validity.size() != (m_rows + 7) / 8 || column.liquidity.size() != m_rows * 2)
             continue;
+        if (!live && m_liveGeneration == generation) {
+            const auto existing = m_recordingLive.find(column.bucketStartMs);
+            if (existing != m_recordingLive.end()) {
+                const auto& old = existing->second;
+                // Recover a final correction missed under congestion, without
+                // replacing the current provisional with a shorter disk prefix.
+                const bool finalized = old.provisional && column.observedMs > 0 &&
+                    (column.observedMs > old.observedMs ||
+                     (column.bucketStartMs < m_latestRecordingMs && column.observedMs == old.observedMs));
+                if (!finalized) continue;
+                m_recordingLive.erase(existing);
+            }
+        }
+        if (live) m_recordingLive[column.bucketStartMs] = column;
         m_projected[column.bucketStartMs] = column;
         m_latestRecordingMs = std::max(m_latestRecordingMs, column.bucketStartMs);
         changed.push_back(column.bucketStartMs);
     }
+    while (static_cast<int>(m_recordingLive.size()) > m_capacity) m_recordingLive.erase(m_recordingLive.begin());
     // Only completed, tf-aligned output buckets are proven by a recording page.
     if (scannedEndMs > scannedStartMs && scannedStartMs > 0 &&
         scannedStartMs % m_timeframeMs == 0 && scannedEndMs % m_timeframeMs == 0)
@@ -395,13 +416,18 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
         const auto back = std::prev(m_projected.end());
         m_projected.erase(m_placed && front->first >= windowStartMs() ? back : front);
     }
+    bool changedWindow = false;
     if (!m_placed) {
         firstPlacement = place(out, changed);
-        return firstPlacement;
+        changedWindow = firstPlacement;
+    } else if (m_latestRecordingMs > previousLatest) changedWindow = place(out, changed);
+    else {
+        emitWindow(false, changed, out);
+        changedWindow = !out.writes.empty();
     }
-    if (m_latestRecordingMs > previousLatest) return place(out, changed);
-    emitWindow(false, changed, out);
-    return !out.writes.empty();
+    if (live && changedWindow && std::find(changed.begin(), changed.end(), m_latestRecordingMs) != changed.end())
+        out.liveBucketMs = m_latestRecordingMs;
+    return changedWindow;
 }
 
 bool ColumnWindow::setViewport(int64_t viewStartMs, int64_t viewEndMs, bool follow, Update& out) {
@@ -529,13 +555,18 @@ void ColumnWindow::writeSlot(int64_t bucketMs, SlotWrite& out) {
     out.bucketStartMs = bucketMs;
     const auto& cache = m_recording ? m_projected : m_cache;
     const auto it = cache.find(bucketMs);
-    if (it != cache.end()) {
+    const Column* column = it == cache.end() ? nullptr : &it->second;
+    if (m_recording && m_liveGeneration == m_bandGeneration) {
+        const auto live = m_recordingLive.find(bucketMs);
+        if (live != m_recordingLive.end()) column = &live->second;
+    }
+    if (column) {
         if (m_recording) {
-            out.intensity = it->second.intensity;
-            out.liquidity = it->second.liquidity;
-            out.validity = it->second.validity;
-        } else resampleColumn(it->second, m_band, m_rows, m_bytesPerCell, out.intensity, out.liquidity);
-        out.liquidityScale = it->second.liquidityScale > 0.0 ? it->second.liquidityScale : 1.0;
+            out.intensity = column->intensity;
+            out.liquidity = column->liquidity;
+            out.validity = column->validity;
+        } else resampleColumn(*column, m_band, m_rows, m_bytesPerCell, out.intensity, out.liquidity);
+        out.liquidityScale = column->liquidityScale > 0.0 ? column->liquidityScale : 1.0;
         out.recorded = true;
     } else {
         out.intensity = m_zeroIntensity;

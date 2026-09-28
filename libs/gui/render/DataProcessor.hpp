@@ -47,6 +47,7 @@ public slots:
     void setRecordingCapability(bool available);
     void setRecordingConnected(bool connected);
     void refreshRecordingHistory();
+    void onRecordingLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void onRecordingHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void onRecordingHistoryError(const QString& symbol, const QString& requestId,
                                  uint64_t generation, const QString& message);
@@ -73,6 +74,7 @@ public:
 signals:
     // Ring writes for the GPU window; live and history both arrive this way.
     void heatmapWindowUpdated(heatmap_window::UpdatePtr update);
+    void recordingViewNeeded(const recording::LiveView& view);
     void recordingHistoryFetchNeeded(const protocol::recordingwire::Request& request);
     void heatmapHistoryFetchNeeded(qint64 timeframeMs, qint64 endTimeMs, int count);
     void heatmapHistoryStatus(bool loading, qint64 oldestAvailableMs);
@@ -158,3 +160,5 @@ private:
 };
 
 Q_DECLARE_METATYPE(protocol::recordingwire::Request)
+
+Q_DECLARE_METATYPE(recording::LiveView)

@@ -38,6 +38,7 @@ public:
                                        int64_t timeframeMs,
                                        int64_t endTimeMs,
                                        int count) = 0;
+    virtual void registerRecordingView(const recording::LiveView& view) = 0;
     virtual void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) = 0;
     virtual void requestFootprintHistory(const QString& symbol,
                                          int64_t timeframeMs,
@@ -74,6 +75,7 @@ signals:
                                 int64_t requestEndMs,
                                 int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
+    void recordingHeatmapLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void recordingHeatmapHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void recordingHeatmapHistoryError(const QString& symbol, const QString& requestId,
                                       uint64_t bandGeneration, const QString& message);
