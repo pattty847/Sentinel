@@ -525,3 +525,82 @@ TEST(HeatmapRecordingWindow, WallsRejectLegacyAndExcessiveScans) {
     narrow.limit = 0;
     EXPECT_EQ(recording.captureWalls(narrow).status, 422);
 }
+
+TEST(HeatmapRecordingWindow, FinalRepairCapsAttemptsAcceptsShortHistoryAndAdvances) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 116, 1}, 1, u);
+    auto a = makeColumn(10), b = makeColumn(11), c = makeColumn(12);
+    for (auto* column : {&a, &b, &c}) {
+        column->validity = QByteArray(2, '\xff');
+        column->provisional = true;
+        column->observedMs = 59000;
+    }
+    ASSERT_TRUE(w.ingestRecording({a, b, c}, 1, {}, 0, 0, false, 0, bucket(12), 1e-6, 819, u, first, true));
+    int64_t requested = 0;
+    EXPECT_FALSE(w.nextRecordingRepair(0, requested, u));
+    EXPECT_EQ(requested, bucket(10));
+    auto disk = a;
+    disk.provisional = false;
+    disk.observedMs = 30000;
+    disk.intensity.fill('\x22');
+    disk.validity[1] = 0; // disk evidence leaves these rows unknown
+    w.setRecordingRequest("repair");
+    w.ingestRecording({disk}, 1, "repair", bucket(10), bucket(11), false, 0, bucket(12), 1e-6, 819, u, first);
+    EXPECT_EQ(w.unfinishedRecordingBucket(), bucket(10));
+    for (const auto [now, expected] : std::vector<std::pair<int64_t, int64_t>>{
+             {1999, 0}, {2000, bucket(10)}, {5999, 0}, {6000, bucket(10)}, {13999, 0}}) {
+        EXPECT_FALSE(w.nextRecordingRepair(now, requested, u));
+        EXPECT_EQ(requested, expected);
+    }
+    ASSERT_TRUE(w.nextRecordingRepair(14000, requested, u));
+    EXPECT_EQ(requested, bucket(11));
+    EXPECT_EQ(w.unfinishedRecordingBucket(), bucket(11));
+    const auto* write = writeFor(u, bucket(10));
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(write->intensity, disk.intensity);
+    EXPECT_EQ(write->validity, disk.validity);
+    // Delayed provisional replays cannot resurrect a settled repair.
+    w.ingestRecording({a}, 1, {}, 0, 0, false, 0, bucket(12), 1e-6, 819, u, first, true);
+    EXPECT_EQ(w.unfinishedRecordingBucket(), bucket(11));
+    // A real final correction still wins after repair exhaustion.
+    a.provisional = false;
+    a.observedMs = 60000;
+    ASSERT_TRUE(w.ingestRecording({a}, 1, {}, 0, 0, false, 0, bucket(12), 1e-6, 819, u, first, true));
+    EXPECT_EQ(writeFor(u, bucket(10))->intensity, a.intensity);
+}
+
+TEST(HeatmapRecordingWindow, MissingOrFailedHistorySettlesUnknownAndDoesNotBlockNewerBuckets) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 116, 1}, 1, u);
+    auto a = makeColumn(10), b = makeColumn(11), c = makeColumn(12);
+    for (auto* column : {&a, &b, &c}) {
+        column->validity = QByteArray(2, '\xff');
+        column->provisional = true;
+        column->observedMs = 59000;
+    }
+    w.ingestRecording({a, b, c}, 1, {}, 0, 0, false, 0, bucket(12), 1e-6, 819, u, first, true);
+    int64_t requested = 0;
+    for (const auto now : {0, 2000, 6000}) {
+        w.nextRecordingRepair(now, requested, u);
+        ASSERT_EQ(requested, bucket(10));
+        // Empty pages and request failures provide no recorded value.
+        w.ingestRecording({}, 1, {}, bucket(10), bucket(11), false, 0, bucket(12), 1e-6, 819, u, first);
+    }
+    ASSERT_TRUE(w.nextRecordingRepair(14000, requested, u));
+    EXPECT_EQ(requested, bucket(11));
+    const auto* write = writeFor(u, bucket(10));
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(write->validity, QByteArray(2, 0));
+    EXPECT_EQ(write->intensity, QByteArray(32, 0));
+    w.nextRecordingRepair(16000, requested, u);
+    w.nextRecordingRepair(20000, requested, u);
+    ASSERT_TRUE(w.nextRecordingRepair(28000, requested, u));
+    EXPECT_EQ(requested, 0);
+    EXPECT_EQ(w.unfinishedRecordingBucket(), 0); // current bucket is never retired
+    w.nextRecordingRepair(100000, requested, u);
+    EXPECT_EQ(requested, 0);
+}

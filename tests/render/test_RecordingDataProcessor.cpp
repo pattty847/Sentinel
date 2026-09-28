@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QTemporaryFile>
 #include "ConfigLoader.hpp"
@@ -324,4 +325,87 @@ TEST_F(RecordingDataProcessor, LostFinalIsFetchedAfterLiveMovesToNextBucket) {
     EXPECT_EQ(found->intensity, final.columns[0].intensity);
     events(2200);
     EXPECT_EQ(requests.size(), 2); // repair completed; no paging/retry loop
+}
+
+TEST_F(RecordingDataProcessor, UnrepairableBucketStopsAfterThreeAttemptsAndNextBucketRepairs) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    history.status = "complete";
+    history.exhausted = true;
+    history.scannedStartMs = history.oldestAvailableMs = 60000;
+    processor.onRecordingHistoryReceived(history);
+    auto live = history;
+    live.columns[0].observedMs = 59000;
+    live.columns[0].flags = recording::kProvisional;
+    for (const auto bucket : {12'060'000, 12'120'000, 12'180'000}) {
+        live.columns[0].bucketStartMs = bucket;
+        processor.onRecordingLiveReceived(live);
+    }
+    auto awaitRequests = [&](size_t count, int deadlineMs) {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (requests.size() < count && elapsed.elapsed() < deadlineMs) events(20);
+        return requests.size() == count;
+    };
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        // Qt's coarse 2s polling can fire before a backoff expires and defer
+        // the request to the next poll. Assert behavior, not an exact wakeup.
+        ASSERT_TRUE(awaitRequests(static_cast<size_t>(attempt + 2), attempt == 2 ? 7500 : 5500));
+        EXPECT_EQ(requests.back().endTimeMs, 12'060'000);
+        EXPECT_EQ(requests.back().count, 1);
+        auto response = page(requests.back());
+        response.columns.clear();
+        if (attempt == 0) {
+            response.status = "complete"; // no column was ever committed
+            response.scannedStartMs = 12'060'000;
+            response.scannedEndMs = 12'120'000;
+        } else if (attempt == 1) {
+            response.status = "budget"; // must not bypass per-bucket attempts via 250ms retry
+            response.scannedStartMs = response.scannedEndMs = 0;
+        } else response.status = "io_error";
+        processor.onRecordingHistoryReceived(response);
+    }
+    ASSERT_TRUE(awaitRequests(5, 11500));
+    EXPECT_EQ(requests.back().endTimeMs, 12'120'000);
+    auto final = page(requests.back());
+    final.status = "complete";
+    final.columns[0].bucketStartMs = 12'120'000;
+    final.columns[0].observedMs = 60000;
+    processor.onRecordingHistoryReceived(final);
+    processor.setRecordingConnected(false);
+}
+
+TEST_F(RecordingDataProcessor, FinalRepairCancelsASupersededHistoryBudgetTimer) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    processor.onRecordingHistoryReceived(history); // starts an ordinary continuation
+    ASSERT_EQ(requests.size(), 2);
+    auto live = history;
+    live.status = "complete";
+    live.columns[0].observedMs = 59000;
+    live.columns[0].flags = recording::kProvisional;
+    live.columns[0].bucketStartMs = 12'060'000;
+    processor.onRecordingLiveReceived(live);
+    live.columns[0].bucketStartMs += 60000;
+    processor.onRecordingLiveReceived(live);
+    auto budget = page(requests.back());
+    budget.columns.clear();
+    budget.scannedStartMs = budget.scannedEndMs = 0;
+    processor.onRecordingHistoryReceived(budget); // schedules 250ms retry
+    // Deliver the final-repair timeout in that 250ms gap, without wall-clock races.
+    QTimer* finalTimer = nullptr;
+    for (auto* timer : processor.findChildren<QTimer*>())
+        if (timer->isActive() && timer->interval() == 2000) finalTimer = timer;
+    ASSERT_NE(finalTimer, nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(finalTimer, "timeout", Qt::DirectConnection));
+    ASSERT_EQ(requests.size(), 3);
+    ASSERT_EQ(requests.back().count, 1);
+    auto failed = page(requests.back());
+    failed.status = "io_error";
+    processor.onRecordingHistoryReceived(failed);
+    events(350);
+    EXPECT_EQ(requests.size(), 3); // stale 250ms timer cannot bypass repair backoff
+    processor.setRecordingConnected(false);
 }

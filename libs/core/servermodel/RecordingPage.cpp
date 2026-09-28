@@ -302,13 +302,15 @@ struct LiveBuilder::Impl {
     struct Bucket {
         Aggregate aggregate;
         int64_t through = 0;
+        std::optional<ServedColumn> final;
     };
     std::map<int64_t, Bucket> buckets;
     explicit Impl(LiveView v) : view(std::move(v)) {}
 };
 LiveBuilder::LiveBuilder(LiveView view) : impl_(std::make_unique<Impl>(std::move(view))) {}
 LiveBuilder::~LiveBuilder() = default;
-BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &source) {
+BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &source,
+                               int64_t deliveredFinalThroughMs) {
     auto &v = impl_->view;
     BuildResult out;
     out.band = v.band;
@@ -356,6 +358,10 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
                 b.aggregate.column.bucketStartMs = start;
                 b.aggregate.direct = v.tfMs == minute;
             }
+            if (b.final) {
+                if (b.final->observedMs && start > deliveredFinalThroughMs) out.columns.push_back(*b.final);
+                continue;
+            }
             const auto end = std::max(start, std::min(start + v.tfMs, source.committedThroughMs));
             // The retained suffix proves all commits since its first record. Older
             // data is scanned once; a budget keeps the proven prefix and resumes.
@@ -380,6 +386,16 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
                 b.through = r->bucketStartMs + minute;
             }
             b.through = std::max(b.through, end);
+            if (b.through == start + v.tfMs) {
+                // Final projections are immutable. Finish in place exactly once;
+                // release the potentially 262k-row accumulator after projection.
+                ReadControl atomic;
+                b.final = b.aggregate.column.observedMs
+                    ? b.aggregate.finish(v.band, out.sizeScale, v.tfMs, atomic) : ServedColumn{};
+                b.aggregate = {};
+                if (b.final->observedMs && start > deliveredFinalThroughMs) out.columns.push_back(*b.final);
+                continue;
+            }
             auto live = b.aggregate; // bounded by distinct native rows, not minute count
             for (const auto &[time, pending] : source.provisional) {
                 if (time < b.through || time < start || time >= start + v.tfMs) continue;

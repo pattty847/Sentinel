@@ -1,4 +1,4 @@
-// Reproducible worker cost measurement; no exchange, socket, or disk warmup cost.
+// Reproducible worker cost measurement; no exchange or socket cost; disk warmup is excluded.
 #include "servermodel/RecordingLive.hpp"
 #include "protocol/RecordingHistoryWire.hpp"
 #include <QTemporaryDir>
@@ -8,6 +8,8 @@
 #include <thread>
 using namespace recording;
 namespace {
+int sourceEntries = 12000;
+int nativeRows = 20480;
 RecordPtr sample(int minute, int observed, bool provisional) {
     auto r = std::make_shared<Hmc2Record>();
     r->header.symbol = "BENCH-USD";
@@ -18,28 +20,40 @@ RecordPtr sample(int minute, int observed, bool provisional) {
     r->committedThroughMs = kHmc2MinMs + (provisional ? minute : minute + 1) * 60000;
     r->flags = provisional ? kProvisional : 0;
     r->bidRowLo = r->askRowLo = 0;
-    r->bidRowHi = r->askRowHi = 20479;
-    for (int i = 0; i < 12000; ++i) {
+    r->bidRowHi = r->askRowHi = nativeRows - 1;
+    for (int i = 0; i < sourceEntries; ++i) {
         const auto code = encodeSize((i % 97 + 1) * 0.125);
-        r->entries.push_back({2000 + i, i % 2 != 0, code, code});
+        r->entries.push_back({i, i % 2 != 0, code, code});
     }
     return r;
 }
 }
 int main(int argc, char** argv) {
     const int iterations = argc > 1 ? std::clamp(std::atoi(argv[1]), 2, 30) : 5;
-    std::cout << "fixture=12000 source entries/minute, 2048 display rows, 10 native rows/display row\n"
-                 "warmup excluded; delivery includes per-client JSON/base64 encoding, no socket/TLS\n";
+    if (argc > 2) { sourceEntries = 262144; nativeRows = 262144; }
+    std::cout << "fixture=" << sourceEntries << " source entries/minute, 2048 display rows, "
+              << nativeRows / 2048 << " native rows/display row\n"
+                 "five persisted fixture minutes span previous/current buckets; warmup excluded; delivery includes per-client JSON/base64 encoding, no socket/TLS\n";
     std::cout << "tf_ms clients builds/update project_ms/update encode_ms/update total_worker_ms/update cadence_s/update bytes/update\n";
-    for (const int64_t tf : {60000, 300000}) for (const int clients : {1, 8}) {
+    for (const int64_t tf : {60000, 300000, 86400000}) for (const int clients : {1, 8}) {
         QTemporaryDir dir;
+        Hmc2Store store(dir.path().toStdString());
         LiveService service(dir.path().toStdString());
         std::mutex mutex;
         std::condition_variable wake;
         uint64_t received = 0, bytes = 0;
+        const int base = tf / 60000;
+        auto commit = [&](int m) {
+            const auto r = sample(m, 60000, false);
+            store.append(*r); // retained mailbox may evict dense committed records
+            service.publish(r);
+        };
+        commit(base - 1);
+        for (int m = 0; m < 4; ++m) commit(base + m);
+        service.publish(sample(base + 4, 10000, true));
         std::vector<std::shared_ptr<LiveService::Subscription>> subscriptions;
         for (int c = 0; c < clients; ++c) {
-            LiveView view{"BENCH-USD", "deep", tf, {0, 100, 2048}, static_cast<uint64_t>(c)};
+            LiveView view{"BENCH-USD", "deep", tf, {0, 10.0 * nativeRows / 2048, 2048}, static_cast<uint64_t>(c)};
             subscriptions.push_back(service.subscribe(view, [&](const auto& v, const auto& page) {
                 if (page.status != BuildStatus::Complete) throw std::runtime_error(page.message);
                 const auto payload = protocol::recordingwire::buildLive(v, page).dump();
@@ -48,12 +62,11 @@ int main(int argc, char** argv) {
                 return true;
             }));
         }
-        for (int m = 0; m < 4; ++m) service.publish(sample(m, 60000, false));
         auto round = [&](int step) {
-            service.publish(sample(4, 10000 + step * 1000, true));
+            service.publish(sample(base + 4, 10000 + step * 1000, true));
             const auto expected = static_cast<uint64_t>((step + 1) * clients);
             std::unique_lock lock(mutex);
-            if (!wake.wait_for(lock, std::chrono::seconds(10), [&] { return received >= expected; }))
+            if (!wake.wait_for(lock, std::chrono::seconds(step == 0 ? 90 : 15), [&] { return received >= expected; }))
                 throw std::runtime_error("live measurement timed out");
             lock.unlock();
             while (service.diagnostics().deliveries < expected) std::this_thread::yield();

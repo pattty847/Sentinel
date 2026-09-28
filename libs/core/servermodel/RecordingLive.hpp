@@ -39,7 +39,8 @@ class LiveBuilder {
 public:
     explicit LiveBuilder(LiveView view);
     ~LiveBuilder();
-    BuildResult build(Hmc2Reader &reader, const LiveCache::Snapshot &source);
+    BuildResult build(Hmc2Reader &reader, const LiveCache::Snapshot &source,
+                      int64_t deliveredFinalThroughMs = 0);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -84,6 +85,8 @@ public:
     // Idempotent. Deactivates subscriptions and joins in-flight delivery before
     // the transport executor can be stopped/destroyed. Call off the live worker.
     void shutdown();
+    // Idempotent restart after shutdown; old subscriptions remain inactive.
+    void start();
     struct Diagnostics { uint64_t builds = 0, buildMicros = 0, deliveries = 0, deliveryMicros = 0; };
     Diagnostics diagnostics() const;
     bool publish(RecordPtr record);

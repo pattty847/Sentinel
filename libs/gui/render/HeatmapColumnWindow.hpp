@@ -163,6 +163,9 @@ public:
     // Newest bucket near the viewport that is neither cached nor known missing.
     bool nextFetch(FetchRequest& out) const;
     int64_t unfinishedRecordingBucket() const;
+    // Called only when no history request is in flight. Three attempts at 2/4/8s
+    // backoff, then settle from disk evidence (or unknown) and advance the queue.
+    bool nextRecordingRepair(int64_t nowMs, int64_t& bucket, Update& out);
 
 private:
     int slotFor(int64_t bucketMs) const;
@@ -191,6 +194,13 @@ private:
     double m_sizeFloor = 0.0, m_codesPerOctave = 0.0;
     int64_t m_latestRecordingMs = 0;
     std::map<int64_t, Column> m_recordingLive;
+    struct RecordingRepair {
+        int attempts = 0;
+        int64_t nextMs = 0;
+        bool settled = false;
+        std::optional<Column> history;
+    };
+    std::map<int64_t, RecordingRepair> m_recordingRepairs;
     uint64_t m_liveGeneration = 0;
     std::map<int64_t, Column> m_projected;
     std::map<int64_t, Column> m_cache;

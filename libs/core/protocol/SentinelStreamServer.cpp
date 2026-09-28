@@ -159,6 +159,7 @@ TpoLetterStats summarizeTpoLetters(const QByteArray& letters) {
 }
 
 class Session : public std::enable_shared_from_this<Session> {
+    friend struct RecordingServerStopTest;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
@@ -2276,6 +2277,7 @@ void SentinelStreamServer::start() {
 
     try {
         m_ioc.restart();
+        if (auto* live = m_model.recordingLive()) live->start();
         m_running = true;
 
         const auto& tls = m_serverConfig.tls;
