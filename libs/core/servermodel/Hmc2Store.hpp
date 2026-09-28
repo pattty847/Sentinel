@@ -45,6 +45,8 @@ struct Hmc2Record {
 // warn and skip unreadable files, preserving the rest of the requested history.
 // Readers need no writer lock. Concurrent append tails are ignored, never repaired
 // by a reader. Only the locked writer repairs incomplete terminal frames.
+// Writes use file schema 3 (keyframes/temporal deltas); schemas 1/2 remain
+// readable as absolute records. Returned entries are always reconstructed.
 class Hmc2Store {
   public:
     explicit Hmc2Store(std::filesystem::path root);

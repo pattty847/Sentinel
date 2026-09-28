@@ -138,7 +138,7 @@ The server runs paper execution (no real broker); fills use last trade price plu
 - **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading configuration and hotkeys.
 - **`docs/CONFIG.md`** — Server and client YAML options.
 
-## Recording v2 core (HMC2, not yet wired)
+## Recording v2 core (HMC2)
 
 `recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The constructor overload accepting a local-clock function and `drainForTest()` permit deterministic replay without sleeps.
 
@@ -152,14 +152,14 @@ The queue bounds queued level count and has 4,096 message slots, including contr
 
 All scalar fields are little-endian, with no native padding. IEEE-754 `f64` is used for floating fields. Symbols/layers are 1-255 ASCII letters, digits, dot, dash or underscore, excluding `.` and `..`.
 
-Path: `<root>/<symbol>/<layer>-<tfMs>/<YYYY-MM-DD>.hmc2`, selected using the **bucket start UTC day**. A configuration mismatch against the latest generation creates `<YYYY-MM-DD>.g<N>.hmc2`, starting at N=1. Returning to an old configuration also creates a new generation. Readers visit generations numerically and return the last valid record per bucket, sorted chronologically. Queries use `[startMs, endMs)` bucket starts. Supported UTC years are 2000 through 2200 inclusive (`[2000-01-01, 2201-01-01)`). Appends and path construction reject times outside this range before calendar conversion; range queries clamp their bounds. The recorder also rejects event/local clock values outside it, preventing microsecond timestamps from advancing the minute loop.
+Path: `<root>/<symbol>/<layer>-<tfMs>/<YYYY-MM-DD>.hmc2`, selected using the **bucket start UTC day**. A configuration or file-schema mismatch against the latest generation creates `<YYYY-MM-DD>.g<N>.hmc2`, starting at N=1. Returning to an old configuration also creates a new generation. Readers visit generations numerically and return the last valid record per bucket, sorted chronologically. Queries use `[startMs, endMs)` bucket starts. Supported UTC years are 2000 through 2200 inclusive (`[2000-01-01, 2201-01-01)`). Appends and path construction reject times outside this range before calendar conversion; range queries clamp their bounds. The recorder also rejects event/local clock values outside it, preventing microsecond timestamps from advancing the minute loop.
 
-File header, schema version 2:
+File header, schema version 3 (temporal deltas). The deployed absolute format already used schema 2; readers accept schema 1 and 2 as absolute records. New writes always use schema 3:
 
 | Field | Encoding |
 | --- | --- |
 | Magic | u32 `0x32434d48` (bytes `HMC2`) |
-| Schema | u16 `2` |
+| Schema | u16 `3` |
 | Header length | u32, includes the 14-byte fixed prefix; maximum 65,536 |
 | Header CRC | u32 IEEE CRC-32 over the **whole header with this field zeroed** |
 | Symbol, layer | Each u16 byte length followed by bytes |
@@ -175,7 +175,14 @@ Record framing: u32 magic `0x32524348` (bytes `HCR2`), u32 compressed length, u3
 - i64 bucketStartMs; u32 observedMs; u32 flags.
 - i64 bidRowLo, bidRowHi, askRowLo, askRowHi (inclusive; lo > hi is empty).
 - f64 midOpen, midClose, midMin, midMax; u32 entryCount.
-- Sorted unique `(row, side)` entries: LEB128 zigzag i64 row delta (first relative to 0), u16 TWAP magnitude with ask in bit 15, u16 peak magnitude. Repeated row with bid then ask uses delta 0. Peak has no side bit.
+- Schema 1/2: sorted unique `(row, side)` entries: LEB128 zigzag i64 row delta (first relative to 0), u16 TWAP magnitude with ask in bit 15, u16 peak magnitude. Every record is absolute.
+- Schema 3: after entryCount, u8 kind (`0` keyframe, `1` delta), then i64 predecessor bucketStartMs (`0` for keyframes). EntryCount counts changes for a delta, including removals.
+- Schema 3 entries: LEB128 zigzag i64 row delta (first relative to 0), u8 side (`0` bid, `1` ask), LEB128 zigzag `(twapCode - previousTwapCode)`, LEB128 zigzag `(peakCode - twapCode)`. Previous TWAP is zero for keyframes/new keys. Repeated row with bid then ask uses row delta 0. Codes remain 15-bit magnitudes; side is separate.
+- Keyframes list every key. Deltas list only changed keys; omitted keys retain both codes. A removal reconstructs TWAP and peak as zero. A record containing a zero-TWAP entry uses a keyframe: this preserves legitimate instantaneous peaks with zero integrated TWAP without confusing them with delta removals. Empty books have no entries. Bounds, mids, observation time, and observation flags are absolute metadata on every record; changing bounds does not implicitly remove keys.
+
+A keyframe starts every UTC 15-minute interval containing a record, and is also required on writer reopen/eviction, after rollback/write failure, and on a gap, duplicate, or backward timestamp. Hourly records are therefore always keyframes. Delta predecessors must be the immediately preceding record in that same file and series, exactly one timeframe earlier and inside the same 15-minute interval. Writer state advances only after a durable append; the cache holds at most 64 file writers and eviction discards the base. Sparse changes with an unrepresentable signed row jump, or replacements exceeding the raw limit, fall back to a keyframe.
+
+Range readers reconstruct from the query start's UTC 15-minute boundary (at most 15 minutes of preceding records), maintaining an independent base per file before deduplicating generations. The format has no seek index: readers still scan framing and compressed payloads to find timestamps, but do not reconstruct older entry states. A missing/corrupt predecessor invalidates the chain: deltas warn and are skipped until a valid keyframe, never applied to another generation or an earlier surviving bucket. Framing, CRC, zstd, varints, code ranges, sorted unique keys and reconstructed state size remain bounded/validated. Readers never repair.
 
 Flags: bit 0 partial (`observedMs < timeframe`), bit 1 resynced (snapshot occurred), bit 2 late events, bit 3 underflow (a positive stored TWAP/peak was below the size floor). Positive underflows encode as magnitude 1. Readers return side separately from both magnitudes. Extreme representable sizes saturate the fixed size code.
 

@@ -5,6 +5,11 @@
 #include <barrier>
 #include <thread>
 #include <future>
+#include <bit>
+#include <array>
+#include <algorithm>
+#include <iostream>
+#include <random>
 #include <zstd.h>
 #include "servermodel/HmcolFormat.hpp"
 #include "servermodel/PersistenceIo.hpp"
@@ -46,6 +51,67 @@ class StoreTest : public testing::Test {
     void set32(std::vector<uint8_t> &b, size_t p, uint32_t value) {
         for (size_t i = 0; i < 4; ++i)
             b[p + i] = static_cast<uint8_t>(value >> (8 * i));
+    }
+    template <class T> void scalar(std::vector<uint8_t> &b, T value) {
+        auto raw = std::bit_cast<std::array<uint8_t, sizeof(T)>>(value);
+        if constexpr (std::endian::native == std::endian::big)
+            std::reverse(raw.begin(), raw.end());
+        b.insert(b.end(), raw.begin(), raw.end());
+    }
+    std::vector<uint8_t> absolutePayload(const Hmc2Record &r) {
+        std::vector<uint8_t> b;
+        scalar(b, r.bucketStartMs);
+        scalar(b, r.observedMs);
+        scalar(b, r.flags);
+        for (auto v : {r.bidRowLo, r.bidRowHi, r.askRowLo, r.askRowHi})
+            scalar(b, v);
+        for (auto v : {r.midOpen, r.midClose, r.midMin, r.midMax})
+            scalar(b, v);
+        scalar(b, static_cast<uint32_t>(r.entries.size()));
+        int64_t previous = 0;
+        for (const auto &e : r.entries) {
+            putVarint(b, zigzag(e.row - previous));
+            scalar(b, withSide(e.twapCode, e.isAsk));
+            scalar(b, e.peakCode);
+            previous = e.row;
+        }
+        return b;
+    }
+    void legacyFile(const std::filesystem::path &path, uint16_t schema, const std::vector<Hmc2Record> &records) {
+        const auto &h = records.front().header;
+        std::vector<uint8_t> b;
+        scalar(b, kHmc2Magic);
+        scalar(b, schema);
+        scalar(b, uint32_t{0});
+        scalar(b, uint32_t{0});
+        for (const auto &str : {h.symbol, h.layer}) {
+            scalar(b, static_cast<uint16_t>(str.size()));
+            b.insert(b.end(), str.begin(), str.end());
+        }
+        scalar(b, h.tfMs);
+        scalar(b, h.priceScale);
+        scalar(b, h.rowTickUnits);
+        scalar(b, h.sizeScale.floor);
+        scalar(b, h.sizeScale.codesPerOctave);
+        scalar(b, h.configHash);
+        set32(b, 6, b.size());
+        set32(b, 10, hmcol::crc32(b.data(), b.size()));
+        for (const auto &r : records) {
+            const auto frame = frameFromRaw(absolutePayload(r));
+            b.insert(b.end(), frame.begin(), frame.end());
+        }
+        std::filesystem::create_directories(path.parent_path());
+        save(path, b);
+    }
+    std::vector<std::vector<uint8_t>> frames(const std::filesystem::path &path) {
+        const auto b = bytes(path);
+        std::vector<std::vector<uint8_t>> out;
+        for (size_t pos = u32(b, 6); pos < b.size();) {
+            const size_t end = pos + 16 + u32(b, pos + 4);
+            out.emplace_back(b.begin() + pos, b.begin() + end);
+            pos = end;
+        }
+        return out;
     }
     std::vector<uint8_t> frameFor(const Hmc2Record &r) {
         QTemporaryDir other;
@@ -212,9 +278,8 @@ TEST_F(StoreTest, InteriorCrcMagicAndLengthCorruptionPreserveLaterRecords) {
         }
         EXPECT_GT(std::filesystem::file_size(path), oldSize);
         auto rows = Hmc2Store::readRange(root(), "BTC-USD", r.header.layer, 60000, kEpoch, kEpoch + 240000);
-        ASSERT_EQ(rows.size(), 3);
-        EXPECT_EQ(rows[1].bucketStartMs, kEpoch + 120000);
-        EXPECT_EQ(rows[2].bucketStartMs, kEpoch + 180000);
+        ASSERT_EQ(rows.size(), 2);
+        EXPECT_EQ(rows[1].bucketStartMs, kEpoch + 180000);
     }
 }
 TEST_F(StoreTest, CompleteTerminalCrcDamageIsNotTruncated) {
@@ -470,7 +535,7 @@ TEST_F(StoreTest, CrcValidUndecodablePayloadsAndMultipleZstdFramesAreSkipped) {
         if (kind == 1)
             raw[0] ^= 1; // bucket not aligned
         if (kind == 2)
-            raw[91] &= 0x7F; // second entry duplicates first row/side
+            raw[94] = 2; // invalid side byte
         auto bad = frameFromRaw(raw, kind == 3);
         EXPECT_EQ(u32(bad, 12), hmcol::crc32(bad.data() + 16, bad.size() - 16));
         b.insert(b.end(), bad.begin(), bad.end());
@@ -548,7 +613,8 @@ TEST_F(StoreTest, ConcurrentReadersIgnorePartialAppendsWithoutRepairing) {
     EXPECT_NO_THROW(writer.get());
     auto rows = read();
     ASSERT_EQ(rows.size(), 2);
-    EXPECT_EQ(std::filesystem::file_size(path), initial.size() + frameFor(next).size());
+    EXPECT_EQ(std::filesystem::file_size(path), initial.size() + 16 + u32(partial, initial.size() + 4));
+    EXPECT_EQ(absolutePayload(rows.back()), absolutePayload(next));
 }
 TEST_F(StoreTest, UnreadableDayDoesNotDiscardOtherDays) {
 #ifndef _WIN32
@@ -607,5 +673,281 @@ TEST_F(StoreTest, GenerationCollisionCannotOverwriteTheBaseFile) {
     Hmc2Store store(root());
     EXPECT_THROW(store.append(r), std::runtime_error);
     EXPECT_EQ(bytes(path), original);
+}
+TEST_F(StoreTest, LegacySchemasReadAndForceANewGeneration) {
+    for (uint16_t schema : {1, 2}) {
+        auto a = record(), b = record(60000);
+        a.header.layer = b.header.layer = "legacy" + std::to_string(schema);
+        b.entries[0].twapCode -= 5;
+        const auto path = Hmc2Store::filePath(root(), a.header, kEpoch);
+        legacyFile(path, schema, {a, b});
+        const auto original = bytes(path);
+        auto rows = Hmc2Store::readRange(root(), "BTC-USD", a.header.layer, 60000, kEpoch, kEpoch + 120000);
+        ASSERT_EQ(rows.size(), 2);
+        EXPECT_EQ(absolutePayload(rows[0]), absolutePayload(a));
+        EXPECT_EQ(absolutePayload(rows[1]), absolutePayload(b));
+        {
+            Hmc2Store store(root());
+            b.bucketStartMs += 60000;
+            store.append(b);
+        }
+        EXPECT_EQ(bytes(path), original);
+        const auto next = Hmc2Store::filePath(root(), b.header, kEpoch, 1);
+        EXPECT_EQ(bytes(next)[4], 3);
+        EXPECT_EQ(rawPayload(frames(next)[0])[84], 0);
+    }
+}
+TEST_F(StoreTest, KeyframesOnBoundaryGapReopenAndRollback) {
+    auto r = record(13 * 60000);
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    {
+        Hmc2Store store(root());
+        for (int minute : {13, 14, 15, 16, 18, 19}) {
+            r.bucketStartMs = kEpoch + minute * 60000;
+            store.append(r);
+        }
+    }
+    {
+        Hmc2Store store(root());
+        r.bucketStartMs += 60000; // reopen at 20
+        store.append(r);
+        r.bucketStartMs += 60000;
+        store.afterFrameHeaderForTest([] { throw std::runtime_error("rollback"); });
+        EXPECT_THROW(store.append(r), std::runtime_error);
+        store.append(r); // rollback forces keyframe at 21
+        r.bucketStartMs += 60000;
+        store.append(r);
+    }
+    const auto all = frames(path);
+    const std::vector<uint8_t> kinds{0, 1, 0, 1, 0, 1, 0, 0, 1};
+    ASSERT_EQ(all.size(), kinds.size());
+    for (size_t j = 0; j < all.size(); ++j)
+        EXPECT_EQ(rawPayload(all[j])[84], kinds[j]) << j;
+    EXPECT_EQ(read().size(), all.size());
+}
+TEST_F(StoreTest, DeltaRemovalsNewKeysPeakOnlyAndBoundsChanges) {
+    std::vector<Hmc2Record> expected;
+    auto r = record();
+    {
+        Hmc2Store store(root());
+        auto append = [&] {
+            store.append(r);
+            expected.push_back(r);
+            r.bucketStartMs += 60000;
+        };
+        append();
+        r.entries[0].peakCode += 1; // peak-only changes are not omitted
+        r.entries[1].twapCode -= 7;
+        append();
+        r.entries.erase(r.entries.begin()); // remove bid while keeping ask at same row
+        r.entries.push_back({10, false, 1, 2});
+        r.bidRowLo = 10;
+        r.bidRowHi = 20;
+        r.midMin = 99;
+        r.observedMs = 57000;
+        r.flags = kPartial | kLateEvents;
+        append();
+        r.entries.clear();
+        r.askRowLo = 1;
+        r.askRowHi = 0;
+        append();
+        r.entries = {{-2, true, kMaxCode, 1}, {20, false, 1, kMaxCode}};
+        append();
+        append(); // zero changed keys
+    }
+    const auto got = read();
+    ASSERT_EQ(got.size(), expected.size());
+    for (size_t j = 0; j < got.size(); ++j)
+        EXPECT_EQ(absolutePayload(got[j]), absolutePayload(expected[j])) << j;
+}
+TEST_F(StoreTest, SyntheticStreamEqualsAbsoluteAndDeltasAreSmaller) {
+    std::mt19937 rng(42);
+    auto r = record();
+    r.entries.clear();
+    for (int j = 0; j < 12000; ++j) {
+        const auto twap = static_cast<uint16_t>(1000 + rng() % 28000);
+        r.entries.push_back({j - 6000, j % 2 != 0, twap, static_cast<uint16_t>(twap + rng() % 300)});
+    }
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    std::vector<Hmc2Record> expected;
+    {
+        Hmc2Store store(root());
+        for (int minute = 0; minute < 46; ++minute) {
+            r.bucketStartMs = kEpoch + minute * 60000;
+            for (int j = 0; j < 120; ++j) {
+                auto &entry = r.entries[rng() % r.entries.size()];
+                entry.twapCode += (j % 2 ? 1 : -1);
+                entry.peakCode += (j % 2 ? 2 : -2);
+            }
+            r.bidRowLo = -6000 + minute;
+            r.askRowHi = 6000 - minute;
+            r.midClose += 0.125;
+            r.flags = minute % 4;
+            store.append(r);
+            expected.push_back(r);
+        }
+    }
+    QTemporaryDir legacyRoot;
+    const auto legacyPath = Hmc2Store::filePath(legacyRoot.path().toStdString(), r.header, kEpoch);
+    legacyFile(legacyPath, 2, expected);
+    const auto absolute = Hmc2Store::readRange(legacyRoot.path().toStdString(), "BTC-USD", "deep", 60000,
+                                             kEpoch, kEpoch + 46 * 60000);
+    const auto delta = read();
+    ASSERT_EQ(absolute.size(), expected.size());
+    ASSERT_EQ(delta.size(), expected.size());
+    for (size_t j = 0; j < delta.size(); ++j) {
+        EXPECT_EQ(absolutePayload(delta[j]), absolutePayload(absolute[j])) << j;
+        EXPECT_EQ(absolutePayload(delta[j]), absolutePayload(expected[j])) << j;
+    }
+    for (int start : {1, 7, 14, 15, 16, 29, 44}) {
+        auto part = Hmc2Store::readRange(root(), "BTC-USD", "deep", 60000,
+                                       kEpoch + start * 60000 + 1, kEpoch + (start + 2) * 60000);
+        ASSERT_EQ(part.size(), 1) << start;
+        EXPECT_EQ(absolutePayload(part.front()), absolutePayload(expected[start + 1]));
+    }
+    size_t keys = 0, deltas = 0, keyBytes = 0, deltaBytes = 0;
+    for (const auto &frame : frames(path)) {
+        if (rawPayload(frame)[84] == 0) {
+            ++keys;
+            keyBytes += frame.size();
+        } else {
+            ++deltas;
+            deltaBytes += frame.size();
+        }
+    }
+    ASSERT_EQ(keys, 4);
+    ASSERT_EQ(deltas, 42);
+    const double keyMean = double(keyBytes) / keys, deltaMean = double(deltaBytes) / deltas;
+    std::cout << "Synthetic 12000-key book, 1% updates/minute: keyframe=" << keyMean
+              << " bytes/record, delta=" << deltaMean << " bytes/record (framing + zstd L3)\n";
+    EXPECT_LT(deltaMean, keyMean / 10);
+}
+TEST_F(StoreTest, CorruptOrWrongBaseDeltaSkipsChainUntilKeyframe) {
+    for (int kind = 0; kind < 5; ++kind) {
+        auto r = record();
+        r.header.layer = "chain" + std::to_string(kind);
+        const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+        {
+            Hmc2Store store(root());
+            for (int minute = 0; minute < 18; ++minute) {
+                r.bucketStartMs = kEpoch + minute * 60000;
+                ++r.entries[0].twapCode;
+                store.append(r);
+            }
+        }
+        auto b = bytes(path);
+        auto all = frames(path);
+        auto raw = rawPayload(all[2]);
+        if (kind == 0)
+            all[2][12] ^= 1; // CRC corruption
+        if (kind == 1) {
+            raw[85] ^= 1; // referenced bucket is not the previous bucket
+            all[2] = frameFromRaw(raw);
+        }
+        if (kind == 2)
+            all[2].clear(); // physically missing predecessor
+        if (kind == 3) {
+            raw.resize(95);
+            raw.push_back(0x80); // truncated code varint
+            all[2] = frameFromRaw(raw);
+        }
+        if (kind == 4) {
+            raw[93] = 0xff; // malformed row varint consumes entry payload
+            all[2] = frameFromRaw(raw);
+        }
+        b.resize(u32(b, 6));
+        for (const auto &frame : all)
+            b.insert(b.end(), frame.begin(), frame.end());
+        save(path, b);
+        const auto got = Hmc2Store::readRange(root(), "BTC-USD", r.header.layer, 60000, kEpoch, kEpoch + 18 * 60000);
+        ASSERT_EQ(got.size(), 5) << kind;
+        EXPECT_EQ(got[1].bucketStartMs, kEpoch + 60000);
+        EXPECT_EQ(got[2].bucketStartMs, kEpoch + 15 * 60000);
+        EXPECT_EQ(absolutePayload(got.back()), absolutePayload(r));
+        EXPECT_EQ(bytes(path), b); // reader never repairs
+    }
+}
+TEST_F(StoreTest, ZeroTwapPeakIsPreservedByKeyframeThenRemovedByDelta) {
+    auto r = record();
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    std::vector<Hmc2Record> expected;
+    {
+        Hmc2Store store(root());
+        store.append(r);
+        expected.push_back(r);
+        r.bucketStartMs += 60000;
+        r.entries[0].twapCode = 0; // observed instantaneous peak, no time integral
+        store.append(r);
+        expected.push_back(r);
+        r.bucketStartMs += 60000;
+        r.entries.erase(r.entries.begin());
+        store.append(r);
+        expected.push_back(r);
+    }
+    const auto all = frames(path);
+    EXPECT_EQ(rawPayload(all[1])[84], 0);
+    EXPECT_EQ(rawPayload(all[2])[84], 1);
+    const auto got = read();
+    ASSERT_EQ(got.size(), expected.size());
+    for (size_t j = 0; j < got.size(); ++j)
+        EXPECT_EQ(absolutePayload(got[j]), absolutePayload(expected[j]));
+}
+TEST_F(StoreTest, EvictionForgetsBaseAndSeriesNeverShareIt) {
+    auto r = record();
+    r.header.layer = "a";
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    Hmc2Store store(root());
+    store.append(r);
+    for (int j = 0; j < 64; ++j) {
+        auto other = record();
+        other.header.layer = "z" + std::to_string(j);
+        store.append(other);
+    }
+    r.bucketStartMs += 60000;
+    store.append(r);
+    const auto all = frames(path);
+    ASSERT_EQ(all.size(), 2);
+    EXPECT_EQ(rawPayload(all[1])[84], 0);
+}
+TEST_F(StoreTest, SparseExtremeRowJumpFallsBackToKeyframe) {
+    auto r = record();
+    r.entries = {{INT64_MIN, false, 1, 2}, {-2, false, 1, 2}, {3, true, 1, 2}};
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    Hmc2Store store(root());
+    store.append(r);
+    r.bucketStartMs += 60000;
+    ++r.entries.front().peakCode;
+    ++r.entries.back().peakCode;
+    store.append(r);
+    EXPECT_EQ(rawPayload(frames(path)[1])[84], 0);
+    const auto got = read();
+    ASSERT_EQ(got.size(), 2);
+    EXPECT_EQ(absolutePayload(got.back()), absolutePayload(r));
+}
+TEST_F(StoreTest, GenerationCannotSupplyAnotherFilesMissingBase) {
+    auto r = record();
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    {
+        Hmc2Store store(root());
+        store.append(r);
+        r.bucketStartMs += 60000;
+        ++r.entries[0].twapCode;
+        store.append(r);
+    }
+    auto b = bytes(path);
+    const auto all = frames(path);
+    b.resize(u32(b, 6));
+    b.insert(b.end(), all[1].begin(), all[1].end());
+    const auto generationPath = Hmc2Store::filePath(root(), r.header, kEpoch, 1);
+    save(generationPath, b); // orphan in higher generation must not override valid record
+    auto changed = rawPayload(all[1]);
+    changed.back() ^= 2; // valid different peak offset if incorrectly given the other file's base
+    b.resize(u32(b, 6));
+    const auto frame = frameFromRaw(changed);
+    b.insert(b.end(), frame.begin(), frame.end());
+    save(generationPath, b);
+    const auto got = read();
+    ASSERT_EQ(got.size(), 2);
+    EXPECT_EQ(absolutePayload(got.back()), absolutePayload(r));
 }
 } // namespace
