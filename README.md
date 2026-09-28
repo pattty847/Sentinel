@@ -119,11 +119,29 @@ TPO, Footprint, and Volume Profile are implemented at a foundational level but r
 
 ## Quick Start
 
-### Run a Release
+### Run a Release (recommended)
 
-Download the latest build:
+1. Download the latest **[release](https://github.com/pattty847/Sentinel-Trading-Terminal/releases)** artifact for your platform. Maintainers publish macOS archives from `./scripts/release_macos.sh` (under `dist/`; see **`docs/RELEASE_CHECKLIST.md`**) and Windows folders via **`scripts/release/windows-package-release.ps1`** (see **`scripts/release/README.md`**).
+2. **macOS Zip:** unzip, then `./run.sh` from that folder. This starts **`SentinelServer.app`** plus **`Sentinel.app`** (`SENTINEL_QML_PATH` is set by the launcher). **Windows package:** **`run.cmd`** from the unpacked folder (**`scripts/release/README.md`**).
 
-https://github.com/pattty847/Sentinel-Trading-Terminal/releases
+   No API keys are required for **live Coinbase public** market data (`BTC-USD` is configured by default).
+
+3. Pick a Coinbase spot symbol and stream from the GUI (magnifying glass / symbol entry) — the fastest demo path is the **public** websocket (no signup).
+
+Automated sanity for a staged folder (maintainers): `./scripts/smoke_macos.sh`
+
+**See it in motion:** Showcase GIFs are in **[Showcase](#showcase)** below (heatmap, stock chart + SEC insiders, screener).
+
+**After launch — what should work**
+
+| Item | Notes |
+|------|--------|
+| Server starts | `./run.sh` or `scripts/smoke_macos.sh`; health pings `127.0.0.1` (default HTTP health port configurable via **`SENTINEL_HEALTH_PORT`**) |
+| GUI window opens | If it does not, check TLS certs and `resources/certs/ca-bundle.crt` |
+| Coinbase spot stream | Public symbols (**no credentials**) — subscribe in client |
+| Python-backed features | SEC overlays, candle fetch via `uv`-managed `scripts/` — run **`brew install uv`**, **`(cd scripts && uv sync)`** inside the unpacked folder if overlays fail |
+
+Maintainers: reproducible bundles from source use **`cmake --preset mac-clang-release`**, **`./scripts/release_macos.sh`** (see **`scripts/release/README.md`**).
 
 ---
 
@@ -139,12 +157,12 @@ git clone https://github.com/pattty847/Sentinel.git
 cd Sentinel
 cmake --preset windows-msvc
 cmake --build --preset windows-msvc -j
-````
+```
 
 Run:
 
 ```powershell
-build/windows-msvc/apps/sentinel_gui/Release/sentinel_gui.exe
+build/windows-msvc/apps/sentinel-gui/Release/sentinel-gui.exe
 ```
 
 ---
@@ -179,19 +197,18 @@ cmake --build --preset linux-gcc -j
 
 ---
 
-## Run
+## Run (from source build tree)
 
-Start server:
-
-```bash
-./build/linux-gcc/bin/sentinel-server
-```
-
-Start GUI:
+CMake uses output name **`sentinel-gui`** and **`sentinel-server`** under **`build/<preset>/apps/sentinel-gui/<Config>/`** and **`apps/sentinel-server/<Config>/`** (exact path depends on platform and preset). Adjust paths accordingly — example:
 
 ```bash
-./build/linux-gcc/apps/sentinel_gui/sentinel_gui
+./build/linux-gcc/apps/sentinel-server/Release/sentinel-server
+./build/linux-gcc/apps/sentinel-gui/Release/sentinel-gui
 ```
+
+Start **server before client**.
+
+For **macOS bundles** produced off this repo see **`scripts/release_macos.sh`** and **`LAUNCH_README.md`** bundled with releases.
 
 ---
 

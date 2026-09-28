@@ -10,6 +10,7 @@
 vcpkg/
 vcpkg_installed/
 build/
+dist/
 data/
 build-windows/
 out/
