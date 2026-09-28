@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <thread>
 #include <future>
+#include <fstream>
 #include <set>
 using namespace recording;
 namespace {
@@ -339,4 +340,145 @@ TEST(RecordingLive, SeriesCapacityRaisesOnlyOneDeferredWarning) {
     EXPECT_EQ(warning->first, "BTC-USD");
     EXPECT_FALSE(cache.publish(record(1, 2)));
     EXPECT_FALSE(cache.takeCapacityWarning());
+}
+
+TEST(RecordingLive, FinalProjectionIsCachedAndCanBeOmittedAfterDelivery) {
+    for (const int64_t tf : {60000, 300000, 86400000}) {
+        QTemporaryDir dir;
+        Hmc2Reader reader(dir.path().toStdString());
+        LiveCache cache;
+        const int minutes = tf / 60000;
+        cache.publish(record(minutes - 1, 2));
+        cache.publish(record(minutes, 4, 1000, true));
+        LiveBuilder builder(view(tf));
+        const auto first = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+        ASSERT_EQ(first.columns.size(), 2);
+        ASSERT_FALSE(first.columns.front().flags & kProvisional);
+        const auto finalBucket = first.columns.front().bucketStartMs;
+        cache.publish(record(minutes, 4, 2000, true));
+        const auto next = builder.build(reader, cache.snapshot("BTC-USD", "near"), finalBucket);
+        ASSERT_EQ(next.columns.size(), 1);
+        EXPECT_EQ(next.columns.front().observedMs, 2000);
+        EXPECT_EQ(next.sourceRecords, 0);
+        // A newly joined or congested viewer can still retrieve the cached final.
+        const auto missed = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+        ASSERT_EQ(missed.columns.size(), 2);
+        EXPECT_EQ(missed.columns.front().cells, first.columns.front().cells);
+        EXPECT_EQ(missed.columns.front().observedMs, first.columns.front().observedMs);
+    }
+}
+
+TEST(RecordingLive, FinalsAreDeliveredOncePerViewerIncludingCongestedAndNewViewers) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    std::mutex mutex;
+    std::condition_variable wake;
+    int fastCalls = 0, slowCalls = 0, fastFinals = 0, slowFinals = 0, lateFinals = 0;
+    auto callback = [&](int& calls, int& finals, bool congested) {
+        return [&, congested](const auto&, const auto& page) {
+            std::lock_guard lock(mutex);
+            ++calls;
+            const bool accepted = !congested || calls > 1;
+            if (accepted) for (const auto& c : page.columns) if (!(c.flags & kProvisional)) ++finals;
+            wake.notify_one();
+            return accepted;
+        };
+    };
+    auto fast = service.subscribe(view(300000), callback(fastCalls, fastFinals, false));
+    auto slow = service.subscribe(view(300000), callback(slowCalls, slowFinals, true));
+    service.publish(record(4, 2));
+    service.publish(record(5, 4, 1000, true));
+    {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(wake.wait_for(lock, std::chrono::seconds(3), [&] { return fastCalls && slowCalls; }));
+    }
+    for (int i = 2; i <= 4; ++i) {
+        service.publish(record(5, 4, i * 1000, true));
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(wake.wait_for(lock, std::chrono::seconds(4), [&] { return fastCalls >= i; }));
+    }
+    int lateCalls = 0;
+    auto late = service.subscribe(view(300000), callback(lateCalls, lateFinals, false));
+    {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(wake.wait_for(lock, std::chrono::seconds(4), [&] { return slowFinals && lateFinals; }));
+        EXPECT_EQ(fastFinals, 1);
+        EXPECT_EQ(slowFinals, 1);
+        EXPECT_EQ(lateFinals, 1);
+    }
+    service.shutdown();
+}
+
+TEST(RecordingLive, IoErrorRetriesSameRevisionWithoutDeactivatingSubscription) {
+    QTemporaryDir dir;
+    const auto obstruction = std::filesystem::path(dir.path().toStdString()) / "BTC-USD" / "near-60000";
+    std::filesystem::create_directories(obstruction.parent_path());
+    { std::ofstream file(obstruction); file << 'x'; }
+    LiveService service(dir.path().toStdString());
+    std::promise<BuildStatus> delivered;
+    auto subscription = service.subscribe(view(300000), [&](const auto&, const auto& page) {
+        delivered.set_value(page.status);
+        return true;
+    });
+    service.publish(record(3, 4, 1000, true));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!service.diagnostics().builds && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(service.diagnostics().builds, 1);
+    auto result = delivered.get_future();
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout);
+    EXPECT_TRUE(subscription->active.load());
+    EXPECT_EQ(service.diagnostics().builds, 1); // retry obeys backoff
+    std::filesystem::remove(obstruction);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), BuildStatus::Complete);
+    EXPECT_TRUE(subscription->active.load());
+    service.shutdown();
+    EXPECT_EQ(service.diagnostics().builds, 2);
+}
+
+TEST(RecordingLive, StartAfterShutdownRestoresDeliveryWithoutRevivingOldViews) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    auto old = service.subscribe(view(), [](const auto&, const auto&) { return true; });
+    service.shutdown();
+    service.publish(record(0, 2, 1000, true)); // producer can continue while transport is stopped
+    service.start();
+    service.start();
+    EXPECT_FALSE(old->active.load());
+    std::promise<uint64_t> delivered;
+    auto current = service.subscribe(view(), [&](const auto&, const auto& page) {
+        delivered.set_value(page.columns.back().observedMs);
+        return true;
+    });
+    ASSERT_TRUE(current);
+    auto result = delivered.get_future();
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(result.get(), 1000);
+    service.shutdown();
+}
+
+TEST(RecordingLive, TransientReadFailurePreservesPreviouslyWarmedPrefix) {
+    QTemporaryDir dir;
+    Hmc2Store store(dir.path().toStdString());
+    Hmc2Reader reader(dir.path().toStdString());
+    for (int i = 0; i < 2; ++i) store.append(*record(i, 2));
+    LiveCache cache;
+    cache.publish(record(2, 2, 1000, true));
+    LiveBuilder builder(view(300000));
+    auto warm = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(warm.status, BuildStatus::Complete);
+    ASSERT_EQ(warm.columns.size(), 1);
+    EXPECT_EQ(warm.columns.back().observedMs, 121000);
+    for (int i = 2; i < 4; ++i) store.append(*record(i, 2));
+    cache.publish(record(4, 2, 1000, true));
+    reader.beforeCandidateForTest([] { throw std::runtime_error("transient fixture read failure"); });
+    auto failed = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    EXPECT_EQ(failed.status, BuildStatus::IoError);
+    auto recovered = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(recovered.status, BuildStatus::Complete);
+    ASSERT_EQ(recovered.columns.size(), 1);
+    EXPECT_EQ(recovered.sourceRecords, 2); // previous two minutes were not warmed again
+    EXPECT_EQ(recovered.columns.back().observedMs, 241000);
+    EXPECT_NEAR(quantity(recovered.columns.back()), 2, .01);
 }

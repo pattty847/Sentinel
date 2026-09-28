@@ -53,10 +53,15 @@ DataProcessor::DataProcessor(QObject* parent)
     m_recordingFinalRetry = new QTimer(this);
     m_recordingFinalRetry->setSingleShot(true);
     connect(m_recordingFinalRetry, &QTimer::timeout, this, [this] {
-        const auto bucket = m_heatmapWindow.unfinishedRecordingBucket();
-        if (!recordingMode() || !m_recordingConnected || !bucket) return;
-        if (!m_recordingInFlight && !m_recordingDebounce.pending) sendRecordingRequest(bucket, true);
-        m_recordingFinalRetry->start(2000);
+        if (!recordingMode() || !m_recordingConnected) return;
+        if (!m_recordingInFlight && !m_recordingDebounce.pending) {
+            int64_t bucket = 0;
+            auto update = std::make_shared<heatmap_window::Update>();
+            if (m_heatmapWindow.nextRecordingRepair(m_recordingClock.elapsed(), bucket, *update))
+                publishHeatmapWindow(std::move(update), false);
+            if (bucket) sendRecordingRequest(bucket, true);
+        }
+        if (m_heatmapWindow.unfinishedRecordingBucket()) m_recordingFinalRetry->start(2000);
     });
     m_recordingTimeout = new QTimer(this);
     m_recordingTimeout->setSingleShot(true);
@@ -800,6 +805,11 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
     // Discovery/index budgets can return no completed bucket yet. Retry the
     // same inclusive boundary, with a fresh id, without inventing known history.
     if (page.status == "budget" && page.scannedEndMs <= page.scannedStartMs && page.columns.empty()) {
+        if (m_recordingFinalFetch) {
+            onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration,
+                                    "recording final repair made no progress");
+            return; // the per-bucket timer owns the bounded retry budget
+        }
         if (++m_recordingNoProgress > 3) {
             onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration,
                                     "recording budget made no progress after three retries");

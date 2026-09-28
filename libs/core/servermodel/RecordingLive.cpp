@@ -72,6 +72,14 @@ struct LiveService::Impl {
         wake.notify_one();
         if (worker.joinable()) worker.join();
     }
+    void start() {
+        std::lock_guard joinLock(shutdownMutex);
+        std::lock_guard lock(mutex);
+        if (!stopping) return;
+        subscriptions.clear();
+        worker = std::thread([this] { run(); });
+        stopping = false;
+    }
     void run() {
         sentinel::logging::setCurrentThreadName("recording-live");
         Hmc2Reader reader(root);
@@ -81,11 +89,13 @@ struct LiveService::Impl {
             std::weak_ptr<Subscription> subscription;
             LiveCadence cadence;
             uint64_t deliveredRevision = 0;
+            int64_t deliveredFinalMs = 0;
         };
         struct Group {
             std::unique_ptr<LiveBuilder> builder;
             BuildResult page;
             uint64_t revision = 0;
+            int64_t omittedFinalThroughMs = 0;
             LiveCadence cadence;
         };
         std::map<const Subscription *, State> states;
@@ -126,17 +136,46 @@ struct LiveService::Impl {
                 if (!source.revision || source.revision == state.deliveredRevision) continue;
                 bool accepted = false;
                 try {
+                    const bool needsFinal = state.deliveredFinalMs < group.omittedFinalThroughMs;
+                    if (needsFinal && !group.cadence.due(nowMs())) continue;
                     if (group.cadence.due(nowMs()) &&
-                        (group.revision != source.revision || group.page.status != BuildStatus::Complete)) {
+                        (group.revision != source.revision || group.page.status != BuildStatus::Complete || needsFinal)) {
+                        auto deliveredFinal = state.deliveredFinalMs;
+                        for (const auto& viewer : views) {
+                            if (!viewer->active.load() || keyOf(viewer->view) != keyOf(s->view)) continue;
+                            const auto prior = states.find(viewer.get());
+                            deliveredFinal = std::min(deliveredFinal, prior == states.end()
+                                ? int64_t{0} : prior->second.deliveredFinalMs);
+                        }
                         const auto start = std::chrono::steady_clock::now();
-                        group.page = group.builder->build(reader, source);
+                        group.page = group.builder->build(reader, source, deliveredFinal);
+                        group.omittedFinalThroughMs = deliveredFinal;
+                        if (group.page.status == BuildStatus::IoError)
+                            sLog_Warning("Recording live read retry: symbol=" << s->view.symbol
+                                << " tf=" << s->view.tfMs << " message=" << group.page.message);
                         ++builds;
                         buildMicros += micros(start);
                         group.revision = source.revision;
                         group.cadence.completed(nowMs(), group.page.status == BuildStatus::Complete);
                     }
                     if (!group.revision || state.deliveredRevision == group.revision) continue;
-                    const auto &page = group.page;
+                    if (group.page.status == BuildStatus::IoError) {
+                        // Transient storage failure: keep the builder's proven
+                        // prefix, retry even if publication revision is unchanged.
+                        // Sending a view error would make the client re-register.
+                        state.cadence.completed(nowMs(), false);
+                        continue;
+                    }
+                    BuildResult filtered;
+                    const bool hasDeliveredFinal = std::any_of(group.page.columns.begin(), group.page.columns.end(),
+                        [&](const auto& c) { return !(c.flags & kProvisional) && c.bucketStartMs <= state.deliveredFinalMs; });
+                    if (hasDeliveredFinal) {
+                        filtered = group.page; // display rows only, never the native aggregate
+                        std::erase_if(filtered.columns, [&](const auto& c) {
+                            return !(c.flags & kProvisional) && c.bucketStartMs <= state.deliveredFinalMs;
+                        });
+                    }
+                    const auto &page = hasDeliveredFinal ? filtered : group.page;
                     // Errors are delivered through the same bounded transport path,
                     // carrying the individual subscriber's generation.
                     if (page.status != BuildStatus::Budget && page.status != BuildStatus::Cancelled && s->active.load()) {
@@ -145,7 +184,12 @@ struct LiveService::Impl {
                         deliveryMicros += micros(start);
                         ++deliveries;
                     }
-                    if (accepted) state.deliveredRevision = group.revision;
+                    if (accepted) {
+                        state.deliveredRevision = group.revision;
+                        for (const auto& column : page.columns)
+                            if (!(column.flags & kProvisional))
+                                state.deliveredFinalMs = std::max(state.deliveredFinalMs, column.bucketStartMs);
+                    }
                     if (accepted && page.status != BuildStatus::Complete) s->active.store(false);
                     sLog_Probe("recording.live.send", "symbol=" << s->view.symbol << " tf=" << s->view.tfMs
                         << " gen=" << s->view.generation << " columns=" << page.columns.size()
@@ -161,6 +205,7 @@ struct LiveService::Impl {
 LiveService::LiveService(std::filesystem::path root) : impl_(std::make_unique<Impl>(std::move(root))) {}
 LiveService::~LiveService() = default;
 void LiveService::shutdown() { impl_->shutdown(); }
+void LiveService::start() { impl_->start(); }
 LiveService::Diagnostics LiveService::diagnostics() const {
     return {impl_->builds.load(), impl_->buildMicros.load(), impl_->deliveries.load(), impl_->deliveryMicros.load()};
 }

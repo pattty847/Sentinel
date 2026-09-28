@@ -325,3 +325,46 @@ TEST_F(RecordingDataProcessor, LostFinalIsFetchedAfterLiveMovesToNextBucket) {
     events(2200);
     EXPECT_EQ(requests.size(), 2); // repair completed; no paging/retry loop
 }
+
+TEST_F(RecordingDataProcessor, UnrepairableBucketStopsAfterThreeAttemptsAndNextBucketRepairs) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    history.status = "complete";
+    history.exhausted = true;
+    history.scannedStartMs = history.oldestAvailableMs = 60000;
+    processor.onRecordingHistoryReceived(history);
+    auto live = history;
+    live.columns[0].observedMs = 59000;
+    live.columns[0].flags = recording::kProvisional;
+    for (const auto bucket : {12'060'000, 12'120'000, 12'180'000}) {
+        live.columns[0].bucketStartMs = bucket;
+        processor.onRecordingLiveReceived(live);
+    }
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        events(attempt == 2 ? 4400 : 2300);
+        ASSERT_EQ(requests.size(), static_cast<size_t>(attempt + 2));
+        EXPECT_EQ(requests.back().endTimeMs, 12'060'000);
+        EXPECT_EQ(requests.back().count, 1);
+        auto response = page(requests.back());
+        response.columns.clear();
+        if (attempt == 0) {
+            response.status = "complete"; // no column was ever committed
+            response.scannedStartMs = 12'060'000;
+            response.scannedEndMs = 12'120'000;
+        } else if (attempt == 1) {
+            response.status = "budget"; // must not bypass per-bucket attempts via 250ms retry
+            response.scannedStartMs = response.scannedEndMs = 0;
+        } else response.status = "io_error";
+        processor.onRecordingHistoryReceived(response);
+    }
+    events(8400);
+    ASSERT_EQ(requests.size(), 5);
+    EXPECT_EQ(requests.back().endTimeMs, 12'120'000);
+    auto final = page(requests.back());
+    final.status = "complete";
+    final.columns[0].bucketStartMs = 12'120'000;
+    final.columns[0].observedMs = 60000;
+    processor.onRecordingHistoryReceived(final);
+    processor.setRecordingConnected(false);
+}

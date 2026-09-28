@@ -263,11 +263,23 @@ Delivery normally follows publication at ~1 s, coalesces under load, and backs o
 on budget/backpressure. It is latest-state streaming, not an event log. Committed minutes
 are recoverable through history. The recorder callback, disk read/projection/encoding
 worker, and network executor have separate ownership. Identical views share projection;
-encoding still echoes each subscriber's generation. Live has one <=1 MiB in-flight slot
+final projections are cached once and sent only to viewers whose per-subscription final
+marker has not advanced past that bucket. New or congested viewers can still receive the
+cached final. Encoding still echoes each subscriber's generation. Transient disk I/O errors
+retain the shared projection and its committed prefix and retry with 2/4/5-second backoff;
+they do not deactivate the view or trigger client re-registration. Live has one <=1 MiB in-flight slot
 independent of the 16 MiB legacy/history budget (17 MiB combined bound), and is scheduled
 immediately after the current write. Shutdown joins live delivery before stopping I/O.
+Starting the stream server restarts live delivery; old subscriptions remain inactive and
+clients register new ones. Recorder publications remain cached while transport is stopped.
 Clients reject stale generations, preserve live columns while browsing history, advance
 latest time monotonically, and keep matching live data ahead of delayed history responses.
 After live moves past a cached provisional bucket, the client requests that single bucket
-through history on a 2 s repair cadence until final data replaces it. This repairs finals
-missed through prolonged transport congestion without an unbounded server replay queue.
+through history at most three times, with 2/4/8-second backoff (request timeouts or an
+in-flight history request can delay the next attempt). A final with sufficient observed
+duration replaces the provisional immediately. After exhaustion, the last valid disk value
+wins even if shorter; without a disk value, the bucket becomes unknown. Repair then advances
+to the next old provisional. Delayed provisionals cannot reopen a settled repair, while an
+actual live final can still correct it. Attempt state is bounded by the column cache and
+reset with the projection generation. This repairs finals missed through prolonged transport
+congestion without an unbounded server replay queue or a permanent oldest-bucket retry loop.

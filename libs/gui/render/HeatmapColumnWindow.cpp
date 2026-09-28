@@ -204,6 +204,7 @@ void ColumnWindow::clear() {
     m_bytesPerCell = 0;
     m_cache.clear();
     m_recordingLive.clear();
+    m_recordingRepairs.clear();
     m_liveGeneration = 0;
     m_projected.clear();
     m_recording = false;
@@ -437,6 +438,7 @@ bool ColumnWindow::setDisplayBand(const Band& band, uint64_t generation, Update&
     if (m_recording && generation == m_bandGeneration && band.sameAs(m_band)) return false;
     m_recording = true;
     m_bandGeneration = generation;
+    m_recordingRepairs.clear();
     m_band = band;
     m_rows = static_cast<int>(std::llround(rowCount));
     m_bytesPerCell = 2;
@@ -467,6 +469,7 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
     if (latestAvailableMs > 0) m_latestRecordingMs = std::max(m_latestRecordingMs, latestAvailableMs);
     if (live && m_liveGeneration != generation) {
         m_recordingLive.clear();
+        m_recordingRepairs.clear();
         m_liveGeneration = generation;
     }
     std::vector<int64_t> changed;
@@ -484,11 +487,21 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
                 const bool finalized = old.provisional && column.observedMs > 0 &&
                     (column.observedMs > old.observedMs ||
                      (column.bucketStartMs < m_latestRecordingMs && column.observedMs == old.observedMs));
-                if (!finalized) continue;
+                if (!finalized) {
+                    // Keep the most recent disk evidence for bounded repair,
+                    // while the provisional remains visible during retries.
+                    if (old.provisional && !column.provisional)
+                        m_recordingRepairs[column.bucketStartMs].history = column;
+                    continue;
+                }
+                m_recordingRepairs.erase(column.bucketStartMs);
                 m_recordingLive.erase(existing);
             }
         }
         if (live) {
+            const auto repair = m_recordingRepairs.find(column.bucketStartMs);
+            if (column.provisional && repair != m_recordingRepairs.end() && repair->second.settled) continue;
+            if (!column.provisional) m_recordingRepairs.erase(column.bucketStartMs);
             const auto existing = m_projected.find(column.bucketStartMs);
             if (column.provisional && existing != m_projected.end() &&
                 !existing->second.provisional && existing->second.observedMs >= column.observedMs &&
@@ -499,7 +512,10 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
         m_latestRecordingMs = std::max(m_latestRecordingMs, column.bucketStartMs);
         changed.push_back(column.bucketStartMs);
     }
-    while (static_cast<int>(m_recordingLive.size()) > m_capacity) m_recordingLive.erase(m_recordingLive.begin());
+    while (static_cast<int>(m_recordingLive.size()) > m_capacity) {
+        m_recordingRepairs.erase(m_recordingLive.begin()->first);
+        m_recordingLive.erase(m_recordingLive.begin());
+    }
     // Only completed, tf-aligned output buckets are proven by a recording page.
     if (scannedEndMs > scannedStartMs && scannedStartMs > 0 &&
         scannedStartMs % m_timeframeMs == 0 && scannedEndMs % m_timeframeMs == 0)
@@ -701,6 +717,37 @@ int64_t ColumnWindow::unfinishedRecordingBucket() const {
     for (const auto& [bucket, column] : m_recordingLive)
         if (column.provisional && bucket < m_latestRecordingMs) return bucket;
     return 0;
+}
+
+bool ColumnWindow::nextRecordingRepair(int64_t nowMs, int64_t& bucket, Update& out) {
+    bucket = 0;
+    std::vector<int64_t> changed;
+    while (const auto pending = unfinishedRecordingBucket()) {
+        auto& repair = m_recordingRepairs[pending];
+        if (nowMs < repair.nextMs) break;
+        if (repair.attempts < 3) {
+            repair.nextMs = nowMs + (2000LL << repair.attempts++);
+            bucket = pending;
+            break;
+        }
+        auto& column = m_recordingLive.at(pending);
+        if (repair.history) column = std::move(*repair.history);
+        else {
+            column.intensity = m_zeroIntensity;
+            column.liquidity = m_zeroIntensity;
+            column.validity = m_zeroValidity;
+            column.liquidityScale = 0;
+            column.observedMs = 0;
+        }
+        column.provisional = false;
+        repair.history.reset();
+        repair.settled = true;
+        m_projected[pending] = column;
+        changed.push_back(pending);
+    }
+    if (changed.empty() || !m_placed) return false;
+    emitWindow(false, changed, out);
+    return !out.writes.empty();
 }
 
 bool ColumnWindow::nextFetch(FetchRequest& out) const {
