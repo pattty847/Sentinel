@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cstdlib>
 
 namespace {
@@ -125,9 +126,83 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
         }
     });
     m_candleTimer.start();
+
+    startRecorder();
 }
 
 ServerDataModel::~ServerDataModel() {
+}
+
+namespace {
+// "/Volumes/T7/..." is only usable while that volume is mounted; writing there
+// otherwise would silently fill the boot disk under /Volumes.
+bool volumeMounted(const std::filesystem::path& dir) {
+    auto it = dir.begin();
+    if (dir.is_absolute() && it != dir.end() && ++it != dir.end() && *it == "Volumes" && ++it != dir.end()) {
+        return std::filesystem::is_directory(std::filesystem::path("/Volumes") / *it);
+    }
+    return true;
+}
+
+std::vector<recording::Level> toRecorderLevels(const std::vector<OrderBookLevel>& bids,
+                                               const std::vector<OrderBookLevel>& asks) {
+    std::vector<recording::Level> levels;
+    levels.reserve(bids.size() + asks.size());
+    for (const auto& l : bids) levels.push_back({true, l.price, l.size});
+    for (const auto& l : asks) levels.push_back({false, l.price, l.size});
+    return levels;
+}
+} // namespace
+
+void ServerDataModel::startRecorder() {
+    const auto& rc = m_serverConfig.recording;
+    if (!rc.enabled) {
+        sLog_App("Recording v2 disabled (recording.enabled=false)");
+        return;
+    }
+    std::filesystem::path dir = rc.dir;
+    if (!volumeMounted(dir)) {
+        if (rc.fallbackDir.empty()) {
+            sLog_Warning("Recording v2 not started: volume for " << dir.string()
+                         << " is not mounted and recording.fallback_dir is empty");
+            return;
+        }
+        sLog_Warning("Recording v2: volume for " << dir.string() << " not mounted, using fallback "
+                     << rc.fallbackDir);
+        dir = rc.fallbackDir;
+    }
+    recording::RecorderConfig cfg;
+    cfg.root = dir;
+    cfg.priceScale = rc.priceScale;
+    cfg.sizeScale = {rc.sizeFloor, rc.codesPerOctave};
+    cfg.latenessMs = rc.latenessMs;
+    const auto units = [&](double dollars) { return static_cast<int64_t>(std::llround(dollars * rc.priceScale)); };
+    cfg.layers = {
+        {"near", units(rc.nearTick), 1.0 - rc.nearPct, 1.0 + rc.nearPct, false},
+        {"deep", units(rc.deepTick), rc.deepLowFrac, rc.deepHighMult, true},
+    };
+    try {
+        m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
+    } catch (const std::exception& e) {
+        sLog_Error("Recording v2 failed to start: dir=" << dir.string() << " error=" << e.what());
+        return;
+    }
+    sLog_App("Recording v2 started: dir=" << dir.string()
+             << " near=" << rc.nearTick << "@+/-" << rc.nearPct * 100 << "%"
+             << " deep=" << rc.deepTick << "@[" << rc.deepLowFrac << "x.." << rc.deepHighMult << "x]");
+
+    m_recorderTimer.setInterval(250);
+    connect(&m_recorderTimer, &QTimer::timeout, this, [this]() {
+        if (!m_recorder) return;
+        m_recorder->onTick(localNowMs());
+        if (++m_recorderTicks % 240 == 0) {  // once a minute
+            const auto s = m_recorder->stats();
+            sLog_Data("Recording v2 stats: columns=" << s.columnsWritten << " late=" << s.lateEvents
+                      << " backward=" << s.backwardSteps << " queueDrops=" << s.queueDrops
+                      << " invalidations=" << s.invalidations << " diskErrors=" << s.diskErrors);
+        }
+    });
+    m_recorderTimer.start();
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
@@ -252,6 +327,13 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
 
     updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
 
+    if (m_recorder && !updates.empty()) {
+        std::vector<recording::Level> levels;
+        levels.reserve(updates.size());
+        for (const auto& u : updates) levels.push_back({u.isBid, u.price, u.quantity});
+        m_recorder->onUpdates(symbol, static_cast<int64_t>(exchangeMs), std::move(levels));
+    }
+
     if (data.liveBook.getTickSize() <= 0.0) {
         // Can repeat per message until the snapshot arrives; rate limited.
         sLog_DataN(1000, "Order book update ignored, book not initialized: symbol=" << symbol
@@ -283,6 +365,9 @@ void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const
             }
         }
     }
+    if (m_recorder) {
+        m_recorder->onInvalid(symbol, localNowMs(), reason.toStdString());
+    }
     sLog_Data("ServerDataModel: book invalid until next snapshot: symbol="
               << (symbol.empty() ? std::string("*") : symbol) << " symbols=" << count
               << " reason=" << reason);
@@ -292,6 +377,12 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
+    if (m_recorder) {
+        // The whole book, before the live book's band clip.
+        m_recorder->onSnapshot(symbol, envelopeMs > 0 ? static_cast<int64_t>(envelopeMs) : exchangeNowMs(),
+                               toRecorderLevels(bids, asks));
+    }
+
     const double tickSize = m_serverConfig.orderbook.tickSize;
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);

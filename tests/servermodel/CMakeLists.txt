@@ -106,3 +106,8 @@ set_tests_properties(RecordingCodecTests PROPERTIES LABELS "servermodel")
 find_package(zstd CONFIG REQUIRED)
 target_link_libraries(test_hmc2_store PRIVATE
     $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
+
+# Inspection tool for recording v2 files (not a test).
+add_executable(hmc2_dump hmc2_dump.cpp)
+target_include_directories(hmc2_dump PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(hmc2_dump PRIVATE sentinel_core)

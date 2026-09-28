@@ -23,6 +23,7 @@ recording:
   deep_tick: 10       # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
   deep_low_frac: 0.25
   deep_high_mult: 4
+  size_floor: 1.0e-8   # BTC base increment; codes span 1e-8 .. ~11k BTC per row at 0.085%
 candles:
   update_bps_fast: 5e-05
   update_bps_slow: 0.0002

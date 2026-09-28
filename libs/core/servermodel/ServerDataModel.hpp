@@ -15,6 +15,7 @@
 #include "IHeatmapDataSource.hpp"
 #include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
+#include "BookRecorder.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../protocol/HeatmapSlice.hpp"
 #include "../config/ConfigTypes.hpp"
@@ -93,4 +94,9 @@ private:
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;
     QTimer m_candleTimer;
+    // Recording v2 (null when recording.enabled is false or no usable dir).
+    std::unique_ptr<recording::BookRecorder> m_recorder;
+    QTimer m_recorderTimer;
+    int m_recorderTicks = 0;
+    void startRecorder();
 };
