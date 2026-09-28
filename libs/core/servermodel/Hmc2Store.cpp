@@ -752,7 +752,7 @@ struct Hmc2Reader::Impl {
         return hmcol::crc32(bytes.data(), bytes.size()) == last.crc;
     }
     explicit Impl(fs::path p) : root(std::move(p)) {}
-    Index *index(const fs::path &path, ReadControl &control, bool discovery = false) {
+    Index *index(const fs::path &path, ReadControl &control) {
         if (!control.poll())
             return nullptr;
         try {
@@ -835,7 +835,7 @@ struct Hmc2Reader::Impl {
             return &next;
         } catch (const ReadIo &e) {
             sLog_Warning("Hmc2Reader: index I/O path=" << path.string() << " error=" << e.what());
-            if (!e.permission && !discovery) control.status = ReadStatus::IoError;
+            if (!e.permission) control.status = ReadStatus::IoError;
             incompleteDiscovery = true;
             indexes.erase(path);
             forgetReplay(path);
@@ -846,9 +846,16 @@ struct Hmc2Reader::Impl {
             forgetReplay(path);
             incompleteDiscovery = true;
             return nullptr;
+        } catch (const fs::filesystem_error &e) {
+            sLog_Warning("Hmc2Reader: index filesystem error path=" << path.string() << " error=" << e.what());
+            if (e.code() != std::errc::permission_denied) control.status = ReadStatus::IoError;
+            incompleteDiscovery = true;
+            indexes.erase(path);
+            forgetReplay(path);
+            return nullptr;
         } catch (const std::exception &e) {
             sLog_Warning("Hmc2Reader: index failed path=" << path.string() << " error=" << e.what());
-            if (!discovery) control.status = ReadStatus::IoError;
+            control.status = ReadStatus::IoError;
             incompleteDiscovery = true;
             indexes.erase(path);
             forgetReplay(path);
@@ -1037,10 +1044,16 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
         if (ec) {
             sLog_Warning("Hmc2Reader: availability skipped stat path=" << path.string() << " error=" << ec.message());
             i.incompleteDiscovery = true;
+            if (ec != std::errc::permission_denied) { control.status = ReadStatus::IoError; return {}; }
             continue;
         }
         const auto modified = fs::last_write_time(path, ec);
-        if (ec) { i.incompleteDiscovery = true; continue; }
+        if (ec) {
+            sLog_Warning("Hmc2Reader: availability skipped mtime path=" << path.string() << " error=" << ec.message());
+            i.incompleteDiscovery = true;
+            if (ec != std::errc::permission_denied) { control.status = ReadStatus::IoError; return {}; }
+            continue;
+        }
         next.signature.emplace_back(path, size, modified);
     }
     if (auto it = i.available.find(dir); it != i.available.end() && it->second.signature == next.signature)
@@ -1056,7 +1069,7 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
             for (const auto &[path, size, modified] : next.signature) {
                 if (path.filename().string().substr(0, 10) != day)
                     continue;
-                if (auto *idx = i.index(path, control, true)) {
+                if (auto *idx = i.index(path, control)) {
                     if (idx->header.symbol == symbol && idx->header.layer == layer && idx->header.tfMs == tf)
                         for (size_t n = 0; n < idx->frames.size(); ++n)
                             if (idx->frames[n].bucket)
