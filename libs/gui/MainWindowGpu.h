@@ -84,6 +84,9 @@ private:
     AgentApi::Metadata agentApiMetadata() const;
     AgentApi::StateSnapshot agentApiStateSnapshot() const;
     AgentApi::ViewportSnapshot agentApiViewportSnapshot() const;
+    std::optional<AgentApi::CandleSnapshot> agentApiCandlesSnapshot(const AgentApi::ValidationResult& query) const;
+    AgentApi::BookSnapshot agentApiBookSnapshot(int levels) const;
+    AgentApi::TradesSnapshot agentApiTradesSnapshot(qint64 windowMs, int limit) const;
     void propagateSymbolChange(const QString& symbol);
     bool canRequestConfiguredHistoryForSymbol(const QString& symbol) const;
     void requestConfiguredHistoryForSymbol(const QString& symbol);
@@ -127,6 +130,7 @@ private:
     std::optional<qint64> m_candlesReceivedAtMs;
     std::optional<qint64> m_bookReceivedAtMs;
     std::optional<qint64> m_tradesReceivedAtMs;
+    AgentApi::TradeTape m_agentApiTradeTape;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
 

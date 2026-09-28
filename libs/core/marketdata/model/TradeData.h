@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <utility>
+#include <limits>
 
 enum class AggressorSide {
     Buy,
@@ -86,12 +87,14 @@ public:
         std::chrono::system_clock::time_point timestamp;
         std::span<const std::pair<uint32_t, double>> bidLevels; // (index, quantity)
         std::span<const std::pair<uint32_t, double>> askLevels; // (index, quantity)
+        bool scanLimited = false;
+        double maxPrice = 0.0;
     };
 
     DenseBookSnapshotView captureDenseNonZero(
         std::vector<std::pair<uint32_t, double>>& bidBuffer,
         std::vector<std::pair<uint32_t, double>>& askBuffer,
-        size_t maxPerSide) const;
+        size_t maxPerSide, size_t maxScanWordsPerSide = std::numeric_limits<size_t>::max()) const;
 
     void accumulateRange(double minPrice,
                          double maxPrice,
@@ -124,6 +127,9 @@ private:
     // Vectors for O(1) price level management
     std::vector<double> m_bids;
     std::vector<double> m_asks;
+    // Preallocated occupancy words keep top-level reads independent of dense band width.
+    std::vector<uint64_t> m_bidPresent;
+    std::vector<uint64_t> m_askPresent;
 
     // Book structure configuration
     double m_min_price = 0.0;

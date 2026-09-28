@@ -25,6 +25,8 @@ set(GRID_CORE_SOURCES
     mainwindow/AgentApiCodec.cpp
     mainwindow/AgentApiCodec.hpp
     mainwindow/AgentApiTypes.hpp
+    mainwindow/AgentApiSnapshots.cpp
+    mainwindow/AgentApiSnapshots.hpp
     mainwindow/GuiApiServer.cpp
     mainwindow/GuiApiServer.h
 
