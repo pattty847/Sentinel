@@ -1,17 +1,25 @@
 #include "TradeData.h"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <cmath>
 #include <span>
 #include <bit>
 
 void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    m_tick_size = tick_size;
     m_min_price = min_price;
     m_max_price = max_price;
-    m_tick_size = tick_size;
 
     if (m_tick_size <= 0) return;
+
+    // Buckets sit on the tick grid (a multiple of tick_size), so bucket prices are
+    // clean ($x.x0 for a $0.10 tick) instead of inheriting the band edge's offset.
+    m_min_price = std::floor(min_price / tick_size) * tick_size;
+    m_max_price = std::ceil(max_price / tick_size) * tick_size;
+    min_price = m_min_price;
+    max_price = m_max_price;
 
     size_t size = static_cast<size_t>((max_price - min_price) / tick_size) + 1;
 

@@ -47,3 +47,5 @@ curl -si 'http://127.0.0.1:17100/api/v1/missing'
 ```
 
 Check the API metadata across a symbol switch, timeframe switch and disconnect/reconnect. Compare viewport values with the visible chart and inspect the newest GUI run log for warnings and errors. The GUI cannot be launched inside the sandbox, so these checks are for the orchestrator.
+
+Book prices are dense-book bucket starts on `orderbook.tickSize` (see `/state`), not individual exchange price levels; sizes are the bucket totals rounded to 1e-8. Best bid and best ask are bucket prices too, so they can share a bucket and `spread` can read 0 when the real spread is under one tick.

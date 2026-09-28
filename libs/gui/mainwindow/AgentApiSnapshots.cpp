@@ -4,6 +4,15 @@
 #include <cmath>
 
 namespace AgentApi {
+namespace {
+// Dense-book prices are bucket starts on the tick grid; strip float noise.
+double cleanPrice(double price, double tick) {
+    return std::round(std::round(price / tick) * tick * 1e8) / 1e8;
+}
+// The client book stores float sizes; report satoshi precision, not float noise.
+double cleanQty(double qty) { return std::round(qty * 1e8) / 1e8; }
+} // namespace
+
 std::optional<CandleSnapshot> captureCandles(const CandleSeriesBuffer& buffer,
     const QString& symbol, qint64 startMs, qint64 endMs, qint64 timeframeMs,
     size_t limit, Metadata meta) {
@@ -38,20 +47,20 @@ BookSnapshot captureBook(const LiveOrderBook& book, size_t levels,
     out.scanLimited = view.scanLimited;
     out.meta.truncated = view.scanLimited;
     if (view.tickSize > 0 && std::isfinite(view.minPrice) && std::isfinite(view.maxPrice)) {
-        out.bandMin = view.minPrice;
-        out.bandMax = view.maxPrice;
+        out.bandMin = cleanPrice(view.minPrice, view.tickSize);
+        out.bandMax = cleanPrice(view.maxPrice, view.tickSize);
         for (const auto& [index, qty] : view.bidLevels) {
-            const double price = view.minPrice + index * view.tickSize;
-            if (std::isfinite(price) && std::isfinite(qty)) out.bids.push_back({price, qty});
+            const double price = cleanPrice(view.minPrice + index * view.tickSize, view.tickSize);
+            if (std::isfinite(price) && std::isfinite(qty)) out.bids.push_back({price, cleanQty(qty)});
         }
         for (const auto& [index, qty] : view.askLevels) {
-            const double price = view.minPrice + index * view.tickSize;
-            if (std::isfinite(price) && std::isfinite(qty)) out.asks.push_back({price, qty});
+            const double price = cleanPrice(view.minPrice + index * view.tickSize, view.tickSize);
+            if (std::isfinite(price) && std::isfinite(qty)) out.asks.push_back({price, cleanQty(qty)});
         }
     }
     if (!out.bids.empty()) out.bestBid = out.bids.front().price;
     if (!out.asks.empty()) out.bestAsk = out.asks.front().price;
-    if (out.bestBid && out.bestAsk) out.spread = *out.bestAsk - *out.bestBid;
+    if (out.bestBid && out.bestAsk) out.spread = cleanPrice(*out.bestAsk - *out.bestBid, view.tickSize);
     out.meta.coverage = receivedAtMs ? "partial" : "unknown";
     return out;
 }
