@@ -5,7 +5,8 @@ Author: Lt. Astra (gpt-6-astra, read-only design pass), 2026-09-28. Reviewed by 
 Orchestrator notes:
 - Build order is the four slices at the end. Slice 1 first.
 - Linked candle/heatmap timeframes are a v1 simplification only. INV-004 (independent timeframes) stays the target.
-- Risk 3 (CandlestickOverlayItem reads CandleSeriesBuffer on the render thread) is an existing INV-051 violation, tracked separately.
+- Risk 3 (CandlestickOverlayItem reads CandleSeriesBuffer in updatePaintNode): a policy breach of INV-051 but not a data race, since Qt runs updatePaintNode during sync with the GUI thread blocked and the buffer is GUI-thread only. Low priority; fix when the candle look-and-feel work touches that file.
+- Slice 3 (walls) waits for recording v2, so walls come from absolute sizes. Slice 4 (controls) goes first.
 
 ---
 
