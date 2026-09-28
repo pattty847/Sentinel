@@ -3,7 +3,14 @@
 #
 #   scripts/dev/agent-worktree.sh create <branch> [base-ref]   # default base: main
 #   scripts/dev/agent-worktree.sh remove <branch> [--force]
+#   scripts/dev/agent-worktree.sh land <branch> [--yes] [-m <message>]
 #   scripts/dev/agent-worktree.sh list
+#
+# land = the merge queue, one branch at a time: rebase the branch onto the
+# current main (rerere on), build and run ctest in its worktree, stop for review
+# if the rebase changed any commit (git range-diff), refuse if main moved, then
+# merge --no-ff into main and remove the worktree. The rebased tip contains main,
+# so the tested tree is exactly what lands. Run it from the main checkout.
 #
 # Worktrees live on the external drive when it is mounted
 # (SENTINEL_WORKTREE_ROOT, default /Volumes/T7/sentinel-worktrees), otherwise
@@ -80,11 +87,64 @@ case "$cmd" in
             echo "removed $dir; branch $branch kept (not merged into HEAD)"
         fi
         ;;
+    land)
+        branch=${2:?usage: land <branch> [--yes] [-m <message>]}
+        shift 2
+        confirmed=0
+        message="merge: $branch"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --yes) confirmed=1; shift ;;
+                -m) message=${2:?-m needs a message}; shift 2 ;;
+                *) echo "error: unknown option $1" >&2; exit 2 ;;
+            esac
+        done
+        [[ "$(git -C "$REPO" symbolic-ref --short HEAD)" == "main" ]] ||
+            { echo "error: $REPO is not on main" >&2; exit 1; }
+        git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet ||
+            { echo "error: main checkout has uncommitted changes to tracked files" >&2; exit 1; }
+        dir=$(path_of_branch "$branch")
+        [[ -z "$dir" ]] && { echo "error: no worktree for branch $branch" >&2; exit 1; }
+        [[ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]] ||
+            { echo "error: $dir has uncommitted changes" >&2; exit 1; }
+        main_tip=$(git -C "$REPO" rev-parse main)
+        old_tip=$(git -C "$dir" rev-parse HEAD)
+        old_base=$(git -C "$dir" merge-base HEAD main)
+        if [[ "$old_base" != "$main_tip" ]]; then
+            echo "rebasing $branch onto main ($main_tip)..."
+            if ! git -C "$dir" -c rerere.enabled=true -c rerere.autoUpdate=true rebase main; then
+                git -C "$dir" rebase --abort || true
+                echo "error: rebase conflicts. Resolve in $dir (git rebase main), commit, then rerun land." >&2
+                exit 1
+            fi
+        fi
+        new_tip=$(git -C "$dir" rev-parse HEAD)
+        echo "building and testing $branch at $new_tip..."
+        (cd "$dir" && cmake --build --preset mac-clang > "$dir/.land-build.log" 2>&1) ||
+            { echo "error: build failed, see $dir/.land-build.log" >&2; exit 1; }
+        (cd "$dir" && ctest --test-dir build/mac-clang --output-on-failure > "$dir/.land-ctest.log" 2>&1) ||
+            { tail -20 "$dir/.land-ctest.log" >&2; echo "error: ctest failed, see $dir/.land-ctest.log" >&2; exit 1; }
+        grep -E "tests passed" "$dir/.land-ctest.log" || true
+        if [[ "$old_tip" != "$new_tip" ]]; then
+            changed=$(git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip" | grep -c '^[0-9-]*: *[0-9a-f-]* ! ' || true)
+            if [[ "$changed" -gt 0 && "$confirmed" -eq 0 ]]; then
+                git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip"
+                echo "stop: the rebase changed $changed commit(s) (above). Review, then rerun with --yes." >&2
+                exit 3
+            fi
+        fi
+        [[ "$(git -C "$REPO" rev-parse main)" == "$main_tip" ]] ||
+            { echo "error: main moved during land; rerun land" >&2; exit 1; }
+        git -C "$REPO" merge --no-ff -q "$branch" -m "$message"
+        echo "landed $branch as $(git -C "$REPO" rev-parse --short HEAD)"
+        "$0" remove "$branch"
+        echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
+        ;;
     list)
         git -C "$REPO" worktree list
         ;;
     *)
-        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
