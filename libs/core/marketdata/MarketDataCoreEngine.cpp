@@ -5,6 +5,8 @@
 #include "dispatch/Channels.hpp"
 #include "Cpp20Utils.hpp"
 #include <thread>
+#include <cmath>
+#include <limits>
 #include <chrono>
 #include <algorithm>
 #include <random>
@@ -105,7 +107,10 @@ inline void MarketDataCoreEngine::emitError(std::string msg) {
 inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
     if (connected) {
         m_loggedEmptySubscriptionAck = false;
+    } else {
+        emitBookInvalidated(std::string(), "disconnected");
     }
+    m_lastSequenceNum = -1;
     if (m_onConnectionStatus) {
         try {
             m_onConnectionStatus(connected);
@@ -283,9 +288,35 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
     });
 }
 
+void MarketDataCoreEngine::emitBookInvalidated(const std::string& productId, const std::string& reason) {
+    sLog_Warning("Order book invalidated: product=" << (productId.empty() ? std::string("*") : productId)
+                 << " reason=" << reason);
+    if (m_onLiveOrderBookInvalidated) {
+        try {
+            m_onLiveOrderBookInvalidated(productId, reason);
+        } catch (const std::exception& e) {
+            sLog_Error("Order book invalidated callback exception: " << e.what());
+        }
+    }
+}
+
 void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
     if (!message.is_object()) return;
     auto arrival_time = std::chrono::system_clock::now();
+
+    // A missing sequence number means a dropped message on this connection: every
+    // book is now unknown. Reconnecting resubscribes, which brings fresh snapshots.
+    if (message.contains("sequence_num") && message["sequence_num"].is_number_integer()) {
+        const int64_t seq = message["sequence_num"].get<int64_t>();
+        if (m_lastSequenceNum >= 0 && seq != m_lastSequenceNum + 1) {
+            emitBookInvalidated(std::string(), "sequence gap expected=" + std::to_string(m_lastSequenceNum + 1)
+                                                   + " got=" + std::to_string(seq));
+            m_lastSequenceNum = -1;
+            triggerImmediateReconnect("sequence gap");
+            return;
+        }
+        m_lastSequenceNum = seq;
+    }
     
     sLog_Probe("ws.rx", message.dump());
 
@@ -412,33 +443,56 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
     }
 }
 
+namespace {
+// One L2 level: side, positive finite price, finite non-negative quantity (0 = remove).
+bool parseLevel(const nlohmann::json& update, bool& isBid, double& price, double& quantity) {
+    if (!update.is_object()) return false;
+    const auto side = update.find("side");
+    const auto priceIt = update.find("price_level");
+    const auto qtyIt = update.find("new_quantity");
+    if (side == update.end() || priceIt == update.end() || qtyIt == update.end() ||
+        !side->is_string() || !priceIt->is_string() || !qtyIt->is_string()) {
+        return false;
+    }
+    const std::string normalized = side_norm::normalize(side->get<std::string>());
+    if (normalized != "bid" && normalized != "ask") return false;
+    isBid = (normalized == "bid");
+    constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+    price = Cpp20Utils::fastStringToDouble(priceIt->get_ref<const std::string&>(), kNaN);
+    quantity = Cpp20Utils::fastStringToDouble(qtyIt->get_ref<const std::string&>(), kNaN);
+    return std::isfinite(price) && price > 0.0 && std::isfinite(quantity) && quantity >= 0.0;
+}
+} // namespace
+
 void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
                                                    const std::string& product_id,
                                                    const std::chrono::system_clock::time_point& exchange_timestamp) {
     if (!event.contains("updates") || product_id.empty()) return;
     std::vector<OrderBookLevel> sparse_bids;
     std::vector<OrderBookLevel> sparse_asks;
+    int malformed = 0;
     for (const auto& update : event["updates"]) {
-        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
+        bool isBid = false;
+        double price = 0.0;
+        double quantity = 0.0;
+        if (!parseLevel(update, isBid, price, quantity)) {
+            ++malformed;
             continue;
         }
-        
-        std::string side = update["side"];
-        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
-        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-        
         if (quantity > 0.0) {
-            OrderBookLevel level = {price, quantity};
-            if (side == "bid") {
-                sparse_bids.push_back(level);
-            } else if (side_norm::normalize(side) == "ask") {
-                sparse_asks.push_back(level);
-            }
+            (isBid ? sparse_bids : sparse_asks).push_back(OrderBookLevel{price, quantity});
         }
     }
+    if (malformed > 0) {
+        emitBookInvalidated(product_id, "malformed snapshot entries=" + std::to_string(malformed));
+        triggerImmediateReconnect("malformed l2");
+        return;
+    }
+    const int64_t envelopeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        exchange_timestamp.time_since_epoch()).count();
     if (m_onLiveOrderBookInitialized) {
         try {
-            m_onLiveOrderBookInitialized(product_id, sparse_bids, sparse_asks);
+            m_onLiveOrderBookInitialized(product_id, sparse_bids, sparse_asks, envelopeMs);
         } catch (const std::exception& e) {
             sLog_Error("Order book init callback exception: product=" << product_id
                        << " error=" << e.what());
@@ -457,15 +511,15 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
     levelUpdates.reserve(event["updates"].size());
 
     for (const auto& update : event["updates"]) {
-        if (!update.contains("side") || !update.contains("price_level") || !update.contains("new_quantity")) {
-            continue;
+        bool isBid = false;
+        double price = 0.0;
+        double quantity = 0.0;
+        if (!parseLevel(update, isBid, price, quantity)) {
+            // A level we cannot apply leaves the book in an unknown state.
+            emitBookInvalidated(product_id, "malformed update level");
+            triggerImmediateReconnect("malformed l2");
+            return;
         }
-
-        std::string side = side_norm::normalize(update["side"].get<std::string>());
-        const bool isBid = (side == "bid");
-        double price = Cpp20Utils::fastStringToDouble(update["price_level"].get<std::string>());
-        double quantity = Cpp20Utils::fastStringToDouble(update["new_quantity"].get<std::string>());
-
         levelUpdates.push_back(BookLevelUpdate{isBid, price, quantity});
     }
 

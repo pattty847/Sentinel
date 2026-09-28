@@ -58,7 +58,8 @@ void MarketDataCoreQt::wireCallbacks() {
 
     m_core.onLiveOrderBookInitialized([self](const std::string& productId,
                                              const std::vector<OrderBookLevel>& bids,
-                                             const std::vector<OrderBookLevel>& asks) {
+                                             const std::vector<OrderBookLevel>& asks,
+                                             int64_t /*envelopeMs*/) {
         if (!self) return;
         QString productIdQ = QString::fromStdString(productId);
         std::vector<OrderBookLevel> bidsCopy = bids;

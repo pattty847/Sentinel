@@ -271,7 +271,24 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     }
 }
 
-void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
+void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const QString& reason) {
+    const std::string symbol = productId.toStdString();
+    int count = 0;
+    std::shared_lock lock(m_mutex);
+    for (auto& [key, data] : m_symbols) {
+        if (symbol.empty() || key == symbol) {
+            if (data) {
+                data->bookValid = false;
+                ++count;
+            }
+        }
+    }
+    sLog_Data("ServerDataModel: book invalid until next snapshot: symbol="
+              << (symbol.empty() ? std::string("*") : symbol) << " symbols=" << count
+              << " reason=" << reason);
+}
+
+void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs) {
     std::string symbol = productId.toStdString();
     SymbolHotData& data = ensureSymbol(symbol);
     
@@ -292,8 +309,9 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     
     auto now = std::chrono::system_clock::now();
     data.liveBook.applyUpdates(updates, now, nullptr);
-    
-    sLog_Data("ServerDataModel: Initialized book: symbol=" << symbol
+    data.bookValid = true;
+
+    sLog_Data("ServerDataModel: Initialized book: symbol=" << symbol << " envelopeMs=" << envelopeMs
               << " bids=" << bids.size() << " asks=" << asks.size()
               << " range=[" << minPrice << ".." << maxPrice << "]"
               << " tick=" << tickSize << " bandPct=" << bandPct);

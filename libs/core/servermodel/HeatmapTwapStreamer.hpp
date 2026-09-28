@@ -101,6 +101,9 @@ private:
         double runningMaxAsk = 0.0;
         int height = 0;
         int64_t lastSampleMs = 0;
+        // Set while the book is invalid; the next valid sample treats the whole
+        // interval as a gap (never integrated), so no column spans unknown book time.
+        bool bookGap = false;
         bool initialized = false;
         bool pendingReset = false;
         std::vector<double> rowValuesBid;
