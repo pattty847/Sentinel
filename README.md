@@ -206,7 +206,15 @@ CMake uses output name **`sentinel-gui`** and **`sentinel-server`** under **`bui
 ./build/linux-gcc/apps/sentinel-gui/Release/sentinel-gui
 ```
 
-Start **server before client**.
+Start **server before client**, from the repository root.
+
+The stream server uses TLS with a per-machine self-signed pair that is never committed. Generate it once before the first run:
+
+```bash
+bash certs/gen-certs.sh
+```
+
+(Windows: `certs/gen-certs.ps1`.) Without it the server logs `SentinelStreamServer start failed` and clients cannot connect.
 
 For **macOS bundles** produced off this repo see **`scripts/release_macos.sh`** and **`LAUNCH_README.md`** bundled with releases.
 

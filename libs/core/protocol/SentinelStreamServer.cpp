@@ -38,6 +38,8 @@
 #include "../trading/LiveTradingSession.hpp"
 #include "Cpp20Utils.hpp"
 
+#include <filesystem>
+
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
@@ -2180,10 +2182,17 @@ void SentinelStreamServer::start() {
         });
         
     } catch (const std::exception& e) {
+        std::error_code fsError;
+        const bool tlsFilesMissing =
+            !std::filesystem::exists(m_serverConfig.tls.certFile, fsError) ||
+            !std::filesystem::exists(m_serverConfig.tls.keyFile, fsError);
         sLog_Error("SentinelStreamServer start failed: port=" << m_port
                    << " cert=" << m_serverConfig.tls.certFile
                    << " key=" << m_serverConfig.tls.keyFile
-                   << " error=" << e.what());
+                   << " error=" << e.what()
+                   << (tlsFilesMissing
+                           ? " (TLS files missing: run `bash certs/gen-certs.sh` from the repo root)"
+                           : ""));
         m_running = false;
         std::unique_ptr<net::thread_pool> historyWorkers;
         {
