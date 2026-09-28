@@ -441,6 +441,12 @@ void HeatmapTwapStreamer::onSample() {
         auto& state = m_symbols[symbol];
 
         const auto& hotData = m_model.ensureSymbol(symbol);
+        if (!hotData.bookValid.load(std::memory_order_relaxed)) {
+            // Unknown book (disconnect, sequence gap): not observed time. The next
+            // valid sample restarts integration, so the gap is never filled (FM-044).
+            state.bookGap = true;
+            continue;
+        }
         const double lastTrade = hotData.lastTradePrice;
 
         double bestBid = 0.0;
@@ -505,7 +511,8 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
     // A long sample gap (host sleep, stalled loop) was not observed. Do not
     // integrate the current book across it: close the forming bucket only if
     // it holds observed time, then realign at the next sample.
-    if (intervalEnd - intervalStart > kMaxSampleGapMs) {
+    if (intervalEnd - intervalStart > kMaxSampleGapMs || state.bookGap) {
+        state.bookGap = false;
         for (auto& frame : state.frames) {
             if (frame.timeframeMs <= 0) {
                 continue;
@@ -525,7 +532,7 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
             std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
             std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
         }
-        sLog_Warning("HeatmapTwapStreamer: sample gap not integrated, buckets in the gap stay missing:"
+        sLog_Warning("HeatmapTwapStreamer: sample or book gap not integrated, buckets in the gap stay missing:"
                      << " symbol=" << symbol
                      << " gapMs=" << (intervalEnd - intervalStart)
                      << " from=" << intervalStart << " to=" << intervalEnd);

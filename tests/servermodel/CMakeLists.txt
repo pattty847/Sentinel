@@ -80,3 +80,8 @@ add_custom_target(servermodel_tests
 )
 
 message(STATUS "Servermodel tests configured (6 test suites)")
+
+add_executable(test_recording_codec test_recording_codec.cpp)
+target_include_directories(test_recording_codec PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_recording_codec PRIVATE GTest::gtest_main)
+add_test(NAME RecordingCodecTests COMMAND test_recording_codec)

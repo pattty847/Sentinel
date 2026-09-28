@@ -63,7 +63,9 @@ public slots:
     void onLiveOrderBookLevelUpdates(const QString& productId,
                                      const std::vector<BookLevelUpdate>& updates,
                                      qint64 exchangeMs);
-    void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
+    void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs = 0);
+    // Empty productId = every symbol. The book stays invalid until its next snapshot.
+    void onLiveOrderBookInvalidated(const QString& productId, const QString& reason);
 
 signals:
     // Rebroadcast signals for streaming clients

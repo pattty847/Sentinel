@@ -10,6 +10,7 @@
     "openssl",
     "jwt-cpp",
     "msdfgen",
-    "yaml-cpp"
+    "yaml-cpp",
+    "zstd"
   ]
 }

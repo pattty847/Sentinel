@@ -127,12 +127,22 @@ bool SentinelServerApp::initialize() {
         });
         m_marketDataCore->onLiveOrderBookInitialized([modelPtr](const std::string& productId,
                                                                 const std::vector<OrderBookLevel>& bids,
-                                                                const std::vector<OrderBookLevel>& asks) {
+                                                                const std::vector<OrderBookLevel>& asks,
+                                                                int64_t envelopeMs) {
             QString productIdQ = QString::fromStdString(productId);
             std::vector<OrderBookLevel> bidsCopy = bids;
             std::vector<OrderBookLevel> asksCopy = asks;
-            safeInvoke(modelPtr, [productIdQ, bidsCopy = std::move(bidsCopy), asksCopy = std::move(asksCopy)](ServerDataModel& model) mutable {
-                model.onLiveOrderBookInitialized(productIdQ, bidsCopy, asksCopy);
+            safeInvoke(modelPtr, [productIdQ, bidsCopy = std::move(bidsCopy), asksCopy = std::move(asksCopy), envelopeMs](ServerDataModel& model) mutable {
+                model.onLiveOrderBookInitialized(productIdQ, bidsCopy, asksCopy, static_cast<qint64>(envelopeMs));
+            });
+        });
+        // Queued behind any updates already in flight, so ordering with the book stream holds.
+        m_marketDataCore->onLiveOrderBookInvalidated([modelPtr](const std::string& productId,
+                                                                const std::string& reason) {
+            QString productIdQ = QString::fromStdString(productId);
+            QString reasonQ = QString::fromStdString(reason);
+            safeInvoke(modelPtr, [productIdQ, reasonQ](ServerDataModel& model) {
+                model.onLiveOrderBookInvalidated(productIdQ, reasonQ);
             });
         });
         
