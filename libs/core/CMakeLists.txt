@@ -31,6 +31,10 @@ add_library(sentinel_core
     servermodel/TickBinaryLogger.cpp
     servermodel/HmcolFormat.hpp
     servermodel/HmcolFormat.cpp
+    servermodel/BookRecorder.cpp
+    servermodel/BookRecorder.hpp
+    servermodel/Hmc2Store.cpp
+    servermodel/Hmc2Store.hpp
     servermodel/HeatmapColumnStore.hpp
     servermodel/HeatmapColumnStore.cpp
     servermodel/TimeframeAggregator.hpp

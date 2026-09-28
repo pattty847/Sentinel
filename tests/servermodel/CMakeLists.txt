@@ -79,9 +79,25 @@ add_custom_target(servermodel_tests
     COMMENT "Running servermodel persistence tests"
 )
 
-message(STATUS "Servermodel tests configured (6 test suites)")
+message(STATUS "Servermodel tests configured (9 test suites)")
 
 add_executable(test_recording_codec test_recording_codec.cpp)
 target_include_directories(test_recording_codec PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_recording_codec PRIVATE GTest::gtest_main)
 add_test(NAME RecordingCodecTests COMMAND test_recording_codec)
+
+foreach(name IN ITEMS book_recorder hmc2_store)
+    add_executable(test_${name} test_${name}.cpp)
+    target_include_directories(test_${name} PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+    target_link_libraries(test_${name} PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+    if(name STREQUAL "book_recorder")
+        set(suite BookRecorderTests)
+    else()
+        set(suite Hmc2StoreTests)
+    endif()
+    add_test(NAME ${suite} COMMAND test_${name})
+    set_tests_properties(${suite} PROPERTIES LABELS "servermodel")
+    add_dependencies(servermodel_tests test_${name})
+endforeach()
+add_dependencies(servermodel_tests test_recording_codec)
+set_tests_properties(RecordingCodecTests PROPERTIES LABELS "servermodel")

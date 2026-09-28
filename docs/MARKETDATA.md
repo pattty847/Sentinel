@@ -137,3 +137,52 @@ The server runs paper execution (no real broker); fills use last trade price plu
 - **`docs/ARCHITECTURE.md`** — System overview, client–server pipeline, rendering.
 - **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading configuration and hotkeys.
 - **`docs/CONFIG.md`** — Server and client YAML options.
+
+## Recording v2 core (HMC2, not yet wired)
+
+`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The constructor overload accepting a local-clock function and `drainForTest()` permit deterministic replay without sleeps.
+
+Each side has an ordered, pooled price map (O(log levels) updates, O(1) best bid/ask access). Each layer has a pooled hash map keyed by `(integer row, side)`, with lazily advanced integrals and a reused touched-row buffer. One message is applied in full before its final row sizes update peaks. Malformed prices/sizes invalidate the whole batch's book continuity. Prices use checked nearest rounding in integer price units; an inclusion window tests the row's lower price edge, so bounds are `ceil(minMid * lowFrac * priceScale / rowTickUnits)` through `floor(maxMid * highMult * priceScale / rowTickUnits)`, inclusive on both sides. Empty entries inside minute bounds mean observed zero, not a missing book.
+
+Enqueue arrival time samples the supplied local clock; idle ticks use the last actual `local - envelope` offset. Envelope time is clamped to a nondecreasing integration clock. A crossed minute is sealed before applying the new batch, then held until `clock >= bucketEnd + latenessMs`. Backward messages cannot revise sealed integrals, even within the lateness hold; older-than-committed messages also set the current minute's late flag. Lateness is therefore a commit delay, not an event-reordering buffer. Shutdown drains accepted messages but does not advance time: the open minute and any sealed records still in the lateness hold are dropped. Crash has the same uncommitted-tail loss. Restart begins observation at the new snapshot, never the last stored timestamp. Upstream must deliver disconnect/gap/suspend invalidations in order before timer advancement; silence alone is not evidence of an invalid book.
+
+The queue bounds queued level count and has 4,096 message slots, including control events. A dropped data batch becomes an ordered invalidation for its symbol. If the control slots themselves fill, an out-of-band barrier invalidates all symbols after the queued prefix; incoming messages, including snapshots, are dropped until that barrier is consumed. Continuity then requires a newly accepted snapshot. All drops are counted. Pooled containers and buffers reuse their high-water storage; new symbols, larger books/batches, minute sealing and hourly work can still allocate.
+
+### HMC2 byte layout
+
+All scalar fields are little-endian, with no native padding. IEEE-754 `f64` is used for floating fields. Symbols/layers are 1-255 ASCII letters, digits, dot, dash or underscore, excluding `.` and `..`.
+
+Path: `<root>/<symbol>/<layer>-<tfMs>/<YYYY-MM-DD>.hmc2`, selected using the **bucket start UTC day**. A configuration mismatch against the latest generation creates `<YYYY-MM-DD>.g<N>.hmc2`, starting at N=1. Returning to an old configuration also creates a new generation. Readers visit generations numerically and return the last valid record per bucket, sorted chronologically. Queries use `[startMs, endMs)` bucket starts.
+
+File header, schema version 2:
+
+| Field | Encoding |
+| --- | --- |
+| Magic | u32 `0x32434d48` (bytes `HMC2`) |
+| Schema | u16 `2` |
+| Header length | u32, includes the 14-byte fixed prefix; maximum 65,536 |
+| Header CRC | u32 IEEE CRC-32 over the **whole header with this field zeroed** |
+| Symbol, layer | Each u16 byte length followed by bytes |
+| Timeframe | i64 ms; 60,000 or 3,600,000 |
+| Price scale, row tick | f64 price units per quote currency unit; i64 price units |
+| Size floor, codes/octave | f64, f64 |
+| Config hash | u64 |
+
+The recorder uses FNV-1a-64 over the serialized header body (config hash zeroed), then f64 lowFrac and highMult. Header fields are compared as well as the hash. Hour records retain the originating minute policy hash, allowing rebuilds to exclude incompatible generations.
+
+Record framing: u32 magic `0x32524348` (bytes `HCR2`), u32 compressed length, u32 raw length, u32 IEEE CRC-32 of **compressed bytes**, followed by one zstd frame (compression level 3). Raw length is bounded to 16 MiB; compressed input is bounded to `ZSTD_compressBound(16 MiB)` before allocation. Payload:
+
+- i64 bucketStartMs; u32 observedMs; u32 flags.
+- i64 bidRowLo, bidRowHi, askRowLo, askRowHi (inclusive; lo > hi is empty).
+- f64 midOpen, midClose, midMin, midMax; u32 entryCount.
+- Sorted unique `(row, side)` entries: LEB128 zigzag i64 row delta (first relative to 0), u16 TWAP magnitude with ask in bit 15, u16 peak magnitude. Repeated row with bid then ask uses delta 0. Peak has no side bit.
+
+Flags: bit 0 partial (`observedMs < timeframe`), bit 1 resynced (snapshot occurred), bit 2 late events, bit 3 underflow (a positive stored TWAP/peak was below the size floor). Positive underflows encode as magnitude 1. Readers return side separately from both magnitudes. Extreme representable sizes saturate the fixed size code.
+
+One root `.lock` is held for the writer's lifetime. Every append flushes the stream and synchronizes the file (macOS F_FULLFSYNC with fsync fallback). New directories and their parents, and directories receiving a new file, are synchronized. Windows attempts a native directory metadata flush and surfaces a failure if the filesystem denies it; this path needs platform validation. A writer that fails mid-append is poisoned for that day/config until reopen. Disk failures are logged and counted; failed minute writes never enter the live hourly accumulator.
+
+Locked writer reopen repairs only an incomplete terminal frame at a known record boundary. Complete bad-CRC frames, bad magic and interior corruption are retained and logged. Recovery scans forward in chunks and accepts a resync candidate only after framing, CRC, zstd and payload validation; a length extending past EOF does not cause truncation if a later valid record exists. Read-only queries never truncate. Bad headers are skipped, and a writer creates a fresh generation; I/O errors surface to the caller.
+
+Hourly layers rebuild the current hour from deduplicated, committed minute records of the matching policy on the first snapshot. For each row/side, the mean is `sum(decodedMinuteTwap * minuteObservedMs) / sum(minuteObservedMs where minute bounds cover row)`; a covered absent row contributes zero, and an uncovered row contributes neither numerator nor denominator. Peaks use decoded maxima. The hour is persisted after its own lateness watermark, including when the book is invalid at hour end.
+
+**Schema limitation before serving:** an hourly record has one bounds interval per side and one observedMs. Its bounds are the envelope of contributing minute bounds. They cannot express disjoint coverage holes or the different denominator of each row. Stored nonzero hourly quantities use the correct coverage-weighted math, but a future reader must consult minute coverage before interpreting every absent row inside the hourly envelope as observed zero, or extend the schema with coverage runs. Further rollups must likewise use minute coverage, not blindly weight hourly values by the hour's global observedMs. This is a limitation of Revision 2's hourly representation, not permission to fabricate coverage.

@@ -68,3 +68,11 @@ TEST(RecordingCodec, ZigzagRoundTrip) {
     }
     EXPECT_LT(zigzag(-1), 4u);
 }
+
+TEST(RecordingCodec, RejectsOverflowingVarintTenthByte) {
+    std::vector<uint8_t> input(10, 0xFF);
+    input.back() = 2;
+    size_t pos = 0;
+    uint64_t result = 0;
+    EXPECT_FALSE(getVarint(input.data(), input.size(), pos, result));
+}

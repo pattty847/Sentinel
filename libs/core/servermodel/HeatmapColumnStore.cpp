@@ -1,4 +1,5 @@
 #include "HeatmapColumnStore.hpp"
+#include "PersistenceIo.hpp"
 
 #include "SentinelLogging.hpp"
 
@@ -43,46 +44,7 @@ void copySymbolField(const std::string& symbol, char (&dst)[24]) noexcept {
     std::memcpy(dst, symbol.data(), n);
 }
 
-bool syncFilePath(const fs::path& path, int& errorCode) {
-#ifdef _WIN32
-    HANDLE file = CreateFileW(path.c_str(),
-                              GENERIC_WRITE,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr,
-                              OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        errorCode = static_cast<int>(GetLastError());
-        return false;
-    }
-    const bool ok = FlushFileBuffers(file) != 0;
-    if (!ok) {
-        errorCode = static_cast<int>(GetLastError());
-    }
-    CloseHandle(file);
-    return ok;
-#else
-    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        errorCode = errno;
-        return false;
-    }
-#ifdef __APPLE__
-    int result = ::fcntl(fd, F_FULLFSYNC);
-    if (result != 0) {
-        result = ::fsync(fd);
-    }
-#else
-    const int result = ::fsync(fd);
-#endif
-    if (result != 0) {
-        errorCode = errno;
-    }
-    ::close(fd);
-    return result == 0;
-#endif
-}
+using sentinel::persistence::syncFilePath;
 
 } // namespace
 
@@ -130,52 +92,16 @@ bool HeatmapColumnStore::acquireLock() {
     std::error_code ec;
     fs::create_directories(m_baseDir, ec);
 
+    int error = 0;
+    const auto handle = sentinel::persistence::acquireFileLock(m_lockPath, error);
+    if (handle == sentinel::persistence::noLock) {
+        sLog_Warning("HeatmapColumnStore: lock " << m_lockPath << " unavailable, error=" << error);
+        return false;
+    }
 #ifdef _WIN32
-    HANDLE file = CreateFileW(m_lockPath.c_str(),
-                              GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ,
-                              nullptr,
-                              OPEN_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        sLog_Error("HeatmapColumnStore: cannot open lock file " << m_lockPath
-                  << " error=" << GetLastError());
-        return false;
-    }
-    OVERLAPPED overlapped{};
-    if (!LockFileEx(file,
-                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0,
-                    MAXDWORD,
-                    MAXDWORD,
-                    &overlapped)) {
-        const DWORD error = GetLastError();
-        CloseHandle(file);
-        sLog_Warning("HeatmapColumnStore: lock " << m_lockPath
-                     << " unavailable, error=" << error);
-        return false;
-    }
-    m_lockHandle = file;
+    m_lockHandle = handle;
 #else
-    const int fd = ::open(m_lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
-        sLog_Error("HeatmapColumnStore: cannot open lock file " << m_lockPath
-                  << " errno=" << errno);
-        return false;
-    }
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        const int err = errno;
-        ::close(fd);
-        if (err == EWOULDBLOCK) {
-            sLog_Warning("HeatmapColumnStore: lock " << m_lockPath
-                         << " held by another process; refusing to start writer");
-        } else {
-            sLog_Error("HeatmapColumnStore: flock " << m_lockPath << " failed errno=" << err);
-        }
-        return false;
-    }
-    m_lockFd = fd;
+    m_lockFd = handle;
 #endif
     sLog_Data("HeatmapColumnStore: writer lock acquired: path=" << m_lockPath);
     return true;
