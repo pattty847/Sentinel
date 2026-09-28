@@ -129,15 +129,27 @@ if [[ -f "$REPO_ROOT/libs/gui/qmldir" ]]; then
   cp "$REPO_ROOT/libs/gui/qmldir" "$STAGE/libs/gui/"
 fi
 
-# Python scripts (venv not copied — uv sync fills .venv later)
-mkdir -p "$STAGE/third_party"
-if [[ -d "$REPO_ROOT/../CopeTech-Edgar" ]]; then
-  echo "[release] Including third_party/CopeTech-Edgar from sibling checkout."
-  rsync -a --delete-after \
-    --exclude '.git/' \
-    "$REPO_ROOT/../CopeTech-Edgar/" "$STAGE/third_party/CopeTech-Edgar/"
+# Python scripts (venv not copied — uv sync fills .venv later).
+# copetech-edgar ships as a wheel built from a release tag, never from the sibling
+# working tree: the bundle is reproducible and carries no local .venv, data or caches.
+EDGAR_REPO="${COPETECH_EDGAR_REPO:-$REPO_ROOT/../CopeTech-Edgar}"
+EDGAR_REF="${COPETECH_EDGAR_REF:-v0.2.0}"
+EDGAR_WHEEL=""
+mkdir -p "$STAGE/third_party/wheels"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "[release] WARN: uv not on PATH; cannot build the copetech-edgar wheel (brew install uv)."
+elif [[ -d "$EDGAR_REPO/.git" ]] && git -C "$EDGAR_REPO" rev-parse -q --verify "$EDGAR_REF^{commit}" >/dev/null; then
+  EDGAR_SRC="$(mktemp -d)"
+  git -C "$EDGAR_REPO" archive "$EDGAR_REF" | tar -x -C "$EDGAR_SRC"
+  if (cd "$EDGAR_SRC" && uv build --wheel --out-dir "$STAGE/third_party/wheels" >/dev/null 2>&1); then
+    EDGAR_WHEEL="$(ls "$STAGE"/third_party/wheels/copetech_edgar-*.whl | head -1)"
+    echo "[release] Built $(basename "$EDGAR_WHEEL") from CopeTech-Edgar $EDGAR_REF ($(git -C "$EDGAR_REPO" rev-parse --short "$EDGAR_REF^{commit}"))."
+  else
+    echo "[release] WARN: building the copetech-edgar wheel from $EDGAR_REF failed; SEC overlays will not install."
+  fi
+  rm -rf "$EDGAR_SRC"
 else
-  echo "[release] WARN: ~/.../Sentinel/../CopeTech-Edgar not found; SEC overlay Python deps may not install until you add copetech-edgar (see docs/RELEASE_CHECKLIST.md)."
+  echo "[release] WARN: CopeTech-Edgar $EDGAR_REF not found in $EDGAR_REPO; SEC overlays will not install (set COPETECH_EDGAR_REPO / COPETECH_EDGAR_REF)."
 fi
 
 rsync -a \
@@ -145,16 +157,18 @@ rsync -a \
   --exclude '__pycache__/' \
   --exclude '.pytest_cache/' \
   --exclude '*.py[cod]' \
+  --exclude 'dev/' \
+  --exclude 'data/' \
   "$REPO_ROOT/scripts/" "$STAGE/scripts/"
 
-# Point bundled pyproject at in-bundle copetech when present (release layout differs from dev).
+# Point the bundled pyproject at the in-bundle wheel (dev uses the editable sibling checkout).
 STAGED_PP="$STAGE/scripts/pyproject.toml"
-if [[ -f "$STAGED_PP" ]] && [[ -d "$STAGE/third_party/CopeTech-Edgar" ]] \
-  && grep -q '../../CopeTech-Edgar' "$STAGED_PP"; then
-  perl -0777 -i -pe \
-    's|path\s*=\s*"../../CopeTech-Edgar"|path = "../third_party/CopeTech-Edgar"|g' \
+if [[ -f "$STAGED_PP" && -n "$EDGAR_WHEEL" ]]; then
+  WHEEL_REL="../third_party/wheels/$(basename "$EDGAR_WHEEL")"
+  WHEEL_REL="$WHEEL_REL" perl -i -pe \
+    's|^copetech-edgar\s*=\s*\{[^}]*\}|copetech-edgar = { path = "$ENV{WHEEL_REL}" }|' \
     "$STAGED_PP"
-  echo "[release] Adjusted scripts/pyproject.toml copetech-edgar path for bundle layout."
+  echo "[release] scripts/pyproject.toml now installs copetech-edgar from $WHEEL_REL."
 fi
 
 if command -v uv >/dev/null 2>&1; then
@@ -377,7 +391,7 @@ BUILD_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo ""
   echo "Python scripts (uv-managed; optional .venv inside scripts/ after uv sync during packaging):"
   echo "  - scripts/pyproject.toml, scripts/uv.lock"
-  echo "  - third_party/CopeTech-Edgar/  (if present)"
+  echo "  - third_party/wheels/copetech_edgar-*.whl  (SEC library, built from a CopeTech-Edgar release tag)"
   echo ""
   echo "User-facing docs in this bundle: README_RELEASE.md (start here), LAUNCH_README.md, README.md (upstream copy)"
 } >"$STAGE/MANIFEST.txt"

@@ -17,7 +17,7 @@ Operational notes for Sentinel release bundles (portable folders + archives). Ta
 
 3. **Default output:** `dist/Sentinel-macos-YYYYMMDD/`, **`MANIFEST.txt`**, **`README_RELEASE.md`** (bundled onboarding), **`run.sh`** (sets **`cwd`** to bundle root, exports **`SENTINEL_QML_PATH`**, server → **`logs/sentinel-server.log`**), plus `dist/Sentinel-macos-YYYYMMDD.zip`.
 
-4. **Python backends:** Packaging copies `scripts/`, adjusts `copetech-edgar` when `third_party/CopeTech-Edgar` is bundled, and runs `uv sync` if `uv` is on PATH. **Without** a sibling checkout of **CopeTech-Edgar** at `../CopeTech-Edgar`, `uv sync` may fail until that dependency path is resolved (SEC overlay Python features).
+4. **Python backends:** Packaging copies `scripts/` (without `.venv/`, `data/` or `dev/`), builds a `copetech-edgar` wheel from the CopeTech-Edgar release tag (`COPETECH_EDGAR_REF`, default `v0.2.0`; repo from `COPETECH_EDGAR_REPO`, default `../CopeTech-Edgar`) into `third_party/wheels/`, points the staged `scripts/pyproject.toml` at it, and runs `uv sync` if `uv` is on PATH. If the tag is missing, packaging warns and SEC overlays will not install.
 
 5. **Automated sanity (staged folder inside `dist/`):**
    ```bash
@@ -66,4 +66,4 @@ Run server then GUI (or platform launcher). Subscribe to **`BTC-USD`** (Coinbase
 
 1. **Headless GUI smoke:** Not automated via CI without a harness (Qt/macOS lifecycle, GPU). Covered by `./run.sh` manual run.
 2. **Coinbase WebSocket:** Smoke uses **public REST** only; authenticated channels are unchanged from main app semantics.
-3. **Python `copetech-edgar`:** Development layout uses `{ path = "../../CopeTech-Edgar", editable = true }` (sibling of repo root). Releases bundle **`third_party/CopeTech-Edgar`** when `[repo]/../CopeTech-Edgar` exists at package time and patch `scripts/pyproject.toml` accordingly.
+3. **Python `copetech-edgar`:** Development layout uses `{ path = "../../CopeTech-Edgar", editable = true }` (sibling of repo root). Releases bundle a wheel built from a tagged CopeTech-Edgar release in **`third_party/wheels/`** and patch the staged `scripts/pyproject.toml` to install it; the working tree of the sibling checkout is never copied.

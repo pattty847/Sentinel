@@ -53,5 +53,5 @@ If the stream server never accepts connections (**Connection refused**), open **
 
 - **Unsigned / ad-hoc** bundles may trigger macOS security prompts until explicitly allowed.
 - **Python-backed** features (`scripts/` — SEC overlays, candles, some screener paths) rely on **`uv`** and **`uv sync`** in `scripts/`. Missing `.venv`/deps → those panels report errors rather than crashing the GUI.
-- **`copetech-edgar`**: If the overlay depends on EDG tooling, releases expect either a bundled **`third_party/CopeTech-Edgar`** (maintainer-packaged) or a documented workaround in `RELEASE_CHECKLIST`/repo docs — do not assume an adjacent git checkout unless you built from source.
+- **`copetech-edgar`**: If the overlay depends on EDG tooling, releases bundle it as a wheel in **`third_party/wheels/`**, built from a tagged CopeTech-Edgar release (see `docs/RELEASE_CHECKLIST.md`) — no adjacent git checkout is needed.
 - **Smoke / CI parity**: Maintainers validate against extracted zips **`smoke_macos.sh --clean-room`**; end users only need `./run.sh` + **README_RELEASE.md**.
