@@ -220,3 +220,26 @@ bool CandleSeriesBuffer::getVisibleSlice(const QString& symbol,
     }
     return !out.empty();
 }
+
+bool CandleSeriesBuffer::getBoundedSlice(const QString& symbol, int64_t timeframeSec,
+                                         qint64 startMs, qint64 endMs, size_t limit,
+                                         std::vector<CandleBar>& out, bool& hasMore,
+                                         qint64& nextStartMs) const {
+    out.clear();
+    hasMore = false;
+    nextStartMs = 0;
+    if (symbol.isEmpty() || timeframeSec <= 0 || startMs >= endMs || limit == 0) return false;
+    const auto it = m_series.find(SeriesKey{symbol, timeframeSec});
+    if (it == m_series.end()) return false;
+    const Series& series = it->second;
+    const size_t first = lowerBound(series, startMs);
+    const size_t last = lowerBound(series, endMs); // API end is exclusive.
+    if (first >= last) return true;
+    const size_t available = last - first;
+    const size_t count = std::min(available, limit);
+    out.reserve(count);
+    for (size_t i = 0; i < count; ++i) out.push_back(getAt(series, first + i));
+    hasMore = available > count;
+    if (hasMore) nextStartMs = getAt(series, first + count).timeStartMs;
+    return true;
+}

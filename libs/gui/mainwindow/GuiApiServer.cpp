@@ -49,13 +49,19 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            QQuickView* labView,
                            std::function<AgentApi::StateSnapshot()> stateSnapshot,
                            std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
+                           std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
+                           std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
+                           std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
                            QObject* parent)
     : QObject(parent),
       m_targetWindow(targetWindow),
       m_heatmapView(heatmapView),
       m_labView(labView),
       m_stateSnapshot(std::move(stateSnapshot)),
-      m_viewportSnapshot(std::move(viewportSnapshot)) {
+      m_viewportSnapshot(std::move(viewportSnapshot)),
+      m_candlesSnapshot(std::move(candlesSnapshot)),
+      m_bookSnapshot(std::move(bookSnapshot)),
+      m_tradesSnapshot(std::move(tradesSnapshot)) {
 }
 
 bool GuiApiServer::start(quint16 port, const QString& screenshotDir) {
@@ -159,6 +165,26 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             return;
         }
         respond(socket, 200, AgentApi::jsonBytes(AgentApi::viewportJson(snapshot)), "application/json");
+        return;
+    }
+    if (path == "/api/v1/candles" || path == "/api/v1/book" || path == "/api/v1/trades") {
+        const auto check = AgentApi::validateQuery(parsed.request, m_stateSnapshot().meta.symbol);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+            return;
+        }
+        if (path == "/api/v1/candles") {
+            const auto snapshot = m_candlesSnapshot(check);
+            if (!snapshot) {
+                respond(socket, 422, AgentApi::jsonBytes(AgentApi::error("timeframe_unavailable", "The client does not hold candles for this symbol and timeframe")), "application/json");
+                return;
+            }
+            respond(socket, 200, AgentApi::jsonBytes(AgentApi::candlesJson(*snapshot)), "application/json");
+        } else if (path == "/api/v1/book") {
+            respond(socket, 200, AgentApi::jsonBytes(AgentApi::bookJson(m_bookSnapshot(check.levels))), "application/json");
+        } else {
+            respond(socket, 200, AgentApi::jsonBytes(AgentApi::tradesJson(m_tradesSnapshot(check.windowMs, check.limit))), "application/json");
+        }
         return;
     }
     const QUrlQuery legacyQuery(parsed.request.query);

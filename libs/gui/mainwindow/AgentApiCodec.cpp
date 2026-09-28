@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QSet>
 #include <cmath>
 #include <limits>
 
@@ -113,6 +114,8 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
         return fail(400, "bad_request", "Invalid request target");
     const QString path = url.path();
     const bool known = path == "/api/v1/state" || path == "/api/v1/viewport" ||
+                       path == "/api/v1/candles" || path == "/api/v1/book" ||
+                       path == "/api/v1/trades" ||
                        path == "/api/v1/screenshot" || path == "/screenshot";
     if (!known) return fail(404, "not_found", "Unknown route");
     if (parts[0] != "GET") return fail(405, "method_not_allowed", "Only GET is supported");
@@ -132,6 +135,52 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
         result.message = QString::fromLatin1(message);
         return result;
     };
+    if (request.path == "/api/v1/candles" || request.path == "/api/v1/book" ||
+        request.path == "/api/v1/trades") {
+        ValidationResult result;
+        if (request.path == "/api/v1/candles") result.limit = 500;
+        const bool candles = request.path == "/api/v1/candles";
+        const bool book = request.path == "/api/v1/book";
+        QSet<QString> seen;
+        for (const auto& item : query.queryItems()) {
+            const QString& key = item.first;
+            if (seen.contains(key)) return reject(400, "invalid_parameter", "Duplicate query parameter");
+            seen.insert(key);
+            if (key == "symbol") continue;
+            if (!((candles && (key == "startMs" || key == "endMs" || key == "timeframeMs" || key == "limit")) ||
+                  (book && key == "levels") || (!candles && !book && (key == "windowMs" || key == "limit"))))
+                return reject(400, "invalid_parameter", "Unknown query parameter");
+            bool ok = false;
+            const qint64 value = item.second.toLongLong(&ok);
+            if (!ok || item.second.isEmpty() || value < 0 ||
+                (value == 0 && key != "startMs" && key != "endMs"))
+                return reject(422, "invalid_parameter", "Query parameter must be a nonnegative time or positive limit");
+            if (key == "startMs") result.startMs = value;
+            else if (key == "endMs") result.endMs = value;
+            else if (key == "timeframeMs") result.timeframeMs = value;
+            else if (key == "windowMs") result.windowMs = value;
+            else if (key == "limit") {
+                if (value > (candles ? 2000 : 1000)) return reject(422, "invalid_limit", "limit exceeds maximum");
+                result.limit = static_cast<int>(value);
+            } else if (key == "levels") {
+                if (value > 200) return reject(422, "invalid_levels", "levels exceeds 200");
+                result.levels = static_cast<int>(value);
+            }
+        }
+        if (seen.contains("symbol") && query.queryItemValue("symbol") != activeSymbol)
+            return reject(409, "symbol_mismatch", "Only the active symbol is available");
+        if (candles) {
+            if (!seen.contains("startMs") || !seen.contains("endMs") || !seen.contains("timeframeMs"))
+                return reject(422, "missing_parameter", "startMs, endMs and timeframeMs are required");
+            if (result.startMs >= result.endMs)
+                return reject(422, "invalid_range", "startMs must precede endMs");
+            if (result.timeframeMs % 1000 != 0)
+                return reject(422, "invalid_timeframe", "timeframeMs must be whole seconds");
+        }
+        if (!candles && !book && result.windowMs > 900000)
+            return reject(422, "invalid_window", "windowMs exceeds 900000");
+        return result;
+    }
     if (request.path == "/api/v1/state" || request.path == "/api/v1/viewport") {
         for (const auto& item : query.queryItems()) {
             if (item.first != "symbol") return reject(400, "invalid_parameter", "Unknown query parameter");
@@ -255,6 +304,84 @@ QJsonObject viewportJson(const ViewportSnapshot& s) {
         {"viewportVersion", s.viewportVersion ? QJsonValue(QString::number(*s.viewportVersion)) : QJsonValue(QJsonValue::Null)},
         {"widthPx", number(s.widthPx)}, {"heightPx", number(s.heightPx)},
         {"zoom", QJsonObject{{"msPerPx", number(msPerPx)}, {"pricePerPx", number(pricePerPx)}}}});
+}
+QJsonObject candlesJson(const CandleSnapshot& s) {
+    QJsonArray bars;
+    for (const auto& b : s.bars) bars.append(QJsonObject{
+        {"startMs", b.startMs}, {"endMs", b.endMs}, {"open", b.open},
+        {"high", b.high}, {"low", b.low}, {"close", b.close},
+        {"volume", b.volume}, {"closed", b.closed}, {"seq", QString::number(b.seq)}});
+    return envelope(s.meta, {{"bars", bars}, {"nextStartMs", integer(s.nextStartMs)}});
+}
+QJsonObject bookJson(const BookSnapshot& s) {
+    QJsonArray bids, asks, band;
+    for (const auto& b : s.bids) bids.append(QJsonArray{b.price, b.qty});
+    for (const auto& a : s.asks) asks.append(QJsonArray{a.price, a.qty});
+    if (s.bandMin && s.bandMax) { band.append(*s.bandMin); band.append(*s.bandMax); }
+    return envelope(s.meta, {{"bestBid", number(s.bestBid)}, {"bestAsk", number(s.bestAsk)},
+        {"spread", number(s.spread)}, {"bids", bids}, {"asks", asks},
+        {"bandLimited", s.bandLimited},
+        {"band", s.bandMin && s.bandMax ? QJsonValue(band) : QJsonValue(QJsonValue::Null)},
+        {"receivedAtMs", integer(s.receivedAtMs)}, {"scanLimited", s.scanLimited}});
+}
+QJsonObject tradesJson(const TradesSnapshot& s) {
+    QJsonArray rows;
+    for (const auto& t : s.trades) rows.append(QJsonObject{
+        {"receivedAtMs", t.receivedAtMs}, {"eventTimeMs", QJsonValue(QJsonValue::Null)},
+        {"id", t.id.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(t.id)},
+        {"side", t.side}, {"price", t.price}, {"qty", t.qty}});
+    const auto& a = s.summary;
+    return envelope(s.meta, {{"timeBasis", "received"}, {"trades", rows},
+        {"summary", QJsonObject{{"count", static_cast<qint64>(a.count)},
+            {"buyQty", a.buyQty}, {"sellQty", a.sellQty}, {"unknownQty", a.unknownQty},
+            {"deltaQty", a.deltaQty}, {"vwap", number(a.vwap)}}},
+        {"retentionLimited", s.retentionLimited}});
+}
+
+void TradeTape::append(TradeRow row) {
+    if (!std::isfinite(row.price) || !std::isfinite(row.qty) || row.price <= 0 || row.qty <= 0) return;
+    if (row.selectionEpoch != m_epoch) {
+        m_head = m_count = 0;
+        m_lastEvictedAtMs = 0;
+        m_epoch = row.selectionEpoch;
+    }
+    while (m_count && m_rows[m_head].receivedAtMs < row.receivedAtMs - RetentionMs) {
+        m_head = (m_head + 1) % Capacity;
+        --m_count;
+    }
+    if (m_count == Capacity) {
+        m_lastEvictedAtMs = m_rows[m_head].receivedAtMs;
+        m_head = (m_head + 1) % Capacity;
+        --m_count;
+    }
+    m_rows[(m_head + m_count) % Capacity] = std::move(row);
+    ++m_count;
+}
+TradesSnapshot TradeTape::snapshot(Metadata meta, qint64 windowMs, size_t limit) const {
+    TradesSnapshot out;
+    out.meta = std::move(meta);
+    if (windowMs <= 0 || limit == 0) return out;
+    const qint64 cutoff = out.meta.observedAtMs - std::min(windowMs, RetentionMs);
+    out.retentionLimited = m_epoch == out.meta.selectionEpoch &&
+                           m_lastEvictedAtMs >= cutoff && m_lastEvictedAtMs != 0;
+    double notional = 0, qtyTotal = 0;
+    for (size_t i = 0; i < m_count; ++i) {
+        const TradeRow& t = m_rows[(m_head + m_count - 1 - i) % Capacity];
+        if (t.receivedAtMs < cutoff) break;
+        if (t.receivedAtMs > out.meta.observedAtMs || t.selectionEpoch != out.meta.selectionEpoch) continue;
+        ++out.summary.count;
+        if (t.side == "buy") out.summary.buyQty += t.qty;
+        else if (t.side == "sell") out.summary.sellQty += t.qty;
+        else out.summary.unknownQty += t.qty;
+        notional += t.price * t.qty;
+        qtyTotal += t.qty;
+        if (out.trades.size() < limit) out.trades.push_back(t);
+    }
+    out.summary.deltaQty = out.summary.buyQty - out.summary.sellQty;
+    if (qtyTotal > 0) out.summary.vwap = notional / qtyTotal;
+    out.meta.truncated = out.summary.count > out.trades.size();
+    out.meta.coverage = out.summary.count ? "partial" : "unknown";
+    return out;
 }
 QByteArray jsonBytes(const QJsonObject& object) { return QJsonDocument(object).toJson(QJsonDocument::Compact); }
 } // namespace AgentApi

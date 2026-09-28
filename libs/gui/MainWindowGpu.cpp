@@ -48,6 +48,7 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "mainwindow/AgentApiCodec.hpp"
+#include "mainwindow/AgentApiSnapshots.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "TradeInputManager.hpp"
 #include "config/GuiConfigStore.hpp"
@@ -491,6 +492,9 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     m_labDock ? m_labDock->qquickView() : nullptr,
                                                     [this]() { return agentApiStateSnapshot(); },
                                                     [this]() { return agentApiViewportSnapshot(); },
+                                                    [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
+                                                    [this](int levels) { return agentApiBookSnapshot(levels); },
+                                                    [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
                                                     this);
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
@@ -1001,8 +1005,18 @@ void MainWindowGPU::connectMarketDataSignals() {
             });
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived, this,
             [this](const Trade& trade) {
-                if (QString::fromStdString(trade.product_id) == m_currentSymbol)
-                    m_tradesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                if (QString::fromStdString(trade.product_id) != m_currentSymbol) return;
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                m_tradesReceivedAtMs = now;
+                AgentApi::TradeRow row;
+                row.receivedAtMs = now;
+                row.selectionEpoch = m_agentApiSelectionEpoch;
+                row.id = QString::fromStdString(trade.trade_id);
+                row.side = trade.side == AggressorSide::Buy ? "buy" :
+                           trade.side == AggressorSide::Sell ? "sell" : "unknown";
+                row.price = trade.price;
+                row.qty = trade.size;
+                m_agentApiTradeTape.append(std::move(row));
             });
     connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated, this,
             [this](const QString& symbol, const std::vector<BookDelta>&) {
@@ -1216,4 +1230,28 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
     if (renderer->width() > 0) s.widthPx = renderer->width();
     if (renderer->height() > 0) s.heightPx = renderer->height();
     return s;
+}
+
+std::optional<AgentApi::CandleSnapshot> MainWindowGPU::agentApiCandlesSnapshot(
+    const AgentApi::ValidationResult& query) const {
+    const auto* remote = dynamic_cast<const RemoteGridDataSource*>(m_dataSource.get());
+    const auto* buffer = remote ? qobject_cast<const CandleSeriesBuffer*>(remote->candleBuffer()) : nullptr;
+    if (!buffer) return std::nullopt;
+    return AgentApi::captureCandles(*buffer, m_currentSymbol, query.startMs, query.endMs,
+                                    query.timeframeMs, static_cast<size_t>(query.limit), agentApiMetadata());
+}
+
+AgentApi::BookSnapshot MainWindowGPU::agentApiBookSnapshot(int levels) const {
+    AgentApi::Metadata meta = agentApiMetadata();
+    if (!m_dataSource || m_currentSymbol.isEmpty() || !m_bookReceivedAtMs) {
+        AgentApi::BookSnapshot out;
+        out.meta = std::move(meta);
+        return out;
+    }
+    const LiveOrderBook& book = m_dataSource->getDirectLiveOrderBook(m_currentSymbol.toStdString());
+    return AgentApi::captureBook(book, static_cast<size_t>(levels), m_bookReceivedAtMs, std::move(meta));
+}
+
+AgentApi::TradesSnapshot MainWindowGPU::agentApiTradesSnapshot(qint64 windowMs, int limit) const {
+    return m_agentApiTradeTape.snapshot(agentApiMetadata(), windowMs, static_cast<size_t>(limit));
 }

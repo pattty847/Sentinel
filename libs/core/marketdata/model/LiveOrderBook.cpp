@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <span>
+#include <bit>
 
 void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -16,6 +17,8 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
 
     m_bids.assign(size, 0.0);
     m_asks.assign(size, 0.0);
+    m_bidPresent.assign((size + 63) / 64, 0);
+    m_askPresent.assign((size + 63) / 64, 0);
 
     m_nonZeroBidCount = 0;
     m_nonZeroAskCount = 0;
@@ -105,6 +108,10 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
     }
 
     if (wasNonZero != isNonZero) {
+        auto& present = isBid ? m_bidPresent : m_askPresent;
+        const uint64_t bit = uint64_t{1} << (index % 64);
+        if (isNonZero) present[index / 64] |= bit;
+        else present[index / 64] &= ~bit;
         if (isNonZero) {
             ++nonZeroLevels;
         } else if (nonZeroLevels > 0) {
@@ -126,7 +133,7 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
 LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     std::vector<std::pair<uint32_t, double>>& bidBuffer,
     std::vector<std::pair<uint32_t, double>>& askBuffer,
-    size_t maxPerSide) const {
+    size_t maxPerSide, size_t maxScanWordsPerSide) const {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     bidBuffer.clear();
@@ -134,26 +141,42 @@ LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     bidBuffer.reserve(std::min(maxPerSide, m_bids.size()));
     askBuffer.reserve(std::min(maxPerSide, m_asks.size()));
 
-    for (size_t i = m_bids.size(); i-- > 0 && bidBuffer.size() < maxPerSide; ) {
-        double qty = m_bids[i];
-        if (qty > 0.0) {
-            bidBuffer.emplace_back(static_cast<uint32_t>(i), qty);
+    size_t bidScanned = 0;
+    if (m_nonZeroBidCount) {
+        for (size_t word = m_bidPresent.size(); word-- > 0 && bidBuffer.size() < maxPerSide && bidScanned < maxScanWordsPerSide;) {
+            ++bidScanned;
+            uint64_t bits = m_bidPresent[word];
+            while (bits && bidBuffer.size() < maxPerSide) {
+                const unsigned bit = 63u - std::countl_zero(bits);
+                const size_t index = word * 64 + bit;
+                bidBuffer.emplace_back(static_cast<uint32_t>(index), m_bids[index]);
+                bits &= ~(uint64_t{1} << bit);
+            }
         }
     }
-
-    for (size_t i = 0; i < m_asks.size() && askBuffer.size() < maxPerSide; ++i) {
-        double qty = m_asks[i];
-        if (qty > 0.0) {
-            askBuffer.emplace_back(static_cast<uint32_t>(i), qty);
+    size_t askScanned = 0;
+    if (m_nonZeroAskCount) {
+        for (size_t word = 0; word < m_askPresent.size() && askBuffer.size() < maxPerSide && askScanned < maxScanWordsPerSide; ++word) {
+            ++askScanned;
+            uint64_t bits = m_askPresent[word];
+            while (bits && askBuffer.size() < maxPerSide) {
+                const unsigned bit = std::countr_zero(bits);
+                const size_t index = word * 64 + bit;
+                askBuffer.emplace_back(static_cast<uint32_t>(index), m_asks[index]);
+                bits &= bits - 1;
+            }
         }
     }
 
     DenseBookSnapshotView view;
     view.minPrice = m_min_price;
+    view.maxPrice = m_max_price;
     view.tickSize = m_tick_size;
     view.timestamp = m_lastUpdate;
     view.bidLevels = std::span<const std::pair<uint32_t, double>>(bidBuffer.data(), bidBuffer.size());
     view.askLevels = std::span<const std::pair<uint32_t, double>>(askBuffer.data(), askBuffer.size());
+    view.scanLimited = (bidBuffer.size() < maxPerSide && m_nonZeroBidCount > bidBuffer.size() && bidScanned >= maxScanWordsPerSide) ||
+                       (askBuffer.size() < maxPerSide && m_nonZeroAskCount > askBuffer.size() && askScanned >= maxScanWordsPerSide);
     return view;
 }
 

@@ -20,6 +20,9 @@ public:
                           QQuickView* labView,
                           std::function<AgentApi::StateSnapshot()> stateSnapshot,
                           std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
+                          std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
+                          std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
+                          std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
                           QObject* parent = nullptr);
 
     bool start(quint16 port, const QString& screenshotDir);
@@ -42,6 +45,9 @@ private:
     QString m_screenshotDir;
     std::function<AgentApi::StateSnapshot()> m_stateSnapshot;
     std::function<AgentApi::ViewportSnapshot()> m_viewportSnapshot;
+    std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> m_candlesSnapshot;
+    std::function<AgentApi::BookSnapshot(int)> m_bookSnapshot;
+    std::function<AgentApi::TradesSnapshot(qint64, int)> m_tradesSnapshot;
     QHash<QTcpSocket*, AgentApi::RequestParser> m_requests;
     QSet<QTcpSocket*> m_openConnections;
 };
