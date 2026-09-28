@@ -46,7 +46,16 @@ def read_frame(sock):
     payload = read_exact(sock, length)
     if mask:
         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-    return first & 0x0F, payload
+    return first & 0x0F, payload, bool(first & 0x80)
+
+
+def read_message(sock):
+    """Reassemble fragmented messages: the server (Boost.Beast) splits large replies."""
+    opcode, payload, fin = read_frame(sock)
+    while not fin:
+        _, more, fin = read_frame(sock)
+        payload += more
+    return opcode, payload
 
 
 def main():
@@ -86,7 +95,7 @@ def main():
             send_frame(sock, json.dumps(request))
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                opcode, payload = read_frame(sock)
+                opcode, payload = read_message(sock)
                 if opcode == 9:
                     continue
                 if opcode != 1:
