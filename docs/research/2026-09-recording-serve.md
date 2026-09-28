@@ -109,3 +109,14 @@ Index discovery retains its partial cursor across budget stops. Append-only grow
 Budgets are soft admission limits with minimums of 1 source record, 1 entry-work unit and 10 ms. The first selected record/chain is allowed to exceed them; counters expose that work. Cancellation is not deferred. Very small cold requests can first return no columns while advancing cached discovery, so S2 must reuse its per-worker reader. A large rollup still needs a budget sufficient for one whole output bucket; partial buckets never become proven history.
 
 Hour rollups are exact relative to the **stored quantized values**. BookRecorder re-encodes each hour TWAP, so an hour-based rollup and a rollup directly from minutes can differ by roughly one size-code step from rounding; coverage precision does not make the codec lossless.
+
+Updated timings after the review fixes, using the same unoptimized build and fixtures (fixture writes excluded):
+
+| Request | Columns | Fresh reader | Repeated reader |
+| --- | ---: | ---: | ---: |
+| Deep 1m, synthetic day | 1,024 | 923 ms | 828 ms |
+| Near 1m, synthetic day | 1,024 | 419 ms | 351 ms |
+| Deep 4h, one day of hours | 6 | 141 ms | 84 ms |
+| Deep 4h, 4,096 hourly sources | 1,024 | 15,312 ms | — |
+
+The default 5,000 ms budget returned 348 complete 4h columns in 5,007 ms, status Budget, exhausted=false. Both optional timing fixtures passed. Cold deep-minute discovery remains similar; cache changes primarily avoid repeated filesystem work and whole-day reindexing after live appends. Deterministic diagnostics additionally verify that appending one frame indexes exactly one new frame, repeated visits reuse one directory listing, and eviction respects recent use rather than filename order.
