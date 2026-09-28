@@ -30,6 +30,16 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
         cfg.heatmap.intensityFloor = hm.value("intensity_floor", cfg.heatmap.intensityFloor);
         cfg.heatmap.debugSliceLog = hm.value("debug_slice_log", cfg.heatmap.debugSliceLog);
         cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
+        if (hm.contains("served_timeframes_ms") && hm["served_timeframes_ms"].is_array()) {
+            for (const auto& item : hm["served_timeframes_ms"]) {
+                if (item.is_number_integer()) {
+                    const int64_t tf = item.get<int64_t>();
+                    if (tf > 0) {
+                        cfg.heatmap.servedTimeframesMs.push_back(tf);
+                    }
+                }
+            }
+        }
     }
     if (msg.contains("orderbook") && msg["orderbook"].is_object()) {
         const auto& ob = msg["orderbook"];

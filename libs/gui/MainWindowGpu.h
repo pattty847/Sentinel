@@ -112,6 +112,7 @@ private:
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
     bool m_connected = false;
+    bool m_serverConfigReady = false;
     bool m_userSubscribed = false;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;

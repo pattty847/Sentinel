@@ -58,7 +58,12 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     payload["type"] = "server_config";
     payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
     payload["timeframes_ms"] = cfg.heatmap.timeframesMs;
+    const int64_t servedTimeframeMs = cfg.heatmap.activeTimeframeMs > 0
+        ? cfg.heatmap.activeTimeframeMs
+        : (cfg.heatmap.timeframesMs.empty() ? 0 : cfg.heatmap.timeframesMs.front());
     payload["heatmap"] = {
+        {"served_timeframes_ms", servedTimeframeMs > 0
+            ? std::vector<int64_t>{servedTimeframeMs} : std::vector<int64_t>{}},
         {"grid_width", cfg.heatmap.gridWidth},
         {"grid_height", cfg.heatmap.gridHeight},
         {"tick_size", cfg.heatmap.tickSize},

@@ -8,7 +8,8 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
          {{"grid_width", 4096},
           {"grid_height", 1024},
           {"tick_size", 0.5},
-          {"active_timeframe_ms", 60000}}},
+          {"active_timeframe_ms", 60000},
+          {"served_timeframes_ms", nlohmann::json::array({0, 60000, -1, 300000})}}},
         {"orderbook", {{"tick_size", 0.01}, {"band_pct", 0.25}}},
         {"candles", {{"update_bps_fast", 0.1}, {"update_tick_size", 0.5}}},
         {"default_symbols", nlohmann::json::array({"BTC-USD", 123, "ETH-USD"})}
@@ -22,6 +23,7 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     EXPECT_EQ(cfg.heatmap.gridHeight, 1024);
     EXPECT_DOUBLE_EQ(cfg.heatmap.tickSize, 0.5);
     EXPECT_EQ(cfg.heatmap.activeTimeframeMs, 60000);
+    EXPECT_EQ(cfg.heatmap.servedTimeframesMs, (std::vector<int64_t>{60000, 300000}));
     EXPECT_DOUBLE_EQ(cfg.orderbook.tickSize, 0.01);
     EXPECT_DOUBLE_EQ(cfg.orderbook.bandPct, 0.25);
     EXPECT_DOUBLE_EQ(cfg.candles.bpsFast, 0.1);
@@ -29,6 +31,14 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     ASSERT_EQ(cfg.defaultSymbols.size(), 2u);
     EXPECT_EQ(cfg.defaultSymbols[0], "BTC-USD");
     EXPECT_EQ(cfg.defaultSymbols[1], "ETH-USD");
+}
+
+TEST(SentinelStreamClientParseHelpers, MissingServedTimeframesMeansUnknown) {
+    const auto cfg = protocol::clientparse::parseServerConfig({
+        {"timeframes_ms", nlohmann::json::array({1000, 60000})},
+        {"heatmap", {{"active_timeframe_ms", 60000}}}
+    });
+    EXPECT_TRUE(cfg.heatmap.servedTimeframesMs.empty());
 }
 
 namespace {

@@ -10,10 +10,10 @@ struct ServerHeatmapConfig {
     int gridHeight = 2048;
     double tickSize = 0.0;
     double recenterDelta = 0.01;
-    // All 7 timeframes that the toolbar exposes: 1s, 1m, 5m, 15m, 1h, 4h, 1D.
-    // The server pre-builds a TWAP heatmap ring buffer for each of these so
-    // the client can switch between any of them without waiting for data.
+    // Configured candidates; the streamer currently builds only the active timeframe.
     std::vector<int64_t> timeframesMs{1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    // Empty means the server did not advertise availability (older protocol peer).
+    std::vector<int64_t> servedTimeframesMs;
     int64_t activeTimeframeMs = 0;
     double bandFast = 0.15;
     double bandMedium = 0.25;
