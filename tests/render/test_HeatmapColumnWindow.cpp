@@ -418,3 +418,81 @@ TEST(HeatmapRecordingWindow, LiveArrivalDuringProjectionIsCachedWithoutChangingB
     EXPECT_DOUBLE_EQ(u.band.minPrice, 300);
     EXPECT_EQ(w.cachedColumns(), 2);
 }
+
+TEST(HeatmapRecordingWindow, WallRankingUsesLinearQuantityAndValidity) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 116, 1}, 1, u);
+    w.setRecordingRequest("walls");
+    auto a = makeColumn(10);
+    auto b = makeColumn(12);
+    a.validity = QByteArray(2, 0);
+    b.validity = QByteArray(2, 0);
+    a.validity[0] = static_cast<char>((1u << 2) | (1u << 3));
+    b.validity[0] = static_cast<char>(1u << 2);
+    a.liquidityScale = b.liquidityScale = 0.5;
+    auto set = [](Column& c, int row, uint16_t code, uint16_t qty) {
+        code = qToLittleEndian(code);
+        qty = qToLittleEndian(qty);
+        std::memcpy(c.intensity.data() + row * 2, &code, 2);
+        std::memcpy(c.liquidity.data() + row * 2, &qty, 2);
+    };
+    set(a, 2, 0x8001, 20); // ask, qty 10
+    set(a, 3, 1, 20);      // bid, qty 10, lower price breaks tie
+    set(a, 4, 1, 200);     // unknown row must never rank
+    set(b, 2, 1, 20);      // later time breaks tie
+    ASSERT_TRUE(w.ingestRecording({a, b}, 1, "walls", bucket(10), bucket(13), false,
+                                  0, bucket(12), 1e-6, 819, u, first));
+    WallQuery q;
+    q.startMs = bucket(10);
+    q.endMs = bucket(13);
+    auto result = w.captureWalls(q);
+    EXPECT_EQ(result.status, 200);
+    EXPECT_EQ(result.recordedColumns, 2);
+    EXPECT_EQ(result.missingColumns, 1);
+    EXPECT_TRUE(result.unknownRows);
+    ASSERT_EQ(result.walls.size(), 3u);
+    EXPECT_EQ(result.walls[0].bucketStartMs, bucket(10));
+    EXPECT_DOUBLE_EQ(result.walls[0].priceLow, 112);
+    EXPECT_FALSE(result.walls[0].ask);
+    EXPECT_DOUBLE_EQ(result.walls[0].qty, 10);
+    EXPECT_DOUBLE_EQ(result.walls[0].notional, 1125);
+    EXPECT_TRUE(result.walls[1].ask);
+    EXPECT_EQ(result.walls[2].bucketStartMs, bucket(12));
+    q.minQty = 11;
+    EXPECT_TRUE(w.captureWalls(q).walls.empty());
+    q.minQty = 0;
+    q.priceMax = 113;
+    EXPECT_EQ(w.captureWalls(q).walls.size(), 1u);
+    q.priceMax.reset();
+    q.startMs = bucket(10) + 1;
+    EXPECT_EQ(w.captureWalls(q).recordedColumns, 1); // bucket starts are half-open
+}
+
+TEST(HeatmapRecordingWindow, WallsRejectLegacyAndExcessiveScans) {
+    auto legacy = makeWindow();
+    Update u;
+    ASSERT_TRUE(live(legacy, makeColumn(10), u));
+    EXPECT_EQ(legacy.captureWalls({}).status, 409);
+
+    ColumnWindow recording;
+    recording.configure(kTf, 9000, 0);
+    recording.setDisplayBand({100, 2148, 1}, 1, u);
+    recording.setRecordingRequest("budget");
+    auto c = makeColumn(10);
+    c.maxPrice = 2148;
+    c.intensity = QByteArray(2048 * 2, 0);
+    c.liquidity = QByteArray(2048 * 2, 0);
+    c.validity = QByteArray(2048 / 8, 0);
+    bool first = false;
+    ASSERT_TRUE(recording.ingestRecording({c}, 1, "budget", bucket(10), bucket(11), false,
+                                          0, bucket(10), 1e-6, 819, u, first));
+    EXPECT_EQ(recording.captureWalls({}).status, 422);
+    WallQuery narrow;
+    narrow.startMs = bucket(10);
+    narrow.endMs = bucket(11);
+    EXPECT_EQ(recording.captureWalls(narrow).status, 200);
+    narrow.limit = 0;
+    EXPECT_EQ(recording.captureWalls(narrow).status, 422);
+}

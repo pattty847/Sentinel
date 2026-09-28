@@ -1,4 +1,4 @@
-# Agent API (v1, slices 1, 2 and 4)
+# Agent API (v1)
 
 The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0` disables it. This is a local observation API; reads do not fetch history. All times are UTC epoch milliseconds. It currently exposes these routes:
 
@@ -9,6 +9,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
 | GET | `/api/v1/trades?windowMs=60000&limit=100` | Receive-time tape, newest first, and summary of all retained matches. Window maximum 900,000 ms; limit maximum 1,000. |
+| GET | `/api/v1/heatmap/walls?startMs=...&endMs=...&priceMin=...&priceMax=...&minQty=0&limit=20` | Ranked recording heatmap cells from the loaded window. `limit` maximum 100. |
 | GET | `/api/v1/screenshot?name=review&target=main` | Existing screenshot result; `target` is `main`, `heatmap`, or `lab`. |
 | POST | `/api/v1/symbol` | JSON `{"symbol":"ETH-USD"}`; subscribes through the chart's symbol path. |
 | POST | `/api/v1/timeframe` | JSON with `heatmapTimeframeMs` and/or `candleTimeframeMs`; v1 links them and requires an advertised served timeframe. |
@@ -17,7 +18,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/api/v1/operations/<id>?waitMs=5000` | Current operation state; waits at most five seconds for a rendered frame. |
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |
 
-State, viewport, candles, book and trades accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
+State, viewport, candles, book, trades and walls accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
 
 Successful state and viewport responses have `{"ok":true,"meta":{"sessionId":"...","symbol":"BTC-USD","selectionEpoch":"1","observedAtMs":1790596800000,"source":"gui-cache","stale":false,"coverage":"unknown","truncated":false},"data":{...}}`. Errors have `{"ok":false,"error":{"code":"not_found","message":"Unknown route"}}`. Screenshot success retains `{"ok":true,"path":"./screenshots/review.png","target":"main"}`. The v1 route also accepts `afterOperation=<id>&waitMs=0..5000`; it captures only after that operation renders, returning `408 render_timeout` if no frame arrives, `409 operation_not_rendered` if superseded or failed, and `404 unknown_operation` for an unknown ID. A guarded screenshot includes decimal-string `frameId`, `viewportVersion` and `selectionEpoch`. Screenshots are limited to one request per second (`429`).
 
@@ -39,9 +40,29 @@ Book levels are price/quantity pairs, bids descending and asks ascending. Missin
 
 Trades are held in a preallocated GUI ring, capped at 10,000 rows and 15 minutes. Each row has `receivedAtMs`, `eventTimeMs:null`, `id`, `side`, `price` and `qty`; `timeBasis` is `received` because wire event time is currently discarded. The summary counts and sums every retained trade in the requested window, even when `limit` returns fewer rows. `meta.truncated` marks that row limit; `retentionLimited` marks a capacity eviction inside the requested window. A symbol, timeframe or reconnect epoch change excludes prior epoch rows.
 
+## Heatmap walls
+
+`GET /api/v1/heatmap/walls` reads only the currently loaded recording projection; it never requests history. Omitted time bounds use the loaded window `[start,end)`. Provided bounds select bucket starts within that window, and price bounds include cells whose price band overlaps the requested band. `minQty` defaults to 0 and must be finite and nonnegative. `limit` defaults to 20 and is capped at 100. The scan rejects more than 16,000,000 candidate cells with `422 scan_limit`; narrow the time range. An empty or not-yet-placed window returns an empty result and `coverage:"unknown"`.
+
+The standard envelope contains `basis:"recording-twap-sum"`, `bandTick`, `loadedRange:[startMs,endMs]`, `recordedColumns`, `missingColumns`, a note, and `walls`. Each wall has `bucketStartMs`, `priceLow`, `priceHigh`, `side:"bid"|"ask"`, `qty`, `notional`, and `forming:false`. `qty` is the valid row's little-endian linear quantity code multiplied by that column's scale. `notional` uses the midpoint of the price band. These are aggregated resting sizes per cell, not individual orders or proof of continuous persistence. Recording cells represent the dominant side at each row. Ranking is descending quantity, then ascending bucket start, price low and side (bid before ask). Zero-size and invalid rows are excluded. `recordedColumns` counts cached columns in the selected time range; `missingColumns` counts absent buckets, whether known missing or not yet fetched. `meta.coverage` is `complete` only when all selected columns are present and selected rows are valid, `partial` when some are present, otherwise `unknown`.
+
+Legacy mode returns `409 recording_required`. Its source liquidity channel is a linear, absolute quantity (`u16 * liquidityScale`), but its side bit comes from separately normalized and thresholded intensity. The channel can select an ask while the intensity reports a bid, and legacy has no row-validity mask. It cannot produce reliable side-labeled walls or distinguish unknown rows from zero. The GPU and label rings are also display-resampled, so they are not suitable source columns for this endpoint. The API queues the bounded scan to `DataProcessor`'s worker thread and returns its small immutable result asynchronously; a selection change during the scan returns `409 selection_changed`.
+
 ## Live hand-off checks
 
 Run `sentinel-gui` with the API enabled, then use:
+
+With `heatmap.source: recording` and an advertising recording server, wait until recorded columns appear, then check:
+
+```sh
+curl -si 'http://127.0.0.1:17100/api/v1/heatmap/walls'
+curl -si 'http://127.0.0.1:17100/api/v1/heatmap/walls?limit=3&minQty=1'
+curl -si 'http://127.0.0.1:17100/api/v1/heatmap/walls?startMs=1790593200000&endMs=1790596800000&priceMin=64000&priceMax=65000'
+curl -si 'http://127.0.0.1:17100/api/v1/heatmap/walls?limit=101'
+curl -si 'http://127.0.0.1:17100/api/v1/heatmap/walls?startMs=2&endMs=1'
+```
+
+Use actual loaded time and price bounds from `/api/v1/viewport` for the third request. Check quantity order, validity gaps, `loadedRange`, coverage counts and the source band tick against the visible heatmap. Switch to `heatmap.source: legacy` and confirm the same route returns `409 recording_required`. A large time range can return `422 scan_limit`; narrowing it should succeed.
 
 ```sh
 # The POST returns an operationId such as o1. Substitute the returned ID below.

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <queue>
 
 namespace heatmap_window {
 namespace {
@@ -47,6 +48,73 @@ bool Band::sameAs(const Band& other) const {
     return nearlyEqual(minPrice, other.minPrice) &&
            nearlyEqual(maxPrice, other.maxPrice) &&
            nearlyEqual(tickSize, other.tickSize);
+}
+
+WallsSnapshot ColumnWindow::captureWalls(const WallQuery& query) const {
+    WallsSnapshot out;
+    if (query.limit < 1 || query.limit > 100 || !std::isfinite(query.minQty) || query.minQty < 0 ||
+        (query.priceMin && (!std::isfinite(*query.priceMin) || *query.priceMin <= 0)) ||
+        (query.priceMax && (!std::isfinite(*query.priceMax) || *query.priceMax <= 0)) ||
+        (query.priceMin && query.priceMax && *query.priceMin >= *query.priceMax) ||
+        (query.startMs && query.endMs && *query.startMs >= *query.endMs)) {
+        out.status = 422;
+        return out;
+    }
+    if (!m_recording) { out.status = 409; return out; }
+    if (!m_placed || m_rows <= 0 || m_timeframeMs <= 0) return out;
+    out.loadedStartMs = windowStartMs();
+    out.loadedEndMs = m_windowEndMs + m_timeframeMs;
+    out.bandTick = m_band.tickSize;
+
+    const int64_t start = std::max(out.loadedStartMs, query.startMs.value_or(out.loadedStartMs));
+    const int64_t end = std::min(out.loadedEndMs, query.endMs.value_or(out.loadedEndMs));
+    if (end <= start) return out;
+    const int64_t first = align(start + m_timeframeMs - 1);
+    if (first >= end) return out;
+    const int64_t count = (end - first + m_timeframeMs - 1) / m_timeframeMs;
+    // Upper bound includes rows excluded by price filters. Keep the worker scan bounded.
+    constexpr int64_t kMaxExaminedCells = 16'000'000;
+    if (count > kMaxExaminedCells / m_rows) { out.status = 422; return out; }
+
+    const auto better = [](const Wall& a, const Wall& b) {
+        if (a.qty != b.qty) return a.qty > b.qty;
+        if (a.bucketStartMs != b.bucketStartMs) return a.bucketStartMs < b.bucketStartMs;
+        if (a.priceLow != b.priceLow) return a.priceLow < b.priceLow;
+        return a.ask < b.ask;
+    };
+    std::priority_queue<Wall, std::vector<Wall>, decltype(better)> ranked(better);
+    for (int64_t bucket = first; bucket < end; bucket += m_timeframeMs) {
+        const auto it = m_projected.find(bucket);
+        if (it == m_projected.end()) { ++out.missingColumns; continue; }
+        const Column& column = it->second;
+        ++out.recordedColumns;
+        if (column.intensity.size() != m_rows * 2 || column.liquidity.size() != m_rows * 2 ||
+            column.validity.size() != (m_rows + 7) / 8 || !std::isfinite(column.liquidityScale) ||
+            column.liquidityScale <= 0) { out.unknownRows = true; continue; }
+        for (int row = 0; row < m_rows; ++row) {
+            const double high = column.maxPrice - static_cast<double>(row) * column.tickSize;
+            const double low = high - column.tickSize;
+            if (query.priceMin && high <= *query.priceMin) continue;
+            if (query.priceMax && low >= *query.priceMax) continue;
+            if (!(static_cast<uint8_t>(column.validity.at(row / 8)) & (1u << (row % 8)))) {
+                out.unknownRows = true;
+                continue;
+            }
+            const double qty = static_cast<double>(readCell(column.liquidity, row, 2)) * column.liquidityScale;
+            if (!(qty > 0.0) || qty < query.minQty || !std::isfinite(qty)) continue;
+            const uint16_t encoded = readCell(column.intensity, row, 2);
+            if ((encoded & 0x7fffu) == 0) continue;
+            Wall wall{bucket, low, high, (encoded & 0x8000u) != 0, qty,
+                      qty * (low + high) / 2.0, false};
+            if (!std::isfinite(wall.notional)) continue;
+            if (ranked.size() < static_cast<size_t>(query.limit)) ranked.push(wall);
+            else if (better(wall, ranked.top())) { ranked.pop(); ranked.push(wall); }
+        }
+    }
+    out.walls.reserve(ranked.size());
+    while (!ranked.empty()) { out.walls.push_back(ranked.top()); ranked.pop(); }
+    std::reverse(out.walls.begin(), out.walls.end());
+    return out;
 }
 
 int intensityMagnitude(uint16_t value, int bytesPerCell) {
