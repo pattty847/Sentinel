@@ -312,10 +312,12 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
         const auto& b = result.body;
         if (b.startMs.has_value() != b.endMs.has_value() || b.priceMin.has_value() != b.priceMax.has_value())
             return reject("invalid_range", "Bounds must be paired");
-        if (b.startMs && (*b.startMs >= *b.endMs || b.followLive.value_or(false)))
-            return reject("invalid_range", "Time bounds must increase and cannot enable followLive");
+        if (b.startMs && *b.startMs >= *b.endMs)
+            return reject("invalid_range", "Time bounds must increase");
         if (b.priceMin && *b.priceMin >= *b.priceMax)
             return reject("invalid_range", "Price bounds must increase");
+        if (b.followLive.value_or(false) && (b.startMs || b.priceMin))
+            return reject("invalid_range", "Bounds cannot enable followLive");
     }
     return result;
 }

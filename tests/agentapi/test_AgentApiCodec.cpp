@@ -22,6 +22,7 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1,"endMs":10,"priceMin":1,"priceMax":2})").status, 200);
     EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1})").status, 422);
     EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1,"endMs":10,"followLive":true})").status, 422);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"priceMin":1,"priceMax":2,"followLive":true})").status, 422);
     EXPECT_EQ(check("/api/v1/viewport", R"({"priceMin":2,"priceMax":1})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"heatmap":true,"candles":false,"tpo":true})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":1})").status, 422);
