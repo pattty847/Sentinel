@@ -10,6 +10,7 @@ layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 params;
     vec4 params2;
+    vec4 params3;  // x: value mode (0 legacy normalized, 1 absolute log code), y: lo code, z: hi code
 };
 
 // Display tick: params2.y = N base rows per display row, params2.z = row phase
@@ -51,21 +52,39 @@ float sampleGroupedRows(vec2 uv) {
 void main() {
     vec2 uv = vec2(fract(v_texcoord.x + params.w), v_texcoord.y);
     float encoded = sampleGroupedRows(uv);
-    if (encoded <= 0.0001) {
-        fragColor = vec4(0.0, 0.0, 0.0, 0.0);
-        return;
-    }
     float gamma = params.y;
     float contrast = params.z;
     float floorVal = params2.x;
-
-    // Detect bid vs ask: bytes 0-127 = bid, 128-255 = ask
     float isAsk = step(0.5, encoded);
-    
-    // Extract magnitude within each half (0.0 to 1.0)
-    // Bids: 1-127 → 0.004-0.498 → magnitude 0.008-0.996
-    // Asks: 128-255 → 0.502-1.0 → magnitude 0.004-1.0
-    float magnitude = mix(encoded * 2.0, (encoded - 0.5) * 2.0, isAsk);
+    float magnitude = 0.0;
+
+    if (params3.x > 0.5) {
+        // Recording mode: absolute log size code | side bit (RecordingCodec.hpp).
+        // 0 = recorded empty, 0x8000 = not recorded (unknown), drawn as a faint veil.
+        int raw = int(encoded * 65535.0 + 0.5);
+        if (raw == 32768) {
+            fragColor = vec4(0.16, 0.18, 0.22, 0.30 * params.x);
+            return;
+        }
+        int code = raw & 32767;
+        if (code == 0) {
+            fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+        float span = max(params3.z - params3.y, 1.0);
+        magnitude = clamp((float(code) - params3.y) / span, 0.0, 1.0);
+        if (magnitude <= 0.0) {
+            fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+    } else {
+        if (encoded <= 0.0001) {
+            fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+        // Legacy: per-column log-normalized intensity; bids 0..0.5, asks 0.5..1.
+        magnitude = mix(encoded * 2.0, (encoded - 0.5) * 2.0, isAsk);
+    }
     
     // Apply gamma for brightness control, ensure minimum visibility
     float adjusted = pow(max(magnitude, floorVal), gamma);

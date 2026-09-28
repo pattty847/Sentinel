@@ -20,7 +20,7 @@ public:
         Q_UNUSED(oldMaterial);
         auto* material = static_cast<HeatmapIntensityMaterial*>(newMaterial);
         QByteArray* data = state.uniformData();
-        const int uniformSize = sizeof(float) * (16 + 8);
+        const int uniformSize = sizeof(float) * (16 + 12);
         if (data->size() != uniformSize) {
             data->resize(uniformSize);
         }
@@ -40,6 +40,9 @@ public:
                                 0.0f);
         memcpy(data->data() + 64, &params, sizeof(QVector4D));
         memcpy(data->data() + 64 + sizeof(QVector4D), &params2, sizeof(QVector4D));
+        const QVector4D params3(material->absoluteCodes() ? 1.0f : 0.0f, material->loCode(),
+                                material->hiCode(), 0.0f);
+        memcpy(data->data() + 64 + 2 * sizeof(QVector4D), &params3, sizeof(QVector4D));
         changed = true;
 
         return changed;
@@ -219,6 +222,9 @@ int HeatmapIntensityMaterial::compare(const QSGMaterial* other) const {
     if (m_rowPhase != rhs->m_rowPhase) {
         return m_rowPhase < rhs->m_rowPhase ? -1 : 1;
     }
+    if (m_absoluteCodes != rhs->m_absoluteCodes || m_loCode != rhs->m_loCode || m_hiCode != rhs->m_hiCode) {
+        return m_loCode < rhs->m_loCode ? -1 : 1;
+    }
     return 0;
 }
 
@@ -290,6 +296,15 @@ void HeatmapIntensityNode::setTimeOffset(float offset) {
 
 void HeatmapIntensityNode::setShaderFloor(float floor) {
     m_material.setShaderFloor(floor);
+    markDirty(QSGNode::DirtyMaterial);
+}
+
+void HeatmapIntensityNode::setValueMode(bool absoluteLogCodes, float loCode, float hiCode) {
+    if (m_material.absoluteCodes() == absoluteLogCodes && m_material.loCode() == loCode &&
+        m_material.hiCode() == hiCode) {
+        return;
+    }
+    m_material.setValueMode(absoluteLogCodes, loCode, hiCode);
     markDirty(QSGNode::DirtyMaterial);
 }
 
