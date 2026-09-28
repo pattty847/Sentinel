@@ -7,6 +7,7 @@ Sentinel — ViewportAutoScrollController
 #include "HeatmapStreamState.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -46,6 +47,14 @@ void ViewportAutoScrollController::setInitialPricePct(int pct) {
 void ViewportAutoScrollController::resetSpan() {
     m_autoScrollSpanMs = 0;
     m_lastViewEndMs = std::numeric_limits<int64_t>::min();
+}
+
+bool ViewportAutoScrollController::applyPendingPriceCenter(GridViewState& view, double span) {
+    if (!view.isTimeWindowValid()) return false;
+    const auto range = m_priceCenter.consume(span, view.isAutoScrollEnabled());
+    if (!range) return false;
+    view.setViewport(view.getVisibleTimeStart(), view.getVisibleTimeEnd(), range->min, range->max);
+    return true;
 }
 
 void ViewportAutoScrollController::updateLagFromView(const GridViewState& view,
@@ -100,15 +109,24 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
     if (viewEnd <= viewStart) {
         return false;
     }
-    double viewMinPrice = snapshot.minPrice;
-    double viewMaxPrice = snapshot.maxPrice;
+    double viewMinPrice = view.isTimeWindowValid() && !m_priceCenter.initialRequest()
+        ? view.getMinPrice() : snapshot.minPrice;
+    double viewMaxPrice = view.isTimeWindowValid() && !m_priceCenter.initialRequest()
+        ? view.getMaxPrice() : snapshot.maxPrice;
     if (m_initialPricePct > 0 && m_initialPricePct < 100 &&
-        snapshot.maxPrice > snapshot.minPrice) {
+        snapshot.maxPrice > snapshot.minPrice && m_priceCenter.initialRequest()) {
         const double mid = (snapshot.minPrice + snapshot.maxPrice) * 0.5;
         const double fullRange = snapshot.maxPrice - snapshot.minPrice;
         const double viewRange = fullRange * (static_cast<double>(m_initialPricePct) / 100.0);
         viewMinPrice = mid - viewRange * 0.5;
         viewMaxPrice = mid + viewRange * 0.5;
+    }
+    if (m_priceCenter.pending()) {
+        if (const auto range = m_priceCenter.consume(viewMaxPrice - viewMinPrice,
+                                                     view.isAutoScrollEnabled())) {
+            viewMinPrice = range->min;
+            viewMaxPrice = range->max;
+        }
     }
     view.setViewport(viewStart, viewEnd, viewMinPrice, viewMaxPrice);
     m_lastViewEndMs = viewEnd;
@@ -141,15 +159,7 @@ bool ViewportAutoScrollController::applySliceAutoScroll(GridViewState& view,
     }
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
-    const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());
-    const double heatmapMid = (snapshot.minPrice + snapshot.maxPrice) * 0.5;
-    double viewMin = view.getMinPrice();
-    double viewMax = view.getMaxPrice();
-    if (viewMax < snapshot.minPrice || viewMin > snapshot.maxPrice) {
-        viewMin = heatmapMid - priceSpan * 0.5;
-        viewMax = heatmapMid + priceSpan * 0.5;
-    }
-    view.setViewport(viewStart, viewEnd, viewMin, viewMax);
+    view.setViewport(viewStart, viewEnd, view.getMinPrice(), view.getMaxPrice());
     m_lastViewEndMs = viewEnd;
     return true;
 }
@@ -184,16 +194,7 @@ bool ViewportAutoScrollController::applySmoothAutoScroll(GridViewState& view,
     }
     const int64_t viewStart = viewEnd - clampedSpanMs;
 
-    const double priceSpan = std::max(1e-6, view.getMaxPrice() - view.getMinPrice());
-    const double heatmapMid = (snapshot.minPrice + snapshot.maxPrice) * 0.5;
-    double viewMin = view.getMinPrice();
-    double viewMax = view.getMaxPrice();
-    if (viewMax < snapshot.minPrice || viewMin > snapshot.maxPrice) {
-        viewMin = heatmapMid - priceSpan * 0.5;
-        viewMax = heatmapMid + priceSpan * 0.5;
-    }
-
-    view.setViewport(viewStart, viewEnd, viewMin, viewMax);
+    view.setViewport(viewStart, viewEnd, view.getMinPrice(), view.getMaxPrice());
     m_lastViewEndMs = viewEnd;
     return true;
 }

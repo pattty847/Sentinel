@@ -1033,7 +1033,18 @@ void MainWindowGPU::connectMarketDataSignals() {
             });
     connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated, this,
             [this](const QString& symbol, const std::vector<BookDelta>&) {
-                if (symbol == m_currentSymbol) m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                if (symbol != m_currentSymbol) return;
+                m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+                if (!renderer) return;
+                thread_local std::vector<std::pair<uint32_t, double>> bids, asks;
+                const auto view = m_dataSource->getDirectLiveOrderBook(symbol.toStdString())
+                                      .captureDenseNonZero(bids, asks, 1, 16384);
+                const double bid = view.bidLevels.empty() ? 0.0
+                    : view.minPrice + view.bidLevels.front().first * view.tickSize;
+                const double ask = view.askLevels.empty() ? 0.0
+                    : view.minPrice + view.askLevels.front().first * view.tickSize;
+                renderer->setLiveBookTop(bid, ask);
             });
     if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
         connect(remote->streamClient(), &SentinelStreamClient::candleBarUpdateReceived, this,
@@ -1073,6 +1084,9 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         m_candlesReceivedAtMs.reset();
         m_bookReceivedAtMs.reset();
         m_tradesReceivedAtMs.reset();
+        if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr) {
+            renderer->resetLivePriceCenter();
+        }
     }
     m_connected = connected;
     if (!connected) {
@@ -1269,7 +1283,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
             return out;
         }
-        if (body.startMs) renderer->enableAutoScroll(false);
+        if (body.startMs || body.priceMin) renderer->enableAutoScroll(false);
         if (body.startMs || body.priceMin) {
             renderer->setViewport(body.startMs.value_or(*current.startMs), body.endMs.value_or(*current.endMs),
                                   body.priceMin.value_or(*current.priceMin), body.priceMax.value_or(*current.priceMax));

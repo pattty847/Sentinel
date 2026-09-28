@@ -105,6 +105,11 @@ public:
     void setInitialPricePct(int pct);
     void resetAutoScrollSpan();
     void updateAutoScrollLag(GridViewState& vs, int64_t cadenceMs);
+    void resetPriceCenter();
+    void setLiveBook(double bid, double ask, GridViewState* viewState);
+    void setLastTrade(double price, GridViewState* viewState);
+    void requestPriceCenter(GridViewState* viewState);
+    void cancelPriceCenter();
 
     // ── Grid dimensions ──────────────────────────────────────────────────────
     void setGridDimensions(int w, int h, HeatmapOverlayRenderer& overlay);
@@ -118,11 +123,13 @@ public:
     bool fitToDataRange(GridViewState* viewState);
 
 private:
+    void applyPendingPriceCenter(GridViewState* viewState);
     std::unique_ptr<HeatmapStreamState> m_stream;
     QElapsedTimer m_clock;
     TimeAuthority m_timeAuthority;
     std::unique_ptr<ViewportAutoScrollController> m_autoScrollController;
     bool m_viewportInitialized = false;
+    bool m_priceBandReady = false;
     int m_gridWidth = 5120;
     int m_gridHeight = 2048;
     int m_intensityBytesPerCell = 1;

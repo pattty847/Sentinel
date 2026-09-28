@@ -7,6 +7,7 @@ Threading: GUI thread only.
 
 #include <cstdint>
 #include <limits>
+#include "PriceCenteringPolicy.hpp"
 
 class GridViewState;
 class HeatmapStreamState;
@@ -22,6 +23,14 @@ public:
     void setInitialPricePct(int pct);     // 1–100, % of price range; 0 = full range
     int initialColumnPx() const { return m_initialColumnPx; }
     int initialPricePct() const { return m_initialPricePct; }
+    void resetPriceCenter() { m_priceCenter.reset(); }
+    void setLiveBook(double bid, double ask) { m_priceCenter.setBook(bid, ask); }
+    void setLastTrade(double price) { m_priceCenter.setTrade(price); }
+    void requestPriceCenter() { m_priceCenter.requestFollow(); }
+    void cancelPriceCenter() { m_priceCenter.cancel(); }
+    bool priceCenterPending() const { return m_priceCenter.pending(); }
+    bool initialPriceCenterPending() const { return m_priceCenter.initialRequest(); }
+    bool applyPendingPriceCenter(GridViewState& view, double span);
 
     void resetSpan();
     void updateLagFromView(const GridViewState& view, const HeatmapStreamState& stream);
@@ -53,4 +62,5 @@ private:
     bool m_smoothEnabled = true;
     int m_initialColumnPx = 8;      // screen pixels per column
     int m_initialPricePct = 5;      // % of price range; 0 = full
+    PriceCenteringPolicy m_priceCenter;
 };
