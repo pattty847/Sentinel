@@ -61,12 +61,7 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
         return;
     }
 
-    SeriesKey key{symbol, timeframeSec};
-    auto& series = m_series[key];
-    if (series.capacity == 0) {
-        series.capacity = capacityFor(timeframeSec);
-        series.ring.resize(series.capacity);
-    }
+    auto& series = seriesFor(symbol, timeframeSec);
 
     if (seq <= series.lastSeq) {
         sLog_Probe("candles.drop",
@@ -93,7 +88,14 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
         }
     }
 
-    if (!updatedExisting) {
+    const bool olderThanNewest = series.count > 0 &&
+        updated.timeStartMs < getAt(series, series.count - 1).timeStartMs;
+    if (!updatedExisting && olderThanNewest) {
+        // Rare late bar: keep the ring sorted so lowerBound stays valid.
+        std::vector<CandleBar> bars = linearize(series);
+        bars.insert(bars.begin() + static_cast<std::ptrdiff_t>(lowerBound(series, updated.timeStartMs)), updated);
+        rebuild(series, std::move(bars));
+    } else if (!updatedExisting) {
         if (series.count < series.capacity) {
             getAt(series, series.count) = updated;
             series.count++;
@@ -112,6 +114,76 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
                << " count=" << series.count
                << " oldestMs=" << getAt(series, 0).timeStartMs
                << " newestMs=" << getAt(series, series.count - 1).timeStartMs);
+}
+
+CandleSeriesBuffer::Series& CandleSeriesBuffer::seriesFor(const QString& symbol, int64_t timeframeSec) {
+    auto& series = m_series[SeriesKey{symbol, timeframeSec}];
+    if (series.capacity == 0) {
+        series.capacity = capacityFor(timeframeSec);
+        series.ring.resize(series.capacity);
+    }
+    return series;
+}
+
+std::vector<CandleSeriesBuffer::CandleBar> CandleSeriesBuffer::linearize(const Series& series) {
+    std::vector<CandleBar> bars;
+    bars.reserve(series.count + 1);
+    for (size_t i = 0; i < series.count; ++i) {
+        bars.push_back(getAt(series, i));
+    }
+    return bars;
+}
+
+void CandleSeriesBuffer::rebuild(Series& series, std::vector<CandleBar>&& sorted) {
+    if (sorted.size() > series.capacity) {
+        sorted.erase(sorted.begin(), sorted.end() - static_cast<std::ptrdiff_t>(series.capacity));
+    }
+    std::copy(sorted.begin(), sorted.end(), series.ring.begin());
+    series.head = 0;
+    series.count = sorted.size();
+}
+
+void CandleSeriesBuffer::applyHistory(const QString& symbol,
+                                      int64_t timeframeSec,
+                                      const std::vector<CandleBar>& history) {
+    if (symbol.isEmpty() || timeframeSec <= 0 || history.empty()) {
+        return;
+    }
+    auto& series = seriesFor(symbol, timeframeSec);
+    std::vector<CandleBar> merged = linearize(series);
+    const auto byStart = [](const CandleBar& a, qint64 t) { return a.timeStartMs < t; };
+    for (const auto& bar : history) {
+        if (bar.timeStartMs <= 0) {
+            continue;
+        }
+        auto it = std::lower_bound(merged.begin(), merged.end(), bar.timeStartMs, byStart);
+        if (it != merged.end() && it->timeStartMs == bar.timeStartMs) {
+            // Keep the live bar unless history says the bucket is final and live does not.
+            if (bar.isClosed && !it->isClosed) {
+                *it = bar;
+            }
+        } else {
+            merged.insert(it, bar);
+        }
+    }
+    rebuild(series, std::move(merged));
+    if (series.count == 0) {
+        return;
+    }
+    const qint64 first = getAt(series, 0).timeStartMs;
+    const qint64 last = getAt(series, series.count - 1).timeEndMs;
+    emit candlesDirty(symbol, timeframeSec, first, last);
+    sLog_Probe("candles.buffer",
+               "history symbol=" << symbol << " tfSec=" << timeframeSec
+               << " merged=" << history.size() << " count=" << series.count
+               << " oldestMs=" << first << " newestMs=" << getAt(series, series.count - 1).timeStartMs
+               << " lastSeq=" << series.lastSeq);
+}
+
+void CandleSeriesBuffer::resetSequences() {
+    for (auto& [key, series] : m_series) {
+        series.lastSeq = 0;
+    }
 }
 
 bool CandleSeriesBuffer::getVisibleSlice(const QString& symbol,

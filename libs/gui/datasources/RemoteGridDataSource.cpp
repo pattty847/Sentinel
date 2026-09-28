@@ -101,7 +101,11 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
 
     connect(&m_client, &SentinelStreamClient::connected,
             this,
-            [this]{ emit connectionStatusChanged(true); },
+            [this]{
+                // Candle seq numbers restart with every server session.
+                if (m_candleBuffer) m_candleBuffer->resetSequences();
+                emit connectionStatusChanged(true);
+            },
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::disconnected,
             this,
@@ -339,7 +343,9 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
     if (!m_candleBuffer) {
         return;
     }
-    int64_t seq = 0;
+    // History is merged by time and never touches the live seq stream.
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    bars.reserve(static_cast<size_t>(candles.size()));
     for (const auto& bar : candles) {
         CandleSeriesBuffer::CandleBar out;
         out.timeStartMs = bar.timeStartMs;
@@ -350,9 +356,9 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
         out.close = bar.close;
         out.volume = bar.volume;
         out.isClosed = bar.isClosed;
-        out.seq = ++seq;
-        m_candleBuffer->applyUpdate(symbol, timeframeSec, out, out.seq, out.isClosed);
+        bars.push_back(out);
     }
+    m_candleBuffer->applyHistory(symbol, timeframeSec, bars);
     sLog_Probe("candles.history",
                "applied symbol=" << symbol << " tfSec=" << timeframeSec
                << " t=[" << startTimeSec << ".." << endTimeSec << "]"
