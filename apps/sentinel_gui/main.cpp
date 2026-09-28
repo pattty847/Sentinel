@@ -23,6 +23,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QSurfaceFormat>
 #include <QSysInfo>
 #include "SentinelLogging.hpp"
+#include "SentinelLogSink.hpp"
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
@@ -93,6 +94,8 @@ void registerMetaTypesAndQml() {
 // --- Main application entrypoint ---
 int main(int argc, char *argv[])
 {
+    sentinel::logging::installLogSink("sentinel-gui", argc, argv);
+
     ClientConfig clientConfig;
     ConfigLoader::loadClientConfig("config/client_config.yaml", &clientConfig);
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);

@@ -1,11 +1,11 @@
 #include <QCoreApplication>
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
+#include "SentinelLogSink.hpp"
 #include "ConfigLoader.hpp"
 
 int main(int argc, char *argv[]) {
-    // Set up logging
-    qSetMessagePattern("[%{time yyyy-MM-dd h:mm:ss.zzz}] %{type}: %{message}");
+    sentinel::logging::installLogSink("sentinel-server", argc, argv);
     sLog_App("Starting Sentinel Server...");
 
     QCoreApplication app(argc, argv);

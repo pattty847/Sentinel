@@ -1,6 +1,7 @@
 #include "SentinelLogging.hpp"
 
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 
 #include <array>
 #include <chrono>
@@ -10,6 +11,34 @@ Q_LOGGING_CATEGORY(logApp, "sentinel.app")
 Q_LOGGING_CATEGORY(logData, "sentinel.data")
 Q_LOGGING_CATEGORY(logRender, "sentinel.render")
 Q_LOGGING_CATEGORY(logDebug, "sentinel.debug")
+Q_LOGGING_CATEGORY(logProbe, "sentinel.probe")
+
+namespace sentinel::logging {
+
+bool probeFilterMatches(const QString& filter, const char* name) {
+    const QString probe = QString::fromLatin1(name);
+    static const QRegularExpression kSeparators(QStringLiteral("[,;\\s]+"));
+    const QStringList entries = filter.split(kSeparators, Qt::SkipEmptyParts);
+    for (const QString& entry : entries) {
+        if (entry.compare(QStringLiteral("all"), Qt::CaseInsensitive) == 0 ||
+            entry == QStringLiteral("*")) {
+            return true;
+        }
+        if (probe.compare(entry, Qt::CaseInsensitive) == 0) return true;
+        if (probe.size() > entry.size() && probe.at(entry.size()) == QLatin1Char('.') &&
+            probe.startsWith(entry, Qt::CaseInsensitive)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool probeEnabled(const char* name) {
+    static const QString filter = qEnvironmentVariable("SENTINEL_PROBES");
+    return !filter.isEmpty() && probeFilterMatches(filter, name);
+}
+
+} // namespace sentinel::logging
 
 namespace sentinel::log_throttle {
 
