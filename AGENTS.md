@@ -29,7 +29,7 @@ Rules:
 ## 1) Sentinel Non-Negotiables (Core Identity)
 
 Protect these at all times:
-- **Core stays pure C++** (no Qt contamination in core, except explicitly tolerated utility types if already established)
+- **Core stays free of GUI Qt** (QtCore is allowed: QObject/signals, QTimer, QByteArray, QString; no QtGui, QtQuick, QML or QSG in core)
 - **GUI owns Qt/QML/QSG behavior**
 - **Rendering is GPU-first, deterministic, and low-lag**
 

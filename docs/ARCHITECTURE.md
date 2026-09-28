@@ -18,7 +18,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 ### 1. Core (`libs/core`)
 **Responsibility:** Business logic, networking, state management, and data aggregation.
 **Ownership & Boundaries:**
-- The Core must remain purely C++ (with minimal QtCore usage if functionally necessary). It cannot have any Qt GUI dependencies.
+- The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
