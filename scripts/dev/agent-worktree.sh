@@ -52,6 +52,11 @@ case "$cmd" in
         if [[ "$dir" == "$EXTERNAL_ROOT"/* ]]; then
             git -C "$REPO" worktree lock --reason "external drive worktree" "$dir"
         fi
+        # _agent/ (invariants, failure modes, decisions) is gitignored; link the
+        # shared copy so agents read current rules and record into one place.
+        if [[ -d "$REPO/_agent" && ! -e "$dir/_agent" ]]; then
+            ln -s "$REPO/_agent" "$dir/_agent"
+        fi
         (cd "$dir" && cmake --preset mac-clang -DCMAKE_MAKE_PROGRAM="$NINJA" > "$dir/.configure.log" 2>&1) || {
             echo "error: configure failed, see $dir/.configure.log" >&2; exit 1; }
         echo "ready: $dir"
