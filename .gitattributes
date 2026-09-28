@@ -1,0 +1,15 @@
+# One line-ending standard: LF everywhere in the repo.
+* text=auto eol=lf
+
+# Windows-only scripts stay CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets.
+*.png binary
+*.gif binary
+*.ttf binary
+*.otf binary
+*.ico binary
+*.hmcol binary
