@@ -10,7 +10,7 @@ public:
     static GuiConfigStore& instance();
 
     void setClientConfig(const ClientConfig& config);
-    void setServerConfig(const ServerConfig& config, bool persist = true);
+    void setServerConfig(const ServerConfig& config);
 
     const ClientConfig& clientConfig() const { return m_clientConfig; }
     const ServerConfig& serverConfig() const { return m_serverConfig; }
@@ -22,7 +22,6 @@ signals:
 
 private:
     GuiConfigStore();
-    void persistServerConfig(const ServerConfig& config) const;
 
     ClientConfig m_clientConfig;
     ServerConfig m_serverConfig;
