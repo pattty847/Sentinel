@@ -81,7 +81,7 @@ struct SeriesAvailability {
     std::optional<Hmc2Header> latestHeader;
 };
 // Worker-owned reusable read session; no writer lock, no GUI dependencies.
-// Caches file metadata, one record per file (64 max), and a bounded 16-record
+// Caches metadata for 64 files, the active record, and a bounded 16-record
 // replay window (262144 entries max); never retains a requested series/range.
 // File size/mtime and directory contents invalidate metadata/availability, including
 // appends by a writer in another process. Callback references expire on return.

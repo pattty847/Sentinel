@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 #include <chrono>
 #include <iostream>
+#include <fstream>
 using namespace recording;
 namespace {
 constexpr int64_t epoch = kHmc2MinMs, minute = 60000, hour = 3600000;
@@ -71,6 +72,16 @@ TEST_F(PageTest, LayerSelectionAndAbsoluteGrid) {
     EXPECT_EQ(buildPage(root(), q).layer, "deep");
     q.displayTick = 11;
     EXPECT_EQ(buildPage(root(), q).status, BuildStatus::InvalidRequest);
+}
+TEST_F(PageTest, AutomaticBandUsesCustomDeepGrid) {
+    auto deep = record(0, "deep");
+    deep.header.rowTickUnits = 300;
+    write({record(), deep});
+    auto p = buildPage(root(), request(0, 10, 2));
+    EXPECT_EQ(p.status, BuildStatus::Complete);
+    EXPECT_EQ(p.layer, "deep");
+    EXPECT_EQ(p.band.tick, 6);
+    EXPECT_EQ(p.band.rows, 2);
 }
 TEST_F(PageTest, SumsDecodedSizesDominantSideTieAndDescendingRows) {
     auto r = record();
@@ -357,6 +368,32 @@ TEST_F(PageTest, StreamAcrossDaysAndLargeAlignedDisplayRows) {
     EXPECT_EQ(r.status, ReadStatus::Complete);
     EXPECT_EQ(r.scannedEndMs, epoch + 86400000 + minute);
 }
+TEST_F(PageTest, PositiveEntryBudgetStopsBeforeNextReconstruction) {
+    write({record(), record(minute), record(2 * minute)});
+    Hmc2Reader reader(root());
+    ReadControl warm;
+    reader.availability("BTC-USD", "near", minute, warm);
+    ReadControl control;
+    control.limits.maxEntriesVisited = 3;
+    size_t seen = 0;
+    const auto scan = reader.visit("BTC-USD", "near", minute, epoch, epoch + 3 * minute,
+                                   [&](const auto &) { ++seen; }, control);
+    EXPECT_EQ(seen, 1);
+    EXPECT_LE(control.entriesVisited, 3);
+    EXPECT_EQ(scan.status, ReadStatus::Budget);
+    EXPECT_EQ(scan.scannedEndMs, epoch + minute);
+}
+TEST_F(PageTest, IoErrorDoesNotClaimMissingHistory) {
+    std::filesystem::create_directory(root() / "BTC-USD");
+    {
+        std::ofstream obstruction(root() / "BTC-USD" / "near-60000");
+        obstruction << 'x';
+    }
+    const auto page = buildPage(root(), request());
+    EXPECT_EQ(page.status, BuildStatus::IoError);
+    EXPECT_FALSE(page.exhausted);
+    EXPECT_EQ(page.scannedStartMs, page.scannedEndMs);
+}
 // Explicit benchmark only: numbers are reported, never asserted against a time limit.
 TEST_F(PageTest, DISABLED_SyntheticDayTiming) {
     Hmc2Store store(root());
@@ -383,8 +420,8 @@ TEST_F(PageTest, DISABLED_SyntheticDayTiming) {
             }
         }
     }
-    Hmc2Reader reader(root());
     for (const auto &label : {std::string("deep-1m"), std::string("near-1m"), std::string("deep-4h")}) {
+        Hmc2Reader reader(root());
         auto q = label == "near-1m" ? request(0, 1200, 2048) : request(0, 120000, 2048);
         if (label == "deep-4h") q.tfMs = 4 * hour;
         for (int pass = 0; pass < 2; ++pass) {
@@ -397,5 +434,35 @@ TEST_F(PageTest, DISABLED_SyntheticDayTiming) {
             EXPECT_EQ(p.columns.size(), label == "deep-4h" ? 6 : 1024);
         }
     }
+}
+TEST_F(PageTest, DISABLED_FullFourHourPageTiming) {
+    Hmc2Store store(root());
+    auto r = record(0, "deep", hour);
+    r.bidRowHi = r.askRowHi = 11999;
+    r.coverage = {{0, 11999, false, hour}, {0, 11999, true, hour}};
+    r.entries.clear();
+    for (int i = 0; i < 12000; ++i)
+        r.entries.push_back({i, bool(i % 2), encodeSize(1 + i % 100), encodeSize(100), hour});
+    for (int n = 0; n < 4096; ++n) {
+        r.bucketStartMs = epoch + n * hour;
+        store.append(r);
+    }
+    Hmc2Reader reader(root());
+    auto q = request(0, 120000, 2048, 4 * hour);
+    const auto start = std::chrono::steady_clock::now();
+    auto p = buildPage(reader, q);
+    const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    std::cout << "SERVE_TIMING deep-4h-full columns=" << p.columns.size() << " ms=" << ms
+              << " records=" << p.sourceRecords << " entries=" << p.entriesVisited << '\n';
+    EXPECT_EQ(p.status, BuildStatus::Complete);
+    EXPECT_EQ(p.columns.size(), 1024);
+    q.budgets = BuildRequest{}.budgets;
+    const auto limitedStart = std::chrono::steady_clock::now();
+    p = buildPage(reader, q);
+    std::cout << "SERVE_TIMING deep-4h-default-budget columns=" << p.columns.size() << " ms="
+              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - limitedStart).count()
+              << " status=" << static_cast<int>(p.status) << " exhausted=" << p.exhausted << '\n';
+    EXPECT_TRUE(p.status == BuildStatus::Budget || p.status == BuildStatus::Complete);
+    EXPECT_FALSE(p.columns.empty());
 }
 } // namespace

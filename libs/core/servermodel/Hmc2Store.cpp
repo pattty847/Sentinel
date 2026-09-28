@@ -622,7 +622,8 @@ bool ReadControl::poll() {
 bool ReadControl::charge(uint64_t entries) {
     if (!poll())
         return false;
-    if (sourceRecords >= limits.maxSourceRecords || entries > limits.maxEntriesVisited - entriesVisited) {
+    if (sourceRecords >= limits.maxSourceRecords || entriesVisited > limits.maxEntriesVisited ||
+        entries > limits.maxEntriesVisited - entriesVisited) {
         status = ReadStatus::Budget;
         return false;
     }
@@ -657,6 +658,14 @@ struct Hmc2Reader::Impl {
             replayEntries -= replay.front().record->entries.size() + replay.front().record->coverage.size();
             replay.pop_front();
         }
+        // File metadata must not pin 64 potentially maximal decoded frames.
+        // Keep the current record and only records in the bounded replay window.
+        for (auto &[_, index] : indexes)
+            if (index.last && index.last != record &&
+                std::none_of(replay.begin(), replay.end(), [&](const auto &r) { return r.record == index.last; })) {
+                index.last.reset();
+                index.lastIndex = SIZE_MAX;
+            }
     }
     struct CachedAvailability {
         std::vector<std::tuple<fs::path, uintmax_t, fs::file_time_type>> signature;

@@ -75,3 +75,26 @@ Measured live (schema 3): deep ~1 KB/min deltas + ~35 KB keyframe per 15 min, ne
 9. **Client:** `ColumnWindow::setDisplayBand()` re-bands without `configure()/clear()`, keeps live cache/placement/slots (INV-045), rewrites all slots and validity; projected cache keyed by (source, tf, band_generation); obsolete replies dropped by request_id; viewport dedup includes price bounds; legacy live ingestion gated off in recording mode. Shader gets a value-mode flag and a validity-aware path.
 
 Slices: S1 (builder + streaming reader + budgets + availability + hour-record coverage, core, tests) -> S2 (protocol + server wiring + client DTO parsing) -> S3 (client re-band + shader + labels; orchestrator) -> S4 (live per-client + provisional minute; needs a recorder publication API).
+
+
+## S1 implementation and measurements (Lt. Astra, 2026-09-28)
+
+Core entry points are `Hmc2Reader` in `Hmc2Store.hpp` and `recording::buildPage` in `RecordingPage.hpp`. The API, budget units, paging guarantees and schema 4 byte layout are documented in `docs/MARKETDATA.md`. Protocol/client integration remains S2/S3.
+
+Two clarifications to Revision 2 were necessary:
+
+- Per-entry covered-ms alone is insufficient for exact rollups of sparse hours: an absent row can be either a covered zero or a coverage hole. Schema 4 also stores disjoint per-side coverage runs, including zero rows. Schemas 1-3 hours use observedMs and propagate an approximate-coverage flag. Exactness is with respect to stored quantized TWAPs, not lossless original sizes.
+- This recorder persists deep hours only. Hour-or-coarser requests select deep and reject sub-deep display ticks; they never expand deep quantities into near cells. Adding near hourly persistence would be a separate capability change.
+
+Rough measurements on the configured mac-clang arm64 build (`CMAKE_BUILD_TYPE` and CXX flags empty; **unoptimized**, not release), local synthetic files. Deep uses 12,000 entries/record; near uses 1,200. Prices are projected into at most 2,048 rows. Fixture construction/fsync time is excluded. These are observations, not CI thresholds:
+
+| Request | Columns | First reader pass | Repeated pass |
+| --- | ---: | ---: | ---: |
+| Deep 1m, synthetic day | 1,024 | 915 ms | 903 ms |
+| Near 1m, synthetic day | 1,024 | 457 ms | 540 ms |
+| Deep 4h, one day of hours | 6 | 160 ms | 91 ms |
+| Deep 4h, 4,096 hourly sources | 1,024 | 16,325 ms | — |
+
+The full 4h page performed 74.8M charged entry-work units (including coverage/reconstruction), far less than reading 245,760 minute sources but still expensive in this build. With default 5,000 ms request budget, it returned 317 completed columns in 5,008 ms, status Budget, exhausted=false. Deadlines are cooperative; one bounded frame/projection can overrun slightly. Keep short-page budget semantics in S2; do not assume that using hours alone makes a 1,024-column 4h page cheap. Measure an optimized build before deciding whether persisted 4h rollups are justified.
+
+Reproduce the optional measurements with `build/mac-clang/tests/servermodel/test_recording_page --gtest_also_run_disabled_tests --gtest_filter='*Timing'`. Ordinary CTest excludes these two fixtures and has no timing assertions.

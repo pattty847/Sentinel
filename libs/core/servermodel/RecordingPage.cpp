@@ -194,6 +194,18 @@ BuildResult buildPage(Hmc2Reader &reader, const BuildRequest &q, StopToken stop)
                     throw GridError("band cannot be represented");
             }
         }
+        // A custom deep tick need not divide a near-grid 1-2-5 choice.
+        // Rechoose on the selected layer's grid instead of rejecting an auto band.
+        if (!q.displayTick && tick >= deepTick && !multiple(tick, deepTick)) {
+            tick = deepTick;
+            double decade = 1;
+            int step = 0;
+            constexpr double steps[]{1, 2, 5};
+            while (rowCount() > q.rows) {
+                if (++step == 3) { step = 0; decade *= 10; }
+                tick = deepTick * decade * steps[step];
+            }
+        }
         out.layer = tick < deepTick ? "near" : "deep";
         const auto &source = out.layer == "near" ? near : deep;
         const auto nativeTick = out.layer == "near" ? nearTick : deepTick;
