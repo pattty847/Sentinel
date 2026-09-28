@@ -59,3 +59,19 @@ Zoomed out, the chart shows the deep layer's whale lines across the whole price 
 2. Is sum the right colour quantity when zoomed out (a $1,000 row sums many levels), or should colour use the max row-level size and labels the sum? (Owner saw sum as right for walls; max keeps single whales crisp in wide rows.)
 3. Serve-time rollups for 5m/15m/4h from 1m: cost for a 1024-column 4h page is 1024 * 240 minutes of deep records (~3 billion entry visits). Persist 15m/4h deep rollups too, or cap and page smaller?
 4. Unknown vs zero outside near coverage when mixing layers in one view: fall back to deep rows for those cells (coarser) instead of unknown?
+
+## Revision 2 (after Lt. Astra's review, 2026-09-28) — authoritative where it differs
+
+Measured live (schema 3): deep ~1 KB/min deltas + ~35 KB keyframe per 15 min, near ~6 KB/min; ~15 MB/day, ~5.5 GB/year for BTC.
+
+1. **Aggregate once, on the server, at the displayed tick.** The client computes its display tick from pixel geometry (square cells) and requests exactly that tick and row count; recording columns disable the client's secondary row grouping. Colour and labels both use the **summed TWAP quantity** of the dominant side at that tick (owner preference: walls add up). No server-sum-then-client-max.
+2. **Transport fields:** keep `encoding: "base64"` (transport). Add `value_encoding: "absolute_log_size"`, `size_floor`, `codes_per_octave`, `source`, `layer`, `request_id`, `band_generation`, and per-column validity (see 3). Errors echo `request_id`.
+3. **Coverage is explicit.** Each column carries a row-validity bitmask (1 = recorded, 0 = unknown) derived from the minute's side bounds; an aggregate row is valid only if all constituent rows were covered for the time used. Pages carry `scanned_start/scanned_end`, `next_end`, `exhausted`; a short page never marks older history missing, only the scanned interval.
+4. **Bounded, streaming reads.** `Hmc2Store` gains a streaming reader (visit reconstructed records in order without retaining them), per-request budgets (source records, entries visited, wall-clock ms), a stop token, and a cached per-series availability (oldest/latest bucket). Page size shrinks to fit the budget; the reply says so (not exhausted).
+5. **Hourly records carry coverage.** Hour (tf=3600000) records store per-entry covered-ms (new schema for hour records), so multi-hour rollups are exact: `sum(size*coveredMs)/sum(coveredMs)`. Output tf >= 1h reads hours (plus the current hour's tail from minutes, no double count); tf < 1h reads minutes. Persisted 15m/4h only if measurement demands it.
+6. **Cells are half-open on the absolute grid:** row k covers [k*tick, (k+1)*tick); price of a row is its lower edge; band rows = ceil(hi/tick) - floor(lo/tick) <= rows (grow the tick one 1-2-5 step if not). Wire order stays descending from the top row. Client grouping phase and label coordinates are corrected to the lower-edge convention together.
+7. **Dominant side, single channel** for v1, with deterministic ties (bid on tie); bid and ask accumulators are kept until final projection. Labels state dominant-side quantity.
+8. **Unknown stays unknown** outside near coverage (no expanding $10 totals into $1 rows).
+9. **Client:** `ColumnWindow::setDisplayBand()` re-bands without `configure()/clear()`, keeps live cache/placement/slots (INV-045), rewrites all slots and validity; projected cache keyed by (source, tf, band_generation); obsolete replies dropped by request_id; viewport dedup includes price bounds; legacy live ingestion gated off in recording mode. Shader gets a value-mode flag and a validity-aware path.
+
+Slices: S1 (builder + streaming reader + budgets + availability + hour-record coverage, core, tests) -> S2 (protocol + server wiring + client DTO parsing) -> S3 (client re-band + shader + labels; orchestrator) -> S4 (live per-client + provisional minute; needs a recorder publication API).
