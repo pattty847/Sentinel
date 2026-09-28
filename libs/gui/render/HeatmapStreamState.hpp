@@ -29,11 +29,25 @@ public:
         bool haveLiquidity = false;
     };
 
-    struct WindowColumn {
-        int64_t sliceStartMs = 0;
+    struct SlotColumn {
+        int x = 0;
         QByteArray intensity;
-        QByteArray liquidity;
+        QByteArray liquidity;       // raw uint16_t per row; empty when not recorded
         double liquidityScale = 1.0;
+    };
+
+    struct WindowPlacement {
+        int64_t timeframeMs = 0;
+        int gridWidth = 0;
+        int gridHeight = 0;
+        int bytesPerCell = 0;
+        double minPrice = 0.0;
+        double maxPrice = 0.0;
+        double tickSize = 0.0;
+        int64_t windowEndMs = 0;    // newest bucket start shown by the ring
+        int newestSlot = 0;         // ring slot of windowEndMs; oldest is newestSlot + 1
+        bool full = false;          // every slot is being replaced
+        bool liveEdge = false;      // windowEndMs is the newest live bucket
     };
 
     struct Snapshot {
@@ -65,18 +79,12 @@ public:
     void setAppendMs(int appendMs);
     void updateRange(double minPrice, double maxPrice, double tickSize);
 
-    void ingestSlice(int64_t sliceStartMs,
-                     int timeframeMs,
-                     const QByteArray& intensityColumn,
-                     const QByteArray& liquidityColumn,
-                     double liquidityScale,
+    // Moves the ring window (newest bucket at newestSlot) and writes the given
+    // slots. Heatmap history and live data both arrive this way; the window is
+    // chosen by HeatmapColumnWindow on the DataProcessor thread.
+    bool applyWindow(const WindowPlacement& placement,
+                     std::vector<SlotColumn>&& slotColumns,
                      qint64 nowMs);
-
-    // Replaces a complete, chronological GPU page in one linear pass. This is
-    // used for historical paging so the live monotonic cursor is not involved.
-    bool replaceWindow(int timeframeMs,
-                       const std::vector<WindowColumn>& columns,
-                       qint64 nowMs);
 
     void setIntensityBytesPerCell(int bytesPerCell);
     int intensityBytesPerCell() const;
@@ -113,11 +121,6 @@ private:
     double m_minPrice = 0.0;
     double m_maxPrice = 0.0;
     double m_tickSize = 0.0;
-    QByteArray m_lastColumnData;
-    bool m_haveLastColumn = false;
-    QByteArray m_lastLiquidityColumn;
-    double m_lastLiquidityScale = 1.0;
-    bool m_haveLastLiquidity = false;
 
     mutable std::mutex m_uploadMutex;
     std::vector<PendingColumn> m_pendingUploads;

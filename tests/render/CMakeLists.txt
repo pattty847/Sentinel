@@ -29,22 +29,20 @@ target_link_libraries(test_UgrFrameMath PRIVATE
 add_test(NAME UgrFrameMathTests COMMAND test_UgrFrameMath)
 set_tests_properties(UgrFrameMathTests PROPERTIES LABELS "render")
 
-add_executable(test_HeatmapHistoryWindow
-    test_HeatmapHistoryWindow.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapHistoryWindow.cpp
+add_executable(test_HeatmapColumnWindow
+    test_HeatmapColumnWindow.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapColumnWindow.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapStreamState.cpp
 )
-target_include_directories(test_HeatmapHistoryWindow PRIVATE
+target_include_directories(test_HeatmapColumnWindow PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui
 )
-target_link_libraries(test_HeatmapHistoryWindow PRIVATE
+target_link_libraries(test_HeatmapColumnWindow PRIVATE
     GTest::gtest_main
-    sentinel_core
     Qt6::Core
-    Qt6::Gui
 )
-add_test(NAME HeatmapHistoryWindowTests COMMAND test_HeatmapHistoryWindow)
-set_tests_properties(HeatmapHistoryWindowTests PROPERTIES LABELS "render")
+add_test(NAME HeatmapColumnWindowTests COMMAND test_HeatmapColumnWindow)
+set_tests_properties(HeatmapColumnWindowTests PROPERTIES LABELS "render")
 
 add_executable(test_AxisLayout test_AxisLayout.cpp)
 target_include_directories(test_AxisLayout PRIVATE

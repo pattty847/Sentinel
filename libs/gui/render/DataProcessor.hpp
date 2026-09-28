@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
+#include "HeatmapColumnWindow.hpp"
 
 class FootprintStreamState;
 class TpoStreamState;
@@ -36,6 +37,8 @@ public slots:
                                   int64_t requestEndMs,
                                   int64_t oldestAvailableMs,
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
+    // Visible time range from the GUI; places the heatmap window (INV-045).
+    void setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow);
     
 public:
     void clearData();
@@ -54,32 +57,13 @@ public:
     void setHeatmapGridHeight(int height);
     void setHeatmapGridDimensions(int width, int height);
     void setHeatmapIntensityScale(double scale);
-    void setHeatmapRecenterFraction(double fraction);
-    void setCacheCapacityOverride(int capacity);
     void setServerTimeframe(int64_t timeframeMs);
     
 signals:
-    void heatmapColumnReady(const QString& symbol,
-                            int64_t sliceStartMs,
-                            int64_t sliceEndMs,
-                            int64_t timeframeMs,
-                            double minPrice,
-                            double maxPrice,
-                            double tickSize,
-                            const QByteArray& column,
-                            const QByteArray& liquidityColumn,
-                            double liquidityScale,
-                            int intensityBytesPerCell);
-    void heatmapHistoryBatchReady(const QString& symbol,
-                                  int64_t timeframeMs,
-                                  int gridWidth,
-                                  int gridHeight,
-                                  int64_t requestEndMs,
-                                  int64_t oldestAvailableMs,
-                                  int64_t oldestReturnedMs,
-                                  const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
-                                  const QByteArray& coverage,
-                                  int intensityBytesPerCell);
+    // Ring writes for the GPU window; live and history both arrive this way.
+    void heatmapWindowUpdated(heatmap_window::UpdatePtr update);
+    void heatmapHistoryFetchNeeded(qint64 timeframeMs, qint64 endTimeMs, int count);
+    void heatmapHistoryStatus(bool loading, qint64 oldestAvailableMs);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
     void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
     void tpoColumnReady(int x,
@@ -97,34 +81,24 @@ signals:
     void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:
-    struct HeatmapGridKey {
-        std::string symbol;
-        int gridWidth = 0;
-        int gridHeight = 0;
-        int64_t timeframeMs = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        double tickSize = 0.0;
+    struct HeatmapViewKey {
+        int64_t startBucket = std::numeric_limits<int64_t>::min();
+        int64_t endBucket = std::numeric_limits<int64_t>::min();
+        bool follow = false;
     };
 
-    struct HeatmapGridKeyHash {
-        size_t operator()(const HeatmapGridKey& key) const noexcept;
-    };
+    void ensureHeatmapWindow(int64_t timeframeMs, int width, int rows);
+    void resetHeatmapWindow();
+    void publishHeatmapWindow(std::shared_ptr<heatmap_window::Update> update, bool firstPlacement);
+    void requestHeatmapFetch();
 
-    struct HeatmapGridKeyEq {
-        bool operator()(const HeatmapGridKey& a, const HeatmapGridKey& b) const noexcept;
-    };
+    heatmap_window::ColumnWindow m_heatmapWindow;
+    HeatmapViewKey m_lastHeatmapView;
+    bool m_heatmapFetchInFlight = false;
+    int64_t m_heatmapFetchEndMs = 0;
+    int m_heatmapFetchCount = 0;
+    uint64_t m_heatmapFetchGeneration = 0;
 
-    struct HeatmapColumnCache {
-        int capacity = 0;
-        int writeIndex = 0;
-        int count = 0;
-        std::vector<IGridDataSource::HeatmapHistoryColumn> columns;
-
-        void reset(int newCapacity);
-        void push(IGridDataSource::HeatmapHistoryColumn column);
-    };
-    
     bool m_manualTimeframeSet = false;
     QElapsedTimer m_manualTimeframeTimer;
     int64_t m_currentTimeframe_ms = 100;
@@ -133,20 +107,9 @@ private:
     int m_heatmapGridWidth = 5120;
     int m_heatmapGridHeight = 2048;
     double m_heatmapIntensityScale = 1.0;
-    double m_heatmapMinPrice = 0.0;
-    double m_heatmapMaxPrice = 0.0;
-    double m_heatmapTickSize = 0.0;
-    bool m_heatmapRangeValid = false;
-    double m_heatmapRecenterFraction = 0.15;
-    int64_t m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
-    QByteArray m_heatmapLastColumn;
-    bool m_heatmapHasLastColumn = false;
     std::atomic<bool> m_shuttingDown{false};
     QString m_activeSymbol;
 
-    // Week 0: writes disabled to prevent unbounded client growth; reserved for future bounded cache design.
-    std::unordered_map<HeatmapGridKey, HeatmapColumnCache, HeatmapGridKeyHash, HeatmapGridKeyEq> m_heatmapCache;
-    int m_cacheCapacityOverride = 0;
     int m_footprintGridWidth = 5120;
     int m_footprintGridHeight = 2048;
     std::unique_ptr<FootprintStreamState> m_footprintStream;

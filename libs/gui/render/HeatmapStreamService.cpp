@@ -38,177 +38,65 @@ void HeatmapStreamService::ensureClockStarted() {
     }
 }
 
-// ── Column ingestion ─────────────────────────────────────────────────────────
+// ── Window updates ───────────────────────────────────────────────────────────
 
 HeatmapStreamService::IngestResult
-HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
-                                   GridViewState* viewState,
-                                   HeatmapOverlayRenderer& overlay,
-                                   int liquidityLabelMode,
-                                   int64_t currentTimeframeMs) {
-    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
+                                        GridViewState* viewState,
+                                        HeatmapOverlayRenderer& overlay,
+                                        int liquidityLabelMode) {
     IngestResult result;
-
-    if (event.column.isEmpty()) {
-        if (debug) {
-            sLog_Render("GPU HEATMAP DROP: grid=" << m_gridWidth << "x" << m_gridHeight
-                        << " bytes=" << event.column.size());
-        }
+    if (!m_stream || update.width <= 0 || update.rows <= 0 || update.timeframeMs <= 0 ||
+        (update.bytesPerCell != 1 && update.bytesPerCell != 2) || !update.band.valid()) {
         return result;
     }
+    const bool debug = qEnvironmentVariableIsSet("SENTINEL_GPU_HEATMAP_DEBUG");
+    const int64_t cadenceMs = update.timeframeMs;
 
-    // A manually selected historical page owns the display ring. Live events
-    // continue through the network and processor, but do not overwrite that
-    // page until the user returns to auto-scroll.
-    if (m_historyViewActive && viewState && !viewState->isAutoScrollEnabled()) {
-        return result;
-    }
-    if (m_historyViewActive) {
-        m_historyViewActive = false;
-        if (m_stream) {
-            m_stream->reset(m_gridWidth, m_gridHeight,
-                            event.minPrice, event.maxPrice, event.tickSize);
-        }
-        overlay.requestFullTextureRebuild();
-        if (m_autoScrollController) {
-            m_autoScrollController->resetSpan();
-        }
-        m_viewportInitialized = false;
-    }
-    if (m_historyCoverageActive) {
-        overlay.setHistoryCoverage({});
-        m_historyCoverageActive = false;
-    }
-
-    // ── Intensity format update ──────────────────────────────────────────────
-    const int bytesPerCell = (event.intensityBytesPerCell > 0) ? event.intensityBytesPerCell : 1;
-    if (bytesPerCell != m_intensityBytesPerCell) {
-        m_intensityBytesPerCell = bytesPerCell;
-        overlay.setIntensityBytesPerCell(bytesPerCell);
-        if (m_stream) {
-            m_stream->setIntensityBytesPerCell(bytesPerCell);
-        }
-    }
-    if ((event.column.size() % bytesPerCell) != 0) {
-        return result;
-    }
-    const int columnHeight = event.column.size() / bytesPerCell;
-    if (columnHeight <= 0) {
-        return result;
-    }
-
-    // ── Grid height change → full reset ──────────────────────────────────────
-    if (columnHeight != m_gridHeight) {
-        m_gridHeight = columnHeight;
+    const bool reshape = update.width != m_gridWidth || update.rows != m_gridHeight ||
+                         update.bytesPerCell != m_intensityBytesPerCell;
+    if (reshape) {
+        m_gridWidth = update.width;
+        m_gridHeight = update.rows;
+        m_intensityBytesPerCell = update.bytesPerCell;
         overlay.setGridDimensions(m_gridWidth, m_gridHeight);
-        if (m_stream) {
-            m_stream->reset(m_gridWidth, m_gridHeight,
-                            event.minPrice, event.maxPrice, event.tickSize);
-        }
-        m_viewportInitialized = false;
+        overlay.setIntensityBytesPerCell(m_intensityBytesPerCell);
     }
-
-    // ── Debug statistics ─────────────────────────────────────────────────────
-    if (debug) {
-        static int debugCount = 0;
-        ++debugCount;
-        if (debugCount <= 5 || debugCount % 50 == 0) {
-            int bidCount = 0;
-            int askCount = 0;
-            uint16_t minValue = std::numeric_limits<uint16_t>::max();
-            uint16_t maxValue = 0;
-            if (bytesPerCell == 1) {
-                const auto* bytes = reinterpret_cast<const uint8_t*>(event.column.constData());
-                for (int i = 0; i < event.column.size(); ++i) {
-                    const uint8_t v = bytes[i];
-                    if (v == 0) continue;
-                    minValue = std::min<uint16_t>(minValue, static_cast<uint16_t>(v) * 257);
-                    maxValue = std::max<uint16_t>(maxValue, static_cast<uint16_t>(v) * 257);
-                    if (v >= 128) ++askCount;
-                    else ++bidCount;
-                }
-            } else if (bytesPerCell == 2) {
-                const auto* values = reinterpret_cast<const uint16_t*>(event.column.constData());
-                for (int i = 0; i < columnHeight; ++i) {
-                    const uint16_t v = qFromLittleEndian(values[i]);
-                    if (v == 0) continue;
-                    minValue = std::min(minValue, v);
-                    maxValue = std::max(maxValue, v);
-                    if (v >= 0x8000u) ++askCount;
-                    else ++bidCount;
-                }
-            }
-            sLog_Render("GPU HEATMAP BYTES: bids=" << bidCount
-                        << " asks=" << askCount
-                        << " min=" << minValue
-                        << " max=" << maxValue
-                        << " bpp=" << bytesPerCell);
-        }
+    if (reshape || update.full) {
+        overlay.requestFullTextureRebuild();
     }
-
-    // ── Tick size tracking ───────────────────────────────────────────────────
-    if (event.tickSize > 0.0 && event.tickSize != m_tickSize) {
-        m_tickSize = event.tickSize;
-        result.tickSizeChanged = true;
-        result.newTickSize = m_tickSize;
-    }
-
-    // ── Cadence resolution ───────────────────────────────────────────────────
-    int64_t cadenceMs = m_timeAuthority.activeTimeframeMs();
-    if (cadenceMs <= 0) {
-        cadenceMs = (event.timeframeMs > 0) ? event.timeframeMs : currentTimeframeMs;
+    if (m_timeAuthority.activeTimeframeMs() != cadenceMs) {
         m_timeAuthority.setActiveTimeframeMs(cadenceMs);
     }
 
-    if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-        static QElapsedTimer cadenceTimer;
-        static bool cadenceTimerStarted = false;
-        if (!cadenceTimerStarted) {
-            cadenceTimer.start();
-            cadenceTimerStarted = true;
-        }
-        if (cadenceTimer.elapsed() > 1000 &&
-            event.timeframeMs > 0 &&
-            cadenceMs > 0 &&
-            event.timeframeMs != cadenceMs) {
-            sLog_Debug(QString("Cadence mismatch: incoming_slice_tf=%1ms active_mapping_tf=%2ms renderer_tf=%3ms")
-                           .arg(event.timeframeMs)
-                           .arg(cadenceMs)
-                           .arg(currentTimeframeMs));
-            cadenceTimer.restart();
+    // ── Liquidity range tracking (newest live column only) ───────────────────
+    const heatmap_window::SlotWrite* liveWrite = nullptr;
+    if (update.liveBucketMs > 0) {
+        for (const auto& write : update.writes) {
+            if (write.bucketStartMs == update.liveBucketMs) {
+                liveWrite = &write;
+                break;
+            }
         }
     }
-
-    // ── Stream range + append cadence ────────────────────────────────────────
-    if (m_stream) {
-        m_stream->updateRange(event.minPrice, event.maxPrice, event.tickSize);
-        if (cadenceMs > 0) {
-            m_stream->setAppendMs(static_cast<int>(cadenceMs));
-        }
-    }
-
-    // ── Liquidity tracking ───────────────────────────────────────────────────
     const int expectedLiquidityBytes = m_gridHeight * static_cast<int>(sizeof(uint16_t));
-    const bool haveLiquidityColumn = (event.liquidityColumn.size() == expectedLiquidityBytes);
-
-    if (haveLiquidityColumn && event.liquidityScale > 0.0) {
-        const auto* raw = reinterpret_cast<const uint16_t*>(event.liquidityColumn.constData());
+    if (liveWrite && liveWrite->liquidity.size() == expectedLiquidityBytes &&
+        liveWrite->liquidityScale > 0.0) {
+        const auto* raw = reinterpret_cast<const uint16_t*>(liveWrite->liquidity.constData());
         double colMin = std::numeric_limits<double>::max();
         double colMax = 0.0;
         int nonZeroCount = 0;
         for (int y = 0; y < m_gridHeight; ++y) {
             const uint16_t packed = qFromLittleEndian(raw[y]);
             if (packed == 0) continue;
-            double value = static_cast<double>(packed) * event.liquidityScale;
+            double value = static_cast<double>(packed) * liveWrite->liquidityScale;
             if (liquidityLabelMode != 0) {
-                const double price = event.maxPrice - (static_cast<double>(y) * event.tickSize);
-                value *= price;
+                value *= update.band.maxPrice - (static_cast<double>(y) * update.band.tickSize);
             }
-            if (value > colMax) colMax = value;
-            if (value < colMin) colMin = value;
+            colMax = std::max(colMax, value);
+            colMin = std::min(colMin, value);
             ++nonZeroCount;
         }
-
         if (colMax > m_maxObservedLiquidity) {
             m_maxObservedLiquidity = colMax;
             result.maxLiquidityChanged = true;
@@ -221,149 +109,59 @@ HeatmapStreamService::ingestColumn(const HeatmapColumnEvent& event,
         }
     }
 
-    // ── Slice ingestion ──────────────────────────────────────────────────────
-    if (m_stream) {
-        const qint64 nowMs = m_clock.elapsed();
-        m_stream->ingestSlice(event.sliceStartMs,
-                              static_cast<int>(cadenceMs),
-                              event.column,
-                              event.liquidityColumn,
-                              event.liquidityScale,
-                              nowMs);
-        m_stream->updateTimeOffset(0.0f);
-        m_timeAuthority.observeEventTime(
-            (event.sliceEndMs > event.sliceStartMs)
-                ? event.sliceEndMs
-                : (event.sliceStartMs + cadenceMs),
-            nowMs);
+    // ── Ring window ──────────────────────────────────────────────────────────
+    std::vector<HeatmapStreamState::SlotColumn> slotColumns;
+    slotColumns.reserve(update.writes.size());
+    for (const auto& write : update.writes) {
+        slotColumns.push_back({write.slot, write.intensity, write.liquidity, write.liquidityScale});
     }
-
-    if (debug) {
-        const int writeColumn = m_stream ? m_stream->writeColumn() : 0;
-        sLog_Render("GPU HEATMAP ENQUEUE: col=" << writeColumn
-                    << " tf=" << event.timeframeMs
-                    << " range=$" << event.minPrice << "-$" << event.maxPrice);
-    }
-
-    // ── Viewport initialization ──────────────────────────────────────────────
-    if (!m_viewportInitialized && viewState && m_stream && m_autoScrollController) {
-        if (m_autoScrollController->initializeViewport(*viewState,
-                                                       *m_stream,
-                                                       event.sliceStartMs,
-                                                       static_cast<int>(cadenceMs))) {
-            m_viewportInitialized = true;
-            // viewport initialized successfully
-            if (debug) {
-                const auto snapshot = m_stream->snapshot();
-                sLog_Render("GPU HEATMAP VIEWPORT INIT: [" << viewState->getVisibleTimeStart()
-                            << "-" << viewState->getVisibleTimeEnd()
-                            << "] $" << snapshot.minPrice << "-$" << snapshot.maxPrice);
-            }
-        }
-    }
-
-    // ── Slice auto-scroll (non-smooth mode) ──────────────────────────────────
-    if (viewState && viewState->isAutoScrollEnabled() && m_stream && m_autoScrollController &&
-        !m_autoScrollController->smoothEnabled()) {
-        const bool applied = m_autoScrollController->applySliceAutoScroll(*viewState,
-                                                                          *m_stream,
-                                                                          event.sliceStartMs,
-                                                                          static_cast<int>(cadenceMs));
-        if (applied) {
-            result.autoScrollApplied = true;
-        }
-    }
-
-    m_streamGeneration.fetch_add(1, std::memory_order_acq_rel);
-    result.accepted = true;
-    return result;
-}
-
-HeatmapStreamService::IngestResult
-HeatmapStreamService::ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
-                                          const QByteArray& coverage,
-                                          GridViewState* viewState,
-                                          HeatmapOverlayRenderer& overlay) {
-    IngestResult result;
-    if (events.empty() || !m_stream) {
-        return result;
-    }
-
-    const auto& first = events.front();
-    const int bytesPerCell = first.intensityBytesPerCell;
-    const int64_t cadenceMs = first.timeframeMs;
-    if ((bytesPerCell != 1 && bytesPerCell != 2) ||
-        cadenceMs <= 0 || first.column.isEmpty() ||
-        first.column.size() % bytesPerCell != 0) {
-        return result;
-    }
-    const int gridHeight = first.column.size() / bytesPerCell;
-    const int gridWidth = static_cast<int>(events.size());
-    if (gridWidth <= 0 || gridHeight <= 0 || coverage.size() != gridWidth ||
-        first.maxPrice <= first.minPrice || first.tickSize <= 0.0) {
-        return result;
-    }
-
-    int64_t previousStart = std::numeric_limits<int64_t>::min();
-    for (const auto& event : events) {
-        if (event.timeframeMs != cadenceMs ||
-            event.intensityBytesPerCell != bytesPerCell ||
-            event.column.size() != gridHeight * bytesPerCell ||
-            event.minPrice != first.minPrice ||
-            event.maxPrice != first.maxPrice ||
-            event.tickSize != first.tickSize ||
-            event.sliceStartMs <= previousStart ||
-            (previousStart != std::numeric_limits<int64_t>::min() &&
-             event.sliceStartMs - previousStart != cadenceMs)) {
-            return result;
-        }
-        previousStart = event.sliceStartMs;
-    }
-
-    m_gridWidth = gridWidth;
-    m_gridHeight = gridHeight;
-    m_intensityBytesPerCell = bytesPerCell;
-    overlay.setGridDimensions(gridWidth, gridHeight);
-    overlay.setIntensityBytesPerCell(bytesPerCell);
-    overlay.requestFullTextureRebuild();
-
-    m_stream->reset(gridWidth, gridHeight,
-                    first.minPrice, first.maxPrice, first.tickSize);
-    m_stream->setAppendMs(static_cast<int>(cadenceMs));
-    m_stream->setIntensityBytesPerCell(bytesPerCell);
+    HeatmapStreamState::WindowPlacement placement;
+    placement.timeframeMs = cadenceMs;
+    placement.gridWidth = update.width;
+    placement.gridHeight = update.rows;
+    placement.bytesPerCell = update.bytesPerCell;
+    placement.minPrice = update.band.minPrice;
+    placement.maxPrice = update.band.maxPrice;
+    placement.tickSize = update.band.tickSize;
+    placement.windowEndMs = update.windowEndMs;
+    placement.newestSlot = update.newestSlot;
+    placement.full = update.full;
+    placement.liveEdge = update.pinnedToLive && update.liveBucketMs == update.windowEndMs;
     const qint64 nowMs = m_clock.elapsed();
-    std::vector<HeatmapStreamState::WindowColumn> windowColumns;
-    windowColumns.reserve(events.size());
-    for (const auto& event : events) {
-        windowColumns.push_back({event.sliceStartMs,
-                                 event.column,
-                                 event.liquidityColumn,
-                                 event.liquidityScale});
-    }
-    if (!m_stream->replaceWindow(static_cast<int>(cadenceMs), windowColumns, nowMs)) {
+    if (!m_stream->applyWindow(placement, std::move(slotColumns), nowMs)) {
         return result;
     }
-    overlay.setHistoryCoverage(coverage);
-    m_historyCoverageActive = true;
+    m_stream->updateTimeOffset(0.0f);
+    overlay.setHistoryCoverage(update.coverage);
 
-    if (first.tickSize != m_tickSize) {
-        m_tickSize = first.tickSize;
+    if (update.band.tickSize != m_tickSize) {
+        m_tickSize = update.band.tickSize;
         result.tickSizeChanged = true;
         result.newTickSize = m_tickSize;
     }
+    if (update.liveBucketMs > 0) {
+        m_timeAuthority.observeEventTime(update.liveBucketMs + cadenceMs, nowMs);
+    }
+    if (debug) {
+        sLog_Render("GPU HEATMAP WINDOW: end=" << update.windowEndMs
+                    << " writes=" << update.writes.size()
+                    << " full=" << update.full
+                    << " pinned=" << update.pinnedToLive
+                    << " range=$" << update.band.minPrice << "-$" << update.band.maxPrice);
+    }
 
-    m_historyViewActive = viewState && !viewState->isAutoScrollEnabled();
-    if (!m_historyViewActive) {
-        const auto& last = events.back();
-        m_timeAuthority.observeEventTime(
-            (last.sliceEndMs > last.sliceStartMs)
-                ? last.sliceEndMs
-                : last.sliceStartMs + cadenceMs,
-            nowMs);
-        if (!m_viewportInitialized && viewState && m_autoScrollController) {
-            m_viewportInitialized = m_autoScrollController->initializeViewport(
-                *viewState, *m_stream, last.sliceStartMs, static_cast<int>(cadenceMs));
-        }
+    // ── Viewport initialization and non-smooth follow ────────────────────────
+    const int64_t anchorMs = update.liveBucketMs > 0 ? update.liveBucketMs : update.windowEndMs;
+    if (!m_viewportInitialized && viewState && m_autoScrollController) {
+        m_viewportInitialized = m_autoScrollController->initializeViewport(
+            *viewState, *m_stream, anchorMs, static_cast<int>(cadenceMs));
+    }
+    if (update.liveBucketMs > 0 && viewState && viewState->isAutoScrollEnabled() &&
+        m_autoScrollController && !m_autoScrollController->smoothEnabled() &&
+        m_autoScrollController->applySliceAutoScroll(*viewState, *m_stream,
+                                                     update.liveBucketMs,
+                                                     static_cast<int>(cadenceMs))) {
+        result.autoScrollApplied = true;
     }
 
     m_streamGeneration.fetch_add(1, std::memory_order_acq_rel);
@@ -420,11 +218,7 @@ HeatmapStreamService::handleRenderTick(GridViewState* viewState) {
 
 void HeatmapStreamService::handleTimeframeChange(int64_t timeframeMs,
                                                  HeatmapOverlayRenderer& overlay) {
-    m_historyViewActive = false;
-    if (m_historyCoverageActive) {
-        overlay.setHistoryCoverage({});
-        m_historyCoverageActive = false;
-    }
+    overlay.setHistoryCoverage({});
     m_timeAuthority.setActiveTimeframeMs(timeframeMs);
     if (m_stream) {
         const auto snap = m_stream->snapshot();
@@ -450,14 +244,7 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
 
     ensureClockStarted();
 
-    if (m_historyViewActive && viewState && !viewState->isAutoScrollEnabled()) {
-        return result;
-    }
-    m_historyViewActive = false;
-    if (m_historyCoverageActive) {
-        overlay.setHistoryCoverage({});
-        m_historyCoverageActive = false;
-    }
+    overlay.setHistoryCoverage({});
 
     if (gridWidth > 0) m_gridWidth = gridWidth;
     if (gridHeight > 0) m_gridHeight = gridHeight;
@@ -485,11 +272,9 @@ HeatmapStreamService::handleRangeReset(double minPrice, double maxPrice, double 
         const int64_t cadenceMs = (m_timeAuthority.activeTimeframeMs() > 0)
             ? m_timeAuthority.activeTimeframeMs()
             : 1000;
-        const int pct = m_autoScrollController
-            ? std::clamp(m_autoScrollController->initialViewportPct(), 1, 100)
-            : 10;
-        const int64_t maxSpanMs = static_cast<int64_t>(m_gridWidth) * cadenceMs;
-        const int64_t spanMs = std::max<int64_t>(1, maxSpanMs * pct / 100);
+        const int64_t spanMs = m_autoScrollController
+            ? m_autoScrollController->initialSpanMs(viewState->getViewportWidth(), m_gridWidth, cadenceMs)
+            : static_cast<int64_t>(100) * cadenceMs;
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         viewState->setViewport(nowMs - spanMs, nowMs, minPrice, maxPrice);
     }
@@ -512,9 +297,9 @@ void HeatmapStreamService::setAutoScrollSmoothEnabled(bool enabled) {
     }
 }
 
-void HeatmapStreamService::setInitialViewportPct(int pct) {
+void HeatmapStreamService::setInitialColumnPx(int px) {
     if (m_autoScrollController) {
-        m_autoScrollController->setInitialViewportPct(pct);
+        m_autoScrollController->setInitialColumnPx(px);
     }
 }
 

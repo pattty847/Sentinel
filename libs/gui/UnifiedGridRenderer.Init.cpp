@@ -96,112 +96,44 @@ void UnifiedGridRenderer::init() {
     }
 }
 
-// Helper: build a HeatmapColumnEvent from signal args and delegate to the service.
-// Returns true if accepted.
-bool UnifiedGridRenderer::ingestHeatmapColumn(
-        const HeatmapStreamService::HeatmapColumnEvent& event) {
-    m_lastIncomingHeatmapSliceTimeframeMs.store(event.timeframeMs, std::memory_order_relaxed);
-    if (!m_useGpuHeatmap) {
-        m_useGpuHeatmap = true;
-        m_heatmapOverlay.requestFullTextureRebuild();
-        m_heatmapStreamService->ensureClockStarted();
-    }
-    auto result = m_heatmapStreamService->ingestColumn(
-        event, m_viewState.get(), m_heatmapOverlay,
-        m_liquidityLabelMode, m_currentTimeframe_ms);
-    if (!result.accepted) return false;
-
-    if (result.tickSizeChanged) emit heatmapTickSizeChanged();
-    if (result.maxLiquidityChanged) emit heatmapMaxObservedLiquidityChanged();
-    if (result.minLiquidityChanged) emit heatmapMinObservedLiquidityChanged();
-    if (result.autoScrollApplied && m_panSyncPending) {
-        m_viewState->clearPanVisualOffset();
-        m_panSyncPending = false;
-    }
-    return true;
-}
-
 void UnifiedGridRenderer::connectDataProcessorSignals() {
-    using Event = HeatmapStreamService::HeatmapColumnEvent;
-
-    connect(m_dataProcessor.get(), &DataProcessor::heatmapColumnReady,
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapWindowUpdated,
             this,
-            [this](const QString& symbol, int64_t sliceStartMs, int64_t sliceEndMs, int64_t timeframeMs,
-                   double minPrice, double maxPrice, double tickSize,
-                   const QByteArray& column, const QByteArray& liquidityColumn,
-                   double liquidityScale, int intensityBytesPerCell) {
-                if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
-                    return;
+            [this](heatmap_window::UpdatePtr windowUpdate) {
+                if (!windowUpdate) return;
+                m_lastIncomingHeatmapSliceTimeframeMs.store(windowUpdate->timeframeMs, std::memory_order_relaxed);
+                if (!m_useGpuHeatmap) {
+                    m_useGpuHeatmap = true;
+                    m_heatmapOverlay.requestFullTextureRebuild();
+                    m_heatmapStreamService->ensureClockStarted();
                 }
-                Event event;
-                event.sliceStartMs = sliceStartMs;
-                event.sliceEndMs = sliceEndMs;
-                event.timeframeMs = timeframeMs;
-                event.minPrice = minPrice;
-                event.maxPrice = maxPrice;
-                event.tickSize = tickSize;
-                event.column = column;
-                event.liquidityColumn = liquidityColumn;
-                event.liquidityScale = liquidityScale;
-                event.intensityBytesPerCell = intensityBytesPerCell;
-                if (ingestHeatmapColumn(event)) update();
+                const auto result = m_heatmapStreamService->applyWindowUpdate(
+                    *windowUpdate, m_viewState.get(), m_heatmapOverlay, m_liquidityLabelMode);
+                if (!result.accepted) return;
+                if (result.tickSizeChanged) emit heatmapTickSizeChanged();
+                if (result.maxLiquidityChanged) emit heatmapMaxObservedLiquidityChanged();
+                if (result.minLiquidityChanged) emit heatmapMinObservedLiquidityChanged();
+                if (result.autoScrollApplied && m_panSyncPending) {
+                    m_viewState->clearPanVisualOffset();
+                    m_panSyncPending = false;
+                }
+                update();
             },
             Qt::QueuedConnection);
 
-    connect(m_dataProcessor.get(), &DataProcessor::heatmapHistoryBatchReady,
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapHistoryFetchNeeded,
             this,
-            [this](const QString& symbol, int64_t timeframeMs, int gridWidth, int gridHeight,
-                   int64_t requestEndMs, int64_t oldestAvailableMs, int64_t oldestReturnedMs,
-                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns,
-                   const QByteArray& coverage,
-                   int intensityBytesPerCell) {
-                Q_UNUSED(gridWidth);
-                Q_UNUSED(gridHeight);
-                if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
-                    return;
-                }
-                const bool autoScroll = m_viewState && m_viewState->isAutoScrollEnabled();
-                if ((autoScroll && requestEndMs > 0) ||
-                    (!autoScroll && requestEndMs == 0 && !m_historyRequestInFlight) ||
-                    (m_historyRequestInFlight && requestEndMs != m_lastHistoryRequestEndMs) ||
-                    (!m_historyRequestInFlight && requestEndMs > 0)) {
-                    return;
-                }
-                m_historyAvailabilityKnown = true;
-                setOldestHeatmapAvailableMs(oldestAvailableMs);
-                if (m_lastHistoryRequestEndMs > 0) {
-                    setHistoryExhausted(columns.isEmpty() || oldestReturnedMs <= 0 ||
-                                        oldestReturnedMs >= m_lastHistoryRequestEndMs);
-                }
-                setHistoryRequestInFlight(false);
-                m_lastHistoryRequestEndMs = 0;
+            [this](qint64 timeframeMs, qint64 endTimeMs, int count) {
+                emit heatmapHistoryNeeded(timeframeMs, endTimeMs, count);
+            },
+            Qt::QueuedConnection);
 
-                std::vector<Event> events;
-                events.reserve(static_cast<size_t>(columns.size()));
-                for (const auto& col : columns) {
-                    Event event;
-                    event.sliceStartMs = col.bucketStartMs;
-                    event.sliceEndMs = col.bucketEndMs;
-                    event.timeframeMs = timeframeMs;
-                    event.minPrice = col.minPrice;
-                    event.maxPrice = col.maxPrice;
-                    event.tickSize = col.tickSize;
-                    event.column = col.intensity;
-                    event.liquidityColumn = col.liquidity;
-                    event.liquidityScale = col.liquidityScale;
-                    event.intensityBytesPerCell = intensityBytesPerCell;
-                    events.push_back(std::move(event));
-                }
-                const auto result = m_heatmapStreamService->ingestHistoryWindow(
-                    events, coverage, m_viewState.get(), m_heatmapOverlay);
-                if (qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
-                    sLog_Debug(QString("Heatmap history window applied: columns=%1 accepted=%2 manual=%3")
-                                   .arg(columns.size())
-                                   .arg(result.accepted ? 1 : 0)
-                                   .arg(m_heatmapStreamService->historyViewActive() ? 1 : 0));
-                }
-                if (result.tickSizeChanged) emit heatmapTickSizeChanged();
-                if (result.accepted) update();
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapHistoryStatus,
+            this,
+            [this](bool loading, qint64 oldestAvailableMs) {
+                setHistoryRequestInFlight(loading);
+                setOldestHeatmapAvailableMs(oldestAvailableMs);
+                updateHistoryFloorState();
             },
             Qt::QueuedConnection);
 

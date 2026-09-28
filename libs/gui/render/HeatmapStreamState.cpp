@@ -42,410 +42,122 @@ void HeatmapStreamState::updateRange(double minPrice, double maxPrice, double ti
     m_tickSize = tickSize;
 }
 
-void HeatmapStreamState::ingestSlice(int64_t sliceStartMs,
-                                     int timeframeMs,
-                                     const QByteArray& intensityColumn,
-                                     const QByteArray& liquidityColumn,
-                                     double liquidityScale,
+bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
+                                     std::vector<SlotColumn>&& slotColumns,
                                      qint64 nowMs) {
-    if (intensityColumn.isEmpty()) {
-        return;
-    }
-
-    int gridWidth = 0;
-    int gridHeight = 0;
-    int appendMs = 0;
-    int bytesPerCell = 1;
-    int step = 1;
-    bool sameBucketUpdate = false;
-    bool haveLastColumn = false;
-    bool haveLastLiquidity = false;
-    QByteArray lastColumnData;
-    QByteArray lastLiquidityColumn;
-    double lastLiquidityScale = 1.0;
-    int writeColumn = 0;
-    int64_t lastSliceStartMs = std::numeric_limits<int64_t>::min();
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        if (timeframeMs > 0) {
-            m_appendMs = timeframeMs;
-        }
-        gridWidth = m_gridWidth;
-        gridHeight = m_gridHeight;
-        appendMs = m_appendMs;
-        bytesPerCell = m_intensityBytesPerCell;
-        if (gridWidth <= 0 || gridHeight <= 0 || appendMs <= 0) {
-            return;
-        }
-
-        lastSliceStartMs = m_lastSliceStartMs;
-        if (lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
-            sliceStartMs < lastSliceStartMs) {
-            return;
-        }
-        sameBucketUpdate = (lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
-                            sliceStartMs == lastSliceStartMs);
-
-        if (m_timeOriginMs == 0) {
-            m_timeOriginMs = sliceStartMs;
-        }
-        if (m_streamBaseMs == std::numeric_limits<int64_t>::min()) {
-            m_streamBaseMs = sliceStartMs - nowMs;
-        } else if (appendMs > 0) {
-            const int64_t desiredBase = sliceStartMs - nowMs;
-            const int64_t drift = desiredBase - m_streamBaseMs;
-            const int64_t driftAbs = std::llabs(drift);
-            const int64_t driftThreshold = std::max<int64_t>(1, appendMs / 2);
-            if (driftAbs > driftThreshold) {
-                m_streamBaseMs = desiredBase;
-            }
-        }
-
-        if (!sameBucketUpdate &&
-            lastSliceStartMs != std::numeric_limits<int64_t>::min() &&
-            appendMs > 0) {
-            const int64_t dt = sliceStartMs - lastSliceStartMs;
-            if (dt > 0) {
-                const int64_t rawStep = dt / appendMs;
-                step = static_cast<int>(std::clamp<int64_t>(rawStep, 1, gridWidth));
-            }
-        }
-
-        haveLastColumn = m_haveLastColumn;
-        lastColumnData = m_lastColumnData;
-        haveLastLiquidity = m_haveLastLiquidity;
-        lastLiquidityColumn = m_lastLiquidityColumn;
-        lastLiquidityScale = m_lastLiquidityScale;
-        writeColumn = m_writeColumn;
-    }
-
-    const int expectedLiquidityBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
-    const bool haveLiquidityColumn = (liquidityColumn.size() == expectedLiquidityBytes);
-    const int expectedIntensityBytes = gridHeight * bytesPerCell;
-
-    QByteArray fillColumn;
-    if (!haveLastColumn) {
-        fillColumn = QByteArray(intensityColumn.size(), 0);
-    } else {
-        fillColumn = lastColumnData;
-    }
-
-    QByteArray fillLiquidityColumn;
-    double fillLiquidityScale = lastLiquidityScale;
-    if (!haveLastLiquidity || expectedLiquidityBytes <= 0) {
-        fillLiquidityColumn = QByteArray(expectedLiquidityBytes, 0);
-        fillLiquidityScale = 1.0;
-    } else {
-        fillLiquidityColumn = lastLiquidityColumn;
-    }
-
-    auto upsertPendingColumn = [](std::vector<PendingColumn>& uploads,
-                                   int x,
-                                   const QByteArray& data,
-                                   const QByteArray& liq,
-                                   double liqScale) {
-        for (auto& pending : uploads) {
-            if (pending.x == x) {
-                pending.data = data;
-                pending.liquidity = liq;
-                pending.liquidityScale = liqScale;
-                return;
-            }
-        }
-        uploads.push_back({x, data, liq, liqScale});
-    };
-    auto upsertPendingLabelColumn = [](std::vector<PendingLabelColumn>& uploads,
-                                       int x,
-                                       const QByteArray& intensity,
-                                       const QByteArray& liquidity,
-                                       double scale,
-                                       bool haveLiquidity) {
-        for (auto& pending : uploads) {
-            if (pending.x == x) {
-                pending.intensity = intensity;
-                pending.liquidity = liquidity;
-                pending.liquidityScale = scale;
-                pending.haveLiquidity = haveLiquidity;
-                return;
-            }
-        }
-        PendingLabelColumn pending;
-        pending.x = x;
-        pending.intensity = intensity;
-        pending.liquidity = liquidity;
-        pending.liquidityScale = scale;
-        pending.haveLiquidity = haveLiquidity;
-        uploads.push_back(std::move(pending));
-    };
-
-    const QByteArray& realLiq = haveLiquidityColumn ? liquidityColumn : fillLiquidityColumn;
-    const double realLiqScale = haveLiquidityColumn
-                                    ? ((liquidityScale > 0.0) ? liquidityScale : 1.0)
-                                    : fillLiquidityScale;
-
-    if (!sameBucketUpdate) {
-        std::lock_guard<std::mutex> lock(m_uploadMutex);
-        for (int i = 0; i < step - 1; ++i) {
-            writeColumn = (writeColumn + 1) % gridWidth;
-            upsertPendingColumn(m_pendingUploads, writeColumn, fillColumn, fillLiquidityColumn, fillLiquidityScale);
-        }
-
-        writeColumn = (writeColumn + 1) % gridWidth;
-        upsertPendingColumn(m_pendingUploads, writeColumn, intensityColumn, realLiq, realLiqScale);
-    } else {
-        std::lock_guard<std::mutex> lock(m_uploadMutex);
-        upsertPendingColumn(m_pendingUploads, writeColumn, intensityColumn, realLiq, realLiqScale);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_labelUploadMutex);
-        if (!sameBucketUpdate) {
-            for (int i = 0; i < step - 1; ++i) {
-                const int columnIndex = (writeColumn - (step - 1 - i) + gridWidth) % gridWidth;
-                upsertPendingLabelColumn(m_pendingLabelUploads,
-                                         columnIndex,
-                                         fillColumn,
-                                         fillLiquidityColumn,
-                                         fillLiquidityScale,
-                                         fillLiquidityColumn.size() == expectedLiquidityBytes);
-            }
-        }
-
-        QByteArray labelLiquidity = fillLiquidityColumn;
-        double labelLiquidityScale = fillLiquidityScale;
-        bool labelHaveLiquidity = false;
-        if (haveLiquidityColumn) {
-            labelLiquidity = liquidityColumn;
-            labelLiquidityScale = (liquidityScale > 0.0) ? liquidityScale : 1.0;
-            labelHaveLiquidity = true;
-        }
-        upsertPendingLabelColumn(m_pendingLabelUploads,
-                                 writeColumn,
-                                 intensityColumn,
-                                 labelLiquidity,
-                                 labelLiquidityScale,
-                                 labelHaveLiquidity);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_ringMutex);
-        const size_t expectedSize = static_cast<size_t>(gridWidth) * gridHeight;
-        if (m_intensityRing.size() != expectedSize) {
-            m_intensityRing.assign(expectedSize, 0);
-        }
-        if (m_liquidityRing.size() != expectedSize) {
-            m_liquidityRing.assign(expectedSize, 0);
-            m_liquidityScales.assign(gridWidth, 1.0);
-        }
-
-        for (int i = 0; i < step - 1; ++i) {
-            const int columnIndex = (writeColumn - (step - 1 - i) + gridWidth) % gridWidth;
-            if (fillColumn.size() == expectedIntensityBytes) {
-                if (bytesPerCell == 1) {
-                    const auto* src = reinterpret_cast<const uint8_t*>(fillColumn.constData());
-                    for (int y = 0; y < gridHeight; ++y) {
-                        m_intensityRing[static_cast<size_t>(y) * gridWidth + columnIndex] =
-                            static_cast<uint16_t>(src[y]) * 257;
-                    }
-                } else if (bytesPerCell == 2) {
-                    const auto* src = reinterpret_cast<const uint16_t*>(fillColumn.constData());
-                    for (int y = 0; y < gridHeight; ++y) {
-                        const uint16_t raw = qFromLittleEndian(src[y]);
-                        m_intensityRing[static_cast<size_t>(y) * gridWidth + columnIndex] = raw;
-                    }
-                }
-            }
-            if (fillLiquidityColumn.size() == expectedLiquidityBytes) {
-                const auto* src = reinterpret_cast<const uint16_t*>(fillLiquidityColumn.constData());
-                for (int y = 0; y < gridHeight; ++y) {
-                    const uint16_t raw = qFromLittleEndian(src[y]);
-                    m_liquidityRing[static_cast<size_t>(y) * gridWidth + columnIndex] = raw;
-                }
-                m_liquidityScales[columnIndex] = fillLiquidityScale;
-            }
-        }
-
-        if (intensityColumn.size() == expectedIntensityBytes) {
-            if (bytesPerCell == 1) {
-                const auto* src = reinterpret_cast<const uint8_t*>(intensityColumn.constData());
-                for (int y = 0; y < gridHeight; ++y) {
-                    m_intensityRing[static_cast<size_t>(y) * gridWidth + writeColumn] =
-                        static_cast<uint16_t>(src[y]) * 257;
-                }
-            } else if (bytesPerCell == 2) {
-                const auto* src = reinterpret_cast<const uint16_t*>(intensityColumn.constData());
-                for (int y = 0; y < gridHeight; ++y) {
-                    const uint16_t raw = qFromLittleEndian(src[y]);
-                    m_intensityRing[static_cast<size_t>(y) * gridWidth + writeColumn] = raw;
-                }
-            }
-        }
-        if (haveLiquidityColumn) {
-            const auto* src = reinterpret_cast<const uint16_t*>(liquidityColumn.constData());
-            for (int y = 0; y < gridHeight; ++y) {
-                const uint16_t raw = qFromLittleEndian(src[y]);
-                m_liquidityRing[static_cast<size_t>(y) * gridWidth + writeColumn] = raw;
-            }
-            m_liquidityScales[writeColumn] = (liquidityScale > 0.0) ? liquidityScale : 1.0;
-            m_liquidityAvailable = true;
-        } else {
-            if (fillLiquidityColumn.size() == expectedLiquidityBytes) {
-                const auto* src = reinterpret_cast<const uint16_t*>(fillLiquidityColumn.constData());
-                for (int y = 0; y < gridHeight; ++y) {
-                    const uint16_t raw = qFromLittleEndian(src[y]);
-                    m_liquidityRing[static_cast<size_t>(y) * gridWidth + writeColumn] = raw;
-                }
-                m_liquidityScales[writeColumn] = fillLiquidityScale;
-            }
-            m_liquidityAvailable = false;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_writeColumn = writeColumn;
-        if (!sameBucketUpdate && m_filledColumns < m_gridWidth) {
-            const int remaining = m_gridWidth - m_filledColumns;
-            const int addCount = std::min(remaining, step);
-            m_filledColumns += addCount;
-        }
-        m_lastSliceStartMs = sliceStartMs;
-        m_lastColumnData = intensityColumn;
-        m_haveLastColumn = true;
-        if (haveLiquidityColumn) {
-            m_lastLiquidityColumn = liquidityColumn;
-            m_lastLiquidityScale = (liquidityScale > 0.0) ? liquidityScale : 1.0;
-            m_haveLastLiquidity = true;
-        }
-        m_lastAppendMs = nowMs;
-    }
-}
-
-bool HeatmapStreamState::replaceWindow(int timeframeMs,
-                                       const std::vector<WindowColumn>& columns,
-                                       qint64 nowMs) {
-    if (timeframeMs <= 0 || columns.empty()) {
+    const int gridWidth = placement.gridWidth;
+    const int gridHeight = placement.gridHeight;
+    const int bytesPerCell = placement.bytesPerCell;
+    if (placement.timeframeMs <= 0 || gridWidth <= 0 || gridHeight <= 0 ||
+        (bytesPerCell != 1 && bytesPerCell != 2) ||
+        placement.newestSlot < 0 || placement.newestSlot >= gridWidth) {
         return false;
     }
-
-    int gridWidth = 0;
-    int gridHeight = 0;
-    int bytesPerCell = 1;
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        gridWidth = m_gridWidth;
-        gridHeight = m_gridHeight;
-        bytesPerCell = m_intensityBytesPerCell;
-    }
-    if (gridWidth <= 0 || gridHeight <= 0 ||
-        columns.size() != static_cast<size_t>(gridWidth)) {
-        return false;
-    }
-
     const int intensityBytes = gridHeight * bytesPerCell;
     const int liquidityBytes = gridHeight * static_cast<int>(sizeof(uint16_t));
-    int64_t previousStart = std::numeric_limits<int64_t>::min();
-    for (const auto& column : columns) {
-        if (column.intensity.size() != intensityBytes ||
-            column.sliceStartMs <= previousStart ||
-            (previousStart != std::numeric_limits<int64_t>::min() &&
-             column.sliceStartMs - previousStart != timeframeMs)) {
+    for (const auto& slot : slotColumns) {
+        if (slot.x < 0 || slot.x >= gridWidth || slot.intensity.size() != intensityBytes) {
             return false;
         }
-        previousStart = column.sliceStartMs;
     }
 
-    const size_t ringSize = static_cast<size_t>(gridWidth) * gridHeight;
-    std::vector<uint16_t> intensityRing(ringSize, 0);
-    std::vector<uint16_t> liquidityRing(ringSize, 0);
-    std::vector<double> liquidityScales(gridWidth, 1.0);
-    std::vector<PendingColumn> pendingUploads;
-    std::vector<PendingLabelColumn> pendingLabelUploads;
-    pendingUploads.reserve(columns.size());
-    pendingLabelUploads.reserve(columns.size());
-    bool liquidityAvailable = false;
-
-    for (int i = 0; i < gridWidth; ++i) {
-        const auto& column = columns[static_cast<size_t>(i)];
-        // A full live ring starts writing at x=1 and ends at x=0. Preserve
-        // that mapping so timeOffset and render sampling remain unchanged.
-        const int x = (i + 1) % gridWidth;
-        const bool haveLiquidity = column.liquidity.size() == liquidityBytes;
-        const double liquidityScale = haveLiquidity && column.liquidityScale > 0.0
-            ? column.liquidityScale
-            : 1.0;
-
-        PendingColumn pending;
-        pending.x = x;
-        pending.data = column.intensity;
-        if (haveLiquidity) {
-            pending.liquidity = column.liquidity;
-        }
-        pending.liquidityScale = liquidityScale;
-        pendingUploads.push_back(std::move(pending));
-
-        PendingLabelColumn label;
-        label.x = x;
-        label.intensity = column.intensity;
-        if (haveLiquidity) {
-            label.liquidity = column.liquidity;
-        }
-        label.liquidityScale = liquidityScale;
-        label.haveLiquidity = haveLiquidity;
-        pendingLabelUploads.push_back(std::move(label));
-
-        if (bytesPerCell == 1) {
-            const auto* source = reinterpret_cast<const uint8_t*>(column.intensity.constData());
-            for (int y = 0; y < gridHeight; ++y) {
-                intensityRing[static_cast<size_t>(y) * gridWidth + x] =
-                    static_cast<uint16_t>(source[y]) * 257;
-            }
-        } else {
-            const auto* source = reinterpret_cast<const uint16_t*>(column.intensity.constData());
-            for (int y = 0; y < gridHeight; ++y) {
-                intensityRing[static_cast<size_t>(y) * gridWidth + x] =
-                    qFromLittleEndian(source[y]);
-            }
-        }
-        if (haveLiquidity) {
-            const auto* source = reinterpret_cast<const uint16_t*>(column.liquidity.constData());
-            for (int y = 0; y < gridHeight; ++y) {
-                liquidityRing[static_cast<size_t>(y) * gridWidth + x] =
-                    qFromLittleEndian(source[y]);
-            }
-            liquidityScales[x] = liquidityScale;
-            liquidityAvailable = true;
-        }
-    }
-
-    // Match resetLocked's lock order so render-thread snapshots never observe
-    // a new cursor paired with an old ring.
+    // Lock order matches resetLocked: state, then upload, label and ring.
     std::lock_guard<std::mutex> stateLock(m_stateMutex);
-    std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-    std::lock_guard<std::mutex> labelLock(m_labelUploadMutex);
-    std::lock_guard<std::mutex> ringLock(m_ringMutex);
+    const bool reshape = m_gridWidth != gridWidth || m_gridHeight != gridHeight ||
+                         m_intensityBytesPerCell != bytesPerCell;
+    if (reshape) {
+        resetLocked(gridWidth, gridHeight);
+        m_intensityBytesPerCell = bytesPerCell;
+    }
+    const bool replaceAll = placement.full || reshape;
 
-    m_appendMs = timeframeMs;
-    m_writeColumn = 0;
+    m_appendMs = static_cast<int>(placement.timeframeMs);
+    m_minPrice = placement.minPrice;
+    m_maxPrice = placement.maxPrice;
+    m_tickSize = placement.tickSize;
+    m_writeColumn = placement.newestSlot;
     m_filledColumns = gridWidth;
+    m_lastSliceStartMs = placement.windowEndMs;
+    m_timeOriginMs = placement.windowEndMs -
+        static_cast<int64_t>(gridWidth - 1) * placement.timeframeMs;
+    const int64_t desiredBase = placement.windowEndMs - nowMs;
+    if (m_streamBaseMs == std::numeric_limits<int64_t>::min()) {
+        m_streamBaseMs = desiredBase;
+    } else if (placement.liveEdge &&
+               std::llabs(desiredBase - m_streamBaseMs) >
+                   std::max<int64_t>(1, placement.timeframeMs / 2)) {
+        m_streamBaseMs = desiredBase;
+    }
     m_lastAppendMs = nowMs;
-    m_lastSliceStartMs = columns.back().sliceStartMs;
-    m_timeOriginMs = columns.front().sliceStartMs;
-    m_streamBaseMs = columns.back().sliceStartMs - nowMs;
-    m_lastColumnData = columns.back().intensity;
-    m_haveLastColumn = true;
-    m_lastLiquidityColumn = columns.back().liquidity;
-    m_lastLiquidityScale = columns.back().liquidityScale > 0.0
-        ? columns.back().liquidityScale
-        : 1.0;
-    m_haveLastLiquidity = columns.back().liquidity.size() == liquidityBytes;
-    m_pendingUploads = std::move(pendingUploads);
-    m_pendingLabelUploads = std::move(pendingLabelUploads);
-    m_intensityRing = std::move(intensityRing);
-    m_liquidityRing = std::move(liquidityRing);
-    m_liquidityScales = std::move(liquidityScales);
-    m_liquidityAvailable = liquidityAvailable;
-    m_timeOffset.store(1.0f / static_cast<float>(gridWidth));
+
+    {
+        std::lock_guard<std::mutex> lock(m_uploadMutex);
+        if (replaceAll) {
+            m_pendingUploads.clear();
+            m_pendingUploads.reserve(slotColumns.size());
+        }
+        for (const auto& slot : slotColumns) {
+            auto it = replaceAll ? m_pendingUploads.end()
+                                 : std::find_if(m_pendingUploads.begin(), m_pendingUploads.end(),
+                                                [&slot](const PendingColumn& p) { return p.x == slot.x; });
+            if (it == m_pendingUploads.end()) {
+                m_pendingUploads.push_back({slot.x, slot.intensity, slot.liquidity, slot.liquidityScale});
+            } else {
+                *it = {slot.x, slot.intensity, slot.liquidity, slot.liquidityScale};
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_labelUploadMutex);
+        if (replaceAll) {
+            m_pendingLabelUploads.clear();
+            m_pendingLabelUploads.reserve(slotColumns.size());
+        }
+        for (const auto& slot : slotColumns) {
+            PendingLabelColumn label;
+            label.x = slot.x;
+            label.intensity = slot.intensity;
+            label.liquidity = slot.liquidity;
+            label.liquidityScale = slot.liquidityScale;
+            label.haveLiquidity = slot.liquidity.size() == liquidityBytes;
+            auto it = replaceAll ? m_pendingLabelUploads.end()
+                                 : std::find_if(m_pendingLabelUploads.begin(), m_pendingLabelUploads.end(),
+                                                [&slot](const PendingLabelColumn& p) { return p.x == slot.x; });
+            if (it == m_pendingLabelUploads.end()) {
+                m_pendingLabelUploads.push_back(std::move(label));
+            } else {
+                *it = std::move(label);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_ringMutex);
+        const size_t ringSize = static_cast<size_t>(gridWidth) * gridHeight;
+        if (m_intensityRing.size() != ringSize || replaceAll) {
+            m_intensityRing.assign(ringSize, 0);
+            m_liquidityRing.assign(ringSize, 0);
+            m_liquidityScales.assign(static_cast<size_t>(gridWidth), 1.0);
+            m_liquidityAvailable = false;
+        }
+        for (const auto& slot : slotColumns) {
+            const bool haveLiquidity = slot.liquidity.size() == liquidityBytes;
+            for (int y = 0; y < gridHeight; ++y) {
+                const size_t index = static_cast<size_t>(y) * gridWidth + slot.x;
+                if (bytesPerCell == 1) {
+                    m_intensityRing[index] =
+                        static_cast<uint16_t>(static_cast<uint8_t>(slot.intensity.at(y))) * 257;
+                } else {
+                    m_intensityRing[index] = qFromLittleEndian(
+                        reinterpret_cast<const uint16_t*>(slot.intensity.constData())[y]);
+                }
+                m_liquidityRing[index] = haveLiquidity
+                    ? qFromLittleEndian(reinterpret_cast<const uint16_t*>(slot.liquidity.constData())[y])
+                    : 0;
+            }
+            m_liquidityScales[static_cast<size_t>(slot.x)] = slot.liquidityScale > 0.0 ? slot.liquidityScale : 1.0;
+            m_liquidityAvailable = m_liquidityAvailable || haveLiquidity;
+        }
+    }
     return true;
 }
 
@@ -582,11 +294,6 @@ void HeatmapStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_lastSliceStartMs = std::numeric_limits<int64_t>::min();
     m_timeOriginMs = 0;
     m_streamBaseMs = std::numeric_limits<int64_t>::min();
-    m_lastColumnData.clear();
-    m_haveLastColumn = false;
-    m_lastLiquidityColumn.clear();
-    m_lastLiquidityScale = 1.0;
-    m_haveLastLiquidity = false;
     m_minPrice = 0.0;
     m_maxPrice = 0.0;
     m_tickSize = 0.0;

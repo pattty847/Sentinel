@@ -66,6 +66,8 @@ heatmap:
   contrast: 1.15
   label_px: 9999
   client_cache_columns: 1024  # history/GPU page; protocol maximum is 1024
+  initial_column_px: 8        # time zoom on connect: screen pixels per heatmap column
+  initial_price_pct: 5        # price zoom on connect: % of the band; 0 = full
 
 gui:
   api_port: 17100

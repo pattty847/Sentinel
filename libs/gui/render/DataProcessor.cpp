@@ -10,7 +10,6 @@ Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
-#include "HeatmapHistoryWindow.hpp"
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
@@ -19,6 +18,7 @@ Assumptions: Server is authoritative for heatmap columns.
 #include "../../core/protocol/VolumeProfileSlice.hpp"
 #include <algorithm>
 #include <QtGlobal>
+#include <QTimer>
 #include <limits>
 #include <cstring>
 #include <bit>
@@ -28,6 +28,7 @@ DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
     qRegisterMetaType<IGridDataSource::HeatmapHistoryColumn>("IGridDataSource::HeatmapHistoryColumn");
     qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
+    qRegisterMetaType<heatmap_window::UpdatePtr>("heatmap_window::UpdatePtr");
     m_footprintStream = std::make_unique<FootprintStreamState>();
     m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
     m_tpoStream = std::make_unique<TpoStreamState>();
@@ -53,11 +54,7 @@ void DataProcessor::stopProcessing() {
 }
 
 void DataProcessor::clearData() {
-    m_heatmapRangeValid = false;
-    m_heatmapLastSliceStart = std::numeric_limits<int64_t>::min();
-    m_heatmapHasLastColumn = false;
-    m_heatmapLastColumn.clear();
-    m_heatmapCache.clear();
+    resetHeatmapWindow();
     if (m_footprintStream) {
         m_footprintStream->clear();
     }
@@ -81,14 +78,13 @@ void DataProcessor::setActiveSymbol(const QString& symbol) {
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     Q_UNUSED(slice.midPrice);
     Q_UNUSED(slice.lastTrade);
-    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
-
     if (m_shuttingDown.load()) {
         return;
     }
     if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) {
         return;
     }
+    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
 
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP SLICE RX: tf=" << slice.timeframeMs
@@ -103,90 +99,134 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     if (m_forcedTimeframeMs > 0 && slice.timeframeMs > 0 && slice.timeframeMs != m_forcedTimeframeMs) {
         return;
     }
-
     if (slice.timeframeMs > 0 && m_currentTimeframe_ms != slice.timeframeMs) {
         m_currentTimeframe_ms = slice.timeframeMs;
         m_manualTimeframeSet = true;
         m_manualTimeframeTimer.restart();
     }
-
-    if (slice.column.isEmpty()) {
+    if (slice.column.isEmpty() || slice.timeframeMs <= 0) {
         return;
     }
 
     const QString fmt = slice.format.trimmed().toLower();
     int bytesPerCell = 1;
-    if (fmt == QStringLiteral("u8") || fmt == QStringLiteral("r8")) {
-        bytesPerCell = 1;
-    } else if (fmt == QStringLiteral("u16") || fmt == QStringLiteral("r16") ||
-               fmt == QStringLiteral("r16f")) {
+    if (fmt == QStringLiteral("u16") || fmt == QStringLiteral("r16") ||
+        fmt == QStringLiteral("r16f")) {
         bytesPerCell = 2;
-    } else if (fmt == QStringLiteral("f32") || fmt == QStringLiteral("r32f")) {
-        bytesPerCell = 4;
+    } else if (fmt != QStringLiteral("u8") && fmt != QStringLiteral("r8")) {
+        return;  // f32 and unknown formats are not supported by the ring
     }
-    const int prevHeight = m_heatmapGridHeight;
-    const int prevWidth = m_heatmapGridWidth;
-    int height = 0;
-    QByteArray expanded;
-    const int64_t lastSliceStart = m_heatmapLastSliceStart;
-    bool forceReset = false;
+    if (slice.column.size() % bytesPerCell != 0) {
+        return;
+    }
+    const int rows = (slice.gridHeight > 0) ? slice.gridHeight : slice.column.size() / bytesPerCell;
+    if (rows <= 0 || slice.column.size() / bytesPerCell != rows) {
+        return;
+    }
 
-    if (bytesPerCell <= 0 || (slice.column.size() % bytesPerCell) != 0) {
-        return;
-    }
-    height = (slice.gridHeight > 0) ? slice.gridHeight : (slice.column.size() / bytesPerCell);
-    if (height <= 0) {
-        return;
-    }
-    if (slice.column.size() / bytesPerCell != height) {
-        return;
-    }
-    expanded = slice.column;
+    ensureHeatmapWindow(slice.timeframeMs, resolvedWidth, rows);
+    heatmap_window::Column column;
+    column.bucketStartMs = slice.bucketStartMs;
+    column.minPrice = slice.minPrice;
+    column.maxPrice = slice.maxPrice;
+    column.tickSize = slice.tickSize;
+    column.intensity = slice.column;
+    column.liquidity = slice.liquidityColumn;
+    column.liquidityScale = slice.liquidityScale;
 
-    m_heatmapGridWidth = resolvedWidth;
-    m_heatmapGridHeight = height;
-    const double effectiveTick = slice.tickSize;
-    if (lastSliceStart != std::numeric_limits<int64_t>::min()) {
-        // Same bucket start means an in-progress update for the active bucket; allow in-place refresh.
-        if (slice.bucketStartMs < lastSliceStart) {
-            forceReset = true;
-        } else if (slice.timeframeMs > 0 && resolvedWidth > 0) {
-            const int64_t maxGapMs = static_cast<int64_t>(resolvedWidth) * slice.timeframeMs;
-            if (maxGapMs > 0 && (slice.bucketStartMs - lastSliceStart) > maxGapMs) {
-                forceReset = true;
-            }
+    auto update = std::make_shared<heatmap_window::Update>();
+    bool firstPlacement = false;
+    if (!m_heatmapWindow.ingestLive(column, bytesPerCell, *update, firstPlacement)) {
+        return;
+    }
+    publishHeatmapWindow(std::move(update), firstPlacement);
+    if (firstPlacement) {
+        requestHeatmapFetch();
+    }
+}
+
+void DataProcessor::setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    // Placement only changes at bucket granularity; skip sub-bucket pans.
+    const int64_t tf = std::max<int64_t>(1, m_heatmapWindow.timeframeMs());
+    const HeatmapViewKey key{viewStartMs / tf, viewEndMs / tf, follow};
+    if (key.startBucket == m_lastHeatmapView.startBucket &&
+        key.endBucket == m_lastHeatmapView.endBucket &&
+        key.follow == m_lastHeatmapView.follow) {
+        return;
+    }
+    m_lastHeatmapView = key;
+    auto update = std::make_shared<heatmap_window::Update>();
+    if (m_heatmapWindow.setViewport(viewStartMs, viewEndMs, follow, *update)) {
+        publishHeatmapWindow(std::move(update), false);
+    }
+    requestHeatmapFetch();
+}
+
+void DataProcessor::ensureHeatmapWindow(int64_t timeframeMs, int width, int rows) {
+    const int boundedWidth = std::clamp(width, heatmap_window::ColumnWindow::kPageColumns, 16384);
+    if (m_heatmapWindow.timeframeMs() == timeframeMs &&
+        m_heatmapWindow.width() == boundedWidth &&
+        (m_heatmapWindow.rows() == 0 || m_heatmapWindow.rows() == rows)) {
+        return;
+    }
+    if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
+        sLog_Render("HEATMAP WINDOW CONFIGURE: tf=" << m_heatmapWindow.timeframeMs() << "->" << timeframeMs
+                    << " width=" << m_heatmapWindow.width() << "->" << boundedWidth
+                    << " rows=" << m_heatmapWindow.rows() << "->" << rows);
+    }
+    m_heatmapWindow.configure(timeframeMs, boundedWidth,
+                              boundedWidth + 4 * heatmap_window::ColumnWindow::kPageColumns);
+    m_heatmapGridWidth = boundedWidth;
+    m_heatmapGridHeight = rows;
+    m_heatmapFetchInFlight = false;
+    ++m_heatmapFetchGeneration;
+    m_lastHeatmapView = {};
+}
+
+void DataProcessor::resetHeatmapWindow() {
+    if (m_heatmapWindow.timeframeMs() > 0) {
+        m_heatmapWindow.configure(m_heatmapWindow.timeframeMs(), m_heatmapWindow.width(),
+                                  m_heatmapWindow.width() + 4 * heatmap_window::ColumnWindow::kPageColumns);
+    }
+    m_heatmapFetchInFlight = false;
+    ++m_heatmapFetchGeneration;
+    m_lastHeatmapView = {};
+}
+
+void DataProcessor::publishHeatmapWindow(std::shared_ptr<heatmap_window::Update> update,
+                                         bool firstPlacement) {
+    if (firstPlacement) {
+        // Placeholder viewport and axis init for a fresh window (FM-034).
+        emit heatmapRangeReset(update->band.minPrice, update->band.maxPrice, update->band.tickSize,
+                               update->width, update->rows);
+    }
+    emit heatmapWindowUpdated(std::move(update));
+}
+
+void DataProcessor::requestHeatmapFetch() {
+    if (m_heatmapFetchInFlight) {
+        return;
+    }
+    heatmap_window::FetchRequest request;
+    if (!m_heatmapWindow.nextFetch(request)) {
+        return;
+    }
+    m_heatmapFetchInFlight = true;
+    m_heatmapFetchEndMs = request.endMs;
+    m_heatmapFetchCount = request.count;
+    const uint64_t generation = ++m_heatmapFetchGeneration;
+    emit heatmapHistoryFetchNeeded(m_heatmapWindow.timeframeMs(), request.endMs, request.count);
+    emit heatmapHistoryStatus(true, m_heatmapWindow.oldestAvailableMs());
+    QTimer::singleShot(5000, this, [this, generation]() {
+        if (generation != m_heatmapFetchGeneration || !m_heatmapFetchInFlight) {
+            return;
         }
-    }
-    if (forceReset) {
-        m_heatmapRangeValid = false;
-        m_heatmapLastColumn.clear();
-        m_heatmapHasLastColumn = false;
-        m_heatmapCache.clear();
-    }
-    const bool needsReset = slice.reset || forceReset || !m_heatmapRangeValid ||
-                            (prevHeight != height || prevWidth != m_heatmapGridWidth);
-
-    if (needsReset) {
-        emit heatmapRangeReset(slice.minPrice, slice.maxPrice, effectiveTick, m_heatmapGridWidth, height);
-    }
-
-    m_heatmapRangeValid = true;
-    emit heatmapColumnReady(slice.symbol,
-                            slice.bucketStartMs,
-                            slice.bucketEndMs,
-                            slice.timeframeMs,
-                            slice.minPrice,
-                            slice.maxPrice,
-                            effectiveTick,
-                            expanded,
-                            slice.liquidityColumn,
-                            slice.liquidityScale,
-                            bytesPerCell);
-
-    // Week 0 guardrail: client-side heatmap cache writes are disabled.
-    // This map is currently unused by any read path and can grow unbounded under live flow.
-    // Long-term caching should live in server-side chunk/history serving, not ad-hoc client accumulation.
-    m_heatmapLastSliceStart = slice.bucketStartMs;
+        m_heatmapFetchInFlight = false;
+        emit heatmapHistoryStatus(false, m_heatmapWindow.oldestAvailableMs());
+    });
 }
 
 void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
@@ -380,100 +420,58 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int64_t requestEndMs,
                                              int64_t oldestAvailableMs,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
+    if (m_shuttingDown.load()) {
+        return;
+    }
     if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
         return;
     }
     if (qEnvironmentVariableIsSet("SENTINEL_HEATMAP_SLICE_LOG")) {
         sLog_Render("HEATMAP HISTORY RX: cols=" << columns.size()
                     << " grid=" << gridWidth << "x" << gridHeight
-                    << " tf=" << timeframeMs);
+                    << " tf=" << timeframeMs
+                    << " end=" << requestEndMs);
     }
-
-    if (m_forcedTimeframeMs > 0 && timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
+    if (timeframeMs <= 0 || gridHeight <= 0 ||
+        (m_forcedTimeframeMs > 0 && timeframeMs != m_forcedTimeframeMs)) {
         return;
     }
 
-    int64_t oldestReturnedMs = std::numeric_limits<int64_t>::max();
-    for (const auto& column : columns) {
-        if (column.bucketStartMs > 0) {
-            oldestReturnedMs = std::min(oldestReturnedMs, column.bucketStartMs);
-        }
-    }
-    if (oldestReturnedMs == std::numeric_limits<int64_t>::max()) {
-        oldestReturnedMs = 0;
-    }
-
-    heatmap_history::Window window;
-    if (gridWidth <= 0 || gridHeight <= 0 ||
-        !heatmap_history::buildWindow(columns,
-                                      timeframeMs,
-                                      gridWidth,
-                                      gridHeight,
-                                      requestEndMs,
-                                      window)) {
-        emit heatmapHistoryBatchReady(symbol, timeframeMs, gridWidth, gridHeight,
-                                      requestEndMs, oldestAvailableMs, oldestReturnedMs,
-                                      {}, QByteArray{}, 0);
-        return;
+    // A page reports its own size as grid_width; the window width comes from the
+    // live stream and server config only.
+    const int windowWidth = m_heatmapWindow.width() > 0 ? m_heatmapWindow.width()
+                                                        : std::max(gridWidth, m_heatmapGridWidth);
+    ensureHeatmapWindow(timeframeMs, windowWidth, gridHeight);
+    std::vector<heatmap_window::Column> page;
+    page.reserve(static_cast<size_t>(columns.size()));
+    int bytesPerCell = 2;
+    for (const auto& source : columns) {
+        heatmap_window::Column column;
+        column.bucketStartMs = source.bucketStartMs;
+        column.minPrice = source.minPrice;
+        column.maxPrice = source.maxPrice;
+        column.tickSize = source.tickSize;
+        column.intensity = source.intensity;
+        column.liquidity = source.liquidity;
+        column.liquidityScale = source.liquidityScale;
+        bytesPerCell = std::max(1, static_cast<int>(source.intensity.size()) / gridHeight);
+        page.push_back(std::move(column));
     }
 
-    // Do NOT emit heatmapRangeReset here — that stomps the viewport back to "now"
-    // every time a history batch arrives (e.g. scroll-past-cache fetch).
-    // heatmapRangeReset is for live slice initialisation only (onHeatmapSliceReceived).
-    emit heatmapHistoryBatchReady(symbol,
-                                  timeframeMs,
-                                  gridWidth,
-                                  gridHeight,
-                                  requestEndMs,
-                                  oldestAvailableMs,
-                                  oldestReturnedMs,
-                                  window.columns,
-                                  window.coverage,
-                                  window.intensityBytesPerCell);
-}
-
-size_t DataProcessor::HeatmapGridKeyHash::operator()(const HeatmapGridKey& key) const noexcept {
-    auto hashCombine = [](size_t seed, size_t value) {
-        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
-    };
-    size_t seed = std::hash<std::string>{}(key.symbol);
-    seed = hashCombine(seed, std::hash<int>{}(key.gridWidth));
-    seed = hashCombine(seed, std::hash<int>{}(key.gridHeight));
-    seed = hashCombine(seed, std::hash<int64_t>{}(key.timeframeMs));
-    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.minPrice)));
-    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.maxPrice)));
-    seed = hashCombine(seed, std::hash<uint64_t>{}(std::bit_cast<uint64_t>(key.tickSize)));
-    return seed;
-}
-
-bool DataProcessor::HeatmapGridKeyEq::operator()(const HeatmapGridKey& a,
-                                                 const HeatmapGridKey& b) const noexcept {
-    return a.symbol == b.symbol &&
-           a.gridWidth == b.gridWidth &&
-           a.gridHeight == b.gridHeight &&
-           a.timeframeMs == b.timeframeMs &&
-           a.minPrice == b.minPrice &&
-           a.maxPrice == b.maxPrice &&
-           a.tickSize == b.tickSize;
-}
-
-void DataProcessor::HeatmapColumnCache::reset(int newCapacity) {
-    capacity = newCapacity;
-    writeIndex = 0;
-    count = 0;
-    columns.clear();
-    if (capacity > 0) {
-        columns.resize(static_cast<size_t>(capacity));
+    const bool ours = m_heatmapFetchInFlight && requestEndMs == m_heatmapFetchEndMs;
+    const int requested = ours ? m_heatmapFetchCount : heatmap_window::ColumnWindow::kPageColumns;
+    if (ours) {
+        m_heatmapFetchInFlight = false;
     }
-}
 
-void DataProcessor::HeatmapColumnCache::push(IGridDataSource::HeatmapHistoryColumn column) {
-    if (capacity <= 0) {
-        return;
+    auto update = std::make_shared<heatmap_window::Update>();
+    bool firstPlacement = false;
+    if (m_heatmapWindow.ingestHistory(page, bytesPerCell, requestEndMs, requested,
+                                      oldestAvailableMs, *update, firstPlacement)) {
+        publishHeatmapWindow(std::move(update), firstPlacement);
     }
-    columns[static_cast<size_t>(writeIndex)] = std::move(column);
-    writeIndex = (writeIndex + 1) % capacity;
-    count = std::min(count + 1, capacity);
+    emit heatmapHistoryStatus(m_heatmapFetchInFlight, m_heatmapWindow.oldestAvailableMs());
+    requestHeatmapFetch();
 }
 
 void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
@@ -515,19 +513,10 @@ void DataProcessor::setHeatmapIntensityScale(double scale) {
     }
 }
 
-void DataProcessor::setHeatmapRecenterFraction(double fraction) {
-    m_heatmapRecenterFraction = std::clamp(fraction, 0.01, 0.45);
-}
-
-void DataProcessor::setCacheCapacityOverride(int capacity) {
-    if (capacity > 0) {
-        m_cacheCapacityOverride = capacity;
-    }
-}
-
 void DataProcessor::setServerTimeframe(int64_t timeframeMs) {
-    if (timeframeMs > 0) {
+    if (timeframeMs > 0 && timeframeMs != m_forcedTimeframeMs) {
         m_forcedTimeframeMs = timeframeMs;
+        resetHeatmapWindow();
     }
 }
 

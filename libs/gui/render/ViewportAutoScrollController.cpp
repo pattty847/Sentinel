@@ -26,8 +26,17 @@ void ViewportAutoScrollController::setSmoothEnabled(bool enabled) {
     m_smoothEnabled = enabled;
 }
 
-void ViewportAutoScrollController::setInitialViewportPct(int pct) {
-    m_initialViewportPct = std::clamp(pct, 1, 100);
+void ViewportAutoScrollController::setInitialColumnPx(int px) {
+    m_initialColumnPx = std::clamp(px, 2, 64);
+}
+
+int64_t ViewportAutoScrollController::initialSpanMs(double viewportWidthPx,
+                                                   int gridWidth,
+                                                   int64_t timeframeMs) const {
+    const double widthPx = viewportWidthPx > 0.0 ? viewportWidthPx : 800.0;
+    const int columns = std::clamp(static_cast<int>(widthPx / m_initialColumnPx), 16,
+                                   std::max(16, gridWidth - 1));
+    return static_cast<int64_t>(columns) * std::max<int64_t>(1, timeframeMs);
 }
 
 void ViewportAutoScrollController::setInitialPricePct(int pct) {
@@ -78,8 +87,8 @@ bool ViewportAutoScrollController::initializeViewport(GridViewState& view,
     }
     const int64_t maxSpanMs = std::max<int64_t>(1, static_cast<int64_t>(snapshot.gridWidth - 1) * timeframeMs);
     if (m_autoScrollSpanMs <= 0 || m_autoScrollSpanMs > maxSpanMs) {
-        const double pct = static_cast<double>(std::clamp(m_initialViewportPct, 1, 100)) / 100.0;
-        m_autoScrollSpanMs = static_cast<int64_t>(maxSpanMs * pct * (1.0 - m_paddingFrac));
+        m_autoScrollSpanMs = std::min(maxSpanMs,
+            initialSpanMs(view.getViewportWidth(), snapshot.gridWidth, timeframeMs));
         if (m_autoScrollSpanMs <= 0) {
             m_autoScrollSpanMs = maxSpanMs;
         }

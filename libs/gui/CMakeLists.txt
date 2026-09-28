@@ -52,8 +52,8 @@ set(GRID_CORE_SOURCES
     render/GridViewState.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
-    render/HeatmapHistoryWindow.hpp
-    render/HeatmapHistoryWindow.cpp
+    render/HeatmapColumnWindow.hpp
+    render/HeatmapColumnWindow.cpp
     render/HeatmapStreamState.hpp
     render/HeatmapStreamState.cpp
     render/FootprintStreamState.hpp

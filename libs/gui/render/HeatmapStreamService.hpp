@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "HeatmapColumnWindow.hpp"
 #include "HeatmapStreamState.hpp"
 #include "TimeAuthority.hpp"
 #include "ViewportAutoScrollController.hpp"
@@ -30,20 +31,6 @@ class HeatmapStreamService : public QObject {
     Q_OBJECT
 public:
     // ── Event struct (moved from UnifiedGridRenderer) ────────────────────────
-    struct HeatmapColumnEvent {
-        int64_t sliceStartMs = 0;
-        int64_t sliceEndMs = 0;
-        int64_t timeframeMs = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        double tickSize = 0.0;
-        QByteArray column;
-        QByteArray liquidityColumn;
-        double liquidityScale = 1.0;
-        int intensityBytesPerCell = 1;
-    };
-
-    // ── Ingest result (returned to caller so it can emit Q_PROPERTY signals) ─
     struct IngestResult {
         bool accepted = false;
         bool tickSizeChanged = false;
@@ -94,18 +81,12 @@ public:
     void incrementGeneration() { m_streamGeneration.fetch_add(1, std::memory_order_acq_rel); }
 
     // ── Column ingestion ─────────────────────────────────────────────────────
-    IngestResult ingestColumn(const HeatmapColumnEvent& event,
-                              GridViewState* viewState,
-                              HeatmapOverlayRenderer& overlay,
-                              int liquidityLabelMode,
-                              int64_t currentTimeframeMs);
-    IngestResult ingestHistoryWindow(const std::vector<HeatmapColumnEvent>& events,
-                                     const QByteArray& coverage,
-                                     GridViewState* viewState,
-                                     HeatmapOverlayRenderer& overlay);
-    bool historyViewActive() const { return m_historyViewActive; }
+    // Brings the ring in line with a HeatmapColumnWindow update (live and history).
+    IngestResult applyWindowUpdate(const heatmap_window::Update& update,
+                                   GridViewState* viewState,
+                                   HeatmapOverlayRenderer& overlay,
+                                   int liquidityLabelMode);
 
-    // ── Render loop tick ─────────────────────────────────────────────────────
     RenderTickResult handleRenderTick(GridViewState* viewState);
 
     // ── Timeframe change ─────────────────────────────────────────────────────
@@ -120,7 +101,7 @@ public:
     // ── Auto-scroll configuration ────────────────────────────────────────────
     void setAutoScrollPaddingFrac(double frac);
     void setAutoScrollSmoothEnabled(bool enabled);
-    void setInitialViewportPct(int pct);
+    void setInitialColumnPx(int px);
     void setInitialPricePct(int pct);
     void resetAutoScrollSpan();
     void updateAutoScrollLag(GridViewState& vs, int64_t cadenceMs);
@@ -149,6 +130,4 @@ private:
     double m_tickSize = 0.0;
     double m_maxObservedLiquidity = 0.0;
     double m_minObservedLiquidity = std::numeric_limits<double>::max();
-    bool m_historyViewActive = false;
-    bool m_historyCoverageActive = false;
 };

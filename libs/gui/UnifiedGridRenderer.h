@@ -117,13 +117,9 @@ private:
     QElapsedTimer m_manualTimeframeTimer;
 
     bool m_panSyncPending = false;
-    bool m_historyFetchPending = false;  // debounce for scroll-past-cache history fetch
     bool m_historyRequestInFlight = false;
-    bool m_historyAvailabilityKnown = false;
     bool m_historyExhausted = false;
     int64_t m_oldestHeatmapAvailableMs = 0;
-    int64_t m_lastHistoryRequestEndMs = 0;
-    uint64_t m_historyRequestGeneration = 0;
     QString m_activeSymbol;
 
     bool m_useGpuHeatmap = false;
@@ -386,7 +382,6 @@ protected:
 
 private:
     void buildMsdfAtlas();
-    bool ingestHeatmapColumn(const HeatmapStreamService::HeatmapColumnEvent& event);
     void connectDataProcessorSignals();
     void startHeatmapRenderLoop();
     HeatmapIntensityNode* ensureHeatmapRootNode(QSGNode* oldNode);
@@ -428,6 +423,7 @@ private:
     void setHistoryExhausted(bool exhausted);
     void setOldestHeatmapAvailableMs(int64_t oldestMs);
     void resetHeatmapHistoryStatus();
+    void updateHistoryFloorState();
 
 private:
     void setIntensityScale(double scale);
