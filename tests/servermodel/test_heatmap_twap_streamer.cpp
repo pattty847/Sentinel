@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -136,4 +137,66 @@ TEST(HeatmapTwapStreamerGaps, SleepGapClosesObservedBucketOnly) {
     const auto cols = history(streamer);
     ASSERT_EQ(cols.size(), 1u);
     EXPECT_EQ(cols.front().bucketStartMs, minute);
+}
+
+TEST(HeatmapTwapStreamerRollup, MissingBucketsAndSignedMean) {
+    app();
+    const auto dir = makeTempDir("rollup");
+    const int64_t base = (1'700'000'000'000 / 300'000) * 300'000;
+    {
+        HeatmapColumnStore store(dir);
+        ASSERT_TRUE(store.acquireLock());
+        std::vector<uint16_t> cells(kGridHeight, 0);
+        std::vector<uint16_t> liquidity(kGridHeight, 0);
+        for (const auto [minute, encoded, quantity] : {
+                 std::tuple<int, uint16_t, uint16_t>{0, 1000, 100},
+                 {1, static_cast<uint16_t>(0x8000u + 3000), 300},
+                 {10, 2000, 500}}) {
+            cells[0] = encoded;
+            liquidity[0] = quantity;
+            ASSERT_EQ(store.append(kSymbol, kMs1m, kGridHeight, base + minute * kMs1m,
+                                   base + (minute + 1) * kMs1m, 0, kGridHeight, 1,
+                                   cells.data(), liquidity.data(), 1.0),
+                      HeatmapColumnStore::AppendResult::Written);
+        }
+    }
+    FakeSource source([](int) { return 0; });
+    auto cfg = baseConfig();
+    cfg.timeframesMs = {kMs1m, 300'000};
+    cfg.persistenceEnabled = true;
+    cfg.persistenceDir = dir.string();
+    HeatmapTwapStreamer streamer(source, cfg);
+    std::vector<HeatmapTwapStreamer::HistoryColumn> out;
+    int width = 0, height = 0;
+    ASSERT_TRUE(streamer.fetchHistory(kSymbol, 300'000, 0, 10, width, height, out));
+    ASSERT_EQ(out.size(), 2u); // Entire middle 5m bucket is absent.
+    EXPECT_EQ(out[0].bucketStartMs, base);
+    EXPECT_EQ(out[1].bucketStartMs, base + 600'000);
+    EXPECT_EQ(out[0].bucketEndMs, base + 300'000);
+    const auto* first = reinterpret_cast<const uint16_t*>(out[0].intensity.constData());
+    const auto* second = reinterpret_cast<const uint16_t*>(out[1].intensity.constData());
+    EXPECT_EQ(first[0], static_cast<uint16_t>(0x8000u + 1000));
+    EXPECT_EQ(second[0], 2000);
+    const auto* quantity = reinterpret_cast<const uint16_t*>(out[0].liquidity.constData());
+    EXPECT_NEAR(quantity[0] * out[0].liquidityScale, 200.0, 0.01);
+    fs::remove_all(dir);
+}
+
+TEST(HeatmapTwapStreamerRollup, LiveRolledBucketRefreshesOnMinuteFinalize) {
+    app();
+    const int64_t base = (1'700'000'000'000 / 300'000) * 300'000;
+    FakeSource source([&](int i) { return base + i * 5'000; });
+    auto cfg = baseConfig();
+    cfg.timeframesMs = {kMs1m, 300'000};
+    HeatmapTwapStreamer streamer(source, cfg);
+    std::vector<int64_t> rolledStarts;
+    QObject::connect(&streamer, &HeatmapTwapStreamer::heatmapSliceReady,
+                     &streamer, [&](const HeatmapSlice& slice) {
+                         if (slice.timeframeMs == 300'000)
+                             rolledStarts.push_back(slice.bucketStartMs);
+                     });
+    runUntilCalls(streamer, source, 27);
+    ASSERT_GE(rolledStarts.size(), 2u);
+    EXPECT_EQ(rolledStarts[0], base);
+    EXPECT_EQ(rolledStarts[1], base);
 }

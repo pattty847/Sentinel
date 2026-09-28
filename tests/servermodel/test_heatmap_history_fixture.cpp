@@ -179,3 +179,22 @@ TEST_F(HistoryFixture, ReferenceLineKeepsItsPriceAcrossTheBandShift) {
     EXPECT_EQ(zeroColumns, Layout{}.zeroLen);
     EXPECT_EQ(bandMids.size(), 2u);
 }
+
+TEST_F(HistoryFixture, RolledPagesPreserveObservedCoverageAndUtcDays) {
+    IdleSource source;
+    HeatmapTwapStreamer streamer(source, streamerConfig());
+    for (const int64_t tf : {300'000LL, 900'000LL, kDayMs}) {
+        std::vector<HeatmapTwapStreamer::HistoryColumn> cols;
+        int width = 0, height = 0;
+        ASSERT_TRUE(streamer.fetchHistory(m_spec.symbol, tf, 0, 1024, width, height, cols));
+        std::set<int64_t> expected;
+        for (const auto minute : m_expected) expected.insert((minute / tf) * tf);
+        std::set<int64_t> actual;
+        for (const auto& col : cols) {
+            actual.insert(col.bucketStartMs);
+            EXPECT_EQ(col.bucketStartMs % tf, 0);
+            EXPECT_EQ(col.bucketEndMs, col.bucketStartMs + tf);
+        }
+        EXPECT_EQ(actual, expected) << "timeframe=" << tf;
+    }
+}

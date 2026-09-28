@@ -61,9 +61,15 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
     const int64_t servedTimeframeMs = cfg.heatmap.activeTimeframeMs > 0
         ? cfg.heatmap.activeTimeframeMs
         : (cfg.heatmap.timeframesMs.empty() ? 0 : cfg.heatmap.timeframesMs.front());
+    std::vector<int64_t> servedHeatmap;
+    if (servedTimeframeMs > 0) servedHeatmap.push_back(servedTimeframeMs);
+    if (servedTimeframeMs == 60'000) {
+        for (const auto tf : cfg.heatmap.timeframesMs) {
+            if (tf > 60'000 && tf % 60'000 == 0) servedHeatmap.push_back(tf);
+        }
+    }
     payload["heatmap"] = {
-        {"served_timeframes_ms", servedTimeframeMs > 0
-            ? std::vector<int64_t>{servedTimeframeMs} : std::vector<int64_t>{}},
+        {"served_timeframes_ms", servedHeatmap},
         {"grid_width", cfg.heatmap.gridWidth},
         {"grid_height", cfg.heatmap.gridHeight},
         {"tick_size", cfg.heatmap.tickSize},
@@ -1073,19 +1079,19 @@ public:
             });
 
         barUpdatedConn_ = QObject::connect(&model_, &ServerDataModel::barUpdated,
-            [weak](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+            [weak](const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
                 if (auto self = weak.lock()) {
-                    self->postModelEvent([symbol, tf, bar](Session& session) {
-                        session.on_bar_updated(symbol, tf, bar);
+                    self->postModelEvent([symbol, timeframeMs, bar](Session& session) {
+                        session.on_bar_updated(symbol, timeframeMs, bar);
                     });
                 }
             });
 
         barClosedConn_ = QObject::connect(&model_, &ServerDataModel::barClosed,
-            [weak](const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+            [weak](const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
                 if (auto self = weak.lock()) {
-                    self->postModelEvent([symbol, tf, bar](Session& session) {
-                        session.on_bar_closed(symbol, tf, bar);
+                    self->postModelEvent([symbol, timeframeMs, bar](Session& session) {
+                        session.on_bar_closed(symbol, timeframeMs, bar);
                     });
                 }
             });
@@ -1318,7 +1324,7 @@ public:
                     if (limit > 10000) {
                         limit = 10000;
                     }
-                    const auto history = model_.getHistory(symbol, Timeframe::OneSecond, static_cast<size_t>(limit));
+                    const auto history = model_.getHistory(symbol, 1000, static_cast<size_t>(limit));
                     std::vector<OHLCVBar> filtered;
                     filtered.reserve(history.size());
                     for (const auto& bar : history) {
@@ -1366,8 +1372,11 @@ public:
                     return;
                 }
 
-                const auto granularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
-                if (!granularity) {
+                const int64_t timeframeMs = timeframeSec * 1000;
+                if (timeframeMs < 60'000 || timeframeMs % 60'000 != 0 ||
+                    std::find(owner_->serverConfig().heatmap.timeframesMs.begin(),
+                              owner_->serverConfig().heatmap.timeframesMs.end(),
+                              timeframeMs) == owner_->serverConfig().heatmap.timeframesMs.end()) {
                     send_error("candle_history_request", symbol, "unsupported timeframe_sec");
                     return;
                 }
@@ -1379,16 +1388,46 @@ public:
                 }
 
                 auto self = shared_from_this();
-                std::thread([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit, granularity]() {
+                std::thread([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit]() {
                     sentinel::logging::setCurrentThreadName("candle-fetch");
-                    CandleFetchResult res = self->owner_->restClient().fetchProductCandles(
-                        symbol, startTimeSec, endTimeSec, *granularity, limit);
-
-                    if (!res.ok) {
-                        self->send_error("candle_history_request", symbol,
-                                         std::string("fetch failed: ") + res.error);
-                        return;
+                    // Coinbase caps one request at 350 1m bars. Page the anchor,
+                    // then use the same UTC rollup rule as live candle updates.
+                    std::vector<OHLCVBar> minutes;
+                    const int64_t firstMinuteSec = (startTimeSec / 60) * 60;
+                    for (int64_t pageStart = firstMinuteSec; pageStart < endTimeSec;) {
+                        const int64_t pageEnd = std::min(pageStart + 350 * 60, endTimeSec);
+                        auto page = self->owner_->restClient().fetchProductCandles(
+                            symbol, pageStart, pageEnd, "ONE_MINUTE", 350);
+                        if (!page.ok) {
+                            self->send_error("candle_history_request", symbol,
+                                             std::string("fetch failed: ") + page.error);
+                            return;
+                        }
+                        for (auto& minute : page.candles) {
+                            if (minute.timestamp_ms >= pageStart * 1000 &&
+                                minute.timestamp_ms < pageEnd * 1000)
+                                minutes.push_back(std::move(minute));
+                        }
+                        pageStart = pageEnd;
                     }
+                    std::sort(minutes.begin(), minutes.end(),
+                              [](const OHLCVBar& a, const OHLCVBar& b) {
+                                  return a.timestamp_ms < b.timestamp_ms;
+                              });
+                    minutes.erase(std::unique(minutes.begin(), minutes.end(),
+                        [](const OHLCVBar& a, const OHLCVBar& b) {
+                            return a.timestamp_ms == b.timestamp_ms;
+                        }), minutes.end());
+                    CandleFetchResult res;
+                    res.ok = true;
+                    res.candles = TimeframeAggregator::rollupMinutes(minutes, timeframeSec * 1000);
+                    res.candles.erase(std::remove_if(res.candles.begin(), res.candles.end(),
+                        [startTimeSec, endTimeSec](const OHLCVBar& bar) {
+                            return bar.timestamp_ms < startTimeSec * 1000 ||
+                                   bar.timestamp_ms > endTimeSec * 1000;
+                        }), res.candles.end());
+                    if (res.candles.size() > static_cast<size_t>(limit))
+                        res.candles.erase(res.candles.begin(), res.candles.end() - limit);
 
                     std::sort(res.candles.begin(), res.candles.end(),
                               [](const OHLCVBar& a, const OHLCVBar& b) {
@@ -1820,11 +1859,11 @@ public:
         return highChanged || lowChanged || closeMoved || volumeMoved || silence;
     }
 
-    void on_bar_updated(const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+    void on_bar_updated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
         const std::string sym = symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
-        const int64_t tfSec = static_cast<int64_t>(tf);
+        const int64_t tfSec = (timeframeMs / 1000);
         const std::string key = sym + "|" + std::to_string(tfSec);
         const int64_t nowMs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1875,11 +1914,11 @@ public:
         do_write(payload.dump());
     }
 
-    void on_bar_closed(const QString& symbol, Timeframe tf, const OHLCVBar& bar) {
+    void on_bar_closed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
         const std::string sym = symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
-        const int64_t tfSec = static_cast<int64_t>(tf);
+        const int64_t tfSec = (timeframeMs / 1000);
         const std::string key = sym + "|" + std::to_string(tfSec);
         CandleStreamState state;
         {

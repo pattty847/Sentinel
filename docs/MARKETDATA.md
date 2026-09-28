@@ -68,7 +68,11 @@ The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpd
 
 ## Heatmap timeframes
 
-In `server_config`, top-level `timeframes_ms` is the configured candidate list, kept for compatibility. `heatmap.served_timeframes_ms` lists the timeframes for which the server actually builds heatmap columns; currently it contains only the active timeframe. The client uses this list to disable unavailable chart timeframes. If the field is absent on an older server, availability is unknown and all toolbar timeframes stay enabled.
+In `server_config`, top-level `timeframes_ms` is the configured candidate list, kept for compatibility. `heatmap.served_timeframes_ms` lists the active 1m anchor and configured integer multiples of 1m that the server rolls up from it (5m, 15m, 1h, 4h, 1d in the shipped config). The client uses this list to disable unavailable chart timeframes. If the field is absent on an older server, availability is unknown and all toolbar timeframes stay enabled. The 1s timeframe remains available for candles but is not served as a heatmap.
+
+Heatmap rollup buckets align to UTC epoch multiples of their timeframe; 1d starts at 00:00 UTC. A bucket is present if it contains at least one recorded 1m column. Missing minutes contribute no value, and a bucket with no recorded columns is absent. Each recorded 1m TWAP contributes one minute of weight. The server maps each column into the latest observed price band for the output bucket, averages signed bid/ask intensity (bid positive, ask negative), and averages liquidity in physical units before quantizing. Live rolled slices refresh when a 1m column finalizes; the forming 1m slice continues at the sample cadence. `oldest_available_ms` for a rolled timeframe is the containing aligned bucket of the oldest 1m stored column.
+
+Candle timeframe identifiers are millisecond durations internally and `timeframe_sec` on the wire. The 1m candle is the anchor for every configured coarser candle (5m, 15m, 1h, 4h, 1d). Rollups use the first open, last close, extrema of highs/lows, and sums of volume and trade count. Live 1m empty bars carried by the server are included in coarser bars. Historical REST backfill pages 1m candles and applies the same UTC rollup boundaries; REST does not provide trade count, so backfilled counts remain zero.
 
 ## Heatmap history transport
 
