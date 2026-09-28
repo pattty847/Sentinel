@@ -67,6 +67,21 @@
           "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
           "CMAKE_MAKE_PROGRAM": "/usr/bin/ninja"
         }
+      },
+      {
+        "name": "linux-cloud",
+        "displayName": "Linux - Claude Code on the web (deps from scripts/setup/bootstrap-cloud.sh)",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/linux-cloud",
+        "cacheVariables": {
+          "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+          "CMAKE_PREFIX_PATH": "/opt/sentinel-deps/qt;/opt/sentinel-deps/prefix",
+          "JWT_CPP_INCLUDE_DIR": "/opt/sentinel-deps/jwt-cpp/include",
+          "CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES": "/opt/sentinel-deps/prefix/include",
+          "FETCHCONTENT_SOURCE_DIR_GOOGLETEST": "/opt/sentinel-deps/googletest",
+          "FETCHCONTENT_FULLY_DISCONNECTED": "ON",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
       }
     ],
   
@@ -83,10 +98,18 @@
       { "name": "windows-msvc-ninja",  "configurePreset": "windows-msvc-ninja" },
       { "name": "mac-clang",    "configurePreset": "mac-clang" },
       { "name": "mac-clang-release", "configurePreset": "mac-clang-release" },
-      { "name": "linux-gcc",    "configurePreset": "linux-gcc" }
+      { "name": "linux-gcc",    "configurePreset": "linux-gcc" },
+      { "name": "linux-cloud",  "configurePreset": "linux-cloud" }
     ],
 
     "testPresets": [
+      {
+        "name": "linux-cloud",
+        "configurePreset": "linux-cloud",
+        "output": {
+          "outputOnFailure": true
+        }
+      },
       {
         "name": "windows-msvc-vs",
         "configurePreset": "windows-msvc-vs",
