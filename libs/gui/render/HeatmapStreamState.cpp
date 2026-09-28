@@ -75,6 +75,7 @@ bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
     m_minPrice = placement.minPrice;
     m_maxPrice = placement.maxPrice;
     m_tickSize = placement.tickSize;
+    m_valueMetadata = placement;
     m_writeColumn = placement.newestSlot;
     m_filledColumns = gridWidth;
     m_lastSliceStartMs = placement.windowEndMs;
@@ -101,9 +102,9 @@ bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
                                  : std::find_if(m_pendingUploads.begin(), m_pendingUploads.end(),
                                                 [&slot](const PendingColumn& p) { return p.x == slot.x; });
             if (it == m_pendingUploads.end()) {
-                m_pendingUploads.push_back({slot.x, slot.intensity, slot.liquidity, slot.liquidityScale});
+                m_pendingUploads.push_back({slot.x, slot.intensity, slot.liquidity, slot.liquidityScale, slot.validity});
             } else {
-                *it = {slot.x, slot.intensity, slot.liquidity, slot.liquidityScale};
+                *it = {slot.x, slot.intensity, slot.liquidity, slot.liquidityScale, slot.validity};
             }
         }
     }
@@ -119,6 +120,7 @@ bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
             label.intensity = slot.intensity;
             label.liquidity = slot.liquidity;
             label.liquidityScale = slot.liquidityScale;
+            label.validity = slot.validity;
             label.haveLiquidity = slot.liquidity.size() == liquidityBytes;
             auto it = replaceAll ? m_pendingLabelUploads.end()
                                  : std::find_if(m_pendingLabelUploads.begin(), m_pendingLabelUploads.end(),
@@ -137,6 +139,7 @@ bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
             m_intensityRing.assign(ringSize, 0);
             m_liquidityRing.assign(ringSize, 0);
             m_liquidityScales.assign(static_cast<size_t>(gridWidth), 1.0);
+            m_validity.assign(static_cast<size_t>(gridWidth), {});
             m_liquidityAvailable = false;
         }
         for (const auto& slot : slotColumns) {
@@ -154,6 +157,7 @@ bool HeatmapStreamState::applyWindow(const WindowPlacement& placement,
                     ? qFromLittleEndian(reinterpret_cast<const uint16_t*>(slot.liquidity.constData())[y])
                     : 0;
             }
+            m_validity[static_cast<size_t>(slot.x)] = slot.validity;
             m_liquidityScales[static_cast<size_t>(slot.x)] = slot.liquidityScale > 0.0 ? slot.liquidityScale : 1.0;
             m_liquidityAvailable = m_liquidityAvailable || haveLiquidity;
         }
@@ -205,6 +209,10 @@ HeatmapStreamState::Snapshot HeatmapStreamState::snapshot() const {
         snap.minPrice = m_minPrice;
         snap.maxPrice = m_maxPrice;
         snap.tickSize = m_tickSize;
+        snap.valueEncoding = m_valueMetadata.valueEncoding;
+        snap.bandGeneration = m_valueMetadata.bandGeneration;
+        snap.sizeFloor = m_valueMetadata.sizeFloor;
+        snap.codesPerOctave = m_valueMetadata.codesPerOctave;
     }
     snap.timeOffset = m_timeOffset.load();
     {
@@ -243,6 +251,10 @@ bool HeatmapStreamState::copyLabelSnapshot(LabelSnapshot& out) const {
         snap.minPrice = m_minPrice;
         snap.maxPrice = m_maxPrice;
         snap.tickSize = m_tickSize;
+        snap.valueEncoding = m_valueMetadata.valueEncoding;
+        snap.bandGeneration = m_valueMetadata.bandGeneration;
+        snap.sizeFloor = m_valueMetadata.sizeFloor;
+        snap.codesPerOctave = m_valueMetadata.codesPerOctave;
     }
     snap.timeOffset = m_timeOffset.load();
 
@@ -252,6 +264,7 @@ bool HeatmapStreamState::copyLabelSnapshot(LabelSnapshot& out) const {
     out.liquidityRing = m_liquidityRing;
     out.intensityRing = m_intensityRing;
     out.liquidityScales = m_liquidityScales;
+    out.validity = m_validity;
     return snap.liquidityAvailable;
 }
 
@@ -297,6 +310,7 @@ void HeatmapStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_minPrice = 0.0;
     m_maxPrice = 0.0;
     m_tickSize = 0.0;
+    m_valueMetadata = {};
 
     {
         std::lock_guard<std::mutex> lock(m_uploadMutex);
@@ -312,6 +326,7 @@ void HeatmapStreamState::resetLocked(int gridWidth, int gridHeight) {
         m_intensityRing.assign(expectedSize, 0);
         m_liquidityRing.assign(expectedSize, 0);
         m_liquidityScales.assign(gridWidth, 1.0);
+        m_validity.assign(gridWidth, {});
         m_liquidityAvailable = false;
     }
     m_timeOffset.store(0.0f);

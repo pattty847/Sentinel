@@ -5,6 +5,7 @@ Threading: Ingest on GUI thread; snapshot/pending uploads on render thread.
 */
 #pragma once
 
+#include "HeatmapColumnWindow.hpp"
 #include <QByteArray>
 #include <atomic>
 #include <cstdint>
@@ -19,6 +20,7 @@ public:
         QByteArray data;
         QByteArray liquidity;       // raw uint16_t per row; empty if not available
         double liquidityScale = 1.0;
+        QByteArray validity; // packed row bits; empty for legacy
     };
 
     struct PendingLabelColumn {
@@ -26,6 +28,7 @@ public:
         QByteArray intensity;
         QByteArray liquidity;
         double liquidityScale = 1.0;
+        QByteArray validity; // packed row bits; empty for legacy
         bool haveLiquidity = false;
     };
 
@@ -34,9 +37,15 @@ public:
         QByteArray intensity;
         QByteArray liquidity;       // raw uint16_t per row; empty when not recorded
         double liquidityScale = 1.0;
+        QByteArray validity; // packed row bits; empty for legacy
     };
 
     struct WindowPlacement {
+        heatmap_window::ValueEncoding valueEncoding = heatmap_window::ValueEncoding::LegacyIntensity;
+        uint64_t bandGeneration = 0;
+        double sizeFloor = 0.0;
+        double codesPerOctave = 0.0;
+
         int64_t timeframeMs = 0;
         int gridWidth = 0;
         int gridHeight = 0;
@@ -51,6 +60,11 @@ public:
     };
 
     struct Snapshot {
+        heatmap_window::ValueEncoding valueEncoding = heatmap_window::ValueEncoding::LegacyIntensity;
+        uint64_t bandGeneration = 0;
+        double sizeFloor = 0.0;
+        double codesPerOctave = 0.0;
+
         int gridWidth = 0;
         int gridHeight = 0;
         int appendMs = 0;
@@ -70,6 +84,7 @@ public:
         std::vector<uint16_t> liquidityRing;
         std::vector<uint16_t> intensityRing;
         std::vector<double> liquidityScales;
+        std::vector<QByteArray> validity; // slot indexed, for full rebuilds
     };
 
     HeatmapStreamState() = default;
@@ -121,6 +136,7 @@ private:
     double m_minPrice = 0.0;
     double m_maxPrice = 0.0;
     double m_tickSize = 0.0;
+    WindowPlacement m_valueMetadata;
 
     mutable std::mutex m_uploadMutex;
     std::vector<PendingColumn> m_pendingUploads;
@@ -132,6 +148,7 @@ private:
     std::vector<uint16_t> m_intensityRing;
     std::vector<uint16_t> m_liquidityRing;
     std::vector<double> m_liquidityScales;
+    std::vector<QByteArray> m_validity;
     bool m_liquidityAvailable = false;
     int m_intensityBytesPerCell = 1;
 

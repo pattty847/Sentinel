@@ -697,6 +697,17 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
+    const auto& store = GuiConfigStore::instance();
+    if (store.clientConfig().heatmap.source == "recording" &&
+        store.serverConfig().wasAdvertised("recording.available") && store.serverConfig().recording.available) {
+        if (m_qmlController) {
+            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+                QMetaObject::invokeMethod(renderer->getDataProcessor(), &DataProcessor::refreshRecordingHistory,
+                                          Qt::QueuedConnection);
+            }
+        }
+        return;
+    }
     int64_t timeframeMs = 0;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
@@ -996,6 +1007,20 @@ void MainWindowGPU::connectMarketDataSignals() {
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     unifiedGridRenderer->setActiveSymbol(m_currentSymbol);
     if (dataProcessor) {
+        QMetaObject::invokeMethod(dataProcessor, [dataProcessor, connected = m_connected] {
+            dataProcessor->setRecordingConnected(connected);
+        }, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
+                dataProcessor, &DataProcessor::setRecordingConnected, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryReceived,
+                dataProcessor, &DataProcessor::onRecordingHistoryReceived, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryError,
+                dataProcessor, &DataProcessor::onRecordingHistoryError, Qt::QueuedConnection);
+        connect(dataProcessor, &DataProcessor::recordingHistoryFetchNeeded, this,
+                [this](const protocol::recordingwire::Request& request) {
+                    if (!canRequestConfiguredHistoryForSymbol(QString::fromStdString(request.symbol))) return;
+                    m_dataSource->requestRecordingHeatmapHistory(request);
+                }, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
                 dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,

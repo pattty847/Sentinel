@@ -140,11 +140,15 @@ void UnifiedGridRenderer::onViewportChanged() {
   const qint64 viewStart = m_viewState->getVisibleTimeStart();
   const qint64 viewEnd = m_viewState->getVisibleTimeEnd();
   const bool follow = m_viewState->isAutoScrollEnabled();
+  const double minPrice = m_viewState->getMinPrice();
+  const double maxPrice = m_viewState->getMaxPrice();
+  const double widthPx = m_viewState->getViewportWidth();
+  const double heightPx = m_viewState->getViewportHeight();
   if (m_viewState->isTimeWindowValid()) {
     QMetaObject::invokeMethod(
         m_dataProcessor.get(),
-        [this, viewStart, viewEnd, follow]() {
-          m_dataProcessor->setHeatmapViewport(viewStart, viewEnd, follow);
+        [this, viewStart, viewEnd, follow, minPrice, maxPrice, widthPx, heightPx]() {
+          m_dataProcessor->setHeatmapViewport(viewStart, viewEnd, follow, minPrice, maxPrice, widthPx, heightPx);
         },
         Qt::QueuedConnection);
   }
@@ -808,6 +812,12 @@ void UnifiedGridRenderer::buildMsdfAtlas() {
 }
 
 void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
+  if (m_dataProcessor) {
+    const auto heatmap = config.heatmap;
+    QMetaObject::invokeMethod(m_dataProcessor.get(), [this, heatmap] {
+      m_dataProcessor->setRecordingConfig(heatmap.source == "recording", heatmap.targetRowPx, heatmap.cellAspect);
+    }, Qt::QueuedConnection);
+  }
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
@@ -827,10 +837,20 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
     sLog_Warning("Heatmap labelPx exceeds max 128, keeping current: labelPx="
                  << config.heatmap.labelPx << " using=" << m_heatmapLabelPx);
   }
+  onViewportChanged();
   update();
 }
 
 void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
+  if (m_dataProcessor) {
+    const bool available = config.wasAdvertised("recording.available") && config.recording.available;
+    const int gridWidth = config.heatmap.gridWidth;
+    const int gridHeight = config.heatmap.gridHeight;
+    QMetaObject::invokeMethod(m_dataProcessor.get(), [this, available, gridWidth, gridHeight] {
+      m_dataProcessor->setHeatmapGridDimensions(gridWidth, gridHeight);
+      m_dataProcessor->setRecordingCapability(available);
+    }, Qt::QueuedConnection);
+  }
   if (m_heatmapStreamService) {
     m_heatmapStreamService->setGridDimensions(
         config.heatmap.gridWidth, config.heatmap.gridHeight, m_heatmapOverlay);

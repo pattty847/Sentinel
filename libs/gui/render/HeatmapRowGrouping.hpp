@@ -50,6 +50,13 @@ inline double targetRowPx(double columnPx, double minRowPx, double aspect, doubl
     return std::clamp(columnPx * aspect, lo, std::max(lo, maxRowPx));
 }
 
+// Price tick implied by the same square-cell pixel target used by the renderer.
+// The caller/server rounds this onto its authoritative native price grid.
+inline double squareCellTick(double pricePerPixel, double columnPx, double minRowPx, double aspect) {
+    if (!(pricePerPixel > 0.0) || !std::isfinite(pricePerPixel)) return 0.0;
+    return pricePerPixel * targetRowPx(columnPx, minRowPx, aspect);
+}
+
 // Texture row 0 is the top of the band (maxPrice); row r is price maxPrice - r * tick.
 // Returns (absolute tick index of row 0) mod n, in [0, n). Display row boundaries
 // fall where (phase - r) is a multiple of n.

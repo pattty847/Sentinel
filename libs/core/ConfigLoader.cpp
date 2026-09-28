@@ -205,6 +205,9 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
     }
 
     if (heatmapNode) {
+        readScalar(heatmapNode, "source", cfg.heatmap.source);
+        if (cfg.heatmap.source != "legacy" && cfg.heatmap.source != "recording")
+            cfg.heatmap.source = "legacy";
         readScalar(heatmapNode, "gamma", cfg.heatmap.gamma);
         readScalar(heatmapNode, "contrast", cfg.heatmap.contrast);
         readScalar(heatmapNode, "shader_floor", cfg.heatmap.shaderFloor);

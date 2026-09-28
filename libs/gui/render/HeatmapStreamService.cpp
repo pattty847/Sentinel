@@ -121,9 +121,13 @@ HeatmapStreamService::applyWindowUpdate(const heatmap_window::Update& update,
     std::vector<HeatmapStreamState::SlotColumn> slotColumns;
     slotColumns.reserve(update.writes.size());
     for (const auto& write : update.writes) {
-        slotColumns.push_back({write.slot, write.intensity, write.liquidity, write.liquidityScale});
+        slotColumns.push_back({write.slot, write.intensity, write.liquidity, write.liquidityScale, write.validity});
     }
     HeatmapStreamState::WindowPlacement placement;
+    placement.valueEncoding = update.valueEncoding;
+    placement.bandGeneration = update.bandGeneration;
+    placement.sizeFloor = update.sizeFloor;
+    placement.codesPerOctave = update.codesPerOctave;
     placement.timeframeMs = cadenceMs;
     placement.gridWidth = update.width;
     placement.gridHeight = update.rows;
@@ -189,6 +193,8 @@ HeatmapStreamService::handleRenderTick(GridViewState* viewState) {
     RenderTickResult result;
 
     const auto snapshot = m_stream ? m_stream->snapshot() : HeatmapStreamState::Snapshot{};
+    // S3 history has a fixed right edge; never advance presentation time past it.
+    if (snapshot.valueEncoding == heatmap_window::ValueEncoding::AbsoluteLogSize) return result;
     const qint64 nowMs = m_clock.elapsed();
     const auto timeSnapshot = m_timeAuthority.snapshot(nowMs);
     const int64_t cadenceMs = (timeSnapshot.activeTimeframeMs > 0)
@@ -466,7 +472,8 @@ void HeatmapStreamService::rebuildTextureFromRing(HeatmapOverlayRenderer& overla
         const double liqScale = (x < static_cast<int>(snap.liquidityScales.size()))
                                     ? snap.liquidityScales[x]
                                     : 1.0;
-        columns.push_back({x, std::move(intensityData), std::move(liquidityData), liqScale});
+        const QByteArray validity = x < static_cast<int>(snap.validity.size()) ? snap.validity[x] : QByteArray{};
+        columns.push_back({x, std::move(intensityData), std::move(liquidityData), liqScale, validity});
     }
 
     m_stream->injectPendingUploads(std::move(columns));
