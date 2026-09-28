@@ -118,3 +118,6 @@ target_link_libraries(test_recording_page PRIVATE sentinel_core GTest::gtest_mai
 add_test(NAME RecordingPageTests COMMAND test_recording_page)
 set_tests_properties(RecordingPageTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_recording_page)
+# Restart upgrade fixture independently constructs schema-3 hour frames.
+target_link_libraries(test_book_recorder PRIVATE
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)

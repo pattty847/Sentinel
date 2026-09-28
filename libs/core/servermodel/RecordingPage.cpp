@@ -253,6 +253,9 @@ BuildResult buildPage(Hmc2Reader &reader, const BuildRequest &q, StopToken stop)
             }
             if (!control.poll())
                 break;
+            std::optional<ReadControl::WorkScope> firstColumn;
+            if (out.columns.empty() && q.tfMs / (q.tfMs < hour ? minute : hour) <= 16)
+                firstColumn.emplace(control, false);
             Aggregate aggregate;
             aggregate.direct = q.tfMs == minute;
             aggregate.column.bucketStartMs = bucket;

@@ -234,7 +234,7 @@ TEST_F(PageTest, IncompleteRollupDoesNotClaimItsScannedInterval) {
     EXPECT_EQ(p.nextEnd, epoch);
     EXPECT_FALSE(p.exhausted);
 }
-TEST_F(PageTest, CancellationAndZeroBudgetsMakeNoClaims) {
+TEST_F(PageTest, CancellationStopsButZeroBudgetsAreClampedForProgress) {
     write({record()});
     auto q = request();
     std::stop_source stop;
@@ -243,15 +243,24 @@ TEST_F(PageTest, CancellationAndZeroBudgetsMakeNoClaims) {
     EXPECT_EQ(p.status, BuildStatus::Cancelled);
     EXPECT_FALSE(p.exhausted);
     EXPECT_TRUE(p.columns.empty());
-    for (bool wall : {false, true}) {
-        q.budgets = {};
-        if (wall) q.budgets.maxWallMs = 0;
-        else q.budgets.maxEntriesVisited = 0;
-        p = buildPage(root(), q);
+    Hmc2Reader reader(root());
+    q.budgets.maxSourceRecords = 0;
+    q.budgets.maxEntriesVisited = 0;
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        p = buildPage(reader, q);
+        if (!p.columns.empty()) break;
         EXPECT_EQ(p.status, BuildStatus::Budget);
         EXPECT_FALSE(p.exhausted);
-        EXPECT_EQ(p.scannedStartMs, p.scannedEndMs);
     }
+    ASSERT_EQ(p.columns.size(), 1);
+    EXPECT_EQ(p.scannedStartMs, epoch);
+    EXPECT_EQ(p.scannedEndMs, epoch + minute);
+    ReadControl clamped;
+    clamped.limits = {0, 0, 0};
+    EXPECT_TRUE(clamped.poll());
+    EXPECT_EQ(clamped.limits.maxSourceRecords, 1);
+    EXPECT_EQ(clamped.limits.maxEntriesVisited, 1);
+    EXPECT_EQ(clamped.limits.maxWallMs, 10);
 }
 TEST_F(PageTest, AvailabilityCachedAndInvalidatedOnAppendAndGeneration) {
     write({record()});

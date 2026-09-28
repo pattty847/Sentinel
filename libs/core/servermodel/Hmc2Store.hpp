@@ -62,13 +62,34 @@ struct ReadLimits {
 // Share one control across availability and all scans in a request. Entry work
 // includes inherited delta entries plus changes (a conservative reconstruction bound).
 // Index discovery charges source records too, but parses no entries. It shares
-// the deadline; cold-cache requests can spend their budget in discovery.
+// the deadline; cold discovery resumes from its cached cursor on later requests.
+// Minimum limits are 1 source record, 1 entry, 10 ms. The first selected record
+// (plus its bounded delta chain) is admitted atomically, so counters may exceed
+// those soft limits. Cancellation is never deferred.
 struct ReadControl {
     ReadLimits limits;
     StopToken stop;
     uint64_t sourceRecords = 0, entriesVisited = 0;
     ReadStatus status = ReadStatus::Complete;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    uint64_t deliveredRecords = 0;
+    unsigned deadlineDepth = 0, admissionDepth = 0;
+    // A first record + its <=15-record chain is an atomic admission unit.
+    // Builders defer only the deadline through first-column projection.
+    struct WorkScope {
+        ReadControl &control;
+        bool admission;
+        WorkScope(ReadControl &c, bool admit) : control(c), admission(admit) {
+            ++control.deadlineDepth;
+            if (admission) ++control.admissionDepth;
+        }
+        WorkScope(const WorkScope &) = delete;
+        WorkScope &operator=(const WorkScope &) = delete;
+        ~WorkScope() {
+            --control.deadlineDepth;
+            if (admission) --control.admissionDepth;
+        }
+    };
     bool poll();
     bool charge(uint64_t entries);
 };
@@ -81,7 +102,8 @@ struct SeriesAvailability {
     std::optional<Hmc2Header> latestHeader;
 };
 // Worker-owned reusable read session; no writer lock, no GUI dependencies.
-// Caches metadata for 64 files, the active record, and a bounded 16-record
+// Debug builds assert use/destruction on the constructing thread.
+// Caches LRU metadata for 64 files, the active record, and a bounded 16-record
 // replay window (262144 entries max); never retains a requested series/range.
 // File size/mtime and directory contents invalidate metadata/availability, including
 // appends by a writer in another process. Callback references expire on return.
@@ -96,6 +118,12 @@ class Hmc2Reader {
     ScanResult visit(const std::string &symbol, const std::string &layer, int64_t tfMs,
                      int64_t startMs, int64_t endMs, const std::function<void(const Hmc2Record &)> &visitor,
                      ReadControl &control);
+    // Deterministic race/I/O seams; one-shot hooks are invoked before refreshing
+    // a collected candidate and immediately before its payload read, respectively.
+    void beforeCandidateForTest(std::function<void()> hook);
+    void beforeReadForTest(std::function<void()> hook);
+    struct Diagnostics { uint64_t indexedFrames = 0, directoryListings = 0, indexEvictions = 0; };
+    Diagnostics diagnosticsForTest() const;
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -16,6 +16,9 @@
 #include <stdexcept>
 #include <tuple>
 #include <deque>
+#include <thread>
+#include <cassert>
+#include <cerrno>
 
 namespace recording {
 namespace {
@@ -32,6 +35,10 @@ constexpr size_t kMaxEntries = (kHmc2MaxRawLen - 93) / 5;
 constexpr size_t kMaxWriters = 64;
 constexpr size_t kPrefix = 14; // magic:u32, version:u16, length:u32, crc:u32
 constexpr uint32_t kMaxHeader = 65536;
+struct ReadIo : std::runtime_error {
+    bool permission;
+    explicit ReadIo(const std::string &message, bool denied = false) : std::runtime_error(message), permission(denied) {}
+};
 struct Corrupt : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
@@ -373,6 +380,9 @@ Hmc2Record decodeRecord(const Hmc2Header &h, uint16_t schema, const Bytes &b, co
     }
     if (c.p != b.size())
         throw Corrupt("record trailing bytes");
+    if (schema != kHourSchema || h.tfMs != 3'600'000)
+        for (auto &entry : r.entries)
+            entry.coveredMs = r.observedMs;
     return r;
 }
 void sync(const fs::path &p, bool directory = false) {
@@ -482,13 +492,16 @@ uint64_t nextMagic(std::ifstream &f, uint64_t pos, uint64_t end, Bytes &scratch,
 // A length running past EOF is terminal only if no later valid candidate exists.
 template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
                                int64_t decodeStart = kHmc2MinMs, int64_t decodeEnd = kHmc2EndMs,
-                               const std::function<void(const Hmc2Header &, uint16_t, const Bytes &, uint64_t, bool)> &metadataSink = {},
-                               const std::function<bool()> &poll = {}) {
+                               const std::function<bool(const Hmc2Header &, uint16_t, const Bytes &, uint64_t, bool, uint64_t, uint32_t)> &metadataSink = {},
+                               const std::function<bool()> &poll = {}, uint64_t resume = 0,
+                               uint64_t *nextOffset = nullptr) {
     std::ifstream f(path, std::ios::binary);
-    check(f.is_open(), "open " + path.string());
+    if (!f.is_open())
+        throw ReadIo("open " + path.string(), errno == EACCES || errno == EPERM);
     uint64_t pos = 0;
     uint16_t schema;
     const auto h = readHeader(f, pos, schema);
+    if (resume) pos = resume;
     std::optional<Hmc2Record> previous;
     std::error_code sizeError;
     const auto end = fs::file_size(path, sizeError);
@@ -497,6 +510,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
     uint64_t tail = end;
     bool damaged = false;
     while (pos < end) {
+        if (nextOffset) *nextOffset = pos;
         if (poll && !poll())
             return;
         if (damaged)
@@ -515,7 +529,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
             break;
         }
         if (!readAt(f, pos, framing, 16))
-            fail("read " + path.string());
+            throw ReadIo("read " + path.string());
         Cursor c{framing};
         if (c.get<uint32_t>() != kHmc2RecordMagic) {
             damaged = true;
@@ -536,7 +550,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
             continue;
         }
         if (!readAt(f, pos + 16, compressed, clen))
-            fail("read payload " + path.string());
+            throw ReadIo("read payload " + path.string());
         bool good = hmcol::crc32(compressed.data(), compressed.size()) == crc;
         if (good) {
             raw.resize(rlen);
@@ -545,7 +559,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
             good = !ZSTD_isError(n) && n == rlen && frameSize == clen;
         }
         if (good && metadataSink) {
-            metadataSink(h, schema, raw, pos, damaged);
+            if (!metadataSink(h, schema, raw, pos, damaged, pos + 16 + clen, crc)) return;
             pos += 16 + clen;
             damaged = false;
             continue;
@@ -593,6 +607,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
         damaged = true;
         pos = nextMagic(f, pos + 1, end, scratch, poll);
     }
+    if (nextOffset) *nextOffset = pos;
     if (damaged) {
         sLog_Warning("Hmc2Store: corrupt bytes skipped path=" << path.string());
         if (tail == end)
@@ -610,11 +625,14 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
 } // namespace
 
 bool ReadControl::poll() {
+    limits.maxSourceRecords = std::max<uint64_t>(1, limits.maxSourceRecords);
+    limits.maxEntriesVisited = std::max<uint64_t>(1, limits.maxEntriesVisited);
+    limits.maxWallMs = std::max<uint64_t>(10, limits.maxWallMs);
     if (status != ReadStatus::Complete)
         return false;
     if (stop.stop_requested())
         status = ReadStatus::Cancelled;
-    else if (static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+    else if (!deadlineDepth && static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::steady_clock::now() - started).count()) >= limits.maxWallMs)
         status = ReadStatus::Budget;
     return status == ReadStatus::Complete;
@@ -622,8 +640,8 @@ bool ReadControl::poll() {
 bool ReadControl::charge(uint64_t entries) {
     if (!poll())
         return false;
-    if (sourceRecords >= limits.maxSourceRecords || entriesVisited > limits.maxEntriesVisited ||
-        entries > limits.maxEntriesVisited - entriesVisited) {
+    if (!admissionDepth && (sourceRecords >= limits.maxSourceRecords || entriesVisited > limits.maxEntriesVisited ||
+        entries > limits.maxEntriesVisited - entriesVisited)) {
         status = ReadStatus::Budget;
         return false;
     }
@@ -633,10 +651,19 @@ bool ReadControl::charge(uint64_t entries) {
 }
 struct Hmc2Reader::Impl {
     fs::path root;
+    const std::thread::id owner = std::this_thread::get_id();
+    void assertOwner() const { assert(owner == std::this_thread::get_id()); }
+    Diagnostics diagnostics;
+    std::function<void()> beforeCandidate, beforeRead;
+    uint64_t clock = 0;
+    bool incompleteDiscovery = false;
+    std::vector<fs::path> interruptedListing;
     struct Frame {
         int64_t bucket;
         uint64_t offset, work;
         bool delta, chain;
+        uint64_t end = 0;
+        uint32_t crc = 0;
     };
     struct Index {
         Hmc2Header header;
@@ -646,6 +673,8 @@ struct Hmc2Reader::Impl {
         std::vector<Frame> frames;
         std::shared_ptr<Hmc2Record> last;
         size_t lastIndex = SIZE_MAX;
+        uint64_t used = 0, nextOffset = 0;
+        bool complete = false;
     };
     std::map<fs::path, Index> indexes;
     struct Replay { fs::path path; size_t at; std::shared_ptr<Hmc2Record> record; };
@@ -672,30 +701,100 @@ struct Hmc2Reader::Impl {
         SeriesAvailability value;
     };
     std::map<fs::path, CachedAvailability> available;
+    struct Listing { fs::file_time_type modified; std::vector<fs::path> paths; uint64_t used; };
+    std::map<fs::path, Listing> listings;
+    const std::vector<fs::path> &listing(const fs::path &dir, ReadControl &control) {
+        std::error_code ec;
+        const auto modified = fs::last_write_time(dir, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory)
+            throw ReadIo("directory stat " + dir.string() + ": " + ec.message());
+        if (auto it = listings.find(dir); it != listings.end() && it->second.modified == modified) {
+            it->second.used = ++clock;
+            return it->second.paths;
+        }
+        auto paths = files(dir, {}, false, [&] { return control.poll(); });
+        ++diagnostics.directoryListings;
+        if (!control.poll()) { interruptedListing.clear(); return interruptedListing; }
+        if (listings.size() >= 64 && !listings.contains(dir)) {
+            auto victim = std::min_element(listings.begin(), listings.end(), [](const auto &a, const auto &b) {
+                return a.second.used < b.second.used;
+            });
+            listings.erase(victim);
+        }
+        return listings.insert_or_assign(dir, Listing{modified, std::move(paths), ++clock}).first->second.paths;
+    }
+    void forgetReplay(const fs::path &path) {
+        std::erase_if(replay, [&](const auto &r) {
+            if (r.path != path) return false;
+            replayEntries -= r.record->entries.size() + r.record->coverage.size();
+            return true;
+        });
+    }
+    bool intactTail(const fs::path &path, const Index &idx) {
+        if (idx.frames.empty() || !idx.nextOffset) return false;
+        std::ifstream f(path, std::ios::binary);
+        if (!f.is_open()) throw ReadIo("open tail " + path.string(), errno == EACCES || errno == EPERM);
+        uint64_t pos = 0;
+        uint16_t schema;
+        const auto h = readHeader(f, pos, schema);
+        if (schema != idx.schema || headerBody(h) != headerBody(idx.header)) return false;
+        const auto &last = idx.frames.back();
+        Bytes bytes;
+        if (!readAt(f, last.offset, bytes, 16)) throw ReadIo("read tail framing " + path.string());
+        Cursor framing{bytes};
+        if (framing.get<uint32_t>() != kHmc2RecordMagic) return false;
+        const auto length = framing.get<uint32_t>();
+        framing.get<uint32_t>();
+        if (framing.get<uint32_t>() != last.crc || length != last.end - last.offset - 16) return false;
+        if (last.end != idx.nextOffset || last.end < last.offset + 16) return false;
+        if (!readAt(f, last.offset + 16, bytes, last.end - last.offset - 16))
+            throw ReadIo("read tail " + path.string());
+        return hmcol::crc32(bytes.data(), bytes.size()) == last.crc;
+    }
     explicit Impl(fs::path p) : root(std::move(p)) {}
-    Index *index(const fs::path &path, ReadControl &control) {
+    Index *index(const fs::path &path, ReadControl &control, bool discovery = false) {
         if (!control.poll())
             return nullptr;
         try {
             const auto size = fs::file_size(path);
             const auto modified = fs::last_write_time(path);
-            if (auto it = indexes.find(path); it != indexes.end()) {
-                if (it->second.size == size && it->second.modified == modified)
-                    return &it->second;
-                indexes.erase(it);
+            auto found = indexes.find(path);
+            if (found != indexes.end() && found->second.size == size && found->second.modified == modified && found->second.complete) {
+                found->second.used = ++clock;
+                return &found->second;
             }
-            std::erase_if(replay, [&](const auto &r) {
-                if (r.path != path)
-                    return false;
-                replayEntries -= r.record->entries.size() + r.record->coverage.size();
-                return true;
-            });
-            Index next;
+            bool resume = found != indexes.end() &&
+                          (size > found->second.size || (size == found->second.size &&
+                           modified == found->second.modified && !found->second.complete)) &&
+                          intactTail(path, found->second);
+            if (!resume && found != indexes.end()) {
+                indexes.erase(found);
+                found = indexes.end();
+                forgetReplay(path);
+            }
+            if (found == indexes.end()) {
+                if (indexes.size() >= 64) {
+                    auto victim = std::min_element(indexes.begin(), indexes.end(), [](const auto &a, const auto &b) {
+                        return a.second.used < b.second.used;
+                    });
+                    forgetReplay(victim->first);
+                    indexes.erase(victim);
+                    ++diagnostics.indexEvictions;
+                }
+                found = indexes.emplace(path, Index{}).first;
+            }
+            auto &next = found->second;
+            next.used = ++clock;
             next.size = size;
             next.modified = modified;
+            next.complete = false;
+            const auto offset = next.nextOffset;
             scan(path, false, [](Hmc2Record &&) {}, kHmc2MinMs, kHmc2EndMs,
-                [&](const auto &h, uint16_t schema, const Bytes &raw, uint64_t offset, bool damaged) {
-                    if (!control.charge(0)) return;
+                [&](const auto &h, uint16_t schema, const Bytes &raw, uint64_t offset, bool damaged, uint64_t frameEnd, uint32_t crc) {
+                    std::optional<ReadControl::WorkScope> firstFrame;
+                    if (!control.sourceRecords) firstFrame.emplace(control, true);
+                    if (!control.charge(0)) return false;
+                    ++diagnostics.indexedFrames;
                     next.header = h;
                     next.schema = schema;
                     try {
@@ -717,11 +816,12 @@ struct Hmc2Reader::Impl {
                                            predecessor / kKeyframeMs == bucket / kKeyframeMs;
                         if (bucket < kHmc2MinMs || bucket >= kHmc2EndMs || bucket % h.tfMs)
                             throw Corrupt("indexed bucket");
-                        next.frames.push_back({bucket, offset, count + (schema == kHourSchema ? raw.size() / 21 : 0), delta, chain});
+                        next.frames.push_back({bucket, offset, count + (schema == kHourSchema ? raw.size() / 21 : 0), delta, chain, frameEnd, crc});
                     } catch (const Corrupt &) {
                         // Preserve a physical-chain barrier; it can never match a legal bucket.
-                        next.frames.push_back({0, offset, 0, false, false});
+                        next.frames.push_back({0, offset, 0, false, false, frameEnd, crc});
                     }
+                    return true;
                 }, [&] {
                     if (!control.poll()) return false;
                     if (control.sourceRecords >= control.limits.maxSourceRecords) {
@@ -729,24 +829,38 @@ struct Hmc2Reader::Impl {
                         return false;
                     }
                     return true;
-                });
-            if (!control.poll())
-                return nullptr;
-            if (indexes.size() >= 64)
-                indexes.erase(indexes.begin());
-            return &indexes.emplace(path, std::move(next)).first->second;
+                }, offset, &next.nextOffset);
+            if (!control.poll()) return nullptr;
+            next.complete = true;
+            return &next;
+        } catch (const ReadIo &e) {
+            sLog_Warning("Hmc2Reader: index I/O path=" << path.string() << " error=" << e.what());
+            if (!e.permission && !discovery) control.status = ReadStatus::IoError;
+            incompleteDiscovery = true;
+            indexes.erase(path);
+            forgetReplay(path);
+            return nullptr;
         } catch (const Corrupt &e) {
             sLog_Warning("Hmc2Reader: skipped corrupt header path=" << path.string() << " error=" << e.what());
+            indexes.erase(path);
+            forgetReplay(path);
+            incompleteDiscovery = true;
             return nullptr;
         } catch (const std::exception &e) {
             sLog_Warning("Hmc2Reader: index failed path=" << path.string() << " error=" << e.what());
-            control.status = ReadStatus::IoError;
+            if (!discovery) control.status = ReadStatus::IoError;
+            incompleteDiscovery = true;
+            indexes.erase(path);
+            forgetReplay(path);
             return nullptr;
         }
     }
     const Hmc2Record *load(const fs::path &path, Index &idx, size_t at, ReadControl &control) {
-        if (!control.poll())
+        if (!control.poll()) return nullptr;
+        if (at >= idx.frames.size()) {
+            control.status = ReadStatus::IoError; // stale candidate, not a proven gap
             return nullptr;
+        }
         for (const auto &cached : replay)
             if (cached.path == path && cached.at == at) {
                 idx.last = cached.record;
@@ -774,31 +888,48 @@ struct Hmc2Reader::Impl {
         if (!control.charge(frame.work + (base ? base->entries.size() : 0)))
             return nullptr;
         try {
+            if (auto hook = std::exchange(beforeRead, {})) hook();
             std::ifstream f(path, std::ios::binary);
+            if (!f.is_open()) throw ReadIo("open selected frame " + path.string());
             Bytes framing, compressed, raw;
             if (!readAt(f, frame.offset, framing, 16))
-                throw Corrupt("indexed frame disappeared");
+                throw ReadIo("read selected frame " + path.string());
             Cursor c{framing};
             if (c.get<uint32_t>() != kHmc2RecordMagic)
                 throw Corrupt("indexed magic");
             const auto clen = c.get<uint32_t>(), rlen = c.get<uint32_t>(), crc = c.get<uint32_t>();
-            if (rlen > kHmc2MaxRawLen || clen > ZSTD_compressBound(kHmc2MaxRawLen) ||
-                !readAt(f, frame.offset + 16, compressed, clen) || hmcol::crc32(compressed.data(), clen) != crc)
-                throw Corrupt("indexed frame changed");
+            if (rlen > kHmc2MaxRawLen || clen > ZSTD_compressBound(kHmc2MaxRawLen))
+                throw Corrupt("indexed frame bounds");
+            if (!readAt(f, frame.offset + 16, compressed, clen))
+                throw ReadIo("read selected payload " + path.string());
+            if (hmcol::crc32(compressed.data(), clen) != crc)
+                throw Corrupt("indexed frame CRC");
             raw.resize(rlen);
             const auto n = ZSTD_decompress(raw.data(), rlen, compressed.data(), clen);
             if (ZSTD_isError(n) || n != rlen || ZSTD_findFrameCompressedSize(compressed.data(), clen) != clen)
                 throw Corrupt("indexed zstd");
             bool missing = false;
             auto record = decodeRecord(idx.header, idx.schema, raw, base, missing);
+            if (record.bucketStartMs != frame.bucket)
+                throw ReadIo("selected frame bucket changed " + path.string());
             if (missing)
                 return nullptr;
             idx.last = std::make_shared<Hmc2Record>(std::move(record));
             idx.lastIndex = at;
             remember(path, at, idx.last);
             return control.poll() ? &*idx.last : nullptr;
+        } catch (const ReadIo &e) {
+            sLog_Warning("Hmc2Reader: selected frame I/O path=" << path.string() << " error=" << e.what());
+            control.status = ReadStatus::IoError;
+            idx.last.reset();
+            idx.lastIndex = SIZE_MAX;
+            forgetReplay(path);
+            idx.complete = false;
+            idx.nextOffset = 0;
+            return nullptr;
         } catch (const Corrupt &e) {
             sLog_Warning("Hmc2Reader: skipped payload path=" << path.string() << " error=" << e.what());
+            idx.frames[at].bucket = 0; // do not spend every small request on the same bad frame
             idx.last.reset();
             idx.lastIndex = SIZE_MAX;
             return nullptr;
@@ -810,7 +941,16 @@ struct Hmc2Reader::Impl {
     }
 };
 Hmc2Reader::Hmc2Reader(fs::path root) : impl_(std::make_unique<Impl>(std::move(root))) {}
-Hmc2Reader::~Hmc2Reader() = default;
+Hmc2Reader::~Hmc2Reader() { impl_->assertOwner(); }
+void Hmc2Reader::beforeCandidateForTest(std::function<void()> hook) {
+    impl_->assertOwner(); impl_->beforeCandidate = std::move(hook);
+}
+void Hmc2Reader::beforeReadForTest(std::function<void()> hook) {
+    impl_->assertOwner(); impl_->beforeRead = std::move(hook);
+}
+Hmc2Reader::Diagnostics Hmc2Reader::diagnosticsForTest() const {
+    impl_->assertOwner(); return impl_->diagnostics;
+}
 ScanResult Hmc2Reader::visit(const std::string &symbol, const std::string &layer, int64_t tf,
                            int64_t start, int64_t end, const std::function<void(const Hmc2Record &)> &visitor,
                            ReadControl &control) {
@@ -818,7 +958,8 @@ ScanResult Hmc2Reader::visit(const std::string &symbol, const std::string &layer
     end = std::clamp(end, start, kHmc2EndMs);
     ScanResult result{start, start};
     auto &i = *impl_;
-    const auto paths = files(i.directory(symbol, layer, tf), {}, false, [&] { return control.poll(); });
+    i.assertOwner();
+    const auto &paths = i.listing(i.directory(symbol, layer, tf), control);
     // Only metadata for the requested days is retained. Iterate a day at a time
     // so arbitrarily long scans never retain an unbounded record map.
     for (int64_t day = start - start % 86'400'000; day < end; day += 86'400'000) {
@@ -845,22 +986,29 @@ ScanResult Hmc2Reader::visit(const std::string &symbol, const std::string &layer
         if (!control.poll())
             break;
         for (const auto &[bucket, candidates] : buckets) {
-            // Prove only the gap up to this bucket until its winning record is read.
+            // A selected-frame I/O error invalidates this tentative gap claim too.
+            const auto previousEnd = result.scannedEndMs;
             result.scannedEndMs = bucket;
             for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+                if (auto hook = std::exchange(i.beforeCandidate, {})) hook();
                 auto *idx = i.index(it->first, control);
                 if (!idx) {
-                    if (!control.poll()) break;
-                    continue;
+                    if (control.poll()) control.status = ReadStatus::IoError;
+                    break;
                 }
+                std::optional<ReadControl::WorkScope> first;
+                if (!control.deliveredRecords) first.emplace(control, true);
                 if (const auto *record = i.load(it->first, *idx, it->second, control)) {
+                    if (record->bucketStartMs != bucket) { control.status = ReadStatus::IoError; break; }
                     visitor(*record);
+                    ++control.deliveredRecords;
                     result.scannedEndMs = std::min(end, bucket + tf);
                     break;
                 }
                 if (!control.poll())
                     break;
             }
+            if (control.status == ReadStatus::IoError) result.scannedEndMs = previousEnd;
             if (!control.poll())
                 break;
             result.scannedEndMs = std::min(end, bucket + tf);
@@ -875,14 +1023,25 @@ ScanResult Hmc2Reader::visit(const std::string &symbol, const std::string &layer
 SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std::string &layer, int64_t tf,
                                            ReadControl &control) {
     auto &i = *impl_;
+    i.assertOwner();
     const auto dir = i.directory(symbol, layer, tf);
     Impl::CachedAvailability next;
+    i.incompleteDiscovery = false;
     if (!control.poll())
         return {};
-    for (const auto &path : files(dir, {}, false, [&] { return control.poll(); })) {
+    for (const auto &path : i.listing(dir, control)) {
         if (!control.poll())
             return {};
-        next.signature.emplace_back(path, fs::file_size(path), fs::last_write_time(path));
+        std::error_code ec;
+        const auto size = fs::file_size(path, ec);
+        if (ec) {
+            sLog_Warning("Hmc2Reader: availability skipped stat path=" << path.string() << " error=" << ec.message());
+            i.incompleteDiscovery = true;
+            continue;
+        }
+        const auto modified = fs::last_write_time(path, ec);
+        if (ec) { i.incompleteDiscovery = true; continue; }
+        next.signature.emplace_back(path, size, modified);
     }
     if (auto it = i.available.find(dir); it != i.available.end() && it->second.signature == next.signature)
         return it->second.value;
@@ -897,7 +1056,7 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
             for (const auto &[path, size, modified] : next.signature) {
                 if (path.filename().string().substr(0, 10) != day)
                     continue;
-                if (auto *idx = i.index(path, control)) {
+                if (auto *idx = i.index(path, control, true)) {
                     if (idx->header.symbol == symbol && idx->header.layer == layer && idx->header.tfMs == tf)
                         for (size_t n = 0; n < idx->frames.size(); ++n)
                             if (idx->frames[n].bucket)
@@ -908,11 +1067,18 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
             std::stable_sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
             if (latest)
                 std::reverse(candidates.begin(), candidates.end());
+            bool firstCandidate = true;
             for (const auto &[bucket, where] : candidates) {
+                if (auto hook = std::exchange(i.beforeCandidate, {})) hook();
                 auto *idx = i.index(where.first, control);
-                if (!idx)
+                if (!idx) {
+                    if (control.poll()) control.status = ReadStatus::IoError;
                     break;
+                }
+                std::optional<ReadControl::WorkScope> first;
+                if (std::exchange(firstCandidate, false)) first.emplace(control, true);
                 if (const auto *r = i.load(where.first, *idx, where.second, control)) {
+                    if (r->bucketStartMs != bucket) { control.status = ReadStatus::IoError; break; }
                     if (latest) {
                         next.value.latestMs = bucket;
                         next.value.latestHeader = r->header;
@@ -926,7 +1092,7 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
             days.erase(day);
         }
     }
-    if (control.poll()) {
+    if (!i.incompleteDiscovery && (control.poll() || (next.value.oldestMs && next.value.latestMs))) {
         if (i.available.size() >= 64)
             i.available.erase(i.available.begin());
         i.available.insert_or_assign(dir, next);
