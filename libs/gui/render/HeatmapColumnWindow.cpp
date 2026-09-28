@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <queue>
 
 namespace heatmap_window {
 namespace {
@@ -47,6 +48,97 @@ bool Band::sameAs(const Band& other) const {
     return nearlyEqual(minPrice, other.minPrice) &&
            nearlyEqual(maxPrice, other.maxPrice) &&
            nearlyEqual(tickSize, other.tickSize);
+}
+
+WallsSnapshot ColumnWindow::captureWalls(const WallQuery& query) const {
+    WallsSnapshot out;
+    if (query.limit < 1 || query.limit > 100 || !std::isfinite(query.minQty) || query.minQty < 0 ||
+        (query.priceMin && (!std::isfinite(*query.priceMin) || *query.priceMin <= 0)) ||
+        (query.priceMax && (!std::isfinite(*query.priceMax) || *query.priceMax <= 0)) ||
+        (query.priceMin && query.priceMax && *query.priceMin >= *query.priceMax) ||
+        (query.startMs && query.endMs && *query.startMs >= *query.endMs)) {
+        out.status = 422;
+        return out;
+    }
+    if (!m_recording) { out.status = 409; return out; }
+    if (!m_placed || m_rows <= 0 || m_timeframeMs <= 0) return out;
+    out.loadedStartMs = windowStartMs();
+    out.loadedEndMs = m_windowEndMs + m_timeframeMs;
+    out.bandTick = m_band.tickSize;
+
+    const int64_t start = std::max(out.loadedStartMs, query.startMs.value_or(out.loadedStartMs));
+    const int64_t end = std::min(out.loadedEndMs, query.endMs.value_or(out.loadedEndMs));
+    if (end <= start) return out;
+    const int64_t first = align(start + m_timeframeMs - 1);
+    if (first >= end) return out;
+    const int64_t count = (end - first + m_timeframeMs - 1) / m_timeframeMs;
+    // Only recorded columns are scanned (missing slots cost nothing), so budget on
+    // those: the default full-window request must work on a mostly empty window.
+    int64_t recorded = 0;
+    for (auto it = m_projected.lower_bound(first); it != m_projected.end() && it->first < end; ++it) ++recorded;
+    constexpr int64_t kMaxExaminedCells = 16'000'000;
+    if (recorded > kMaxExaminedCells / m_rows) { out.status = 422; return out; }
+    (void)count;
+
+    const auto better = [](const Wall& a, const Wall& b) {
+        if (a.qty != b.qty) return a.qty > b.qty;
+        if (a.bucketStartMs != b.bucketStartMs) return a.bucketStartMs < b.bucketStartMs;
+        if (a.priceLow != b.priceLow) return a.priceLow < b.priceLow;
+        return a.ask < b.ask;
+    };
+    // Group by (price cell, side) across the range: a wall is a level, not a minute.
+    std::map<std::pair<int64_t, bool>, Wall> levels;
+    for (int64_t bucket = first; bucket < end; bucket += m_timeframeMs) {
+        const auto it = m_projected.find(bucket);
+        if (it == m_projected.end()) { ++out.missingColumns; continue; }
+        const Column& column = it->second;
+        ++out.recordedColumns;
+        if (column.intensity.size() != m_rows * 2 || column.liquidity.size() != m_rows * 2 ||
+            column.validity.size() != (m_rows + 7) / 8 || !std::isfinite(column.liquidityScale) ||
+            column.liquidityScale <= 0) { out.unknownRows = true; continue; }
+        for (int row = 0; row < m_rows; ++row) {
+            const double high = column.maxPrice - static_cast<double>(row) * column.tickSize;
+            const double low = high - column.tickSize;
+            if (query.priceMin && high <= *query.priceMin) continue;
+            if (query.priceMax && low >= *query.priceMax) continue;
+            if (!(static_cast<uint8_t>(column.validity.at(row / 8)) & (1u << (row % 8)))) {
+                out.unknownRows = true;
+                continue;
+            }
+            const double qty = static_cast<double>(readCell(column.liquidity, row, 2)) * column.liquidityScale;
+            if (!(qty > 0.0) || qty < query.minQty || !std::isfinite(qty)) continue;
+            const uint16_t encoded = readCell(column.intensity, row, 2);
+            if ((encoded & 0x7fffu) == 0) continue;
+            Wall wall{bucket, low, high, (encoded & 0x8000u) != 0, qty,
+                      qty * (low + high) / 2.0, false};
+            if (!std::isfinite(wall.notional)) continue;
+            const auto key = std::make_pair(static_cast<int64_t>(std::llround(low / column.tickSize)), wall.ask);
+            auto [lvl, added] = levels.try_emplace(key, wall);
+            Wall& w = lvl->second;
+            if (added) {
+                w.firstSeenMs = bucket;
+                w.meanQty = 0.0;
+            } else if (qty > w.qty) {
+                w.qty = qty;
+                w.notional = wall.notional;
+                w.bucketStartMs = bucket;
+            }
+            w.meanQty += qty;
+            w.lastSeenMs = bucket;
+            ++w.columns;
+        }
+    }
+    std::vector<Wall> ranked;
+    ranked.reserve(levels.size());
+    for (auto& [key, w] : levels) {
+        w.meanQty = out.recordedColumns > 0 ? w.meanQty / out.recordedColumns : 0.0;
+        ranked.push_back(w);
+    }
+    const size_t keep = std::min(ranked.size(), static_cast<size_t>(query.limit));
+    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(keep), ranked.end(), better);
+    ranked.resize(keep);
+    out.walls = std::move(ranked);
+    return out;
 }
 
 int intensityMagnitude(uint16_t value, int bytesPerCell) {

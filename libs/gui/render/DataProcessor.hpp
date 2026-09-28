@@ -69,6 +69,7 @@ public:
     void setHeatmapGridDimensions(int width, int height);
     void setHeatmapIntensityScale(double scale);
     void setServerTimeframe(int64_t timeframeMs);
+    heatmap_window::WallsSnapshot captureHeatmapWalls(const heatmap_window::WallQuery& query) const;
     
 signals:
     // Ring writes for the GPU window; live and history both arrive this way.

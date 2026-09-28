@@ -24,6 +24,8 @@ public:
                           std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
                           std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
                           std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
+                          std::function<void(const heatmap_window::WallQuery&,
+                                             std::function<void(heatmap_window::WallsSnapshot)>)> wallsSnapshot,
                           std::function<AgentApi::ControlApply(const QString&, const AgentApi::ControlBody&)> applyControl,
                           std::function<std::pair<quint64, quint64>()> frameAck,
                           std::function<void(quint64)> publishRevision,
@@ -56,6 +58,8 @@ private:
     std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> m_candlesSnapshot;
     std::function<AgentApi::BookSnapshot(int)> m_bookSnapshot;
     std::function<AgentApi::TradesSnapshot(qint64, int)> m_tradesSnapshot;
+    std::function<void(const heatmap_window::WallQuery&,
+                       std::function<void(heatmap_window::WallsSnapshot)>)> m_wallsSnapshot;
     std::function<AgentApi::ControlApply(const QString&, const AgentApi::ControlBody&)> m_applyControl;
     std::function<std::pair<quint64, quint64>()> m_frameAck;
     std::function<void(quint64)> m_publishRevision;
@@ -63,4 +67,5 @@ private:
     qint64 m_lastScreenshotMs = 0;
     QHash<QTcpSocket*, AgentApi::RequestParser> m_requests;
     QSet<QTcpSocket*> m_openConnections;
+    QSet<QTcpSocket*> m_pendingWalls;
 };
