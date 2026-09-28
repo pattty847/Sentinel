@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QTemporaryFile>
 #include "ConfigLoader.hpp"
@@ -341,9 +342,16 @@ TEST_F(RecordingDataProcessor, UnrepairableBucketStopsAfterThreeAttemptsAndNextB
         live.columns[0].bucketStartMs = bucket;
         processor.onRecordingLiveReceived(live);
     }
+    auto awaitRequests = [&](size_t count, int deadlineMs) {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (requests.size() < count && elapsed.elapsed() < deadlineMs) events(20);
+        return requests.size() == count;
+    };
     for (int attempt = 0; attempt < 3; ++attempt) {
-        events(attempt == 2 ? 4400 : 2300);
-        ASSERT_EQ(requests.size(), static_cast<size_t>(attempt + 2));
+        // Qt's coarse 2s polling can fire before a backoff expires and defer
+        // the request to the next poll. Assert behavior, not an exact wakeup.
+        ASSERT_TRUE(awaitRequests(static_cast<size_t>(attempt + 2), attempt == 2 ? 7500 : 5500));
         EXPECT_EQ(requests.back().endTimeMs, 12'060'000);
         EXPECT_EQ(requests.back().count, 1);
         auto response = page(requests.back());
@@ -358,8 +366,7 @@ TEST_F(RecordingDataProcessor, UnrepairableBucketStopsAfterThreeAttemptsAndNextB
         } else response.status = "io_error";
         processor.onRecordingHistoryReceived(response);
     }
-    events(8400);
-    ASSERT_EQ(requests.size(), 5);
+    ASSERT_TRUE(awaitRequests(5, 11500));
     EXPECT_EQ(requests.back().endTimeMs, 12'120'000);
     auto final = page(requests.back());
     final.status = "complete";
