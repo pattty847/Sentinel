@@ -20,6 +20,7 @@
 #include "../core/servermodel/SessionManager.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
+#include "render/GridViewState.hpp"
 #include "SentinelLogging.hpp"
 #include "widgets/ChartDock.hpp"
 #include "widgets/LabDock.hpp"
@@ -46,6 +47,7 @@
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
+#include "mainwindow/AgentApiCodec.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "TradeInputManager.hpp"
 #include "config/GuiConfigStore.hpp"
@@ -93,6 +95,7 @@ int timeframeMsFromLabel(const QString& label) {
 }
 
 MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
+    m_agentApiSessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const auto& clientConfig = GuiConfigStore::instance().clientConfig();
     auto remote = std::make_unique<RemoteGridDataSource>(
         QString::fromStdString(clientConfig.server.host),
@@ -136,7 +139,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
             if (m_qmlController) {
                 m_qmlController->updateSymbolInContext(defaultSymbol);
             }
-            m_currentSymbol = defaultSymbol;
+            if (m_currentSymbol != defaultSymbol) propagateSymbolChange(defaultSymbol);
         }
         if (m_connected && m_userSubscribed) {
             requestConfiguredHistoryForSymbol(m_currentSymbol);
@@ -177,6 +180,15 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     setupShortcuts();
     
     setupConnections();
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
+                ++m_agentApiSelectionEpoch;
+                m_heatmapReceivedAtMs.reset();
+                m_candlesReceivedAtMs.reset();
+            });
+        }
+    }
     setWindowProperties();
     setupGuiApiServer();
     
@@ -477,6 +489,8 @@ void MainWindowGPU::setupGuiApiServer() {
     m_guiApiServer = std::make_unique<GuiApiServer>(this,
                                                     m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
                                                     m_labDock ? m_labDock->qquickView() : nullptr,
+                                                    [this]() { return agentApiStateSnapshot(); },
+                                                    [this]() { return agentApiViewportSnapshot(); },
                                                     this);
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
@@ -632,6 +646,13 @@ void MainWindowGPU::onSubscribe() {
 }
 
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
+    if (m_currentSymbol != symbol) {
+        ++m_agentApiSelectionEpoch;
+        m_heatmapReceivedAtMs.reset();
+        m_candlesReceivedAtMs.reset();
+        m_bookReceivedAtMs.reset();
+        m_tradesReceivedAtMs.reset();
+    }
     m_currentSymbol = symbol;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
@@ -974,6 +995,30 @@ void MainWindowGPU::connectMarketDataSignals() {
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
     
+    connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived, this,
+            [this](const HeatmapSlice& slice) {
+                if (slice.symbol == m_currentSymbol) m_heatmapReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+            }, Qt::QueuedConnection);
+    connect(m_dataSource.get(), &IGridDataSource::tradeReceived, this,
+            [this](const Trade& trade) {
+                if (QString::fromStdString(trade.product_id) == m_currentSymbol)
+                    m_tradesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+            }, Qt::QueuedConnection);
+    connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated, this,
+            [this](const QString& symbol, const std::vector<BookDelta>&) {
+                if (symbol == m_currentSymbol) m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+            }, Qt::QueuedConnection);
+    if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
+        connect(remote->streamClient(), &SentinelStreamClient::candleBarUpdateReceived, this,
+                [this](const QString& symbol, int64_t, int64_t, int64_t, const SentinelStreamClient::CandleBar&) {
+                    if (symbol == m_currentSymbol) m_candlesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                }, Qt::QueuedConnection);
+        connect(remote->streamClient(), &SentinelStreamClient::candleBarClosedReceived, this,
+                [this](const QString& symbol, int64_t, int64_t, int64_t, const SentinelStreamClient::CandleBar&) {
+                    if (symbol == m_currentSymbol) m_candlesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                }, Qt::QueuedConnection);
+    }
+
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
 
@@ -994,6 +1039,13 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
             // Show "Connecting..." immediately on disconnect — we always attempt reconnect.
             m_statusBar->setConnectionConnecting();
         }
+    }
+    if (connected != m_connected) {
+        ++m_agentApiSelectionEpoch;
+        m_heatmapReceivedAtMs.reset();
+        m_candlesReceivedAtMs.reset();
+        m_bookReceivedAtMs.reset();
+        m_tradesReceivedAtMs.reset();
     }
     m_connected = connected;
     if (!connected) {
@@ -1099,4 +1151,69 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.orderBookDock = m_orderBookDock;
     docks.paperTradingDock = m_paperTradingDock;
     return docks;
+}
+
+AgentApi::Metadata MainWindowGPU::agentApiMetadata() const {
+    AgentApi::Metadata meta;
+    meta.sessionId = m_agentApiSessionId;
+    meta.symbol = m_currentSymbol;
+    meta.selectionEpoch = m_agentApiSelectionEpoch;
+    meta.observedAtMs = QDateTime::currentMSecsSinceEpoch();
+    meta.stale = !m_connected;
+    meta.coverage = "unknown";
+    return meta;
+}
+
+AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
+    AgentApi::StateSnapshot s;
+    s.meta = agentApiMetadata();
+    s.connected = m_connected;
+    s.serverConfigReady = m_serverConfigReady;
+    const auto& client = GuiConfigStore::instance().clientConfig();
+    s.serverHost = QString::fromStdString(client.server.host);
+    bool portOk = false;
+    const int port = QString::fromStdString(client.server.port).toInt(&portOk);
+    if (portOk && port > 0 && port <= 65535) s.serverPort = port;
+    if (m_serverConfigReady)
+        AgentApi::applyAdvertisedServerConfig(s, GuiConfigStore::instance().serverConfig());
+    s.heatmapReceivedAtMs = m_heatmapReceivedAtMs;
+    s.candlesReceivedAtMs = m_candlesReceivedAtMs;
+    s.bookReceivedAtMs = m_bookReceivedAtMs;
+    s.tradesReceivedAtMs = m_tradesReceivedAtMs;
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            s.heatmapLayer = renderer->heatmapLayerEnabled();
+            s.footprintLayer = renderer->footprintLayerEnabled();
+            s.tpoLayer = renderer->tpoLayerEnabled();
+            s.volumeProfileLayer = renderer->volumeProfileLayerEnabled();
+        }
+    }
+    if (m_modeController) s.candlesLayer = m_modeController->candlesEnabled();
+    return s;
+}
+
+AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
+    AgentApi::ViewportSnapshot s;
+    s.meta = agentApiMetadata();
+    if (!m_qmlController) return s;
+    auto* renderer = m_qmlController->getUnifiedGridRenderer();
+    if (!renderer) return s;
+    const int64_t tf = renderer->getCurrentTimeframe();
+    if (tf > 0) {
+        s.heatmapTimeframeMs = tf;
+        s.candleTimeframeMs = tf; // v1 QML links candle cadence to renderer cadence.
+    }
+    s.followLive = renderer->autoScrollEnabled();
+    auto* view = renderer->getViewState();
+    if (!view || !view->isTimeWindowValid()) return s;
+    const qint64 start = view->getVisibleTimeStart();
+    const qint64 end = view->getVisibleTimeEnd();
+    const double low = view->getMinPrice();
+    const double high = view->getMaxPrice();
+    if (end > start) { s.startMs = start; s.endMs = end; }
+    if (std::isfinite(low) && std::isfinite(high) && high > low) { s.priceMin = low; s.priceMax = high; }
+    s.viewportVersion = view->getViewportVersion();
+    if (renderer->width() > 0) s.widthPx = renderer->width();
+    if (renderer->height() > 0) s.heightPx = renderer->height();
+    return s;
 }

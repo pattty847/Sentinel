@@ -2,6 +2,10 @@
 
 #include <QObject>
 #include <QTcpServer>
+#include <QHash>
+#include <QSet>
+#include <functional>
+#include "AgentApiCodec.hpp"
 
 class QTcpSocket;
 class QWidget;
@@ -14,6 +18,8 @@ public:
     explicit GuiApiServer(QWidget* targetWindow,
                           QQuickView* heatmapView,
                           QQuickView* labView,
+                          std::function<AgentApi::StateSnapshot()> stateSnapshot,
+                          std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
                           QObject* parent = nullptr);
 
     bool start(quint16 port, const QString& screenshotDir);
@@ -34,4 +40,8 @@ private:
     QQuickView* m_heatmapView = nullptr;
     QQuickView* m_labView = nullptr;
     QString m_screenshotDir;
+    std::function<AgentApi::StateSnapshot()> m_stateSnapshot;
+    std::function<AgentApi::ViewportSnapshot()> m_viewportSnapshot;
+    QHash<QTcpSocket*, AgentApi::RequestParser> m_requests;
+    QSet<QTcpSocket*> m_openConnections;
 };

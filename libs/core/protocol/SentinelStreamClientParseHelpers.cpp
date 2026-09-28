@@ -1,9 +1,15 @@
 #include "SentinelStreamClientParseHelpers.hpp"
+#include <utility>
 
 namespace protocol::clientparse {
 
 ServerConfig parseServerConfig(const nlohmann::json& msg) {
     ServerConfig cfg;
+    auto mark = [&cfg](const nlohmann::json& object, const char* wire, const char* field) {
+        if (object.contains(wire)) cfg.advertisedFields.insert(field);
+    };
+    mark(msg, "timeframes_ms", "heatmap.configuredTimeframesMs");
+    mark(msg, "default_symbols", "defaultSymbols");
     if (msg.contains("timeframes_ms") && msg["timeframes_ms"].is_array()) {
         cfg.heatmap.timeframesMs.clear();
         for (const auto& item : msg["timeframes_ms"]) {
@@ -15,6 +21,9 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
     }
     if (msg.contains("heatmap") && msg["heatmap"].is_object()) {
         const auto& hm = msg["heatmap"];
+        for (const auto& [wire, field] : {std::pair{"grid_width", "heatmap.gridWidth"},
+                 {"grid_height", "heatmap.gridHeight"}, {"active_timeframe_ms", "heatmap.activeTimeframeMs"},
+                 {"served_timeframes_ms", "heatmap.servedTimeframesMs"}}) mark(hm, wire, field);
         cfg.heatmap.gridWidth = hm.value("grid_width", cfg.heatmap.gridWidth);
         cfg.heatmap.gridHeight = hm.value("grid_height", cfg.heatmap.gridHeight);
         cfg.heatmap.tickSize = hm.value("tick_size", cfg.heatmap.tickSize);
@@ -43,11 +52,18 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
     }
     if (msg.contains("orderbook") && msg["orderbook"].is_object()) {
         const auto& ob = msg["orderbook"];
+        mark(ob, "tick_size", "orderbook.tickSize");
+        mark(ob, "band_pct", "orderbook.bandPct");
         cfg.orderbook.tickSize = ob.value("tick_size", cfg.orderbook.tickSize);
         cfg.orderbook.bandPct = ob.value("band_pct", cfg.orderbook.bandPct);
     }
     if (msg.contains("candles") && msg["candles"].is_object()) {
         const auto& cd = msg["candles"];
+        for (const auto& [wire, field] : {std::pair{"update_bps_fast", "candles.bpsFast"},
+                 {"update_bps_slow", "candles.bpsSlow"}, {"update_tick_mult_fast", "candles.tickMultFast"},
+                 {"update_tick_mult_slow", "candles.tickMultSlow"}, {"update_silence_ms_fast", "candles.silenceMsFast"},
+                 {"update_silence_ms_slow", "candles.silenceMsSlow"}, {"update_volume_fast", "candles.volumeFast"},
+                 {"update_volume_slow", "candles.volumeSlow"}, {"update_tick_size", "candles.tickSize"}}) mark(cd, wire, field);
         cfg.candles.bpsFast = cd.value("update_bps_fast", cfg.candles.bpsFast);
         cfg.candles.bpsSlow = cd.value("update_bps_slow", cfg.candles.bpsSlow);
         cfg.candles.tickMultFast = cd.value("update_tick_mult_fast", cfg.candles.tickMultFast);

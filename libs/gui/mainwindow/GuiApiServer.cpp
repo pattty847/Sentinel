@@ -10,10 +10,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScreen>
+#include <QSaveFile>
 #include <QTcpSocket>
 #include <QQuickView>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QTimer>
 #include <QWindow>
 #include <QWidget>
 
@@ -24,6 +26,13 @@ QByteArray statusText(int statusCode) {
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 409: return "Conflict";
+    case 413: return "Payload Too Large";
+    case 422: return "Unprocessable Content";
+    case 431: return "Request Header Fields Too Large";
+    case 403: return "Forbidden";
+    case 408: return "Request Timeout";
+    case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
     case 503: return "Service Unavailable";
     default: return "OK";
@@ -38,11 +47,15 @@ QByteArray jsonBody(const QJsonObject& obj) {
 GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            QQuickView* heatmapView,
                            QQuickView* labView,
+                           std::function<AgentApi::StateSnapshot()> stateSnapshot,
+                           std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
                            QObject* parent)
     : QObject(parent),
       m_targetWindow(targetWindow),
       m_heatmapView(heatmapView),
-      m_labView(labView) {
+      m_labView(labView),
+      m_stateSnapshot(std::move(stateSnapshot)),
+      m_viewportSnapshot(std::move(viewportSnapshot)) {
 }
 
 bool GuiApiServer::start(quint16 port, const QString& screenshotDir) {
@@ -76,11 +89,34 @@ void GuiApiServer::handleNewConnection() {
         if (!socket) {
             continue;
         }
+        if (m_openConnections.size() >= 8) {
+            respond(socket, 429, AgentApi::jsonBytes(AgentApi::error("too_many_requests", "At most eight requests may be open")), "application/json");
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            continue;
+        }
         socket->setParent(this);
+        m_openConnections.insert(socket);
+        m_requests.insert(socket, {});
+        auto* deadline = new QTimer(socket);
+        deadline->setSingleShot(true);
+        deadline->start(5000);
+        connect(deadline, &QTimer::timeout, socket, [this, socket]() {
+            if (m_requests.contains(socket)) {
+                respond(socket, 408, AgentApi::jsonBytes(AgentApi::error("request_timeout", "Request timed out")), "application/json");
+                m_requests.remove(socket);
+            } else {
+                socket->abort(); // Write deadline for a peer that stops reading.
+            }
+        });
         connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
             handleRequest(socket);
         });
+        connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
+            m_requests.remove(socket);
+            m_openConnections.remove(socket);
+        });
         connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        if (socket->bytesAvailable()) handleRequest(socket);
     }
 }
 
@@ -89,55 +125,67 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         return;
     }
 
-    QByteArray buffer = socket->property("buffer").toByteArray();
-    buffer.append(socket->readAll());
-    if (!buffer.contains("\r\n\r\n")) {
-        socket->setProperty("buffer", buffer);
+    auto it = m_requests.find(socket);
+    if (it == m_requests.end()) return;
+    const QByteArray bytes = socket->read(24577);
+    if (socket->bytesAvailable() > 0) {
+        respond(socket, 413, AgentApi::jsonBytes(AgentApi::error("request_too_large", "Request exceeds size limit")), "application/json");
+        m_requests.erase(it);
         return;
     }
-
-    socket->setProperty("buffer", QByteArray());
-    const QList<QByteArray> lines = buffer.split('\n');
-    if (lines.isEmpty()) {
-        respond(socket, 400, "{}", "application/json");
+    const AgentApi::ParseResult parsed = it.value().feed(bytes);
+    if (parsed.kind == AgentApi::ParseResult::Kind::Incomplete) return;
+    m_requests.erase(it);
+    if (parsed.kind == AgentApi::ParseResult::Kind::Error) {
+        respond(socket, parsed.status, AgentApi::jsonBytes(AgentApi::error(parsed.code, parsed.message)), "application/json");
         return;
     }
-
-    const QByteArray requestLine = lines.first().trimmed();
-    const QList<QByteArray> parts = requestLine.split(' ');
-    if (parts.size() < 2) {
-        respond(socket, 400, "{}", "application/json");
+    const QString path = parsed.request.path;
+    if (path == "/api/v1/state") {
+        const auto snapshot = m_stateSnapshot();
+        const auto check = AgentApi::validateQuery(parsed.request, snapshot.meta.symbol);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+            return;
+        }
+        respond(socket, 200, AgentApi::jsonBytes(AgentApi::stateJson(snapshot)), "application/json");
         return;
     }
-
-    const QByteArray method = parts.at(0);
-    const QByteArray targetPath = parts.at(1);
-    if (method != "GET") {
-        respond(socket, 405, "{}", "application/json");
+    if (path == "/api/v1/viewport") {
+        const auto snapshot = m_viewportSnapshot();
+        const auto check = AgentApi::validateQuery(parsed.request, snapshot.meta.symbol);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+            return;
+        }
+        respond(socket, 200, AgentApi::jsonBytes(AgentApi::viewportJson(snapshot)), "application/json");
         return;
     }
-
-    const QUrl url(QString::fromUtf8(targetPath));
-    const QString path = url.path();
-    if (path != "/screenshot") {
-        respond(socket, 404, "{}", "application/json");
+    const QUrlQuery legacyQuery(parsed.request.query);
+    const auto check = AgentApi::validateQuery(parsed.request);
+    if (check.status != 200) {
+        respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
         return;
     }
-
-    const QUrlQuery query(url);
-    QString name = query.queryItemValue("name");
-    if (!name.isEmpty()) {
-        name = QFileInfo(name).fileName();
-    }
-
-    QString targetName = query.queryItemValue("target");
-    if (targetName.isEmpty()) {
-        targetName = "main";
+    QString name = path == "/screenshot" ? legacyQuery.queryItemValue("name") : check.screenshotName;
+    if (!name.isEmpty()) name = QFileInfo(name).fileName();
+    QString targetName = path == "/screenshot" ? legacyQuery.queryItemValue("target") : check.screenshotTarget;
+    if (targetName.isEmpty()) targetName = "main";
+    if (path == "/api/v1/screenshot" && !name.isEmpty()) {
+        const QString fileName = name.endsWith(".png", Qt::CaseInsensitive) ? name : name + ".png";
+        if (QFileInfo(QDir(m_screenshotDir).filePath(fileName)).isSymLink()) {
+            respond(socket, 403, AgentApi::jsonBytes(AgentApi::error("forbidden_path", "Screenshot destination is a symlink")), "application/json");
+            return;
+        }
     }
 
     QString error;
     const QString savedPath = captureScreenshot(name, targetName, &error);
     if (savedPath.isEmpty()) {
+        if (path == "/api/v1/screenshot") {
+            respond(socket, 500, AgentApi::jsonBytes(AgentApi::error("screenshot_failed", error.isEmpty() ? "Screenshot failed" : error)), "application/json");
+            return;
+        }
         QJsonObject payload;
         payload["ok"] = false;
         payload["error"] = error.isEmpty() ? "screenshot_failed" : error;
@@ -158,20 +206,25 @@ void GuiApiServer::respond(QTcpSocket* socket, int statusCode, const QByteArray&
         return;
     }
 
+    const bool oversized = body.size() > 1024 * 1024;
+    const int responseStatus = oversized ? 500 : statusCode;
+    const QByteArray payload = oversized
+        ? AgentApi::jsonBytes(AgentApi::error("response_too_large", "Response exceeds 1 MiB")) : body;
+
     QByteArray response;
     response.append("HTTP/1.1 ");
-    response.append(QByteArray::number(statusCode));
+    response.append(QByteArray::number(responseStatus));
     response.append(' ');
-    response.append(statusText(statusCode));
+    response.append(statusText(responseStatus));
     response.append("\r\n");
     response.append("Content-Type: ");
     response.append(contentType);
     response.append("\r\n");
     response.append("Content-Length: ");
-    response.append(QByteArray::number(body.size()));
+    response.append(QByteArray::number(payload.size()));
     response.append("\r\n");
     response.append("Connection: close\r\n\r\n");
-    response.append(body);
+    response.append(payload);
 
     socket->write(response);
     disconnect(socket, &QTcpSocket::readyRead, nullptr, nullptr);
@@ -201,7 +254,8 @@ QString GuiApiServer::captureScreenshot(const QString& baseName, const QString& 
         return {};
     }
 
-    if (!image.save(fullPath, "PNG")) {
+    QSaveFile file(fullPath);
+    if (!file.open(QIODevice::WriteOnly) || !image.save(&file, "PNG") || !file.commit()) {
         if (error) {
             *error = "save_failed";
         }

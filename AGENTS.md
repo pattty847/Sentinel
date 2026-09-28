@@ -106,6 +106,7 @@ Write logs (`libs/core/SentinelLogging.hpp`):
 Look before you claim a visual or performance result.
 
 - Screenshot: with `sentinel-gui` running, `curl -s 'http://127.0.0.1:17100/screenshot?name=<name>'` returns `{"ok":true,"path":"./screenshots/<name>.png"}` (relative to the GUI's cwd, normally the repo root). Port is `gui.api_port` in `config/client_config.yaml`.
+- Agent API state, viewport, and screenshot routes: see `docs/AGENT_API.md`.
 - Viewing it: Claude Code reads the PNG directly; Codex opens local images mid-task on its own (verified 2026-09-27) or takes them up front with `codex exec -i <png>`. A sandboxed Codex run cannot launch the GUI (`Cannot create window: no screens available`), so it cannot take its own screenshots: report the visual check as unverified and the orchestrator runs it.
 - Input: the dev build is a raw binary with no app bundle, so computer-use tools cannot drive it. Ask the owner to pan, zoom or click, then read the run log and screenshot.
 - Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log (section 4a).
