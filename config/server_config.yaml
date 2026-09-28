@@ -14,6 +14,15 @@ heatmap:
 orderbook:
   tick_size: 0.1
   band_pct: 0.3
+recording:
+  enabled: true
+  dir: /Volumes/T7/sentinel-data/recording
+  fallback_dir: data/recording
+  near_tick: 1        # $ rows within near_pct of the mid (follows the mid)
+  near_pct: 0.05
+  deep_tick: 10       # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
+  deep_low_frac: 0.25
+  deep_high_mult: 4
 candles:
   update_bps_fast: 5e-05
   update_bps_slow: 0.0002
