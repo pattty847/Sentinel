@@ -19,6 +19,9 @@ heatmap:
   # row height ~ column width * cell_aspect, never below target_row_px
   target_row_px: 2
   cell_aspect: 0.75
+  # Recording mode colour range in BTC (log scale): <= min dark, >= max brightest
+  sensitivity_min: 0.05
+  sensitivity_max: 50
 
 gui:
   api_port: 17100

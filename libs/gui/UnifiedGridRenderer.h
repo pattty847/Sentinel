@@ -136,6 +136,8 @@ private:
     double m_heatmapShaderFloor = 0.01;
     int m_heatmapTargetRowPx = 2;       // minimum display row height (heatmap.target_row_px)
     double m_heatmapCellAspect = 0.75;  // row height / column width (heatmap.cell_aspect)
+    double m_heatmapSensitivityMin = 0.05;  // recording colour range, base units (heatmap.sensitivity_*)
+    double m_heatmapSensitivityMax = 50.0;
     int m_heatmapLabelPx = 14;
     int m_primaryField = 0;
     bool m_heatmapLayerEnabled = true;

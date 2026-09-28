@@ -5,6 +5,7 @@
 #include "render/FrameContextBuilder.hpp"
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/HeatmapRowGrouping.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include "render/HeatmapStreamState.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
@@ -176,6 +177,20 @@ void UnifiedGridRenderer::drainFrameUploads(
                 }
             }
         }
+        // Recording mode: rows the recording never covered become the 0x8000
+        // "unknown" code (ask side, zero size, never produced by the encoder), so
+        // the shader draws them differently from recorded-empty rows (0).
+        if (streamSnap.valueEncoding == heatmap_window::ValueEncoding::AbsoluteLogSize &&
+            bytesPerCell == 2 && !upload.validity.isEmpty() &&
+            upload.data.size() == gridHeight * bytesPerCell) {
+            auto* dst = reinterpret_cast<uint16_t*>(upload.data.data());
+            const auto* bits = reinterpret_cast<const uint8_t*>(upload.validity.constData());
+            const int bitRows = std::min(gridHeight, static_cast<int>(upload.validity.size()) * 8);
+            for (int y = 0; y < gridHeight; ++y) {
+                const bool covered = y < bitRows && ((bits[y / 8] >> (y % 8)) & 1u);
+                if (!covered) dst[y] = qToLittleEndian<uint16_t>(0x8000u);
+            }
+        }
         heatmapUploads.push_back({upload.x, std::move(upload.data)});
     }
 }
@@ -206,8 +221,17 @@ void UnifiedGridRenderer::renderOverlays(
                                  srcRect,
                                  heatmapUploads);
     if (texNode) {
+        // Recording columns arrive aggregated at the display tick: no client grouping.
+        const bool recordingMode = snapshot.valueEncoding == heatmap_window::ValueEncoding::AbsoluteLogSize;
+        if (recordingMode && snapshot.sizeFloor > 0.0 && snapshot.codesPerOctave > 0.0) {
+            const recording::SizeScale scale{snapshot.sizeFloor, snapshot.codesPerOctave};
+            texNode->setValueMode(true, recording::encodeSize(m_heatmapSensitivityMin, scale),
+                                  recording::encodeSize(m_heatmapSensitivityMax, scale));
+        } else {
+            texNode->setValueMode(false, 0.0f, 1.0f);
+        }
         const double columnPx = (srcRect.width() > 0.0) ? drawRect.width() / srcRect.width() : 0.0;
-        const int rowGroup = (drawHeatmap && srcRect.height() > 0.0)
+        const int rowGroup = recordingMode ? 1 : (drawHeatmap && srcRect.height() > 0.0)
             ? heatmap_rows::rowsPerDisplayRow(
                   drawRect.height() / srcRect.height(),
                   heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect))
@@ -308,8 +332,10 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
     // Display tick: labels follow the same row groups as the heatmap shader.
     // Same grouping as the colour pass, so text sits inside the drawn cells.
     const double columnPx = (srcRectCurrent.width() > 0.0) ? drawRect.width() / srcRectCurrent.width() : 0.0;
-    const int rowGroup = heatmap_rows::rowsPerDisplayRow(
-        baseRowH, heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect));
+    const int rowGroup = (snapshot.valueEncoding == heatmap_window::ValueEncoding::AbsoluteLogSize)
+        ? 1
+        : heatmap_rows::rowsPerDisplayRow(
+              baseRowH, heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect));
     const int rowPhase = heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup);
     const float cellH = baseRowH * static_cast<float>(rowGroup);
     const float cellW = (srcRectCurrent.width() > 0.0f)

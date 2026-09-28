@@ -82,6 +82,8 @@ heatmap:
   initial_price_pct: 5        # price zoom on connect: % of the band; 0 = full
   target_row_px: 2            # display tick: minimum row height (px)
   cell_aspect: 0.75           # display tick: rows merge (1-2-5 steps) toward column width * cell_aspect (square-ish cells)
+  sensitivity_min: 0.05       # recording mode colour range in base units (log scale): <= min dark
+  sensitivity_max: 50         # >= max brightest
 
 gui:
   api_port: 17100

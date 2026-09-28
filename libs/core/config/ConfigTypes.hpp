@@ -128,6 +128,10 @@ struct ClientHeatmapConfig {
     /// tall (cells stay roughly square), and never shorter than targetRowPx.
     int targetRowPx = 2;
     double cellAspect = 0.75;
+    /// Recording mode colour range, in base units (BTC): sizes at or below min are dark,
+    /// at or above max are brightest (log scale in between).
+    double sensitivityMin = 0.05;
+    double sensitivityMax = 50.0;
 };
 
 struct ClientGuiConfig {
