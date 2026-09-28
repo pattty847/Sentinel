@@ -175,6 +175,12 @@ inline nlohmann::json buildChunk(const Request& q, const recording::BuildResult&
     return out;
 }
 
+inline nlohmann::json viewError(const recording::LiveView& v, const std::string& code,
+                                const std::string& message, int retryMs = 1000) {
+    return {{"type", "error"}, {"context", "heatmap_recording_view"}, {"symbol", v.symbol},
+        {"band_generation", v.generation}, {"code", code}, {"message", message}, {"retry_ms", retryMs}};
+}
+
 inline nlohmann::json viewMessage(const recording::LiveView& v) {
     return {{"type", "heatmap_recording_view"}, {"symbol", v.symbol}, {"layer", v.layer},
         {"timeframe_ms", v.tfMs}, {"band_lo", v.band.lo}, {"band_tick", v.band.tick},

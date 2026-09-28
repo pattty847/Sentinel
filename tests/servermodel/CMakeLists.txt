@@ -128,3 +128,15 @@ target_link_libraries(test_recording_live PRIVATE sentinel_core GTest::gtest_mai
 add_test(NAME RecordingLiveTests COMMAND test_recording_live)
 set_tests_properties(RecordingLiveTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_recording_live)
+
+# Controlled S4 cost measurement (not a timing-sensitive CTest assertion).
+add_executable(recording_live_bench recording_live_bench.cpp)
+target_include_directories(recording_live_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(recording_live_bench PRIVATE sentinel_core Qt6::Core)
+
+add_executable(test_recording_server_stop test_recording_server_stop.cpp)
+target_include_directories(test_recording_server_stop PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_recording_server_stop PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RecordingServerStopTests COMMAND test_recording_server_stop)
+set_tests_properties(RecordingServerStopTests PROPERTIES LABELS "servermodel")
+add_dependencies(servermodel_tests test_recording_server_stop)

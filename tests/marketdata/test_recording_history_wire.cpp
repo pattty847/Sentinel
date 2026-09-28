@@ -189,3 +189,16 @@ TEST(RecordingHistoryWire, LiveUsesIdenticalColumnEncodingAndEchoesGeneration) {
     EXPECT_EQ(parsed->columns[0].validity.toHex(), "0f");
     EXPECT_EQ(parsed->bandGeneration, 123);
 }
+
+TEST(RecordingHistoryWire, ViewErrorsCarryTypeIdentityAndRetryDelay) {
+    recording::LiveView view{"BTC-USD", "deep", 60000, {0, 10, 2048}, 99};
+    for (const auto* code : {"capacity", "unavailable", "invalid_request", "incompatible_grid", "rate_limited"}) {
+        const auto error = viewError(view, code, "test rejection", 2000);
+        EXPECT_EQ(error["type"], "error");
+        EXPECT_EQ(error["context"], "heatmap_recording_view");
+        EXPECT_EQ(error["symbol"], "BTC-USD");
+        EXPECT_EQ(error["band_generation"], 99);
+        EXPECT_EQ(error["code"], code);
+        EXPECT_EQ(error["retry_ms"], 2000);
+    }
+}

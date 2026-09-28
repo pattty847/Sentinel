@@ -23,6 +23,8 @@ struct RecorderConfig {
     size_t maxQueuedLevels = 2'000'000;
     // Worker callback: bounded handoff only; no I/O or projection. Installed before start.
     std::function<void(std::shared_ptr<const Hmc2Record>)> publisher;
+    // Deterministic allocation-failure seam, before making a publication copy.
+    std::function<void(bool provisional)> beforePublicationForTest;
 };
 struct Level {
     bool isBid;

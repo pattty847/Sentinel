@@ -1,5 +1,6 @@
 #include "servermodel/BookRecorder.hpp"
 #include "servermodel/Hmc2Store.hpp"
+#include "servermodel/RecordingLive.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <cmath>
@@ -501,7 +502,7 @@ TEST_F(RecorderTest, PublicationIsWorkerOwnedAndConstantBookMatchesClose) {
     tick(*r, 30'250);
     EXPECT_EQ(publications.size(), 1); // one-second coalescing
     tick(*r, 60'000);
-    ASSERT_EQ(publications.size(), 2);
+    ASSERT_EQ(publications.size(), 3); // finished-pending publication, then commit
     const auto committed = publications.back();
     EXPECT_FALSE(committed->flags & kProvisional);
     EXPECT_EQ(committed->observedMs, 60'000);
@@ -542,4 +543,46 @@ TEST_F(RecorderTest, PublicationExcludesInvalidTimeAndResyncDoesNotInventLiquidi
     EXPECT_EQ(publications.back()->observedMs, 30'000);
     EXPECT_FALSE(publications.back()->flags & kProvisional);
     value(*publications.back(), 99, false, 14.0 / 3, 6);
+}
+
+TEST_F(RecorderTest, FirstCommitWatermarkPreservesPendingMinuteInColdLiveView) {
+    LiveCache cache;
+    auto c = config();
+    c.latenessMs = 2000;
+    c.publisher = [&](auto r) { cache.publish(std::move(r)); };
+    auto recorder = make(c);
+    Hmc2Reader reader(c.root);
+    LiveBuilder builder({"BTC-USD", "near", 300000, {90, 1, 20}, 1});
+    snap(*recorder, 0);
+    tick(*recorder, 59000);
+    auto before = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(before.columns.size(), 1);
+    EXPECT_EQ(before.columns[0].observedMs, 59000);
+    tick(*recorder, 61000);
+    const auto pending = cache.snapshot("BTC-USD", "near");
+    EXPECT_EQ(pending.committedThroughMs, kEpoch);
+    EXPECT_EQ(pending.provisional.size(), 2);
+    EXPECT_TRUE(pending.committed.empty());
+    auto atBoundary = builder.build(reader, pending);
+    ASSERT_EQ(atBoundary.columns.size(), 1);
+    EXPECT_EQ(atBoundary.columns[0].observedMs, 61000);
+    tick(*recorder, 62000);
+    auto after = builder.build(reader, cache.snapshot("BTC-USD", "near"));
+    ASSERT_EQ(after.columns.size(), 1);
+    EXPECT_EQ(after.columns[0].observedMs, 62000);
+    EXPECT_EQ(after.columns[0].cells, atBoundary.columns[0].cells);
+}
+
+TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
+    auto c = config();
+    c.layers[0].hourlyRollup = true;
+    c.publisher = [](auto) {};
+    c.beforePublicationForTest = [](bool provisional) { if (!provisional) throw std::bad_alloc(); };
+    auto recorder = make(c);
+    snap(*recorder, 3540000);
+    tick(*recorder, 3600000);
+    EXPECT_EQ(recorder->stats().diskErrors, 0);
+    EXPECT_EQ(recorder->stats().columnsWritten, 2);
+    EXPECT_EQ(read().size(), 1);
+    EXPECT_EQ(read(3600000).size(), 1);
 }

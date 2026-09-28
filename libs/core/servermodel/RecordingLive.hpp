@@ -18,16 +18,20 @@ struct LiveView {
 class LiveCache {
 public:
     struct Snapshot {
-        RecordPtr provisional;
+        std::map<int64_t, RecordPtr> provisional;
+        int64_t committedThroughMs = 0;
         std::deque<RecordPtr> committed;
         uint64_t revision = 0;
     };
     bool publish(RecordPtr record);
     Snapshot snapshot(const std::string &symbol, const std::string &layer) const;
+    std::optional<std::pair<std::string, std::string>> takeCapacityWarning();
     static constexpr size_t kMaxSeries = 128, kMaxRecords = 16, kMaxEntries = 262144;
 private:
     mutable std::mutex mutex_;
     std::map<std::pair<std::string, std::string>, Snapshot> series_;
+    bool warnedSeriesLimit_ = false;
+    std::optional<std::pair<std::string, std::string>> capacityWarning_;
 };
 // Worker-owned, incremental two-bucket projection. Reader warmup resumes at its
 // proven scan cursor. No cold I/O is repeated each second.
@@ -49,6 +53,22 @@ struct LiveCadence {
         nextMs = now + delayMs;
     }
 };
+// Independent transport admission: history bytes cannot consume this one slot.
+class LiveWriteSlot {
+public:
+    bool tryAcquire() { bool expected = false; return busy_.compare_exchange_strong(expected, true); }
+    void release() { busy_.store(false); }
+private:
+    std::atomic_bool busy_{false};
+};
+struct LiveRegistrationGate {
+    int64_t nextMs = 0;
+    bool admit(int64_t now) {
+        if (now < nextMs) return false;
+        nextMs = now + 250;
+        return true;
+    }
+};
 class LiveService {
 public:
     // Callback runs on live worker; must reserve bounded transport capacity and return.
@@ -61,6 +81,11 @@ public:
     };
     explicit LiveService(std::filesystem::path root);
     ~LiveService();
+    // Idempotent. Deactivates subscriptions and joins in-flight delivery before
+    // the transport executor can be stopped/destroyed. Call off the live worker.
+    void shutdown();
+    struct Diagnostics { uint64_t builds = 0, buildMicros = 0, deliveries = 0, deliveryMicros = 0; };
+    Diagnostics diagnostics() const;
     bool publish(RecordPtr record);
     std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
 private:

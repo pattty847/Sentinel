@@ -53,6 +53,7 @@ struct Hmc2Record {
     double midOpen = 0, midClose = 0, midMin = 0, midMax = 0;
     std::vector<Hmc2Entry> entries;
     std::vector<CoverageRun> coverage; // hours, including covered zero rows
+    int64_t committedThroughMs = 0; // publication only: exclusive closed/committed watermark; never serialized
 };
 
 using StopToken = std::stop_token;

@@ -323,8 +323,9 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
         return out;
     }
     const auto latestCommit = source.committed.empty() ? RecordPtr{} : source.committed.back();
-    const auto newest = source.provisional && (!latestCommit ||
-        source.provisional->bucketStartMs > latestCommit->bucketStartMs) ? source.provisional : latestCommit;
+    const auto provisional = source.provisional.empty() ? RecordPtr{} : source.provisional.rbegin()->second;
+    const auto newest = provisional && (!latestCommit ||
+        provisional->bucketStartMs > latestCommit->bucketStartMs) ? provisional : latestCommit;
     if (!newest) return out;
     out.sizeScale = newest->header.sizeScale;
     const double nativeTick = newest->header.rowTickUnits / newest->header.priceScale;
@@ -339,8 +340,7 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
     out.latestAvailableMs = current;
     // Also correct the preceding bucket when its delayed final commit arrives.
     std::vector<int64_t> wanted;
-    if (latestCommit && latestCommit->bucketStartMs / v.tfMs * v.tfMs < current)
-        wanted.push_back(latestCommit->bucketStartMs / v.tfMs * v.tfMs);
+    if (current - v.tfMs >= kHmc2MinMs) wanted.push_back(current - v.tfMs);
     wanted.push_back(current);
     for (auto it = impl_->buckets.begin(); it != impl_->buckets.end();) {
         if (std::find(wanted.begin(), wanted.end(), it->first) == wanted.end()) it = impl_->buckets.erase(it);
@@ -356,8 +356,7 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
                 b.aggregate.column.bucketStartMs = start;
                 b.aggregate.direct = v.tfMs == minute;
             }
-            const auto end = latestCommit ? std::min(start + v.tfMs, latestCommit->bucketStartMs + minute)
-                : std::min(start + v.tfMs, newest->bucketStartMs);
+            const auto end = std::max(start, std::min(start + v.tfMs, source.committedThroughMs));
             // The retained suffix proves all commits since its first record. Older
             // data is scanned once; a budget keeps the proven prefix and resumes.
             const auto cachedStart = source.committed.empty() ? end : source.committed.front()->bucketStartMs;
@@ -382,11 +381,14 @@ BuildResult LiveBuilder::build(Hmc2Reader &reader, const LiveCache::Snapshot &so
             }
             b.through = std::max(b.through, end);
             auto live = b.aggregate; // bounded by distinct native rows, not minute count
-            if (source.provisional && source.provisional->bucketStartMs >= b.through &&
-                source.provisional->bucketStartMs >= start && source.provisional->bucketStartMs < start + v.tfMs) {
+            for (const auto &[time, pending] : source.provisional) {
+                if (time < b.through || time < start || time >= start + v.tfMs) continue;
                 ReadControl atomic;
-                live.add(*source.provisional, v.band, atomic);
+                live.add(*pending, v.band, atomic);
             }
+            // Even a bucket with only committed source records is still forming
+            // until the recorder watermark proves its exclusive end.
+            if (b.through < start + v.tfMs) live.column.flags |= kProvisional;
             if (live.column.observedMs) {
                 ReadControl atomic;
                 out.columns.push_back(live.finish(v.band, out.sizeScale, v.tfMs, atomic));

@@ -284,6 +284,18 @@ struct BookRecorder::Impl {
             sLog_Error("BookRecorder: publisher failed error=" << e.what());
         }
     }
+    void publishCopy(const Hmc2Record &record, int64_t through, bool provisional) {
+        if (!cfg.publisher) return;
+        try {
+            if (cfg.beforePublicationForTest) cfg.beforePublicationForTest(provisional);
+            auto copy = std::make_shared<Hmc2Record>(record);
+            copy->committedThroughMs = through;
+            if (provisional) copy->flags |= kProvisional;
+            publish(std::move(copy));
+        } catch (const std::exception &e) {
+            sLog_Error("BookRecorder: publication failed bucket=" << record.bucketStartMs << " error=" << e.what());
+        }
+    }
     void publishOpen(Symbol &s) {
         if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < 1000) return;
         s.lastPublish = s.clock;
@@ -292,6 +304,7 @@ struct BookRecorder::Impl {
             auto r = std::make_shared<Hmc2Record>();
             r->header = layer.header;
             r->bucketStartMs = s.minute;
+            r->committedThroughMs = s.closedThrough;
             r->observedMs = s.observed;
             r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
             r->midOpen = s.midOpen; r->midClose = s.midClose;
@@ -348,6 +361,7 @@ struct BookRecorder::Impl {
                 std::sort(r.entries.begin(), r.entries.end(),
                           [](const auto &a, const auto &b) { return Key{a.row, a.isAsk} < Key{b.row, b.isAsk}; });
                 s.pending.push_back(std::move(r));
+                publishCopy(s.pending.back(), s.closedThrough, true);
             }
         }
     }
@@ -511,12 +525,12 @@ struct BookRecorder::Impl {
             s.pending.pop_front();
             try {
                 write(r);
-                if (cfg.publisher) publish(std::make_shared<const Hmc2Record>(r));
             } catch (const std::exception &e) {
                 ++diskErrors;
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
                 continue;
             }
+            publishCopy(r, r.bucketStartMs + kMinute, false);
             try {
                 rollup(s, r);
             } catch (const std::exception &e) {

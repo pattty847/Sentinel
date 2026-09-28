@@ -260,3 +260,68 @@ TEST_F(RecordingDataProcessor, HistoryCanFinalizeMissedLiveCommit) {
     ASSERT_NE(found, writes.end());
     EXPECT_EQ(found->intensity, final.columns[0].intensity);
 }
+
+TEST_F(RecordingDataProcessor, ViewRejectionRetriesWithBackoffAndDropsStaleErrors) {
+    processor.setRecordingCapability(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 1);
+    const auto generation = views.back().generation;
+    processor.onRecordingViewError("BTC-USD", generation - 1, "capacity", "stale", 1000);
+    events(1050);
+    EXPECT_EQ(views.size(), 1);
+    processor.onRecordingViewError("BTC-USD", generation, "capacity", "full", 1000);
+    events(1100);
+    ASSERT_EQ(views.size(), 2);
+    EXPECT_EQ(views.back().generation, generation);
+    processor.onRecordingViewError("BTC-USD", generation, "incompatible_grid", "changed", 1000);
+    events(1100);
+    EXPECT_EQ(views.size(), 2);
+    events(1100);
+    EXPECT_EQ(views.size(), 3);
+    processor.onRecordingViewError("BTC-USD", generation, "unavailable", "stopped", 1000);
+    processor.setRecordingConnected(false);
+    events(100);
+    EXPECT_EQ(views.size(), 3);
+}
+
+TEST_F(RecordingDataProcessor, LostFinalIsFetchedAfterLiveMovesToNextBucket) {
+    processor.setRecordingCapability(true);
+    events(180);
+    auto history = page(requests.back());
+    history.status = "complete";
+    history.exhausted = true;
+    history.scannedStartMs = history.oldestAvailableMs = 60000;
+    processor.onRecordingHistoryReceived(history);
+    ASSERT_EQ(requests.size(), 1);
+    auto live = history;
+    live.columns[0].bucketStartMs = 12'060'000;
+    live.columns[0].observedMs = 59000;
+    live.columns[0].flags = recording::kProvisional;
+    processor.onRecordingLiveReceived(live);
+    // Closing payload was coalesced by transport congestion. Next live bucket
+    // must initiate an explicit history repair, even though the slot is cached.
+    live.columns[0].bucketStartMs = 12'120'000;
+    live.columns[0].observedMs = 1000;
+    processor.onRecordingLiveReceived(live);
+    events(2200);
+    ASSERT_EQ(requests.size(), 2);
+    EXPECT_EQ(requests.back().endTimeMs, 12'060'000);
+    EXPECT_EQ(requests.back().count, 1);
+    auto final = page(requests.back());
+    final.columns[0].bucketStartMs = 12'060'000;
+    final.columns[0].observedMs = 60000;
+    final.columns[0].flags = 0;
+    final.columns[0].intensity.fill('\x31');
+    final.scannedStartMs = 12'060'000;
+    final.scannedEndMs = 12'120'000;
+    processor.onRecordingHistoryReceived(final);
+    const auto& writes = updates.back()->writes;
+    const auto found = std::find_if(writes.begin(), writes.end(), [&](const auto& w) {
+        return w.bucketStartMs == 12'060'000;
+    });
+    ASSERT_NE(found, writes.end());
+    EXPECT_EQ(found->intensity, final.columns[0].intensity);
+    events(2200);
+    EXPECT_EQ(requests.size(), 2); // repair completed; no paging/retry loop
+}

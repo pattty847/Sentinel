@@ -647,6 +647,11 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
+                if (msg.value("context", "") == "heatmap_recording_view") {
+                    emit recordingViewError(QString::fromStdString(msg.value("symbol", "")),
+                        msg.value("band_generation", uint64_t{0}), QString::fromStdString(msg.value("code", "")),
+                        QString::fromStdString(msg.value("message", "")), msg.value("retry_ms", 1000));
+                }
                 if (msg.value("context", "") == "heatmap_history_request" &&
                     msg.contains("request_id") && msg["request_id"].is_string()) {
                     emit recordingHeatmapHistoryError(

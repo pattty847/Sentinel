@@ -131,6 +131,7 @@ public:
 
     // Newest bucket near the viewport that is neither cached nor known missing.
     bool nextFetch(FetchRequest& out) const;
+    int64_t unfinishedRecordingBucket() const;
 
 private:
     int slotFor(int64_t bucketMs) const;

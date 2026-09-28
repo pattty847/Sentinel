@@ -1012,6 +1012,8 @@ void MainWindowGPU::connectMarketDataSignals() {
         }, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
                 dataProcessor, &DataProcessor::setRecordingConnected, Qt::QueuedConnection);
+        connect(m_dataSource.get(), &IGridDataSource::recordingViewError,
+                dataProcessor, &DataProcessor::onRecordingViewError, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapLiveReceived,
                 dataProcessor, &DataProcessor::onRecordingLiveReceived, Qt::QueuedConnection);
         connect(dataProcessor, &DataProcessor::recordingViewNeeded, this,

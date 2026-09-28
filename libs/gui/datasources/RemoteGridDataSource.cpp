@@ -90,6 +90,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
             this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::recordingViewError,
+            this, &IGridDataSource::recordingViewError, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::recordingHeatmapLiveReceived,
             this, &IGridDataSource::recordingHeatmapLiveReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::recordingHeatmapHistoryReceived,

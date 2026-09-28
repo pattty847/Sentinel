@@ -396,7 +396,13 @@ bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t 
                 m_recordingLive.erase(existing);
             }
         }
-        if (live) m_recordingLive[column.bucketStartMs] = column;
+        if (live) {
+            const auto existing = m_projected.find(column.bucketStartMs);
+            if (column.provisional && existing != m_projected.end() &&
+                !existing->second.provisional && existing->second.observedMs >= column.observedMs &&
+                existing->second.observedMs > 0) continue;
+            m_recordingLive[column.bucketStartMs] = column;
+        }
         m_projected[column.bucketStartMs] = column;
         m_latestRecordingMs = std::max(m_latestRecordingMs, column.bucketStartMs);
         changed.push_back(column.bucketStartMs);
@@ -596,6 +602,13 @@ void ColumnWindow::evict() {
             (!frontInWindow && (centre - front->first) >= (back->first - centre));
         m_cache.erase(evictFront ? front : back);
     }
+}
+
+int64_t ColumnWindow::unfinishedRecordingBucket() const {
+    if (!m_recording || m_liveGeneration != m_bandGeneration) return 0;
+    for (const auto& [bucket, column] : m_recordingLive)
+        if (column.provisional && bucket < m_latestRecordingMs) return bucket;
+    return 0;
 }
 
 bool ColumnWindow::nextFetch(FetchRequest& out) const {

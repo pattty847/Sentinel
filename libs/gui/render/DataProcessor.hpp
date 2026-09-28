@@ -47,6 +47,8 @@ public slots:
     void setRecordingCapability(bool available);
     void setRecordingConnected(bool connected);
     void refreshRecordingHistory();
+    void onRecordingViewError(const QString& symbol, uint64_t generation, const QString& code,
+                              const QString& message, int retryMs);
     void onRecordingLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void onRecordingHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void onRecordingHistoryError(const QString& symbol, const QString& requestId,
@@ -110,7 +112,7 @@ private:
     bool recordingMode() const { return m_recordingRequested && m_recordingAvailable; }
     void scheduleRecordingBand();
     void applyRecordingBand();
-    void sendRecordingRequest(int64_t endMs);
+    void sendRecordingRequest(int64_t endMs, bool finalRepair = false);
     void resetRecordingRequest();
     bool m_recordingRequested = false, m_recordingAvailable = false;
     bool m_recordingConnected = false, m_recordingBootstrapped = false;
@@ -128,6 +130,11 @@ private:
     QTimer* m_recordingTimeout = nullptr;
     QTimer* m_recordingRetry = nullptr;
     int m_recordingNoProgress = 0;
+    recording::LiveView m_registeredView;
+    QTimer* m_recordingViewRetry = nullptr;
+    int m_recordingViewRetryMs = 1000;
+    QTimer* m_recordingFinalRetry = nullptr;
+    bool m_recordingFinalFetch = false;
 
     heatmap_window::ColumnWindow m_heatmapWindow;
     HeatmapViewKey m_lastHeatmapView;

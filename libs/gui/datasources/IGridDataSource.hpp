@@ -75,6 +75,8 @@ signals:
                                 int64_t requestEndMs,
                                 int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
+    void recordingViewError(const QString& symbol, uint64_t generation, const QString& code,
+                            const QString& message, int retryMs);
     void recordingHeatmapLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void recordingHeatmapHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
     void recordingHeatmapHistoryError(const QString& symbol, const QString& requestId,
