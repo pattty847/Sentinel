@@ -109,6 +109,8 @@ Look before you claim a visual or performance result.
 - Agent API state, viewport, and screenshot routes: see `docs/AGENT_API.md`.
 - Viewing it: Claude Code reads the PNG directly; Codex opens local images mid-task on its own (verified 2026-09-27) or takes them up front with `codex exec -i <png>`. A sandboxed Codex run cannot launch the GUI (`Cannot create window: no screens available`), so it cannot take its own screenshots: report the visual check as unverified and the orchestrator runs it.
 - Input: the dev build is a raw binary with no app bundle, so computer-use tools cannot drive it. Ask the owner to pan, zoom or click, then read the run log and screenshot.
+- Drive the app: the Agent API (`docs/AGENT_API.md`) sets symbol, timeframe, viewport and layers, waits for the change to render (`/api/v1/operations/<id>?waitMs=`), then screenshots that frame (`afterOperation=`). Screenshots fail with `grab_failed` while the Mac screen is locked (`ioreg -n Root -d1 -a | grep -A1 ScreenIsLocked`).
+- Recorded book data (recording v2): `build/mac-clang/tests/servermodel/hmc2_dump <recording.dir> BTC-USD deep|near [tfMs] [lastN] [topK]` prints recorded columns and the biggest walls.
 - Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log (section 4a).
 - CPU: `sample <pid> <seconds> -file <out>` (macOS). Work that happens outside `updatePaintNode` (Qt texture uploads, QML, other threads) only shows up here.
 
