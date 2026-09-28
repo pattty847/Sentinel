@@ -34,6 +34,15 @@ public:
                      int64_t seq,
                      bool isClosed);
 
+    // Merges history bars by bar start time. A still-forming live bar wins over a
+    // history copy of the same bucket; the live seq stream is not touched.
+    void applyHistory(const QString& symbol,
+                      int64_t timeframeSec,
+                      const std::vector<CandleBar>& bars);
+
+    // Live seq numbers restart with each server session; call on (re)connect.
+    void resetSequences();
+
     bool getVisibleSlice(const QString& symbol,
                          int64_t timeframeSec,
                          qint64 timeStartMs,
@@ -74,6 +83,10 @@ private:
     static CandleBar& getAt(Series& series, size_t index);
     static size_t lowerBound(const Series& series, qint64 timeStartMs);
     static size_t upperBound(const Series& series, qint64 timeEndMs);
+    static std::vector<CandleBar> linearize(const Series& series);
+    // Replaces the ring with time-sorted bars, keeping the newest `capacity`.
+    static void rebuild(Series& series, std::vector<CandleBar>&& sorted);
+    Series& seriesFor(const QString& symbol, int64_t timeframeSec);
 
     std::unordered_map<SeriesKey, Series, SeriesKeyHash> m_series;
 };

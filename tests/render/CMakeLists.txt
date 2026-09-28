@@ -44,6 +44,18 @@ target_link_libraries(test_HeatmapColumnWindow PRIVATE
 add_test(NAME HeatmapColumnWindowTests COMMAND test_HeatmapColumnWindow)
 set_tests_properties(HeatmapColumnWindowTests PROPERTIES LABELS "render")
 
+add_executable(test_CandleSeriesBuffer test_CandleSeriesBuffer.cpp)
+target_include_directories(test_CandleSeriesBuffer PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/gui
+)
+target_link_libraries(test_CandleSeriesBuffer PRIVATE
+    GTest::gtest_main
+    sentinel_gui_lib
+    Qt6::Core
+)
+add_test(NAME CandleSeriesBufferTests COMMAND test_CandleSeriesBuffer)
+set_tests_properties(CandleSeriesBufferTests PROPERTIES LABELS "render")
+
 add_executable(test_AxisLayout test_AxisLayout.cpp)
 target_include_directories(test_AxisLayout PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui
