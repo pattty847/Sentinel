@@ -97,10 +97,24 @@ struct BookRecorder::Impl {
     enum class Kind { Snapshot, Updates, Invalid, InvalidEnvelope, Tick };
     struct Message {
         Kind kind = Kind::Tick;
-        std::string symbol, reason;
+        const std::string *symbolName = nullptr;
+        std::string reason;
+        const std::string &symbol() const {
+            static const std::string allSymbols;
+            return symbolName ? *symbolName : allSymbols;
+        }
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
     };
+    // Only the producer accesses this set. Its immutable strings have stable
+    // addresses, so even long symbols require no allocation on repeated enqueues.
+    std::set<std::string, std::less<>> producerSymbols;
+    const std::string *internSymbol(const std::string &name) {
+        auto it = producerSymbols.find(name);
+        if (it == producerSymbols.end())
+            it = producerSymbols.emplace(name).first;
+        return &*it;
+    }
     static constexpr size_t kQueueSlots = 4096;
     std::array<Message, kQueueSlots> queue;
     std::mutex mutex;
@@ -441,8 +455,8 @@ struct BookRecorder::Impl {
         // batch invalidates continuity; skipping only its bad levels invents a book.
         for (const auto &level : m.levels) {
             if (!priceUnits(level.price, cfg.priceScale) || !std::isfinite(level.size) || level.size < 0) {
-                sLog_Warning("BookRecorder: malformed L2 symbol=" << m.symbol);
-                invalidate(m.symbol, s, "malformed L2");
+                sLog_Warning("BookRecorder: malformed L2 symbol=" << m.symbol());
+                invalidate(m.symbol(), s, "malformed L2");
                 return;
             }
         }
@@ -490,17 +504,17 @@ struct BookRecorder::Impl {
         for (const auto &layer : s.layers) {
             for (const auto *row : layer.touched) {
                 if (!std::isfinite(row->size)) {
-                    invalidate(m.symbol, s, "row size overflow");
+                    invalidate(m.symbol(), s, "row size overflow");
                     return;
                 }
             }
         }
         if (s.bids.empty() || s.asks.empty()) {
-            invalidate(m.symbol, s, "missing two-sided mid");
+            invalidate(m.symbol(), s, "missing two-sided mid");
             return;
         }
         if (!trackMid(s)) {
-            invalidate(m.symbol, s, "unrepresentable mid");
+            invalidate(m.symbol(), s, "unrepresentable mid");
             return;
         }
         for (auto &l : s.layers)
@@ -508,7 +522,7 @@ struct BookRecorder::Impl {
                 row->peak = std::max(row->peak, row->size);
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
-            sLog_Data("BookRecorder: snapshot symbol=" << m.symbol << " time=" << s.clock
+            sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
     }
@@ -521,7 +535,7 @@ struct BookRecorder::Impl {
         }
         if (m.kind == Kind::Tick || m.kind == Kind::Invalid) {
             for (auto &[name, ptr] : symbols) {
-                if (m.kind == Kind::Invalid && !m.symbol.empty() && name != m.symbol)
+                if (m.kind == Kind::Invalid && !m.symbol().empty() && name != m.symbol())
                     continue;
                 auto &s = *ptr;
                 if (!s.initialized)
@@ -533,7 +547,7 @@ struct BookRecorder::Impl {
             }
             return;
         }
-        auto &s = getSymbol(m.symbol);
+        auto &s = getSymbol(m.symbol());
         if (!s.initialized) {
             if (m.kind != Kind::Snapshot)
                 return;
@@ -558,13 +572,13 @@ struct BookRecorder::Impl {
         if (late)
             s.flags |= kLateEvents;
         if (m.kind == Kind::InvalidEnvelope) {
-            sLog_Warning("BookRecorder: queue overflow symbol=" << m.symbol);
-            invalidate(m.symbol, s, m.reason);
+            sLog_Warning("BookRecorder: queue overflow symbol=" << m.symbol());
+            invalidate(m.symbol(), s, m.reason);
             return;
         }
         if (m.kind == Kind::Snapshot || s.valid)
             apply(s, m);
-        sLog_Probe("recording.event", "symbol=" << m.symbol << " envelope=" << m.time << " clock=" << s.clock
+        sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());
     }
 };
@@ -573,13 +587,15 @@ BookRecorder::BookRecorder(RecorderConfig cfg, std::function<int64_t()> clock)
     : impl_(std::make_unique<Impl>(std::move(cfg), std::move(clock))) {}
 BookRecorder::~BookRecorder() = default;
 void BookRecorder::onSnapshot(const std::string &symbol, int64_t time, std::vector<Level> levels) {
-    impl_->enqueue({Impl::Kind::Snapshot, symbol, {}, time, impl_->localClock(), std::move(levels)});
+    impl_->enqueue(
+        {Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
 }
 void BookRecorder::onUpdates(const std::string &symbol, int64_t time, std::vector<Level> levels) {
-    impl_->enqueue({Impl::Kind::Updates, symbol, {}, time, impl_->localClock(), std::move(levels)});
+    impl_->enqueue(
+        {Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
-    impl_->enqueue({Impl::Kind::Invalid, symbol, std::move(reason), local, local, {}});
+    impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
 }
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});

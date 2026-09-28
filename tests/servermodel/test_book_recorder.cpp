@@ -316,4 +316,17 @@ TEST_F(RecorderTest, RejectedResnapshotCannotIntegrateProvisionalLevelsDuringGap
     EXPECT_EQ(rows[0].observedMs, 40000);
     value(rows[0], 99, false, 5, 8);
 }
+TEST_F(RecorderTest, QueuedLongSymbolOwnsItsLifetime) {
+    auto r = make(config());
+    const std::string expected(80, 'X');
+    std::string callerName = expected;
+    r->onSnapshot(callerName, 0, {{true, 99, 2}, {false, 101, 4}});
+    callerName.assign("caller-reused-its-storage");
+    local = 30000;
+    r->onUpdates(expected, 30000, {{true, 99, 6}});
+    tick(*r, 60000);
+    auto rows = Hmc2Store::readRange(dir.path().toStdString(), expected, "near", 60000, 0, 60000);
+    ASSERT_EQ(rows.size(), 1);
+    value(rows[0], 99, false, 4, 6);
+}
 } // namespace
