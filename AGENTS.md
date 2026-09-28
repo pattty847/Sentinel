@@ -73,6 +73,34 @@ Cheap verification ladder:
 3. Run targeted tests / targeted repro
 4. Ask before broad/full runs unless user asked for it
 
+## 4a) Logs and Probes (Debug What the User Saw)
+
+Every run of `sentinel-gui` and `sentinel-server` writes its own log file. Read it before guessing.
+
+Where:
+- macOS: `~/Library/Logs/Sentinel/sentinel-gui-latest.log`, `~/Library/Logs/Sentinel/sentinel-server-latest.log` (symlinks to the newest run)
+- Older runs: `<app>-YYYYMMDD-HHMMSS-<pid>.log` in the same dir (last 20 kept, `SENTINEL_LOG_KEEP`)
+- Windows/Linux: `<GenericDataLocation>/Sentinel/logs`. `SENTINEL_LOG_DIR` overrides. stderr prints `[sentinel] log file: <path>` at startup.
+
+Read:
+- Header lines start with `#`: version, pid, `exe=... built=...` (check the binary is not stale vs your change), args, cwd, `SENTINEL_*`/`QT_*`/`QSG_*` env.
+- Line format: `<local time> <D/I/W/E/F> <category> <thread> <file:line> | <message>`
+- Categories: `app`, `data`, `render`, `debug`, `probe`, plus Qt's own (`qt.*`, `default` for plain qDebug).
+- Start with `rg ' [WEF] ' <log>`, then narrow by the time the user describes, category, and thread (`main`, `QSGRenderThread`, ...).
+
+Probes (values for a specific behavior, off by default):
+- List them: `rg -o 'sLog_Probe\("[^"]+"' libs apps | sort -u`
+- Enable by name or prefix: `SENTINEL_PROBES=tpo,heatmap.window` (`all` enables every probe). A prefix enables its children (`tpo` -> `tpo.ingest`).
+- If the log lacks the values you need, ask the user to rerun with the probes on, or add a probe and ask them to reproduce. Example: `SENTINEL_PROBES=heatmap ./build/mac-clang/apps/sentinel-gui/sentinel-gui`
+
+Write logs (`libs/core/SentinelLogging.hpp`):
+- `sLog_App/Data/Render/Debug(...)`: every call prints. State changes and one-off events. Include identifying values as `key=value` (symbol, tf, range, counts).
+- `sLog_Warning/sLog_Error(...)`: problems. Do not swallow a failure silently.
+- `sLog_Probe("area.detail", "k=" << v)`: anything per frame, per message, or per bucket. Name is a string literal; checked once per call site, free when off.
+- `sLog_*N(ms, ...)`: per-site time throttle, only for an always-on recurring line.
+- Do not gate logging with ad-hoc env vars, and do not write side files (`/tmp/*.log`, `.cursor/debug.log`). Everything goes through Qt logging so it lands in the run log.
+- Too noisy: `QT_LOGGING_RULES="sentinel.render.debug=false"` silences a category.
+
 ## 5) Hot Paths (Treat Like Live Wires)
 
 Changes here require performance caution and small diffs:
