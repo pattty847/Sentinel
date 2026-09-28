@@ -13,6 +13,10 @@
 namespace {
 constexpr int64_t kMsPerSecond = 1000;
 constexpr int64_t kMinuteMs = 60'000;
+// One rollup history request reads at most this many 1m source columns (7 days,
+// about 60 MB at 2048 rows). Wider timeframes return fewer columns per page and
+// the client pages further back.
+constexpr int64_t kMaxRollupSourceColumns = 7 * 24 * 60;
 using Column = HeatmapTwapStreamer::HistoryColumn;
 
 // Called per history fetch or per completed 1m bucket, never per 50 ms sample.
@@ -876,7 +880,7 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         if (timeframeMs % kMinuteMs != 0) return false;
         const int64_t factor = timeframeMs / kMinuteMs;
         const int64_t sourceCount = std::min<int64_t>(
-            static_cast<int64_t>(count) * factor, std::numeric_limits<int>::max());
+            static_cast<int64_t>(count) * factor, std::max(factor, kMaxRollupSourceColumns));
         // endTimeMs names the requested output bucket start, so include every
         // recorded minute through that bucket's end.
         const int64_t sourceEnd = endTimeMs > 0
