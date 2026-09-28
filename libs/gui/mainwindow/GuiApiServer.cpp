@@ -13,6 +13,7 @@
 #include <QSaveFile>
 #include <QTcpSocket>
 #include <QQuickView>
+#include <QPointer>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QTimer>
@@ -52,6 +53,8 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
                            std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
                            std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
+                           std::function<void(const heatmap_window::WallQuery&,
+                                              std::function<void(heatmap_window::WallsSnapshot)>)> wallsSnapshot,
                            std::function<AgentApi::ControlApply(const QString&, const AgentApi::ControlBody&)> applyControl,
                            std::function<std::pair<quint64, quint64>()> frameAck,
                            std::function<void(quint64)> publishRevision,
@@ -65,6 +68,7 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
       m_candlesSnapshot(std::move(candlesSnapshot)),
       m_bookSnapshot(std::move(bookSnapshot)),
       m_tradesSnapshot(std::move(tradesSnapshot)),
+      m_wallsSnapshot(std::move(wallsSnapshot)),
       m_applyControl(std::move(applyControl)), m_frameAck(std::move(frameAck)),
       m_publishRevision(std::move(publishRevision)) {
 }
@@ -113,9 +117,10 @@ void GuiApiServer::handleNewConnection() {
         deadline->setSingleShot(true);
         deadline->start(6500);
         connect(deadline, &QTimer::timeout, socket, [this, socket]() {
-            if (m_requests.contains(socket)) {
+            if (m_requests.contains(socket) || m_pendingWalls.contains(socket)) {
                 respond(socket, 408, AgentApi::jsonBytes(AgentApi::error("request_timeout", "Request timed out")), "application/json");
                 m_requests.remove(socket);
+                m_pendingWalls.remove(socket);
             } else {
                 socket->abort(); // Write deadline for a peer that stops reading.
             }
@@ -125,6 +130,7 @@ void GuiApiServer::handleNewConnection() {
         });
         connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
             m_requests.remove(socket);
+            m_pendingWalls.remove(socket);
             m_openConnections.remove(socket);
         });
         connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
@@ -209,7 +215,8 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         respond(socket, 200, AgentApi::jsonBytes(AgentApi::viewportJson(snapshot)), "application/json");
         return;
     }
-    if (path == "/api/v1/candles" || path == "/api/v1/book" || path == "/api/v1/trades") {
+    if (path == "/api/v1/candles" || path == "/api/v1/book" || path == "/api/v1/trades" ||
+        path == "/api/v1/heatmap/walls") {
         const auto check = AgentApi::validateQuery(parsed.request, m_stateSnapshot().meta.symbol);
         if (check.status != 200) {
             respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
@@ -224,8 +231,36 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             respond(socket, 200, AgentApi::jsonBytes(AgentApi::candlesJson(*snapshot)), "application/json");
         } else if (path == "/api/v1/book") {
             respond(socket, 200, AgentApi::jsonBytes(AgentApi::bookJson(m_bookSnapshot(check.levels))), "application/json");
-        } else {
+        } else if (path == "/api/v1/trades") {
             respond(socket, 200, AgentApi::jsonBytes(AgentApi::tradesJson(m_tradesSnapshot(check.windowMs, check.limit))), "application/json");
+        } else {
+            const auto meta = m_stateSnapshot().meta;
+            QPointer<GuiApiServer> server(this);
+            QPointer<QTcpSocket> peer(socket);
+            m_pendingWalls.insert(socket);
+            m_wallsSnapshot(check.walls, [server, peer, meta](heatmap_window::WallsSnapshot data) mutable {
+                if (!server || !peer || !server->m_pendingWalls.remove(peer.data()) ||
+                    peer->state() != QAbstractSocket::ConnectedState) return;
+                if (server->m_stateSnapshot().meta.selectionEpoch != meta.selectionEpoch) {
+                    server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
+                        "selection_changed", "Symbol or timeframe changed while reading walls")), "application/json");
+                } else if (data.status == 409) {
+                    server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
+                        "recording_required", "Legacy liquidity is absolute, but its intensity side can disagree and rows lack validity")), "application/json");
+                } else if (data.status == 422) {
+                    server->respond(peer, 422, AgentApi::jsonBytes(AgentApi::error(
+                        "scan_limit", "Request exceeds the 16000000-cell scan budget; narrow the time range")), "application/json");
+                } else if (data.status != 200) {
+                    server->respond(peer, 503, AgentApi::jsonBytes(AgentApi::error(
+                        "heatmap_unavailable", "Heatmap processor is unavailable")), "application/json");
+                } else {
+                    AgentApi::WallsSnapshot result{meta, std::move(data)};
+                    result.meta.coverage = result.data.missingColumns == 0 && !result.data.unknownRows &&
+                                           result.data.recordedColumns > 0 ? "complete" :
+                        result.data.recordedColumns > 0 ? "partial" : "unknown";
+                    server->respond(peer, 200, AgentApi::jsonBytes(AgentApi::wallsJson(result)), "application/json");
+                }
+            });
         }
         return;
     }

@@ -36,5 +36,6 @@ QJsonObject viewportJson(const ViewportSnapshot& snapshot);
 QJsonObject candlesJson(const CandleSnapshot& snapshot);
 QJsonObject bookJson(const BookSnapshot& snapshot);
 QJsonObject tradesJson(const TradesSnapshot& snapshot);
+QJsonObject wallsJson(const WallsSnapshot& snapshot);
 QByteArray jsonBytes(const QJsonObject& object);
 } // namespace AgentApi

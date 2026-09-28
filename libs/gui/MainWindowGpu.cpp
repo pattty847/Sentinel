@@ -477,6 +477,25 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
                                                     [this](int levels) { return agentApiBookSnapshot(levels); },
                                                     [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
+                                                    [this](const heatmap_window::WallQuery& query,
+                                                           std::function<void(heatmap_window::WallsSnapshot)> complete) {
+                                                        auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+                                                        auto* processor = renderer ? renderer->getDataProcessor() : nullptr;
+                                                        if (!processor) {
+                                                            heatmap_window::WallsSnapshot unavailable;
+                                                            unavailable.status = 503;
+                                                            complete(std::move(unavailable));
+                                                            return;
+                                                        }
+                                                        QMetaObject::invokeMethod(processor,
+                                                            [processor, renderer, query, complete = std::move(complete)]() mutable {
+                                                                auto snapshot = processor->captureHeatmapWalls(query);
+                                                                QMetaObject::invokeMethod(renderer,
+                                                                    [snapshot = std::move(snapshot), complete = std::move(complete)]() mutable {
+                                                                        complete(std::move(snapshot));
+                                                                    }, Qt::QueuedConnection);
+                                                            }, Qt::QueuedConnection);
+                                                    },
                                                     [this](const QString& kind, const AgentApi::ControlBody& body) { return agentApiApplyControl(kind, body); },
                                                     [this]() {
                                                         auto* r = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;

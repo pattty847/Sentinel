@@ -12,6 +12,7 @@ Threading: owned and used by DataProcessor on its worker thread only.
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,35 @@ struct FetchRequest {
     int count = 0;
 };
 
+struct WallQuery {
+    std::optional<int64_t> startMs, endMs;
+    std::optional<double> priceMin, priceMax;
+    double minQty = 0.0;
+    int limit = 20;
+};
+
+// One price cell and side over the scanned time range: a wall is a level, not a
+// minute. qty is its peak aggregated resting size; bucketStartMs is when it peaked.
+struct Wall {
+    int64_t bucketStartMs = 0;
+    double priceLow = 0, priceHigh = 0;
+    bool ask = false;
+    double qty = 0, notional = 0;
+    bool forming = false;
+    double meanQty = 0;          // mean over recorded columns in range (absent = 0)
+    int64_t firstSeenMs = 0, lastSeenMs = 0;
+    int columns = 0;             // recorded columns where the cell held this side
+};
+
+struct WallsSnapshot {
+    int status = 200;
+    int64_t loadedStartMs = 0, loadedEndMs = 0;
+    double bandTick = 0;
+    int recordedColumns = 0, missingColumns = 0;
+    bool unknownRows = false;
+    std::vector<Wall> walls;
+};
+
 // Signed heatmap intensity magnitude: bids are v, asks are v - 0x8000 (u16),
 // matching heatmap_intensity.frag.
 int intensityMagnitude(uint16_t value, int bytesPerCell);
@@ -102,6 +132,7 @@ public:
     int64_t windowEndMs() const { return m_windowEndMs; }
     int64_t oldestAvailableMs() const { return m_floorMs; }
     size_t cachedColumns() const { return m_cache.size(); }
+    WallsSnapshot captureWalls(const WallQuery& query) const;
 
     // Explicit recording projection; never clears the source/live cache or placement.
     // A generation change invalidates projected data/known ranges and rewrites every slot.

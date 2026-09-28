@@ -122,12 +122,13 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
                          path == "/api/v1/viewport" || path == "/api/v1/layers";
     const bool known = operation || control || path == "/api/v1/state" ||
                        path == "/api/v1/candles" || path == "/api/v1/book" ||
-                       path == "/api/v1/trades" ||
+                       path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" ||
                        path == "/api/v1/screenshot" || path == "/screenshot";
     if (!known) return fail(404, "not_found", "Unknown route");
     const bool readable = operation || path == "/api/v1/state" || path == "/api/v1/viewport" ||
                           path == "/api/v1/candles" || path == "/api/v1/book" ||
-                          path == "/api/v1/trades" || path == "/api/v1/screenshot" || path == "/screenshot";
+                          path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" ||
+                          path == "/api/v1/screenshot" || path == "/screenshot";
     if (!((parts[0] == "GET" && readable) || (parts[0] == "POST" && control)))
         return fail(405, "method_not_allowed", "Method not allowed");
     if (parts[0] == "GET" && contentLength != 0) return fail(400, "bad_request", "GET body is unsupported");
@@ -148,6 +149,43 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
         result.message = QString::fromLatin1(message);
         return result;
     };
+    if (request.path == "/api/v1/heatmap/walls") {
+        ValidationResult result;
+        QSet<QString> seen;
+        for (const auto& item : query.queryItems()) {
+            const QString& key = item.first;
+            if (seen.contains(key)) return reject(400, "invalid_parameter", "Duplicate query parameter");
+            seen.insert(key);
+            if (key == "symbol") continue;
+            if (key == "startMs" || key == "endMs" || key == "limit") {
+                bool ok = false;
+                const qint64 value = item.second.toLongLong(&ok);
+                if (!ok || value < 0 || value > 9007199254740991LL || (key == "limit" && value == 0))
+                    return reject(422, "invalid_parameter", "Time must be a nonnegative safe integer; limit must be positive");
+                if (key == "startMs") result.walls.startMs = value;
+                else if (key == "endMs") result.walls.endMs = value;
+                else {
+                    if (value > 100) return reject(422, "invalid_limit", "limit exceeds 100");
+                    result.walls.limit = static_cast<int>(value);
+                }
+            } else if (key == "priceMin" || key == "priceMax" || key == "minQty") {
+                bool ok = false;
+                const double value = item.second.toDouble(&ok);
+                if (!ok || !std::isfinite(value) || value < 0 || (key != "minQty" && value == 0))
+                    return reject(422, "invalid_parameter", "Price must be finite and positive; minQty must be nonnegative");
+                if (key == "priceMin") result.walls.priceMin = value;
+                else if (key == "priceMax") result.walls.priceMax = value;
+                else result.walls.minQty = value;
+            } else return reject(400, "invalid_parameter", "Unknown query parameter");
+        }
+        if (seen.contains("symbol") && query.queryItemValue("symbol") != activeSymbol)
+            return reject(409, "symbol_mismatch", "Only the active symbol is available");
+        if (result.walls.startMs && result.walls.endMs && *result.walls.startMs >= *result.walls.endMs)
+            return reject(422, "invalid_range", "startMs must precede endMs");
+        if (result.walls.priceMin && result.walls.priceMax && *result.walls.priceMin >= *result.walls.priceMax)
+            return reject(422, "invalid_range", "priceMin must be below priceMax");
+        return result;
+    }
     if (request.path == "/api/v1/candles" || request.path == "/api/v1/book" ||
         request.path == "/api/v1/trades") {
         ValidationResult result;
@@ -438,6 +476,21 @@ QJsonObject tradesJson(const TradesSnapshot& s) {
             {"buyQty", a.buyQty}, {"sellQty", a.sellQty}, {"unknownQty", a.unknownQty},
             {"deltaQty", a.deltaQty}, {"vwap", number(a.vwap)}}},
         {"retentionLimited", s.retentionLimited}});
+}
+
+QJsonObject wallsJson(const WallsSnapshot& s) {
+    QJsonArray rows;
+    for (const auto& w : s.data.walls) rows.append(QJsonObject{
+        {"bucketStartMs", w.bucketStartMs}, {"priceLow", w.priceLow},
+        {"priceHigh", w.priceHigh}, {"side", w.ask ? "ask" : "bid"},
+        {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming},
+        {"meanQty", w.meanQty}, {"firstSeenMs", w.firstSeenMs}, {"lastSeenMs", w.lastSeenMs},
+        {"columns", w.columns}});
+    return envelope(s.meta, {{"basis", "recording-twap-sum"},
+        {"bandTick", s.data.bandTick > 0 ? QJsonValue(s.data.bandTick) : QJsonValue(QJsonValue::Null)},
+        {"loadedRange", QJsonArray{s.data.loadedStartMs, s.data.loadedEndMs}},
+        {"recordedColumns", s.data.recordedColumns}, {"missingColumns", s.data.missingColumns},
+        {"note", "Aggregated resting size per cell, not individual orders"}, {"walls", rows}});
 }
 
 void TradeTape::append(TradeRow row) {

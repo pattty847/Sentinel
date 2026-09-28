@@ -109,6 +109,35 @@ TEST(AgentApiCodec, RouteAndOriginHostValidation) {
     RequestParser legacy;
     EXPECT_EQ(legacy.feed(request("/screenshot?name=a")).kind, ParseResult::Kind::Complete);
 }
+
+TEST(AgentApiWalls, QueryLimitsAndJson) {
+    RequestParser parser;
+    EXPECT_EQ(parser.feed(request("/api/v1/heatmap/walls?limit=2")).kind, ParseResult::Kind::Complete);
+    auto valid = validateQuery({"GET", "/api/v1/heatmap/walls",
+        "startMs=100&endMs=200&priceMin=99.5&priceMax=100.5&minQty=0.25&limit=100&symbol=BTC-USD"}, "BTC-USD");
+    EXPECT_EQ(valid.status, 200);
+    EXPECT_EQ(valid.walls.limit, 100);
+    EXPECT_DOUBLE_EQ(valid.walls.minQty, 0.25);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "limit=101"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "limit=0"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "limit=1&limit=2"}).status, 400);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "minQty=-1"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "priceMin=2&priceMax=1"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "startMs=2&endMs=1"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/walls", "symbol=ETH-USD"}, "BTC-USD").status, 409);
+    WallsSnapshot snapshot;
+    snapshot.meta = {"s1", "BTC-USD", 1, 100, false, "partial", false};
+    snapshot.data.loadedStartMs = 0;
+    snapshot.data.loadedEndMs = 200;
+    snapshot.data.bandTick = 0.5;
+    snapshot.data.recordedColumns = 1;
+    snapshot.data.missingColumns = 1;
+    snapshot.data.walls.push_back({100, 99.5, 100, true, 2, 199.5, false});
+    const auto json = wallsJson(snapshot);
+    EXPECT_EQ(json.value("data").toObject().value("basis").toString(), "recording-twap-sum");
+    EXPECT_EQ(json.value("data").toObject().value("walls").toArray().first().toObject().value("side").toString(), "ask");
+    EXPECT_EQ(json.value("meta").toObject().value("coverage").toString(), "partial");
+}
 TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     StateSnapshot s;
     s.meta = {"session", "BTC-USD", 7, 1790596800000, true, "unknown", false};

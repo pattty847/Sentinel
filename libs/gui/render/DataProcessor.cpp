@@ -10,6 +10,7 @@ Related: DataProcessor.hpp.
 Assumptions: Server is authoritative for heatmap columns.
 */
 #include "DataProcessor.hpp"
+
 #include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
@@ -21,6 +22,10 @@ Assumptions: Server is authoritative for heatmap columns.
 #include <limits>
 #include <cstring>
 #include <bit>
+
+heatmap_window::WallsSnapshot DataProcessor::captureHeatmapWalls(const heatmap_window::WallQuery& query) const {
+    return m_heatmapWindow.captureWalls(query);
+}
 
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {

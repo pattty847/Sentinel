@@ -8,6 +8,7 @@
 #include <optional>
 #include <array>
 #include <vector>
+#include "../render/HeatmapColumnWindow.hpp"
 
 namespace AgentApi {
 
@@ -38,6 +39,7 @@ struct ValidationResult {
     qint64 windowMs = 60000;
     int limit = 100;
     int levels = 20;
+    heatmap_window::WallQuery walls;
     QString afterOperation;
     int waitMs = 0;
 };
@@ -147,6 +149,11 @@ struct TradesSnapshot {
     std::vector<TradeRow> trades;
     TradeSummary summary;
     bool retentionLimited = false;
+};
+
+struct WallsSnapshot {
+    Metadata meta;
+    heatmap_window::WallsSnapshot data;
 };
 
 class TradeTape {
