@@ -7,6 +7,8 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <filesystem>
+#include <optional>
 #include <QObject>
 #include <QByteArray>
 #include <QTimer>
@@ -58,6 +60,8 @@ public:
                                 int64_t endTimeMs,
                                 std::vector<FootprintTradeSample>& out) const;
     int64_t exchangeNowMs() const override;
+    bool recordingAvailable() const { return m_recorder != nullptr; }
+    const std::optional<std::filesystem::path>& recordingDir() const { return m_recordingDir; }
 
 public slots:
     void onTrade(const Trade& trade);
@@ -96,6 +100,7 @@ private:
     QTimer m_candleTimer;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::unique_ptr<recording::BookRecorder> m_recorder;
+    std::optional<std::filesystem::path> m_recordingDir;
     QTimer m_recorderTimer;
     int m_recorderTicks = 0;
     void startRecorder();

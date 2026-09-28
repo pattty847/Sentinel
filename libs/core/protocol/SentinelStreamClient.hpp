@@ -10,11 +10,13 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <optional>
 #include <deque>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
+#include "RecordingHistoryWire.hpp"
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
@@ -41,6 +43,20 @@ public:
         QByteArray intensity;
         QByteArray liquidity;
         double liquidityScale = 1.0;
+        QByteArray validity;
+        uint64_t observedMs = 0;
+        uint32_t flags = 0;
+    };
+    struct RecordingHistoryPage {
+        QString symbol, requestId, status, layer, valueEncoding, message;
+        int64_t timeframeMs = 0, requestEndMs = 0;
+        int64_t scannedStartMs = 0, scannedEndMs = 0, nextEndMs = 0;
+        int64_t oldestAvailableMs = 0, latestAvailableMs = 0;
+        uint64_t bandGeneration = 0;
+        bool exhausted = false;
+        double bandLo = 0, bandTick = 0, sizeFloor = 0, codesPerOctave = 0;
+        int bandRows = 0;
+        QVector<HeatmapHistoryColumn> columns;
     };
     struct CandleBar {
         int64_t timeStartMs = 0;
@@ -66,6 +82,8 @@ public:
                                int64_t timeframeMs,
                                int64_t endTimeMs,
                                int count);
+    void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request);
+    static std::optional<RecordingHistoryPage> parseRecordingHistoryChunk(const nlohmann::json& msg);
     void requestFootprintHistory(const std::string& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -109,6 +127,9 @@ signals:
                                 int64_t requestEndMs,
                                 int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
+    void recordingHeatmapHistoryReceived(const RecordingHistoryPage& page);
+    void recordingHeatmapHistoryError(const QString& symbol, const QString& requestId,
+                                      uint64_t bandGeneration, const QString& message);
     void candleHistoryReceived(const QString& symbol,
                                int64_t timeframeSec,
                                int64_t startTimeSec,
@@ -188,6 +209,7 @@ private:
 };
 
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)
+Q_DECLARE_METATYPE(SentinelStreamClient::RecordingHistoryPage)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(SentinelStreamClient::CandleBar)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::CandleBar>)

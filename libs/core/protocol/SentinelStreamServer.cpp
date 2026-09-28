@@ -1,6 +1,7 @@
 #include "SentinelStreamServer.hpp"
 #include "HeatmapSlice.hpp"
 #include "SentinelStreamProtocol.hpp"
+#include "RecordingHistoryWire.hpp"
 #include "SentinelLogging.hpp"
 #include "../servermodel/SessionManager.hpp"
 #include <boost/beast/core.hpp>
@@ -53,7 +54,7 @@ int64_t tradeTimestampMs(const Trade& trade) {
         std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
 }
 
-nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
+nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingAvailable) {
     nlohmann::json payload;
     payload["type"] = "server_config";
     payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
@@ -104,6 +105,7 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg) {
         {"update_tick_size", cfg.candles.tickSize}
     };
     payload["default_symbols"] = cfg.defaultSymbols;
+    payload["recording"] = protocol::recordingwire::capability(cfg, recordingAvailable);
     return payload;
 }
 
@@ -1047,7 +1049,8 @@ public:
         auto weak = std::weak_ptr<Session>(self);
 
         if (owner_) {
-            auto configPayload = buildServerConfigPayload(owner_->serverConfig());
+            auto configPayload = buildServerConfigPayload(owner_->serverConfig(),
+                                                          owner_->m_model.recordingAvailable());
             do_write(configPayload.dump());
         }
         
@@ -1206,6 +1209,52 @@ public:
                 }
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
+                const std::string source = j.value("source", std::string("legacy"));
+                if (source == "recording") {
+                    const std::string requestId = j.contains("request_id") && j["request_id"].is_string()
+                        ? j["request_id"].get<std::string>() : "";
+                    const uint64_t generation = j.contains("band_generation") && j["band_generation"].is_number_unsigned()
+                        ? j["band_generation"].get<uint64_t>() : 0;
+                    auto fail = [this, &symbol, &requestId, generation](const std::string& message) {
+                        sLog_Warning("Recording history request rejected: symbol=" << symbol
+                                     << " requestId=" << requestId << " reason=" << message);
+                        do_write(protocol::recordingwire::error(symbol, message, requestId, generation).dump());
+                    };
+                    const auto q = protocol::recordingwire::parseRequest(j);
+                    if (!q) { fail("invalid recording history request"); return; }
+                    if (!owner_ || !owner_->m_model.recordingDir()) {
+                        fail("recording unavailable"); return;
+                    }
+                    auto weak = weak_from_this();
+                    auto* owner = owner_;
+                    const auto root = *owner->m_model.recordingDir();
+                    const bool queued = owner->submitHistoryTask([weak, q = *q, root] {
+                        try {
+                            auto request = protocol::recordingwire::buildRequest(q);
+                            auto page = recording::buildPage(protocol::recordingwire::threadReader(root), request);
+                            protocol::recordingwire::emptyPaddingValues(q, page);
+                            auto response = protocol::recordingwire::buildChunk(q, page).dump();
+                            if (auto self = weak.lock()) self->do_write(std::move(response));
+                        } catch (const std::exception& ex) {
+                            sLog_Error("Recording history build failed: symbol=" << q.symbol
+                                       << " requestId=" << q.requestId << " error=" << ex.what());
+                            if (auto self = weak.lock())
+                                self->do_write(protocol::recordingwire::error(
+                                    q.symbol, std::string("history build failed: ") + ex.what(),
+                                    q.requestId, q.bandGeneration).dump());
+                        }
+                    });
+                    if (!queued) fail("history worker queue is full");
+                    return;
+                }
+                if (source != "legacy") {
+                    const auto id = j.contains("request_id") && j["request_id"].is_string()
+                        ? j["request_id"].get<std::string>() : "";
+                    const auto generation = j.contains("band_generation") && j["band_generation"].is_number_unsigned()
+                        ? j["band_generation"].get<uint64_t>() : 0;
+                    do_write(protocol::recordingwire::error(symbol, "unsupported source", id, generation).dump());
+                    return;
+                }
                 const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
                 const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
                 // Phase 4: optional start_time. 0 (or absent) means no lower bound.

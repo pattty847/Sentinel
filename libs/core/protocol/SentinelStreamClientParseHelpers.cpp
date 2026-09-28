@@ -57,6 +57,26 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
         cfg.orderbook.tickSize = ob.value("tick_size", cfg.orderbook.tickSize);
         cfg.orderbook.bandPct = ob.value("band_pct", cfg.orderbook.bandPct);
     }
+    if (msg.contains("recording") && msg["recording"].is_object()) {
+        const auto& rec = msg["recording"];
+        mark(rec, "available", "recording.available");
+        mark(rec, "layers", "recording.layers");
+        mark(rec, "timeframes_ms", "recording.timeframesMs");
+        mark(rec, "size_floor", "recording.sizeFloor");
+        mark(rec, "codes_per_octave", "recording.codesPerOctave");
+        cfg.recording.available = rec.value("available", false);
+        cfg.recording.sizeFloor = rec.value("size_floor", cfg.recording.sizeFloor);
+        cfg.recording.codesPerOctave = rec.value("codes_per_octave", cfg.recording.codesPerOctave);
+        if (rec.contains("layers") && rec["layers"].is_array()) {
+            for (const auto& item : rec["layers"])
+                if (item.is_string()) cfg.recording.layers.push_back(item.get<std::string>());
+        }
+        if (rec.contains("timeframes_ms") && rec["timeframes_ms"].is_array()) {
+            for (const auto& item : rec["timeframes_ms"])
+                if (item.is_number_integer() && item.get<int64_t>() > 0)
+                    cfg.recording.timeframesMs.push_back(item.get<int64_t>());
+        }
+    }
     if (msg.contains("candles") && msg["candles"].is_object()) {
         const auto& cd = msg["candles"];
         for (const auto& [wire, field] : {std::pair{"update_bps_fast", "candles.bpsFast"},
@@ -140,4 +160,3 @@ std::vector<BookLevelUpdate> parseL2Updates(const nlohmann::json& deltas) {
 }
 
 } // namespace protocol::clientparse
-

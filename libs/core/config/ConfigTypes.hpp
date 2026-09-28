@@ -81,6 +81,10 @@ struct ServerTlsConfig {
 // currency; one set of values for now (BTC-USD). Per-asset ticks come later.
 struct ServerRecordingConfig {
     bool enabled = false;
+    // Wire capability; true only when the server's recorder started.
+    bool available = false;
+    std::vector<std::string> layers;
+    std::vector<int64_t> timeframesMs;
     std::string dir = "data/recording";
     std::string fallbackDir;          // used when dir's volume is not mounted; empty = do not record
     double priceScale = 100.0;        // price units per 1.0 quote (0.01 increment)

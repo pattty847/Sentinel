@@ -183,6 +183,7 @@ void ServerDataModel::startRecorder() {
     };
     try {
         m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
+        m_recordingDir = dir;
     } catch (const std::exception& e) {
         sLog_Error("Recording v2 failed to start: dir=" << dir.string() << " error=" << e.what());
         return;
