@@ -86,6 +86,7 @@ private:
         int64_t timeframeMs = 0;
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;
+        int64_t observedMs = 0;
         std::vector<double> accumBid;
         std::vector<double> accumAsk;
     };
@@ -164,6 +165,8 @@ private:
     IntensityConfig m_intensity;
     QTimer m_timer;
     int m_sampleMs = 50;
+    // Sample gaps longer than this are treated as unobserved, not integrated.
+    static constexpr int64_t kMaxSampleGapMs = 5000;
 
     double m_recenterDelta = 0.01;
     double m_bandFast = 0.15;

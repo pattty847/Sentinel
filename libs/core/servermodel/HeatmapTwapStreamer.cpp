@@ -170,20 +170,19 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
     state.minPrice = latest.minPrice;
     state.maxPrice = latest.maxPrice;
     state.lastRecenterMid = (latest.minPrice + latest.maxPrice) * 0.5;
-    state.lastSampleMs = latest.bucketEndMs;
+    // Live sampling restarts at the first post-boot sample. The book was not
+    // observed while the server was down, so the downtime stays missing.
+    state.lastSampleMs = 0;
     state.lastMidPrice = state.lastRecenterMid;
     state.rowValuesBid.assign(static_cast<size_t>(state.height), 0.0);
     state.rowValuesAsk.assign(static_cast<size_t>(state.height), 0.0);
     state.runningMaxBid = 0.0;
     state.runningMaxAsk = 0.0;
 
-    // Initialize the active-timeframe frame so the first live sample slots in.
+    // Initialize the active-timeframe frame; the first live sample aligns it.
     state.frames.clear();
     TimeframeState frame;
     frame.timeframeMs = m_activeTimeframeMs;
-    // Forming bucket starts at the next bucket after latest.bucketEndMs.
-    frame.bucketStartMs = latest.bucketEndMs;
-    frame.bucketEndMs   = frame.bucketStartMs + m_activeTimeframeMs;
     frame.accumBid.assign(static_cast<size_t>(state.height), 0.0);
     frame.accumAsk.assign(static_cast<size_t>(state.height), 0.0);
     state.frames.push_back(std::move(frame));
@@ -413,6 +412,36 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
         return;
     }
 
+    // A long sample gap (host sleep, stalled loop) was not observed. Do not
+    // integrate the current book across it: close the forming bucket only if
+    // it holds observed time, then realign at the next sample.
+    if (intervalEnd - intervalStart > kMaxSampleGapMs) {
+        for (auto& frame : state.frames) {
+            if (frame.timeframeMs <= 0) {
+                continue;
+            }
+            if (m_activeTimeframeMs > 0 && frame.timeframeMs != m_activeTimeframeMs) {
+                continue;
+            }
+            if (frame.bucketStartMs == 0 || frame.bucketEndMs > nowMs) {
+                continue;
+            }
+            if (frame.observedMs > 0) {
+                finalizeBucket(symbol, state, frame, lastTrade, midPrice);
+            }
+            frame.bucketStartMs = 0;
+            frame.bucketEndMs = 0;
+            frame.observedMs = 0;
+            std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
+            std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
+        }
+        sLog_Warning("HeatmapTwapStreamer: " << QString::fromStdString(symbol)
+                     << " sample gap " << (intervalEnd - intervalStart)
+                     << " ms not integrated; buckets in the gap stay missing");
+        state.lastSampleMs = nowMs;
+        return;
+    }
+
     for (auto& frame : state.frames) {
         if (frame.timeframeMs <= 0) {
             continue;
@@ -436,11 +465,13 @@ void HeatmapTwapStreamer::accumulateForSymbol(const std::string& symbol,
                 frame.accumAsk[i] += state.rowValuesAsk[i] * dtMs;
             }
 
+            frame.observedMs += segmentEnd - t0;
             t0 = segmentEnd;
             if (segmentEnd >= frame.bucketEndMs) {
                 finalizeBucket(symbol, state, frame, lastTrade, midPrice);
                 frame.bucketStartMs = frame.bucketEndMs;
                 frame.bucketEndMs = frame.bucketStartMs + frame.timeframeMs;
+                frame.observedMs = 0;
                 std::fill(frame.accumBid.begin(), frame.accumBid.end(), 0.0);
                 std::fill(frame.accumAsk.begin(), frame.accumAsk.end(), 0.0);
             }
