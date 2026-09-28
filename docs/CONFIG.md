@@ -47,6 +47,17 @@ heatmap:
   persistence_fsync_every_ms: 1000
   persistence_retention_days: 0  # keep all day files
 
+recording:                # recording v2: near and deep order-book layers (docs/research/2026-09-recording-v2.md)
+  enabled: true
+  dir: /Volumes/T7/sentinel-data/recording
+  fallback_dir: data/recording   # used when dir's volume is not mounted; empty = do not record
+  near_tick: 1              # $ rows within near_pct of the mid
+  near_pct: 0.05
+  deep_tick: 10             # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
+  deep_low_frac: 0.25
+  deep_high_mult: 4
+  # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
+
 server:
   mdc:
     host: advanced-trade-ws.coinbase.com
