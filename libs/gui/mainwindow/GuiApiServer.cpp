@@ -106,6 +106,7 @@ void GuiApiServer::handleNewConnection() {
             continue;
         }
         socket->setParent(this);
+        socket->setReadBufferSize(24580);
         m_openConnections.insert(socket);
         m_requests.insert(socket, {});
         auto* deadline = new QTimer(socket);
