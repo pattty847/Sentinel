@@ -998,25 +998,25 @@ void MainWindowGPU::connectMarketDataSignals() {
     connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived, this,
             [this](const HeatmapSlice& slice) {
                 if (slice.symbol == m_currentSymbol) m_heatmapReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-            }, Qt::QueuedConnection);
+            });
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived, this,
             [this](const Trade& trade) {
                 if (QString::fromStdString(trade.product_id) == m_currentSymbol)
                     m_tradesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-            }, Qt::QueuedConnection);
+            });
     connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated, this,
             [this](const QString& symbol, const std::vector<BookDelta>&) {
                 if (symbol == m_currentSymbol) m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-            }, Qt::QueuedConnection);
+            });
     if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
         connect(remote->streamClient(), &SentinelStreamClient::candleBarUpdateReceived, this,
                 [this](const QString& symbol, int64_t, int64_t, int64_t, const SentinelStreamClient::CandleBar&) {
                     if (symbol == m_currentSymbol) m_candlesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-                }, Qt::QueuedConnection);
+                });
         connect(remote->streamClient(), &SentinelStreamClient::candleBarClosedReceived, this,
                 [this](const QString& symbol, int64_t, int64_t, int64_t, const SentinelStreamClient::CandleBar&) {
                     if (symbol == m_currentSymbol) m_candlesReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-                }, Qt::QueuedConnection);
+                });
     }
 
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
