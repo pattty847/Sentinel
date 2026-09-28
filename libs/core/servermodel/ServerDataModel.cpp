@@ -161,9 +161,9 @@ const LiveOrderBook& ServerDataModel::getLiveOrderBook(const std::string& symbol
     return ensureSymbol(symbol).liveBook;
 }
 
-std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, Timeframe tf, size_t limit) const {
+std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit) const {
     if (m_aggregator) {
-        return m_aggregator->getHistory(symbol, tf, limit);
+        return m_aggregator->getHistory(symbol, timeframeMs, limit);
     }
     return {};
 }

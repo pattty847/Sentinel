@@ -1,5 +1,11 @@
 find_package(Qt6 REQUIRED COMPONENTS Core)
 
+add_executable(test_timeframe_aggregator test_timeframe_aggregator.cpp)
+target_include_directories(test_timeframe_aggregator PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_timeframe_aggregator PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME TimeframeAggregatorTests COMMAND test_timeframe_aggregator)
+set_tests_properties(TimeframeAggregatorTests PROPERTIES LABELS "servermodel")
+
 add_executable(test_hmcol_format test_hmcol_format.cpp)
 target_include_directories(test_hmcol_format PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/core
@@ -69,8 +75,8 @@ set_tests_properties(SessionManagerTests PROPERTIES LABELS "servermodel")
 
 add_custom_target(servermodel_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L servermodel
-    DEPENDS test_hmcol_format test_heatmap_column_store test_heatmap_twap_streamer test_heatmap_history_fixture test_session_manager
+    DEPENDS test_timeframe_aggregator test_hmcol_format test_heatmap_column_store test_heatmap_twap_streamer test_heatmap_history_fixture test_session_manager
     COMMENT "Running servermodel persistence tests"
 )
 
-message(STATUS "Servermodel tests configured (5 test suites)")
+message(STATUS "Servermodel tests configured (6 test suites)")

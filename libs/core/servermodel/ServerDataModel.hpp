@@ -38,7 +38,7 @@ public:
     // Snapshot Accessor
     const LiveOrderBook& getLiveOrderBook(const std::string& symbol);
     // History Accessor
-    std::vector<OHLCVBar> getHistory(const std::string& symbol, Timeframe tf, size_t limit = 1000) const;
+    std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
     bool getHeatmapHistory(const std::string& symbol,
                            int64_t timeframeMs,
                            int64_t endTimeMs,
@@ -71,8 +71,8 @@ signals:
     void bookUpdateBroadcast(const QString& productId, const std::vector<BookDelta>& deltas);
     
     // Aggregation signals (forwarded from aggregator)
-    void barClosed(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
-    void barUpdated(const QString& symbol, Timeframe tf, const OHLCVBar& bar);
+    void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
+    void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
 
     void heatmapSliceReady(const HeatmapSlice& slice);
 
