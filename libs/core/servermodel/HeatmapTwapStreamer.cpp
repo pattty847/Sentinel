@@ -6,10 +6,88 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <span>
 #include <stdexcept>
 
 namespace {
 constexpr int64_t kMsPerSecond = 1000;
+constexpr int64_t kMinuteMs = 60'000;
+using Column = HeatmapTwapStreamer::HistoryColumn;
+
+// Called per history fetch or per completed 1m bucket, never per 50 ms sample.
+// The encoded magnitudes are normalized values, so averaging their signed
+// values preserves ask/bid polarity; zero contributes zero on either side.
+Column rollupColumns(std::span<const Column> inputs, int64_t timeframeMs) {
+    Column out;
+    if (inputs.empty()) return out;
+    const Column& band = inputs.back();
+    const int rows = band.intensity.size() / 2;
+    out.bucketStartMs = (band.bucketStartMs / timeframeMs) * timeframeMs;
+    out.bucketEndMs = out.bucketStartMs + timeframeMs;
+    out.minPrice = band.minPrice;
+    out.maxPrice = band.maxPrice;
+    out.tickSize = band.tickSize;
+    if (rows <= 0 || out.tickSize <= 0.0) return {};
+    std::vector<double> signedSum(static_cast<size_t>(rows), 0.0);
+    std::vector<double> quantitySum(static_cast<size_t>(rows), 0.0);
+    std::vector<int> scratch(static_cast<size_t>(rows), 0);
+    std::vector<double> quantityScratch(static_cast<size_t>(rows), 0.0);
+    int observed = 0;
+    int withLiquidity = 0;
+    for (const auto& input : inputs) {
+        if (input.intensity.isEmpty() || input.tickSize <= 0.0) continue;
+        std::fill(scratch.begin(), scratch.end(), 0);
+        std::fill(quantityScratch.begin(), quantityScratch.end(), 0.0);
+        const int inputRows = input.intensity.size() / 2;
+        for (int row = 0; row < inputRows; ++row) {
+            const double price = input.maxPrice - (static_cast<double>(row) + 0.5) * input.tickSize;
+            const int target = static_cast<int>(std::floor((out.maxPrice - price) / out.tickSize));
+            if (target < 0 || target >= rows) continue;
+            const auto* cell = reinterpret_cast<const uchar*>(input.intensity.constData()) + row * 2;
+            const uint16_t encoded = qFromLittleEndian<uint16_t>(cell);
+            const int signedValue = (encoded & 0x8000u) ? -static_cast<int>(encoded & 0x7fffu)
+                                                         : static_cast<int>(encoded);
+            auto& value = scratch[static_cast<size_t>(target)];
+            if (std::abs(signedValue) > std::abs(value)) value = signedValue;
+            if (input.liquidity.size() == input.intensity.size()) {
+                const auto* quantity = reinterpret_cast<const uchar*>(input.liquidity.constData()) + row * 2;
+                auto& targetQuantity = quantityScratch[static_cast<size_t>(target)];
+                targetQuantity = std::max(targetQuantity,
+                    static_cast<double>(qFromLittleEndian<uint16_t>(quantity)) * input.liquidityScale);
+            }
+        }
+        for (int row = 0; row < rows; ++row) {
+            signedSum[static_cast<size_t>(row)] += scratch[static_cast<size_t>(row)];
+            quantitySum[static_cast<size_t>(row)] += quantityScratch[static_cast<size_t>(row)];
+        }
+        ++observed;
+        if (input.liquidity.size() == input.intensity.size()) ++withLiquidity;
+    }
+    if (observed == 0) return {};
+    out.intensity.resize(rows * 2);
+    double maxQuantity = 0.0;
+    for (int row = 0; row < rows; ++row) {
+        const int signedValue = static_cast<int>(std::lround(signedSum[static_cast<size_t>(row)] / observed));
+        const uint16_t encoded = signedValue < 0
+            ? static_cast<uint16_t>(0x8000u + std::min(-signedValue, 32767))
+            : static_cast<uint16_t>(std::min(signedValue, 32767));
+        qToLittleEndian<uint16_t>(encoded,
+            reinterpret_cast<uchar*>(out.intensity.data()) + row * 2);
+        maxQuantity = std::max(maxQuantity, quantitySum[static_cast<size_t>(row)] / observed);
+    }
+    if (withLiquidity > 0) {
+        out.liquidityScale = maxQuantity > 0.0 ? maxQuantity / 65535.0 : 1.0;
+        out.liquidity.resize(rows * 2);
+        for (int row = 0; row < rows; ++row) {
+            const double mean = quantitySum[static_cast<size_t>(row)] / observed;
+            const auto quantized = static_cast<uint16_t>(std::clamp(std::lround(mean / out.liquidityScale), 0l, 65535l));
+            qToLittleEndian<uint16_t>(quantized,
+                reinterpret_cast<uchar*>(out.liquidity.data()) + row * 2);
+        }
+    }
+    return out;
+}
 }
 
 HeatmapTwapStreamer::HeatmapTwapStreamer(IHeatmapDataSource& model,
@@ -240,7 +318,10 @@ int HeatmapTwapStreamer::primeRingFromDisk(const std::string& symbol) {
 int64_t HeatmapTwapStreamer::oldestPersistedMs(const std::string& symbol,
                                                int64_t timeframeMs) const {
     if (!m_columnStore) return 0;
-    return m_columnStore->oldestPersistedMs(symbol, timeframeMs);
+    const int64_t anchorTf = timeframeMs > kMinuteMs && timeframeMs % kMinuteMs == 0
+        ? kMinuteMs : timeframeMs;
+    const int64_t first = m_columnStore->oldestPersistedMs(symbol, anchorTf);
+    return first > 0 && timeframeMs > anchorTf ? (first / timeframeMs) * timeframeMs : first;
 }
 
 int HeatmapTwapStreamer::bootstrapFromDisk(const std::vector<std::string>& symbols) {
@@ -565,6 +646,54 @@ void HeatmapTwapStreamer::finalizeBucket(const std::string& symbol,
         slice.reset = reset;
         emit heatmapSliceReady(slice);
     }
+
+    // Coarser live columns advance on each finalized 1m column. Reuse the
+    // bounded RAM ring; the 50 ms sampling path does no rollup work.
+    if (frame.timeframeMs == kMinuteMs) {
+        for (const int64_t tf : m_timeframesMs) {
+            if (tf <= kMinuteMs || tf % kMinuteMs != 0) continue;
+            const int64_t groupStart = (frame.bucketStartMs / tf) * tf;
+            std::vector<HistoryColumn> inputs;
+            {
+                std::lock_guard<std::mutex> lock(m_historyMutex);
+                const auto symbolIt = m_symbols.find(symbol);
+                if (symbolIt != m_symbols.end()) {
+                    const auto ringIt = symbolIt->second.historyByTf.find(kMinuteMs);
+                    if (ringIt != symbolIt->second.historyByTf.end()) {
+                        const auto& ring = ringIt->second;
+                        inputs.reserve(static_cast<size_t>(std::min<int64_t>(ring.count, tf / kMinuteMs)));
+                        for (int i = 0; i < ring.count; ++i) {
+                            const int idx = (ring.writeIndex - ring.count + i + ring.capacity) % ring.capacity;
+                            const auto& input = ring.columns[static_cast<size_t>(idx)];
+                            if (input.bucketStartMs >= groupStart &&
+                                input.bucketStartMs < groupStart + tf) inputs.push_back(input);
+                        }
+                    }
+                }
+            }
+            if (inputs.empty()) continue;
+            auto rolled = rollupColumns(inputs, tf);
+            if (rolled.intensity.isEmpty()) continue;
+            HeatmapSlice live;
+            live.symbol = QString::fromStdString(symbol);
+            live.bucketStartMs = rolled.bucketStartMs;
+            live.bucketEndMs = rolled.bucketEndMs;
+            live.timeframeMs = tf;
+            live.gridWidth = m_defaultWidth;
+            live.gridHeight = state.height;
+            live.minPrice = rolled.minPrice;
+            live.maxPrice = rolled.maxPrice;
+            live.tickSize = rolled.tickSize;
+            live.midPrice = state.lastMidPrice;
+            live.lastTrade = lastTrade;
+            live.format = QStringLiteral("u16");
+            live.column = rolled.intensity;
+            live.liquidityColumn = rolled.liquidity;
+            live.liquidityScale = rolled.liquidityScale;
+            live.reset = reset;
+            emit heatmapSliceReady(live);
+        }
+    }
 }
 
 void HeatmapTwapStreamer::emitFormingBucket(const std::string& symbol,
@@ -742,6 +871,42 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
     }
 
     out.clear();
+
+    if (timeframeMs > kMinuteMs) {
+        if (timeframeMs % kMinuteMs != 0) return false;
+        const int64_t factor = timeframeMs / kMinuteMs;
+        const int64_t sourceCount = std::min<int64_t>(
+            static_cast<int64_t>(count) * factor, std::numeric_limits<int>::max());
+        // endTimeMs names the requested output bucket start, so include every
+        // recorded minute through that bucket's end.
+        const int64_t sourceEnd = endTimeMs > 0
+            ? (endTimeMs / timeframeMs) * timeframeMs + timeframeMs - kMinuteMs : 0;
+        std::vector<HistoryColumn> minutes;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        if (!fetchHistory(symbol, kMinuteMs, sourceEnd, static_cast<int>(sourceCount),
+                          sourceWidth, sourceHeight, minutes, startTimeMs)) return false;
+        size_t first = 0;
+        while (first < minutes.size()) {
+            const int64_t bucket = (minutes[first].bucketStartMs / timeframeMs) * timeframeMs;
+            size_t last = first + 1;
+            while (last < minutes.size() &&
+                   (minutes[last].bucketStartMs / timeframeMs) * timeframeMs == bucket) ++last;
+            if ((endTimeMs <= 0 || bucket <= endTimeMs) &&
+                (startTimeMs <= 0 || bucket >= startTimeMs)) {
+                auto rolled = rollupColumns(std::span<const HistoryColumn>(minutes.data() + first,
+                                                                           last - first), timeframeMs);
+                if (!rolled.intensity.isEmpty()) out.push_back(std::move(rolled));
+            }
+            first = last;
+        }
+        if (out.size() > static_cast<size_t>(count))
+            out.erase(out.begin(), out.end() - count);
+        outGridWidth = std::min(m_defaultWidth, count);
+        outGridHeight = sourceHeight;
+        return !out.empty();
+    }
+    if (timeframeMs != m_activeTimeframeMs) return false;
 
     // Step 1: scan the in-RAM ring under m_historyMutex. Reverse-walk newest
     // -> oldest, collect into a reverse-order buffer.
