@@ -202,7 +202,7 @@ Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
 - The delegating agent reviews the resulting diff and runs the verification ladder (section 4) before anything merges.
 
 Hand-off protocol (every delegated write task):
-1. Work in your own worktree and branch, created from current `main`.
+1. Work in your own worktree and branch, created from current `main` with `scripts/dev/agent-worktree.sh create <branch>` (branches: `lt-sol/...` for Codex gpt-6-sol, `lt-astra/...` for gpt-6-astra). It puts the worktree on the T7 drive when mounted, supplies `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build take seconds. Remove it after merge with `... remove <branch>`.
 2. Before reporting ready, merge the latest `main` into your branch (`git merge main`), resolve any conflicts yourself, rebuild, and run `ctest` in `build/mac-clang`.
 3. Finish with a message whose first line is `READY: <branch>`, followed by: what changed and why, the tests you ran with their summary line, and anything you could not verify (visual checks, live runs). Say `BLOCKED: <branch>` with the reason instead if you cannot finish.
 4. The orchestrator reviews the diff with a different model, merges with `--no-ff`, and removes the worktree. Never merge your own branch.
