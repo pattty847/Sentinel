@@ -21,7 +21,12 @@ namespace {
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
 using namespace sentinel::persistence;
-constexpr uint16_t kSchema = 2;
+// The deployed absolute format already used schema 2. Schema 1 is also
+// accepted as absolute; schema 3 is the first temporal-delta format.
+constexpr uint16_t kSchema = 3;
+constexpr int64_t kKeyframeMs = 15 * 60'000;
+constexpr size_t kMaxEntries = (kHmc2MaxRawLen - 93) / 5;
+constexpr size_t kMaxWriters = 64;
 constexpr size_t kPrefix = 14; // magic:u32, version:u16, length:u32, crc:u32
 constexpr uint32_t kMaxHeader = 65536;
 struct Corrupt : std::runtime_error {
@@ -112,12 +117,14 @@ bool readAt(std::ifstream &f, uint64_t pos, Bytes &b, size_t n) {
     f.seekg(static_cast<std::streamoff>(pos));
     return static_cast<bool>(f.read(reinterpret_cast<char *>(b.data()), static_cast<std::streamsize>(n)));
 }
-Hmc2Header readHeader(std::ifstream &f, uint64_t &pos) {
+Hmc2Header readHeader(std::ifstream &f, uint64_t &pos, uint16_t &schema) {
     Bytes b;
     if (!readAt(f, 0, b, kPrefix))
         throw Corrupt("incomplete header");
     Cursor c{b};
-    if (c.get<uint32_t>() != kHmc2Magic || c.get<uint16_t>() != kSchema)
+    const auto magic = c.get<uint32_t>();
+    schema = c.get<uint16_t>();
+    if (magic != kHmc2Magic || schema < 1 || schema > kSchema)
         throw Corrupt("header magic/schema");
     const auto n = c.get<uint32_t>();
     const auto crc = c.get<uint32_t>();
@@ -146,7 +153,23 @@ Hmc2Header readHeader(std::ifstream &f, uint64_t &pos) {
     pos = n;
     return h;
 }
-void encodeRecord(const Hmc2Record &r, Bytes &b) {
+auto key(const Hmc2Entry &e) {
+    return std::pair(e.row, e.isAsk);
+}
+void validateEntries(const std::vector<Hmc2Entry> &entries) {
+    check(entries.size() <= kMaxEntries, "too many entries");
+    for (size_t j = 0; j < entries.size(); ++j) {
+        const auto &e = entries[j];
+        check(!j || key(entries[j - 1]) < key(e), "entries must be unique and sorted by row/side");
+        check(!j || entries[j - 1].row >= 0 || e.row <= INT64_MAX + entries[j - 1].row, "row delta overflow");
+        check(e.twapCode <= kMaxCode && e.peakCode <= kMaxCode, "code contains side bit");
+    }
+}
+void encodeRecord(const Hmc2Record &r, Bytes &b, const Hmc2Record *base) {
+    // An instantaneous peak can legitimately have zero integrated TWAP. Use
+    // an absolute record to preserve it without colliding with delta removals.
+    if (base && std::any_of(r.entries.begin(), r.entries.end(), [](const auto &e) { return e.twapCode == 0; }))
+        base = nullptr;
     b.clear();
     put(b, r.bucketStartMs);
     put(b, r.observedMs);
@@ -159,25 +182,56 @@ void encodeRecord(const Hmc2Record &r, Bytes &b) {
     put(b, r.midClose);
     put(b, r.midMin);
     put(b, r.midMax);
-    check(r.entries.size() <= (kHmc2MaxRawLen - 84) / 5, "too many entries");
-    put(b, static_cast<uint32_t>(r.entries.size()));
+    put(b, uint32_t{0});      // changed-entry count, patched below
+    b.push_back(base ? 1 : 0); // 0 keyframe, 1 delta; separate from observation flags
+    put(b, base ? base->bucketStartMs : int64_t{0});
+    uint32_t count = 0;
     int64_t previous = 0;
-    bool previousAsk = false, first = true;
-    for (const auto &e : r.entries) {
-        check(first || e.row > previous || (e.row == previous && !previousAsk && e.isAsk),
-              "entries must be unique and sorted by row/side");
-        check(first || previous >= 0 || e.row <= INT64_MAX + previous, "row delta overflow");
-        check(e.twapCode <= kMaxCode && e.peakCode <= kMaxCode, "code contains side bit");
+    bool overflow = false;
+    auto writeEntry = [&](const Hmc2Entry &e, uint16_t oldTwap) {
+        if (count && previous < 0 && e.row > INT64_MAX + previous) {
+            overflow = true;
+            return;
+        }
         putVarint(b, zigzag(e.row - previous));
-        put(b, withSide(e.twapCode, e.isAsk));
-        put(b, e.peakCode);
+        b.push_back(e.isAsk ? 1 : 0);
+        putVarint(b, zigzag(int64_t{e.twapCode} - oldTwap));
+        putVarint(b, zigzag(int64_t{e.peakCode} - e.twapCode));
         previous = e.row;
-        previousAsk = e.isAsk;
-        first = false;
+        ++count;
+    };
+    size_t old = 0;
+    for (const auto &e : r.entries) {
+        if (base) {
+            while (old < base->entries.size() && key(base->entries[old]) < key(e)) {
+                const auto &gone = base->entries[old++];
+                writeEntry({gone.row, gone.isAsk, 0, 0}, gone.twapCode);
+            }
+        }
+        const auto *prior = base && old < base->entries.size() && key(base->entries[old]) == key(e)
+                                ? &base->entries[old++]
+                                : nullptr;
+        if (!prior || prior->twapCode != e.twapCode || prior->peakCode != e.peakCode)
+            writeEntry(e, prior ? prior->twapCode : 0);
     }
-    check(b.size() <= kHmc2MaxRawLen, "raw record exceeds 16 MiB");
+    if (base) {
+        while (old < base->entries.size()) {
+            const auto &gone = base->entries[old++];
+            writeEntry({gone.row, gone.isAsk, 0, 0}, gone.twapCode);
+        }
+    }
+    // A sparse subset can have an unrepresentable row delta even though the
+    // complete state does not. Large replacements can also exceed the raw cap.
+    if (base && (overflow || b.size() > kHmc2MaxRawLen)) {
+        encodeRecord(r, b, nullptr);
+        return;
+    }
+    check(!overflow && b.size() <= kHmc2MaxRawLen, "raw record exceeds bounds");
+    for (size_t j = 0; j < 4; ++j)
+        b[80 + j] = static_cast<uint8_t>(count >> (8 * j));
 }
-Hmc2Record decodeRecord(const Hmc2Header &h, const Bytes &b) {
+Hmc2Record decodeRecord(const Hmc2Header &h, uint16_t schema, const Bytes &b, const Hmc2Record *base,
+                        bool &missingBase) {
     Cursor c{b};
     Hmc2Record r;
     r.header = h;
@@ -192,31 +246,85 @@ Hmc2Record decodeRecord(const Hmc2Header &h, const Bytes &b) {
     r.midClose = c.get<double>();
     r.midMin = c.get<double>();
     r.midMax = c.get<double>();
-    if (r.observedMs > h.tfMs || r.bucketStartMs % h.tfMs != 0 || !std::isfinite(r.midOpen) ||
+    if (r.bucketStartMs < kHmc2MinMs || r.bucketStartMs >= kHmc2EndMs || r.observedMs > h.tfMs ||
+        r.bucketStartMs % h.tfMs != 0 || !std::isfinite(r.midOpen) ||
         !std::isfinite(r.midClose) || !std::isfinite(r.midMin) || !std::isfinite(r.midMax))
         throw Corrupt("record semantics");
     const auto n = c.get<uint32_t>();
-    if (n > (b.size() - c.p) / 5)
+    bool deltaRecord = false;
+    if (schema == kSchema) {
+        if (c.p == b.size() || b[c.p] > 1)
+            throw Corrupt("record kind");
+        deltaRecord = b[c.p++] == 1;
+        const auto predecessor = c.get<int64_t>();
+        if ((!deltaRecord && predecessor != 0) ||
+            (deltaRecord && (predecessor != r.bucketStartMs - h.tfMs ||
+                             predecessor / kKeyframeMs != r.bucketStartMs / kKeyframeMs)))
+            throw Corrupt("delta predecessor/boundary");
+        missingBase = deltaRecord && (!base || base->bucketStartMs != predecessor);
+    }
+    if (n > (b.size() - c.p) / (schema == kSchema ? 4 : 5))
         throw Corrupt("entry count");
-    r.entries.reserve(n);
-    int64_t prev = 0;
-    bool prevAsk = false;
-    for (uint32_t i = 0; i < n; ++i) {
+    const size_t maxEntries = schema < kSchema ? (kHmc2MaxRawLen - 84) / 5 : kMaxEntries;
+    r.entries.reserve(std::min<size_t>(maxEntries, n + (deltaRecord && base ? base->entries.size() : 0)));
+    size_t old = 0;
+    auto add = [&](const Hmc2Entry &e) {
+        if (r.entries.size() >= maxEntries)
+            throw Corrupt("decoded entry count");
+        r.entries.push_back(e);
+    };
+    auto signedVarint = [&]() {
         uint64_t v;
         if (!getVarint(b.data(), b.size(), c.p, v))
-            throw Corrupt("row varint");
-        const int64_t delta = unzigzag(v);
-        if (i && (delta < 0 || prev > INT64_MAX - delta))
+            throw Corrupt("entry varint");
+        return unzigzag(v);
+    };
+    int64_t prev = 0;
+    bool prevAsk = false;
+    for (uint32_t j = 0; j < n; ++j) {
+        const int64_t delta = signedVarint();
+        if (j && (delta < 0 || prev > INT64_MAX - delta))
             throw Corrupt("row delta");
         const int64_t row = prev + delta;
-        const auto twap = c.get<uint16_t>(), peak = c.get<uint16_t>();
-        const bool ask = isAsk(twap);
-        if (peak > kMaxCode || (i && row == prev && (prevAsk || !ask)))
-            throw Corrupt("entry order/code");
-        r.entries.push_back({row, ask, static_cast<uint16_t>(twap & kMaxCode), peak});
+        bool ask;
+        int64_t twap, peak;
+        if (schema < kSchema) {
+            const auto code = c.get<uint16_t>();
+            ask = isAsk(code);
+            twap = code & kMaxCode;
+            peak = c.get<uint16_t>();
+        } else {
+            if (c.p == b.size() || b[c.p] > 1)
+                throw Corrupt("entry side");
+            ask = b[c.p++] == 1;
+            const auto twapDelta = signedVarint(), peakOffset = signedVarint();
+            if (twapDelta < -kMaxCode || twapDelta > kMaxCode || peakOffset < -kMaxCode || peakOffset > kMaxCode)
+                throw Corrupt("code offset");
+            uint16_t prior = 0;
+            if (deltaRecord && !missingBase) {
+                while (old < base->entries.size() && key(base->entries[old]) < std::pair(row, ask))
+                    add(base->entries[old++]);
+                if (old < base->entries.size() && key(base->entries[old]) == std::pair(row, ask))
+                    prior = base->entries[old++].twapCode;
+            }
+            twap = prior + twapDelta;
+            peak = twap + peakOffset;
+        }
+        if (j && row == prev && (prevAsk || !ask))
+            throw Corrupt("entry order");
+        if (!missingBase) {
+            if (twap < 0 || twap > kMaxCode || peak < 0 || peak > kMaxCode ||
+                (deltaRecord && twap == 0 && peak != 0))
+                throw Corrupt("entry code/removal");
+            if (!deltaRecord || twap != 0)
+                add({row, ask, static_cast<uint16_t>(twap), static_cast<uint16_t>(peak)});
+        }
         prev = row;
         prevAsk = ask;
     }
+    if (deltaRecord && !missingBase)
+        while (old < base->entries.size())
+            add(base->entries[old++]);
     if (c.p != b.size())
         throw Corrupt("record trailing bytes");
     return r;
@@ -322,11 +430,14 @@ uint64_t nextMagic(std::ifstream &f, uint64_t pos, uint64_t end, Bytes &scratch)
 }
 // A resync candidate is accepted only after framing, CRC, zstd and payload validation.
 // A length running past EOF is terminal only if no later valid candidate exists.
-template <class Sink> void scan(const fs::path &path, bool repair, Sink sink) {
+template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
+                               int64_t decodeStart = kHmc2MinMs, int64_t decodeEnd = kHmc2EndMs) {
     std::ifstream f(path, std::ios::binary);
     check(f.is_open(), "open " + path.string());
     uint64_t pos = 0;
-    const auto h = readHeader(f, pos);
+    uint16_t schema;
+    const auto h = readHeader(f, pos, schema);
+    std::optional<Hmc2Record> previous;
     std::error_code sizeError;
     const auto end = fs::file_size(path, sizeError);
     check(!sizeError, "file size " + path.string() + " error=" + sizeError.message());
@@ -334,6 +445,8 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink) {
     uint64_t tail = end;
     bool damaged = false;
     while (pos < end) {
+        if (damaged)
+            previous.reset();
         if (end - pos < 16) {
             if (!damaged) {
                 // At a known frame boundary, only a matching magic prefix can
@@ -380,13 +493,36 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink) {
         if (good) {
             std::optional<Hmc2Record> record;
             try {
-                record = decodeRecord(h, raw);
+                // No on-disk index: framing/zstd are scanned forward, but entry
+                // reconstruction starts at most 15 minutes before the query.
+                Cursor metadata{raw};
+                const auto bucket = metadata.get<int64_t>();
+                if (!repair && (bucket < decodeStart || bucket >= decodeEnd)) {
+                    previous.reset();
+                    pos += 16 + clen;
+                    continue;
+                }
+                bool missingBase = false;
+                record = decodeRecord(h, schema, raw, previous ? &*previous : nullptr, missingBase);
+                if (missingBase) {
+                    sLog_Warning("Hmc2Store: skipped delta without predecessor path=" << path.string()
+                                 << " bucket=" << bucket);
+                    previous.reset();
+                    record.reset();
+                    // A structurally valid orphan still establishes a frame
+                    // boundary. Never truncate it as an incomplete write.
+                    pos += 16 + clen;
+                    tail = end;
+                    damaged = false;
+                    continue;
+                }
             } catch (const Corrupt &e) {
                 sLog_Warning("Hmc2Store: invalid payload path=" << path.string() << " error=" << e.what());
             }
             if (record) {
                 if (damaged)
                     sLog_Warning("Hmc2Store: skipped interior corruption path=" << path.string() << " resume=" << pos);
+                previous = *record;
                 sink(std::move(*record));
                 pos += 16 + clen;
                 tail = end;
@@ -419,6 +555,7 @@ struct Hmc2Store::Impl {
     struct Writer {
         Hmc2Header header;
         fs::path path;
+        std::optional<Hmc2Record> previous;
     };
     std::map<fs::path, Writer> writers;
     Bytes raw, compressed, frame;
@@ -482,7 +619,8 @@ void Hmc2Store::append(const Hmc2Record &r) {
                 std::ifstream f(latest, std::ios::binary);
                 uint64_t p;
                 check(f.is_open(), "open " + latest.string());
-                reuse = headerBody(readHeader(f, p)) == headerBody(r.header);
+                uint16_t schema;
+                reuse = headerBody(readHeader(f, p, schema)) == headerBody(r.header) && schema == kSchema;
             } catch (const Corrupt &e) {
                 sLog_Warning("Hmc2Store: unusable header path=" << latest.string() << " error=" << e.what());
             }
@@ -501,12 +639,20 @@ void Hmc2Store::append(const Hmc2Record &r) {
         // A complete header may have survived a failed first creation before
         // its directory entry was synced. Cover that case on reuse as well.
         sync(path.parent_path(), true);
-        found = i.writers.insert_or_assign(base, Impl::Writer{r.header, path}).first;
+        if (i.writers.size() >= kMaxWriters && found == i.writers.end())
+            i.writers.erase(i.writers.begin());
+        found = i.writers.insert_or_assign(base, Impl::Writer{r.header, path, {}}).first;
     }
     auto &w = found->second;
     check(std::isfinite(r.midOpen) && std::isfinite(r.midClose) && std::isfinite(r.midMin) && std::isfinite(r.midMax),
           "nonfinite mid metadata");
-    encodeRecord(r, i.raw);
+    validateEntries(r.entries);
+    // Copy before writing so allocation failure cannot leave a committed record
+    // with stale cache state. Only a successful durable append advances the base.
+    auto next = r;
+    const bool delta = w.previous && w.previous->bucketStartMs == r.bucketStartMs - r.header.tfMs &&
+                       w.previous->bucketStartMs / kKeyframeMs == r.bucketStartMs / kKeyframeMs;
+    encodeRecord(r, i.raw, delta ? &*w.previous : nullptr);
     i.compressed.resize(ZSTD_compressBound(i.raw.size()));
     const auto n = ZSTD_compress(i.compressed.data(), i.compressed.size(), i.raw.data(), i.raw.size(), 3);
     check(!ZSTD_isError(n), "zstd compression failed");
@@ -537,6 +683,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
         f.close();
         check(static_cast<bool>(f), "close " + w.path.string());
         sync(w.path);
+        w.previous = std::move(next);
     } catch (...) {
         const auto path = w.path;
         i.writers.erase(found);
@@ -572,11 +719,14 @@ std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::st
         if (day < firstDay || day > lastDay)
             continue;
         try {
-            scan(path, false, [&](Hmc2Record &&r) {
-                if (r.header.symbol == symbol && r.header.layer == layer && r.header.tfMs == tf &&
-                    r.bucketStartMs >= start && r.bucketStartMs < end)
-                    records.insert_or_assign(r.bucketStartMs, std::move(r));
-            });
+            scan(
+                path, false,
+                [&](Hmc2Record &&r) {
+                    if (r.header.symbol == symbol && r.header.layer == layer && r.header.tfMs == tf &&
+                        r.bucketStartMs >= start && r.bucketStartMs < end)
+                        records.insert_or_assign(r.bucketStartMs, std::move(r));
+                },
+                start - start % kKeyframeMs, end);
         } catch (const std::exception &e) {
             sLog_Warning("Hmc2Store: skipped file path=" << path.string() << " error=" << e.what());
         }
