@@ -76,6 +76,7 @@ add_library(sentinel_core
 # Find required packages
 find_package(Qt6 REQUIRED COMPONENTS Core)
 find_package(yaml-cpp CONFIG REQUIRED)
+find_package(zstd CONFIG REQUIRED)
 # Dependencies found in root CMakeLists.txt via vcpkg
 # - Boost (with system component)
 # - nlohmann_json
@@ -98,6 +99,7 @@ target_link_libraries(sentinel_core
     PRIVATE
         nlohmann_json::nlohmann_json
         jwt-cpp::jwt-cpp
+        $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>
 )
 
 # Keep file:line in Qt message context for release builds too (log sink prints it).
