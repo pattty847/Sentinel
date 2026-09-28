@@ -139,7 +139,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
             m_currentSymbol = defaultSymbol;
         }
         if (m_connected && m_userSubscribed) {
-            requestHeatmapHistoryForSymbol(m_currentSymbol);
+            requestConfiguredHistoryForSymbol(m_currentSymbol);
         }
     });
 
@@ -626,10 +626,8 @@ void MainWindowGPU::onSubscribe() {
         m_dataSource->subscribe(symbol);
     }
     if (m_connected) {
-        requestHeatmapHistoryForSymbol(symbol);
-        requestFootprintHistoryForSymbol(symbol);
+        requestConfiguredHistoryForSymbol(symbol);
         requestTpoHistoryForSymbol(symbol);
-        requestCandleHistoryForSymbol(symbol);
     }
 }
 
@@ -643,12 +641,22 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     emit symbolChanged(symbol);
 }
 
-void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
-    if (!m_dataSource || symbol.isEmpty()) {
+bool MainWindowGPU::canRequestConfiguredHistoryForSymbol(const QString& symbol) const {
+    return m_connected && m_userSubscribed && m_serverConfigReady && m_dataSource &&
+           !symbol.isEmpty() && symbol == m_currentSymbol;
+}
+
+void MainWindowGPU::requestConfiguredHistoryForSymbol(const QString& symbol) {
+    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
-    // The connect signal can arrive before server_config; wait for its active timeframe.
-    if (!m_serverConfigReady) {
+    requestHeatmapHistoryForSymbol(symbol);
+    requestFootprintHistoryForSymbol(symbol);
+    requestCandleHistoryForSymbol(symbol);
+}
+
+void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
+    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
     int64_t timeframeMs = 0;
@@ -679,7 +687,7 @@ void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
-    if (!m_dataSource || symbol.isEmpty()) {
+    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
     int64_t timeframeMs = 0;
@@ -734,7 +742,7 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
-    if (!m_dataSource || symbol.isEmpty()) {
+    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
     int64_t timeframeSec = 1;
@@ -770,7 +778,7 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
         if (!m_candleViewportConn) {
             sLog_Data("Candle history request deferred until viewport is valid: symbol=" << symbol
                       << " view=[" << viewStart << ".." << viewEnd << "]");
-            m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this, symbol]() {
+            m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
                 if (!m_qmlController) {
                     return;
                 }
@@ -785,9 +793,7 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
                     disconnect(m_candleViewportConn);
                     m_candleViewportConn = QMetaObject::Connection();
                 }
-                if (m_connected) {
-                    requestCandleHistoryForSymbol(symbol);
-                }
+                requestCandleHistoryForSymbol(m_currentSymbol);
             });
         }
         return;
@@ -939,14 +945,7 @@ void MainWindowGPU::connectMarketDataSignals() {
             &UnifiedGridRenderer::heatmapHistoryNeeded,
             this,
             [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
-                if (!m_dataSource || m_currentSymbol.isEmpty()) return;
-                if (!m_serverConfigReady) return;
-                if (!m_connected) {
-                    sLog_Warning("Heatmap history fetch dropped, not connected: symbol=" << m_currentSymbol
-                                 << " tfMs=" << timeframeMs << " endMs=" << endTimeMs
-                                 << " count=" << count);
-                    return;
-                }
+                if (!canRequestConfiguredHistoryForSymbol(m_currentSymbol)) return;
                 m_dataSource->requestHeatmapHistory(m_currentSymbol, timeframeMs, endTimeMs, count);
             },
             Qt::QueuedConnection);
@@ -1020,11 +1019,9 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
             // filter incoming data (e.g. OrderBookDock sets m_currentSymbol).
             emit symbolChanged(m_currentSymbol);
             m_dataSource->subscribe(m_currentSymbol);
-            requestHeatmapHistoryForSymbol(m_currentSymbol);
-            requestFootprintHistoryForSymbol(m_currentSymbol);
+            requestConfiguredHistoryForSymbol(m_currentSymbol);
             requestTpoHistoryForSymbol(m_currentSymbol);
-            requestCandleHistoryForSymbol(m_currentSymbol);
-            sLog_Data("Resubscribed and requested history on connect: symbol=" << m_currentSymbol);
+            sLog_Data("Resubscribed and requested available history on connect: symbol=" << m_currentSymbol);
         }
     }
 }

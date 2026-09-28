@@ -80,6 +80,8 @@ private:
     void setWindowProperties();
     void setupGuiApiServer();
     void propagateSymbolChange(const QString& symbol);
+    bool canRequestConfiguredHistoryForSymbol(const QString& symbol) const;
+    void requestConfiguredHistoryForSymbol(const QString& symbol);
     void requestHeatmapHistoryForSymbol(const QString& symbol);
     void requestFootprintHistoryForSymbol(const QString& symbol);
     void requestTpoHistoryForSymbol(const QString& symbol);
