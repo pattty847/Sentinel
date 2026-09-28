@@ -32,7 +32,8 @@ class FootprintIntensityNode;
  *     aligning letters with the underlying candle/heatmap series.
  *     Requires valid sessionStartMs / sessionEndMs in the snapshot plus
  *     a valid TimeAxisMapping (passed as extra parameters).
- */
+ */
+class HeatmapColumnTexture;
 class TpoOverlayRenderer : public IOverlayRenderer {
 public:
     struct PendingUpload {
@@ -96,7 +97,8 @@ private:
     int m_gridHeight = 2048;
     int m_lastWriteColumn = -1;
     bool m_textureDirty = true;
-    QImage m_image;
+    QImage m_image;                                   // CPU mirror for full uploads
+    HeatmapColumnTexture* m_columnTexture = nullptr;  // RHI path; owned by the node
     TpoStreamState::DisplayMode m_displayMode =
         TpoStreamState::DisplayMode::VerticalTimeline;
 

@@ -1,4 +1,5 @@
 #include "FootprintOverlayRenderer.hpp"
+#include "HeatmapIntensityNode.hpp"
 
 #include "FootprintIntensityNode.hpp"
 
@@ -29,6 +30,7 @@ void FootprintOverlayRenderer::clearPending() {
 
 void FootprintOverlayRenderer::onRootRebuilt() {
     m_node = nullptr;
+    m_columnTexture = nullptr;  // owned and deleted by the old node
     m_lastWriteColumn = -1;
     m_textureDirty = true;
 }
@@ -117,8 +119,14 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
                     auto* row = m_image.scanLine(y);
                     std::memcpy(row + upload.x * 2, src + y * 2, 2);
                 }
+                // RHI backends upload only the changed column (see HeatmapColumnTexture).
+                if (m_columnTexture && !m_textureDirty) {
+                    m_columnTexture->enqueueColumn(upload.x, upload.data);
+                }
             }
-            m_textureDirty = true;
+            if (!m_columnTexture) {
+                m_textureDirty = true;
+            }
         }
     }
 
@@ -128,7 +136,19 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
     if (needTextureRefresh && m_gridWidth > 0 && m_gridHeight > 0) {
         ensureImage();
         if (!m_image.isNull()) {
-            auto* footprintTexture = window->createTextureFromImage(m_image);
+            QSGTexture* footprintTexture = nullptr;
+            if (!useIncrementalGlUploads) {
+                if (!m_columnTexture) {
+                    m_columnTexture = new HeatmapColumnTexture();
+                }
+                m_columnTexture->setFull(m_image.size(), 2,
+                                         QByteArray(reinterpret_cast<const char*>(m_image.constBits()),
+                                                    static_cast<qsizetype>(m_image.sizeInBytes())),
+                                         static_cast<int>(m_image.bytesPerLine()));
+                footprintTexture = m_columnTexture;
+            } else {
+                footprintTexture = window->createTextureFromImage(m_image);
+            }
             if (!footprintTexture) {
                 const QImage fallback = m_image.convertToFormat(QImage::Format_Grayscale16);
                 footprintTexture = window->createTextureFromImage(fallback);

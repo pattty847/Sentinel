@@ -23,6 +23,7 @@
  * distinguish letter brackets visually without needing MSDF glyphs.
  */
 #include "TpoOverlayRenderer.hpp"
+#include "HeatmapIntensityNode.hpp"
 #include "TpoDebugTrace.hpp"
 
 #include "FootprintIntensityNode.hpp"
@@ -120,6 +121,7 @@ void TpoOverlayRenderer::drainPending(std::vector<PendingUpload>& out,
 
 void TpoOverlayRenderer::onRootRebuilt() {
     m_node = nullptr;
+    m_columnTexture = nullptr;  // owned and deleted by the old node
     m_lastWriteColumn = -1;
     m_textureDirty = true;
 }
@@ -266,14 +268,28 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                     upload.letters.size() != m_gridHeight) {
                     continue;
                 }
+                const bool uploadColumn = m_columnTexture && !m_textureDirty;
+                QByteArray column;
+                if (uploadColumn) {
+                    column.resize(m_gridHeight * static_cast<int>(sizeof(uint16_t)));
+                }
                 for (int y = 0; y < m_gridHeight; ++y) {
                     const uint16_t encoded =
                         qToLittleEndian<uint16_t>(encodeLetterToU16(upload.letters.at(y)));
                     auto* row = reinterpret_cast<uint16_t*>(m_image.scanLine(y));
                     row[upload.x] = encoded;
+                    if (uploadColumn) {
+                        std::memcpy(column.data() + y * 2, &encoded, sizeof(encoded));
+                    }
+                }
+                // RHI backends upload only the changed column (see HeatmapColumnTexture).
+                if (uploadColumn) {
+                    m_columnTexture->enqueueColumn(upload.x, std::move(column));
                 }
             }
-            m_textureDirty = true;
+            if (!m_columnTexture) {
+                m_textureDirty = true;
+            }
         }
     }
 
@@ -283,7 +299,19 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     if (needTextureRefresh && m_gridWidth > 0 && m_gridHeight > 0) {
         ensureImage();
         if (!m_image.isNull()) {
-            auto* tpoTexture = window->createTextureFromImage(m_image);
+            QSGTexture* tpoTexture = nullptr;
+            if (!useIncrementalGlUploads) {
+                if (!m_columnTexture) {
+                    m_columnTexture = new HeatmapColumnTexture();
+                }
+                m_columnTexture->setFull(m_image.size(), 2,
+                                         QByteArray(reinterpret_cast<const char*>(m_image.constBits()),
+                                                    static_cast<qsizetype>(m_image.sizeInBytes())),
+                                         static_cast<int>(m_image.bytesPerLine()));
+                tpoTexture = m_columnTexture;
+            } else {
+                tpoTexture = window->createTextureFromImage(m_image);
+            }
             if (!tpoTexture) {
                 const QImage fallback = m_image.convertToFormat(QImage::Format_Grayscale16);
                 tpoTexture = window->createTextureFromImage(fallback);

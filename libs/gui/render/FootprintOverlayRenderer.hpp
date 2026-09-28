@@ -13,7 +13,8 @@
 class QQuickWindow;
 class QSGNode;
 class FootprintIntensityNode;
-
+
+class HeatmapColumnTexture;
 class FootprintOverlayRenderer : public IOverlayRenderer {
 public:
     struct PendingUpload {
@@ -53,7 +54,8 @@ private:
     int m_gridHeight = 2048;
     int m_lastWriteColumn = -1;
     bool m_textureDirty = true;
-    QImage m_image;
+    QImage m_image;                                   // CPU mirror for full uploads
+    HeatmapColumnTexture* m_columnTexture = nullptr;  // RHI path; owned by the node
     std::atomic<bool> m_resetPending{false};
 
     mutable std::mutex m_pendingMutex;
