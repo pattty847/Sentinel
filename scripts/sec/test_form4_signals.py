@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from sec.form4_processor import Form4Processor
+from copetech_sec.form4_processor import Form4Processor
 
 
 async def _unused_fetch(*args, **kwargs):
