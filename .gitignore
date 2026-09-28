@@ -135,7 +135,7 @@ package-lock.json
 CLAUDE.md
 # AGENTS.md
 GEMINI.md
-_agent/
+_agent
 .cursor/
 
 # Documentation subdirectories (keep only base docs/)
