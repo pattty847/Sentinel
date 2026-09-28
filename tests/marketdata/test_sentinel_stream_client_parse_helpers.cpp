@@ -24,6 +24,9 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     EXPECT_DOUBLE_EQ(cfg.heatmap.tickSize, 0.5);
     EXPECT_EQ(cfg.heatmap.activeTimeframeMs, 60000);
     EXPECT_EQ(cfg.heatmap.servedTimeframesMs, (std::vector<int64_t>{60000, 300000}));
+    EXPECT_TRUE(cfg.wasAdvertised("heatmap.servedTimeframesMs"));
+    EXPECT_TRUE(cfg.wasAdvertised("orderbook.tickSize"));
+    EXPECT_FALSE(cfg.wasAdvertised("candles.bpsSlow"));
     EXPECT_DOUBLE_EQ(cfg.orderbook.tickSize, 0.01);
     EXPECT_DOUBLE_EQ(cfg.orderbook.bandPct, 0.25);
     EXPECT_DOUBLE_EQ(cfg.candles.bpsFast, 0.1);
@@ -39,6 +42,7 @@ TEST(SentinelStreamClientParseHelpers, MissingServedTimeframesMeansUnknown) {
         {"heatmap", {{"active_timeframe_ms", 60000}}}
     });
     EXPECT_TRUE(cfg.heatmap.servedTimeframesMs.empty());
+    EXPECT_FALSE(cfg.wasAdvertised("heatmap.servedTimeframesMs"));
 }
 
 namespace {

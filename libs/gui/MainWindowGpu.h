@@ -14,6 +14,8 @@
 #include <QPointer>
 #include <QProcess>
 #include <memory>
+#include <optional>
+#include "mainwindow/AgentApiTypes.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
 #include "../core/trading/TradingTypes.hpp"
@@ -79,6 +81,9 @@ private:
     void connectMarketDataSignals();
     void setWindowProperties();
     void setupGuiApiServer();
+    AgentApi::Metadata agentApiMetadata() const;
+    AgentApi::StateSnapshot agentApiStateSnapshot() const;
+    AgentApi::ViewportSnapshot agentApiViewportSnapshot() const;
     void propagateSymbolChange(const QString& symbol);
     bool canRequestConfiguredHistoryForSymbol(const QString& symbol) const;
     void requestConfiguredHistoryForSymbol(const QString& symbol);
@@ -116,6 +121,12 @@ private:
     bool m_connected = false;
     bool m_serverConfigReady = false;
     bool m_userSubscribed = false;
+    QString m_agentApiSessionId;
+    quint64 m_agentApiSelectionEpoch = 1;
+    std::optional<qint64> m_heatmapReceivedAtMs;
+    std::optional<qint64> m_candlesReceivedAtMs;
+    std::optional<qint64> m_bookReceivedAtMs;
+    std::optional<qint64> m_tradesReceivedAtMs;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;
 

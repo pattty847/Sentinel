@@ -22,6 +22,9 @@ set(GRID_CORE_SOURCES
     mainwindow/MenuBuilder.h
     mainwindow/ShortcutBinder.cpp
     mainwindow/ShortcutBinder.h
+    mainwindow/AgentApiCodec.cpp
+    mainwindow/AgentApiCodec.hpp
+    mainwindow/AgentApiTypes.hpp
     mainwindow/GuiApiServer.cpp
     mainwindow/GuiApiServer.h
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <set>
 #include <QMetaType>
 
 struct ServerHeatmapConfig {
@@ -77,6 +78,9 @@ struct ServerTlsConfig {
 };
 
 struct ServerConfig {
+    // Client-side wire presence: absent capabilities must not appear as defaults.
+    std::set<std::string> advertisedFields;
+    bool wasAdvertised(const std::string& key) const { return advertisedFields.contains(key); }
     ServerHeatmapConfig heatmap;
     ServerOrderBookConfig orderbook;
     ServerCandleGateConfig candles;

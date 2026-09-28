@@ -123,6 +123,7 @@ enable_testing()
 add_subdirectory(tests/core)
 add_subdirectory(tests/marketdata)
 add_subdirectory(tests/render)
+add_subdirectory(tests/agentapi)
 add_subdirectory(tests/trading)
 add_subdirectory(tests/servermodel)
 
