@@ -138,3 +138,18 @@ Update only the relevant canonical doc in the same change:
 - `docs/TODO.md`
 
 Read these only if the task actually needs them.
+
+## 10) Cross-Agent Delegation (Codex CLI)
+
+The owner's ChatGPT subscription can run Codex agents headless, to spread work across subscriptions.
+Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
+
+- Binary: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. `codex` is only a zsh alias; use the full path in scripts.
+- Models that answered a live `codex exec` call: `gpt-6-sol` (config default) and `gpt-6-astra`. Also listed for this account: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`. Reasoning effort: `low`..`max`, plus `ultra` on 6-astra and 5.6-sol/terra. Re-check `~/.codex/models_cache.json` before relying on a model.
+- Run: `codex exec -C <dir> -s read-only|workspace-write -m gpt-6-sol -c model_reasoning_effort='"high"' --json -o <last-message.txt> "<prompt>"`
+- Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with `codex exec resume <uuid> "<follow-up>"` (or `--last`).
+- Reviews: `codex exec review` runs a code review of the current repo.
+- Isolation: write tasks run in their own git worktree (`--worktree`, or `-C` into a `git worktree add` path) so two agents never edit the same checkout. Audits and reviews use `-s read-only`.
+- Never pass `--dangerously-bypass-approvals-and-sandbox`.
+- Prompts must stand alone: point the agent at `AGENTS.md`, the files, the acceptance checks, and the build/test commands.
+- The delegating agent reviews the resulting diff and runs the verification ladder (section 4) before anything merges.
