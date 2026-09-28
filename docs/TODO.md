@@ -453,6 +453,7 @@ Each feature is a self-contained block. Use this template:
 - [x] Recording v2 live: near +/-5% @ $1 and whole-book deep layer @ $10 on the T7, fixed size scale, ~5.5 GB/year (2026-09-28)
 - [x] Serving S1-S4: server-built LOD pages, client re-band, shader value mode, live provisional columns (2026-09-28)
 - [x] Agent API v1 (state, viewport, candles, book, trades, walls, controls, render-ordered screenshots) + CopeNet `sentinel.*` tools (2026-09-28)
+- [x] Multi-agent git workflow: rebase at hand-off, `agent-worktree.sh land` merge queue, rerere (2026-09-28)
 
 #### Session log
 - **2026-09-28** — Owner's first look at recording mode: "exactly how I want it"; the deep layer shows the resting order that stopped price near $83.9k. Live columns and MSDF text update. Items above captured from the owner's notes.
