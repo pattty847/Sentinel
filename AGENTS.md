@@ -169,6 +169,7 @@ Update only the relevant canonical doc in the same change:
 - Default checkpoint rule: if a meaningful feature seam is implemented and targeted validation passed, make a commit unless the user says not to.
 - Do not sweep unrelated modified files into the same commit; leave unrelated worktree changes alone.
 - Commit messages should say what changed and why at the feature level, not just "fix stuff".
+- Line endings: LF everywhere (`.gitattributes` enforces it; `.ps1`/`.bat` check out as CRLF). Never write CRLF into other files.
 
 ## 9) References (Read on Demand Not By Default)
 
