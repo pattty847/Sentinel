@@ -184,6 +184,7 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
             return;
         }
+        if (auto* deadline = socket->findChild<QTimer*>()) deadline->start(10000);
         waitForOperation(socket, path.mid(QStringLiteral("/api/v1/operations/").size()),
                          QDateTime::currentMSecsSinceEpoch() + check.waitMs, false);
         return;
@@ -239,6 +240,7 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
     QString targetName = path == "/screenshot" ? legacyQuery.queryItemValue("target") : check.screenshotTarget;
     if (targetName.isEmpty()) targetName = "main";
     if (path == "/api/v1/screenshot" && !check.afterOperation.isEmpty()) {
+        if (auto* deadline = socket->findChild<QTimer*>()) deadline->start(10000);
         waitForOperation(socket, check.afterOperation,
                          QDateTime::currentMSecsSinceEpoch() + check.waitMs, true, name, targetName);
         return;
