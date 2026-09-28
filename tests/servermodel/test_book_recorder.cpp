@@ -249,6 +249,12 @@ TEST_F(RecorderTest, HourlyCoverageWeightsDecodedSizesAndRebuildsOnRestart) {
     auto rows = read(3'600'000, "deep");
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows[0].observedMs, 150000);
+    EXPECT_FALSE(rows[0].flags & kApproximateCoverage);
+    ASSERT_FALSE(rows[0].coverage.empty());
+    const auto covered104 = std::find_if(rows[0].entries.begin(), rows[0].entries.end(),
+        [](const auto &e) { return e.row == 104 && e.isAsk; });
+    ASSERT_NE(covered104, rows[0].entries.end());
+    EXPECT_EQ(covered104->coveredMs, 90000);
     const double decoded8 = decodeSize(encodeSize(8));
     value(rows[0], 104, true, decoded8 * 60000 / 90000, decoded8);
     value(rows[0], 99, false, decodeSize(encodeSize(2)), decodeSize(encodeSize(2)));
@@ -430,4 +436,46 @@ TEST_F(RecorderTest, HistoryReadFailureDoesNotInvalidateAnySymbol) {
     EXPECT_EQ(btc[0].bucketStartMs, 60000);
     EXPECT_EQ(btc[0].observedMs, 60000);
     EXPECT_EQ(r->stats().diskErrors, 1);
+}
+
+#include "Hmc2LegacyFixture.hpp"
+TEST_F(RecorderTest, RestartAcrossHourBoundaryRetainsSchemaThreeAndWritesSchemaFourGeneration) {
+    constexpr int64_t hour = 3600000;
+    auto cfg = config();
+    cfg.layers[0].name = "deep"; cfg.layers[0].hourlyRollup = true;
+    Hmc2Record old;
+    old.header = {"BTC-USD", "deep", 60000, cfg.priceScale, cfg.layers[0].rowTickUnits, cfg.sizeScale, 0};
+    old.header.configHash = Hmc2Store::configHash(old.header, cfg.layers[0].lowFrac, cfg.layers[0].highMult);
+    old.header.tfMs = hour; old.bucketStartMs = kEpoch; old.observedMs = 60000;
+    old.bidRowLo = old.askRowLo = 50; old.bidRowHi = old.askRowHi = 200;
+    old.entries = {{99, false, encodeSize(2), encodeSize(2)}};
+    const auto path = Hmc2Store::filePath(cfg.root, old.header, kEpoch);
+    recording_fixture::schema3Hour(path, old);
+    const auto originalSize = std::filesystem::file_size(path);
+    {
+        auto recorder = make(cfg);
+        snap(*recorder, 2 * hour - 60000);
+        tick(*recorder, 2 * hour);
+        EXPECT_EQ(recorder->stats().diskErrors, 0);
+    }
+    { // Actual recorder destruction/restart on the other side of the boundary.
+        auto recorder = make(cfg);
+        snap(*recorder, 2 * hour + 30000);
+        tick(*recorder, 3 * hour);
+        EXPECT_EQ(recorder->stats().diskErrors, 0);
+    }
+    const auto hours = read(hour, "deep");
+    ASSERT_EQ(hours.size(), 3);
+    EXPECT_TRUE(hours[0].flags & kApproximateCoverage);
+    for (size_t n = 1; n < hours.size(); ++n) {
+        EXPECT_EQ(hours[n].bucketStartMs, n * hour);
+        EXPECT_FALSE(hours[n].flags & kApproximateCoverage);
+        ASSERT_FALSE(hours[n].coverage.empty());
+        EXPECT_GT(hours[n].entries[0].coveredMs, 0);
+    }
+    EXPECT_EQ(std::filesystem::file_size(path), originalSize);
+    std::ifstream legacy(path, std::ios::binary); legacy.seekg(4); EXPECT_EQ(legacy.get(), 3);
+    const auto generation = Hmc2Store::filePath(cfg.root, old.header, kEpoch, 1);
+    std::ifstream current(generation, std::ios::binary); current.seekg(4); EXPECT_EQ(current.get(), 4);
+    EXPECT_FALSE(std::filesystem::exists(Hmc2Store::filePath(cfg.root, old.header, kEpoch, 2)));
 }

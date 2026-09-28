@@ -33,6 +33,8 @@ add_library(sentinel_core
     servermodel/HmcolFormat.cpp
     servermodel/BookRecorder.cpp
     servermodel/BookRecorder.hpp
+    servermodel/RecordingPage.cpp
+    servermodel/RecordingPage.hpp
     servermodel/Hmc2Store.cpp
     servermodel/Hmc2Store.hpp
     servermodel/HeatmapColumnStore.hpp

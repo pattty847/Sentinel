@@ -111,3 +111,13 @@ target_link_libraries(test_hmc2_store PRIVATE
 add_executable(hmc2_dump hmc2_dump.cpp)
 target_include_directories(hmc2_dump PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(hmc2_dump PRIVATE sentinel_core)
+
+add_executable(test_recording_page test_recording_page.cpp)
+target_include_directories(test_recording_page PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_recording_page PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RecordingPageTests COMMAND test_recording_page)
+set_tests_properties(RecordingPageTests PROPERTIES LABELS "servermodel")
+add_dependencies(servermodel_tests test_recording_page)
+# Restart upgrade fixture independently constructs schema-3 hour frames.
+target_link_libraries(test_book_recorder PRIVATE
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
