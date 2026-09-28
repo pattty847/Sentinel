@@ -13,6 +13,8 @@ Threading: pure functions, any thread.
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <limits>
+#include <optional>
 
 namespace recording {
 
@@ -26,7 +28,8 @@ constexpr uint16_t kMaxCode = 0x7FFFu;
 
 // 0 means empty. Sizes below the floor round up to code 1 so a real order never vanishes.
 inline uint16_t encodeSize(double size, const SizeScale& scale = {}) {
-    if (!(size > 0.0) || !std::isfinite(size) || !(scale.floor > 0.0)) {
+    if (!(size > 0.0) || !std::isfinite(size) || !(scale.floor > 0.0) || !std::isfinite(scale.floor) ||
+        !(scale.codesPerOctave > 0.0) || !std::isfinite(scale.codesPerOctave)) {
         return 0;
     }
     const double code = std::round(std::log2(size / scale.floor) * scale.codesPerOctave) + 1.0;
@@ -64,12 +67,25 @@ inline bool getVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& v
             return false;
         }
         const uint8_t byte = data[pos++];
+        if (shift == 63 && (byte & 0xFEu) != 0) return false;
         value |= static_cast<uint64_t>(byte & 0x7Fu) << shift;
         if ((byte & 0x80u) == 0) {
             return true;
         }
     }
     return false;
+}
+
+// Checked nearest integer price conversion: do not floor floating quotients.
+inline std::optional<int64_t> priceUnits(double price, double scale) {
+    if (!std::isfinite(price) || price <= 0 || !std::isfinite(scale) || scale <= 0) return {};
+    const double scaled = price * scale;
+    // INT64_MAX rounds to 2^63 as double, so the upper bound is exclusive.
+    if (!std::isfinite(scaled) || scaled >= 0x1p63 || scaled < 0.5) return {};
+    return std::llround(scaled);
+}
+constexpr int64_t floorDiv(int64_t value, int64_t divisor) {
+    return value / divisor - (value % divisor < 0 ? 1 : 0);
 }
 
 // Zigzag so small negative row indices stay short.
