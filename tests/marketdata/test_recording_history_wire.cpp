@@ -59,6 +59,17 @@ TEST(RecordingHistoryWire, ChunkPadsTopRowsAndValidity) {
     EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("validity").get<std::string>())).toHex(), "14");
     EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("column").get<std::string>())).toHex(),
               "00000000341200000280");
+    const auto parsed = SentinelStreamClient::parseRecordingHistoryChunk(wire);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed->requestId, "r-2");
+    EXPECT_EQ(parsed->bandGeneration, 3u);
+    EXPECT_EQ(parsed->bandRows, 5);
+    EXPECT_EQ(parsed->scannedStartMs, 60'000);
+    EXPECT_TRUE(parsed->exhausted);
+    ASSERT_EQ(parsed->columns.size(), 1);
+    EXPECT_EQ(parsed->columns[0].validity.toHex(), "14");
+    EXPECT_EQ(parsed->columns[0].observedMs, 45'000u);
+    EXPECT_EQ(parsed->columns[0].flags, recording::kPartial);
 }
 
 TEST(RecordingHistoryWire, CoveredPaddingKeepsValidityButClearsValues) {
@@ -89,6 +100,17 @@ TEST(RecordingHistoryWire, StatusErrorsAndCapabilities) {
     EXPECT_STREQ(statusName(recording::BuildStatus::InvalidRequest), "invalid_request");
     EXPECT_STREQ(statusName(recording::BuildStatus::IncompatibleGrid), "incompatible_grid");
     EXPECT_STREQ(statusName(recording::BuildStatus::IoError), "io_error");
+    Request q;
+    q.symbol = "BTC-USD"; q.timeframeMs = 60000; q.count = 1; q.rows = 4;
+    recording::BuildResult partial;
+    partial.band = {100.0, 10.0, 4};
+    partial.status = recording::BuildStatus::Budget;
+    partial.nextEnd = 60'000;
+    const auto dto = SentinelStreamClient::parseRecordingHistoryChunk(buildChunk(q, partial));
+    ASSERT_TRUE(dto);
+    EXPECT_EQ(dto->status, "budget");
+    EXPECT_FALSE(dto->exhausted);
+    EXPECT_EQ(dto->nextEndMs, 60'000);
     const auto err = error("BTC-USD", "queue full", "r-3", 9);
     EXPECT_EQ(err.at("request_id"), "r-3");
     EXPECT_EQ(err.at("band_generation"), 9);

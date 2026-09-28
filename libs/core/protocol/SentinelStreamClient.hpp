@@ -10,6 +10,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <optional>
 #include <deque>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
@@ -82,6 +83,7 @@ public:
                                int64_t endTimeMs,
                                int count);
     void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request);
+    static std::optional<RecordingHistoryPage> parseRecordingHistoryChunk(const nlohmann::json& msg);
     void requestFootprintHistory(const std::string& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
