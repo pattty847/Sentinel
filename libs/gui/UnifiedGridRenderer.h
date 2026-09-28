@@ -186,8 +186,24 @@ private:
     std::atomic<uint64_t> m_footprintStreamGeneration{0};
     std::atomic<uint64_t> m_candleStreamGeneration{0};
     std::atomic<int64_t> m_lastIncomingHeatmapSliceTimeframeMs{0};
+    std::atomic<uint64_t> m_controlRevision{0};
+    std::atomic<uint64_t> m_controlSelectionEpoch{0};
+    std::atomic<uint64_t> m_controlViewportVersion{0};
+    std::atomic<uint64_t> m_renderedRevision{0};
+    std::atomic<uint64_t> m_renderedFrameId{0};
+    uint64_t m_nextFrameId = 0; // render thread only
+    uint64_t m_pendingFrameRevision = 0; // render thread only
+    uint64_t m_pendingFrameId = 0; // render thread only
 
 public:
+    void setAgentControlRevision(uint64_t revision, uint64_t selectionEpoch, uint64_t viewportVersion) {
+        m_controlSelectionEpoch.store(selectionEpoch, std::memory_order_release);
+        m_controlViewportVersion.store(viewportVersion, std::memory_order_release);
+        m_controlRevision.store(revision, std::memory_order_release);
+        update();
+    }
+    uint64_t renderedControlRevision() const { return m_renderedRevision.load(std::memory_order_acquire); }
+    uint64_t renderedFrameId() const { return m_renderedFrameId.load(std::memory_order_acquire); }
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
     

@@ -67,6 +67,11 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
               if (m_axisTextService) {
                   m_axisTextService->bindAxisLayoutWindow(w);
               }
+              if (w) connect(w, &QQuickWindow::afterRendering, this, [this]() {
+                  // Direct render-thread callback: fixed-size frame snapshot only.
+                  m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
+                  m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
+              }, Qt::DirectConnection);
           });
 
   init();

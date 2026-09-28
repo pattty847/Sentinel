@@ -29,6 +29,10 @@ struct FrameStreamGenerations {
 
 /// Immutable per-frame snapshot assembled at the start of updatePaintNode.
 struct FrameContext {
+    uint64_t controlRevision = 0;
+    uint64_t selectionEpoch = 0;
+    uint64_t viewportVersion = 0;
+    uint64_t frameId = 0;
     struct OverlayActivationSet {
         bool heatmap = false;
         bool footprint = false;

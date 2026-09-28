@@ -1,5 +1,6 @@
 #include "AgentApiCodec.hpp"
 #include "AgentApiSnapshots.hpp"
+#include "AgentApiOperations.hpp"
 #include "CandleSeriesBuffer.hpp"
 #include "marketdata/model/TradeData.h"
 #include "config/ConfigTypes.hpp"
@@ -8,6 +9,60 @@
 #include <QJsonArray>
 
 using namespace AgentApi;
+
+TEST(AgentApiControls, BodiesAndBounds) {
+    auto check = [](const char* path, const char* body) {
+        return validateControl({"POST", path, {}, body}, QList<qint64>{60000, 300000});
+    };
+    EXPECT_EQ(check("/api/v1/symbol", R"({"symbol":"ETH-USD"})").body.symbol, "ETH-USD");
+    EXPECT_EQ(check("/api/v1/symbol", R"({"symbol":"../BAD"})").status, 422);
+    EXPECT_EQ(check("/api/v1/timeframe", R"({"candleTimeframeMs":60000})").body.timeframeMs, 60000);
+    EXPECT_EQ(check("/api/v1/timeframe", R"({"heatmapTimeframeMs":60000,"candleTimeframeMs":300000})").status, 422);
+    EXPECT_EQ(check("/api/v1/timeframe", R"({"heatmapTimeframeMs":1000})").code, "timeframe_unavailable");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1,"endMs":10,"priceMin":1,"priceMax":2})").status, 200);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1})").status, 422);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1,"endMs":10,"followLive":true})").status, 422);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"priceMin":2,"priceMax":1})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"heatmap":true,"candles":false,"tpo":true})").body.layers.size(), 3);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpo":1})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"unknown":true})").status, 422);
+}
+
+TEST(AgentApiControls, PostParserAndWaitValidation) {
+    RequestParser parser;
+    const QByteArray body = R"({"symbol":"ETH-USD"})";
+    const QByteArray head = "POST /api/v1/symbol HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: "
+        + QByteArray::number(body.size()) + "\r\n\r\n";
+    EXPECT_EQ(parser.feed(head + body.left(5)).kind, ParseResult::Kind::Incomplete);
+    const auto parsed = parser.feed(body.mid(5));
+    EXPECT_EQ(parsed.kind, ParseResult::Kind::Complete);
+    EXPECT_EQ(parsed.request.body, body);
+    RequestParser badMethod;
+    EXPECT_EQ(badMethod.feed("GET /api/v1/symbol HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 405);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/operations/o1", "waitMs=5000"}).status, 200);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/operations/o1", "waitMs=5001"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1&waitMs=5000"}).status, 200);
+}
+
+TEST(AgentApiControls, OperationStateWithFakeFrameAck) {
+    Operations ops;
+    const auto first = ops.apply("viewport", 42);
+    EXPECT_EQ(ops.find(first.id)->status, "applied");
+    ops.poll(0, 0); // hidden window / no frame: waiting expires with applied status
+    EXPECT_EQ(ops.find(first.id)->status, "applied");
+    EXPECT_TRUE(shouldDefer(*ops.find(first.id), 99, 100));
+    EXPECT_FALSE(shouldDefer(*ops.find(first.id), 100, 100));
+    const auto second = ops.apply("viewport", 43);
+    EXPECT_EQ(ops.find(first.id)->status, "superseded");
+    ops.poll(second.revision, 912);
+    EXPECT_EQ(ops.find(second.id)->status, "rendered");
+    EXPECT_EQ(ops.find(second.id)->frameId, 912);
+    const auto failed = ops.apply("symbol", 43);
+    ops.fail(failed.id);
+    ops.poll(failed.revision, 913);
+    EXPECT_EQ(ops.find(failed.id)->status, "failed");
+    EXPECT_FALSE(ops.find("o99999").has_value());
+}
 
 namespace {
 QByteArray request(const QByteArray& path, const QByteArray& extra = {}) {
@@ -113,7 +168,7 @@ TEST(AgentApiCodec, QueryValidation) {
     EXPECT_EQ(screenshot.screenshotTarget, "heatmap");
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "name=../outside"}).status, 422);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=unknown"}).status, 422);
-    EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1"}).status, 200);
 }
 
 TEST(AgentApiCodec, AdvertisedCapabilitiesOnly) {

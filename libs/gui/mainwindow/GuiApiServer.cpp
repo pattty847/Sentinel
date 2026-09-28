@@ -52,6 +52,9 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
                            std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
                            std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
+                           std::function<AgentApi::ControlApply(const QString&, const AgentApi::ControlBody&)> applyControl,
+                           std::function<std::pair<quint64, quint64>()> frameAck,
+                           std::function<void(quint64)> publishRevision,
                            QObject* parent)
     : QObject(parent),
       m_targetWindow(targetWindow),
@@ -61,7 +64,9 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
       m_viewportSnapshot(std::move(viewportSnapshot)),
       m_candlesSnapshot(std::move(candlesSnapshot)),
       m_bookSnapshot(std::move(bookSnapshot)),
-      m_tradesSnapshot(std::move(tradesSnapshot)) {
+      m_tradesSnapshot(std::move(tradesSnapshot)),
+      m_applyControl(std::move(applyControl)), m_frameAck(std::move(frameAck)),
+      m_publishRevision(std::move(publishRevision)) {
 }
 
 bool GuiApiServer::start(quint16 port, const QString& screenshotDir) {
@@ -105,7 +110,7 @@ void GuiApiServer::handleNewConnection() {
         m_requests.insert(socket, {});
         auto* deadline = new QTimer(socket);
         deadline->setSingleShot(true);
-        deadline->start(5000);
+        deadline->start(6500);
         connect(deadline, &QTimer::timeout, socket, [this, socket]() {
             if (m_requests.contains(socket)) {
                 respond(socket, 408, AgentApi::jsonBytes(AgentApi::error("request_timeout", "Request timed out")), "application/json");
@@ -147,6 +152,41 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         return;
     }
     const QString path = parsed.request.path;
+    if (parsed.request.method == "POST") {
+        if (!parsed.request.query.isEmpty()) {
+            respond(socket, 400, AgentApi::jsonBytes(AgentApi::error("invalid_parameter", "Controls do not accept query parameters")), "application/json");
+            return;
+        }
+        const auto capability = m_stateSnapshot().servedTimeframesMs;
+        const auto valid = AgentApi::validateControl(parsed.request, capability);
+        if (valid.status != 200) {
+            respond(socket, valid.status, AgentApi::jsonBytes(AgentApi::error(valid.code, valid.message)), "application/json");
+            return;
+        }
+        const QString kind = path.mid(QStringLiteral("/api/v1/").size());
+        const auto applied = m_applyControl(kind, valid.body);
+        if (applied.status != 200) {
+            respond(socket, applied.status, AgentApi::jsonBytes(AgentApi::error(applied.code, applied.message)), "application/json");
+            return;
+        }
+        auto op = m_operations.apply(kind, applied.viewportVersion);
+        m_publishRevision(op.revision);
+        QJsonObject data = applied.data;
+        data["operationId"] = op.id;
+        data["status"] = op.status;
+        respond(socket, 200, AgentApi::jsonBytes(data), "application/json");
+        return;
+    }
+    if (path.startsWith("/api/v1/operations/")) {
+        const auto check = AgentApi::validateQuery(parsed.request);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+            return;
+        }
+        waitForOperation(socket, path.mid(QStringLiteral("/api/v1/operations/").size()),
+                         QDateTime::currentMSecsSinceEpoch() + check.waitMs, false);
+        return;
+    }
     if (path == "/api/v1/state") {
         const auto snapshot = m_stateSnapshot();
         const auto check = AgentApi::validateQuery(parsed.request, snapshot.meta.symbol);
@@ -197,6 +237,11 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
     if (!name.isEmpty()) name = QFileInfo(name).fileName();
     QString targetName = path == "/screenshot" ? legacyQuery.queryItemValue("target") : check.screenshotTarget;
     if (targetName.isEmpty()) targetName = "main";
+    if (path == "/api/v1/screenshot" && !check.afterOperation.isEmpty()) {
+        waitForOperation(socket, check.afterOperation,
+                         QDateTime::currentMSecsSinceEpoch() + check.waitMs, true, name, targetName);
+        return;
+    }
     if (path == "/api/v1/screenshot" && !name.isEmpty()) {
         const QString fileName = name.endsWith(".png", Qt::CaseInsensitive) ? name : name + ".png";
         if (QFileInfo(QDir(m_screenshotDir).filePath(fileName)).isSymLink()) {
@@ -205,18 +250,62 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         }
     }
 
+    sendScreenshot(socket, name, targetName);
+}
+
+void GuiApiServer::waitForOperation(QTcpSocket* socket, const QString& id, qint64 deadlineMs,
+                                    bool screenshot, const QString& name, const QString& target) {
+    if (!m_openConnections.contains(socket)) return;
+    const auto [revision, frameId] = m_frameAck();
+    m_operations.poll(revision, frameId);
+    const auto op = m_operations.find(id);
+    if (!op) {
+        respond(socket, 404, AgentApi::jsonBytes(AgentApi::error("unknown_operation", "Unknown operation ID")), "application/json");
+        return;
+    }
+    if (screenshot && op->status == "rendered") {
+        sendScreenshot(socket, name, target, op);
+        return;
+    }
+    if (AgentApi::shouldDefer(*op, QDateTime::currentMSecsSinceEpoch(), deadlineMs)) {
+        QTimer::singleShot(25, socket, [this, socket, id, deadlineMs, screenshot, name, target]() {
+            waitForOperation(socket, id, deadlineMs, screenshot, name, target);
+        });
+        return;
+    }
+    if (screenshot) {
+        const bool pending = op->status == "applied";
+        respond(socket, pending ? 408 : 409,
+                AgentApi::jsonBytes(AgentApi::error(pending ? "render_timeout" : "operation_not_rendered",
+                                                    pending ? "Operation did not render before deadline" : "Operation is no longer renderable")),
+                "application/json");
+        return;
+    }
+    QJsonObject payload{{"operationId", op->id}, {"status", op->status},
+                        {"viewportVersion", QString::number(op->viewportVersion)}};
+    if (op->status == "rendered") payload["frameId"] = QString::number(op->frameId);
+    respond(socket, 200, AgentApi::jsonBytes(payload), "application/json");
+}
+
+void GuiApiServer::sendScreenshot(QTcpSocket* socket, const QString& name, const QString& targetName,
+                                  const std::optional<AgentApi::Operation>& operation) {
+    if (!name.isEmpty()) {
+        const QString fileName = name.endsWith(".png", Qt::CaseInsensitive) ? name : name + ".png";
+        if (QFileInfo(QDir(m_screenshotDir).filePath(fileName)).isSymLink()) {
+            respond(socket, 403, AgentApi::jsonBytes(AgentApi::error("forbidden_path", "Screenshot destination is a symlink")), "application/json");
+            return;
+        }
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastScreenshotMs && now - m_lastScreenshotMs < 1000) {
+        respond(socket, 429, AgentApi::jsonBytes(AgentApi::error("screenshot_rate_limited", "At most one screenshot per second")), "application/json");
+        return;
+    }
+    m_lastScreenshotMs = now;
     QString error;
     const QString savedPath = captureScreenshot(name, targetName, &error);
     if (savedPath.isEmpty()) {
-        if (path == "/api/v1/screenshot") {
-            respond(socket, 500, AgentApi::jsonBytes(AgentApi::error("screenshot_failed", error.isEmpty() ? "Screenshot failed" : error)), "application/json");
-            return;
-        }
-        QJsonObject payload;
-        payload["ok"] = false;
-        payload["error"] = error.isEmpty() ? "screenshot_failed" : error;
-        payload["target"] = targetName;
-        respond(socket, 500, jsonBody(payload), "application/json");
+        respond(socket, 500, AgentApi::jsonBytes(AgentApi::error("screenshot_failed", error.isEmpty() ? "Screenshot failed" : error)), "application/json");
         return;
     }
 
@@ -224,6 +313,9 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
     payload["ok"] = true;
     payload["path"] = savedPath;
     payload["target"] = targetName;
+    payload["frameId"] = QString::number(operation ? operation->frameId : m_frameAck().second);
+    payload["viewportVersion"] = QString::number(operation ? operation->viewportVersion : m_viewportSnapshot().viewportVersion.value_or(0));
+    payload["selectionEpoch"] = QString::number(m_stateSnapshot().meta.selectionEpoch);
     respond(socket, 200, jsonBody(payload), "application/json");
 }
 
