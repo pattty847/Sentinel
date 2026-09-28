@@ -114,6 +114,7 @@ struct ServerConfig {
 };
 
 struct ClientHeatmapConfig {
+    std::string source = "legacy"; // recording requires advertised recording.available
     double gamma = 0.85;
     double contrast = 1.6;
     double shaderFloor = 0.0;

@@ -11,6 +11,8 @@
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
 #include "HeatmapColumnWindow.hpp"
+#include "RecordingBandPolicy.hpp"
+#include <QTimer>
 
 class FootprintStreamState;
 class TpoStreamState;
@@ -38,7 +40,16 @@ public slots:
                                   int64_t oldestAvailableMs,
                                   const QVector<IGridDataSource::HeatmapHistoryColumn>& columns);
     // Visible time range from the GUI; places the heatmap window (INV-045).
-    void setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow);
+    void setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow,
+                            double minPrice = 0, double maxPrice = 0,
+                            double widthPx = 0, double heightPx = 0);
+    void setRecordingConfig(bool requested, double minRowPx, double aspect);
+    void setRecordingCapability(bool available);
+    void setRecordingConnected(bool connected);
+    void refreshRecordingHistory();
+    void onRecordingHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
+    void onRecordingHistoryError(const QString& symbol, const QString& requestId,
+                                 uint64_t generation, const QString& message);
     
 public:
     void clearData();
@@ -62,6 +73,7 @@ public:
 signals:
     // Ring writes for the GPU window; live and history both arrive this way.
     void heatmapWindowUpdated(heatmap_window::UpdatePtr update);
+    void recordingHistoryFetchNeeded(const protocol::recordingwire::Request& request);
     void heatmapHistoryFetchNeeded(qint64 timeframeMs, qint64 endTimeMs, int count);
     void heatmapHistoryStatus(bool loading, qint64 oldestAvailableMs);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
@@ -85,12 +97,35 @@ private:
         int64_t startBucket = std::numeric_limits<int64_t>::min();
         int64_t endBucket = std::numeric_limits<int64_t>::min();
         bool follow = false;
+        double minPrice = 0, maxPrice = 0, widthPx = 0, heightPx = 0;
     };
 
     void ensureHeatmapWindow(int64_t timeframeMs, int width, int rows);
     void resetHeatmapWindow();
     void publishHeatmapWindow(std::shared_ptr<heatmap_window::Update> update, bool firstPlacement);
     void requestHeatmapFetch();
+
+    bool recordingMode() const { return m_recordingRequested && m_recordingAvailable; }
+    void scheduleRecordingBand();
+    void applyRecordingBand();
+    void sendRecordingRequest(int64_t endMs);
+    void resetRecordingRequest();
+    bool m_recordingRequested = false, m_recordingAvailable = false;
+    bool m_recordingConnected = false, m_recordingBootstrapped = false;
+    bool m_recordingInFlight = false, m_recordingBandConfirmed = false;
+    uint64_t m_bandGeneration = 0, m_recordingSerial = 0;
+    QString m_recordingRequestId;
+    int64_t m_recordingEndMs = 0;
+    double m_recordingMinRowPx = 2, m_recordingAspect = 0.75;
+    recording_view::View m_recordingView;
+    recording_view::BandRequest m_recordingBand;
+    heatmap_window::Band m_recordingDisplayBand;
+    recording_view::Debounce m_recordingDebounce;
+    QElapsedTimer m_recordingClock;
+    QTimer* m_recordingBandTimer = nullptr;
+    QTimer* m_recordingTimeout = nullptr;
+    QTimer* m_recordingRetry = nullptr;
+    int m_recordingNoProgress = 0;
 
     heatmap_window::ColumnWindow m_heatmapWindow;
     HeatmapViewKey m_lastHeatmapView;
@@ -121,3 +156,5 @@ private:
     std::unique_ptr<VolumeProfileState> m_vpStream;
 
 };
+
+Q_DECLARE_METATYPE(protocol::recordingwire::Request)

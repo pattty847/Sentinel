@@ -27,6 +27,24 @@ DataProcessor::DataProcessor(QObject* parent)
     qRegisterMetaType<IGridDataSource::HeatmapHistoryColumn>("IGridDataSource::HeatmapHistoryColumn");
     qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
     qRegisterMetaType<heatmap_window::UpdatePtr>("heatmap_window::UpdatePtr");
+    qRegisterMetaType<protocol::recordingwire::Request>();
+    m_recordingClock.start();
+    m_recordingBandTimer = new QTimer(this);
+    m_recordingBandTimer->setSingleShot(true);
+    m_recordingBandTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_recordingBandTimer, &QTimer::timeout, this, &DataProcessor::applyRecordingBand);
+    m_recordingRetry = new QTimer(this);
+    m_recordingRetry->setSingleShot(true);
+    connect(m_recordingRetry, &QTimer::timeout, this, [this] {
+        if (!m_recordingDebounce.pending) sendRecordingRequest(m_recordingEndMs);
+    });
+    m_recordingTimeout = new QTimer(this);
+    m_recordingTimeout->setSingleShot(true);
+    connect(m_recordingTimeout, &QTimer::timeout, this, [this] {
+        if (!m_recordingInFlight) return;
+        onRecordingHistoryError(m_activeSymbol, m_recordingRequestId, m_bandGeneration,
+                                QStringLiteral("recording history timed out after 5000 ms"));
+    });
     m_footprintStream = std::make_unique<FootprintStreamState>();
     m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
     m_tpoStream = std::make_unique<TpoStreamState>();
@@ -72,6 +90,7 @@ void DataProcessor::setActiveSymbol(const QString& symbol) {
     sLog_Data("DataProcessor symbol: " << m_activeSymbol << "->" << normalized << " (stream state cleared)");
     m_activeSymbol = normalized;
     clearData();
+    scheduleRecordingBand();
 }
 
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
@@ -83,6 +102,16 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) {
         sLog_Probe("heatmap.drop", "reason=symbol symbol=" << slice.symbol
                    << " active=" << m_activeSymbol << " start=" << slice.bucketStartMs);
+        return;
+    }
+    if (recordingMode()) {
+        // Bootstrap geometry from live metadata only; never mix legacy values into recording.
+        if (!m_recordingBootstrapped && !m_recordingView.valid() &&
+            slice.maxPrice > slice.minPrice && slice.tickSize > 0) {
+            m_recordingBootstrapped = true;
+            emit heatmapRangeReset(slice.minPrice, slice.maxPrice, slice.tickSize,
+                                   m_heatmapGridWidth, recording_view::kRows);
+        }
         return;
     }
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
@@ -165,22 +194,30 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
     }
 }
 
-void DataProcessor::setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow) {
+void DataProcessor::setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow,
+                                       double minPrice, double maxPrice, double widthPx, double heightPx) {
     if (m_shuttingDown.load()) {
         return;
     }
     // Placement only changes at bucket granularity; skip sub-bucket pans.
     const int64_t tf = std::max<int64_t>(1, m_heatmapWindow.timeframeMs());
-    const HeatmapViewKey key{viewStartMs / tf, viewEndMs / tf, follow};
+    const HeatmapViewKey key{viewStartMs / tf, viewEndMs / tf, follow,
+                             minPrice, maxPrice, widthPx, heightPx};
     if (key.startBucket == m_lastHeatmapView.startBucket &&
         key.endBucket == m_lastHeatmapView.endBucket &&
-        key.follow == m_lastHeatmapView.follow) {
+        key.follow == m_lastHeatmapView.follow &&
+        (!recordingMode() ||
+         (viewEndMs - viewStartMs == m_recordingView.endMs - m_recordingView.startMs &&
+          key.minPrice == m_lastHeatmapView.minPrice && key.maxPrice == m_lastHeatmapView.maxPrice &&
+          key.widthPx == m_lastHeatmapView.widthPx && key.heightPx == m_lastHeatmapView.heightPx))) {
         return;
     }
     m_lastHeatmapView = key;
-    auto update = std::make_shared<heatmap_window::Update>();
-    if (m_heatmapWindow.setViewport(viewStartMs, viewEndMs, follow, *update)) {
-        publishHeatmapWindow(std::move(update), false);
+    m_recordingView = {viewStartMs, viewEndMs, minPrice, maxPrice, widthPx, heightPx, follow};
+    if (recordingMode()) scheduleRecordingBand();
+    heatmap_window::Update update;
+    if (m_heatmapWindow.setViewport(viewStartMs, viewEndMs, follow, update)) {
+        publishHeatmapWindow(std::make_shared<heatmap_window::Update>(std::move(update)), false);
     }
     requestHeatmapFetch();
 }
@@ -206,6 +243,7 @@ void DataProcessor::ensureHeatmapWindow(int64_t timeframeMs, int width, int rows
 }
 
 void DataProcessor::resetHeatmapWindow() {
+    resetRecordingRequest();
     if (m_heatmapWindow.timeframeMs() > 0) {
         m_heatmapWindow.configure(m_heatmapWindow.timeframeMs(), m_heatmapWindow.width(),
                                   m_heatmapWindow.width() + 4 * heatmap_window::ColumnWindow::kPageColumns);
@@ -226,6 +264,12 @@ void DataProcessor::publishHeatmapWindow(std::shared_ptr<heatmap_window::Update>
 }
 
 void DataProcessor::requestHeatmapFetch() {
+    if (recordingMode()) {
+        if (m_recordingInFlight || m_recordingRetry->isActive() || m_recordingDebounce.pending || !m_recordingBand.valid()) return;
+        heatmap_window::FetchRequest request;
+        if (m_heatmapWindow.nextFetch(request)) sendRecordingRequest(request.endMs);
+        return;
+    }
     if (m_heatmapFetchInFlight) {
         return;
     }
@@ -428,7 +472,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int64_t requestEndMs,
                                              int64_t oldestAvailableMs,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
-    if (m_shuttingDown.load()) {
+    if (recordingMode() || m_shuttingDown.load()) {
         return;
     }
     if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
@@ -541,6 +585,7 @@ void DataProcessor::setServerTimeframe(int64_t timeframeMs) {
                     << " (window reset)");
         m_forcedTimeframeMs = timeframeMs;
         resetHeatmapWindow();
+        scheduleRecordingBand();
     }
 }
 
@@ -579,4 +624,215 @@ void DataProcessor::setTimeframe(int timeframe_ms) {
 
 bool DataProcessor::isManualTimeframeSet() const {
     return m_manualTimeframeSet;
+}
+
+void DataProcessor::resetRecordingRequest() {
+    ++m_bandGeneration;
+    m_recordingInFlight = false;
+    m_recordingBandConfirmed = false;
+    m_recordingRequestId.clear();
+    m_recordingBand = {};
+    m_recordingNoProgress = 0;
+    m_recordingRetry->stop();
+    m_recordingDebounce.cancel();
+    m_recordingBandTimer->stop();
+    m_recordingTimeout->stop();
+    m_recordingBootstrapped = false;
+}
+
+void DataProcessor::setRecordingConfig(bool requested, double minRowPx, double aspect) {
+    const bool changed = m_recordingRequested != requested;
+    m_recordingRequested = requested;
+    m_recordingMinRowPx = std::clamp(minRowPx, 1.0, 64.0);
+    m_recordingAspect = std::clamp(aspect, 0.05, 4.0);
+    if (changed) resetHeatmapWindow();
+    scheduleRecordingBand();
+}
+
+void DataProcessor::setRecordingCapability(bool available) {
+    const bool wasRecording = recordingMode();
+    m_recordingAvailable = available;
+    if (wasRecording != recordingMode()) resetHeatmapWindow();
+    scheduleRecordingBand();
+}
+
+void DataProcessor::setRecordingConnected(bool connected) {
+    m_recordingConnected = connected;
+    if (!connected) {
+        m_recordingAvailable = false; // require a fresh hello on reconnect
+        resetRecordingRequest();
+    }
+    scheduleRecordingBand();
+}
+
+void DataProcessor::refreshRecordingHistory() {
+    if (!recordingMode()) return;
+    if (!m_recordingBand.valid()) scheduleRecordingBand();
+    else if (!m_recordingInFlight) sendRecordingRequest(0);
+}
+
+void DataProcessor::scheduleRecordingBand() {
+    if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty()) return;
+    const auto wanted = recording_view::requestBand(m_recordingView, m_forcedTimeframeMs,
+                                                   m_recordingMinRowPx, m_recordingAspect);
+    if (!recording_view::needsReband(m_recordingView, m_recordingBand, wanted)) {
+        m_recordingDebounce.cancel();
+        m_recordingBandTimer->stop();
+        return;
+    }
+    m_recordingDebounce.changed(m_recordingClock.elapsed());
+    m_recordingBandTimer->start(recording_view::kDebounceMs);
+}
+
+void DataProcessor::applyRecordingBand() {
+    if (!recordingMode() || !m_recordingConnected || !m_recordingView.valid() ||
+        !m_recordingDebounce.ready(m_recordingClock.elapsed())) return;
+    const auto band = recording_view::requestBand(m_recordingView, m_forcedTimeframeMs,
+                                                 m_recordingMinRowPx, m_recordingAspect);
+    if (!band.valid()) return;
+    ensureHeatmapWindow(m_forcedTimeframeMs, m_heatmapGridWidth, recording_view::kRows);
+    m_recordingBand = band;
+    m_recordingNoProgress = 0;
+    m_recordingRetry->stop();
+    m_recordingDebounce.cancel();
+    ++m_bandGeneration;
+    m_recordingBandConfirmed = false;
+    m_recordingInFlight = false;
+    m_recordingTimeout->stop();
+    auto update = std::make_shared<heatmap_window::Update>();
+    // This provisional band only blanks old projections. The reply replaces it.
+    const double tick = (band.maxPrice - band.minPrice) / recording_view::kRows;
+    if (m_heatmapWindow.setDisplayBand({band.minPrice, band.maxPrice, tick}, m_bandGeneration, *update))
+        publishHeatmapWindow(std::move(update), false);
+    heatmap_window::Update placement;
+    if (m_heatmapWindow.setViewport(m_recordingView.startMs, m_recordingView.endMs,
+                                    m_recordingView.follow, placement))
+        publishHeatmapWindow(std::make_shared<heatmap_window::Update>(std::move(placement)), false);
+    sLog_Probe("heatmap.recording.reband", "symbol=" << m_activeSymbol << " tf=" << m_forcedTimeframeMs
+               << " gen=" << m_bandGeneration << " lo=" << band.minPrice << " hi=" << band.maxPrice
+               << " idealTick=" << band.idealTick << " rows=" << recording_view::kRows);
+    sendRecordingRequest(m_recordingView.follow ? 0 : m_recordingView.endMs);
+}
+
+void DataProcessor::sendRecordingRequest(int64_t endMs) {
+    if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty() ||
+        !m_recordingBand.valid() || m_recordingInFlight) return;
+    protocol::recordingwire::Request request;
+    request.symbol = m_activeSymbol.toStdString();
+    request.timeframeMs = m_forcedTimeframeMs;
+    request.endTimeMs = endMs;
+    request.rows = recording_view::kRows;
+    request.count = std::min(heatmap_window::ColumnWindow::kPageColumns, 2'000'000 / request.rows);
+    request.priceMin = m_recordingBand.minPrice;
+    request.priceMax = m_recordingBand.maxPrice;
+    if (m_recordingBandConfirmed) {
+        request.priceMin = m_recordingDisplayBand.minPrice;
+        request.priceMax = m_recordingDisplayBand.maxPrice;
+        request.displayTick = m_recordingDisplayBand.tickSize;
+    }
+    request.bandGeneration = m_bandGeneration;
+    request.requestId = std::to_string(++m_recordingSerial);
+    m_recordingRequestId = QString::fromStdString(request.requestId);
+    m_heatmapWindow.setRecordingRequest(request.requestId);
+    m_recordingEndMs = endMs;
+    m_recordingInFlight = true;
+    m_recordingTimeout->start(5000);
+    sLog_Probe("heatmap.recording.request", "symbol=" << m_activeSymbol << " tf=" << request.timeframeMs
+               << " gen=" << request.bandGeneration << " id=" << m_recordingRequestId
+               << " end=" << endMs << " lo=" << request.priceMin << " hi=" << request.priceMax
+               << " idealTick=" << m_recordingBand.idealTick << " rows=" << request.rows);
+    emit recordingHistoryFetchNeeded(request);
+    emit heatmapHistoryStatus(true, m_heatmapWindow.oldestAvailableMs());
+}
+
+void DataProcessor::onRecordingHistoryError(const QString& symbol, const QString& requestId,
+                                           uint64_t generation, const QString& message) {
+    if (symbol != m_activeSymbol || requestId != m_recordingRequestId ||
+        generation != m_bandGeneration || !m_recordingInFlight) return;
+    m_recordingInFlight = false;
+    m_recordingTimeout->stop();
+    sLog_Warning("Recording history failed: symbol=" << symbol << " gen=" << generation
+                 << " id=" << requestId << " message=" << message);
+    emit heatmapHistoryStatus(false, m_heatmapWindow.oldestAvailableMs());
+}
+
+void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page) {
+    if (!recordingMode() || !m_recordingInFlight || page.symbol != m_activeSymbol ||
+        page.timeframeMs != m_forcedTimeframeMs || page.bandGeneration != m_bandGeneration ||
+        page.requestId != m_recordingRequestId || page.requestEndMs != m_recordingEndMs) {
+        sLog_Probe("heatmap.recording.stale", "symbol=" << page.symbol << " gen=" << page.bandGeneration
+                   << " id=" << page.requestId << " activeGen=" << m_bandGeneration);
+        return;
+    }
+    if (page.status != "complete" && page.status != "budget") {
+        onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration, page.status + ": " + page.message);
+        return;
+    }
+    // Discovery/index budgets can return no completed bucket yet. Retry the
+    // same inclusive boundary, with a fresh id, without inventing known history.
+    if (page.status == "budget" && page.scannedEndMs <= page.scannedStartMs && page.columns.empty()) {
+        if (++m_recordingNoProgress > 3) {
+            onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration,
+                                    "recording budget made no progress after three retries");
+            return;
+        }
+        m_recordingInFlight = false;
+        m_recordingTimeout->stop();
+        m_recordingRetry->start(250);
+        return;
+    }
+    m_recordingNoProgress = 0;
+    const heatmap_window::Band band{page.bandLo, page.bandLo + page.bandRows * page.bandTick, page.bandTick};
+    if (page.bandRows != recording_view::kRows || !band.valid() ||
+        !std::isfinite(band.minPrice) || !std::isfinite(band.maxPrice) || !std::isfinite(band.tickSize) ||
+        (m_recordingBandConfirmed && !band.sameAs(m_recordingDisplayBand)) ||
+        page.valueEncoding != "absolute_log_size" || !(page.sizeFloor > 0) ||
+        !std::isfinite(page.sizeFloor) || !(page.codesPerOctave > 0) || !std::isfinite(page.codesPerOctave)) {
+        onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration, "invalid recording band/scale");
+        return;
+    }
+    for (const auto& c : page.columns) {
+        const heatmap_window::Band columnBand{c.minPrice, c.maxPrice, c.tickSize};
+        if (!columnBand.sameAs(band) || c.bucketStartMs <= 0 || c.bucketStartMs % page.timeframeMs != 0 ||
+            c.intensity.size() != page.bandRows * 2 || c.liquidity.size() != page.bandRows * 2 ||
+            c.validity.size() != (page.bandRows + 7) / 8 || !(c.liquidityScale > 0) ||
+            !std::isfinite(c.liquidityScale)) {
+            onRecordingHistoryError(page.symbol, page.requestId, page.bandGeneration, "invalid recording column");
+            return;
+        }
+    }
+    m_recordingInFlight = false;
+    m_recordingTimeout->stop();
+    auto update = std::make_shared<heatmap_window::Update>();
+    if (m_heatmapWindow.setDisplayBand(band, m_bandGeneration, *update))
+        publishHeatmapWindow(std::move(update), false);
+    m_recordingBandConfirmed = true;
+    m_recordingDisplayBand = band;
+    std::vector<heatmap_window::Column> columns;
+    columns.reserve(page.columns.size());
+    for (const auto& c : page.columns) {
+        columns.push_back({c.bucketStartMs, c.minPrice, c.maxPrice, c.tickSize,
+                           c.intensity, c.liquidity, c.liquidityScale, c.validity});
+    }
+    update = std::make_shared<heatmap_window::Update>();
+    bool first = false;
+    if (m_heatmapWindow.ingestRecording(columns, page.bandGeneration, page.requestId.toStdString(),
+        page.scannedStartMs, page.scannedEndMs, page.exhausted, page.oldestAvailableMs,
+        page.latestAvailableMs, page.sizeFloor, page.codesPerOctave, *update, first))
+        publishHeatmapWindow(std::move(update), first);
+    sLog_Probe("heatmap.recording.page", "symbol=" << page.symbol << " gen=" << page.bandGeneration
+               << " id=" << page.requestId << " tick=" << page.bandTick << " lo=" << page.bandLo
+               << " columns=" << page.columns.size() << " scanned=[" << page.scannedStartMs
+               << ".." << page.scannedEndMs << ") next=" << page.nextEndMs << " exhausted=" << page.exhausted);
+    emit heatmapHistoryStatus(false, m_heatmapWindow.oldestAvailableMs());
+    // Walk only as far as the visible window and its prefetch margin. A short
+    // budget page carries an explicit continuation, never an inferred floor.
+    heatmap_window::FetchRequest missing;
+    if (!m_recordingDebounce.pending && m_heatmapWindow.nextFetch(missing)) {
+        if (!page.exhausted && page.nextEndMs > 0 &&
+            (page.requestEndMs == 0 || page.nextEndMs < page.requestEndMs))
+            sendRecordingRequest(std::max(missing.endMs, page.nextEndMs));
+        else if (page.scannedEndMs > page.scannedStartMs)
+            sendRecordingRequest(missing.endMs);
+    }
 }

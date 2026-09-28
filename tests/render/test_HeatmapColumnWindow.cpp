@@ -297,3 +297,124 @@ TEST(HeatmapStreamStateWindow, ApplyWindowMovesCursorAndQueuesOnlyGivenSlots) {
     std::vector<HeatmapStreamState::SlotColumn> bad{{0, QByteArray(3, 0), {}, 1.0}};
     EXPECT_FALSE(state.applyWindow(placement, std::move(bad), 3000));
 }
+
+TEST(HeatmapRecordingWindow, RebandPreservesLiveCachePlacementAndSlots) {
+    auto w = makeWindow();
+    Update u;
+    ASSERT_TRUE(live(w, makeColumn(10), u));
+    const auto size = w.cachedColumns();
+    const auto end = u.windowEndMs;
+    const auto slot = u.newestSlot;
+    ASSERT_TRUE(w.setDisplayBand({200, 200 + kRows, 1}, 1, u));
+    EXPECT_EQ(w.cachedColumns(), size);
+    EXPECT_EQ(w.windowEndMs(), end);
+    EXPECT_EQ(u.newestSlot, slot);
+    EXPECT_TRUE(u.full);
+    ASSERT_EQ(u.writes.size(), kWidth);
+    for (const auto& write : u.writes) {
+        EXPECT_FALSE(write.recorded);
+        EXPECT_EQ(write.slot, (write.bucketStartMs / kTf) % kWidth);
+        EXPECT_EQ(write.validity, QByteArray((kRows + 7) / 8, 0));
+    }
+    EXPECT_EQ(u.valueEncoding, ValueEncoding::AbsoluteLogSize);
+}
+
+TEST(HeatmapRecordingWindow, KeepsCodesAndValidityAndRejectsStaleReplies) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 100 + kRows, 1}, 3, u);
+    w.setRecordingRequest("current");
+    auto col = makeColumn(10);
+    col.validity = QByteArray((kRows + 7) / 8, '\x55');
+    EXPECT_FALSE(w.ingestRecording({col}, 2, "current", bucket(10), bucket(11), false,
+                                   0, bucket(10), 1e-6, 819, u, first));
+    EXPECT_FALSE(w.ingestRecording({col}, 3, "old", bucket(10), bucket(11), false,
+                                   0, bucket(10), 1e-6, 819, u, first));
+    EXPECT_FALSE(w.placed());
+    ASSERT_TRUE(w.ingestRecording({col}, 3, "current", bucket(10), bucket(11), false,
+                                  0, bucket(10), 1e-6, 819, u, first));
+    ASSERT_TRUE(first);
+    const auto* write = writeFor(u, bucket(10));
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(write->intensity, col.intensity);
+    EXPECT_EQ(write->liquidity, col.liquidity);
+    EXPECT_EQ(write->validity, col.validity);
+    EXPECT_DOUBLE_EQ(u.sizeFloor, 1e-6);
+    EXPECT_DOUBLE_EQ(u.codesPerOctave, 819);
+    EXPECT_EQ(u.bandGeneration, 3);
+    ASSERT_TRUE(w.setDisplayBand({200, 200 + kRows, 1}, 4, u));
+    EXPECT_FALSE(writeFor(u, bucket(10))->recorded);
+    EXPECT_FALSE(w.ingestRecording({col}, 3, "current", bucket(10), bucket(11), false,
+                                   0, bucket(10), 1e-6, 819, u, first));
+    FetchRequest fetch;
+    ASSERT_TRUE(w.nextFetch(fetch));
+    EXPECT_EQ(fetch.endMs, bucket(10));
+}
+
+TEST(HeatmapRecordingWindow, ShortPageKnowsOnlyScannedIntervalExhaustedSetsFloor) {
+    auto w = makeWindow();
+    Update u;
+    bool first = false;
+    w.setDisplayBand({100, 100 + kRows, 1}, 1, u);
+    w.setRecordingRequest("page");
+    auto col = makeColumn(10);
+    col.validity = QByteArray((kRows + 7) / 8, '\xff');
+    ASSERT_TRUE(w.ingestRecording({col}, 1, "page", bucket(8), bucket(11), false,
+                                  bucket(8), bucket(10), 1e-6, 819, u, first));
+    FetchRequest fetch;
+    ASSERT_TRUE(w.nextFetch(fetch));
+    EXPECT_EQ(fetch.endMs, bucket(7)); // 8,9 scanned gaps; older remains fetchable
+    EXPECT_EQ(w.oldestAvailableMs(), 0);
+    w.ingestRecording({}, 1, "page", bucket(6), bucket(8), true,
+                       bucket(6), bucket(10), 1e-6, 819, u, first);
+    EXPECT_EQ(w.oldestAvailableMs(), bucket(6));
+    EXPECT_FALSE(w.nextFetch(fetch));
+}
+
+TEST(HeatmapRecordingWindow, RecordingMetadataSurvivesRingSnapshotsAndUploads) {
+    HeatmapStreamState state;
+    HeatmapStreamState::WindowPlacement placement;
+    placement.gridWidth = 2;
+    placement.gridHeight = 8;
+    placement.timeframeMs = kTf;
+    placement.bytesPerCell = 2;
+    placement.newestSlot = 0;
+    placement.windowEndMs = bucket(10);
+    placement.valueEncoding = ValueEncoding::AbsoluteLogSize;
+    placement.bandGeneration = 42;
+    placement.sizeFloor = 1e-6;
+    placement.codesPerOctave = 819;
+    const QByteArray mask(1, '\x05');
+    ASSERT_TRUE(state.applyWindow(placement, {{0, QByteArray(16, 0), QByteArray(16, 0), 2, mask}}, 0));
+    const auto snapshot = state.snapshot();
+    EXPECT_EQ(snapshot.valueEncoding, ValueEncoding::AbsoluteLogSize);
+    EXPECT_EQ(snapshot.bandGeneration, 42);
+    EXPECT_DOUBLE_EQ(snapshot.sizeFloor, 1e-6);
+    EXPECT_DOUBLE_EQ(snapshot.codesPerOctave, 819);
+    std::vector<HeatmapStreamState::PendingColumn> uploads;
+    state.takePendingUploads(uploads);
+    ASSERT_EQ(uploads.size(), 1);
+    EXPECT_EQ(uploads[0].validity, mask);
+    std::vector<HeatmapStreamState::PendingLabelColumn> labels;
+    state.takePendingLabelUploads(labels);
+    ASSERT_EQ(labels.size(), 1);
+    EXPECT_EQ(labels[0].validity, mask);
+    HeatmapStreamState::LabelSnapshot full;
+    ASSERT_TRUE(state.copyLabelSnapshot(full));
+    ASSERT_EQ(full.validity.size(), 2);
+    EXPECT_EQ(full.validity[0], mask);
+}
+
+TEST(HeatmapRecordingWindow, LiveArrivalDuringProjectionIsCachedWithoutChangingBand) {
+    auto w = makeWindow();
+    Update u;
+    ASSERT_TRUE(live(w, makeColumn(10), u));
+    ASSERT_TRUE(w.setDisplayBand({200, 200 + kRows, 1}, 1, u));
+    EXPECT_FALSE(live(w, makeColumn(11, 500), u));
+    EXPECT_EQ(w.cachedColumns(), 2);
+    EXPECT_EQ(w.windowEndMs(), bucket(10));
+    ASSERT_TRUE(w.setDisplayBand({300, 300 + kRows, 1}, 2, u));
+    EXPECT_DOUBLE_EQ(u.band.minPrice, 300);
+    EXPECT_EQ(w.cachedColumns(), 2);
+}

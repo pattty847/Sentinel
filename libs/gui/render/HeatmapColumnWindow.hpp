@@ -12,6 +12,7 @@ Threading: owned and used by DataProcessor on its worker thread only.
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace heatmap_window {
@@ -25,6 +26,7 @@ struct Column {
     QByteArray intensity;   // rows * bytesPerCell, little-endian
     QByteArray liquidity;   // rows * 2, or empty
     double liquidityScale = 1.0;
+    QByteArray validity; // packed LSB-first row bits; empty for legacy
 };
 
 struct Band {
@@ -42,7 +44,10 @@ struct SlotWrite {
     QByteArray intensity;   // display band, rows * bytesPerCell
     QByteArray liquidity;   // rows * 2, or empty
     double liquidityScale = 1.0;
+    QByteArray validity; // packed LSB-first row bits; empty for legacy
 };
+
+enum class ValueEncoding { LegacyIntensity, AbsoluteLogSize };
 
 // Everything the GUI needs to bring its ring in line with the window.
 struct Update {
@@ -51,6 +56,10 @@ struct Update {
     int rows = 0;
     int bytesPerCell = 0;
     Band band;
+    ValueEncoding valueEncoding = ValueEncoding::LegacyIntensity;
+    uint64_t bandGeneration = 0;
+    double sizeFloor = 0.0;
+    double codesPerOctave = 0.0;
     int64_t windowEndMs = 0;    // newest bucket start in the window
     int newestSlot = 0;         // slot of windowEndMs; the oldest slot is newestSlot + 1
     bool full = false;          // every slot rewritten (placement jump or band change)
@@ -92,6 +101,16 @@ public:
     int64_t oldestAvailableMs() const { return m_floorMs; }
     size_t cachedColumns() const { return m_cache.size(); }
 
+    // Explicit recording projection; never clears the source/live cache or placement.
+    // A generation change invalidates projected data/known ranges and rewrites every slot.
+    bool setDisplayBand(const Band& band, uint64_t generation, Update& out);
+    void setRecordingRequest(const std::string& requestId) { m_requestId = requestId; }
+    bool ingestRecording(const std::vector<Column>& columns, uint64_t generation,
+                         const std::string& requestId, int64_t scannedStartMs,
+                         int64_t scannedEndMs, bool exhausted, int64_t oldestAvailableMs,
+                         int64_t latestAvailableMs, double sizeFloor, double codesPerOctave,
+                         Update& out, bool& firstPlacement);
+
     // Live forming/finalized bucket. Returns true and fills out when the GPU
     // window changes. firstPlacement is set when this created the window.
     bool ingestLive(const Column& column, int bytesPerCell, Update& out, bool& firstPlacement);
@@ -132,6 +151,12 @@ private:
     int m_rows = 0;
     int m_bytesPerCell = 0;
 
+    bool m_recording = false;
+    uint64_t m_bandGeneration = 0;
+    std::string m_requestId;
+    double m_sizeFloor = 0.0, m_codesPerOctave = 0.0;
+    int64_t m_latestRecordingMs = 0;
+    std::map<int64_t, Column> m_projected;
     std::map<int64_t, Column> m_cache;
     std::map<int64_t, int64_t> m_known;   // start -> end, inclusive, tf-aligned
     int64_t m_floorMs = 0;                // server storage floor; older is known missing
@@ -146,6 +171,7 @@ private:
     bool m_pinned = false;                // window end tracks the newest live bucket
     int64_t m_windowEndMs = 0;
     Band m_band;
+    QByteArray m_zeroValidity;            // shared all-unknown recording mask
     QByteArray m_zeroIntensity;           // shared blank column for missing buckets
     std::vector<int64_t> m_slotBucket;    // bucket currently shown in each slot
     std::vector<uint8_t> m_slotRecorded;

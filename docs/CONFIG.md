@@ -73,6 +73,7 @@ Public market data (level2, market_trades, candles) does not require a key; the 
 
 ```yaml
 heatmap:
+  source: legacy             # legacy | recording; recording requires advertised recording.available
   gamma: 1.05
   contrast: 1.15
   label_px: 9999
@@ -87,6 +88,27 @@ gui:
   screenshot_dir: ./screenshots
   default_order_qty: 1.0
 ```
+
+`heatmap.source` defaults to `legacy` (unknown values also fall back to legacy).
+`recording` is active only after a connected server advertises `recording.available: true`;
+otherwise the client uses the legacy path. Recording mode displays closed recording buckets
+only; legacy live values are not mixed into its absolute log codes. Live recording columns
+are deferred to S4. The presentation clock holds at the newest recorded bucket.
+
+Recording requests use 2048 rows and the square-cell target from `target_row_px` and
+`cell_aspect`. A price exit from the buffered band or a change in the ideal 1-2-5 tick
+starts a 150 ms trailing debounce. Requests retain at least 50% of the visible price
+span on each side (clipped at price zero). Because the current protocol's `display_tick`
+is exact and native ticks are not advertised, the first request expands the range to
+at least `2048 * ideal_tick` and leaves tick selection to the server. Its returned
+band is authoritative; continuation pages pin that band and tick. Thus the buffer
+can be wider than 50%, especially at close time zoom. This requires no protocol change.
+
+For data-path checks, start the GUI with `SENTINEL_PROBES=heatmap.recording,heatmap.window`.
+`heatmap.recording.reband` logs the generation, requested range, ideal tick and row count;
+`request` adds the unique request id and paging boundary; `page` logs the authoritative
+tick, scanned interval, `next_end` and exhaustion; `stale` reports obsolete replies.
+Shader/label support for these codes and validity bits is a separate S3b change.
 
 **Paper trading (server):**
 

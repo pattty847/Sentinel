@@ -111,6 +111,12 @@ void ColumnWindow::clear() {
     m_rows = 0;
     m_bytesPerCell = 0;
     m_cache.clear();
+    m_projected.clear();
+    m_recording = false;
+    m_bandGeneration = 0;
+    m_requestId.clear();
+    m_latestRecordingMs = 0;
+    m_sizeFloor = m_codesPerOctave = 0.0;
     m_known.clear();
     m_floorMs = 0;
     m_latestLiveMs = 0;
@@ -119,6 +125,7 @@ void ColumnWindow::clear() {
     m_windowEndMs = 0;
     m_band = {};
     m_zeroIntensity.clear();
+    m_zeroValidity.clear();
     m_slotBucket.assign(static_cast<size_t>(std::max(0, m_width)), kNoBucket);
     m_slotRecorded.assign(static_cast<size_t>(std::max(0, m_width)), 0);
 }
@@ -139,6 +146,7 @@ int64_t ColumnWindow::windowStartMs() const {
 }
 
 int64_t ColumnWindow::latestDataMs() const {
+    if (m_recording) return m_latestRecordingMs;
     const int64_t newestCachedMs = m_cache.empty() ? 0 : m_cache.rbegin()->first;
     return std::max(m_latestLiveMs, newestCachedMs);
 }
@@ -214,6 +222,17 @@ const Column* ColumnWindow::newestCached() const {
 
 bool ColumnWindow::ingestLive(const Column& column, int bytesPerCell, Update& out, bool& firstPlacement) {
     firstPlacement = false;
+    if (m_recording) {
+        // Source data remains cached even while a recording projection is active.
+        // It cannot change the displayed encoding, band or known recording range.
+        if (column.bucketStartMs > 0 && column.bucketStartMs % m_timeframeMs == 0 &&
+            (bytesPerCell == 1 || bytesPerCell == 2) && !column.intensity.isEmpty()) {
+            m_cache[column.bucketStartMs] = column;
+            m_latestLiveMs = std::max(m_latestLiveMs, column.bucketStartMs);
+            evict();
+        }
+        return false;
+    }
     if (!acceptShape(column, bytesPerCell)) {
         return false;
     }
@@ -315,6 +334,76 @@ bool ColumnWindow::ingestHistory(const std::vector<Column>& columns,
     return !out.writes.empty();
 }
 
+bool ColumnWindow::setDisplayBand(const Band& band, uint64_t generation, Update& out) {
+    if (!band.valid() || !std::isfinite(band.minPrice) || !std::isfinite(band.maxPrice) ||
+        !std::isfinite(band.tickSize) || (m_recording && generation < m_bandGeneration)) return false;
+    const double rowCount = (band.maxPrice - band.minPrice) / band.tickSize;
+    if (!std::isfinite(rowCount) || rowCount < 1 || rowCount > 16384 ||
+        std::abs(rowCount - std::round(rowCount)) > 1e-6) return false;
+    if (m_recording && generation == m_bandGeneration && band.sameAs(m_band)) return false;
+    m_recording = true;
+    m_bandGeneration = generation;
+    m_band = band;
+    m_rows = static_cast<int>(std::llround(rowCount));
+    m_bytesPerCell = 2;
+    m_zeroIntensity = QByteArray(m_rows * 2, 0);
+    m_zeroValidity = QByteArray((m_rows + 7) / 8, 0);
+    m_projected.clear();
+    m_known.clear();
+    m_floorMs = 0;
+    // Preserve the time anchor even before the first recording page replaces it.
+    if (m_latestRecordingMs == 0 && m_placed) m_latestRecordingMs = m_windowEndMs;
+    if (!m_placed) return false;
+    emitWindow(true, {}, out);
+    return true;
+}
+
+bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t generation,
+                                   const std::string& requestId, int64_t scannedStartMs,
+                                   int64_t scannedEndMs, bool exhausted, int64_t oldestAvailableMs,
+                                   int64_t latestAvailableMs, double sizeFloor, double codesPerOctave,
+                                   Update& out, bool& firstPlacement) {
+    firstPlacement = false;
+    if (!m_recording || generation != m_bandGeneration || requestId != m_requestId ||
+        !(sizeFloor > 0) || !std::isfinite(sizeFloor) || !(codesPerOctave > 0) ||
+        !std::isfinite(codesPerOctave)) return false;
+    m_sizeFloor = sizeFloor;
+    m_codesPerOctave = codesPerOctave;
+    const auto previousLatest = m_latestRecordingMs;
+    if (latestAvailableMs > 0) m_latestRecordingMs = latestAvailableMs;
+    std::vector<int64_t> changed;
+    changed.reserve(columns.size());
+    for (const auto& column : columns) {
+        if (!bandOf(column).sameAs(m_band) || !acceptShape(column, 2) ||
+            column.validity.size() != (m_rows + 7) / 8 || column.liquidity.size() != m_rows * 2)
+            continue;
+        m_projected[column.bucketStartMs] = column;
+        m_latestRecordingMs = std::max(m_latestRecordingMs, column.bucketStartMs);
+        changed.push_back(column.bucketStartMs);
+    }
+    // Only completed, tf-aligned output buckets are proven by a recording page.
+    if (scannedEndMs > scannedStartMs && scannedStartMs > 0 &&
+        scannedStartMs % m_timeframeMs == 0 && scannedEndMs % m_timeframeMs == 0)
+        addKnown(scannedStartMs, scannedEndMs - m_timeframeMs);
+    if (exhausted) {
+        if (oldestAvailableMs > 0) m_floorMs = oldestAvailableMs;
+        else if (scannedStartMs > 0) m_floorMs = scannedStartMs;
+    }
+    // Projection cache is disposable; source/live cache is never touched by a re-band.
+    while (static_cast<int>(m_projected.size()) > m_capacity) {
+        const auto front = m_projected.begin();
+        const auto back = std::prev(m_projected.end());
+        m_projected.erase(m_placed && front->first >= windowStartMs() ? back : front);
+    }
+    if (!m_placed) {
+        firstPlacement = place(out, changed);
+        return firstPlacement;
+    }
+    if (m_latestRecordingMs > previousLatest) return place(out, changed);
+    emitWindow(false, changed, out);
+    return !out.writes.empty();
+}
+
 bool ColumnWindow::setViewport(int64_t viewStartMs, int64_t viewEndMs, bool follow, Update& out) {
     m_hasView = viewEndMs > viewStartMs;
     m_viewStartMs = viewStartMs;
@@ -356,9 +445,9 @@ bool ColumnWindow::place(Update& out, const std::vector<int64_t>& changed) {
 
     const bool jump = !m_placed || std::llabs(end - m_windowEndMs) >= width * tf;
     Band band = m_band;
-    if (pin && newestCached()) {
+    if (!m_recording && pin && newestCached()) {
         band = bandOf(*newestCached());
-    } else if (jump || !band.valid()) {
+    } else if (!m_recording && (jump || !band.valid())) {
         band = unionBand(end - (width - 1) * tf, end);
         if (!band.valid()) {
             band = m_band.valid() ? m_band : (newestCached() ? bandOf(*newestCached()) : Band{});
@@ -388,6 +477,10 @@ void ColumnWindow::emitWindow(bool full, const std::vector<int64_t>& changed, Up
     out.rows = m_rows;
     out.bytesPerCell = m_bytesPerCell;
     out.band = m_band;
+    out.valueEncoding = m_recording ? ValueEncoding::AbsoluteLogSize : ValueEncoding::LegacyIntensity;
+    out.bandGeneration = m_bandGeneration;
+    out.sizeFloor = m_sizeFloor;
+    out.codesPerOctave = m_codesPerOctave;
     out.windowEndMs = m_windowEndMs;
     out.newestSlot = slotFor(m_windowEndMs);
     out.full = full;
@@ -434,9 +527,14 @@ void ColumnWindow::writeSlot(int64_t bucketMs, SlotWrite& out) {
     const int slot = slotFor(bucketMs);
     out.slot = slot;
     out.bucketStartMs = bucketMs;
-    const auto it = m_cache.find(bucketMs);
-    if (it != m_cache.end()) {
-        resampleColumn(it->second, m_band, m_rows, m_bytesPerCell, out.intensity, out.liquidity);
+    const auto& cache = m_recording ? m_projected : m_cache;
+    const auto it = cache.find(bucketMs);
+    if (it != cache.end()) {
+        if (m_recording) {
+            out.intensity = it->second.intensity;
+            out.liquidity = it->second.liquidity;
+            out.validity = it->second.validity;
+        } else resampleColumn(it->second, m_band, m_rows, m_bytesPerCell, out.intensity, out.liquidity);
         out.liquidityScale = it->second.liquidityScale > 0.0 ? it->second.liquidityScale : 1.0;
         out.recorded = true;
     } else {
@@ -444,6 +542,7 @@ void ColumnWindow::writeSlot(int64_t bucketMs, SlotWrite& out) {
         out.liquidity.clear();
         out.liquidityScale = 1.0;
         out.recorded = false;
+        if (m_recording) out.validity = m_zeroValidity;
     }
     m_slotBucket[static_cast<size_t>(slot)] = bucketMs;
     m_slotRecorded[static_cast<size_t>(slot)] = out.recorded ? 1 : 0;
@@ -482,7 +581,7 @@ bool ColumnWindow::nextFetch(FetchRequest& out) const {
     }
     lo = std::max(lo, windowStart);
     for (int64_t bucket = hi; bucket >= lo; bucket -= tf) {
-        if (!m_cache.count(bucket) && !isKnown(bucket)) {
+        if (!(m_recording ? m_projected : m_cache).count(bucket) && !isKnown(bucket)) {
             out.endMs = bucket;
             out.count = kPageColumns;
             return true;
