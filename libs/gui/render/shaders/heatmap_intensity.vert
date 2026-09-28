@@ -9,6 +9,7 @@ layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     vec4 params;
     vec4 params2;
+    vec4 params3;  // x: value mode (0 legacy normalized, 1 absolute log code), y: lo code, z: hi code
 };
 
 void main() {

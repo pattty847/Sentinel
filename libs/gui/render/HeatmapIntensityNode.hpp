@@ -59,6 +59,12 @@ public:
         m_rowGroup = rowsPerDisplayRow;
         m_rowPhase = phase;
     }
+    // Recording mode: texture holds absolute log size codes; [loCode, hiCode] maps to the palette.
+    void setValueMode(bool absoluteLogCodes, float loCode, float hiCode) {
+        m_absoluteCodes = absoluteLogCodes;
+        m_loCode = loCode;
+        m_hiCode = hiCode;
+    }
     void enqueueColumn(int x, QByteArray data);
     void takePendingUploads(std::vector<std::pair<int, QByteArray>>& out);
 
@@ -70,6 +76,9 @@ public:
     float shaderFloor() const { return m_shaderFloor; }
     int rowGroup() const { return m_rowGroup; }
     int rowPhase() const { return m_rowPhase; }
+    bool absoluteCodes() const { return m_absoluteCodes; }
+    float loCode() const { return m_loCode; }
+    float hiCode() const { return m_hiCode; }
 
 private:
     QSGTexture* m_intensityTexture = nullptr;
@@ -80,6 +89,9 @@ private:
     float m_shaderFloor = 0.1f;
     int m_rowGroup = 1;
     int m_rowPhase = 0;
+    bool m_absoluteCodes = false;
+    float m_loCode = 0.0f;
+    float m_hiCode = 1.0f;
     std::mutex m_uploadMutex;
     std::vector<std::pair<int, QByteArray>> m_pendingUploads;
 };
@@ -98,6 +110,7 @@ public:
     void setShaderFloor(float floor);
     // Display tick: merge N base rows per display row (HeatmapRowGrouping.hpp).
     void setRowGrouping(int rowsPerDisplayRow, int phase);
+    void setValueMode(bool absoluteLogCodes, float loCode, float hiCode);
     void enqueueColumn(int x, QByteArray data);
 
 private:
