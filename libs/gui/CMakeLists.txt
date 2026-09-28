@@ -315,6 +315,10 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Svg
 )
 
+# QRhi (semi-public) for incremental heatmap texture uploads on Metal/D3D/Vulkan.
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+target_link_libraries(sentinel_gui_lib PRIVATE Qt6::GuiPrivate)
+
 target_compile_definitions(sentinel_gui_lib
     PRIVATE
         SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

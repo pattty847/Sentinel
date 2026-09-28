@@ -103,6 +103,7 @@ void HeatmapOverlayRenderer::requestFullTextureRebuild() {
 
 void HeatmapOverlayRenderer::onRootRebuilt() {
     m_textureDirty = true;
+    m_columnTexture = nullptr;  // owned and deleted by the old root node
     m_historyGapNode = nullptr;
     m_gapGeometryDirty = true;
 }
@@ -196,15 +197,36 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
                         std::memcpy(row + upload.x * 2, src + y * 2, 2);
                     }
                 }
+                // RHI backends upload only the changed column; the mirror above
+                // is kept for full uploads after a resize or rebuild.
+                if (m_columnTexture && !m_textureDirty) {
+                    m_columnTexture->enqueueColumn(upload.x, upload.data);
+                }
             }
-            m_textureDirty = true;
+            if (!m_columnTexture) {
+                m_textureDirty = true;
+            }
         }
     }
 
     if (m_textureDirty) {
         ensureHeatmapImage();
         ensurePaletteImage();
-        auto* intensityTexture = window->createTextureFromImage(m_heatmapImage);
+        QSGTexture* intensityTexture = nullptr;
+        if (!useIncrementalGlUploads && !m_heatmapImage.isNull()) {
+            // Metal/D3D/Vulkan: one persistent R16/R8 texture, full upload now,
+            // column uploads afterwards (no per-frame RGBA conversion).
+            if (!m_columnTexture) {
+                m_columnTexture = new HeatmapColumnTexture();
+            }
+            m_columnTexture->setFull(m_heatmapImage.size(), m_intensityBytesPerCell,
+                                     QByteArray(reinterpret_cast<const char*>(m_heatmapImage.constBits()),
+                                                static_cast<qsizetype>(m_heatmapImage.sizeInBytes())),
+                                     static_cast<int>(m_heatmapImage.bytesPerLine()));
+            intensityTexture = m_columnTexture;
+        } else {
+            intensityTexture = window->createTextureFromImage(m_heatmapImage);
+        }
         if (!intensityTexture) {
             const QImage::Format fallbackFormat =
                 (m_intensityBytesPerCell == 2) ? QImage::Format_Grayscale16 : QImage::Format_Grayscale8;
@@ -338,7 +360,7 @@ void HeatmapOverlayRenderer::ensureHeatmapImage() {
     if (m_heatmapImage.isNull()) {
         return;
     }
-    m_heatmapImage.fill(m_backgroundColor);
+    m_heatmapImage.fill(0);  // 0 = empty; any other gray level reads as a bid
 }
 
 void HeatmapOverlayRenderer::ensurePaletteImage() {

@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+class HeatmapColumnTexture;
+
 class QQuickWindow;
 class QSGGeometryNode;
 class HeatmapIntensityNode;
@@ -72,7 +74,8 @@ private:
     bool m_textureDirty = true;
     bool m_paletteDirty = true;
     double m_paletteGamma = 2.0;
-    QImage m_heatmapImage;
+    QImage m_heatmapImage;               // CPU mirror for full uploads
+    HeatmapColumnTexture* m_columnTexture = nullptr;  // RHI path; owned by the node
     QImage m_paletteImage;
 
     std::mutex m_historyCoverageMutex;

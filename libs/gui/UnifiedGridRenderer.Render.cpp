@@ -499,6 +499,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     if (width() <= 0 || height() <= 0 || !m_useGpuHeatmap) {
         return oldNode;
     }
+    const bool profile = FrameProfiler::enabled();
+    if (profile) m_frameProfiler.beginFrame();
 
     FrameContext frame = FrameContextBuilder::build(
         boundingRect(), window(),
@@ -541,9 +543,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         }
     }
 
+    if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     auto* texNode = ensureHeatmapRootNode(oldNode);
     computeAndApplyFrameMapping(frame, texNode, cadenceMs, gridWidth, gridHeight);
     publishFrameContext(frame);
+    if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
 
     std::vector<HeatmapOverlayRenderer::PendingUpload> framePendingHeatmapUploads;
     std::vector<FootprintOverlayRenderer::PendingUpload> framePendingFootprintUploads;
@@ -551,6 +555,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     drainFrameUploads(framePendingHeatmapUploads,
                       framePendingFootprintUploads,
                       framePendingTpoUploads);
+    if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
     renderOverlays(texNode,
                    frame,
                    drawHeatmap && !textOnlyDebug,
@@ -562,16 +567,20 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                    framePendingFootprintUploads,
                    framePendingTpoUploads);
 
+    if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
     m_chartTextRenderer.beginFrame(texNode, window(), m_chartTextAtlas);
     if (m_axisTextService) {
         m_axisTextService->submitAxisText(m_chartTextRenderer, m_chartTextAtlas, width(), height());
     }
+    if (profile) m_frameProfiler.mark(FrameProfiler::AxisText);
     if (drawHeatmap) {
         updateLabelGeometry(texNode, frame, snapshot, gridWidth, gridHeight);
     } else {
         clearLabelGeometry();
     }
+    if (profile) m_frameProfiler.mark(FrameProfiler::Labels);
     m_chartTextRenderer.endFrame();
+    if (profile) m_frameProfiler.mark(FrameProfiler::TextEnd);
     if (m_chartTextRenderer.droppedGlyphs() > 0 && qEnvironmentVariableIsSet("SENTINEL_CHART_DEBUG")) {
         sLog_Debug(QString("Chart text dropped glyphs: total=%1 high=%2 low=%3")
                        .arg(m_chartTextRenderer.droppedGlyphs())
@@ -582,6 +591,11 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     // ── TPO POC/VAH/VAL horizontal lines ────────────────────────────────────
     renderTpoPocVahValLines(texNode, frame, m_tpoLayerEnabled);
+    if (profile) {
+        m_frameProfiler.mark(FrameProfiler::TpoLines);
+        const QString report = m_frameProfiler.endFrame();
+        if (!report.isEmpty()) sLog_Render(report);
+    }
 
     return texNode;
 }

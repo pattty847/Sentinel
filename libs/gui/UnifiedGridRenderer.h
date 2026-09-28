@@ -27,6 +27,7 @@
 // ── Extracted services ───────────────────────────────────────────────────────
 #include "render/AxisTextService.hpp"
 #include "render/HeatmapStreamService.hpp"
+#include "render/FrameProfiler.hpp"
 #include "render/FrameContext.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
 #include "render/IOverlayRenderer.hpp"
@@ -117,6 +118,7 @@ private:
     QElapsedTimer m_manualTimeframeTimer;
 
     bool m_panSyncPending = false;
+    FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
     bool m_historyRequestInFlight = false;
     bool m_historyExhausted = false;
     int64_t m_oldestHeatmapAvailableMs = 0;
