@@ -47,6 +47,7 @@ class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
 class QDoubleSpinBox;
+namespace AgentApi { struct ControlBody; }
 
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
@@ -81,6 +82,9 @@ private:
     void connectMarketDataSignals();
     void setWindowProperties();
     void setupGuiApiServer();
+    bool subscribeSymbol(const QString& symbol);
+    void selectTimeframe(int ms);
+    AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
     AgentApi::Metadata agentApiMetadata() const;
     AgentApi::StateSnapshot agentApiStateSnapshot() const;
     AgentApi::ViewportSnapshot agentApiViewportSnapshot() const;

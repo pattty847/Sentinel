@@ -1,4 +1,4 @@
-# Agent API (v1, slices 1-2)
+# Agent API (v1, slices 1, 2 and 4)
 
 The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0` disables it. This is a local observation API; reads do not fetch history. All times are UTC epoch milliseconds. It currently exposes these routes:
 
@@ -10,13 +10,26 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
 | GET | `/api/v1/trades?windowMs=60000&limit=100` | Receive-time tape, newest first, and summary of all retained matches. Window maximum 900,000 ms; limit maximum 1,000. |
 | GET | `/api/v1/screenshot?name=review&target=main` | Existing screenshot result; `target` is `main`, `heatmap`, or `lab`. |
+| POST | `/api/v1/symbol` | JSON `{"symbol":"ETH-USD"}`; subscribes through the chart's symbol path. |
+| POST | `/api/v1/timeframe` | JSON with `heatmapTimeframeMs` and/or `candleTimeframeMs`; v1 links them and requires an advertised served timeframe. |
+| POST | `/api/v1/viewport` | JSON with paired `startMs,endMs`, paired `priceMin,priceMax`, and/or `followLive`. |
+| POST | `/api/v1/layers` | Partial boolean map for `heatmap`, `candles`, `footprint`, `tpo`, `volumeProfile`. |
+| GET | `/api/v1/operations/<id>?waitMs=5000` | Current operation state; waits at most five seconds for a rendered frame. |
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |
 
-All v1 read routes except screenshot accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
+State, viewport, candles, book and trades accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
 
-Successful state and viewport responses have `{"ok":true,"meta":{"sessionId":"...","symbol":"BTC-USD","selectionEpoch":"1","observedAtMs":1790596800000,"source":"gui-cache","stale":false,"coverage":"unknown","truncated":false},"data":{...}}`. Errors have `{"ok":false,"error":{"code":"not_found","message":"Unknown route"}}`. Screenshot success retains `{"ok":true,"path":"./screenshots/review.png","target":"main"}`. The v1 screenshot route does not yet support operation waits or render acknowledgement.
+Successful state and viewport responses have `{"ok":true,"meta":{"sessionId":"...","symbol":"BTC-USD","selectionEpoch":"1","observedAtMs":1790596800000,"source":"gui-cache","stale":false,"coverage":"unknown","truncated":false},"data":{...}}`. Errors have `{"ok":false,"error":{"code":"not_found","message":"Unknown route"}}`. Screenshot success retains `{"ok":true,"path":"./screenshots/review.png","target":"main"}`. The v1 route also accepts `afterOperation=<id>&waitMs=0..5000`; it captures only after that operation renders, returning `408 render_timeout` if no frame arrives, `409 operation_not_rendered` if superseded or failed, and `404 unknown_operation` for an unknown ID. A guarded screenshot includes decimal-string `frameId`, `viewportVersion` and `selectionEpoch`. Screenshots are limited to one request per second (`429`).
 
-Requests must use HTTP/1.1 and a `Host` of `localhost` or `127.0.0.1`, with an optional port. A browser `Origin` is rejected. Headers are capped at 8 KiB and bodies at 16 KiB; GET requests do not accept bodies. The server allows eight concurrent connections and closes incomplete requests after five seconds. Sockets and handlers currently run on the GUI thread, because the existing screenshot capture and state objects are GUI-owned; the bounded, short read handlers avoid cross-thread object access. PNG capture itself can still pause the GUI, so screenshot rate limiting and asynchronous encoding belong to the later screenshot slice.
+Requests must use HTTP/1.1 and a `Host` of `localhost` or `127.0.0.1`, with an optional port. A browser `Origin` is rejected. Headers are capped at 8 KiB and bodies at 16 KiB; POST controls require `Content-Type: application/json`. GET requests do not accept bodies. The server allows eight concurrent connections and closes stalled requests. Sockets and handlers currently run on the GUI thread; operation waits use short timer callbacks and do not block the event loop. PNG encoding/writing remains synchronous and can pause the GUI.
+
+## Controls and render ordering
+
+Every successful POST returns an `operationId` and `status:"applied"`, plus the changed state. GET `/operations/<id>` returns `applied`, `rendered`, `superseded`, or `failed`; it includes `viewportVersion`, and a rendered operation includes `frameId`. A later control of the same kind supersedes a pending one. `waitMs` expires with the current state (usually `applied`) and does not imply failure. Unknown IDs return 404. Operations are retained for the newest 256 IDs.
+
+`/symbol` accepts uppercase `BASE-QUOTE` symbols with two to twenty ASCII alphanumeric characters on each side. `/timeframe` requires an advertised `servedTimeframesMs` entry; older servers without that advertisement cannot select a timeframe through this API. Either field sets both v1 timeframes, and unequal values return 422. `/viewport` requires each bound pair to be complete, finite, positive for price, and increasing. Explicit time bounds turn off follow mode; neither bound pair can be combined with `followLive:true`. Omitted price bounds preserve the current price range. Follow-only requests preserve the current span. Viewport changes use `setViewport()` so the version advances.
+
+The render acknowledgement is an ordering guarantee: the renderer copies the GUI control revision, selection epoch and viewport version into its frame context, and publishes fixed-size atomic frame data after rendering. It does not assert that history is complete or that live data did not advance. A hidden chart can leave an operation `applied`, so a guarded screenshot can time out. Existing layer setters may disable conflicting layers; the response reports the resulting full layer state.
 
 ## Local evidence reads
 
@@ -29,6 +42,27 @@ Trades are held in a preallocated GUI ring, capped at 10,000 rows and 15 minutes
 ## Live hand-off checks
 
 Run `sentinel-gui` with the API enabled, then use:
+
+```sh
+# The POST returns an operationId such as o1. Substitute the returned ID below.
+curl -si -H 'Content-Type: application/json' -d '{"startMs":1790593200000,"endMs":1790596800000}' http://127.0.0.1:17100/api/v1/viewport
+curl -si 'http://127.0.0.1:17100/api/v1/operations/o1?waitMs=5000'
+curl -si 'http://127.0.0.1:17100/api/v1/screenshot?name=viewport-after&target=heatmap&afterOperation=o1&waitMs=5000'
+curl -si -H 'Content-Type: application/json' -d '{"followLive":true}' http://127.0.0.1:17100/api/v1/viewport
+curl -si -H 'Content-Type: application/json' -d '{"symbol":"ETH-USD"}' http://127.0.0.1:17100/api/v1/symbol
+curl -si -H 'Content-Type: application/json' -d '{"heatmapTimeframeMs":60000,"candleTimeframeMs":60000}' http://127.0.0.1:17100/api/v1/timeframe
+curl -si -H 'Content-Type: application/json' -d '{"heatmap":true,"candles":false}' http://127.0.0.1:17100/api/v1/layers
+
+# Negative cases: each must fail without changing the chart.
+curl -si -H 'Content-Type: application/json' -d '{"startMs":1,"endMs":2,"followLive":true}' http://127.0.0.1:17100/api/v1/viewport
+curl -si -H 'Content-Type: application/json' -d '{"priceMin":100}' http://127.0.0.1:17100/api/v1/viewport
+curl -si -H 'Content-Type: application/json' -d '{"heatmapTimeframeMs":12345}' http://127.0.0.1:17100/api/v1/timeframe
+curl -si -H 'Content-Type: application/json' -d '{"symbol":"../BAD"}' http://127.0.0.1:17100/api/v1/symbol
+curl -si 'http://127.0.0.1:17100/api/v1/operations/o999999?waitMs=5000'
+curl -si 'http://127.0.0.1:17100/api/v1/screenshot?name=bad&afterOperation=o999999&waitMs=5000'
+```
+
+For the hidden-window timeout case, POST a viewport control while the heatmap window is hidden, then request its screenshot with `afterOperation=<returned-id>&waitMs=100`; expect `408 render_timeout` and no file. Wait at least one second between screenshot requests to avoid the 429 rate limit. Restore the window and verify a new operation reaches `rendered` before screenshot capture.
 
 ```sh
 curl -si 'http://127.0.0.1:17100/api/v1/state'
@@ -49,3 +83,5 @@ curl -si 'http://127.0.0.1:17100/api/v1/missing'
 Check the API metadata across a symbol switch, timeframe switch and disconnect/reconnect. Compare viewport values with the visible chart and inspect the newest GUI run log for warnings and errors. The GUI cannot be launched inside the sandbox, so these checks are for the orchestrator.
 
 Book prices are dense-book bucket starts on `orderbook.tickSize` (see `/state`), not individual exchange price levels; sizes are the bucket totals rounded to 1e-8. Best bid and best ask are bucket prices too, so they can share a bucket and `spread` can read 0 when the real spread is under one tick.
+
+Control (`POST`) and `GET /api/v1/operations/<id>` responses use the standard envelope: read `operationId`, `status`, `viewportVersion` and `frameId` under `data`. The screenshot response keeps its legacy flat shape.

@@ -24,6 +24,8 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     mainwindow/AgentApiCodec.cpp
     mainwindow/AgentApiCodec.hpp
+    mainwindow/AgentApiOperations.cpp
+    mainwindow/AgentApiOperations.hpp
     mainwindow/AgentApiTypes.hpp
     mainwindow/AgentApiSnapshots.cpp
     mainwindow/AgentApiSnapshots.hpp

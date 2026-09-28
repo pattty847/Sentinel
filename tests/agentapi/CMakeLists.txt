@@ -1,6 +1,7 @@
 add_executable(test_AgentApiCodec
     test_AgentApiCodec.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/mainwindow/AgentApiCodec.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/mainwindow/AgentApiOperations.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/mainwindow/AgentApiSnapshots.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/datasources/CandleSeriesBuffer.cpp
 )

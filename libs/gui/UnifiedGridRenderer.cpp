@@ -67,6 +67,11 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
               if (m_axisTextService) {
                   m_axisTextService->bindAxisLayoutWindow(w);
               }
+              if (w) connect(w, &QQuickWindow::afterRendering, this, [this]() {
+                  // Direct render-thread callback: fixed-size frame snapshot only.
+                  m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
+                  m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
+              }, Qt::DirectConnection);
           });
 
   init();
@@ -787,6 +792,7 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
   m_heatmapTargetRowPx = std::clamp(config.heatmap.targetRowPx, 1, 64);
+  m_heatmapCellAspect = std::clamp(config.heatmap.cellAspect, 0.05, 4.0);
   if (m_heatmapStreamService) {
     m_heatmapStreamService->setInitialColumnPx(config.heatmap.initialColumnPx);
     m_heatmapStreamService->setInitialPricePct(config.heatmap.initialPricePct);
