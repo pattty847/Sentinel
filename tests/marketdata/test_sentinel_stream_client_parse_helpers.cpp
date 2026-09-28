@@ -31,6 +31,57 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     EXPECT_EQ(cfg.defaultSymbols[1], "ETH-USD");
 }
 
+namespace {
+nlohmann::json serverVolumeProfileSlice() {
+    return {
+        {"type", "volume_profile_slice"},
+        {"schema_version", protocol::SentinelProtocol::kVolumeProfileSchemaVersion},
+        {"symbol", "BTC-USD"},
+        {"session_start_ms", 1000},
+        {"session_end_ms", 2000},
+        {"session_type", 4},
+        {"grid_height", 1},
+        {"min_price", 100.0},
+        {"max_price", 101.0},
+        {"tick_size", 1.0},
+        {"total_volume", 1.0},
+        {"poc_price", 100.0},
+        {"vah_price", 100.0},
+        {"val_price", 100.0},
+        {"format", "vp_f32"},
+        {"encoding", "base64"},
+        {"volume_bins", "AACAPw=="}
+    };
+}
+} // namespace
+
+TEST(SentinelStreamClientParseHelpers, VolumeProfileCanonicalSessionKeysAccepted) {
+    auto msg = serverVolumeProfileSlice();
+    const auto session = protocol::clientparse::parseVolumeProfileSessionBounds(msg);
+    EXPECT_TRUE(session.valid());
+    EXPECT_EQ(session.startMs, 1000);
+    EXPECT_EQ(session.endMs, 2000);
+
+    msg["session_start"] = 10;
+    msg["session_end"] = 20;
+    const auto preferred = protocol::clientparse::parseVolumeProfileSessionBounds(msg);
+    EXPECT_EQ(preferred.startMs, 1000);
+    EXPECT_EQ(preferred.endMs, 2000);
+}
+
+TEST(SentinelStreamClientParseHelpers, VolumeProfileLegacySessionKeysAccepted) {
+    auto msg = serverVolumeProfileSlice();
+    msg["session_start"] = msg["session_start_ms"];
+    msg["session_end"] = msg["session_end_ms"];
+    msg.erase("session_start_ms");
+    msg.erase("session_end_ms");
+
+    const auto session = protocol::clientparse::parseVolumeProfileSessionBounds(msg);
+    EXPECT_TRUE(session.valid());
+    EXPECT_EQ(session.startMs, 1000);
+    EXPECT_EQ(session.endMs, 2000);
+}
+
 TEST(SentinelStreamClientParseHelpers, ParseCandleBarUsesDefaults) {
     nlohmann::json item = {
         {"time_start_ms", 10},

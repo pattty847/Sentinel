@@ -1296,8 +1296,9 @@ void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json&
     if (symbol.empty()) {
         return;
     }
-    const int64_t sessionStartMs = msg.value("session_start_ms", static_cast<int64_t>(0));
-    const int64_t sessionEndMs   = msg.value("session_end_ms",   static_cast<int64_t>(0));
+    const auto session = protocol::clientparse::parseVolumeProfileSessionBounds(msg);
+    const int64_t sessionStartMs = session.startMs;
+    const int64_t sessionEndMs = session.endMs;
     const int     sessionType    = msg.value("session_type",     4);
     const double  minPrice       = msg.value("min_price",        0.0);
     const double  maxPrice       = msg.value("max_price",        0.0);
@@ -1312,7 +1313,7 @@ void SentinelStreamClient::handleVolumeProfileSliceMessage(const nlohmann::json&
     if (!validateGridHeight("volume_profile_slice", gridHeight, DropReason::VolumeProfileGridHeight)) {
         return;
     }
-    if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs || maxPrice <= minPrice || tickSize <= 0.0) {
+    if (!session.valid() || maxPrice <= minPrice || tickSize <= 0.0) {
         logDroppedMessage(DropReason::VolumeProfileSliceMeta,
                           QString("Dropping volume_profile_slice: invalid metadata symbol=%1 session=[%2..%3] tick=%4 range=[%5,%6]")
                               .arg(QString::fromStdString(symbol))

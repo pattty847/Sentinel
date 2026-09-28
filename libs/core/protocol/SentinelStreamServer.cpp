@@ -1763,8 +1763,8 @@ public:
             vp["type"]           = "volume_profile_slice";
             vp["schema_version"] = protocol::SentinelProtocol::kVolumeProfileSchemaVersion;
             vp["symbol"]         = sym;
-            vp["session_start"]  = sessionBoundary.startMs;
-            vp["session_end"]    = sessionBoundary.endMs;
+            vp["session_start_ms"] = sessionBoundary.startMs;
+            vp["session_end_ms"]   = sessionBoundary.endMs;
             vp["session_type"]   = static_cast<int>(tpoSessionType_);
             vp["grid_height"]    = slice.gridHeight;
             vp["min_price"]      = slice.minPrice;
