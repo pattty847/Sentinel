@@ -213,6 +213,7 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "initial_column_px", cfg.heatmap.initialColumnPx);
         readScalar(heatmapNode, "initial_price_pct", cfg.heatmap.initialPricePct);
         readScalar(heatmapNode, "target_row_px", cfg.heatmap.targetRowPx);
+        readScalar(heatmapNode, "cell_aspect", cfg.heatmap.cellAspect);
     }
 
     YAML::Node guiNode;

@@ -14,8 +14,10 @@ heatmap:
   initial_column_px: 8      # Time zoom on connect: screen pixels per heatmap column
   initial_price_pct: 5      # Price zoom (% of full range); 0 = full
 
-  # Display tick: recorded rows merge (1-2-5 steps) until a row is this tall
-  target_row_px: 12
+  # Display tick: recorded rows merge (1-2-5 steps) so cells stay roughly square:
+  # row height ~ column width * cell_aspect, never below target_row_px
+  target_row_px: 2
+  cell_aspect: 0.75
 
 gui:
   api_port: 17100

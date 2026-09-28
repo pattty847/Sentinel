@@ -53,3 +53,12 @@ TEST(HeatmapRowGrouping, NOfOneIsIdentity) {
     EXPECT_EQ(rowPhase(123.0, 1.0, 1), 0);
     EXPECT_EQ(groupFirstRow(17, 1, 0), 17);
 }
+
+TEST(HeatmapRowGrouping, TargetRowFollowsColumnWidthForSquareCells) {
+    EXPECT_DOUBLE_EQ(targetRowPx(40.0, 2.0, 0.75), 30.0);  // big columns: big cells
+    EXPECT_DOUBLE_EQ(targetRowPx(1.0, 2.0, 0.75), 2.0);    // zoomed out: fine lines, floor applies
+    EXPECT_DOUBLE_EQ(targetRowPx(500.0, 2.0, 0.75), 64.0); // capped
+    EXPECT_DOUBLE_EQ(targetRowPx(0.0, 2.0, 0.75), 2.0);    // unknown column width
+    // $1 rows at 3 px with 8 px columns: target 6 px -> merge 2 rows.
+    EXPECT_EQ(rowsPerDisplayRow(3.0, targetRowPx(8.0, 2.0, 0.75)), 2);
+}

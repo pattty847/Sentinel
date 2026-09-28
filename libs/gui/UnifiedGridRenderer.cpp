@@ -792,6 +792,7 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
   m_heatmapTargetRowPx = std::clamp(config.heatmap.targetRowPx, 1, 64);
+  m_heatmapCellAspect = std::clamp(config.heatmap.cellAspect, 0.05, 4.0);
   if (m_heatmapStreamService) {
     m_heatmapStreamService->setInitialColumnPx(config.heatmap.initialColumnPx);
     m_heatmapStreamService->setInitialPricePct(config.heatmap.initialPricePct);

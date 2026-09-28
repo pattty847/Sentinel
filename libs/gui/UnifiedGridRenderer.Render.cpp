@@ -206,8 +206,11 @@ void UnifiedGridRenderer::renderOverlays(
                                  srcRect,
                                  heatmapUploads);
     if (texNode) {
+        const double columnPx = (srcRect.width() > 0.0) ? drawRect.width() / srcRect.width() : 0.0;
         const int rowGroup = (drawHeatmap && srcRect.height() > 0.0)
-            ? heatmap_rows::rowsPerDisplayRow(drawRect.height() / srcRect.height(), m_heatmapTargetRowPx)
+            ? heatmap_rows::rowsPerDisplayRow(
+                  drawRect.height() / srcRect.height(),
+                  heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect))
             : 1;
         texNode->setRowGrouping(rowGroup, heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup));
     }
@@ -303,7 +306,10 @@ void UnifiedGridRenderer::updateLabelGeometry(HeatmapIntensityNode* texNode,
         ? static_cast<float>(drawRect.height()) / static_cast<float>(srcRectCurrent.height())
         : 0.0f;
     // Display tick: labels follow the same row groups as the heatmap shader.
-    const int rowGroup = heatmap_rows::rowsPerDisplayRow(baseRowH, m_heatmapTargetRowPx);
+    // Same grouping as the colour pass, so text sits inside the drawn cells.
+    const double columnPx = (srcRectCurrent.width() > 0.0) ? drawRect.width() / srcRectCurrent.width() : 0.0;
+    const int rowGroup = heatmap_rows::rowsPerDisplayRow(
+        baseRowH, heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect));
     const int rowPhase = heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup);
     const float cellH = baseRowH * static_cast<float>(rowGroup);
     const float cellW = (srcRectCurrent.width() > 0.0f)
