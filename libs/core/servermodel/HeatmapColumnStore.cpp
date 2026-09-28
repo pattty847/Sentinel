@@ -607,7 +607,8 @@ HeatmapColumnStore::scanFileBackwards(const fs::path& file,
         accum.push_back(std::move(col));
         ++result.pushed;
 
-        if (static_cast<int>(accum.size()) >= maxCount) break;
+        // maxCount is this file's budget; accum may already hold newer days.
+        if (result.pushed >= maxCount) break;
     }
     return result;
 }
@@ -666,6 +667,17 @@ bool HeatmapColumnStore::fetchRange(const std::string& symbol,
 
     std::lock_guard<std::mutex> lock(m_mutex);
     flushOpenWritersFor(symbol, timeframeMs);
+
+    if (endMs == 0) {
+        // No upper bound: start from the newest day file.
+        const fs::path latest = latestFileFor(symbol, timeframeMs);
+        if (latest.empty()) return false;
+        std::ifstream in(latest, std::ios::binary);
+        hmcol::FileHeader header{};
+        in.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!in || !hmcol::verifyFileHeader(header)) return false;
+        endMs = header.dayStartMs + kMsPerDay - 1;
+    }
 
     std::vector<LoadedColumn> reverseAccum;
     reverseAccum.reserve(static_cast<std::size_t>(std::min(maxCount, 8192)));

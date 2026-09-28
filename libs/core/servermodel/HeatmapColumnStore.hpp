@@ -97,7 +97,8 @@ public:
                     std::vector<LoadedColumn>& out) const;
 
     // Phase 3 (with phase-4 startMs): read populated columns whose bucketStartMs
-    // is in [startMs, endMs] (startMs == 0 means "no lower bound"), walking back
+    // is in [startMs, endMs] (startMs == 0 means "no lower bound"; endMs == 0
+    // means "start from the newest day file"), walking back
     // across day files until either maxCount is reached, the floor is crossed,
     // or no older day files exist (capped by kMaxDaysScanned for safety).
     // Output is chronological (oldest first), capped at maxCount.

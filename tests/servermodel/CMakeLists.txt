@@ -39,6 +39,24 @@ target_link_libraries(test_heatmap_twap_streamer PRIVATE
 add_test(NAME HeatmapTwapStreamerTests COMMAND test_heatmap_twap_streamer)
 set_tests_properties(HeatmapTwapStreamerTests PROPERTIES LABELS "servermodel")
 
+add_executable(test_heatmap_history_fixture test_heatmap_history_fixture.cpp)
+target_include_directories(test_heatmap_history_fixture PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/core
+    ${CMAKE_SOURCE_DIR}/tests
+)
+target_link_libraries(test_heatmap_history_fixture PRIVATE
+    sentinel_core
+    GTest::gtest_main
+    Qt6::Core
+)
+add_test(NAME HeatmapHistoryFixtureTests COMMAND test_heatmap_history_fixture)
+set_tests_properties(HeatmapHistoryFixtureTests PROPERTIES LABELS "servermodel")
+
+# Dev tool: seeds the same fixture into a data dir for visual scrollback checks.
+add_executable(hmcol_seed hmcol_seed.cpp)
+target_include_directories(hmcol_seed PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(hmcol_seed PRIVATE sentinel_core)
+
 add_executable(test_session_manager test_session_manager.cpp)
 target_include_directories(test_session_manager PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/core
@@ -51,8 +69,8 @@ set_tests_properties(SessionManagerTests PROPERTIES LABELS "servermodel")
 
 add_custom_target(servermodel_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L servermodel
-    DEPENDS test_hmcol_format test_heatmap_column_store test_heatmap_twap_streamer test_session_manager
+    DEPENDS test_hmcol_format test_heatmap_column_store test_heatmap_twap_streamer test_heatmap_history_fixture test_session_manager
     COMMENT "Running servermodel persistence tests"
 )
 
-message(STATUS "Servermodel tests configured (4 test suites)")
+message(STATUS "Servermodel tests configured (5 test suites)")

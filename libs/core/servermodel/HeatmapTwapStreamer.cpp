@@ -767,10 +767,10 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         }
     }
 
-    // Step 2: disk fallthrough — only if (a) we have a store, (b) we still need
-    // more columns, (c) we have a real lower bound to query before. The lower
-    // bound is one full bucket before the ring's oldest matching column (so we
-    // never duplicate a row that's already in `ringReverse`).
+    // Step 2: disk fallthrough — only if (a) we have a store and (b) we still
+    // need more columns. The disk upper bound is one full bucket before the
+    // ring's oldest matching column (so we never duplicate a row that's already
+    // in `ringReverse`); 0 asks the store for its newest page.
     const int needFromDisk = count - static_cast<int>(ringReverse.size());
     std::vector<HistoryColumn> diskChrono;
     if (m_columnStore && needFromDisk > 0) {
@@ -778,7 +778,7 @@ bool HeatmapTwapStreamer::fetchHistory(const std::string& symbol,
         if (ringHadAny && ringOldestBucketStart != std::numeric_limits<int64_t>::max()) {
             diskEndMs = ringOldestBucketStart - timeframeMs;
         }
-        if (diskEndMs > 0) {
+        if (diskEndMs >= 0) {
             std::vector<HeatmapColumnStore::LoadedColumn> loaded;
             if (m_columnStore->fetchRange(symbol, timeframeMs, diskEndMs,
                                           needFromDisk, loaded, startTimeMs)) {
