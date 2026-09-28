@@ -139,6 +139,7 @@ Files:
 Rules:
 - One line per entry, ASCII only
 - Do not add new `_agent` files unless user asks
+- `_agent/` is shared by every worktree and parallel agent: re-read the file tail right before appending and take the next free id (`rg -o '^- FM-[0-9]+' _agent/FAILURE_MODES.md | sort -V | tail -1`)
 - Prefer durable guardrails over session chatter
 - Qdrant indexing is directory-targeted only (`libs/`, `docs/`, optional source dirs), never repo root, never `build/`
 
