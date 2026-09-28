@@ -249,6 +249,12 @@ TEST_F(RecorderTest, HourlyCoverageWeightsDecodedSizesAndRebuildsOnRestart) {
     auto rows = read(3'600'000, "deep");
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows[0].observedMs, 150000);
+    EXPECT_FALSE(rows[0].flags & kApproximateCoverage);
+    ASSERT_FALSE(rows[0].coverage.empty());
+    const auto covered104 = std::find_if(rows[0].entries.begin(), rows[0].entries.end(),
+        [](const auto &e) { return e.row == 104 && e.isAsk; });
+    ASSERT_NE(covered104, rows[0].entries.end());
+    EXPECT_EQ(covered104->coveredMs, 90000);
     const double decoded8 = decodeSize(encodeSize(8));
     value(rows[0], 104, true, decoded8 * 60000 / 90000, decoded8);
     value(rows[0], 99, false, decodeSize(encodeSize(2)), decodeSize(encodeSize(2)));

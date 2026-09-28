@@ -554,6 +554,8 @@ TEST_F(StoreTest, RangeSpansUtcDaysAndHourlyPath) {
     auto a = record(86400000 - 60000), b = record(86400000), hour = record(86400000);
     hour.header.tfMs = 3600000;
     hour.observedMs = 120000;
+    for (auto &e : hour.entries) e.coveredMs = hour.observedMs;
+    hour.coverage = {{0, 100, false, hour.observedMs}, {0, 100, true, hour.observedMs}};
     {
         Hmc2Store store(root());
         store.append(b);
@@ -951,3 +953,98 @@ TEST_F(StoreTest, GenerationCannotSupplyAnotherFilesMissingBase) {
     EXPECT_EQ(absolutePayload(got.back()), absolutePayload(r));
 }
 } // namespace
+
+TEST_F(StoreTest, LegacyHoursExposeApproximateCoverageForSchemasOneTwoAndThree) {
+    for (uint16_t schema : {1, 2, 3}) {
+        auto h = record();
+        h.header.tfMs = 3600000;
+        h.header.symbol = "LEGACY-" + std::to_string(schema);
+        const auto path = Hmc2Store::filePath(root(), h.header, h.bucketStartMs);
+        legacyFile(path, schema == 3 ? 2 : schema, {h});
+        if (schema == 3) {
+            auto b = bytes(path);
+            const auto headerLength = u32(b, 6);
+            b.resize(headerLength);
+            b[4] = 3;
+            set32(b, 10, 0);
+            set32(b, 10, hmcol::crc32(b.data(), b.size()));
+            auto minute = h;
+            minute.header.tfMs = 60000;
+            auto frame = frameFor(minute); // schema 3 absolute payload
+            b.insert(b.end(), frame.begin(), frame.end());
+            save(path, b);
+        }
+        auto out = Hmc2Store::readRange(root(), h.header.symbol, "deep", 3600000, kEpoch, kEpoch + 3600000);
+        ASSERT_EQ(out.size(), 1) << schema;
+        EXPECT_TRUE(out[0].flags & kApproximateCoverage);
+        EXPECT_EQ(out[0].entries[0].coveredMs, h.observedMs);
+        Hmc2Reader reader(root());
+        ReadControl control;
+        size_t count = 0;
+        reader.visit(h.header.symbol, "deep", 3600000, kEpoch, kEpoch + 3600000, [&](const auto &r) {
+            ++count;
+            EXPECT_TRUE(r.flags & kApproximateCoverage);
+            EXPECT_EQ(r.entries[0].coveredMs, h.observedMs);
+        }, control);
+        EXPECT_EQ(count, 1);
+    }
+}
+TEST_F(StoreTest, HourSchemaRejectsMissingOrInconsistentCoverage) {
+    Hmc2Store store(root());
+    auto r = record();
+    r.header.tfMs = 3600000;
+    EXPECT_THROW(store.append(r), std::runtime_error);
+    for (auto &e : r.entries) e.coveredMs = 10000;
+    r.coverage = {{0, 100, false, 10000}, {0, 100, true, 20000}};
+    EXPECT_THROW(store.append(r), std::runtime_error);
+    r.entries[1].coveredMs = 20000;
+    EXPECT_NO_THROW(store.append(r));
+    auto out = Hmc2Store::readRange(root(), "BTC-USD", "deep", 3600000, kEpoch, kEpoch + 3600000);
+    ASSERT_EQ(out.size(), 1);
+    EXPECT_FALSE(out[0].flags & kApproximateCoverage);
+    EXPECT_EQ(out[0].coverage.size(), 2);
+    EXPECT_EQ(out[0].entries[1].coveredMs, 20000);
+    EXPECT_EQ(bytes(Hmc2Store::filePath(root(), r.header, r.bucketStartMs))[4], 4);
+}
+TEST_F(StoreTest, StreamingSkipsCorruptDeltaChainAndFallsBackToEarlierGeneration) {
+    auto r = record();
+    {
+        Hmc2Store store(root());
+        for (int i = 0; i < 20; ++i) {
+            r.bucketStartMs = kEpoch + i * 60000;
+            store.append(r);
+        }
+    }
+    const auto path = Hmc2Store::filePath(root(), r.header, kEpoch);
+    auto b = bytes(path);
+    auto offset = u32(b, 6);
+    offset += 16 + u32(b, offset + 4); // corrupt minute 1; dependent minutes 2..14 must drop
+    b[offset + 16] ^= 1;
+    save(path, b);
+    auto reference = read();
+    Hmc2Reader reader(root());
+    ReadControl control;
+    std::vector<int64_t> times;
+    reader.visit("BTC-USD", "deep", 60000, kEpoch, kEpoch + 20 * 60000,
+                 [&](const auto &r) { times.push_back(r.bucketStartMs); }, control);
+    ASSERT_EQ(times.size(), reference.size());
+    for (size_t n = 0; n < times.size(); ++n)
+        EXPECT_EQ(times[n], reference[n].bucketStartMs);
+    // A malformed complete replacement cannot supersede the valid original.
+    auto newer = record();
+    newer.header.configHash++;
+    {
+        Hmc2Store store(root());
+        store.append(newer);
+    }
+    auto replacement = Hmc2Store::filePath(root(), newer.header, kEpoch, 1);
+    b = bytes(replacement);
+    b.back() ^= 1;
+    save(replacement, b);
+    ReadControl fresh;
+    times.clear();
+    reader.visit("BTC-USD", "deep", 60000, kEpoch, kEpoch + 60000,
+                 [&](const auto &r) { times.push_back(r.bucketStartMs); }, fresh);
+    ASSERT_EQ(times.size(), 1);
+    EXPECT_EQ(times[0], kEpoch);
+}

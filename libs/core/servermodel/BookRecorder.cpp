@@ -420,7 +420,29 @@ struct BookRecorder::Impl {
                     coverage += r.observedMs;
             if (coverage)
                 out.entries.push_back({key.first, key.second, encode(value.first / coverage, cfg.sizeScale, out.flags),
-                                       encode(value.second, cfg.sizeScale, out.flags)});
+                                       encode(value.second, cfg.sizeScale, out.flags), coverage});
+        }
+        // Sweep interval endpoints, retaining coverage of absent (zero) entries too.
+        for (bool ask : {false, true}) {
+            std::map<int64_t, int64_t> changes;
+            for (const auto &r : l.hourMinutes) {
+                const auto lo = ask ? r.askRowLo : r.bidRowLo;
+                const auto hi = ask ? r.askRowHi : r.bidRowHi;
+                if (lo <= hi) {
+                    changes[lo] += r.observedMs;
+                    if (hi != INT64_MAX)
+                        changes[hi + 1] -= r.observedMs;
+                }
+            }
+            int64_t covered = 0, lo = 0;
+            for (const auto &[edge, delta] : changes) {
+                if (covered && edge > lo)
+                    out.coverage.push_back({lo, edge - 1, ask, static_cast<uint32_t>(covered)});
+                covered += delta;
+                lo = edge;
+            }
+            if (covered)
+                out.coverage.push_back({lo, INT64_MAX, ask, static_cast<uint32_t>(covered)});
         }
         write(out);
         l.hourMinutes.clear();
