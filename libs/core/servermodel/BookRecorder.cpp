@@ -19,10 +19,8 @@
 namespace recording {
 namespace {
 constexpr int64_t kMinute = 60'000, kHour = 3'600'000;
-// Epochs are restricted to chrono's positive calendar range, leaving arithmetic
-// headroom for offsets, boundaries and lateness. Market data predates neither 1970
-// nor supports years beyond 9999.
-constexpr int64_t kMaxTime = 253402300799999LL;
+// Reject unit mistakes before they can advance the integration clock.
+constexpr int64_t kMaxTime = kHmc2EndMs - 1;
 using Key = std::pair<int64_t, bool>;
 struct KeyHash {
     size_t operator()(const Key &k) const {
@@ -144,7 +142,7 @@ struct BookRecorder::Impl {
             Hmc2Header h;
             h.symbol = "validation";
             h.layer = l.name;
-            (void)Hmc2Store::filePath(c.root, h, 0);
+            (void)Hmc2Store::filePath(c.root, h, kHmc2MinMs);
         }
         return c;
     }
@@ -235,7 +233,7 @@ struct BookRecorder::Impl {
             auto &layer = next->layers.emplace_back(&next->pool);
             layer.header = {name, l.name, kMinute, cfg.priceScale, l.rowTickUnits, cfg.sizeScale, 0};
             layer.header.configHash = Hmc2Store::configHash(layer.header, l.lowFrac, l.highMult);
-            (void)Hmc2Store::filePath(cfg.root, layer.header, 0);
+            (void)Hmc2Store::filePath(cfg.root, layer.header, kHmc2MinMs);
         }
         return *symbols.emplace(name, std::move(next)).first->second;
     }
@@ -354,6 +352,26 @@ struct BookRecorder::Impl {
         sLog_Data("BookRecorder: rebuilt hour symbol=" << l.header.symbol << " layer=" << l.header.layer
                                                        << " hour=" << hour << " minutes=" << l.hourMinutes.size());
     }
+    void restoreHours(Layer &l, int64_t currentHour) {
+        if (currentHour > kHmc2MinMs) {
+            const auto previous = currentHour - kHour;
+            const auto persisted =
+                Hmc2Store::readRange(cfg.root, l.header.symbol, l.header.layer, kHour, previous, currentHour);
+            const bool exists = std::any_of(persisted.begin(), persisted.end(),
+                                            [&](const auto &r) { return r.header.configHash == l.header.configHash; });
+            if (!exists) {
+                try {
+                    rebuildHour(l, previous);
+                    writeHour(l);
+                } catch (const std::exception &e) {
+                    ++diskErrors;
+                    sLog_Error("BookRecorder: previous-hour recovery failed symbol="
+                               << l.header.symbol << " hour=" << previous << " error=" << e.what());
+                }
+            }
+        }
+        rebuildHour(l, currentHour);
+    }
     void writeHour(Layer &l) {
         if (l.hourMinutes.empty())
             return;
@@ -433,10 +451,17 @@ struct BookRecorder::Impl {
             s.pending.pop_front();
             try {
                 write(r);
-                rollup(s, r);
             } catch (const std::exception &e) {
                 ++diskErrors;
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
+                continue;
+            }
+            try {
+                rollup(s, r);
+            } catch (const std::exception &e) {
+                ++diskErrors;
+                sLog_Error("BookRecorder: minute committed; hourly accumulation failed bucket="
+                           << r.bucketStartMs << " error=" << e.what());
             }
         }
         s.closedThrough =
@@ -535,7 +560,7 @@ struct BookRecorder::Impl {
         }
     }
     void process(const Message &m) {
-        if (m.time < 0 || m.time > kMaxTime || m.local < 0 || m.local > kMaxTime) {
+        if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
             for (auto &[name, s] : symbols)
                 invalidate(name, *s, "invalid timestamp");
@@ -565,7 +590,7 @@ struct BookRecorder::Impl {
             s.closedThrough = s.minute;
             for (size_t li = 0; li < s.layers.size(); ++li)
                 if (cfg.layers[li].hourlyRollup)
-                    rebuildHour(s.layers[li], floorDiv(m.time, kHour) * kHour);
+                    restoreHours(s.layers[li], floorDiv(m.time, kHour) * kHour);
         }
         const bool late = m.time < s.closedThrough;
         if (late)

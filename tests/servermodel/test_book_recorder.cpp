@@ -8,6 +8,8 @@
 
 using namespace recording;
 namespace {
+// Event offsets remain hand-readable; persistence uses a supported UTC epoch.
+constexpr int64_t kEpoch = kHmc2MinMs;
 class RecorderTest : public testing::Test {
   protected:
     QTemporaryDir dir;
@@ -16,25 +18,29 @@ class RecorderTest : public testing::Test {
         return {dir.path().toStdString(), 100, {}, {{"near", 100, 0.5, 2, false}}, 0, 2'000'000};
     }
     std::unique_ptr<BookRecorder> make(RecorderConfig c) {
-        return std::make_unique<BookRecorder>(std::move(c), [&] { return local; });
+        return std::make_unique<BookRecorder>(std::move(c), [&] { return kEpoch + local; });
     }
     void snap(BookRecorder &r, int64_t t, std::vector<Level> l = {{true, 99, 2}, {false, 101, 4}}) {
         local = t;
-        r.onSnapshot("BTC-USD", t, std::move(l));
+        r.onSnapshot("BTC-USD", kEpoch + t, std::move(l));
         r.drainForTest();
     }
     void update(BookRecorder &r, int64_t t, std::vector<Level> l) {
         local = t;
-        r.onUpdates("BTC-USD", t, std::move(l));
+        r.onUpdates("BTC-USD", kEpoch + t, std::move(l));
         r.drainForTest();
     }
     void tick(BookRecorder &r, int64_t t) {
         local = t;
-        r.onTick(t);
+        r.onTick(kEpoch + t);
         r.drainForTest();
     }
     std::vector<Hmc2Record> read(int64_t tf = 60000, const std::string &layer = "near") {
-        return Hmc2Store::readRange(dir.path().toStdString(), "BTC-USD", layer, tf, 0, 10 * 3'600'000);
+        auto records =
+            Hmc2Store::readRange(dir.path().toStdString(), "BTC-USD", layer, tf, kEpoch, kEpoch + 10 * 3'600'000);
+        for (auto &r : records)
+            r.bucketStartMs -= kEpoch;
+        return records;
     }
     void value(const Hmc2Record &r, int64_t row, bool ask, double twap, double peak) {
         const auto it = std::find_if(r.entries.begin(), r.entries.end(),
@@ -90,7 +96,7 @@ TEST_F(RecorderTest, MovingMidKeepsEarlyOutOfWindowContributions) {
 TEST_F(RecorderTest, InvalidIntervalPreservesNumeratorAndResyncReplacesBook) {
     auto r = make(config());
     snap(*r, 0);
-    r->onInvalid("BTC-USD", 20000, "disconnect");
+    r->onInvalid("BTC-USD", kEpoch + 20000, "disconnect");
     r->drainForTest();
     update(*r, 30000, {{true, 99, 200}}); // ignored until snapshot
     snap(*r, 40000, {{true, 99, 8}, {false, 102, 6}});
@@ -143,7 +149,7 @@ TEST_F(RecorderTest, IdleCloseUsesLocalMinusEnvelopeOffset) {
     c.latenessMs = 2000;
     auto r = make(c);
     local = 1'000'000;
-    r->onSnapshot("BTC-USD", 10000, {{true, 99, 2}, {false, 101, 4}});
+    r->onSnapshot("BTC-USD", kEpoch + 10000, {{true, 99, 2}, {false, 101, 4}});
     r->drainForTest();
     tick(*r, 1'051'999);
     EXPECT_TRUE(read().empty());
@@ -158,7 +164,7 @@ TEST_F(RecorderTest, UnknownGapsAndRestartNeverFillDowntime) {
         auto r = make(config());
         snap(*r, 0);
         tick(*r, 60000);
-        r->onInvalid("", 70000, "disconnect");
+        r->onInvalid("", kEpoch + 70000, "disconnect");
         r->drainForTest();
         tick(*r, 5 * 3'600'000);
     }
@@ -228,7 +234,7 @@ TEST_F(RecorderTest, HourlyCoverageWeightsDecodedSizesAndRebuildsOnRestart) {
         snap(*r, 0, {{true, 99, 2}, {false, 101, 4}, {false, 104, 8}});
         tick(*r, 60000);
         snap(*r, 60000, {{true, 99, 2}, {false, 101, 4}}); // row 104 covered but zero
-        r->onInvalid("", 90000, "gap");
+        r->onInvalid("", kEpoch + 90000, "gap");
         r->drainForTest();
         tick(*r, 120000);
     }
@@ -236,7 +242,7 @@ TEST_F(RecorderTest, HourlyCoverageWeightsDecodedSizesAndRebuildsOnRestart) {
         auto r = make(c);
         snap(*r, 120000, {{true, 199, 1}, {false, 201, 1}}); // row 104 outside coverage
         tick(*r, 180000);
-        r->onInvalid("", 180000, "gap");
+        r->onInvalid("", kEpoch + 180000, "gap");
         r->drainForTest();
         tick(*r, 3'600'000);
     }
@@ -273,9 +279,9 @@ TEST_F(RecorderTest, DeepWindowAndIndependentSymbolValidity) {
     auto r = make(c);
     snap(*r, 0, {{true, 99, 2}, {true, 30, 7}, {false, 101, 4}, {false, 390, 8}, {false, 410, 9}});
     local = 0;
-    r->onSnapshot("ETH-USD", 0, {{true, 99, 3}, {false, 101, 5}});
+    r->onSnapshot("ETH-USD", kEpoch + 0, {{true, 99, 3}, {false, 101, 5}});
     r->drainForTest();
-    r->onInvalid("BTC-USD", 20000, "gap");
+    r->onInvalid("BTC-USD", kEpoch + 20000, "gap");
     r->drainForTest();
     tick(*r, 60000);
     auto deep = read(60000, "deep");
@@ -285,7 +291,7 @@ TEST_F(RecorderTest, DeepWindowAndIndependentSymbolValidity) {
     value(deep[0], 39, true, 8, 8);
     EXPECT_TRUE(
         std::none_of(deep[0].entries.begin(), deep[0].entries.end(), [](const auto &e) { return e.row == 41; }));
-    auto eth = Hmc2Store::readRange(dir.path().toStdString(), "ETH-USD", "near", 60000, 0, 60000);
+    auto eth = Hmc2Store::readRange(dir.path().toStdString(), "ETH-USD", "near", 60000, kEpoch, kEpoch + 60000);
     ASSERT_EQ(eth.size(), 1);
     EXPECT_EQ(eth[0].observedMs, 60000);
 }
@@ -306,7 +312,7 @@ TEST_F(RecorderTest, DiskFailureCountedAndNeverBecomesCommittedRollupInput) {
 TEST_F(RecorderTest, RejectedResnapshotCannotIntegrateProvisionalLevelsDuringGap) {
     auto r = make(config());
     snap(*r, 0);
-    r->onInvalid("BTC-USD", 20000, "disconnect");
+    r->onInvalid("BTC-USD", kEpoch + 20000, "disconnect");
     r->drainForTest();
     snap(*r, 30000, {{true, 99, 100}}); // Missing ask: rejected while already invalid.
     snap(*r, 40000, {{true, 99, 8}, {false, 101, 4}});
@@ -320,12 +326,12 @@ TEST_F(RecorderTest, QueuedLongSymbolOwnsItsLifetime) {
     auto r = make(config());
     const std::string expected(80, 'X');
     std::string callerName = expected;
-    r->onSnapshot(callerName, 0, {{true, 99, 2}, {false, 101, 4}});
+    r->onSnapshot(callerName, kEpoch + 0, {{true, 99, 2}, {false, 101, 4}});
     callerName.assign("caller-reused-its-storage");
     local = 30000;
-    r->onUpdates(expected, 30000, {{true, 99, 6}});
+    r->onUpdates(expected, kEpoch + 30000, {{true, 99, 6}});
     tick(*r, 60000);
-    auto rows = Hmc2Store::readRange(dir.path().toStdString(), expected, "near", 60000, 0, 60000);
+    auto rows = Hmc2Store::readRange(dir.path().toStdString(), expected, "near", 60000, kEpoch, kEpoch + 60000);
     ASSERT_EQ(rows.size(), 1);
     value(rows[0], 99, false, 4, 6);
 }
@@ -336,7 +342,7 @@ TEST_F(RecorderTest, QueuedLongSymbolOwnsItsLifetime) {
 // keep writing a phantom underflow entry for the row every minute.
 TEST_F(RecorderTest, EmptiedRowHasNoResidueEntry) {
     auto c = config();
-    c.layers[0].rowTickUnits = 1000;  // $10 rows
+    c.layers[0].rowTickUnits = 1000; // $10 rows
     auto r = make(c);
     snap(*r, 0, {{true, 50, 1}, {false, 101, 1}});
     update(*r, 10000, {{true, 98.1, 1.95481376}, {true, 98.2, 2.36619118}, {true, 98.7, 0.28166937}});
@@ -344,9 +350,84 @@ TEST_F(RecorderTest, EmptiedRowHasNoResidueEntry) {
     tick(*r, 120000);
     auto rows = read();
     ASSERT_EQ(rows.size(), 2u);
-    value(rows[0], 9, false, 4.60267431 * 10000 / 60000, 4.60267431);  // present in minute 0
+    value(rows[0], 9, false, 4.60267431 * 10000 / 60000, 4.60267431); // present in minute 0
     for (const auto &e : rows[1].entries) {
         EXPECT_FALSE(e.row == 9 && !e.isAsk) << "phantom entry for an emptied row";
     }
     EXPECT_EQ(rows[1].flags & kUnderflow, 0u);
+}
+
+TEST_F(RecorderTest, RestartWritesMissingPreviousHourAndLeavesExistingRollupAlone) {
+    constexpr int64_t hour = 3'600'000;
+    auto c = config();
+    c.layers[0].hourlyRollup = true;
+    Hmc2Record minute;
+    minute.header = {"BTC-USD", "near", 60000, c.priceScale, 100, c.sizeScale, 0};
+    minute.header.configHash = Hmc2Store::configHash(minute.header, 0.5, 2);
+    minute.observedMs = 60000;
+    minute.bidRowLo = minute.askRowLo = 50;
+    minute.bidRowHi = minute.askRowHi = 200;
+    minute.midOpen = minute.midClose = minute.midMin = minute.midMax = 100;
+    minute.entries = {{99, false, encodeSize(2), encodeSize(2)}, {101, true, encodeSize(4), encodeSize(4)}};
+    {
+        Hmc2Store store(c.root);
+        minute.bucketStartMs = kEpoch + hour - 120000;
+        store.append(minute);
+        minute.bucketStartMs += 60000;
+        minute.entries[0].twapCode = minute.entries[0].peakCode = encodeSize(6);
+        store.append(minute); // Simulate crash after minute commit, before hourly write.
+    }
+    EXPECT_TRUE(read(hour).empty());
+    {
+        auto r = make(c);
+        snap(*r, hour + 10000);
+        tick(*r, hour + 60000);
+        EXPECT_EQ(r->stats().diskErrors, 0);
+    }
+    auto hours = read(hour);
+    ASSERT_EQ(hours.size(), 1);
+    EXPECT_EQ(hours[0].bucketStartMs, 0);
+    EXPECT_EQ(hours[0].observedMs, 120000);
+    value(hours[0], 99, false, (decodeSize(encodeSize(2)) + decodeSize(encodeSize(6))) / 2, 6);
+    auto header = minute.header;
+    header.tfMs = hour;
+    const auto path = Hmc2Store::filePath(c.root, header, kEpoch);
+    const auto size = std::filesystem::file_size(path);
+    {
+        auto r = make(c);
+        snap(*r, hour + 20000);
+    }
+    EXPECT_EQ(std::filesystem::file_size(path), size); // Existing hour was not duplicated.
+    auto minutes = read();
+    ASSERT_EQ(minutes.size(), 3);
+    EXPECT_EQ(minutes.back().bucketStartMs, hour);
+    EXPECT_EQ(minutes.back().observedMs, 50000);
+}
+
+TEST_F(RecorderTest, HistoryReadFailureDoesNotInvalidateAnySymbol) {
+    auto c = config();
+    c.layers[0].hourlyRollup = true;
+    std::filesystem::create_directories(c.root / "BTC-USD");
+    {
+        std::ofstream blocked(c.root / "BTC-USD" / "near-60000");
+        blocked << 'x';
+    }
+    auto r = make(c);
+    r->onSnapshot("ETH-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
+    r->drainForTest();
+    snap(*r, 0); // Its history directory is unreadable, but the new book is valid.
+    EXPECT_EQ(r->stats().invalidations, 0);
+    tick(*r, 60000);
+    auto eth = Hmc2Store::readRange(c.root, "ETH-USD", "near", 60000, kEpoch, kEpoch + 60000);
+    ASSERT_EQ(eth.size(), 1);
+    EXPECT_EQ(eth[0].observedMs, 60000);
+    EXPECT_EQ(r->stats().invalidations, 0);
+    EXPECT_EQ(r->stats().diskErrors, 1);
+    std::filesystem::remove(c.root / "BTC-USD" / "near-60000");
+    tick(*r, 120000);
+    auto btc = read();
+    ASSERT_EQ(btc.size(), 1);
+    EXPECT_EQ(btc[0].bucketStartMs, 60000);
+    EXPECT_EQ(btc[0].observedMs, 60000);
+    EXPECT_EQ(r->stats().diskErrors, 1);
 }

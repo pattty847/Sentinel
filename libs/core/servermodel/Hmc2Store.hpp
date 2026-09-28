@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingCodec.hpp"
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -9,6 +10,9 @@ namespace recording {
 inline constexpr uint32_t kHmc2Magic = 0x32434d48;       // bytes HMC2
 inline constexpr uint32_t kHmc2RecordMagic = 0x32524348; // bytes HCR2
 inline constexpr uint32_t kHmc2MaxRawLen = 16 * 1024 * 1024;
+// Supported UTC calendar years: 2000 through 2200 inclusive.
+inline constexpr int64_t kHmc2MinMs = 946684800000LL;
+inline constexpr int64_t kHmc2EndMs = 7289654400000LL; // 2201-01-01, exclusive
 inline constexpr uint32_t kPartial = 1u << 0;
 inline constexpr uint32_t kResynced = 1u << 1;
 inline constexpr uint32_t kLateEvents = 1u << 2;
@@ -37,7 +41,8 @@ struct Hmc2Record {
     std::vector<Hmc2Entry> entries;
 };
 
-// Single worker/writer owner. Throws on I/O/config errors; never hides disk loss.
+// Single worker/writer owner. Writes throw on I/O/config errors. Range reads
+// warn and skip unreadable files, preserving the rest of the requested history.
 // Readers need no writer lock. Concurrent append tails are ignored, never repaired
 // by a reader. Only the locked writer repairs incomplete terminal frames.
 class Hmc2Store {
@@ -47,6 +52,9 @@ class Hmc2Store {
     Hmc2Store(const Hmc2Store &) = delete;
     Hmc2Store &operator=(const Hmc2Store &) = delete;
     void append(const Hmc2Record &record);
+    // One-shot hook after flushing the next record's frame header. Tests can
+    // throw to simulate a torn write or rendezvous with a concurrent reader.
+    void afterFrameHeaderForTest(std::function<void()> hook);
     static std::vector<Hmc2Record> readRange(const std::filesystem::path &root, const std::string &symbol,
                                              const std::string &layer, int64_t tfMs, int64_t startMs, int64_t endMs);
     static std::filesystem::path filePath(const std::filesystem::path &root, const Hmc2Header &header,

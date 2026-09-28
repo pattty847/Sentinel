@@ -10,6 +10,8 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <set>
+#include <utility>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -221,18 +223,28 @@ Hmc2Record decodeRecord(const Hmc2Header &h, const Bytes &b) {
 }
 void sync(const fs::path &p, bool directory = false) {
     int error = 0;
-    check(directory ? syncDirectory(p, error) : syncFilePath(p, error),
-          "sync path=" + p.string() + " error=" + std::to_string(error));
+    const bool ok = directory ? syncDirectory(p, error) : syncFilePath(p, error);
+    check(ok, "sync path=" + p.string() + " error=" + std::to_string(error));
 }
-void mkdirs(const fs::path &p) {
-    if (p.empty() || fs::exists(p))
+// Each store re-syncs the existing directory chain on first use, including
+// directories left behind by an earlier process that crashed before syncing.
+void mkdirs(const fs::path &p, std::set<fs::path> &synced) {
+    const auto absolute = fs::absolute(p).lexically_normal();
+    if (synced.contains(absolute))
         return;
-    mkdirs(p.parent_path());
-    fs::create_directory(p);
-    sync(p, true);
-    sync(p.parent_path().empty() ? fs::path(".") : p.parent_path(), true);
+    const auto parent = absolute.parent_path();
+    if (parent != absolute)
+        mkdirs(parent, synced);
+    std::error_code ec;
+    fs::create_directory(absolute, ec);
+    check(!ec, "create directory " + absolute.string() + " error=" + ec.message());
+    sync(absolute, true);
+    if (parent != absolute)
+        sync(parent, true);
+    synced.insert(absolute);
 }
 std::string dayName(int64_t ms) {
+    check(ms >= kHmc2MinMs && ms < kHmc2EndMs, "timestamp outside UTC years 2000-2200");
     using namespace std::chrono;
     const year_month_day ymd{floor<days>(sys_time<milliseconds>{milliseconds{ms}})};
     check(ymd.ok(), "bucket outside supported calendar");
@@ -252,15 +264,41 @@ uint32_t generation(const fs::path &p) {
         return 0;
     }
 }
-std::vector<fs::path> files(const fs::path &dir, const std::string &day = {}) {
+std::vector<fs::path> files(const fs::path &dir, const std::string &day = {}, bool tolerant = false) {
     std::vector<fs::path> out;
-    if (!fs::exists(dir))
+    auto problem = [&](const fs::path &path, const std::error_code &ec) {
+        if (tolerant)
+            sLog_Warning("Hmc2Store: skipped path=" << path.string() << " error=" << ec.message());
+        else
+            fail("enumerate " + path.string() + " error=" + ec.message());
+    };
+    std::error_code ec;
+    const bool exists = fs::exists(dir, ec);
+    if (ec) {
+        problem(dir, ec);
         return out;
-    for (const auto &e : fs::directory_iterator(dir)) {
-        const auto name = e.path().filename().string();
-        if (e.is_regular_file() && e.path().extension() == ".hmc2" &&
-            (day.empty() || name == day + ".hmc2" || name.starts_with(day + ".g")))
-            out.push_back(e.path());
+    }
+    if (!exists)
+        return out;
+    fs::directory_iterator it(dir, ec), end;
+    if (ec) {
+        problem(dir, ec);
+        return out;
+    }
+    while (it != end) {
+        const auto path = it->path();
+        const auto name = path.filename().string();
+        const bool regular = it->is_regular_file(ec);
+        if (ec)
+            problem(path, ec);
+        else if (regular && path.extension() == ".hmc2" &&
+                 (day.empty() || name == day + ".hmc2" || name.starts_with(day + ".g")))
+            out.push_back(path);
+        it.increment(ec);
+        if (ec) {
+            problem(dir, ec);
+            break;
+        }
     }
     std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
         return std::tuple(a.filename().string().substr(0, 10), generation(a)) <
@@ -289,7 +327,9 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink) {
     check(f.is_open(), "open " + path.string());
     uint64_t pos = 0;
     const auto h = readHeader(f, pos);
-    const auto end = fs::file_size(path);
+    std::error_code sizeError;
+    const auto end = fs::file_size(path, sizeError);
+    check(!sizeError, "file size " + path.string() + " error=" + sizeError.message());
     Bytes framing, compressed, raw, scratch;
     uint64_t tail = end;
     bool damaged = false;
@@ -357,8 +397,13 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink) {
         damaged = true;
         pos = nextMagic(f, pos + 1, end, scratch);
     }
-    if (damaged)
+    if (damaged) {
         sLog_Warning("Hmc2Store: corrupt bytes skipped path=" << path.string());
+        if (tail == end)
+            sLog_Warning(
+                "Hmc2Store: kept unverified tail after interior damage; any incomplete terminal frame is retained path="
+                << path.string());
+    }
     f.close();
     if (repair && tail < end) {
         fs::resize_file(path, tail);
@@ -374,14 +419,15 @@ struct Hmc2Store::Impl {
     struct Writer {
         Hmc2Header header;
         fs::path path;
-        bool failed = false;
     };
     std::map<fs::path, Writer> writers;
     Bytes raw, compressed, frame;
+    std::set<fs::path> syncedDirectories;
+    std::function<void()> afterFrameHeader;
     explicit Impl(fs::path p) : root(std::move(p)) {
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
-        mkdirs(root);
+        mkdirs(root, syncedDirectories);
         int error = 0;
         lock = acquireFileLock(root / ".lock", error);
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
@@ -419,13 +465,14 @@ uint64_t Hmc2Store::configHash(const Hmc2Header &h, double low, double high) {
 }
 void Hmc2Store::append(const Hmc2Record &r) {
     validate(r.header);
+    check(r.bucketStartMs >= kHmc2MinMs && r.bucketStartMs < kHmc2EndMs, "bucket outside UTC years 2000-2200");
     check(r.observedMs > 0 && r.observedMs <= r.header.tfMs && r.bucketStartMs % r.header.tfMs == 0,
           "invalid bucket/observation");
     auto &i = *impl_;
     const auto base = filePath(i.root, r.header, r.bucketStartMs);
     auto found = i.writers.find(base);
     if (found == i.writers.end() || headerBody(found->second.header) != headerBody(r.header)) {
-        mkdirs(base.parent_path());
+        mkdirs(base.parent_path(), i.syncedDirectories);
         auto candidates = files(base.parent_path(), dayName(r.bucketStartMs));
         fs::path path = base;
         bool reuse = false;
@@ -445,19 +492,18 @@ void Hmc2Store::append(const Hmc2Record &r) {
             scan(path, true, [](Hmc2Record &&) {});
         else {
             const auto bytes = encodeHeader(r.header);
-            std::ofstream f(path, std::ios::binary | std::ios::trunc);
-            f.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-            f.flush();
-            check(static_cast<bool>(f), "write header " + path.string());
-            f.close();
+            int error = 0;
+            const bool created = writeNewFileExclusive(path, bytes, error);
+            check(created, "exclusive-create header " + path.string() + " error=" + std::to_string(error));
             sync(path);
-            sync(path.parent_path(), true);
             sLog_Data("Hmc2Store: new generation path=" << path.string() << " config=" << r.header.configHash);
         }
+        // A complete header may have survived a failed first creation before
+        // its directory entry was synced. Cover that case on reuse as well.
+        sync(path.parent_path(), true);
         found = i.writers.insert_or_assign(base, Impl::Writer{r.header, path}).first;
     }
     auto &w = found->second;
-    check(!w.failed, "writer poisoned by earlier disk error " + w.path.string());
     check(std::isfinite(r.midOpen) && std::isfinite(r.midClose) && std::isfinite(r.midMin) && std::isfinite(r.midMax),
           "nonfinite mid metadata");
     encodeRecord(r, i.raw);
@@ -470,9 +516,21 @@ void Hmc2Store::append(const Hmc2Record &r) {
     put(i.frame, static_cast<uint32_t>(n));
     put(i.frame, static_cast<uint32_t>(i.raw.size()));
     put(i.frame, hmcol::crc32(i.compressed.data(), n));
+    std::error_code sizeError;
+    const auto offset = fs::file_size(w.path, sizeError);
+    if (sizeError) {
+        const auto path = w.path;
+        i.writers.erase(found);
+        fail("pre-append file size " + path.string() + " error=" + sizeError.message());
+    }
     try {
         std::ofstream f(w.path, std::ios::binary | std::ios::app);
         f.write(reinterpret_cast<const char *>(i.frame.data()), static_cast<std::streamsize>(i.frame.size()));
+        if (auto hook = std::exchange(i.afterFrameHeader, {})) {
+            f.flush();
+            check(static_cast<bool>(f), "append header " + w.path.string());
+            hook();
+        }
         f.write(reinterpret_cast<const char *>(i.compressed.data()), static_cast<std::streamsize>(n));
         f.flush();
         check(static_cast<bool>(f), "append " + w.path.string());
@@ -480,19 +538,38 @@ void Hmc2Store::append(const Hmc2Record &r) {
         check(static_cast<bool>(f), "close " + w.path.string());
         sync(w.path);
     } catch (...) {
-        w.failed = true;
+        const auto path = w.path;
+        i.writers.erase(found);
+        std::error_code rollbackError;
+        fs::resize_file(path, offset, rollbackError);
+        if (rollbackError) {
+            sLog_Error("Hmc2Store: append rollback failed path=" << path.string() << " offset=" << offset
+                                                                 << " error=" << rollbackError.message());
+        } else {
+            try {
+                sync(path);
+            } catch (const std::exception &e) {
+                sLog_Error("Hmc2Store: append rollback sync failed path=" << path.string() << " error=" << e.what());
+            }
+        }
         throw;
     }
+}
+void Hmc2Store::afterFrameHeaderForTest(std::function<void()> hook) {
+    impl_->afterFrameHeader = std::move(hook);
 }
 std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::string &symbol, const std::string &layer,
                                              int64_t tf, int64_t start, int64_t end) {
     check(safeName(symbol) && safeName(layer) && tf > 0, "invalid query");
     std::map<int64_t, Hmc2Record> records;
+    start = std::max(start, kHmc2MinMs);
+    end = std::min(end, kHmc2EndMs);
     if (start >= end)
         return {};
-    for (const auto &path : files(root / symbol / (layer + "-" + std::to_string(tf)))) {
+    const auto firstDay = dayName(start), lastDay = dayName(end - 1);
+    for (const auto &path : files(root / symbol / (layer + "-" + std::to_string(tf)), {}, true)) {
         const auto day = path.filename().string().substr(0, 10);
-        if (day < dayName(start) || day > dayName(end - 1))
+        if (day < firstDay || day > lastDay)
             continue;
         try {
             scan(path, false, [&](Hmc2Record &&r) {
@@ -500,7 +577,7 @@ std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::st
                     r.bucketStartMs >= start && r.bucketStartMs < end)
                     records.insert_or_assign(r.bucketStartMs, std::move(r));
             });
-        } catch (const Corrupt &e) {
+        } catch (const std::exception &e) {
             sLog_Warning("Hmc2Store: skipped file path=" << path.string() << " error=" << e.what());
         }
     }

@@ -95,7 +95,11 @@ bool HeatmapColumnStore::acquireLock() {
     int error = 0;
     const auto handle = sentinel::persistence::acquireFileLock(m_lockPath, error);
     if (handle == sentinel::persistence::noLock) {
-        sLog_Warning("HeatmapColumnStore: lock " << m_lockPath << " unavailable, error=" << error);
+        if (sentinel::persistence::lockIsContended(error)) {
+            sLog_Warning("HeatmapColumnStore: lock " << m_lockPath << " held by another process, error=" << error);
+        } else {
+            sLog_Error("HeatmapColumnStore: cannot acquire lock " << m_lockPath << " error=" << error);
+        }
         return false;
     }
 #ifdef _WIN32

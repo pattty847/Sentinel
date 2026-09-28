@@ -101,3 +101,8 @@ foreach(name IN ITEMS book_recorder hmc2_store)
 endforeach()
 add_dependencies(servermodel_tests test_recording_codec)
 set_tests_properties(RecordingCodecTests PROPERTIES LABELS "servermodel")
+
+# Corruption fixtures construct/recompress raw HMC2 frames independently.
+find_package(zstd CONFIG REQUIRED)
+target_link_libraries(test_hmc2_store PRIVATE
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
