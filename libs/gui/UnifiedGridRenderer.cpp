@@ -135,6 +135,8 @@ void UnifiedGridRenderer::onViewportChanged() {
   if (!m_viewState || !m_dataProcessor)
     return;
   update();
+  if (m_recordingSource && m_heatmapStreamService &&
+      !m_heatmapStreamService->recordingViewportReady(m_viewState.get())) return;
 
   // The DataProcessor places the heatmap window over the view and fetches
   // what the cache lacks (INV-045). It ignores sub-bucket changes.
@@ -813,6 +815,8 @@ void UnifiedGridRenderer::buildMsdfAtlas() {
 }
 
 void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
+  m_recordingSource = config.heatmap.source == "recording";
+  if (m_heatmapStreamService) m_heatmapStreamService->setRecordingMode(m_recordingSource);
   if (m_dataProcessor) {
     const auto heatmap = config.heatmap;
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this, heatmap] {

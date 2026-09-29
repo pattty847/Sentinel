@@ -138,6 +138,7 @@ private:
     double m_heatmapCellAspect = 0.75;  // row height / column width (heatmap.cell_aspect)
     uint64_t m_lastZoomProbeKey = 0;    // render thread: zoom.frame logs only when the picture changes
     double m_heatmapSensitivityMin = 0.05;  // recording colour range, base units (heatmap.sensitivity_*)
+    bool m_recordingSource = false;
     double m_heatmapSensitivityMax = 50.0;
     int m_heatmapLabelPx = 14;
     int m_primaryField = 0;

@@ -363,14 +363,25 @@ void HeatmapStreamService::cancelPriceCenter() {
     if (m_autoScrollController) m_autoScrollController->cancelPriceCenter();
 }
 
+bool HeatmapStreamService::recordingViewportReady(GridViewState* viewState) {
+    if (!m_recordingMode || !m_autoScrollController ||
+        !m_autoScrollController->initialPriceCenterPending()) return true;
+    applyPendingPriceCenter(viewState);
+    return !m_autoScrollController->initialPriceCenterPending();
+}
+
 void HeatmapStreamService::applyPendingPriceCenter(GridViewState* viewState) {
-    if (!viewState || !m_autoScrollController || !m_priceBandReady ||
+    if (!viewState || !m_autoScrollController || (!m_priceBandReady && !m_recordingMode) ||
         !m_autoScrollController->priceCenterPending()) return;
     const auto snapshot = m_stream ? m_stream->snapshot() : HeatmapStreamState::Snapshot{};
     double span = viewState->getMaxPrice() - viewState->getMinPrice();
     if (m_autoScrollController->initialPriceCenterPending() && snapshot.maxPrice > snapshot.minPrice &&
         std::isfinite(snapshot.maxPrice) && std::isfinite(snapshot.minPrice)) {
         span = snapshot.maxPrice - snapshot.minPrice;
+        const int pct = m_autoScrollController->initialPricePct();
+        if (pct > 0 && pct < 100) span *= static_cast<double>(pct) / 100.0;
+    } else if (m_recordingMode && !m_priceBandReady &&
+               m_autoScrollController->initialPriceCenterPending()) {
         const int pct = m_autoScrollController->initialPricePct();
         if (pct > 0 && pct < 100) span *= static_cast<double>(pct) / 100.0;
     }

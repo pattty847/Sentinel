@@ -37,19 +37,26 @@ inline BandRequest requestBand(const View& view, int64_t tf, double minRowPx, do
     if (!view.valid() || tf <= 0) return {};
     const double span = view.maxPrice - view.minPrice;
     const double columnPx = view.widthPx * static_cast<double>(tf) /
-                            static_cast<double>(view.endMs - view.startMs);
+                            (static_cast<double>(view.endMs) - static_cast<double>(view.startMs));
     const double ideal = stepTick(heatmap_rows::squareCellTick(
         span / view.heightPx, columnPx, minRowPx, aspect));
-    // S2 exact display_tick requires native ticks the hello does not expose.
-    // Automatic selection on an expanded range asks the server to choose its
-    // native 1-2-5 tick. Both sides retain at least half a visible span of margin.
-    const double half = std::max(span, ideal * kRows * 0.5);
+    // Leave two rows for the server's outward tick-grid alignment. An exact
+    // rows*tick span can align to rows+1 cells and force the next ladder tick.
+    const double half = std::min(std::max(span, ideal * kRows * 0.5),
+                                 ideal * (kRows - 2) * 0.5);
     const double mid = view.minPrice + span * 0.5;
     if (!std::isfinite(half) || !std::isfinite(mid)) return {};
     const double lo = std::max(0.0, mid - half);
-    const double hi = std::max(mid + half, lo + 2.0 * half);
+    const double hi = lo + 2.0 * half;
     if (!std::isfinite(hi) || hi > 1e12) return {};
     return {lo, hi, ideal};
+}
+inline int firstPageColumns(const View& view, int64_t tf, int maxColumns) {
+    if (!view.valid() || tf <= 0 || maxColumns <= 0) return 0;
+    // Include partially visible buckets and a small margin for the follow edge.
+    const double visible = std::ceil((static_cast<double>(view.endMs) -
+                                      static_cast<double>(view.startMs)) / tf) + 16.0;
+    return static_cast<int>(std::clamp(visible, 1.0, static_cast<double>(maxColumns)));
 }
 inline bool needsReband(const View& view, const BandRequest& active, const BandRequest& wanted) {
     return wanted.valid() && (!active.valid() || view.minPrice < active.minPrice ||

@@ -113,7 +113,7 @@ target_include_directories(hmc2_dump PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(hmc2_dump PRIVATE sentinel_core)
 
 add_executable(test_recording_page test_recording_page.cpp)
-target_include_directories(test_recording_page PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_include_directories(test_recording_page PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_recording_page PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME RecordingPageTests COMMAND test_recording_page)
 set_tests_properties(RecordingPageTests PROPERTIES LABELS "servermodel")

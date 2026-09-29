@@ -106,6 +106,8 @@ public:
     void resetAutoScrollSpan();
     void updateAutoScrollLag(GridViewState& vs, int64_t cadenceMs);
     void resetPriceCenter();
+    void setRecordingMode(bool recording) { m_recordingMode = recording; }
+    bool recordingViewportReady(GridViewState* viewState);
     void setLiveBook(double bid, double ask, GridViewState* viewState);
     void setLastTrade(double price, GridViewState* viewState);
     void requestPriceCenter(GridViewState* viewState);
@@ -130,6 +132,7 @@ private:
     std::unique_ptr<ViewportAutoScrollController> m_autoScrollController;
     bool m_viewportInitialized = false;
     bool m_priceBandReady = false;
+    bool m_recordingMode = false;
     int m_gridWidth = 5120;
     int m_gridHeight = 2048;
     int m_intensityBytesPerCell = 1;

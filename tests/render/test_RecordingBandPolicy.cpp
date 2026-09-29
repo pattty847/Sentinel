@@ -47,6 +47,14 @@ TEST(RecordingBandPolicy, NonnegativeProtocolBandRetainsRequestedResolution) {
     View view{0, 6'000'000, 1, 2, 1000, 500, false};
     const auto band = requestBand(view, 60'000, 2, 0.75);
     EXPECT_GE(band.minPrice, 0);
-    EXPECT_GE(band.maxPrice - band.minPrice, kRows * band.idealTick);
+    EXPECT_LE(band.maxPrice - band.minPrice, (kRows - 2) * band.idealTick);
     EXPECT_TRUE(band.valid());
+}
+
+TEST(RecordingBandPolicy, FirstPageCoversVisibleColumnsWithSmallMargin) {
+    View view{0, 158 * 60'000, 100, 200, 1000, 500, true};
+    EXPECT_EQ(firstPageColumns(view, 60'000, 976), 174);
+    view.endMs = 2000 * 60'000;
+    EXPECT_EQ(firstPageColumns(view, 60'000, 976), 976);
+    EXPECT_EQ(firstPageColumns({}, 60'000, 976), 0);
 }

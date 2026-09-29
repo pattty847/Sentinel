@@ -130,13 +130,6 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
         return;
     }
     if (recordingMode()) {
-        // Bootstrap geometry from live metadata only; never mix legacy values into recording.
-        if (!m_recordingBootstrapped && !m_recordingView.valid() &&
-            slice.maxPrice > slice.minPrice && slice.tickSize > 0) {
-            m_recordingBootstrapped = true;
-            emit heatmapRangeReset(slice.minPrice, slice.maxPrice, slice.tickSize,
-                                   m_heatmapGridWidth, recording_view::kRows);
-        }
         return;
     }
     const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_heatmapGridWidth;
@@ -669,7 +662,6 @@ void DataProcessor::resetRecordingRequest() {
     m_recordingDebounce.cancel();
     m_recordingBandTimer->stop();
     m_recordingTimeout->stop();
-    m_recordingBootstrapped = false;
 }
 
 void DataProcessor::setRecordingConfig(bool requested, double minRowPx, double aspect) {
@@ -763,7 +755,10 @@ void DataProcessor::sendRecordingRequest(int64_t endMs, bool finalRepair) {
     request.endTimeMs = endMs;
     request.rows = recording_view::kRows;
     m_recordingFinalFetch = finalRepair;
-    request.count = finalRepair ? 1 : std::min(heatmap_window::ColumnWindow::kPageColumns, 2'000'000 / request.rows);
+    const int maxColumns = std::min(heatmap_window::ColumnWindow::kPageColumns, 2'000'000 / request.rows);
+    request.count = finalRepair ? 1 : (!m_recordingBandConfirmed
+        ? recording_view::firstPageColumns(m_recordingView, request.timeframeMs, maxColumns)
+        : maxColumns);
     request.priceMin = m_recordingBand.minPrice;
     request.priceMax = m_recordingBand.maxPrice;
     if (m_recordingBandConfirmed) {
@@ -781,7 +776,8 @@ void DataProcessor::sendRecordingRequest(int64_t endMs, bool finalRepair) {
     sLog_Probe("heatmap.recording.request", "symbol=" << m_activeSymbol << " tf=" << request.timeframeMs
                << " gen=" << request.bandGeneration << " id=" << m_recordingRequestId
                << " end=" << endMs << " lo=" << request.priceMin << " hi=" << request.priceMax
-               << " idealTick=" << m_recordingBand.idealTick << " rows=" << request.rows);
+               << " idealTick=" << m_recordingBand.idealTick << " rows=" << request.rows
+               << " count=" << request.count);
     emit recordingHistoryFetchNeeded(request);
     emit heatmapHistoryStatus(true, m_heatmapWindow.oldestAvailableMs());
 }
@@ -855,6 +851,8 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
     const bool registerView = !m_recordingBandConfirmed;
     m_recordingBandConfirmed = true;
     m_recordingDisplayBand = band;
+    m_recordingBand.minPrice = band.minPrice;
+    m_recordingBand.maxPrice = band.maxPrice;
     if (registerView) {
         m_registeredView = {page.symbol.toStdString(), page.layer.toStdString(), page.timeframeMs,
             {page.bandLo, page.bandTick, static_cast<uint32_t>(page.bandRows)}, page.bandGeneration};
