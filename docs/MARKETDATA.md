@@ -324,7 +324,11 @@ fetch errors fail the request explicitly. Every REST call has one 10-second tota
 network deadline covering DNS, connect, TLS and HTTP, including any auth fallback.
 Timeouts return a failed result and log a warning. Overlay jobs check cancellation
 before and after each page; shutdown, unsubscribe and selection changes prevent
-additional page fetches. An in-flight page may use the remaining request deadline.
+additional page fetches. An in-flight page may use the remaining request deadline. Candle history uses
+the same joined history pool, so server shutdown cannot destroy the REST client
+while a fetch is running. Successful DNS endpoints are fresh for five minutes
+and remain usable while a shared refresh is pending; an uncached request waits
+for resolver capacity within its own deadline.
 Candle ranges and retained trades map
 onto the same independent overlay grid, anchored from a candle close when no
 trade is available. This preserves session history without introducing persisted

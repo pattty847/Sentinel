@@ -1,4 +1,5 @@
 #include "CoinbaseRestClient.hpp"
+#include "RestResolver.hpp"
 #include "../../SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -8,9 +9,6 @@
 #include <boost/asio/ssl/stream.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <atomic>
-#include <future>
-#include <thread>
 #include <algorithm>
 
 namespace beast = boost::beast;
@@ -20,37 +18,16 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 namespace {
-// Asio's resolver context destructor joins its blocking getaddrinfo worker.
-// Isolate DNS instead: a timed-out caller never joins it, and at most four
-// lookups can remain outstanding process-wide. Each worker owns all its state;
-// it cannot retain a client, session, authenticator or request buffers.
-tcp::resolver::results_type resolveBefore(const std::string& host, const std::string& port,
-                                          std::chrono::steady_clock::time_point deadline) {
-    static const auto activeLookups = std::make_shared<std::atomic_size_t>(0);
-    if (activeLookups->fetch_add(1) >= 4) {
-        activeLookups->fetch_sub(1);
-        throw std::runtime_error("REST DNS lookup budget exhausted");
-    }
-    std::promise<tcp::resolver::results_type> promise;
-    auto future = promise.get_future();
-    try {
-        std::thread([host, port, activeLookups = activeLookups, promise = std::move(promise)]() mutable {
-            try {
-                net::io_context context;
-                tcp::resolver resolver(context);
-                promise.set_value(resolver.resolve(host, port));
-            } catch (...) {
-                promise.set_exception(std::current_exception());
-            }
-            activeLookups->fetch_sub(1);
-        }).detach();
-    } catch (...) {
-        activeLookups->fetch_sub(1);
-        throw;
-    }
-    if (future.wait_until(deadline) != std::future_status::ready)
-        throw std::runtime_error("REST request deadline exceeded during DNS resolve");
-    return future.get();
+sentinel::rest::Resolver::Endpoints resolveBefore(const std::string& host, const std::string& port,
+                                                  std::chrono::steady_clock::time_point deadline) {
+    static sentinel::rest::Resolver resolver([](const std::string& host, const std::string& port) {
+        net::io_context context;
+        tcp::resolver resolver(context);
+        sentinel::rest::Resolver::Endpoints endpoints;
+        for (const auto& result : resolver.resolve(host, port)) endpoints.push_back(result.endpoint());
+        return endpoints;
+    });
+    return resolver.resolve(host, port, deadline);
 }
 
 std::string buildCandlesPath(const std::string& productId, bool usePublic) {

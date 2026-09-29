@@ -175,8 +175,16 @@ replies return by executor post, with subscription/generation checks before writ
 REST uses asynchronous socket operations behind its synchronous worker API, with
 one 10-second deadline per call. Blocking system DNS lookups are isolated in at
 most four self-owned resolver threads process-wide, so a timed-out caller does
-not join a stuck OS resolver. No resolver thread retains server/client state.
+not join a stuck OS resolver. Lookups are shared per host/port; successful
+endpoints have a five-minute fresh TTL and stay usable while refresh is pending
+or capacity is exhausted. Uncached callers wait within their request deadline
+for capacity. No resolver thread retains server/client state.
 Overlay pagination checks shutdown and selection cancellation between pages.
+Candle-history REST and screener work also use the joined, bounded history pool;
+no detached task retains a session or server executor. The screener uses blocking
+QProcess APIs with a 30-second process deadline, cancellation checks every 50 ms,
+and an 8 MiB output cap. Shutdown joins admitted work before destroying the REST
+client or executor.
 The legacy heatmap streamer remains only for its heatmap path pending removal.
 
 The GUI carries `TradeOverlayGrid` with each immutable footprint/TPO upload.

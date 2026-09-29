@@ -4,8 +4,10 @@
 #include "marketdata/auth/Authenticator.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QDir>
 #include <gtest/gtest.h>
 #include <future>
+#include <boost/asio/read.hpp>
 #include <openssl/pem.h>
 
 // Drive the actual stop path without starting sockets or needing TLS credentials.
@@ -93,6 +95,22 @@ struct RecordingServerStopTest {
         server.stop(); // joins scans/builds before owner/model destruction
         ioc.run(); // late completion and cancelled timer must not publish
         EXPECT_EQ(session->write_queue_.size(), 1);
+    }
+    static std::weak_ptr<Session> startCandleFetch(SentinelStreamServer& server, ServerDataModel& model,
+                                                  Authenticator& auth, unsigned short port) {
+        server.m_restClient = std::make_unique<CoinbaseRestClient>(auth, "127.0.0.1", std::to_string(port),
+                                                                 "", std::chrono::seconds(2));
+        server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
+        startExecutor(server);
+        std::promise<std::weak_ptr<Session>> created;
+        auto future = created.get_future();
+        net::post(server.m_ioc, [&] {
+            auto session = std::make_shared<Session>(tcp::socket(server.m_ioc), server.m_sslCtx, model, &server);
+            server.registerSession(session);
+            session->handle_message(R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_sec":60,"end_time_sec":172860,"limit":1})");
+            created.set_value(session);
+        });
+        return future.get();
     }
     static boost::asio::io_context& startExecutor(SentinelStreamServer& server) {
         server.m_running = true;
@@ -256,3 +274,57 @@ TEST(TradeOverlayServer, BoundedWorkersHistoryAndCloseDiscardLatePublication) {
     SentinelStreamServer server(model, auth, config, 0);
     RecordingServerStopTest::checkOverlayBounds(server, model);
 }
+
+TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
+    int argc = 1; char name[] = "candle-stop"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+    struct RestoreDirectory { QString path = QDir::currentPath(); ~RestoreDirectory() { QDir::setCurrent(path); } } restore;
+    ASSERT_TRUE(QDir::setCurrent(directory.path()));
+    ServerConfig config; config.recording.enabled = false; config.heatmap.persistenceEnabled = false;
+    config.heatmap.timeframesMs = {60000};
+    ServerDataModel model(config);
+    Authenticator auth(directory.path().toStdString() + "/no-key");
+    net::io_context listener;
+    tcp::acceptor acceptor(listener, {net::ip::make_address("127.0.0.1"), 0});
+    tcp::socket peer(listener);
+    std::array<char, 65536> buffer{};
+    std::promise<void> accepted, closed;
+    auto acceptedFuture = accepted.get_future(); auto closedFuture = closed.get_future();
+    acceptor.async_accept(peer, [&](beast::error_code ec) {
+        if (ec) return;
+        accepted.set_value();
+        // Accept ClientHello but never answer: fetch remains in TLS handshake.
+        net::async_read(peer, net::buffer(buffer), [&](beast::error_code ec, size_t) {
+            if (ec) closed.set_value();
+        });
+    });
+    std::thread listenerThread([&] { listener.run(); });
+    struct Join { net::io_context& ioc; std::thread& thread; ~Join() { ioc.stop(); thread.join(); } } join{listener, listenerThread};
+    auto server = std::make_unique<SentinelStreamServer>(model, auth, config, 0);
+    auto session = RecordingServerStopTest::startCandleFetch(*server, model, auth, acceptor.local_endpoint().port());
+    ASSERT_EQ(acceptedFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const auto start = std::chrono::steady_clock::now();
+    server->stop();
+    EXPECT_TRUE(session.expired()); // no detached fetch retains a session/executor
+    server.reset();
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(4));
+    EXPECT_EQ(closedFuture.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+}
+
+#ifndef _WIN32
+TEST(RecordingServerStop, JoinedProcessWorkHonorsCancellationAndDeadline) {
+    int argc = 1; char name[] = "process-stop"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir directory;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = runBoundedProcess("/bin/sh", {"-c", "exec sleep 30"}, directory.path(), [&] {
+        return std::chrono::steady_clock::now() - start > std::chrono::milliseconds(100);
+    });
+    EXPECT_EQ(result.error, "process cancelled");
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+    const auto timed = runBoundedProcess("/bin/sh", {"-c", "exec sleep 30"}, directory.path(), [] { return false; },
+                                         std::chrono::milliseconds(100));
+    EXPECT_EQ(timed.error, "process deadline exceeded");
+}
+#endif

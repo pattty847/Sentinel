@@ -34,6 +34,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QProcess>
 #include <QtEndian>
 #include <cstdio>
 #include "../marketdata/auth/Authenticator.hpp"
@@ -51,6 +52,38 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
+struct ProcessResult { std::string output, error; };
+ProcessResult runBoundedProcess(const QString& program, const QStringList& arguments,
+                               const QString& directory, const std::function<bool()>& stopped,
+                               std::chrono::milliseconds budget = std::chrono::seconds(30)) {
+    ProcessResult result;
+    if (stopped()) { result.error = "process cancelled"; return result; }
+    QProcess process;
+    process.setWorkingDirectory(directory);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    process.start(program, arguments);
+    while (process.state() != QProcess::NotRunning) {
+        if (stopped() || std::chrono::steady_clock::now() >= deadline) {
+            process.kill();
+            process.waitForFinished(1000);
+            result.error = stopped() ? "process cancelled" : "process deadline exceeded";
+            return result;
+        }
+        process.waitForFinished(50);
+        result.output += process.readAll().toStdString();
+        if (result.output.size() > 8 * 1024 * 1024) {
+            process.kill();
+            process.waitForFinished(1000);
+            result.error = "process output budget exceeded";
+            return result;
+        }
+    }
+    if (process.error() == QProcess::FailedToStart || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        result.error = "process failed: " + process.errorString().toStdString();
+    return result;
+}
+
 
 int64_t tradeTimestampMs(const Trade& trade) {
     return static_cast<int64_t>(
@@ -907,18 +940,18 @@ public:
                 }
 
                 auto self = shared_from_this();
-                std::thread([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit]() {
+                const bool queued = owner_->submitHistoryTask([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit]() {
                     sentinel::logging::setCurrentThreadName("candle-fetch");
                     // Coinbase caps one request at 350 1m bars. Page the anchor,
                     // then use the same UTC rollup rule as live candle updates.
                     std::vector<OHLCVBar> minutes;
                     const int64_t firstMinuteSec = (startTimeSec / 60) * 60;
                     for (int64_t pageStart = firstMinuteSec; pageStart < endTimeSec;) {
-                        if (self->closing_.load() || self->closePosted_.load()) return;
+                        if (self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load()) return;
                         const int64_t pageEnd = std::min(pageStart + 350 * 60, endTimeSec);
                         auto page = self->owner_->restClient().fetchProductCandles(
                             symbol, pageStart, pageEnd, "ONE_MINUTE", 350);
-                        if (self->closing_.load() || self->closePosted_.load()) return;
+                        if (self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load()) return;
                         if (!page.ok) {
                             self->send_error("candle_history_request", symbol,
                                              std::string("fetch failed: ") + page.error);
@@ -987,7 +1020,8 @@ public:
                     payload["candles"] = std::move(arr);
 
                     self->do_write(payload.dump());
-                }).detach();
+                });
+                if (!queued) send_error("candle_history_request", symbol, "history worker queue is full");
             } else if (type == "trade_command") {
                 if (owner_ && owner_->tradingSessionPtr()) {
                     try {
@@ -1048,7 +1082,11 @@ public:
                 const double      minVol  = j.value("min_volume", 0.0);
 
                 auto self = shared_from_this();
-                std::thread([self, asset, limit, minVol]() {
+                const bool queued = owner_->submitHistoryTask([self, asset, limit, minVol]() {
+                    const auto stopped = [&] {
+                        return self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load();
+                    };
+                    if (stopped()) return;
                     sentinel::logging::setCurrentThreadName("screener");
                     // Locate scripts/ dir relative to the server binary.
                     // Binary is at <repo>/build/<preset>/apps/sentinel-server/Debug/
@@ -1079,36 +1117,18 @@ public:
                     const QString scriptPath = QDir(scriptsDir).absoluteFilePath("screener/screener_fetch.py");
                     sLog_App("Screener: running " << scriptPath << " asset=" << QString::fromStdString(asset));
 
-                    // Build command: uv run python <script> --asset <x> --limit <n> --min-volume <v>
-                    // Use popen — QProcess requires a Qt event loop and cannot be used in std::thread.
-                    const std::string cmd =
-                        "cd \"" + scriptsDir.toStdString() + "\" && "
-                        "uv run python \"" + scriptPath.toStdString() + "\""
-                        " --asset "      + asset +
-                        " --limit "      + std::to_string(limit) +
-                        " --min-volume " + std::to_string(minVol) +
-                        " 2>&1";
-
-#ifdef _WIN32
-                    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-                    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-                    if (!pipe) {
-                        self->send_error("screener_request", "", "failed to launch screener_fetch.py");
+                    // Blocking QProcess APIs work without a Qt event loop. Keep
+                    // the subprocess bounded/cancellable so joining cannot hang.
+                    const auto process = runBoundedProcess("uv",
+                        {"run", "python", scriptPath, "--asset", QString::fromStdString(asset),
+                         "--limit", QString::number(limit), "--min-volume", QString::number(minVol)},
+                        scriptsDir, stopped);
+                    if (stopped()) return;
+                    if (!process.error.empty()) {
+                        self->send_error("screener_request", "", process.error);
                         return;
                     }
-
-                    std::string output;
-                    char buf[4096];
-                    while (fgets(buf, sizeof(buf), pipe)) {
-                        output += buf;
-                    }
-#ifdef _WIN32
-                    _pclose(pipe);
-#else
-                    pclose(pipe);
-#endif
+                    const auto& output = process.output;
 
                     sLog_App("Screener: output length=" << output.size());
 
@@ -1141,7 +1161,8 @@ public:
                     response["row_count"] = static_cast<int>(response["rows"].size());
                     sLog_App("Screener: sending " << response["row_count"].get<int>() << " rows to client");
                     self->do_write(response.dump());
-                }).detach();
+                });
+                if (!queued) send_error("screener_request", "", "history worker queue is full");
             }
         } catch (const std::exception& e) {
             sLog_Error("Server message parse error: peer=" << peer_ << " bytes=" << msg.size()

@@ -21,6 +21,9 @@ Branch: `lt-astra/remove-legacy-heatmap`. Status: phase 1 implemented; phase 2 r
 - [x] Second review: finite total REST deadline, bounded DNS isolation, and
   overlay page cancellation on shutdown/selection/unsubscribe; local TLS stall
   tests and temporary working directory for the trade-window model fixture.
+- [x] Third review: join candle-history and screener jobs before owner teardown;
+  bound/cancel screener subprocesses; cache/share DNS lookups with capacity waits;
+  test stalled-fetch destruction, resolver recovery, and deadline-test stability.
 - [ ] Orchestrator live continuity checks below.
 
 The original blocker was that `on_heatmap_slice` also produced all three live
