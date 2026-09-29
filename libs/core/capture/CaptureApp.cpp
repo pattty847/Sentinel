@@ -125,7 +125,10 @@ int runApplication(QCoreApplication& app) {
                 auto payload = kind == Kind::Frame ? std::string(observation.payload) :
                     nlohmann::json({{"product", observation.product}, {"reason", reason}}).dump();
                 session.submit({kind, {observation.systemNs, observation.steadyNs}, connection.load(), std::move(payload)});
-            } catch (const std::exception& e) { session.fail(e.what()); }
+            } catch (const std::exception& e) {
+                session.fail(e.what(), RecordLocation{{observation.systemNs, observation.steadyNs}, connection.load(),
+                    observation.kind == MarketDataCoreEngine::IngestKind::Frame ? Kind::Frame : Kind::EngineError});
+            }
         });
         engine->onError([&](const std::string& error) noexcept {
             try { transportReason = error; event(Kind::EngineError, error); }
@@ -175,8 +178,7 @@ int runApplication(QCoreApplication& app) {
     timer.stop();
     if (engine) { engine->stop(); engine.reset(); } // join the producer before draining the writer
     if (!stopped) stopReason = "application exit";
-    event(Kind::CaptureStopped, stopReason);
-    session.close();
+    session.close(stopReason);
     if (const auto error = session.error(); !error.empty()) {
         sLog_Error("Capture incomplete: error=" << error); return 1;
     }

@@ -7,6 +7,7 @@
 #include <QUuid>
 #include <QTimeZone>
 #include "servermodel/HmcolFormat.hpp"
+#include "servermodel/PersistenceIo.hpp"
 #include <zstd.h>
 #include <algorithm>
 #include <array>
@@ -54,9 +55,9 @@ void syncFd(int fd) {
 #ifdef _WIN32
     if (::_commit(fd) != 0) fail("commit failed: " + std::string(std::strerror(errno)));
 #else
-    int result;
-    do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
-    if (result < 0) fail("fsync failed: " + std::string(std::strerror(errno)));
+    int error = 0;
+    if (!sentinel::persistence::syncFileDescriptor(fd, error))
+        fail("durable sync failed: " + std::string(std::strerror(error)));
 #endif
 }
 void syncDirectory(const QString& directory) {
@@ -98,6 +99,36 @@ std::string encodeIndex(const std::vector<BlockIndex>& index) {
     }
     return bytes;
 }
+// An unframed suffix is recoverable only if no valid block/index framing
+// follows it. Scan in bounded chunks, so interior corruption cannot masquerade
+// as a torn tail just because the damaged block's magic was overwritten.
+bool hasFollowingFraming(QFile& file, qint64 start, qint64 end) {
+    for (auto offset = start; offset < end; offset += 65533) {
+        if (!file.seek(offset)) fail("tail scan seek failed");
+        const auto bytes = read(file, std::min<qint64>(65536, end - offset));
+        for (size_t i = 0; i + 4 <= bytes.size(); ++i) {
+            const auto magic = std::string_view(bytes).substr(i, 4);
+            const auto candidate = offset + qint64(i);
+            if (magic == "BLK1" && end - candidate >= BlockHeaderBytes) {
+                if (!file.seek(candidate)) fail("tail scan seek failed");
+                const auto header = read(file, BlockHeaderBytes);
+                size_t pos = 44;
+                if (crc(std::string_view(header).substr(0, 44)) == get(header, pos, 4)) return true;
+            } else if (magic == "IDX1" && end - candidate >= 12) {
+                if (!file.seek(candidate + 4)) fail("tail scan seek failed");
+                const auto length = read(file, 4);
+                size_t pos = 0;
+                const auto size = get(length, pos, 4);
+                if (size < 4 || size > 4 + uint64_t(MaxIndexEntries) * IndexEntryBytes ||
+                    size + 4 > uint64_t(end - file.pos())) continue;
+                const auto body = read(file, size);
+                const auto checksum = read(file, 4); pos = 0;
+                if (crc(body) == get(checksum, pos, 4)) return true;
+            }
+        }
+    }
+    return false;
+}
 nlohmann::json headerFrom(QFile& file) {
     if (file.size() < 16) fail("incomplete file header");
     const auto prefix = read(file, 16);
@@ -127,6 +158,12 @@ nlohmann::json headerFrom(QFile& file) {
     return header;
 }
 } // namespace
+
+struct Writer::CompressionState {
+    std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> context{ZSTD_createCCtx(), &ZSTD_freeCCtx};
+    std::string buffer;
+    CompressionState() { if (!context) fail("cannot allocate zstd context"); }
+};
 
 Stamp Stamp::now() {
     return {std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
@@ -200,6 +237,7 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata)
         {"block_ms", m_config.blockInterval.count()}, {"fsync_blocks", m_config.fsyncBlocks},
         {"zstd_level", m_config.compressionLevel}};
     m_block.reserve(m_config.blockBytes);
+    m_compression = std::make_unique<CompressionState>();
 }
 Writer::~Writer() = default;
 void Writer::write(const std::string& bytes) {
@@ -210,6 +248,7 @@ void Writer::write(const std::string& bytes) {
 void Writer::sync() {
     if (!m_file.flush()) fail("flush failed: " + m_file.errorString().toStdString());
     syncFd(m_file.handle());
+    m_uncommittedRecord.reset(); m_uncommittedFrame.reset();
 }
 void Writer::open(Stamp time) {
     validateRoot(m_config.root);
@@ -256,6 +295,9 @@ void Writer::append(const Record& record) {
     if (m_count && (m_block.size() + size > m_config.blockBytes ||
                    record.time.steadyNs - m_first.steadyNs >= m_config.blockInterval.count() * 1000000)) flush();
     if (m_index.size() >= MaxIndexEntries) { seal(); open(record.time); }
+    const RecordLocation location{record.time, record.connection, record.kind};
+    if (!m_uncommittedRecord) m_uncommittedRecord = location;
+    if (record.kind == Kind::Frame && !m_uncommittedFrame) m_uncommittedFrame = location;
     if (!m_count) m_first = record.time;
     m_last = record.time;
     put32(m_block, static_cast<uint32_t>(28 + record.payload.size()));
@@ -273,8 +315,10 @@ void Writer::flushDue(int64_t steadyNs) {
 }
 void Writer::flush() {
     if (!m_count) return;
-    std::string compressed(ZSTD_compressBound(m_block.size()), '\0');
-    const auto size = ZSTD_compress(compressed.data(), compressed.size(), m_block.data(), m_block.size(), m_config.compressionLevel);
+    auto& compressed = m_compression->buffer;
+    compressed.resize(ZSTD_compressBound(m_block.size()));
+    const auto size = ZSTD_compressCCtx(m_compression->context.get(), compressed.data(), compressed.size(),
+                                      m_block.data(), m_block.size(), m_config.compressionLevel);
     if (ZSTD_isError(size)) fail(std::string("zstd: ") + ZSTD_getErrorName(size));
     compressed.resize(size);
     const BlockIndex entry{uint64_t(m_file.pos()), m_first.systemNs, m_last.systemNs, m_ordinal++, m_count,
@@ -303,6 +347,16 @@ void Writer::seal() {
 void Writer::close() {
     if (m_closed) return;
     seal(); m_closed = true;
+}
+
+std::optional<RecordLocation> Writer::firstUncommitted() const {
+    return m_uncommittedFrame ? m_uncommittedFrame : m_uncommittedRecord;
+}
+void Writer::abandonSegment() {
+    m_file.close();
+    m_block.clear(); m_count = 0; m_index.clear();
+    m_uncommittedRecord.reset(); m_uncommittedFrame.reset();
+    m_closed = false;
 }
 
 nlohmann::json readHeader(const QString& path) {
@@ -340,7 +394,12 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
             result.validBytes = file.pos();
             break;
         }
-        if (magic != "BLK1") fail("unknown block magic at offset=" + std::to_string(offset));
+        if (magic != "BLK1") {
+            if (hasFollowingFraming(file, offset + 1, end))
+                fail("interior corruption at offset=" + std::to_string(offset));
+            result.tornTail = true;
+            break;
+        }
         if (end - offset < BlockHeaderBytes) { result.tornTail = true; break; }
         const auto header = magic + read(file, BlockHeaderBytes - 4);
         size_t pos = 44;

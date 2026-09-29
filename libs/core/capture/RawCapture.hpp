@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -33,6 +34,11 @@ struct Record {
     // Frame: unmodified WebSocket text. Events: JSON with product/reason.
     std::string payload;
     bool operator==(const Record&) const = default;
+};
+struct RecordLocation {
+    Stamp time;
+    uint64_t connection = 0;
+    Kind kind = Kind::Frame;
 };
 struct WriterConfig {
     QString root = "/Volumes/T7/sentinel-data/raw-l2";
@@ -74,6 +80,10 @@ public:
     void flush();
     void flushDue(int64_t steadyNs);
     void close();
+    // Used only after an I/O failure: leave the damaged segment untouched and
+    // create a fresh segment for the reserved failure marker.
+    void abandonSegment();
+    std::optional<RecordLocation> firstUncommitted() const;
     const WriterStats& stats() const { return m_stats; }
     const QString& currentPath() const { return m_path; }
 private:
@@ -93,6 +103,9 @@ private:
     bool m_closed = false;
     std::vector<BlockIndex> m_index;
     WriterStats m_stats;
+    std::optional<RecordLocation> m_uncommittedRecord, m_uncommittedFrame;
+    struct CompressionState;
+    std::unique_ptr<CompressionState> m_compression;
 };
 
 struct ScanResult {
@@ -105,7 +118,7 @@ struct ScanResult {
 };
 using RecordVisitor = std::function<void(const Record&)>;
 nlohmann::json readHeader(const QString& path);
-// Complete CRC failures/interior corruption throw. Only incomplete terminal data
+// Complete CRC failures/interior corruption throw. Incomplete/unframed terminal data
 // is skipped. No file is repaired, truncated or rewritten by the reader.
 ScanResult scan(const QString& path, const RecordVisitor& visitor = {});
 

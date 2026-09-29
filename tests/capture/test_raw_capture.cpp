@@ -8,6 +8,10 @@
 #include <QTemporaryDir>
 #include <algorithm>
 #include <chrono>
+#include <csignal>
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 
 using namespace sentinel::capture;
 namespace {
@@ -145,6 +149,33 @@ TEST_F(CaptureTest, RejectsCompleteCorruptionInHeaderBlockAndIndex) {
     catch (const std::runtime_error& e) { EXPECT_NE(std::string(e.what()).find("block CRC mismatch"), std::string::npos); }
     save(path, original + QByteArray("trailing")); EXPECT_THROW(scan(path), std::runtime_error);
 }
+TEST_F(CaptureTest, ZeroAndGarbageSuffixesAreTornButInteriorDamageIsFatal) {
+    Writer writer(config, metadata());
+    writer.append(record(Kind::Frame, 0, "one")); writer.flush();
+    writer.append(record(Kind::Frame, 1, "two")); writer.close();
+    const auto path = paths(config.root).front();
+    const auto original = contents(path);
+    const auto index = scan(path).index;
+    const auto end = index.back().offset + 48 + index.back().compressedBytes;
+    for (const auto& suffix : {QByteArray(8192, '\0'), QByteArray("garbage BLK1 invalid IDX1 junk"), QByteArray(131072, 'x')}) {
+        save(path, original.first(end) + suffix);
+        std::vector<Record> recovered;
+        const auto result = scan(path, [&](auto& r) { recovered.push_back(r); });
+        EXPECT_TRUE(result.tornTail); EXPECT_FALSE(result.indexed);
+        EXPECT_EQ(result.validBytes, end); ASSERT_EQ(recovered.size(), 2);
+        EXPECT_EQ(recovered.back().payload, "two");
+    }
+    auto broken = original;
+    for (const auto entry : index) {
+        broken = original;
+        for (int i = 0; i < 4; ++i) broken[entry.offset + i] = 0;
+        save(path, broken); EXPECT_THROW(scan(path), std::runtime_error);
+    }
+    // A later valid header split across a tail-scanning chunk still proves
+    // interior damage; it must never be silently classified as a torn suffix.
+    save(path, original.first(index[1].offset) + QByteArray(65535, 'x') + original.mid(index[1].offset));
+    EXPECT_THROW(scan(path), std::runtime_error);
+}
 TEST_F(CaptureTest, HourlyRotationRestartAndClockRollbackNeverOverwrite) {
     Writer writer(config, metadata());
     writer.append(record(Kind::Frame, Hour - 1, "hour A"));
@@ -255,16 +286,69 @@ TEST_F(CaptureTest, SessionDrainsOldReceiveTimesInBlocksInsteadOfFlushingEveryFr
     session.close();
     ASSERT_TRUE(session.error().empty()) << session.error();
     EXPECT_EQ(session.stats().frames, 200);
-    EXPECT_EQ(session.stats().blocks, 1);
+    EXPECT_EQ(session.stats().blocks, 2); // one data block, then the current-time stop marker
 }
 TEST_F(CaptureTest, BoundedQueueFailsInsteadOfEvictingAndStorageFailureSurfaces) {
-    Session session(config, metadata(), 1024);
-    EXPECT_FALSE(session.submit(record(Kind::Frame, 0, std::string(2048, 'a'))));
+    Session session(config, metadata(), 8192);
+    EXPECT_FALSE(session.submit(record(Kind::Frame, 0, std::string(8192, 'a'))));
     session.close(); EXPECT_NE(session.error().find("limit"), std::string::npos);
     config.root = dir.path() + "/not-a-directory"; save(config.root, "file");
     Session failed(config, metadata()); failed.submit(record(Kind::Frame, 0, "x")); failed.close();
     EXPECT_FALSE(failed.error().empty());
 }
+TEST_F(CaptureTest, OverflowPersistsReservedStopWithFirstDroppedFrameAndExplicitGap) {
+    Session session(config, metadata(), 16384);
+    auto records = fixture();
+    for (size_t i = 0; i + 1 < records.size(); ++i) ASSERT_TRUE(session.submit(records[i]));
+    const auto dropped = record(Kind::Frame, 2100000000, std::string(32768, 'a'));
+    EXPECT_FALSE(session.submit(dropped));
+    EXPECT_FALSE(session.submit(record(Kind::Frame, 2200000000, "later loss")));
+    EXPECT_TRUE(session.submit(records.back())); // reserved slot survives failure
+    session.close();
+    EXPECT_FALSE(session.error().empty());
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok); EXPECT_EQ(report.json["explicit_capture_gaps"], 1);
+    EXPECT_EQ(report.json["capture_stops"], 1); EXPECT_EQ(report.json["incomplete_runs"], 0);
+    const auto gap = report.json["capture_gap_details"][0];
+    EXPECT_EQ(gap["first_dropped_system_ns"], dropped.time.systemNs);
+    EXPECT_EQ(gap["first_dropped_steady_ns"], dropped.time.steadyNs);
+    EXPECT_EQ(gap["first_dropped_connection"], 1);
+    EXPECT_NE(gap["reason"].get<std::string>().find("limit"), std::string::npos);
+}
+#ifndef _WIN32
+TEST_F(CaptureTest, DiskWriteFailureLeavesTailAndPersistsGapInANewSegment) {
+    // Exercise real short writes without filling a volume: the OS refuses any
+    // one file larger than 8 KiB; a fresh small failure segment can still fit.
+    struct Limit {
+        rlimit previous{};
+        decltype(std::signal(SIGXFSZ, SIG_IGN)) handler;
+        Limit() : handler(std::signal(SIGXFSZ, SIG_IGN)) {
+            if (getrlimit(RLIMIT_FSIZE, &previous)) throw std::runtime_error("getrlimit");
+            auto limited = previous; limited.rlim_cur = 8192;
+            if (setrlimit(RLIMIT_FSIZE, &limited)) throw std::runtime_error("setrlimit");
+        }
+        ~Limit() { setrlimit(RLIMIT_FSIZE, &previous); std::signal(SIGXFSZ, handler); }
+    } limit;
+    config.blockBytes = MaxRecordBytes;
+    Session session(config, metadata());
+    auto records = fixture();
+    for (size_t i = 0; i < 4; ++i) ASSERT_TRUE(session.submit(records[i]));
+    std::string noise(65536, '\0');
+    uint32_t random = 0x12345678;
+    for (char& c : noise) { random ^= random << 13; random ^= random >> 17; random ^= random << 5; c = char(random); }
+    ASSERT_TRUE(session.submit(record(Kind::Frame, 300, std::move(noise))));
+    ASSERT_TRUE(session.submit(record(Kind::CaptureStopped, 400)));
+    session.close();
+    EXPECT_FALSE(session.error().empty());
+    ASSERT_EQ(paths(config.root).size(), 2);
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok); EXPECT_EQ(report.json["explicit_capture_gaps"], 1);
+    const auto gap = report.json["capture_gap_details"][0];
+    // The first frame in the failed block, not just the last dequeued frame.
+    EXPECT_EQ(gap["first_dropped_system_ns"], records[2].time.systemNs);
+    EXPECT_EQ(gap["first_dropped_steady_ns"], records[2].time.steadyNs);
+}
+#endif
 TEST_F(CaptureTest, RefusesMissingVolumeRecordingPathSymlinkAndUnsafeSymbol) {
     EXPECT_THROW(validateRoot("/Volumes/SentinelDefinitelyAbsentCaptureVolume/raw"), std::runtime_error);
     EXPECT_THROW(validateRoot("/Volumes/T7/sentinel-data/recording/BTC-USD"), std::runtime_error);

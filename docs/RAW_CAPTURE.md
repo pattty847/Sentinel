@@ -39,8 +39,13 @@ Every run logs through SentinelLogging to
 line once a minute. `SENTINEL_LOG_DIR`, `SENTINEL_LOG_KEEP` and
 `SENTINEL_LOG_STDERR` work as for sentinel-server. No secondary diagnostic log is
 created. A disk error, queue overflow or oversized frame makes the process exit
-nonzero with `Capture incomplete`; it never silently drops/evicts frames and
-continues claiming a complete capture. Check the exit status and the run log.
+nonzero with `Capture incomplete`. The queue reserves 4 KiB for a final stop/gap
+record containing the reason and the first dropped frame's system/steady receive
+times and connection ID. Accepted data drains before this marker on overflow.
+After an I/O failure the damaged segment is left untouched and a fresh segment
+is attempted for the marker. If the volume is still unwritable, even that marker
+cannot be persisted: the run log explicitly says so and exit remains nonzero.
+Check the exit status and the run log.
 
 After stopping, verify the whole product directory to preserve the snapshot and
 sequence context across hour boundaries:
@@ -61,7 +66,8 @@ never repaired or rewritten by verification.
 The report includes mean frames/s, p99 counts in one-second steady-clock buckets
 (including idle seconds and partial end buckets), received bytes/day, zstd
 bytes/day, actual file bytes/day including framing/indexes, all-channel sequence
-gaps, connections/reconnects, acknowledgments, resync/invalidation counts, snapshot
+gaps, explicit capture gaps (with reason and first-loss timestamps),
+connections/reconnects, acknowledgments, resync/invalidation counts, snapshot
 frame sizes and entry counts (including zero entries), and received bytes per
 channel. Rates use the sum of recorded per-run steady-clock spans; downtime
 between process runs is excluded, disconnections within a run are included.
@@ -95,7 +101,9 @@ startup; no WebSocket is opened with guessed increments. Credentials/JWTs are
 never placed in the capture header.
 
 The ingest observer is called before parsing and only stamps/copies records into
-the bounded queue. A disk worker handles compression, writes and sync. A record
+the bounded queue. A disk worker reuses one zstd compression context and handles
+writes and sync. Sync uses the shared persistence primitive: `F_FULLFSYNC` on
+Darwin with `fsync` fallback where full sync is unsupported. A record
 is limited to 16 MiB (the existing Beast transport's default message limit), a
 block to that record plus framing, and an index to 65,536 entries; a new segment
 starts if that index limit is reached. Peak capture memory includes the queue,
@@ -140,7 +148,11 @@ ordinal, not filename or receive wall-clock monotonicity.
   are transport up, transport down, book invalidated, resync requested, capture
   started, capture stopped and engine error. Their payloads are JSON reasons and,
   where applicable, products. Transport-up increments the run-local connection
-  ID; synthetic engine errors never invent a new connection.
+  ID; synthetic engine errors never invent a new connection. A failed capture's
+  stop payload has `gap: true`, `reason`, `first_dropped_system_ns`,
+  `first_dropped_steady_ns`, `first_dropped_connection` and `first_dropped_kind`.
+  The verifier counts it in `explicit_capture_gaps` and emits bounded details in
+  `capture_gap_details`, independently of sequence gaps or missing markers.
 - Closing index: `IDX1`, payload length `u32`, payload, payload CRC `u32`. Payload
   starts with entry count `u32`; each 44-byte entry is offset `u64`, first/last
   system timestamps `i64`, block ordinal `u64`, record count `u32`, compressed
@@ -148,8 +160,10 @@ ordinal, not filename or receive wall-clock monotonicity.
   scanning and compared byte-for-byte with a present closing index. System time
   may regress; use all matching entries rather than assuming sorted wall times.
 
-Only incomplete terminal block/index data is skipped on read. Complete bad CRCs,
-invalid lengths, zstd errors, mismatching indexes and interior corruption fail
+Incomplete terminal block/index data and an unframed zero/garbage suffix are
+reported as torn tails and skipped. An unframed suffix is scanned for later valid
+block/index framing; finding it proves interior corruption and fails verification.
+Complete bad CRCs, invalid lengths, zstd errors and mismatching indexes also fail
 verification. Valid prefix blocks remain recoverable. Missing indexes or start/
 stop markers are reported as incomplete, including a crash exactly between blocks.
 The verifier bounds file discovery at 100,000 files and book replay at 2,000,000

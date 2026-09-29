@@ -17,6 +17,21 @@
 #endif
 
 namespace sentinel::persistence {
+#ifndef _WIN32
+// Sync an already-owned descriptor, including the drive cache on Darwin. Some
+// filesystems/descriptors do not support F_FULLFSYNC; retain the fsync fallback.
+inline bool syncFileDescriptor(int fd, int &errorCode) {
+    int result;
+#ifdef __APPLE__
+    do { result = ::fcntl(fd, F_FULLFSYNC); } while (result != 0 && errno == EINTR);
+    if (result == 0) return true;
+#endif
+    do { result = ::fsync(fd); } while (result != 0 && errno == EINTR);
+    if (result != 0) errorCode = errno;
+    return result == 0;
+}
+#endif
+
 inline bool syncFilePath(const std::filesystem::path &path, int &errorCode) {
 #ifdef _WIN32
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -37,19 +52,9 @@ inline bool syncFilePath(const std::filesystem::path &path, int &errorCode) {
         errorCode = errno;
         return false;
     }
-#ifdef __APPLE__
-    int result = ::fcntl(fd, F_FULLFSYNC);
-    if (result != 0) {
-        result = ::fsync(fd);
-    }
-#else
-    const int result = ::fsync(fd);
-#endif
-    if (result != 0) {
-        errorCode = errno;
-    }
+    const bool ok = syncFileDescriptor(fd, errorCode);
     ::close(fd);
-    return result == 0;
+    return ok;
 #endif
 }
 

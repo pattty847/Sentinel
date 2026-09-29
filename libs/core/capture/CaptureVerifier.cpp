@@ -62,6 +62,8 @@ struct Replay {
     uint64_t snapshotMinBytes = UINT64_MAX, snapshotMaxBytes = 0;
     uint64_t snapshotEntries = 0, snapshotMinEntries = UINT64_MAX, snapshotMaxEntries = 0, zeroSnapshotEntries = 0;
     uint64_t systemClockRegressions = 0, captureStops = 0, engineErrors = 0, incompleteRuns = 0;
+    uint64_t explicitGaps = 0;
+    nlohmann::json gapDetails = nlohmann::json::array();
     bool sawStart = false, sawStop = false, sawSnapshot = false;
     int64_t previousSystem = -1, firstSteady = -1, lastSteady = -1, second = -1;
     uint64_t secondFrames = 0, seconds = 0;
@@ -117,7 +119,17 @@ struct Replay {
             expectedSequence = 0; invalidate(); return;
         }
         if (record.kind == Kind::CaptureStarted) { sawStart = true; return; }
-        if (record.kind == Kind::CaptureStopped) { ++captureStops; sawStop = true; active = false; invalidate(); return; }
+        if (record.kind == Kind::CaptureStopped) {
+            ++captureStops; sawStop = true; active = false; invalidate();
+            try {
+                const auto stop = nlohmann::json::parse(record.payload);
+                if (stop.value("gap", false)) {
+                    ++explicitGaps;
+                    if (gapDetails.size() < 30) gapDetails.push_back(stop);
+                }
+            } catch (const std::exception& e) { error(std::string("invalid stop marker: ") + e.what()); }
+            return;
+        }
         if (record.kind == Kind::EngineError) { ++engineErrors; return; }
         if (record.kind == Kind::TransportDown) { ++downs; active = false; invalidate(); return; }
         if (record.kind == Kind::BookInvalidated) { ++invalidations; invalidate(); return; }
@@ -283,7 +295,7 @@ VerificationReport verify(const QString& path) {
     nlohmann::json channels = nlohmann::json::object();
     for (const auto& [name, value] : replay.channels)
         channels[name] = {{"frames", value.frames}, {"received_bytes", value.bytes}, {"received_bytes_per_day", perDay(value.bytes)}};
-    report.ok = replay.errors == 0 && replay.gaps == 0 && replay.unsequenced == 0 && replay.unanchored == 0 && tornTails == 0 && unindexed == 0 && replay.incompleteRuns == 0;
+    report.ok = replay.explicitGaps == 0 && replay.errors == 0 && replay.gaps == 0 && replay.unsequenced == 0 && replay.unanchored == 0 && tornTails == 0 && unindexed == 0 && replay.incompleteRuns == 0;
     report.json = {{"ok", report.ok}, {"files", scanned}, {"runs", runs}, {"blocks", blocks},
         {"frames", replay.frames}, {"duration_seconds", replay.duration}, {"fps_mean", replay.duration > 0 ? replay.frames / replay.duration : 0},
         {"fps_p99_one_second_buckets", p99}, {"fps_bucket_count_including_idle", replay.seconds},
@@ -291,6 +303,7 @@ VerificationReport verify(const QString& path) {
         {"file_bytes", fileBytes}, {"file_bytes_per_day", perDay(fileBytes)}, {"zstd_bytes", compressedBytes},
         {"zstd_bytes_per_day", perDay(compressedBytes)}, {"uncompressed_record_bytes", rawBlockBytes},
         {"connections", replay.connections}, {"reconnects", replay.reconnects}, {"transport_down_events", replay.downs},
+        {"explicit_capture_gaps", replay.explicitGaps}, {"capture_gap_details", replay.gapDetails},
         {"sequence_gaps", replay.gaps}, {"unsequenced_frames", replay.unsequenced}, {"subscription_acks", replay.acks},
         {"invalidations", replay.invalidations}, {"resync_requests", replay.resyncs}, {"engine_errors", replay.engineErrors},
         {"capture_stops", replay.captureStops}, {"incomplete_runs", replay.incompleteRuns}, {"snapshots", replay.snapshots}, {"snapshot_frames", replay.snapshotFrames},
