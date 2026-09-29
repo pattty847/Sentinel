@@ -98,6 +98,90 @@ double commonTick(const GpuSource& source) {
     return lcm ? double(lcm) / source.priceScale : 0;
 }
 
+namespace {
+int64_t tickUnits(const GpuSource& source, uint32_t index) {
+    return index < source.ticks.size() ? static_cast<int64_t>(std::llround(source.ticks[index] * source.priceScale)) : 0;
+}
+uint32_t columnMask(const GpuSource& source, uint32_t column) {
+    uint32_t mask = 0;
+    for (uint32_t g = source.columnGroups[column]; g < source.columnGroups[column + 1]; ++g)
+        mask |= 1u << source.groups[g].tickIndex;
+    return mask;
+}
+} // namespace
+
+uint32_t tickMaskInBuckets(const GpuSource& source, int64_t firstBucket, int64_t endBucket) {
+    const int64_t a = std::max<int64_t>(firstBucket - source.firstBucket, 0);
+    const int64_t b = std::min<int64_t>(endBucket - source.firstBucket, int64_t(source.bucketSlots.size()));
+    uint32_t mask = 0;
+    for (int64_t s = a; s < b; ++s) {
+        const uint32_t c = source.bucketSlots[size_t(s)];
+        if (c < source.columns()) mask |= columnMask(source, c);
+    }
+    return mask;
+}
+
+double commonTickOfMask(const GpuSource& source, uint32_t mask) {
+    int64_t lcm = 0;
+    for (uint32_t i = 0; i < source.ticks.size() && i < kMaxTicks; ++i) {
+        if (!(mask & (1u << i))) continue;
+        const int64_t units = tickUnits(source, i);
+        if (units <= 0) return 0;
+        lcm = lcm ? std::lcm(lcm, units) : units;
+    }
+    return lcm ? double(lcm) / source.priceScale : 0;
+}
+
+double commonTickInView(const GpuSource& source, double timeLoMs, double timeHiMs) {
+    if (!std::isfinite(timeLoMs) || !std::isfinite(timeHiMs) || !(timeHiMs > timeLoMs) || source.tfMs <= 0)
+        return commonTick(source);
+    const auto tf = double(source.tfMs);
+    const double first = std::max(std::floor(timeLoMs / tf), double(source.firstBucket));
+    const double end = std::min(std::ceil(timeHiMs / tf), double(source.firstBucket) + double(source.bucketSlots.size()));
+    const uint32_t mask = end > first ? tickMaskInBuckets(source, int64_t(first), int64_t(end)) : 0;
+    return mask ? commonTickOfMask(source, mask) : commonTick(source);
+}
+
+std::vector<double> columnCommonTicks(const GpuSource& source) {
+    std::vector<uint32_t> masks;
+    for (uint32_t c = 0; c < source.columns(); ++c) {
+        const uint32_t mask = columnMask(source, c);
+        if (mask && std::find(masks.begin(), masks.end(), mask) == masks.end()) masks.push_back(mask);
+    }
+    std::vector<double> out;
+    for (const uint32_t mask : masks) {
+        const double tick = commonTickOfMask(source, mask);
+        if (tick > 0 && std::find(out.begin(), out.end(), tick) == out.end()) out.push_back(tick);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+TickCoverage tickCoverage(const GpuSource& source, int64_t firstBucket, int64_t endBucket, double displayTick) {
+    TickCoverage out;
+    const int64_t tick = static_cast<int64_t>(std::llround(displayTick * source.priceScale));
+    if (!(displayTick > 0) || tick <= 0) return out;
+    const int64_t a = std::max<int64_t>(firstBucket - source.firstBucket, 0);
+    const int64_t b = std::min<int64_t>(endBucket - source.firstBucket, int64_t(source.bucketSlots.size()));
+    uint32_t badMask = 0;
+    for (int64_t s = a; s < b; ++s) {
+        const uint32_t c = source.bucketSlots[size_t(s)];
+        if (c >= source.columns()) continue;
+        ++out.columns;
+        const uint32_t mask = columnMask(source, c);
+        bool builds = true;
+        for (uint32_t i = 0; i < source.ticks.size() && i < kMaxTicks; ++i)
+            if ((mask & (1u << i)) && (tickUnits(source, i) <= 0 || tick % tickUnits(source, i) != 0)) builds = false;
+        if (builds) continue;
+        const int64_t bucket = source.firstBucket + s;
+        if (!out.incompatible++) out.firstIncompatibleBucket = bucket;
+        out.endIncompatibleBucket = bucket + 1;
+        badMask |= mask;
+    }
+    out.incompatibleCommon = commonTickOfMask(source, badMask);
+    return out;
+}
+
 const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale& scale) {
     static std::mutex mutex;
     static std::map<std::pair<double, double>, std::vector<FloatFloat>> cache;

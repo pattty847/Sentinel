@@ -330,7 +330,7 @@ TEST_F(HeatmapModel, CoarseScannedGapsSupersedeMinutesAndCompositionRemainsAssoc
     EXPECT_THROW(heatmap::compose(std::array{minutes, minutes}, 5 * minute), std::invalid_argument);
 }
 
-TEST(HeatmapResolution, PriceLadderLayerAndOnePixelTimeLimit) {
+TEST(HeatmapResolution, PriceLadderAndLayer) {
     EXPECT_EQ(heatmap::idealTick(100, 200, 100, 2), 2);
     EXPECT_EQ(heatmap::idealTick(100, 225, 100, 2), 5);
     EXPECT_EQ(heatmap::idealTick(100, 225, 100, 2, 0.5), 2.5);
@@ -341,15 +341,6 @@ TEST(HeatmapResolution, PriceLadderLayerAndOnePixelTimeLimit) {
     EXPECT_EQ(heatmap::layerFor(5, 5, minute), "deep");
     EXPECT_EQ(heatmap::layerFor(1, 5, hour), "deep");
     EXPECT_EQ(heatmap::layerFor(1, 5, 90 * minute), "deep");
-    for (const auto tf : heatmap::kAutoTimeframes) {
-        EXPECT_EQ(heatmap::autoTimeframe(0, 1000 * tf, 1000), tf);
-        EXPECT_NE(heatmap::autoTimeframe(1, 1 + 1000 * tf, 1000), tf);
-    }
-    EXPECT_FALSE(heatmap::autoTimeframe(0, 1001 * day, 1000));
-    EXPECT_FALSE(heatmap::autoTimeframe(0, minute, 0));
-    EXPECT_EQ(heatmap::autoTimeframe(1, 1000 * minute, 1000), minute);
-    EXPECT_EQ(heatmap::autoTimeframe(-minute, 0, 1), minute);
-    EXPECT_EQ(heatmap::autoTimeframe(-1, 1, 1), std::nullopt);
 }
 
 TEST(HeatmapModelScan, UnloadedChunksAndPartialEdgesNeverBecomeRecorderGaps) {

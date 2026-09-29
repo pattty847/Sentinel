@@ -6,6 +6,7 @@
 #include "heatmap/HeatmapResolution.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
+#include "lab/LabItem.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapGpuSelfTest.hpp"
@@ -22,7 +23,9 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <random>
+#include <set>
 #include <thread>
 
 namespace {
@@ -153,14 +156,15 @@ std::vector<uint32_t> binAndRead(QRhi *rhi, HeatmapGpuBinner &binner, const BinG
                                  const recording::SizeScale &scale = {}) {
     QString error;
     QRhiCommandBuffer *cb = nullptr;
-    QRhiReadbackResult readback;
     EXPECT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
     EXPECT_TRUE(binner.bin(cb, grid, scale, &error)) << error.toStdString();
-    EXPECT_TRUE(binner.readBack(cb, &readback, &error)) << error.toStdString();
+    EXPECT_TRUE(binner.readBack(cb, &error)) << error.toStdString();
     EXPECT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    EXPECT_FALSE(binner.readBackPending());
+    const QByteArray data = binner.readBackData();
     std::vector<uint32_t> cells(size_t(grid.columns) * grid.rows);
-    if (readback.data.size() == qsizetype(cells.size() * 4)) std::memcpy(cells.data(), readback.data.constData(), cells.size() * 4);
-    else ADD_FAILURE() << "readback size " << readback.data.size();
+    if (data.size() == qsizetype(cells.size() * 4)) std::memcpy(cells.data(), data.constData(), cells.size() * 4);
+    else ADD_FAILURE() << "readback size " << data.size();
     return cells;
 }
 
@@ -675,6 +679,82 @@ TEST(HeatmapGpuSelfTest, WaitsForAnActiveSourceAndAWorkerBuiltFixture) {
     EXPECT_EQ(binner.resolvedKernel(), std::optional<KernelVariant>(KernelVariant::Fast));
 }
 
+// FM-099: closing the lab right after its first frame destroyed the render node
+// (binner, self-test and its QRhiReadbackResult) before the frame that recorded
+// the readback completed; ~QRhi then wrote into the freed result
+// (QRhiMetal::finishActiveReadbacks, EXC_BAD_ACCESS). The binner must complete
+// an in-flight self-test readback before freeing it. The destruction here happens
+// inside the recording frame, the same order as window teardown.
+TEST(HeatmapGpuSelfTest, DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    auto binner = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(precisionSelfTestIfReady());
+    uploadPaged(gpu.rhi.get(), *binner, smallSource(), 1 << 20);
+    const uint64_t drained = HeatmapGpuBinner::drainedReadbacksForTest();
+    QRhiCommandBuffer *cb = nullptr;
+    ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+    binner->runPrecisionSelfTest(cb);
+    ASSERT_TRUE(binner->selfTestInFlightForTest()) << "the readback is recorded, not yet completed";
+    binner.reset();
+    EXPECT_EQ(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1);
+    ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    gpu.rhi.reset(); // ~QRhi finishes no stale readback
+    // A binner destroyed with nothing in flight does not stall the GPU.
+    Headless again;
+    { HeatmapGpuBinner idle(again.rhi.get()); }
+    EXPECT_EQ(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1);
+}
+
+// Scene graph invalidation can destroy the QRhi before the render node (or a
+// backend can skip QSGRenderNode::releaseResources). With readbacks in flight
+// (an explicit one and the precision self-test's), destroying the QRhi must
+// complete them into the binner-owned results, leave the binners inert, and the
+// binners' later destruction must not call into the dead QRhi.
+TEST(HeatmapGpuLifetime, QRhiDestroyedFirstWithReadbacksInFlight) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(precisionSelfTestIfReady());
+    auto explicitReadback = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    explicitReadback->forceKernel(KernelVariant::Precise);
+    auto selfTesting = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    const auto source = smallSource();
+    uploadPaged(gpu.rhi.get(), *explicitReadback, source, 1 << 20);
+    uploadPaged(gpu.rhi.get(), *selfTesting, source, 1 << 20);
+    const auto grid = gridFor(*source, 10, 99'900, 30, 1);
+    const uint64_t drained = HeatmapGpuBinner::drainedReadbacksForTest();
+    QString error;
+    QRhiCommandBuffer *cb = nullptr;
+    ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+    ASSERT_TRUE(explicitReadback->bin(cb, grid, {}, &error)) << error.toStdString();
+    ASSERT_TRUE(explicitReadback->readBack(cb, &error)) << error.toStdString();
+    EXPECT_FALSE(explicitReadback->readBack(cb, &error)) << "one readback at a time";
+    selfTesting->runPrecisionSelfTest(cb);
+    ASSERT_TRUE(explicitReadback->readBackPending());
+    ASSERT_TRUE(selfTesting->selfTestInFlightForTest());
+    gpu.rhi.reset(); // the QRhi goes first, mid-frame
+    // The first cleanup callback's finish() completes every readback in flight
+    // (both results are alive); the second finds nothing pending.
+    EXPECT_GE(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1) << "readbacks completed before ~QRhi";
+    EXPECT_EQ(explicitReadback->rhi(), nullptr);
+    EXPECT_EQ(selfTesting->rhi(), nullptr);
+    EXPECT_FALSE(explicitReadback->readBackPending());
+    EXPECT_EQ(explicitReadback->readBackData().size(), qsizetype(grid.columns * grid.rows * 4));
+    EXPECT_FALSE(explicitReadback->canDraw());
+    EXPECT_FALSE(explicitReadback->setSource(source, &error)) << "inert after the QRhi is gone";
+    explicitReadback.reset(); // must not call into the destroyed QRhi
+    selfTesting.reset();
+    // A new QRhi, possibly at the old address: a fresh binner works as usual.
+    Headless again;
+    HeatmapGpuBinner fresh(again.rhi.get());
+    uploadPaged(again.rhi.get(), fresh, source, 1 << 20);
+    EXPECT_EQ(binAndRead(again.rhi.get(), fresh, grid).size(), size_t(grid.columns) * grid.rows);
+}
+
 TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
     Headless gpu;
     if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
@@ -797,12 +877,17 @@ TEST(HeatmapGpuParity, RealRecordingOptIn) {
 }
 
 // ---------------------------------------------------------------- scene graph
+int colorDistance(const QColor &a, const QColor &b) {
+    return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
+}
 class HeatmapTestItem final : public QQuickItem {
 public:
     std::shared_ptr<HeatmapRenderStats> stats = std::make_shared<HeatmapRenderStats>();
     std::shared_ptr<const GpuSource> source;
     ViewWindow view;
-    double tick = 10;
+    double tick = 10;              // Manual tick unless autoTick
+    bool autoTick = false;
+    double hysteresis = 0.25, crossfadeMs = 0;
     recording::SizeScale scale;
     uint64_t cap = HeatmapGpuBinner::kDefaultMemoryCapBytes;
     HeatmapTestItem() { setFlag(ItemHasContents, true); }
@@ -812,7 +897,11 @@ protected:
         HeatmapRenderNode::Frame frame;
         frame.source = source;
         frame.view = view;
+        frame.tick.mode = autoTick ? heatmap::TickMode::Auto : heatmap::TickMode::Manual;
         frame.tick.manualTick = tick;
+        frame.tick.hysteresis = hysteresis;
+        frame.tick.crossfadeMs = crossfadeMs;
+        frame.tick.heightPx = height() * window()->effectiveDevicePixelRatio();
         frame.outputScale = scale;
         frame.gpuMemoryCapBytes = cap;
         frame.rect = QRectF(0, 0, width(), height());
@@ -871,11 +960,22 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     const QColor loadA = at(50), loadB = at(55); // 5 px diagonal stripes
     EXPECT_NE(loadA, loadB) << "loading is a hatch, not a flat fill";
     EXPECT_NE(loadA, QColor(Qt::black));
+    // The veil must read as "unknown", not as background: a neutral grey hatch
+    // clearly brighter than the background and unlike the blue loading hatch.
+    std::set<QRgb> veilTones;
+    for (int x = 81; x < 99; ++x)
+        for (int yy = 41; yy < 49; ++yy) {
+            const QColor v = at(x, yy);
+            veilTones.insert(v.rgb());
+            EXPECT_GE(colorDistance(v, QColor(Qt::black)), 150) << "veil vs background at " << x << "," << yy;
+            EXPECT_GE(colorDistance(v, QColor(0x08, 0x0d, 0x12)), 130) << "veil vs the lab background";
+            EXPECT_LE(std::max({v.red(), v.green(), v.blue()}) - std::min({v.red(), v.green(), v.blue()}), 12)
+                << "veil is neutral grey";
+            EXPECT_GE(colorDistance(v, loadA), 40);
+            EXPECT_GE(colorDistance(v, loadB), 40);
+        }
+    EXPECT_EQ(veilTones.size(), 2u) << "veil is a two-tone hatch";
     const QColor veil = at(90);
-    EXPECT_NE(veil, QColor(Qt::black));
-    EXPECT_EQ(veil, at(95));
-    EXPECT_NE(veil, loadA);
-    EXPECT_NE(veil, loadB);
     const QColor data = at(150);
     EXPECT_GT(data.green(), 100) << "large bid in the bid palette";
     EXPECT_EQ(at(150, 5), QColor(Qt::black)) << "valid empty cell above the band draws nothing";
@@ -920,6 +1020,294 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     item->update();
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
     EXPECT_EQ(item->stats->rebins.load(), baseRebins + 2) << "same scale again: no re-bin";
+    // Manual $5 over this $10 grid: the present columns cannot build it and veil
+    // (never coarsened), visibly distinct from the background.
+    item->tick = 5;
+    item->update();
+    const QImage manual = scene.renderFrame(&error);
+    ASSERT_FALSE(manual.isNull());
+    EXPECT_EQ(item->stats->tick.load(), 5);
+    for (const int x : {120, 150, 180}) {
+        const QColor v = manual.pixelColor(x, y);
+        EXPECT_GE(colorDistance(v, QColor(Qt::black)), 150) << x;
+        EXPECT_LE(std::max({v.red(), v.green(), v.blue()}) - std::min({v.red(), v.green(), v.blue()}), 12) << x;
+    }
+}
+
+// ---------------------------------------------------------------- slice T
+// Columns of `data` in [startMs, endMs): a chunk of the same recording.
+SparseColumns sliceOf(const SparseColumns &data, int64_t startMs, int64_t endMs) {
+    SparseColumns out{data.symbol, data.layer, data.tfMs, startMs, endMs, {}, {}};
+    for (const auto &c : data.columns)
+        if (c.bucketStartMs >= startMs && c.bucketStartMs < endMs) out.columns.push_back(c);
+    for (const auto &r : data.scannedRanges) {
+        const int64_t a = std::max(r.startMs, startMs), b = std::min(r.endMs, endMs);
+        if (a < b) out.scannedRanges.push_back({a, b});
+    }
+    validate(out);
+    return out;
+}
+
+// Spec rule 3: a (tick, price) and a (timeframe, time) always map to the same
+// cell, whatever the view, the grid margin, a reload (new source id) or the
+// chunk the columns arrived in. Every cell two readbacks share must be equal.
+TEST(HeatmapGpuAnchoring, CellsKeepAbsolutePriceAndTimeAcrossViewsReloadsAndChunks) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    const auto minutes = minuteLevel();
+    for (const int64_t tf : {5 * minute, 16 * minute}) {
+        const auto data = compose(minutes, tf);
+        // The chunk starts on a bucket boundary of its timeframe: 06:00 for 5 m,
+        // 13:04 (49 x 16 m) for 16 m.
+        const int64_t cut = tf == 16 * minute ? 784 * minute : 6 * hour;
+        struct Variant { std::string label; std::shared_ptr<const GpuSource> source; int64_t fromMs; };
+        std::vector<Variant> variants{
+            {"full", std::make_shared<const GpuSource>(buildGpuSource(data)), data.startMs},
+            {"reload", std::make_shared<const GpuSource>(buildGpuSource(data)), data.startMs},
+            {"chunk", std::make_shared<const GpuSource>(buildGpuSource(sliceOf(data, epoch + cut, data.endMs))), epoch + cut}};
+        ASSERT_NE(variants[0].source->id, variants[1].source->id);
+        // Views at different fractional offsets, spans and margins.
+        std::vector<std::pair<ViewWindow, int64_t>> views;
+        for (int i = 0; i < 6; ++i) {
+            const double t0 = double(epoch + 10 * hour) + i * 0.37 * double(tf) - i * 3 * double(tf);
+            const double p0 = 99'950 + i * 3.3;
+            views.push_back({{t0, t0 + (40 + 7 * i) * double(tf), p0, p0 + 60 + 11 * i}, int64_t(i % 3)});
+        }
+        uint64_t validAll = 0;
+        for (const double tick : {10.0, 20.0, 5.0}) {
+            // (absolute bucket, absolute bin) -> cell, from the first variant/view that bins it.
+            std::map<std::pair<int64_t, int64_t>, uint32_t> seen;
+            uint64_t compared = 0, mismatches = 0, valid = 0;
+            for (const auto &v : variants) {
+                HeatmapGpuBinner binner(gpu.rhi.get());
+                uploadPaged(gpu.rhi.get(), binner, v.source, 64ull << 20);
+                for (const auto &[view, margin] : views) {
+                    const auto grid = planGrid(view, tf, tick, margin);
+                    ASSERT_TRUE(grid);
+                    const auto cells = binAndRead(gpu.rhi.get(), binner, *grid);
+                    for (uint32_t x = 0; x < grid->columns; ++x) {
+                        const int64_t bucket = grid->firstBucket + x;
+                        if (bucket * tf < v.fromMs) continue; // before this chunk: legitimately not loaded
+                        for (uint32_t y = 0; y < grid->rows; ++y) {
+                            const int64_t bin = grid->firstBin + int64_t(grid->rows - 1 - y);
+                            const uint32_t cell = cells[size_t(y) * grid->columns + x];
+                            valid += decodeCell(cell).state == CellState::Valid;
+                            const auto [it, inserted] = seen.emplace(std::pair(bucket, bin), cell);
+                            if (inserted) continue;
+                            ++compared;
+                            if (it->second != cell && mismatches++ < 5)
+                                std::cerr << v.label << " tf=" << tf / minute << "m tick=" << tick << " bucket="
+                                          << bucket << " bin=" << bin << " moved: " << it->second << " vs " << cell
+                                          << '\n';
+                        }
+                    }
+                }
+            }
+            std::cout << "anchoring tf=" << tf / minute << "m tick=" << tick << ": compared=" << compared
+                      << " valid=" << valid << " mismatches=" << mismatches << '\n';
+            EXPECT_EQ(mismatches, 0u);
+            EXPECT_GT(compared, 5'000u);
+            validAll += valid;
+        }
+        EXPECT_GT(validAll, 1'000u) << "the comparison covers real data, not only empty cells";
+    }
+}
+
+// Manual never coarsens: a locked tick is drawn over columns that cannot build
+// it; Auto skips to the finest preset every column in view can build.
+TEST(HeatmapTickPolicyNode, ManualKeepsItsTickAutoFollowsTheDataInView) {
+    const auto source = buildGpuSource(compose(minuteLevel(), minute)); // $10 until 06:00, then $5
+    HeatmapRenderNode::TickPolicy manual;
+    manual.mode = heatmap::TickMode::Manual;
+    manual.manualTick = 5;
+    manual.heightPx = 100;
+    const ViewWindow both{double(epoch + 5 * hour), double(epoch + 7 * hour), 99'900, 100'100};
+    const ViewWindow recent{double(epoch + 7 * hour), double(epoch + 9 * hour), 99'900, 100'100};
+    EXPECT_EQ(HeatmapRenderNode::displayTickFor(source, both, manual), 5);
+    EXPECT_EQ(HeatmapRenderNode::displayTickFor(source, recent, manual), 5);
+    manual.manualTick = 3; // not a preset
+    EXPECT_EQ(HeatmapRenderNode::displayTickFor(source, both, manual), 0);
+    EXPECT_DOUBLE_EQ(commonTickInView(source, both.timeLoMs, both.timeHiMs), 10);
+    EXPECT_DOUBLE_EQ(commonTickInView(source, recent.timeLoMs, recent.timeHiMs), 5);
+    EXPECT_EQ(columnCommonTicks(source), (std::vector<double>{5, 10}));
+    HeatmapRenderNode::TickPolicy autoPolicy;
+    autoPolicy.heightPx = 400; // $200 over 400 px: $1 rows 2 px; $5 is the finest buildable
+    EXPECT_EQ(HeatmapRenderNode::displayTickFor(source, both, autoPolicy), 10);
+    EXPECT_EQ(HeatmapRenderNode::displayTickFor(source, recent, autoPolicy), 5);
+    // $5 over the view that straddles the grid change: 60 of 120 columns cannot build it.
+    const auto coverage = tickCoverage(source, (epoch + 5 * hour) / minute, (epoch + 7 * hour) / minute, 5);
+    EXPECT_GT(coverage.incompatible, 0u);
+    EXPECT_EQ(coverage.endIncompatibleBucket, (epoch + 6 * hour) / minute);
+    EXPECT_DOUBLE_EQ(coverage.incompatibleCommon, 10);
+    EXPECT_EQ(tickCoverage(source, (epoch + 5 * hour) / minute, (epoch + 7 * hour) / minute, 10).incompatible, 0u);
+    // The veil itself: $5 over a $10 column reads back as veil (GPU).
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    auto shared = std::make_shared<const GpuSource>(source);
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    uploadPaged(gpu.rhi.get(), binner, shared, 64ull << 20);
+    const auto grid = planGrid(both, minute, 5, 0);
+    ASSERT_TRUE(grid);
+    const auto cells = binAndRead(gpu.rhi.get(), binner, *grid);
+    uint64_t oldVeil = 0, oldValid = 0, newValid = 0;
+    for (uint32_t x = 0; x < grid->columns; ++x)
+        for (uint32_t y = 0; y < grid->rows; ++y) {
+            const auto state = decodeCell(cells[size_t(y) * grid->columns + x]).state;
+            const bool old = (grid->firstBucket + x) * minute < epoch + 6 * hour;
+            if (old) { oldVeil += state == CellState::Veil; oldValid += state == CellState::Valid; }
+            else newValid += state == CellState::Valid;
+        }
+    EXPECT_EQ(oldValid, 0u) << "a $10 column never draws a $5 row";
+    EXPECT_GT(oldVeil, 0u);
+    EXPECT_GT(newValid, 0u);
+}
+
+// Auto in the real scene graph: pans inside the prepared grid never re-bin;
+// the tick changes only past the hysteresis thresholds, once per crossing;
+// jitter around a threshold never flips it; a crossfade costs no extra bin.
+// Scene graph invalidation (window teardown) right after the first frame, with
+// the precision self-test started in that frame: node, binner and QRhi go away
+// in scene-graph order without touching freed readback results.
+TEST(HeatmapRenderNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (int frames = 1; frames <= 3; ++frames) {
+        HeatmapGpuBinner::clearSelfTestCacheForTest();
+        auto scene = std::make_unique<lab::OffscreenQuick>();
+        QString error;
+        ASSERT_TRUE(scene->create(QSize(200, 100), &error)) << error.toStdString();
+        auto *item = new HeatmapTestItem;
+        item->setParentItem(scene->window()->contentItem());
+        item->setSize(QSizeF(200, 100));
+        item->source = stateSource();
+        item->view = {double(epoch), double(epoch + 10 * minute), 99'950, 100'050};
+        for (int i = 0; i < frames; ++i) {
+            item->update();
+            ASSERT_FALSE(scene->renderFrame(&error).isNull()) << error.toStdString();
+        }
+        scene.reset();
+    }
+}
+
+TEST(HeatmapRenderNodeScene, AutoTickHysteresisAndPansNeverRebin) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(200, 100), &error)) << error.toStdString();
+    auto *item = new HeatmapTestItem;
+    item->setParentItem(scene.window()->contentItem());
+    item->setSize(QSizeF(200, 100));
+    item->source = stateSource(); // $10 grid
+    item->autoTick = true;
+    const double dpr = scene.window()->effectiveDevicePixelRatio();
+    const double heightPx = 100 * dpr;
+    // $10 rows `rowPx` physical pixels tall, centred on 100,005.
+    auto zoomTo = [&](double rowPx) {
+        const double span = heightPx * 10 / rowPx;
+        item->view.priceLo = 100'005 - span / 2;
+        item->view.priceHi = 100'005 + span / 2;
+    };
+    auto frame = [&] {
+        item->update();
+        const QImage image = scene.renderFrame(&error);
+        EXPECT_FALSE(image.isNull()) << error.toStdString();
+        return image;
+    };
+    item->view.timeLoMs = double(epoch);
+    item->view.timeHiMs = double(epoch + 10 * minute);
+    zoomTo(2.2);
+    for (int i = 0; i < 4; ++i) frame(); // settle the kernel self-test
+    ASSERT_EQ(item->stats->errors.load(), 0u);
+    EXPECT_EQ(item->stats->tick.load(), 10);
+    EXPECT_EQ(item->stats->commonTick.load(), 10);
+    const uint64_t rebins = item->stats->rebins.load(), changes = item->stats->tickChanges.load();
+    // Pure pans (time and price, sub-bin and up to one bin) inside the prepared grid.
+    for (int i = 0; i < 12; ++i) {
+        const double dt = (i % 2 ? -0.45 : 0.4) * minute, dp = (i % 3 ? 3.0 : -4.0);
+        item->view.timeLoMs += dt; item->view.timeHiMs += dt;
+        item->view.priceLo += dp; item->view.priceHi += dp;
+        frame();
+    }
+    EXPECT_EQ(item->stats->rebins.load(), rebins) << "a pan inside the prepared region is a pure translation";
+    EXPECT_EQ(item->stats->tickChanges.load(), changes);
+    // Zoom out inside the hysteresis band (h = 0.25: coarser below 1.5 px).
+    zoomTo(1.6); frame();
+    EXPECT_EQ(item->stats->tick.load(), 10);
+    zoomTo(1.4); frame();
+    EXPECT_EQ(item->stats->tick.load(), 20);
+    EXPECT_EQ(item->stats->tickChanges.load(), changes + 1);
+    // Back in: finer only once $10 rows reach 2.5 px.
+    zoomTo(2.4); frame();
+    EXPECT_EQ(item->stats->tick.load(), 20);
+    zoomTo(2.6); frame();
+    EXPECT_EQ(item->stats->tick.load(), 10);
+    EXPECT_EQ(item->stats->tickChanges.load(), changes + 2);
+    // Jitter around the threshold just crossed: no flip.
+    for (int i = 0; i < 10; ++i) { zoomTo(i % 2 ? 2.6 : 2.4); frame(); }
+    EXPECT_EQ(item->stats->tickChanges.load(), changes + 2);
+    // Same zoom, pans again: still no re-bin.
+    const uint64_t before = item->stats->rebins.load();
+    for (int i = 0; i < 6; ++i) {
+        item->view.timeLoMs += 0.3 * minute; item->view.timeHiMs += 0.3 * minute;
+        frame();
+        item->view.timeLoMs -= 0.3 * minute; item->view.timeHiMs -= 0.3 * minute;
+        frame();
+    }
+    EXPECT_EQ(item->stats->rebins.load(), before);
+    // Crossfade: one compute pass per tick change, the old grid kept for the fade.
+    item->crossfadeMs = 60'000;
+    zoomTo(1.4); frame();
+    EXPECT_EQ(item->stats->rebins.load(), before + 1);
+    EXPECT_EQ(item->stats->tick.load(), 20);
+    EXPECT_TRUE(item->stats->crossfading.load());
+    frame();
+    EXPECT_TRUE(item->stats->crossfading.load());
+    EXPECT_EQ(item->stats->rebins.load(), before + 1) << "fading frames do not re-bin";
+    item->crossfadeMs = 1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    frame();
+    EXPECT_FALSE(item->stats->crossfading.load());
+    EXPECT_EQ(item->stats->errors.load(), 0u);
+}
+// Lab wheel input (spec rules 1, 2, 9): Shift+wheel scales price only, and
+// macOS delivers it as a horizontal delta; wheel zoom obeys the clamps.
+TEST(LabItemZoom, ShiftWheelScalesPriceOnlyWithinTheClamps) {
+    lab::LabItem item;
+    item.setSize(QSizeF(1000, 500));
+    item.loadSynthetic(1'000'000); // the lab's "Synthetic 1M" source ($10 then $5 grid)
+    for (int i = 0; i < 3000 && item.metrics().value("entries").toLongLong() == 0 &&
+                     !item.status().startsWith("Timeframe unavailable"); ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GT(item.metrics().value("entries").toLongLong(), 0) << item.status().toStdString();
+    auto span = [&](const char *key) { return item.metrics().value(key).toDouble(); };
+    const double time0 = span("timeSpanMin"), price0 = span("priceSpan");
+    item.wheelZoom(120, 0, true, 0.5, 0.5); // Shift+wheel as macOS sends it
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0) << "price only";
+    EXPECT_NEAR(span("priceSpan"), price0 * std::exp(-0.12), 1e-6 * price0);
+    const double price1 = span("priceSpan");
+    item.wheelZoom(0, 0, true, 0.5, 0.5);
+    item.wheelZoom(120, 0, false, 0.5, 0.5); // unshifted horizontal scroll is not a zoom
+    EXPECT_DOUBLE_EQ(span("priceSpan"), price1);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    item.wheelZoom(0, 120, true, 0.5, 0.5);  // a mouse that keeps the vertical delta
+    EXPECT_LT(span("priceSpan"), price1);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    // Manual $10: Shift+wheel zoom-out stops at one row per pixel (500 px -> $5000).
+    item.setManualTick(10);
+    for (int i = 0; i < 80; ++i) item.wheelZoom(-120, 0, true, 0.5, 0.5);
+    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    // Plain wheel zoom-out stops at one column per pixel (1000 px at 1 m).
+    for (int i = 0; i < 80; ++i) item.wheelZoom(0, -120, false, 0.5, 0.5);
+    EXPECT_LE(span("timeSpanMin"), 1000 + 1e-9);
+    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6) << "Manual price clamp holds for plain wheel too";
+    // Back to Auto: price zoom-out is no longer clamped (Auto re-ticks instead).
+    item.setManualMode(false);
+    for (int i = 0; i < 10; ++i) item.wheelZoom(-120, 0, true, 0.5, 0.5);
+    EXPECT_GT(span("priceSpan"), 5000);
 }
 } // namespace
 

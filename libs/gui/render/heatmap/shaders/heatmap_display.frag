@@ -22,27 +22,37 @@ vec3 palette(float t, bool ask) {
     if (t < 0.85) return mix(vec3(230,80,0), vec3(255,160,30), (t - 0.60) / 0.25) / 255.0;
     return mix(vec3(255,160,30), vec3(255,230,80), (t - 0.85) / 0.15) / 255.0;
 }
-void main() {
+vec4 shade() {
     // Bins are anchored to absolute time/price; panning inside the grid only
     // changes this mapping, so the picture translates by sub-bin amounts.
     float fx = floor(mapping.x + uv.x * mapping.y);
     float fy = floor(mapping.z + uv.y * mapping.w);
-    if (fx < 0.0 || fy < 0.0 || fx >= float(dims.x) || fy >= float(dims.y)) { fragColor = vec4(0.0); return; }
+    if (fx < 0.0 || fy < 0.0 || fx >= float(dims.x) || fy >= float(dims.y)) return vec4(0.0);
     uint cell = cells[uint(fy) * dims.x + uint(fx)];
     uint state = (cell >> 16u) & 3u;
-    if (state == 0u) { fragColor = vec4(0.0); return; } // no data: background shows through
+    if (state == 0u) return vec4(0.0); // no data: background shows through
     if (state == 1u) {
         // Loading: static diagonal hatch in screen pixels (never stretches with bins).
         bool stripe = mod(floor((gl_FragCoord.x + gl_FragCoord.y) / 5.0), 2.0) < 1.0;
         vec3 c = stripe ? vec3(0.13, 0.20, 0.30) : vec3(0.07, 0.10, 0.15);
-        fragColor = vec4(c * 0.8, 0.8);
-        return;
+        return vec4(c * 0.8, 0.8);
     }
-    if (state == 2u) { fragColor = vec4(vec3(0.16, 0.18, 0.22) * 0.35, 0.35); return; } // veil
+    if (state == 2u) {
+        // Veil (scanned but unproven, or a grid that cannot build this tick):
+        // neutral mid-grey with a fine anti-diagonal hatch, distinct from the
+        // background, from data, and from the blue loading hatch (other slope).
+        bool stripe = mod(floor((gl_FragCoord.x - gl_FragCoord.y) / 3.0), 2.0) < 1.0;
+        vec3 c = stripe ? vec3(0.36, 0.36, 0.38) : vec3(0.27, 0.27, 0.29);
+        return vec4(c * 0.9, 0.9);
+    }
     float code = float(cell & 0x7fffu);
-    if (code <= 0.0) { fragColor = vec4(0.0); return; }
+    if (code <= 0.0) return vec4(0.0);
     float magnitude = clamp((code - style.x) / style.y, 0.0, 1.0);
-    if (magnitude <= 0.0) { fragColor = vec4(0.0); return; }
+    if (magnitude <= 0.0) return vec4(0.0);
     float adjusted = clamp((max(magnitude, 0.08) - 0.5) * 1.25 + 0.5, 0.0, 1.0);
-    fragColor = vec4(palette(adjusted, (cell & 0x8000u) != 0u), 1.0);
+    return vec4(palette(adjusted, (cell & 0x8000u) != 0u), 1.0);
+}
+void main() {
+    // Premultiplied output; style.z is the layer opacity (crossfade).
+    fragColor = shade() * style.z;
 }

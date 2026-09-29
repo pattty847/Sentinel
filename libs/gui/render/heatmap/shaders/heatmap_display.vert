@@ -5,7 +5,7 @@ layout(std140, binding = 1) uniform Draw {
     vec4 rect;     // item-space x, y, width, height
     vec4 mapping;  // left column offset, columns across rect, top row offset, rows down rect
     uvec4 dims;    // grid columns, rows
-    vec4 style;    // code floor, code range, unused, unused
+    vec4 style;    // code floor, code range, opacity, unused
 };
 void main() {
     vec2 corner = vec2(float(gl_VertexIndex & 1), float((gl_VertexIndex >> 1) & 1));

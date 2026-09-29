@@ -7,6 +7,7 @@
 #include <rhi/qshader.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -64,6 +65,7 @@ bool sameScale(const recording::SizeScale &a, const recording::SizeScale &b) {
 // Self-test verdict per backend/device, shared by every binner in the process.
 std::mutex selfTestMutex;
 std::map<QString, KernelVariant> selfTestCache;
+std::atomic<uint64_t> drainedReadbacks{0}; // tests: see drainedReadbacksForTest
 } // namespace
 
 struct HeatmapGpuBinner::SourceBuffers {
@@ -88,18 +90,61 @@ struct HeatmapGpuBinner::SourceBuffers {
 
 struct HeatmapGpuBinner::SelfTestRun {
     std::shared_ptr<const PrecisionSelfTest> fixture; // built off the render thread
-    std::unique_ptr<HeatmapGpuBinner> binner;
-    QRhiReadbackResult readback;
+    std::unique_ptr<HeatmapGpuBinner> binner; // owns the readback
 };
 
 HeatmapGpuBinner::HeatmapGpuBinner(QRhi *rhi, uint64_t memoryCapBytes) : rhi_(rhi), memoryCapBytes_(memoryCapBytes) {
     prewarmPrecisionSelfTest(); // no-op after the first call; the build runs on a worker
+    if (rhi_) rhi_->addCleanupCallback(this, [this](QRhi *) { releaseForDeadRhi(); });
 }
-HeatmapGpuBinner::~HeatmapGpuBinner() = default;
+HeatmapGpuBinner::~HeatmapGpuBinner() {
+    if (!rhi_) return; // the QRhi is gone and released everything through the callback
+    rhi_->removeCleanupCallback(this);
+    // QRhi keeps a raw pointer to the readback result until the frame that
+    // recorded it completes and writes into it then (or in ~QRhi). Destroying
+    // the binner first (window teardown right after the first frame) freed the
+    // self-test's result and crashed in QRhiMetal::finishActiveReadbacks
+    // (FM-099). finish() is valid inside and outside a frame (never inside a
+    // pass; scene graph nodes are never destroyed there). The nested self-test
+    // binner does the same for its own readback when selfTest_ is destroyed.
+    if (readbackPending_) {
+        rhi_->finish();
+        drainedReadbacks.fetch_add(1);
+    }
+}
+
+// The QRhi is being destroyed and still works: complete the readback into our
+// result, then release every resource. Other binners (the self-test's nested
+// one) get their own callback; never add or remove callbacks from here.
+void HeatmapGpuBinner::releaseForDeadRhi() {
+    if (readbackPending_) {
+        rhi_->finish();
+        drainedReadbacks.fetch_add(1);
+    }
+    readbackPending_ = false;
+    active_.reset();
+    spare_.reset();
+    pending_ = false;
+    thresholds_.reset(); output_.reset(); computeParams_.reset(); drawParams_.reset(); dummy_.reset();
+    previousOutput_.reset(); previousDrawParams_.reset();
+    computeBindings_.reset(); drawBindings_.reset(); previousDrawBindings_.reset();
+    for (auto &pipeline : compute_) pipeline.reset();
+    graphics_.reset();
+    binnedGrid_.reset();
+    previousGrid_.reset();
+    computeBoundTo_ = nullptr;
+    rhi_ = nullptr; // inert from here on
+}
+
+uint64_t HeatmapGpuBinner::drainedReadbacksForTest() { return drainedReadbacks.load(); }
+bool HeatmapGpuBinner::selfTestInFlightForTest() const { return selfTest_ != nullptr; }
 
 void HeatmapGpuBinner::clearSelfTestCacheForTest() {
     std::scoped_lock lock(selfTestMutex);
     selfTestCache.clear();
+}
+QByteArray HeatmapGpuBinner::readBackData() const {
+    return readback_ && !readbackPending_ ? readback_->data : QByteArray();
 }
 QString HeatmapGpuBinner::deviceKey() const {
     const auto info = rhi_->driverInfo();
@@ -117,12 +162,14 @@ std::shared_ptr<const GpuSource> HeatmapGpuBinner::pendingSource() const {
 uint64_t HeatmapGpuBinner::sourceBytes() const { return active_ ? active_->bytes() : 0; }
 uint64_t HeatmapGpuBinner::gpuBytes() const {
     uint64_t total = (active_ ? active_->bytes() : 0) + (spare_ ? spare_->bytes() : 0);
-    for (auto *b : {thresholds_.get(), output_.get(), computeParams_.get(), drawParams_.get(), dummy_.get()})
+    for (auto *b : {thresholds_.get(), output_.get(), computeParams_.get(), drawParams_.get(), dummy_.get(),
+                    previousOutput_.get(), previousDrawParams_.get()})
         if (b) total += b->size();
     return total;
 }
 
 bool HeatmapGpuBinner::setSource(std::shared_ptr<const GpuSource> source, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
     if (!source) return true;
     auto dropPending = [this] {
         pending_ = false;
@@ -200,6 +247,7 @@ bool HeatmapGpuBinner::setSource(std::shared_ptr<const GpuSource> source, QStrin
 }
 
 bool HeatmapGpuBinner::uploadStep(QRhiCommandBuffer *cb, uint64_t budgetBytes, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
     if (!pending_) return true;
     if (!cb || !budgetBytes) return fail(error, QStringLiteral("invalid upload step"));
     auto &s = *spare_;
@@ -312,7 +360,7 @@ bool HeatmapGpuBinner::rebuildDrawBindings(QString *error) {
 }
 
 void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
-    if (resolved_) return;
+    if (resolved_ || !rhi_) return;
     if (!testShader_) {
         std::scoped_lock lock(selfTestMutex);
         if (const auto it = selfTestCache.find(deviceKey()); it != selfTestCache.end()) {
@@ -337,7 +385,7 @@ void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
         QString error;
         auto source = std::make_shared<const GpuSource>(run.fixture->source);
         if (!run.binner->setSource(source, &error) || !run.binner->uploadAll(cb, &error) ||
-            !run.binner->bin(cb, run.fixture->grid, {}, &error) || !run.binner->readBack(cb, &run.readback, &error)) {
+            !run.binner->bin(cb, run.fixture->grid, {}, &error) || !run.binner->readBack(cb, &error)) {
             sLog_Warning("heatmap gpu: precision self-test could not run (" << error
                          << "); using the precise kernel");
             resolved_ = KernelVariant::Precise;
@@ -346,9 +394,11 @@ void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
         return;
     }
     auto &run = *selfTest_;
-    if (run.readback.data.size() != qsizetype(run.fixture->expected.size() * 4)) return; // still in flight
+    if (run.binner->readBackPending()) return; // still in flight
+    const QByteArray data = run.binner->readBackData();
     std::vector<uint32_t> cells(run.fixture->expected.size());
-    std::memcpy(cells.data(), run.readback.data.constData(), cells.size() * 4);
+    if (data.size() == qsizetype(cells.size() * 4)) std::memcpy(cells.data(), data.constData(), cells.size() * 4);
+    else std::fill(cells.begin(), cells.end(), 0xffffffffu); // a failed readback fails the test
     const size_t mismatches = countSelfTestMismatches(*run.fixture, cells);
     resolved_ = mismatches ? KernelVariant::Precise : KernelVariant::Fast;
     if (mismatches)
@@ -370,7 +420,8 @@ bool HeatmapGpuBinner::binnedMatches(uint64_t sourceId, const recording::SizeSca
 }
 
 bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
-                           const recording::SizeScale &outputScale, QString *error) {
+                           const recording::SizeScale &outputScale, QString *error, bool keepPrevious) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
     if (!active_) return fail(error, QStringLiteral("no uploaded heatmap source"));
     const auto &source = *active_->source;
     if (!cb || grid.tfMs != source.tfMs || !grid.columns || !grid.rows ||
@@ -383,7 +434,32 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
         if (!computeParams_ || !drawParams_) return false;
     }
     auto *updates = rhi_->nextResourceUpdateBatch();
-    auto bail = [&] { updates->release(); return false; };
+    // keepPrevious: swap the current output (with its draw uniforms and bindings)
+    // into the previous slot, bin into the other buffer, and swap back on failure.
+    const bool swapped = keepPrevious && binnedGrid_.has_value();
+    auto swapSlots = [&] {
+        std::swap(output_, previousOutput_);
+        std::swap(drawParams_, previousDrawParams_);
+        std::swap(drawBindings_, previousDrawBindings_);
+        computeBoundTo_ = nullptr; // compute bindings name the output buffer
+    };
+    if (swapped) {
+        swapSlots();
+        previousGrid_ = binnedGrid_;
+        if (!drawParams_) {
+            drawParams_ = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams), error);
+            drawBindings_.reset();
+        }
+    }
+    auto bail = [&] {
+        updates->release();
+        if (swapped) {
+            swapSlots(); // the current grid's buffer was not touched
+            previousGrid_.reset(); // the previous slot may hold a fresh, unbinned buffer
+        }
+        return false;
+    };
+    if (swapped && !drawParams_) return bail();
     if (!thresholds_ || !sameScale(thresholdScale_, outputScale)) {
         const auto &table = cachedEncodeThresholds(outputScale);
         if (!thresholds_) {
@@ -415,6 +491,7 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
         bail();
         return fail(error, QStringLiteral("heatmap grid native rows exceed int32"));
     }
+    if (!keepPrevious) previousGrid_.reset();
     constexpr double big = double(1 << 30);
     ComputeParams params{};
     params.dims = {grid.columns, grid.rows, uint32_t(source.bucketSlots.size()), source.wide ? 1u : 0u};
@@ -442,16 +519,25 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
     return true;
 }
 
-bool HeatmapGpuBinner::readBack(QRhiCommandBuffer *cb, QRhiReadbackResult *result, QString *error) {
-    if (!binnedGrid_ || !output_ || !result || !cb) return fail(error, QStringLiteral("nothing binned to read back"));
+bool HeatmapGpuBinner::readBack(QRhiCommandBuffer *cb, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
+    if (!binnedGrid_ || !output_ || !cb) return fail(error, QStringLiteral("nothing binned to read back"));
+    if (readbackPending_) return fail(error, QStringLiteral("a readback is already in flight"));
+    if (!readback_) readback_ = std::make_unique<QRhiReadbackResult>();
+    readback_->data.clear();
+    // Runs on the thread that completes the frame (the render thread) while the
+    // result is alive: the destructor and the QRhi cleanup callback finish() first.
+    readback_->completed = [this] { readbackPending_ = false; };
+    readbackPending_ = true;
     const uint64_t bytes = uint64_t(binnedGrid_->columns) * binnedGrid_->rows * 4;
     auto *updates = rhi_->nextResourceUpdateBatch();
-    updates->readBackBuffer(output_.get(), 0, quint32(bytes), result);
+    updates->readBackBuffer(output_.get(), 0, quint32(bytes), readback_.get());
     cb->resourceUpdate(updates);
     return true;
 }
 
 bool HeatmapGpuBinner::prepareDraw(QRhiRenderPassDescriptor *pass, int sampleCount, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
     if (!drawBindings_) return fail(error, QStringLiteral("bin before drawing"));
     const auto format = pass->serializedFormat();
     if (graphics_ && graphicsFormat_ == format && graphicsSamples_ == sampleCount) return true;
@@ -491,8 +577,32 @@ void HeatmapGpuBinner::updateDraw(QRhiResourceUpdateBatch *updates, const QMatri
     params.mapping[0] = mapping.timeOffset; params.mapping[1] = mapping.timeSpan;
     params.mapping[2] = mapping.priceOffset; params.mapping[3] = mapping.priceSpan;
     params.dims[0] = binnedGrid_->columns; params.dims[1] = binnedGrid_->rows;
-    params.style[0] = style.codeFloor; params.style[1] = style.codeRange;
+    params.style[0] = style.codeFloor; params.style[1] = style.codeRange; params.style[2] = style.opacity;
     updates->updateDynamicBuffer(drawParams_.get(), 0, sizeof(params), &params);
+}
+
+void HeatmapGpuBinner::updatePreviousDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp,
+                                          const QRectF &itemRect, const DisplayMapping &mapping,
+                                          const DrawStyle &style) {
+    if (!previousGrid_ || !previousDrawParams_ || !previousOutput_) return;
+    if (!previousDrawBindings_) {
+        const auto fs = QRhiShaderResourceBinding::FragmentStage;
+        const auto vs = QRhiShaderResourceBinding::VertexStage;
+        auto bindings = std::unique_ptr<QRhiShaderResourceBindings>(rhi_->newShaderResourceBindings());
+        bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, previousOutput_.get()),
+                               QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, previousDrawParams_.get())});
+        if (!bindings->create()) { previousGrid_.reset(); return; }
+        previousDrawBindings_ = std::move(bindings);
+    }
+    DrawParams params{};
+    std::memcpy(params.mvp, mvp.constData(), sizeof(params.mvp));
+    params.rect[0] = float(itemRect.x()); params.rect[1] = float(itemRect.y());
+    params.rect[2] = float(itemRect.width()); params.rect[3] = float(itemRect.height());
+    params.mapping[0] = mapping.timeOffset; params.mapping[1] = mapping.timeSpan;
+    params.mapping[2] = mapping.priceOffset; params.mapping[3] = mapping.priceSpan;
+    params.dims[0] = previousGrid_->columns; params.dims[1] = previousGrid_->rows;
+    params.style[0] = style.codeFloor; params.style[1] = style.codeRange; params.style[2] = style.opacity;
+    updates->updateDynamicBuffer(previousDrawParams_.get(), 0, sizeof(params), &params);
 }
 
 void HeatmapGpuBinner::recordDraw(QRhiCommandBuffer *cb) {
@@ -500,5 +610,9 @@ void HeatmapGpuBinner::recordDraw(QRhiCommandBuffer *cb) {
     cb->setGraphicsPipeline(graphics_.get());
     cb->setShaderResources(drawBindings_.get());
     cb->draw(4);
+    if (previousGrid_ && previousDrawBindings_) {
+        cb->setShaderResources(previousDrawBindings_.get());
+        cb->draw(4);
+    }
 }
 } // namespace heatmap::gpu

@@ -13,6 +13,15 @@
 // - Re-requesting the active source cancels a pending upload (A -> B -> A).
 // - The output grid buffer only grows; a resize never touches source buffers.
 // - Entries are split into <= 64 MiB pages (D3D11 guarantees 128 MB per buffer).
+// - QRhi lifetime: the binner registers a keyed cleanup callback on its QRhi. If
+//   the QRhi is destroyed first (scene graph invalidation, backends that skip
+//   QSGRenderNode::releaseResources), the callback completes any in-flight
+//   readback and releases every resource while the QRhi still works; the binner
+//   is then inert (rhi() == nullptr) and its destructor never calls into it.
+//   A binner destroyed while its QRhi lives completes an in-flight readback
+//   first (rhi->finish()), because QRhi writes into the result when the frame
+//   completes (FM-099).
+// - Readbacks: the binner owns the QRhiReadbackResult; callers copy the data.
 // Precision: once an active source exists, the first frame per QRhi
 // backend/device runs a precision self-test (HeatmapGpuSelfTest; its CPU fixture
 // is built on a worker, so the render thread only records the dispatch and the
@@ -55,6 +64,7 @@ inline Cell decodeCell(uint32_t word) {
 
 struct DrawStyle {
     float codeFloor = 6000, codeRange = 24000; // recording-mode palette normalization
+    float opacity = 1;                         // premultiplied: scales colour and alpha
 };
 
 enum class KernelVariant { Fast, Precise };
@@ -68,6 +78,7 @@ public:
     HeatmapGpuBinner(const HeatmapGpuBinner &) = delete;
     HeatmapGpuBinner &operator=(const HeatmapGpuBinner &) = delete;
 
+    // nullptr once the QRhi was destroyed (the binner is then inert).
     QRhi *rhi() const { return rhi_; }
     // No-op if `source` is already pending; cancels the pending upload if it is
     // the active source; otherwise replaces any pending source. nullptr is a no-op.
@@ -86,20 +97,34 @@ public:
     std::shared_ptr<const GpuSource> pendingSource() const;
 
     // One compute pass over the active source. Records outside a render pass.
+    // keepPrevious: the grid binned so far stays drawable as the "previous" grid
+    // (its own output buffer) for a crossfade; a failed bin keeps both unchanged.
     bool bin(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
-             QString *error);
+             QString *error, bool keepPrevious = false);
     const std::optional<BinGrid> &binnedGrid() const { return binnedGrid_; }
     uint64_t binnedSourceId() const { return binnedSourceId_; }
     // True if the last bin() used this source and output scale and the kernel
     // that would be used now (a resolved self-test switches kernels: re-bin).
     bool binnedMatches(uint64_t sourceId, const recording::SizeScale &outputScale) const;
-    // Queues a readback of the binned grid: columns * rows uint32 cells, row 0 = top.
-    bool readBack(QRhiCommandBuffer *cb, QRhiReadbackResult *result, QString *error);
+    // Queues a readback of the binned grid (columns * rows uint32 cells, row 0 =
+    // top) into a binner-owned result; one at a time (refused while in flight).
+    // It completes when the recording frame completes (offscreen: at
+    // endOffscreenFrame), then readBackData() returns a copy.
+    bool readBack(QRhiCommandBuffer *cb, QString *error);
+    bool readBackPending() const { return readbackPending_; }
+    QByteArray readBackData() const; // empty while pending or before any readback
 
     bool prepareDraw(QRhiRenderPassDescriptor *pass, int sampleCount, QString *error);
     void updateDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp, const QRectF &itemRect,
                     const DisplayMapping &mapping, const DrawStyle &style = {});
-    // Inside a render pass; the caller sets viewport/scissor.
+    // Crossfade support: the previous grid (see bin(keepPrevious)) draws after the
+    // current one, so a partly transparent previous grid fades out over it.
+    const std::optional<BinGrid> &previousGrid() const { return previousGrid_; }
+    void updatePreviousDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp, const QRectF &itemRect,
+                            const DisplayMapping &mapping, const DrawStyle &style);
+    void dropPrevious() { previousGrid_.reset(); } // keeps the buffer for reuse
+    // Inside a render pass; the caller sets viewport/scissor. Draws the current
+    // grid, then the previous grid if one is kept.
     void recordDraw(QRhiCommandBuffer *cb);
     bool canDraw() const { return binnedGrid_.has_value() && graphics_ && drawBindings_; }
 
@@ -113,6 +138,10 @@ public:
     // the per-device self-test cache so the candidate is actually tested.
     void setFastKernelShaderForTest(const QString &qsbPath) { fastShaderPath_ = qsbPath; testShader_ = true; }
     static void clearSelfTestCacheForTest();
+    // Tests: a self-test run is recorded and not yet consumed; and how many
+    // in-flight readbacks a destructor or QRhi cleanup completed before freeing them.
+    bool selfTestInFlightForTest() const;
+    static uint64_t drainedReadbacksForTest();
     // Starts (first call) or polls the precision self-test. bin() also calls it;
     // call it every frame so a static view still resolves to the fast kernel.
     void runPrecisionSelfTest(QRhiCommandBuffer *cb) { driveSelfTest(cb); }
@@ -131,6 +160,9 @@ public:
 private:
     struct SourceBuffers;
     struct SelfTestRun;
+    std::unique_ptr<QRhiReadbackResult> readback_;
+    bool readbackPending_ = false;
+    void releaseForDeadRhi(); // QRhi cleanup callback
     QRhi *rhi_ = nullptr;
     std::unique_ptr<SourceBuffers> active_, spare_;
     bool pending_ = false;
@@ -142,6 +174,10 @@ private:
     QVector<quint32> graphicsFormat_;
     int graphicsSamples_ = 0;
     std::optional<BinGrid> binnedGrid_;
+    // Crossfade: the grid binned before the latest tick change and its draw resources.
+    std::unique_ptr<QRhiBuffer> previousOutput_, previousDrawParams_;
+    std::unique_ptr<QRhiShaderResourceBindings> previousDrawBindings_;
+    std::optional<BinGrid> previousGrid_;
     uint64_t binnedSourceId_ = 0;
     recording::SizeScale binnedScale_{0, 0};
     KernelVariant binnedKernel_ = KernelVariant::Precise;

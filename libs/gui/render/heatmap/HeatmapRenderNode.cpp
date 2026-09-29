@@ -12,9 +12,11 @@ HeatmapRenderNode::HeatmapRenderNode(std::shared_ptr<HeatmapRenderStats> stats)
 }
 HeatmapRenderNode::~HeatmapRenderNode() { releaseResources(); }
 
+// Called while the QRhi is still valid: the binner completes any in-flight
+// readback and releases its resources. Backends or paths that skip this are
+// covered by the binner's QRhi cleanup callback.
 void HeatmapRenderNode::releaseResources() {
     binner_.reset();
-    rhi_ = nullptr;
     drawable_ = false;
 }
 
@@ -25,13 +27,22 @@ void HeatmapRenderNode::noteError(const QString &error) {
     lastError_ = error;
 }
 
-double HeatmapRenderNode::displayTickFor(const GpuSource &source, const ViewWindow &view, const TickPolicy &policy) {
-    const double common = commonTick(source);
-    if (!(common > 0)) return 0;
-    if (policy.manualTick > 0 && std::abs(policy.manualTick / common - std::round(policy.manualTick / common)) < 1e-8)
-        return policy.manualTick;
-    return heatmap::idealTick(view.priceLo, view.priceHi, std::max(1.0, policy.heightPx), policy.minRowPx, common,
-                              source.priceScale);
+double HeatmapRenderNode::displayTickFor(const GpuSource &source, const ViewWindow &view, const TickPolicy &policy,
+                                         double currentTick) {
+    if (policy.mode == heatmap::TickMode::Manual) {
+        // Manual never coarsens: a locked preset draws as is; columns whose
+        // native grid cannot build it veil (tickFactors == 0 in the kernel).
+        const int64_t units = heatmap::toUnits(policy.manualTick, source.priceScale);
+        return heatmap::isPresetUnits(units) ? heatmap::fromUnits(units, source.priceScale) : 0;
+    }
+    const double common = commonTickInView(source, view.timeLoMs, view.timeHiMs);
+    const int64_t commonUnits = heatmap::toUnits(common, source.priceScale);
+    const double span = view.priceHi - view.priceLo;
+    if (commonUnits <= 0 || !(span > 0) || !std::isfinite(span)) return 0;
+    const double unitsPerPx = span * source.priceScale / std::max(1.0, policy.heightPx);
+    const int64_t units = heatmap::autoTickUnits(heatmap::toUnits(currentTick, source.priceScale), commonUnits,
+                                                 unitsPerPx, {policy.minRowPx, policy.hysteresis});
+    return units > 0 ? heatmap::fromUnits(units, source.priceScale) : 0;
 }
 
 void HeatmapRenderNode::prepare() {
@@ -40,10 +51,10 @@ void HeatmapRenderNode::prepare() {
     QRhiRenderTarget *rt = renderTarget();
     if (!cb || !rt) return;
     QRhi *rhi = rt->rhi();
-    if (!binner_ || rhi != rhi_) {
-        binner_ = std::make_unique<HeatmapGpuBinner>(rhi);
-        rhi_ = rhi;
-    }
+    // A new QRhi (or the old one destroyed: binner rhi() == nullptr, which also
+    // covers a new QRhi reusing the old address): replace the binner. Its
+    // destructor calls into the old QRhi only if that QRhi is still alive.
+    if (!binner_ || binner_->rhi() != rhi) binner_ = std::make_unique<HeatmapGpuBinner>(rhi);
     stats_->frames.fetch_add(1);
     binner_->setMemoryCap(frame_.gpuMemoryCapBytes);
     QString error;
@@ -59,25 +70,38 @@ void HeatmapRenderNode::prepare() {
     // uploads, the old columns keep their true time extent (never stretched)
     // and a tick its native grids can build.
     const int64_t tf = active->tfMs;
-    const double tick = displayTickFor(*active, frame_.view, frame_.tick);
+    if (frame_.tick.mode == heatmap::TickMode::Manual) autoTick_ = 0;
+    const double tick = displayTickFor(*active, frame_.view, frame_.tick, autoTick_);
+    stats_->commonTick.store(commonTickInView(*active, frame_.view.timeLoMs, frame_.view.timeHiMs));
     if (!(tick > 0)) return;
+    if (frame_.tick.mode == heatmap::TickMode::Auto) autoTick_ = tick;
     const auto &binned = binner_->binnedGrid();
+    // Re-bin triggers (spec rule 6): a new source (timeframe, chunks, generation),
+    // output scale or kernel; a tick change; or the view leaving the prepared grid.
+    // A pan inside the prepared grid only changes the mapping below.
     if (!binned || !binner_->binnedMatches(active->id, frame_.outputScale) ||
         !gridCovers(*binned, frame_.view, tf, tick)) {
         const auto grid = planGrid(frame_.view, tf, tick);
         if (!grid) return;
+        const bool tickChange = binned && binned->tfMs == tf && binned->displayTick != tick;
+        const bool fade = tickChange && frame_.tick.crossfadeMs > 0;
         const auto started = std::chrono::steady_clock::now();
-        if (binner_->bin(cb, *grid, frame_.outputScale, &error)) {
-            stats_->binSubmitMs.store(
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+        if (binner_->bin(cb, *grid, frame_.outputScale, &error, fade)) {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            stats_->binSubmitMs.store(ms);
             stats_->rebins.fetch_add(1);
+            if (tickChange) {
+                stats_->tickChanges.fetch_add(1);
+                stats_->tickChangeBinMs.store(ms);
+            }
+            if (fade) fadeStart_ = std::chrono::steady_clock::now();
             stats_->factor.store(tickFactors(*active, grid->displayTick)[0]);
             stats_->columns.store(grid->columns);
             stats_->rows.store(grid->rows);
             stats_->tick.store(grid->displayTick);
             stats_->preciseKernel.store(binner_->currentKernel() == KernelVariant::Precise);
             sLog_Probe("heatmap.gpu.bin", "source=" << active->id << " tf=" << tf << " cols=" << grid->columns
-                       << " rows=" << grid->rows << " tick=" << grid->displayTick);
+                       << " rows=" << grid->rows << " tick=" << grid->displayTick << " tickChange=" << tickChange);
         } else {
             noteError(error); // keep drawing the previous grid, if any, at its true position
             if (!binner_->binnedGrid()) return;
@@ -85,8 +109,23 @@ void HeatmapRenderNode::prepare() {
     }
     if (!binner_->prepareDraw(rt->renderPassDescriptor(), rt->sampleCount(), &error)) return noteError(error);
     auto *updates = rhi->nextResourceUpdateBatch();
-    binner_->updateDraw(updates, *projectionMatrix() * *matrix(), frame_.rect,
-                        mappingFor(*binner_->binnedGrid(), frame_.view), frame_.style);
+    const QMatrix4x4 mvp = *projectionMatrix() * *matrix();
+    binner_->updateDraw(updates, mvp, frame_.rect, mappingFor(*binner_->binnedGrid(), frame_.view), frame_.style);
+    // Crossfade: the new grid draws at full opacity, the previous one over it
+    // fading out (a linear blend wherever the previous grid is opaque). Both keep
+    // their absolute anchoring, so a pan or zoom during the fade stays aligned.
+    if (const auto &previous = binner_->previousGrid()) {
+        const double t = frame_.tick.crossfadeMs > 0 ?
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fadeStart_).count() /
+                frame_.tick.crossfadeMs : 1.0;
+        if (t >= 1.0 || previous->tfMs != binner_->binnedGrid()->tfMs) binner_->dropPrevious();
+        else {
+            DrawStyle style = frame_.style;
+            style.opacity = float(1.0 - t) * frame_.style.opacity;
+            binner_->updatePreviousDraw(updates, mvp, frame_.rect, mappingFor(*previous, frame_.view), style);
+        }
+    }
+    stats_->crossfading.store(binner_->previousGrid().has_value());
     cb->resourceUpdate(updates);
     stats_->gpuFrameMs.store(cb->lastCompletedGpuTime() * 1000.0);
     stats_->gpuBytes.store(binner_->gpuBytes());
