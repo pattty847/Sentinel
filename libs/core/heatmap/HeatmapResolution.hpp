@@ -24,9 +24,13 @@ inline constexpr std::array<int64_t, 6> kAutoTimeframes{
 // the controller must clamp the time span rather than silently exceed the limit.
 inline std::optional<int64_t> autoTimeframe(int64_t startMs, int64_t endMs, double widthPx) {
     if (endMs <= startMs || !std::isfinite(widthPx) || widthPx < 1) return {};
-    const long double span = static_cast<long double>(endMs) - startMs;
-    for (const auto tf : kAutoTimeframes)
-        if (span / tf <= widthPx) return tf;
+    for (const auto tf : kAutoTimeframes) {
+        // Half-open viewport: the right edge on an epoch boundary touches no
+        // extra bucket. Integer division also handles negative epoch times.
+        const auto first = recording::floorDiv(startMs, tf);
+        const auto last = recording::floorDiv(endMs - 1, tf);
+        if (static_cast<long double>(last) - first + 1 <= widthPx) return tf;
+    }
     return {};
 }
 } // namespace heatmap

@@ -1,6 +1,6 @@
 #include "TimeComposer.hpp"
-#include "servermodel/Hmc2Store.hpp"
-#include <map>
+#include "NativeRows.hpp"
+#include "../servermodel/RecordingCodec.hpp"
 #include <tuple>
 #include <stdexcept>
 
@@ -11,56 +11,36 @@ Identity identity(const NativeColumn& n) {
     return {n.grid.rowTickUnits, n.grid.priceScale, n.grid.configHash,
             n.sizeScale.floor, n.sizeScale.codesPerOctave};
 }
-struct NativeSum {
-    NativeColumn result;
-    std::array<std::map<int64_t, int64_t>, 2> edges;
-    std::map<std::pair<int64_t, bool>, long double> sums;
-    void add(const NativeColumn& n) {
-        result.grid = n.grid;
-        result.sizeScale = n.sizeScale;
-        result.observedMs += n.observedMs;
-        for (size_t side = 0; side < 2; ++side)
-            for (const auto& run : n.coverage[side]) {
-                edges[side][run.lo] += static_cast<int64_t>(run.coveredMs);
-                edges[side][run.hi + 1] -= static_cast<int64_t>(run.coveredMs);
-            }
-        for (size_t i = 0; i < n.entries.size(); ++i) {
-            const auto& entry = n.entries[i];
-            sums[{n.baseRow + entry.row(), entry.isAsk()}] += entryNumerator(n, i);
+NativeColumn combine(std::span<const NativeColumn* const> sources, detail::DecodeTables& tables) {
+    auto rows = detail::aggregateRows(sources, tables);
+    NativeColumn out;
+    out.grid = sources.front()->grid;
+    out.sizeScale = sources.front()->sizeScale;
+    out.composed = true;
+    out.observedMs = rows.observedMs;
+    out.coverage = std::move(rows.coverage);
+    out.baseRow = rows.rows.empty() ? 0 : rows.rows.front().row;
+    out.entries.reserve(rows.rows.size() * 2);
+    out.numerators.reserve(rows.rows.size() * 2);
+    std::array<size_t, 2> runIndex{};
+    for (const auto& row : rows.rows) for (size_t side = 0; side < 2; ++side) {
+        if (!row.numerator[side]) continue;
+        const auto& runs = out.coverage[side];
+        auto& i = runIndex[side];
+        while (i < runs.size() && runs[i].hi < row.row) ++i;
+        const auto duration = i < runs.size() && runs[i].lo <= row.row ? runs[i].coveredMs : 0;
+        if (!duration) continue;
+        out.entries.push_back({packRowSide(row.row, out.baseRow, side),
+            recording::encodeSize(static_cast<double>(row.numerator[side] / duration), out.sizeScale)});
+        if (duration != out.observedMs && out.entryCoveredMs.empty()) {
+            out.entryCoveredMs.reserve(rows.rows.size() * 2);
+            out.entryCoveredMs.resize(out.entries.size() - 1, out.observedMs);
         }
+        if (duration != out.observedMs || !out.entryCoveredMs.empty()) out.entryCoveredMs.push_back(duration);
+        out.numerators.push_back(row.numerator[side]);
     }
-    NativeColumn finish() {
-        for (size_t side = 0; side < 2; ++side) {
-            int64_t duration = 0;
-            auto& runs = result.coverage[side];
-            for (auto it = edges[side].begin(); it != edges[side].end(); ++it) {
-                duration += it->second;
-                const auto next = std::next(it);
-                if (!duration || next == edges[side].end()) continue;
-                const auto hi = next->first - 1;
-                if (!runs.empty() && runs.back().hi + 1 == it->first && runs.back().coveredMs == uint64_t(duration))
-                    runs.back().hi = hi;
-                else runs.push_back({it->first, hi, uint64_t(duration)});
-            }
-        }
-        result.baseRow = sums.empty() ? 0 : sums.begin()->first.first;
-        result.entries.reserve(sums.size());
-        result.numerators.reserve(sums.size());
-        for (const auto& [key, numerator] : sums) {
-            const auto [row, ask] = key;
-            const auto duration = coveredMs(result.coverage[ask], row);
-            if (!duration) continue;
-            result.entries.push_back({packRowSide(row, result.baseRow, ask),
-                recording::encodeSize(static_cast<double>(numerator / duration), result.sizeScale), duration});
-            result.numerators.push_back(numerator);
-        }
-        return std::move(result);
-    }
-};
-struct ColumnSum {
-    SparseColumn result;
-    std::map<Identity, NativeSum> native;
-};
+    return out;
+}
 }
 SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
     if (tfMs < kMinuteMs || tfMs > kDayMs || tfMs % kMinuteMs || levels.empty())
@@ -84,42 +64,74 @@ SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
     });
     out.startMs = selected.front()->startMs;
     out.endMs = selected.front()->endMs;
+    std::vector<SparseColumns::TimeRange> scanned;
     for (size_t i = 0; i < selected.size(); ++i) {
         const auto& level = *selected[i];
         out.startMs = std::min(out.startMs, level.startMs);
         out.endMs = std::max(out.endMs, level.endMs);
+        scanned.insert(scanned.end(), level.scannedRanges.begin(), level.scannedRanges.end());
         for (size_t j = 0; j < i; ++j) {
             const auto& coarse = *selected[j];
-            if (std::max(coarse.startMs, level.startMs) >= std::min(coarse.endMs, level.endMs)) continue;
-            if (coarse.tfMs == level.tfMs || coarse.tfMs % level.tfMs)
-                throw std::invalid_argument("overlapping incompatible heatmap levels");
+            if (coarse.tfMs != level.tfMs && coarse.tfMs % level.tfMs == 0) continue;
+            for (const auto& a : coarse.scannedRanges) for (const auto& b : level.scannedRanges)
+                if (std::max(a.startMs, b.startMs) < std::min(a.endMs, b.endMs))
+                    throw std::invalid_argument("overlapping incompatible heatmap levels");
         }
     }
     out.startMs = recording::floorDiv(out.startMs, tfMs) * tfMs;
     if (out.endMs > std::numeric_limits<int64_t>::max() - tfMs)
         throw std::invalid_argument("heatmap time range overflow");
     out.endMs = recording::floorDiv(out.endMs + tfMs - 1, tfMs) * tfMs;
-    std::map<int64_t, ColumnSum> buckets;
+    std::sort(scanned.begin(), scanned.end(), [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
+    std::vector<SparseColumns::TimeRange> united;
+    for (const auto& range : scanned) {
+        if (!united.empty() && range.startMs <= united.back().endMs)
+            united.back().endMs = std::max(united.back().endMs, range.endMs);
+        else united.push_back(range);
+    }
+    // Only full output buckets are proven scanned. Discarding partial output
+    // aggregates keeps recomposition safe; S5 retains the original input chunks.
+    for (const auto& range : united) {
+        const auto start = recording::floorDiv(range.startMs + tfMs - 1, tfMs) * tfMs;
+        const auto end = recording::floorDiv(range.endMs, tfMs) * tfMs;
+        if (start < end) out.scannedRanges.push_back({start, end});
+    }
+    std::vector<const SparseColumn*> sourceColumns;
     for (size_t i = 0; i < selected.size(); ++i) {
         for (const auto& column : selected[i]->columns) {
-            const bool superseded = std::any_of(selected.begin(), selected.begin() + i, [&](const auto* coarse) {
-                return column.bucketStartMs >= coarse->startMs && column.bucketStartMs < coarse->endMs;
-            });
-            if (superseded) continue;
             const auto bucket = recording::floorDiv(column.bucketStartMs, tfMs) * tfMs;
-            auto& sum = buckets[bucket];
-            sum.result.bucketStartMs = bucket;
-            sum.result.observedMs += column.observedMs;
-            sum.result.flags |= column.flags;
-            for (const auto& native : column.native) sum.native[identity(native)].add(native);
+            if (!isScanned(out, bucket, bucket + tfMs)) continue;
+            const bool superseded = std::any_of(selected.begin(), selected.begin() + i, [&](const auto* coarse) {
+                return isScanned(*coarse, column.bucketStartMs, column.bucketStartMs + selected[i]->tfMs);
+            });
+            if (!superseded) sourceColumns.push_back(&column);
         }
     }
-    out.columns.reserve(buckets.size());
-    for (auto& [bucket, sum] : buckets) {
-        sum.result.flags &= ~recording::kPartial;
-        if (sum.result.observedMs < uint64_t(tfMs)) sum.result.flags |= recording::kPartial;
-        for (auto& [key, native] : sum.native) sum.result.native.push_back(native.finish());
-        out.columns.push_back(std::move(sum.result));
+    std::sort(sourceColumns.begin(), sourceColumns.end(), [](const auto* a, const auto* b) {
+        return a->bucketStartMs < b->bucketStartMs;
+    });
+    detail::DecodeTables tables;
+    for (size_t i = 0; i < sourceColumns.size();) {
+        SparseColumn column;
+        column.bucketStartMs = recording::floorDiv(sourceColumns[i]->bucketStartMs, tfMs) * tfMs;
+        struct Group { Identity key; std::vector<const NativeColumn*> sources; };
+        std::vector<Group> groups;
+        do {
+            const auto& source = *sourceColumns[i++];
+            column.observedMs += source.observedMs;
+            column.flags |= source.flags;
+            for (const auto& native : source.native) {
+                const auto key = identity(native);
+                auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group.key == key; });
+                if (it == groups.end()) groups.push_back({key, {&native}});
+                else it->sources.push_back(&native);
+            }
+        } while (i < sourceColumns.size() && sourceColumns[i]->bucketStartMs < column.bucketStartMs + tfMs);
+        column.flags &= ~recording::kPartial;
+        if (column.observedMs < uint64_t(tfMs)) column.flags |= recording::kPartial;
+        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+        for (const auto& group : groups) column.native.push_back(combine(group.sources, tables));
+        out.columns.push_back(std::move(column));
     }
     validate(out);
     return out;

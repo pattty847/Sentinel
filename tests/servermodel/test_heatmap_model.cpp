@@ -7,6 +7,8 @@
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <map>
+#include <chrono>
+#include <iostream>
 #include <stdexcept>
 
 namespace {
@@ -83,6 +85,57 @@ Hmc2Record makeHour(const std::vector<Hmc2Record>& minutes) {
     return out;
 }
 
+// Independent dense native-row CPU integration of raw minutes. No production
+// accumulator, coverage lookup, binning or composition helpers are used here.
+heatmap::BinCell sumMinutes(const heatmap::SparseColumns& minutes, int64_t start, int64_t tf,
+                            double price, double displayTick) {
+    struct Grid {
+        uint64_t observed = 0;
+        std::map<int64_t, std::array<uint64_t, 2>> coverage;
+        std::map<int64_t, std::array<long double, 2>> numerator;
+    };
+    std::map<double, Grid> grids;
+    uint64_t total = 0;
+    for (const auto& column : minutes.columns) {
+        if (column.bucketStartMs < start || column.bucketStartMs >= start + tf) continue;
+        total += column.observedMs;
+        for (const auto& n : column.native) {
+            const auto tick = n.grid.rowTickUnits / n.grid.priceScale;
+            auto& grid = grids[tick];
+            grid.observed += n.observedMs;
+            const auto lo = int64_t(std::llround(price / tick));
+            const auto end = int64_t(std::llround((price + displayTick) / tick));
+            for (int64_t row = lo; row < end; ++row) for (bool ask : {false, true}) {
+                for (const auto& run : n.coverage[ask])
+                    if (row >= run.lo && row <= run.hi) grid.coverage[row][ask] += n.observedMs;
+            }
+            for (const auto& e : n.entries) {
+                const auto row = n.baseRow + e.row();
+                if (row >= lo && row < end) grid.numerator[row][e.isAsk()] +=
+                    static_cast<long double>(decodeSize(e.code, n.sizeScale)) * n.observedMs;
+            }
+        }
+    }
+    heatmap::BinCell out;
+    if (!total) return out;
+    out.valid = true;
+    std::array<long double, 2> sums{};
+    for (auto& [tick, grid] : grids) {
+        std::array<long double, 2> native{};
+        const auto lo = int64_t(std::llround(price / tick)), end = int64_t(std::llround((price + displayTick) / tick));
+        for (auto row = lo; row < end; ++row) for (bool ask : {false, true}) {
+            const auto duration = grid.coverage[row][ask];
+            out.valid &= duration == grid.observed;
+            if (duration) native[ask] += grid.numerator[row][ask] / duration;
+        }
+        for (bool ask : {false, true}) sums[ask] += native[ask] * (static_cast<long double>(grid.observed) / total);
+    }
+    out.bid = double(sums[0]); out.ask = double(sums[1]);
+    out.dominantAsk = sums[1] > sums[0];
+    out.code = withSide(encodeSize(out.dominantAsk ? out.ask : out.bid), out.dominantAsk);
+    return out;
+}
+
 void comparePage(Hmc2Reader& reader, const BuildRequest& q) {
     const auto page = buildPage(reader, q);
     ASSERT_EQ(page.status, BuildStatus::Complete) << page.message;
@@ -109,6 +162,13 @@ void comparePage(Hmc2Reader& reader, const BuildRequest& q) {
             EXPECT_EQ(cells[row].code, expected.cells[row]); // exactly zero code steps, including side
             EXPECT_EQ(cells[row].dominantAsk, isAsk(expected.cells[row]));
             EXPECT_EQ(cells[row].valid, bool((expected.validity[row / 8] >> (row % 8)) & 1));
+            const auto oracle = heatmap::binCell(actual, page.band.lo + (cells.size() - 1 - row) * page.band.tick,
+                                                  page.band.tick, page.sizeScale);
+            EXPECT_EQ(cells[row].code, oracle.code);
+            EXPECT_EQ(cells[row].valid, oracle.valid);
+            EXPECT_EQ(cells[row].dominantAsk, oracle.dominantAsk);
+            EXPECT_NEAR(cells[row].bid, oracle.bid, 1e-12);
+            EXPECT_NEAR(cells[row].ask, oracle.ask, 1e-12);
             EXPECT_NEAR(std::max(cells[row].bid, cells[row].ask), expected.quantities[row] * expected.quantityScale,
                         expected.quantityScale * 0.501 + 1e-12);
         }
@@ -174,41 +234,19 @@ TEST_F(HeatmapModel, SixteenAndNinetyMinutesUseExactEpochBucketsAndMinuteDuratio
             const auto& column = result.columns[c];
             EXPECT_EQ(column.bucketStartMs, start + int64_t(c) * tf);
             uint64_t observed = 0;
-            std::map<int64_t, uint64_t> gridMs;
-            std::map<std::pair<int64_t, int64_t>, std::array<uint64_t, 2>> coverage;
-            for (const auto& source : levels.front().columns) {
-                if (source.bucketStartMs < column.bucketStartMs || source.bucketStartMs >= column.bucketStartMs + tf) continue;
-                observed += source.observedMs;
-                const auto& n = source.native.front();
-                const auto tick = n.grid.rowTickUnits;
-                gridMs[tick] += source.observedMs;
-                // Independently integrate a single $10 display cell, including
-                // absent/zero rows, then normalize by native-row duration.
-                for (int64_t row = 10'002'000 / tick; row < 10'003'000 / tick; ++row) {
-                    for (bool ask : {false, true}) {
-                        for (const auto& run : n.coverage[ask])
-                            if (row >= run.lo && row <= run.hi) coverage[{tick, row}][ask] += run.coveredMs;
-                    }
-                }
-            }
-            std::map<std::pair<int64_t, int64_t>, std::array<long double, 2>> rowSums;
-            for (const auto& source : levels.front().columns) {
-                if (source.bucketStartMs < column.bucketStartMs || source.bucketStartMs >= column.bucketStartMs + tf) continue;
-                const auto& n = source.native.front();
-                for (const auto& entry : n.entries) {
-                    const auto key = std::make_pair(n.grid.rowTickUnits, n.baseRow + entry.row());
-                    if (coverage.contains(key)) rowSums[key][entry.isAsk()] +=
-                        static_cast<long double>(decodeSize(entry.code, n.sizeScale)) * source.observedMs;
-                }
-            }
-            std::array<long double, 2> expected{};
-            for (const auto& [key, sums] : rowSums)
-                for (bool ask : {false, true})
-                    if (coverage[key][ask]) expected[ask] += sums[ask] / coverage[key][ask] * gridMs[key.first] / observed;
-            const auto cell = heatmap::binCell(column, 100'020, 10);
+            for (const auto& source : levels.front().columns)
+                if (source.bucketStartMs >= column.bucketStartMs && source.bucketStartMs < column.bucketStartMs + tf)
+                    observed += source.observedMs;
             EXPECT_EQ(column.observedMs, observed);
-            EXPECT_NEAR(cell.bid, double(expected[0]), 1e-15);
-            EXPECT_NEAR(cell.ask, double(expected[1]), 1e-15);
+            for (const double price : {99'990., 100'000., 100'010., 100'020., 100'030., 100'040.}) {
+                const auto expected = sumMinutes(levels.front(), column.bucketStartMs, tf, price, 10);
+                const auto actual = heatmap::binCell(column, price, 10);
+                EXPECT_NEAR(actual.bid, expected.bid, 1e-15);
+                EXPECT_NEAR(actual.ask, expected.ask, 1e-15);
+                EXPECT_EQ(actual.code, expected.code);
+                EXPECT_EQ(actual.valid, expected.valid);
+                EXPECT_EQ(actual.dominantAsk, expected.dominantAsk);
+            }
         }
     }
 }
@@ -229,10 +267,16 @@ TEST_F(HeatmapModel, SparseAdapterPreservesIdentityScaleCoverageAndPackedBaseRow
         EXPECT_EQ(n.baseRow + n.entries[i].row(), r.entries[i].row);
         EXPECT_EQ(n.entries[i].isAsk(), r.entries[i].isAsk);
         EXPECT_EQ(n.entries[i].code, r.entries[i].twapCode);
-        EXPECT_EQ(n.entries[i].coveredMs, r.observedMs);
+        EXPECT_TRUE(n.entryCoveredMs.empty());
+        EXPECT_EQ(heatmap::entryCoveredMs(n, i), r.observedMs);
     }
     EXPECT_EQ(n.coverage[0][0].lo, r.bidRowLo);
     EXPECT_EQ(n.coverage[1][0].hi, r.askRowHi);
+    const auto h = makeHour({makeMinute(0), makeMinute(1)});
+    const auto hourColumn = heatmap::fromRecording(h);
+    const auto& hn = hourColumn.native[0];
+    ASSERT_EQ(hn.entryCoveredMs.size(), hn.entries.size());
+    for (size_t i = 0; i < hn.entries.size(); ++i) EXPECT_EQ(hn.entryCoveredMs[i], h.entries[i].coveredMs);
 }
 
 TEST_F(HeatmapModel, OpenHourAcrossGridChangeComposesWithoutMinuteFallback) {
@@ -298,11 +342,116 @@ TEST(HeatmapResolution, PriceLadderLayerAndOnePixelTimeLimit) {
     EXPECT_EQ(heatmap::layerFor(1, 5, hour), "deep");
     EXPECT_EQ(heatmap::layerFor(1, 5, 90 * minute), "deep");
     for (const auto tf : heatmap::kAutoTimeframes) {
-        EXPECT_EQ(heatmap::autoTimeframe(1, 1 + 1000 * tf, 1000), tf);
-        EXPECT_NE(heatmap::autoTimeframe(1, 2 + 1000 * tf, 1000), tf);
+        EXPECT_EQ(heatmap::autoTimeframe(0, 1000 * tf, 1000), tf);
+        EXPECT_NE(heatmap::autoTimeframe(1, 1 + 1000 * tf, 1000), tf);
     }
     EXPECT_FALSE(heatmap::autoTimeframe(0, 1001 * day, 1000));
     EXPECT_FALSE(heatmap::autoTimeframe(0, minute, 0));
+    EXPECT_EQ(heatmap::autoTimeframe(1, 1000 * minute, 1000), minute);
+    EXPECT_EQ(heatmap::autoTimeframe(-minute, 0, 1), minute);
+    EXPECT_EQ(heatmap::autoTimeframe(-1, 1, 1), std::nullopt);
+}
+
+TEST(HeatmapModelScan, UnloadedChunksAndPartialEdgesNeverBecomeRecorderGaps) {
+    using heatmap::BucketState;
+    // Adjacent chunks can jointly prove a 16m bucket; an unloaded middle chunk
+    // must remain loading even though it lies inside the bounding extent.
+    heatmap::SparseColumns a{"BTC-USD", "deep", minute, epoch + minute, epoch + 20 * minute,
+        {heatmap::fromRecording(makeMinute(2)), heatmap::fromRecording(makeMinute(17))},
+        {{epoch + minute, epoch + 20 * minute}}};
+    heatmap::SparseColumns b{"BTC-USD", "deep", minute, epoch + 20 * minute, epoch + 33 * minute,
+        {heatmap::fromRecording(makeMinute(32))}, {{epoch + 20 * minute, epoch + 33 * minute}}};
+    heatmap::SparseColumns c{"BTC-USD", "deep", minute, epoch + 48 * minute, epoch + 64 * minute,
+        {}, {{epoch + 48 * minute, epoch + 64 * minute}}};
+    const auto result = heatmap::compose(std::array{c, a, b}, 16 * minute);
+    EXPECT_EQ(result.startMs, epoch);
+    EXPECT_EQ(result.endMs, epoch + 64 * minute);
+    EXPECT_EQ(result.scannedRanges, (std::vector<heatmap::SparseColumns::TimeRange>{
+        {epoch + 16 * minute, epoch + 32 * minute}, {epoch + 48 * minute, epoch + 64 * minute}}));
+    EXPECT_EQ(heatmap::bucketState(result, epoch), BucketState::NotLoaded);
+    EXPECT_EQ(heatmap::bucketState(result, epoch + 16 * minute), BucketState::Present);
+    EXPECT_EQ(heatmap::bucketState(result, epoch + 32 * minute), BucketState::NotLoaded);
+    EXPECT_EQ(heatmap::bucketState(result, epoch + 48 * minute), BucketState::Gap);
+    EXPECT_EQ(heatmap::bucketState(result, epoch + 64 * minute), BucketState::NotLoaded);
+    ASSERT_EQ(result.columns.size(), 1u);
+    EXPECT_EQ(heatmap::bucketState(heatmap::compose(result, 32 * minute), epoch), BucketState::NotLoaded);
+    auto noProof = a;
+    noProof.scannedRanges.clear();
+    EXPECT_THROW(heatmap::validate(noProof), std::invalid_argument);
+    noProof.columns.clear();
+    const auto unloaded = heatmap::compose(noProof, 16 * minute);
+    EXPECT_TRUE(unloaded.scannedRanges.empty());
+    EXPECT_TRUE(unloaded.columns.empty());
+    // A coarse level's bounding extent alone must not supersede loaded minutes.
+    heatmap::SparseColumns hours{"BTC-USD", "deep", hour, epoch, epoch + 2 * hour, {},
+        {{epoch, epoch + hour}}};
+    heatmap::SparseColumns tail{"BTC-USD", "deep", minute, epoch + hour, epoch + 2 * hour,
+        {heatmap::fromRecording(makeMinute(61))}, {{epoch + hour, epoch + 2 * hour}}};
+    const auto mixed = heatmap::compose(std::array{hours, tail}, hour);
+    EXPECT_EQ(heatmap::bucketState(mixed, epoch), BucketState::Gap);
+    EXPECT_EQ(heatmap::bucketState(mixed, epoch + hour), BucketState::Present);
+}
+
+TEST(HeatmapModelRows, SparseMergeAndWholeColumnBinningMatchCellOracle) {
+    auto r = makeMinute(0, "near");
+    r.observedMs = minute;
+    r.bidRowLo = r.askRowLo = 100'000;
+    r.bidRowHi = r.askRowHi = 700'000;
+    r.entries = {{100'000, false, 10000, 10000, minute}, {700'000, true, 11000, 11000, minute}};
+    auto second = r;
+    second.bucketStartMs += minute;
+    second.entries[0].twapCode = 12000;
+    second.askRowLo += 10;
+    heatmap::SparseColumns minutes{"BTC-USD", "near", minute, epoch, epoch + 2 * minute,
+        {heatmap::fromRecording(r), heatmap::fromRecording(second)}, {{epoch, epoch + 2 * minute}}};
+    const auto composed = heatmap::compose(minutes, 2 * minute);
+    ASSERT_EQ(composed.columns.size(), 1u);
+    const auto& column = composed.columns[0];
+    EXPECT_EQ(column.native[0].entries.size(), 2u);
+    EXPECT_TRUE(column.native[0].composed);
+    const auto cells = heatmap::binColumn(column, 0, 800'000, 100'000);
+    ASSERT_EQ(cells.size(), 8u);
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const auto oracle = heatmap::binCell(column, double(7 - i) * 100'000, 100'000);
+        EXPECT_EQ(cells[i].code, oracle.code);
+        EXPECT_EQ(cells[i].valid, oracle.valid);
+        EXPECT_EQ(cells[i].dominantAsk, oracle.dominantAsk);
+        EXPECT_DOUBLE_EQ(cells[i].bid, oracle.bid);
+        EXPECT_DOUBLE_EQ(cells[i].ask, oracle.ask);
+    }
+    static_assert(sizeof(heatmap::SparseEntry) == 8);
+    EXPECT_TRUE(minutes.columns[0].native[0].entryCoveredMs.empty());
+    auto broken = minutes;
+    std::swap(broken.columns[0].native[0].entries[0], broken.columns[0].native[0].entries[1]);
+    EXPECT_THROW(heatmap::validate(broken), std::invalid_argument);
+}
+
+TEST(HeatmapModelTiming, SyntheticMonthOfDeepHoursReportsComposeMilliseconds) {
+    // A single assert-free timing sample, not a latency gate or benchmark loop.
+    // 720 input columns fit on one screen at >=1px/column; fixture construction
+    // is excluded. Include full validation, decode tables and output allocation.
+    constexpr int64_t rows = 4096;
+    heatmap::SparseColumns hours{"BTC-USD", "deep", hour, epoch, epoch + 30 * day, {},
+        {{epoch, epoch + 30 * day}}};
+    size_t entries = 0;
+    for (int64_t h = 0; h < 720; ++h) {
+        if (h % 19 == 3) continue;
+        heatmap::NativeColumn n;
+        n.grid = {42, 500, 100}; n.baseRow = 20'000;
+        n.observedMs = h % 13 ? hour : hour / 3;
+        n.coverage[0] = {{n.baseRow, n.baseRow + rows - 1, n.observedMs}};
+        n.coverage[1] = n.coverage[0];
+        for (uint32_t row = 0; row < rows; ++row) for (bool ask : {false, true})
+            n.entries.push_back({row | (uint32_t(ask) << 31), uint16_t(10000 + (row * 7 + h * 11 + ask) % 2000)});
+        entries += n.entries.size();
+        hours.columns.push_back({epoch + h * hour, n.observedMs, 0, {std::move(n)}});
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = heatmap::compose(hours, 4 * hour);
+    const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    std::cout << "heatmap month compose: input_hours=720 native_rows=" << rows << " entries=" << entries
+              << " output_columns=" << result.columns.size() << " tf_ms=" << result.tfMs
+              << " elapsed_ms=" << elapsed << " target_ms=50 (informational)\n";
 }
 
 TEST(HeatmapModelPrecision, ComposedNumeratorsAvoidAnExtraLogCodeStep) {
@@ -316,13 +465,19 @@ TEST(HeatmapModelPrecision, ComposedNumeratorsAvoidAnExtraLogCodeStep) {
     b.observedMs = 17'123;
     b.entries[0].twapCode = 10216;
     const heatmap::SparseColumns minutes{"BTC-USD", "near", minute, epoch, epoch + 2 * minute,
-        {heatmap::fromRecording(a), heatmap::fromRecording(b)}};
+        {heatmap::fromRecording(a), heatmap::fromRecording(b)}, {{epoch, epoch + 2 * minute}}};
     const auto composed = heatmap::compose(minutes, 2 * minute);
     ASSERT_EQ(composed.columns.size(), 1u);
     EXPECT_EQ(heatmap::binCell(composed.columns.front(), 100'000, 2).code, 10846);
     auto quantized = composed.columns.front();
     quantized.native.front().numerators.clear();
-    // The old lab contract loses one final display code by rounding row means.
+    auto malformed = composed;
+    malformed.columns.front() = quantized;
+    EXPECT_THROW(heatmap::validate(malformed), std::invalid_argument);
+    EXPECT_THROW(heatmap::compose(malformed, 4 * minute), std::invalid_argument);
+    EXPECT_THROW(heatmap::binCell(quantized, 100'000, 2), std::invalid_argument);
+    // Deliberately reinterpret rounded means as raw data to demonstrate the loss.
+    quantized.native.front().composed = false;
     EXPECT_EQ(heatmap::binCell(quantized, 100'000, 2).code, 10845);
 }
 

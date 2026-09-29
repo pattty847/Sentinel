@@ -1,4 +1,5 @@
 #include "BinCell.hpp"
+#include "NativeRows.hpp"
 #include <map>
 #include <stdexcept>
 
@@ -88,9 +89,71 @@ std::vector<BinCell> binColumn(const SparseColumn& column, double priceLo, doubl
     const auto end = std::ceil(gridPosition(priceHi, displayTick));
     if (end - lo < 1 || end - lo > 16384 || end > 0x1p52)
         throw std::invalid_argument("heatmap price range exceeds row limit");
-    std::vector<BinCell> cells;
-    cells.reserve(static_cast<size_t>(end - lo));
-    for (auto row = end; row > lo; --row) cells.push_back(binCell(column, (row - 1) * displayTick, displayTick, outputScale));
+    const auto count = static_cast<size_t>(end - lo);
+    std::vector<BinCell> cells(count);
+    if (!column.observedMs || column.native.empty()) return cells;
+    const double bandLo = lo * displayTick, bandEnd = end * displayTick;
+    struct Group { double tick; std::vector<const NativeColumn*> sources; };
+    std::vector<Group> groups;
+    for (const auto& native : column.native) {
+        const auto tick = native.grid.rowTickUnits / native.grid.priceScale;
+        const auto factor = displayTick / tick;
+        if (!std::isfinite(tick) || tick <= 0 || !std::isfinite(factor) || factor < 1 ||
+            std::abs(factor - std::round(factor)) >= 1e-8 ||
+            gridPosition(bandLo, tick) != std::round(bandLo / tick) || bandEnd / tick > 0x1p52) return cells;
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& g) { return g.tick == tick; });
+        if (it == groups.end()) groups.push_back({tick, {&native}});
+        else it->sources.push_back(&native);
+    }
+    std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
+    for (auto& cell : cells) cell.valid = true;
+    std::vector<std::array<long double, 2>> values(count), nativeValues(count);
+    detail::DecodeTables tables;
+    for (const auto& grid : groups) {
+        const auto nativeLo = static_cast<int64_t>(std::llround(bandLo / grid.tick));
+        const auto nativeEnd = static_cast<int64_t>(std::llround(bandEnd / grid.tick));
+        const auto factor = static_cast<int64_t>(std::llround(displayTick / grid.tick));
+        const auto aggregate = detail::aggregateRows(grid.sources, tables, nativeLo, nativeEnd);
+        std::fill(nativeValues.begin(), nativeValues.end(), std::array<long double, 2>{});
+        for (size_t side = 0; side < 2; ++side) {
+            const auto& runs = aggregate.coverage[side];
+            size_t runIndex = 0;
+            for (size_t row = 0; row < count; ++row) {
+                const auto cellLo = nativeLo + static_cast<int64_t>(row) * factor;
+                const auto cellEnd = cellLo + factor;
+                auto cursor = cellLo;
+                while (cursor < cellEnd) {
+                    while (runIndex < runs.size() && runs[runIndex].hi < cursor) ++runIndex;
+                    if (runIndex == runs.size() || runs[runIndex].lo > cursor) {
+                        cells[count - 1 - row].valid = false;
+                        break;
+                    }
+                    if (runs[runIndex].coveredMs != aggregate.observedMs) cells[count - 1 - row].valid = false;
+                    cursor = std::min(cellEnd, runs[runIndex].hi + 1);
+                }
+            }
+            runIndex = 0;
+            for (const auto& row : aggregate.rows) {
+                while (runIndex < runs.size() && runs[runIndex].hi < row.row) ++runIndex;
+                if (runIndex == runs.size() || runs[runIndex].lo > row.row) continue;
+                const auto index = count - 1 - static_cast<size_t>((row.row - nativeLo) / factor);
+                nativeValues[index][side] += row.numerator[side] / runs[runIndex].coveredMs;
+            }
+        }
+        const auto weight = static_cast<long double>(aggregate.observedMs) / column.observedMs;
+        for (size_t row = 0; row < count; ++row)
+            for (size_t side = 0; side < 2; ++side) values[row][side] += nativeValues[row][side] * weight;
+    }
+    for (size_t row = 0; row < count; ++row) {
+        auto& cell = cells[row];
+        cell.bid = static_cast<double>(values[row][0]);
+        cell.ask = static_cast<double>(values[row][1]);
+        if (!std::isfinite(cell.bid) || !std::isfinite(cell.ask))
+            throw std::runtime_error("nonfinite binned heatmap quantity");
+        cell.dominantAsk = values[row][1] > values[row][0];
+        cell.code = recording::withSide(recording::encodeSize(cell.dominantAsk ? cell.ask : cell.bid, outputScale),
+                                        cell.dominantAsk);
+    }
     return cells;
 }
 } // namespace heatmap

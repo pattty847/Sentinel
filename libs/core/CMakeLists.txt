@@ -45,6 +45,7 @@ add_library(sentinel_core
     heatmap/SparseColumns.hpp
     heatmap/TimeComposer.cpp
     heatmap/TimeComposer.hpp
+    heatmap/NativeRows.hpp
     heatmap/BinCell.cpp
     heatmap/BinCell.hpp
     heatmap/HeatmapResolution.hpp

@@ -13,7 +13,9 @@ struct BinCell {
 BinCell binCell(const SparseColumn& column, double priceLo, double displayTick,
                 const recording::SizeScale& outputScale = {});
 // Outward-align a price range to displayTick and return cells in descending price
-// order, the same lower-edge convention as recording::buildPage.
+// order, the same lower-edge convention as recording::buildPage. Aggregates each
+// constituent once and sweeps native rows/coverage into all display cells; does
+// not invoke the per-cell oracle. Input must have passed validate().
 std::vector<BinCell> binColumn(const SparseColumn& column, double priceLo, double priceHi,
                               double displayTick, const recording::SizeScale& outputScale = {});
 } // namespace heatmap

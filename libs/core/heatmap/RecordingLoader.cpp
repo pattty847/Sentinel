@@ -28,15 +28,22 @@ SparseColumn fromRecording(const recording::Hmc2Record& record) {
     for (const auto& e : record.entries) {
         if (h.tfMs == kMinuteMs && (e.row < (e.isAsk ? record.askRowLo : record.bidRowLo) ||
                                   e.row > (e.isAsk ? record.askRowHi : record.bidRowHi))) continue;
-        n.entries.push_back({packRowSide(e.row, n.baseRow, e.isAsk), uint16_t(e.twapCode & recording::kMaxCode),
-                             h.tfMs == kHourMs ? e.coveredMs : record.observedMs});
+        n.entries.push_back({packRowSide(e.row, n.baseRow, e.isAsk), uint16_t(e.twapCode & recording::kMaxCode)});
+        if (h.tfMs == kHourMs) {
+            if (e.coveredMs != n.observedMs && n.entryCoveredMs.empty()) {
+                n.entryCoveredMs.reserve(record.entries.size());
+                n.entryCoveredMs.resize(n.entries.size() - 1, n.observedMs);
+            }
+            if (e.coveredMs != n.observedMs || !n.entryCoveredMs.empty()) n.entryCoveredMs.push_back(e.coveredMs);
+        }
     }
     out.native.push_back(std::move(n));
     return out;
 }
 SparseColumns loadRecording(recording::Hmc2Reader& reader, const std::string& symbol,
                              const std::string& layer, int64_t levelMs, int64_t startMs, int64_t endMs) {
-    SparseColumns out{symbol, layer, levelMs, startMs, endMs, {}};
+    SparseColumns out{symbol, layer, levelMs, startMs, endMs, {}, {}};
+    if (startMs < endMs) out.scannedRanges.push_back({startMs, endMs});
     validate(out);
     if ((levelMs != kMinuteMs && levelMs != kHourMs) || (levelMs == kHourMs && layer != "deep") ||
         startMs < recording::kHmc2MinMs || endMs > recording::kHmc2EndMs)

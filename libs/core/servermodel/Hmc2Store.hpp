@@ -16,14 +16,6 @@ inline constexpr uint32_t kHmc2MaxRawLen = 16 * 1024 * 1024;
 // Supported UTC calendar years: 2000 through 2200 inclusive.
 inline constexpr int64_t kHmc2MinMs = 946684800000LL;
 inline constexpr int64_t kHmc2EndMs = 7289654400000LL; // 2201-01-01, exclusive
-inline constexpr uint32_t kPartial = 1u << 0;
-inline constexpr uint32_t kResynced = 1u << 1;
-inline constexpr uint32_t kLateEvents = 1u << 2;
-inline constexpr uint32_t kUnderflow = 1u << 3;
-inline constexpr uint32_t kApproximateCoverage = 1u << 4;
-
-// Publication/wire only; never persisted.
-inline constexpr uint32_t kProvisional = 1u << 5;
 
 struct Hmc2Header {
     std::string symbol, layer;
