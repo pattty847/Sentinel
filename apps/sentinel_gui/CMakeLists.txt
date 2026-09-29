@@ -6,7 +6,7 @@ target_link_libraries(sentinel_gui
 )
 
 set_target_properties(sentinel_gui PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps/sentinel-gui/$<CONFIG>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps/sentinel-gui$<$<BOOL:${CMAKE_CONFIGURATION_TYPES}>:/$<CONFIG>>"
     OUTPUT_NAME "sentinel-gui"
 )
 
