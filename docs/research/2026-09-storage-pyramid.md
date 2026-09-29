@@ -368,19 +368,30 @@ limitation rather than altering the server.
 
 ### Measurement table
 
-Live values are deliberately unfilled; the owner/orchestrator runs the command.
-Report the feed/config and interval alongside numbers. The production reference
-and local-feed minute row do not have the same input-depth/precision contract.
+Live run: BTC-USD, 60 minutes, 2026-09-29 04:04-05:04 EDT, local parsed stream from
+the production recorder server (`storage_probe` at `47da96f`), zstd level 3, near and
+deep layers per the production config, 15-minute keyframes, peak enabled. 65,618 stream
+messages (about 18/s; the server coalesces upstream deltas), one snapshot, no
+invalidations. The production reference and local-feed minute row do not have the same
+input-depth/precision contract.
 
-| Source / encoder | Duration | Encoded bytes/hour | Extrapolated MB/day | CPU seconds | Notes |
+| Source / encoder | Duration | Encoded bytes/hour | Extrapolated MB/day | CPU seconds (1 h) | Notes |
 |---|---:|---:|---:|---:|---|
-| Existing production minute recording | owner measurement | ~625,000 | ~15 | not supplied | Reference only; no new live measurement |
-| Local raw parsed L2 | pending | pending | pending | pending | Includes initial snapshot; no periodic replay checkpoints |
-| Local 100 ms TWAP + peak, near+deep | pending | pending | pending | pending | 15-minute keyframes |
-| Local 1 s TWAP + peak, near+deep | pending | pending | pending | pending | Same interval |
-| Local 10 s TWAP + peak, near+deep | pending | pending | pending | pending | Candidate intermediate tier |
-| Local 1 m TWAP + peak, near+deep | pending | pending | pending | pending | Codec comparable; source not production-equivalent |
+| Existing production minute recording | owner measurement | ~625,000 | ~15 | not supplied | Reference only |
+| Local raw parsed L2 | 60 min | 7,042,508 | 169.0 | 0.34 | Includes initial snapshot; lower bound for full exchange L2 |
+| Local 100 ms TWAP + peak, near+deep | 60 min | 21,764,868 | 522.4 | 49.7 | near 12.1 MB/h, deep 9.6 MB/h |
+| Local 1 s TWAP + peak, near+deep | 60 min | 6,123,905 | 147.0 | 5.5 | near 4.2 MB/h, deep 2.0 MB/h |
+| Local 10 s TWAP + peak, near+deep | 60 min | 1,862,972 | 44.7 | 1.8 | Candidate intermediate tier |
+| Local 1 m TWAP + peak, near+deep | 60 min | 796,326 | 19.1 | 1.4 | Includes startup keyframes; production runs ~15 MB/day |
 | Exact-sums pyramid | not implemented | not measured | not measured | not measured | Requires new schema and common validity/window policy |
+
+Reading (orchestrator, 2026-09-29): per year that is about 62 GB raw, 190 GB at 100 ms,
+54 GB at 1 s, 16 GB at 10 s and 7 GB at 1 m for one symbol. The raw event log costs about
+the same as 1 s columns, less than 100 ms columns, and almost no CPU, while being the only
+option that can rebuild any level and replay the book. Proposal for the owner's decision:
+keep the raw log as the source of truth; keep 1 m and 1 h forever; keep 1 s rolling (about
+30 days, ~4.4 GB); build 100 ms on demand from raw (or keep about 7 days, ~3.7 GB). Measure
+the true exchange feed size before committing, since this stream is already coalesced.
 
 Synthetic traffic is deterministic (4,000 initial levels, 50 single-level updates/sec,
 static best-price neighborhood with rotating sizes). It is a regression fixture,
