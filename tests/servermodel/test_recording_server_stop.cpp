@@ -97,10 +97,13 @@ struct RecordingServerStopTest {
         ioc.run(); // late completion and cancelled timer must not publish
         EXPECT_EQ(session->write_queue_.size(), 1);
     }
+    // Longer than the 3 s wait for the ClientHello below, so the fetch is
+    // still blocked in TLS when stop() runs.
+    static constexpr auto kStalledFetchDeadline = std::chrono::seconds(5);
     static std::weak_ptr<Session> startCandleFetch(SentinelStreamServer& server, ServerDataModel& model,
                                                   Authenticator& auth, unsigned short port) {
         server.m_restClient = std::make_unique<CoinbaseRestClient>(auth, "127.0.0.1", std::to_string(port),
-                                                                 "", std::chrono::seconds(2));
+                                                                 "", kStalledFetchDeadline);
         server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
         startExecutor(server);
         std::promise<std::weak_ptr<Session>> created;
@@ -315,7 +318,8 @@ TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
     server->stop();
     EXPECT_TRUE(session.expired()); // no detached fetch retains a session/executor
     server.reset();
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(4));
+    EXPECT_LT(std::chrono::steady_clock::now() - start,
+              RecordingServerStopTest::kStalledFetchDeadline + std::chrono::seconds(2));
     EXPECT_EQ(closedFuture.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
 }
 

@@ -87,6 +87,9 @@ ProcessResult runBoundedProcess(const QString& program, const QStringList& argum
     if (stopped()) { result.error = "process cancelled"; return result; }
     QProcess process;
 #ifdef Q_OS_UNIX
+    // Do not let the screener inherit server sockets or files (a hung child
+    // would otherwise hold the listen port across a server restart).
+    process.setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors);
     process.setChildProcessModifier([&process] {
         if (::setpgid(0, 0) == -1) process.failChildProcessModifier("setpgid", errno);
     });
