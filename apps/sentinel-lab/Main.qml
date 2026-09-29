@@ -10,7 +10,7 @@ ApplicationWindow {
     height: 940
     minimumWidth: 900
     minimumHeight: 600
-    title: "Sentinel · GPU bin lab"
+    title: "Sentinel · GPU heatmap lab (HeatmapRenderNode)"
     color: "#070b10"
     property var metrics: ({})
     property var frameHistory: []
@@ -25,7 +25,7 @@ ApplicationWindow {
             customTf.text = String(initialTf)
         }
         if (initialSynthetic > 0) {
-            source.currentIndex = initialSynthetic >= 100000000 ? 3 : initialSynthetic >= 10000000 ? 2 : 1
+            source.currentIndex = initialSynthetic >= 10000000 ? 2 : 1
             binLab.loadSynthetic(initialSynthetic)
         } else {
             hours.value = initialHours
@@ -78,7 +78,7 @@ ApplicationWindow {
                 Label { text: "GPU BIN LAB"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 16; Layout.rightMargin: 16 }
                 ComboBox {
                     id: source
-                    model: ["Real HMC2", "Synthetic 1M", "Synthetic 10M", "Synthetic 100M"]
+                    model: ["Real HMC2", "Synthetic 1M", "Synthetic 10M"]
                     Layout.preferredWidth: 170
                 }
                 Label { text: "Hours"; color: "#aab7c0"; visible: source.currentIndex === 0 }
@@ -88,7 +88,7 @@ ApplicationWindow {
                     text: "Load"
                     onClicked: {
                         if (source.currentIndex === 0) binLab.loadReal(hours.value, layer.currentText)
-                        else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : source.currentIndex === 2 ? 10000000 : 100000000)
+                        else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : 10000000)
                     }
                 }
                 Label { text: binLab.status; color: "#b9c9d2"; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -231,7 +231,7 @@ ApplicationWindow {
                         ["Loaded entries", "entries", ""], ["GPU buffers", "gpuBytes", " bytes"],
                         ["Ticks / bin", "group", ""], ["Display tick", "tick", " $"],
                         ["Grid", "columns", " cols"], ["Rows", "rows", ""],
-                        ["Load", "loadMs", " ms"], ["Decode", "decodeMs", " ms"],
+                        ["Load", "loadMs", " ms"], ["Compose", "composeMs", " ms"], ["GPU source build", "buildMs", " ms"],
                         ["First painted", "firstFrameMs", " ms"]
                     ]
                     delegate: RowLayout {
@@ -249,7 +249,7 @@ ApplicationWindow {
                 }
                 Item { Layout.fillHeight: true }
                 Label {
-                    text: "Unknown coverage is veiled. Source entries stay resident on the GPU while view changes rebuild only the output grid."
+                    text: "Time is composed on the CPU at the selected timeframe; the GPU bins price only. Grey veil: scanned but unproven. Blue hatch: not loaded yet. Empty: no data before the oldest recording. Pans inside the grid only move the picture; re-bins happen on tick, timeframe or source change."
                     color: "#8198a6"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
                 }
             }

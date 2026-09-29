@@ -163,6 +163,79 @@ Each slice gets a short tag: S1 (model), S2 (server chunks), S3 (wire), S4 (GPU)
 
 S2 opt-in real-recording benchmark (`SENTINEL_CHUNK_BENCH=1`, latest complete 24 hours, 2026-09-29, arm64 Mac, revised v1): deep 82,294 encoded bytes/hour, 7.40 ms encode, 5.59 ms decode, 24.19 ms cold reader; near 177,320 bytes/hour, 3.12 ms encode, 1.97 ms decode, 26.74 ms cold reader. Bytes are the cacheable SHC1 body; a request envelope adds 14 bytes per response.
 
+**S4 spike answer (2026-09-29, Qt 6.11.2, Metal, arm64 Mac): yes, a compute pass can be recorded in `QSGRenderNode::prepare()`.**
+- Evidence: `tests/render/test_qsg_compute_spike.cpp` (ctest `QsgComputeSpikeTests`). A `QSGRenderNode` inside an ordinary `QQuickItem` tree calls `commandBuffer()->beginComputePass()`/`dispatch()`/`endComputePass()` in `prepare()`, writing a storage buffer, then reads that buffer in its fragment shader in `render()`, in the same frame. The rendered pixels equal the compute output, the rest of the scene is intact, and a second frame dispatches again. 20/20 repeats pass with the Metal API validation layer on (`METAL_DEVICE_WRAPPER_TYPE=1 MTL_DEBUG_LAYER=1`) with no validation messages.
+- Why it works: the batch renderer calls every render node's `prepare()` before it begins the main render pass, so the command buffer is outside a pass, which is what `beginComputePass()` requires. The compute encoder ends before the render encoder starts, so Metal orders the buffer write before the fragment read.
+- The test renders through `QQuickRenderControl` into a Metal texture (`libs/gui/lab/OffscreenQuick`), so it runs headless and with the screen locked. The same batch renderer drives an on-screen `QQuickWindow`. Under the offscreen QPA, the harness must call `QQuickWindow::setSceneGraphBackend("rhi")`, or Qt Quick selects the software adaptation.
+- Result: `HeatmapRenderNode` uses this mechanism. The `beforeRendering` fallback is not needed. D3D11 is unverified: the owner runs the same test on Windows.
+
+**S4 result (2026-09-29, `lt-claude/s4-gpu-binner`).** Code is in `libs/gui/render/heatmap/` (target `sentinel_heatmap_gpu`):
+- `HeatmapGpuSource`: a worker-built, immutable upload image of one composed `SparseColumns`.
+  - Time slots mark each bucket as column, `NotLoaded` or `Gap`.
+  - Same-tick constituents are pooled exactly as `binColumn` pools them.
+  - Each entry is a per-row value `numerator / pooled coverage * group weight`, computed in double and shipped as float-float: a float hi part plus a 15-bit low part quantized to ulp(hi)·2⁻¹⁴, which gives about 2⁻³⁸ relative error. An entry takes 8 bytes (12 bytes if a group's row span exceeds 16 bits).
+  - Coverage is stored as merged full-coverage runs. A row index (one entry per 16 rows) finds the first entry of a bin.
+  - The source records its advertised availability and an optional row clip.
+- `HeatmapGpuBinner`:
+  - Pages sources in within a per-frame byte budget, into fresh buffers. The active source keeps drawing until the new one is complete.
+  - The output buffer only grows. A resize does not touch the source buffers.
+  - Output is one `uint` per cell: code, side, and one of four states. The states are *data*, *veil* (scanned but unproven, or an incompatible grid), *loading* (not scanned yet, or outside the row clip) and *no data* (outside availability). On screen: palette, grey veil, blue diagonal hatch in screen pixels, and nothing drawn.
+- `HeatmapBinGrid`: absolute bucket and price-bin anchoring, with a 2-bin guard. A pan inside the guard changes only the draw mapping.
+- `HeatmapRenderNode`: compute in `prepare()`, draw in `render()`. While a new timeframe uploads, the grid uses the active source's timeframe, so old columns keep their true time extent and are never stretched.
+
+Findings the later slices need:
+- **Exact codes need float-float, and Metal fast math breaks naive float-float.** Qt compiles MSL with fast math on, which folds two-sum error terms to zero. GLSL `precise` survives (SPIRV-Cross emits `[[clang::optnone]]` `spvFAdd`), but it doubles the kernel time. The kernel instead passes every intermediate through an XOR with a runtime zero. Evidence:
+
+  | Kernel | Code mismatches, 10.2M real cells | Code mismatches, always-on stress test |
+  |---|---|---|
+  | float-only sums | 381 | not run |
+  | float-float without the XOR | 381 | 9 |
+  | shipped (XOR laundering) | 0 | 0 |
+
+- **Display ticks must be multiples of `commonTick()`**, the LCM of a source's native ticks. The last deep day mixes $10 and $5 grids. A ladder tick of $25 would veil every $10 column as incompatible. S7's tick policy must use it.
+- **Parity:**
+  - Synthetic: 529k cells covering gaps, grid and size-scale changes, NotLoaded ranges, hour+minute levels, row clip and an incompatible tick. Stress test: 728k cells.
+  - Real data, opt-in (`SENTINEL_HEATMAP_REAL_PARITY=1`, previous closed UTC day, deep 1m/5m/1h and near 1m): 10.2M cells.
+  - All have zero state, code, side or validity mismatches against `bucketState` + `binColumn`.
+- **Bench** (`sentinel-lab --bench`, base Apple M4 at 120 GB/s, last 24 h, 25 zoom levels × 200 compute passes per grid, GPU timestamps). Targets: p95 < 1 ms at 1x, p95 < 2 ms at 2x.
+
+  | Case | Entries | GPU source | 1x p95 / max (ms) | 2x p95 / max (ms) | Result |
+  |---|---|---|---|---|---|
+  | deep 1m | 20.4M | 178 MB | 1.96 / 2.27 | 1.93 / 2.45 | **1x missed**, 2x met |
+  | deep 5m | 4.1M | 36 MB | 0.56 / 0.67 | 0.52 / 0.59 | met |
+  | deep 1h | 0.35M | 3 MB | 0.06 / 0.10 | 0.05 / 0.07 | met |
+  | near 1m | 6.5M | 55 MB | 0.93 / 1.13 | 1.09 / 1.38 | met |
+
+  - Why deep 1m misses: cost is linear in visible entries. The full-day zoom level reads 17.9M entries (143 MB) in 2.27 ms. The memory bandwidth floor for that level alone is about 1.2 ms, so p95 < 1 ms is physically out of reach whenever the view shows a full deep day at 1m.
+  - The cost is per re-bin (tick, timeframe or source change, or leaving the guard), not per frame. A pan inside the guard does no compute.
+  - Levels that show ≤ 5M entries run under 1 ms.
+  - Options for the owner: accept about 2 ms re-bins at maximum zoom-out, or let the auto timeframe step up (1m → 5m) above a visible-entry budget.
+- **Kernel changes tried and measured.**
+  - Kept: compensated accumulation with one renormalization, the row index, and a log-estimated code corrected against the threshold table. Workgroup size (1×64 through 64×1) moves the time by only ±5%.
+  - Rejected, slower: one thread per strip of 8 bins with walking cursors (3.7 ms), and an interpolation or galloping search (4.7 ms).
+- **Lab:** `sentinel-lab` now hosts `HeatmapRenderNode` in a plain `QQuickItem`, which exercises the production path. This replaces `QQuickRhiItem`. `--screenshot` renders headless through `QQuickRenderControl`.
+- **Deleted:** the lab `GpuBinner` and its shaders, `servermodel/RecordingEntries`, and their tests.
+- **Review fixes (Codex gpt-6-sol review, same day):**
+  - *D3D11 buffer size:* entries now live in up to 8 pages of ≤ 64 MiB. A native-tick group never straddles a page (the builder pads), so the kernel picks the page once per group. Every other source buffer is capped at 128 MiB. The deep day uses 3 pages. The first per-read page switch doubled the kernel time; choosing the page per group removed that cost (deep 1m 1x p95 2.02 ms, near 1m 0.88 ms).
+  - *Allocation:* two grow-only buffer sets (active and spare) are reused across sources. At most one source is pending. A new capacity need creates at most one large buffer per upload step. A failed allocation or a refused source drops only the pending source; the active one keeps drawing. Re-requesting the active source cancels a pending upload (A → B → A).
+  - *Re-bin key:* now includes the output size scale and the kernel variant, as well as the source id and grid coverage.
+  - *Display tick:* the node picks it for the source it actually draws (`TickPolicy`), never for a still-pending one.
+  - *Runtime precision self-test* (`HeatmapGpuSelfTest`), once per QRhi backend and device:
+    - The fixture is 384 cells: 128 adversarial bins, whose exact sum lies 1e-9 above a code threshold while a plain float sum stays below it, plus random bins. It is compared with `binColumn`.
+    - Until the test resolves, the binner uses the `precise` kernel variant. It switches to the fast kernel only if the test passes, and logs the result either way.
+    - On this M4 the fast kernel passes. A folding kernel fails 128/384 cells and is rejected (test).
+    - The precise fallback measures p95 3.22 ms against the fast kernel's 2.02 ms on deep 1m at 1x.
+- **Second review round:**
+  - *Refused sources are not retried every frame.* The binner remembers the refused source id and reports it once.
+    - A source refused for limits or for the memory cap is never retried until a different source (or cap) arrives.
+    - After an allocation failure it retries after a backoff of 2 s, doubling to 60 s.
+  - *GPU memory cap.* Both source buffer sets together (active + spare) are capped at 512 MiB by default (`Frame::gpuMemoryCapBytes`, a constructor value). Before refusing, the binner releases unused spare pages. A refused source never disturbs the active one.
+  - *Self-test fixture off the render thread.* The fixture (including the ~18 ms threshold table) is built once per process on a worker, started when the item or node is constructed. `prepare()` only records the self-test dispatch and readback, and only once an active source exists.
+- **Unverified:**
+  - The on-screen interactive lab window: the screen was locked, so no manual pan or zoom was done.
+  - D3D11: HLSL 5.0 shaders compile (all three variants), but nothing has run.
+  - Memory at 2x with several charts. The spare buffer set keeps the capacity of the largest earlier source (up to about 2× the source bytes).
+
 - **Order:** S1 → (S2 ‖ S4 ‖ S5) → S3 (after L) → S6 → S7 → S8, then S9.
 - **Parallel by files:** L with S1/S2/S4/S5; S2, S4 and S5 with each other.
 - **Serial:** S3/L (SentinelStreamServer.cpp) and S6/S7/S8 (hot GUI files).

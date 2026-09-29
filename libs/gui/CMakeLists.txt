@@ -171,14 +171,59 @@ set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})
 
-# The recording GPU experiment is isolated from the production GUI target.
+# GPU heatmap price binning (integration slice S4). Its own target so the lab,
+# tests and (from S6) sentinel_gui_lib link the same code without the whole GUI.
+add_library(sentinel_heatmap_gpu STATIC
+    render/heatmap/HeatmapBinGrid.hpp
+    render/heatmap/HeatmapGpuSource.hpp
+    render/heatmap/HeatmapGpuSource.cpp
+    render/heatmap/HeatmapGpuSelfTest.hpp
+    render/heatmap/HeatmapGpuSelfTest.cpp
+    render/heatmap/HeatmapGpuBinner.hpp
+    render/heatmap/HeatmapGpuBinner.cpp
+    render/heatmap/HeatmapRenderNode.hpp
+    render/heatmap/HeatmapRenderNode.cpp
+)
+qt_add_shaders(sentinel_heatmap_gpu heatmap_gpu_shaders
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/heatmapgpu"
+    BASE "render/heatmap/shaders"
+    FILES
+        render/heatmap/shaders/heatmap_bin.comp
+        render/heatmap/shaders/heatmap_display.vert
+        render/heatmap/shaders/heatmap_display.frag
+)
+# The same kernel with GLSL `precise` float-float: used when the fast kernel
+# fails the runtime precision self-test (HeatmapGpuSelfTest).
+qt_add_shaders(sentinel_heatmap_gpu heatmap_gpu_precise_shader
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/heatmapgpu"
+    BASE "render/heatmap/shaders"
+    DEFINES HEATMAP_PRECISE
+    FILES render/heatmap/shaders/heatmap_bin.comp
+    OUTPUTS heatmap_bin_precise.comp.qsb
+)
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+target_include_directories(sentinel_heatmap_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sentinel_heatmap_gpu
+    PUBLIC sentinel_core Qt6::Core Qt6::Gui Qt6::Quick
+    PRIVATE Qt6::GuiPrivate
+)
+
+# Lab: benchmark/inspection harness around the production heatmap GPU path.
 add_library(sentinel_lab_lib
-    lab/GpuBinner.hpp
-    lab/GpuBinner.cpp
+    lab/LabSources.hpp
+    lab/LabSources.cpp
     lab/LabItem.hpp
     lab/LabItem.cpp
     lab/Bench.hpp
     lab/Bench.cpp
+    lab/OffscreenQuick.hpp
+    lab/OffscreenQuick.cpp
 )
 set_target_properties(sentinel_lab_lib PROPERTIES AUTOMOC ON)
 
@@ -310,16 +355,6 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/footprint_intensity.frag
 )
 
-qt_add_shaders(sentinel_lab_lib lab_shaders
-    GLSL "440"
-    PREFIX "/labshaders"
-    BASE "lab/shaders"
-    FILES
-        lab/shaders/bin.comp
-        lab/shaders/display.vert
-        lab/shaders/display.frag
-)
-
 target_include_directories(sentinel_gui_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/render
@@ -348,7 +383,7 @@ find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 target_link_libraries(sentinel_gui_lib PRIVATE Qt6::GuiPrivate)
 target_include_directories(sentinel_lab_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sentinel_lab_lib
-    PUBLIC sentinel_core Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
+    PUBLIC sentinel_core sentinel_heatmap_gpu Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
     PRIVATE Qt6::GuiPrivate
 )
 
@@ -380,4 +415,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-shadow           # Qt macros cause shadow warnings
     )
     target_compile_options(sentinel_lab_lib PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_compile_options(sentinel_heatmap_gpu PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()

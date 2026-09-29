@@ -1,13 +1,18 @@
 #include "Bench.hpp"
-#include "GpuBinner.hpp"
-#include "servermodel/PriceLadder.hpp"
-#include <QDateTime>
+#include "LabItem.hpp"
+#include "LabSources.hpp"
+#include "OffscreenQuick.hpp"
+#include "heatmap/HeatmapResolution.hpp"
+#include "render/heatmap/HeatmapGpuBinner.hpp"
+#include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
-#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
 #include <algorithm>
@@ -17,9 +22,6 @@
 #include <iostream>
 #include <memory>
 #include <vector>
-#ifdef Q_OS_MACOS
-#include <dlfcn.h>
-#endif
 
 namespace lab {
 namespace {
@@ -29,338 +31,233 @@ double elapsed(Clock::time_point start) {
 }
 double percentile(const std::vector<double> &v, double p) {
     if (v.empty()) return 0;
-    const size_t i = std::min(v.size() - 1, size_t(std::ceil(p * v.size()) - 1));
-    return v[i];
+    return v[std::min(v.size() - 1, size_t(std::ceil(p * double(v.size())) - 1))];
 }
 void print(const QJsonObject &obj) {
-    std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).constData() << '\n';
+    std::cout << QJsonDocument(obj).toJson(QJsonDocument::Compact).constData() << std::endl;
+}
+LabSource loadSource(int hours, const QString &layer, uint32_t synthetic, int tfMinutes) {
+    const int64_t tf = int64_t(tfMinutes) * heatmap::kMinuteMs;
+    return synthetic ? syntheticSource(synthetic, tf) : loadRealSource(layer.toStdString(), hours, hours, tf);
+}
+// Source entries whose bucket and native rows fall inside the grid.
+uint64_t visibleEntries(const heatmap::gpu::GpuSource &s, const heatmap::gpu::BinGrid &grid) {
+    const auto factors = heatmap::gpu::tickFactors(s, grid.displayTick);
+    uint64_t total = 0;
+    for (uint32_t x = 0; x < grid.columns; ++x) {
+        const int64_t slot = grid.firstBucket + x - s.firstBucket;
+        if (slot < 0 || slot >= int64_t(s.bucketSlots.size())) continue;
+        const uint32_t c = s.bucketSlots[size_t(slot)];
+        if (c >= s.columns()) continue;
+        for (uint32_t g = s.columnGroups[c]; g < s.columnGroups[c + 1]; ++g) {
+            const auto &meta = s.groups[g];
+            const int64_t f = factors[meta.tickIndex];
+            if (!f) continue;
+            const int64_t lo = grid.firstBin * f - meta.baseRow, hi = (grid.firstBin + grid.rows) * f - meta.baseRow;
+            auto rowOf = [&](uint32_t i) {
+                const uint32_t key = s.wide ? s.entries[size_t(i) * 3 + 2] : (s.entries[size_t(i) * 2 + 1] & 0x1ffffu);
+                return int64_t(key >> 1);
+            };
+            auto lower = [&](int64_t row) {
+                uint32_t a = meta.entryBegin, b = meta.entryEnd;
+                while (a < b) { const uint32_t m = (a + b) / 2; if (rowOf(m) < row) a = m + 1; else b = m; }
+                return a;
+            };
+            total += lower(hi) - lower(lo);
+        }
+    }
+    return total;
 }
 } // namespace
 
 int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes) {
+    const QString sourceName = synthetic ? QStringLiteral("synthetic") : QStringLiteral("real");
     try {
-        recording::RecordingEntries data;
-        if (synthetic) data = recording::syntheticRecordingEntries(synthetic);
-        else {
-            const uint32_t sourceMinutes = uint32_t(tfMinutes);
-            const int64_t sourceMs = int64_t(sourceMinutes) * 60'000;
-            const int64_t nowMinute = QDateTime::currentMSecsSinceEpoch() / 60'000 * 60'000;
-            const int64_t end = sourceMinutes == 1 ? nowMinute :
-                ((nowMinute + sourceMs - 1) / sourceMs) * sourceMs;
-            const int64_t start = (nowMinute - int64_t(hours) * 3'600'000) / sourceMs * sourceMs;
-            data = sourceMinutes >= 60 && sourceMinutes % 60 == 0 && layer == "deep" ?
-                recording::loadComposedHourEntries("/Volumes/T7/sentinel-data/recording",
-                    "BTC-USD", layer.toStdString(), start, end, sourceMinutes) :
-                recording::loadComposedMinuteEntries("/Volumes/T7/sentinel-data/recording",
-                    "BTC-USD", layer.toStdString(), start, end, sourceMinutes);
-        }
-        if (data.rowSide.empty() || data.nativeTick <= 0) {
-            print({{"error", QStringLiteral("source has no sparse entries")},
-                   {"source", synthetic ? QStringLiteral("synthetic") : QStringLiteral("real")},
-                   {"layer", layer}, {"hours", hours}, {"entries", double(data.rowSide.size())},
-                   {"load_ms", data.loadMs}, {"decode_ms", data.decodeMs}});
-            return 2;
-        }
-#ifdef Q_OS_MACOS
-        // Qt's Metal QRhi aborts on a machine with no MTLDevice. Probe first so
-        // sandboxed runs return a useful JSON result instead of SIGABRT.
-        void *metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW);
-        auto createDevice = metal ? reinterpret_cast<void *(*)()>(dlsym(metal, "MTLCreateSystemDefaultDevice")) : nullptr;
-        const bool deviceAvailable = createDevice && createDevice();
-        if (metal) dlclose(metal);
-        if (!deviceAvailable) {
+        const LabSource source = loadSource(hours, layer, synthetic, tfMinutes);
+        const auto &gpu = *source.gpu;
+        if (!gpu.entryCount || gpu.ticks.empty()) throw std::runtime_error("source has no entries");
+        if (!metalDeviceAvailable()) {
             print({{"error", QStringLiteral("No MTLDevice (Metal unavailable in this sandbox)")},
-                   {"source", synthetic ? QStringLiteral("synthetic") : QStringLiteral("real")},
-                   {"layer", synthetic ? QStringLiteral("synthetic") : layer},
-                   {"hours", hours}, {"entries", double(data.rowSide.size())},
-                   {"load_ms", data.loadMs}, {"decode_ms", data.decodeMs},
-                   {"gpu_bytes_required", double(data.gpuBytes())}});
+                   {"source", sourceName}, {"layer", layer}, {"entries", double(gpu.entryCount)}});
             return 2;
         }
         QRhiMetalInitParams init;
         std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Metal, &init, QRhi::EnableTimestamps));
-#else
-        QRhiNullInitParams init;
-        std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Null, &init));
-#endif
         if (!rhi) throw std::runtime_error("headless Metal QRhi creation failed");
-        GpuBinner binner(rhi.get());
+        heatmap::gpu::HeatmapGpuBinner binner(rhi.get());
+        // Default: the production choice (precision self-test, then fast kernel).
+        if (qgetenv("SENTINEL_HEATMAP_KERNEL") == "precise") binner.forceKernel(heatmap::gpu::KernelVariant::Precise);
         QString error;
-        auto fail = [&](const QString &message) {
-            print({{"error", message}, {"source", synthetic ? QStringLiteral("synthetic") : QStringLiteral("real")},
-                   {"hours", hours}, {"layer", layer}, {"entries", double(data.rowSide.size())},
-                   {"load_ms", data.loadMs}, {"decode_ms", data.decodeMs}});
-            return 2;
-        };
         QRhiCommandBuffer *cb = nullptr;
         const auto uploadStart = Clock::now();
-        if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess)
-            return fail(QStringLiteral("begin upload frame failed"));
-        const bool uploaded = binner.upload(cb, data, &error);
-        const bool uploadFinished = rhi->endOffscreenFrame() == QRhi::FrameOpSuccess;
-        if (!uploaded || !uploadFinished)
-            return fail(QStringLiteral("GPU upload failed: %1").arg(error));
+        if (!binner.setSource(source.gpu, &error) || rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess ||
+            !binner.uploadAll(cb, &error) || rhi->endOffscreenFrame() != QRhi::FrameOpSuccess)
+            throw std::runtime_error(("GPU upload failed: " + error).toStdString());
         const double uploadMs = elapsed(uploadStart);
-        // Exercise the same fragment pipeline once offscreen. Timed passes
-        // below remain compute-only; the first pass is excluded as warmup.
-        std::unique_ptr<QRhiTexture> smokeColor(rhi->newTexture(
-            QRhiTexture::RGBA8, QSize(32, 32), 1, QRhiTexture::RenderTarget));
-        if (!smokeColor || !smokeColor->create()) return fail(QStringLiteral("smoke color texture failed"));
-        std::unique_ptr<QRhiTextureRenderTarget> smokeTarget(rhi->newTextureRenderTarget(
-            QRhiTextureRenderTargetDescription(QRhiColorAttachment(smokeColor.get()))));
-        std::unique_ptr<QRhiRenderPassDescriptor> smokePass(smokeTarget->newCompatibleRenderPassDescriptor());
-        smokeTarget->setRenderPassDescriptor(smokePass.get());
-        if (!smokeTarget->create()) return fail(QStringLiteral("smoke render target failed"));
-        int64_t low = std::numeric_limits<int64_t>::max(), high = std::numeric_limits<int64_t>::min();
-        for (const auto &c : data.coverage) {
-            if (c.bidLo <= c.bidHi) { low = std::min(low, data.baseRow + c.bidLo); high = std::max(high, data.baseRow + c.bidHi); }
-            if (c.askLo <= c.askHi) { low = std::min(low, data.baseRow + c.askLo); high = std::max(high, data.baseRow + c.askHi); }
-        }
-        if (low >= high) return fail(QStringLiteral("source has no valid price coverage"));
+        const double finest = heatmap::gpu::commonTick(gpu);
+        const double coveredLo = gpu.coveredPriceLo, coveredHi = gpu.coveredPriceHi;
+        const double mid = source.medianPrice > 0 ? source.medianPrice : (coveredLo + coveredHi) / 2;
+        const double fullSpan = std::min(coveredHi - coveredLo, 2 * std::min(mid - coveredLo, coveredHi - mid));
+        const double tf = double(gpu.tfMs);
+        const double totalMs = double(source.endMs - source.startMs);
+        // Smoke-test the display pipeline once (timed passes are compute only).
+        std::unique_ptr<QRhiTexture> color(rhi->newTexture(QRhiTexture::RGBA8, QSize(32, 32), 1, QRhiTexture::RenderTarget));
+        if (!color->create()) throw std::runtime_error("smoke texture failed");
+        std::unique_ptr<QRhiTextureRenderTarget> target(rhi->newTextureRenderTarget({QRhiColorAttachment(color.get())}));
+        std::unique_ptr<QRhiRenderPassDescriptor> pass(target->newCompatibleRenderPassDescriptor());
+        target->setRenderPassDescriptor(pass.get());
+        if (!target->create()) throw std::runtime_error("smoke target failed");
+
         auto sweep = [&](uint32_t widthPx, uint32_t heightPx, int dpr) -> QJsonObject {
-        struct ZoomRow {
-            double zoom = 0;
-            uint64_t visible = 0;
-            uint32_t cols = 0, rows = 0, nativeRows = 0;
-            double sourcePerOutput = 0;
-            std::vector<double> cpu, gpu;
-        };
-        std::array<ZoomRow, 25> levels;
-        std::vector<double> cpu, gpu;
-        cpu.reserve(200); gpu.reserve(200);
-        // QRhi::lastCompletedGpuTime belongs to the preceding finished frame
-        // on Metal. Warm every level, time 200 passes, then submit one drain.
-        for (int i = 0; i < 226; ++i) {
-            const int levelIndex = i % int(levels.size());
-            const double zoom = std::pow(2.0, double(levelIndex) / 5.0);
-            const double priceMid = (double(low) + high) * 0.5 * data.nativeTick;
-            const double priceSpan = std::max(data.nativeTick * 64.0,
-                                              (high - low + 1) * data.nativeTick / zoom);
-            const double priceLo = priceMid - priceSpan * 0.5;
-            const double tick = recording::ladderTick(priceSpan / double(heightPx) * 2.0,
-                                                     data.nativeTick, data.priceScale);
-            Grid grid;
-            const double totalMinutes = double(data.columns()) * data.sourceMinutes;
-            const double timeSpan = std::min<double>(totalMinutes / zoom, widthPx * tfMinutes);
-            const double timeLo = (totalMinutes - timeSpan) * 0.5;
-            const double timeHi = timeLo + timeSpan;
-            const int64_t firstBucket = int64_t(std::floor(
-                (double(data.startMs) / 60'000.0 + timeLo) / tfMinutes)) - 2;
-            grid.firstMinute = int32_t(firstBucket * tfMinutes - data.startMs / 60'000);
-            grid.timeframeMinutes = uint32_t(tfMinutes);
-            grid.columns = uint32_t(std::ceil(
-                (timeHi + data.startMs / 60'000.0) / tfMinutes) - firstBucket + 2);
-            grid.group = static_cast<uint32_t>(std::llround(tick / data.nativeTick));
-            const int64_t first = int64_t(std::floor(priceLo / tick)) - 2;
-            if (first * grid.group - data.baseRow < std::numeric_limits<int32_t>::min() ||
-                first * grid.group - data.baseRow > std::numeric_limits<int32_t>::max())
-                throw std::runtime_error("bench row offset out of range");
-            grid.rowLo = int32_t(first * grid.group - data.baseRow);
-            if (data.baseRow < std::numeric_limits<int32_t>::min() ||
-                data.baseRow > std::numeric_limits<int32_t>::max())
-                throw std::runtime_error("bench base row out of range");
-            grid.baseRow = int32_t(data.baseRow);
-            grid.rows = uint32_t(std::ceil((priceMid + priceSpan * 0.5) / tick) - first + 2);
-            grid.sizeFloor = float(data.sizeScale.floor);
-            grid.codesPerOctave = float(data.sizeScale.codesPerOctave);
-            auto &level = levels[levelIndex];
-            level.zoom = zoom; level.cols = grid.columns; level.rows = grid.rows;
-            level.nativeRows = grid.group;
-            level.sourcePerOutput = double(grid.timeframeMinutes) / data.sourceMinutes;
-            if (i < int(levels.size())) {
-                const auto c0 = std::clamp<int>(grid.firstMinute / int(data.sourceMinutes), 0, data.columns());
-                const auto c1 = std::clamp<int>(
-                    (grid.firstMinute + int(grid.columns * grid.timeframeMinutes)) / int(data.sourceMinutes),
-                    0, data.columns());
-                const uint32_t row0 = uint32_t(std::max(grid.rowLo, 0));
-                const uint32_t row1 = uint32_t(std::max<int64_t>(int64_t(grid.rowLo) + int64_t(grid.rows) * grid.group, 0));
-                for (int c = c0; c < c1; ++c) {
-                    const auto begin = data.rowSide.begin() + data.offsets[c];
-                    const auto end = data.rowSide.begin() + data.offsets[c + 1];
-                    auto lower = [&](uint32_t row) {
-                        return std::lower_bound(begin, end, row, [](uint32_t packed, uint32_t key) {
-                            return (packed & 0x7fffffffu) < key;
-                        });
-                    };
-                    level.visible += lower(row1) - lower(row0);
+            struct Level { double zoom = 0; uint64_t visible = 0; uint32_t cols = 0, rows = 0, factor = 0; std::vector<double> gpuMs, cpuMs; };
+            std::array<Level, 25> levels;
+            std::vector<double> gpuAll, cpuAll;
+            // lastCompletedGpuTime reports the previous finished frame on Metal:
+            // warm every level once, time 200 passes, then one drain frame.
+            for (int i = 0; i < 226; ++i) {
+                const int li = i % int(levels.size());
+                const double zoom = std::pow(2.0, double(li) / 5.0);
+                const double priceSpan = std::max(finest * 64, fullSpan / zoom);
+                const double timeSpan = std::min(totalMs / zoom, double(widthPx) * tf); // >= 1 px per column
+                heatmap::gpu::ViewWindow view;
+                view.timeHiMs = double(source.endMs) - (totalMs - timeSpan) * 0.5;
+                view.timeLoMs = view.timeHiMs - timeSpan;
+                view.priceLo = mid - priceSpan / 2;
+                view.priceHi = mid + priceSpan / 2;
+                const double tick = heatmap::idealTick(view.priceLo, view.priceHi, heightPx, 2.0, finest, gpu.priceScale);
+                const auto grid = heatmap::gpu::planGrid(view, gpu.tfMs, tick);
+                if (!grid) throw std::runtime_error("bench grid out of range");
+                auto &level = levels[size_t(li)];
+                level.zoom = zoom; level.cols = grid->columns; level.rows = grid->rows;
+                level.factor = heatmap::gpu::tickFactors(gpu, tick)[0];
+                if (i == 0 && li == 0) {
+                    std::cerr << "native ticks:";
+                    for (const double t : gpu.ticks) std::cerr << ' ' << t;
+                    std::cerr << " common " << finest << '\n';
+                }
+                if (i < int(levels.size())) level.visible = visibleEntries(gpu, *grid);
+                const auto started = Clock::now();
+                if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) throw std::runtime_error("begin frame failed");
+                bool ok = binner.bin(cb, *grid, {}, &error);
+                if (ok && i == 0) {
+                    ok = binner.prepareDraw(pass.get(), 1, &error);
+                    if (ok) {
+                        auto *updates = rhi->nextResourceUpdateBatch();
+                        binner.updateDraw(updates, QMatrix4x4(), QRectF(-1, -1, 2, 2), heatmap::gpu::mappingFor(*grid, view));
+                        cb->beginPass(target.get(), Qt::black, {1.0f, 0}, updates);
+                        cb->setViewport(QRhiViewport(0, 0, 32, 32));
+                        cb->setScissor(QRhiScissor(0, 0, 32, 32));
+                        binner.recordDraw(cb);
+                        cb->endPass();
+                    }
+                }
+                if (rhi->endOffscreenFrame() != QRhi::FrameOpSuccess || !ok)
+                    throw std::runtime_error(("GPU bin failed: " + error).toStdString());
+                const double wall = elapsed(started);
+                if (i >= 25 && i < 225) { cpuAll.push_back(wall); level.cpuMs.push_back(wall); }
+                if (i >= 26 && cb->lastCompletedGpuTime() > 0) {
+                    const double ms = cb->lastCompletedGpuTime() * 1000.0;
+                    gpuAll.push_back(ms);
+                    levels[size_t((i - 1) % int(levels.size()))].gpuMs.push_back(ms);
                 }
             }
-            const auto started = Clock::now();
-            if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess)
-                throw std::runtime_error("begin bin frame failed");
-            const bool binned = binner.bin(cb, grid, &error);
-            const bool drawn = !binned || i != 0 || binner.draw(cb, smokeTarget.get(), {2, 28, 2, 28}, &error);
-            const bool frameFinished = rhi->endOffscreenFrame() == QRhi::FrameOpSuccess;
-            if (!binned || !drawn || !frameFinished)
-                throw std::runtime_error(QStringLiteral("GPU bin failed: %1").arg(error).toStdString());
-            const double wall = elapsed(started);
-            if (i >= 25 && i < 225) {
-                cpu.push_back(wall); level.cpu.push_back(wall);
+            std::sort(gpuAll.begin(), gpuAll.end());
+            std::sort(cpuAll.begin(), cpuAll.end());
+            const bool gpuTimed = gpuAll.size() == cpuAll.size();
+            const auto &times = gpuTimed ? gpuAll : cpuAll;
+            QJsonArray perZoom;
+            std::cerr << "grid " << widthPx << 'x' << heightPx << " (dpr " << dpr
+                      << "): zoom visible_entries cols x rows rows_per_bin gpu_ms_p50 p95 max\n";
+            for (auto &z : levels) {
+                auto &t = gpuTimed ? z.gpuMs : z.cpuMs;
+                std::sort(t.begin(), t.end());
+                const double p50 = percentile(t, 0.5), p95 = percentile(t, 0.95), mx = t.empty() ? 0 : t.back();
+                std::cerr << "  " << z.zoom << ' ' << z.visible << ' ' << z.cols << 'x' << z.rows << ' ' << z.factor
+                          << ' ' << p50 << ' ' << p95 << ' ' << mx << '\n';
+                perZoom.append(QJsonObject{{"zoom", z.zoom}, {"visible_entries", double(z.visible)},
+                                           {"columns", int(z.cols)}, {"rows", int(z.rows)},
+                                           {"native_rows_per_display_row", int(z.factor)},
+                                           {"bin_ms_p50", p50}, {"bin_ms_p95", p95}, {"bin_ms_max", mx}});
             }
-            if (i >= 26 && cb->lastCompletedGpuTime() > 0) {
-                const double ms = cb->lastCompletedGpuTime() * 1000.0;
-                gpu.push_back(ms); levels[(i - 1) % levels.size()].gpu.push_back(ms);
-            }
-        }
-        std::sort(cpu.begin(), cpu.end()); std::sort(gpu.begin(), gpu.end());
-        const auto &times = gpu.size() == cpu.size() ? gpu : cpu;
-        QJsonArray perZoom;
-        std::cerr << "grid=" << widthPx << 'x' << heightPx << " dpr=" << dpr
-                  << " zoom visible_entries grid rows_per_bin source_cols_per_output gpu_ms_p50 gpu_ms_p95 gpu_ms_max\n";
-        for (auto &z : levels) {
-            std::sort(z.cpu.begin(), z.cpu.end()); std::sort(z.gpu.begin(), z.gpu.end());
-            const auto &t = z.gpu.size() == z.cpu.size() ? z.gpu : z.cpu;
-            const double p50 = percentile(t, 0.5), p95 = percentile(t, 0.95);
-            const double max = t.empty() ? 0 : t.back();
-            std::cerr << z.zoom << ' ' << z.visible << ' ' << z.cols << 'x' << z.rows << ' '
-                      << z.nativeRows << ' ' << z.sourcePerOutput << ' ' << p50 << ' ' << p95 << ' ' << max << '\n';
-            perZoom.append(QJsonObject{{"zoom", z.zoom}, {"visible_entries", double(z.visible)},
-                                       {"columns", int(z.cols)}, {"rows", int(z.rows)},
-                                       {"native_rows_per_display_row", int(z.nativeRows)},
-                                       {"source_columns_per_output_column", z.sourcePerOutput},
-                                       {"bin_ms_p50", p50}, {"bin_ms_p95", p95}, {"bin_ms_max", max}});
-        }
-        return {{"width_px", int(widthPx)}, {"height_px", int(heightPx)}, {"dpr", dpr},
-                {"timing", gpu.size() == cpu.size() ? QStringLiteral("GPU frame timestamp") : QStringLiteral("CPU finished offscreen frame")},
-                {"bin_ms_p50", percentile(times, 0.50)}, {"bin_ms_p95", percentile(times, 0.95)},
-                {"bin_ms_max", times.empty() ? 0 : times.back()}, {"zoom_levels", perZoom}};
+            return {{"width_px", int(widthPx)}, {"height_px", int(heightPx)}, {"dpr", dpr},
+                    {"timing", gpuTimed ? QStringLiteral("GPU command buffer timestamp") : QStringLiteral("CPU wall per offscreen frame")},
+                    {"bin_ms_p50", percentile(times, 0.5)}, {"bin_ms_p95", percentile(times, 0.95)},
+                    {"bin_ms_max", times.empty() ? 0 : times.back()}, {"zoom_levels", perZoom}};
         };
         const QJsonObject oneX = sweep(1920, 1080, 1);
         const QJsonObject twoX = sweep(3840, 2160, 2);
-        const auto validColumns = std::count_if(data.observedMs.begin(), data.observedMs.end(),
-                                                [](uint32_t ms) { return ms > 0; });
-        print({{"source", synthetic ? QStringLiteral("synthetic") : QStringLiteral("real")},
-               {"layer", synthetic ? QStringLiteral("synthetic") : layer},
-               {"hours", hours}, {"entries", double(data.rowSide.size())},
-               {"timeframe_minutes", tfMinutes}, {"source_minutes", int(data.sourceMinutes)},
-               {"valid_source_columns", double(validColumns)},
-               {"load_ms", data.loadMs}, {"decode_ms", data.decodeMs}, {"upload_ms", uploadMs},
-               {"gpu_bytes", double(binner.gpuBytes())}, {"source_gpu_bytes", double(binner.sourceBytes())},
-               {"source_bytes_per_million_entries", double(binner.sourceBytes()) * 1'000'000.0 / data.rowSide.size()},
-               {"passes_per_grid", 200}, {"fragment_smoke", true},
-               {"grid_1x", oneX}, {"grid_2x", twoX},
-               {"bin_ms_p50", twoX.value("bin_ms_p50")}, {"bin_ms_p95", twoX.value("bin_ms_p95")},
-               {"bin_ms_max", twoX.value("bin_ms_max")}});
+        print({{"source", sourceName}, {"layer", synthetic ? QStringLiteral("synthetic") : layer},
+               {"hours", hours}, {"timeframe_minutes", tfMinutes}, {"columns", double(gpu.columns())},
+               {"entries", double(gpu.entryCount)}, {"sparse_entries", double(source.sparseEntries)},
+               {"wide_entries", gpu.wide}, {"load_ms", source.loadMs}, {"compose_ms", source.composeMs},
+               {"build_ms", source.buildMs}, {"upload_ms", uploadMs},
+               {"source_gpu_bytes", double(binner.sourceBytes())}, {"gpu_bytes", double(binner.gpuBytes())},
+               {"passes_per_grid", 200}, {"grid_1x", oneX}, {"grid_2x", twoX},
+               {"kernel", binner.currentKernel() == heatmap::gpu::KernelVariant::Fast ? "fast" : "precise"},
+               {"entry_pages", int(gpu.entryPages())},
+               {"p95_1x_ms", oneX.value("bin_ms_p95")}, {"max_1x_ms", oneX.value("bin_ms_max")},
+               {"p95_2x_ms", twoX.value("bin_ms_p95")}, {"max_2x_ms", twoX.value("bin_ms_max")}});
         return 0;
     } catch (const std::exception &e) {
-        print({{"error", QString::fromUtf8(e.what())}, {"source", synthetic ? "synthetic" : "real"},
-               {"hours", hours}, {"layer", layer}});
+        print({{"error", QString::fromUtf8(e.what())}, {"source", sourceName}, {"hours", hours}, {"layer", layer}});
         return 2;
     }
 }
 
-int runScreenshot(int hours, const QString &layer, uint32_t synthetic, int tfMinutes,
-                  const QString &path) {
-    try {
-        const QString outputPath = QFileInfo(path).absoluteFilePath();
-        const QString protectedRoot = QStringLiteral("/Volumes/T7/sentinel-data/recording");
-        const QString canonicalParent = QFileInfo(path).absoluteDir().canonicalPath();
-        if (outputPath == protectedRoot || outputPath.startsWith(protectedRoot + "/") ||
-            canonicalParent == protectedRoot || canonicalParent.startsWith(protectedRoot + "/")) {
-            print({{"error", QStringLiteral("recording directory is read-only")},
-                   {"screenshot", path}});
-            return 2;
-        }
-        recording::RecordingEntries data;
-        if (synthetic) data = recording::syntheticRecordingEntries(synthetic);
-        else {
-            const uint32_t sourceMinutes = uint32_t(tfMinutes);
-            const int64_t sourceMs = int64_t(sourceMinutes) * 60'000;
-            const int64_t nowMinute = QDateTime::currentMSecsSinceEpoch() / 60'000 * 60'000;
-            const int64_t end = sourceMinutes == 1 ? nowMinute :
-                ((nowMinute + sourceMs - 1) / sourceMs) * sourceMs;
-            const int64_t start = (nowMinute - int64_t(hours) * 3'600'000) / sourceMs * sourceMs;
-            data = sourceMinutes >= 60 && sourceMinutes % 60 == 0 && layer == "deep" ?
-                recording::loadComposedHourEntries("/Volumes/T7/sentinel-data/recording",
-                    "BTC-USD", layer.toStdString(), start, end, sourceMinutes) :
-                recording::loadComposedMinuteEntries("/Volumes/T7/sentinel-data/recording",
-                    "BTC-USD", layer.toStdString(), start, end, sourceMinutes);
-        }
-        if (data.rowSide.empty()) throw std::runtime_error("no source entries");
-#ifdef Q_OS_MACOS
-        void *metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW);
-        auto createDevice = metal ? reinterpret_cast<void *(*)()>(dlsym(metal, "MTLCreateSystemDefaultDevice")) : nullptr;
-        const bool available = createDevice && createDevice();
-        if (metal) dlclose(metal);
-        if (!available) throw std::runtime_error("No MTLDevice (Metal unavailable in this sandbox)");
-        QRhiMetalInitParams init;
-        std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Metal, &init));
-#else
-        QRhiNullInitParams init;
-        std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Null, &init));
-#endif
-        if (!rhi) throw std::runtime_error("headless QRhi creation failed");
-        GpuBinner binner(rhi.get());
-        QString error;
-        QRhiCommandBuffer *cb = nullptr;
-        if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess ||
-            !binner.upload(cb, data, &error) ||
-            rhi->endOffscreenFrame() != QRhi::FrameOpSuccess)
-            throw std::runtime_error(QStringLiteral("upload failed: %1").arg(error).toStdString());
-        constexpr int width = 1500, height = 880;
-        int64_t low = std::numeric_limits<int64_t>::max(), high = std::numeric_limits<int64_t>::min();
-        for (const auto &c : data.coverage) {
-            if (c.bidLo <= c.bidHi) { low = std::min(low, data.baseRow + c.bidLo); high = std::max(high, data.baseRow + c.bidHi); }
-            if (c.askLo <= c.askHi) { low = std::min(low, data.baseRow + c.askLo); high = std::max(high, data.baseRow + c.askHi); }
-        }
-        if (low >= high) throw std::runtime_error("no price coverage");
-        const double margin = std::max(2.0, (high - low) * 0.04);
-        const double priceLo = low * data.nativeTick - margin;
-        const double priceHi = (high + 1) * data.nativeTick + margin;
-        const double tick = recording::ladderTick((priceHi - priceLo) / height * 2.0,
-                                                  data.nativeTick, data.priceScale);
-        const uint32_t group = uint32_t(std::llround(tick / data.nativeTick));
-        const double viewHi = double(data.columns()) * data.sourceMinutes;
-        const double viewLo = std::max(0.0, viewHi - width * tfMinutes);
-        const int64_t firstBucket = int64_t(std::floor((data.startMs / 60'000.0 + viewLo) / tfMinutes)) - 2;
-        const int64_t endBucket = int64_t(std::ceil((data.startMs / 60'000.0 + viewHi) / tfMinutes)) + 2;
-        const int64_t firstPrice = int64_t(std::floor(priceLo / tick)) - 2;
-        const int64_t endPrice = int64_t(std::ceil(priceHi / tick)) + 2;
-        Grid grid;
-        grid.firstMinute = int32_t(firstBucket * tfMinutes - data.startMs / 60'000);
-        grid.timeframeMinutes = uint32_t(tfMinutes);
-        grid.columns = uint32_t(endBucket - firstBucket);
-        grid.rowLo = int32_t(firstPrice * group - data.baseRow);
-        grid.baseRow = int32_t(data.baseRow);
-        grid.group = group;
-        grid.rows = uint32_t(endPrice - firstPrice);
-        grid.sizeFloor = float(data.sizeScale.floor);
-        grid.codesPerOctave = float(data.sizeScale.codesPerOctave);
-        DisplayMapping mapping{
-            float((data.startMs / 60'000.0 + viewLo) / tfMinutes - firstBucket),
-            float((viewHi - viewLo) / tfMinutes),
-            float(endPrice - priceHi / tick),
-            float((priceHi - priceLo) / tick)};
-        std::unique_ptr<QRhiTexture> color(rhi->newTexture(
-            QRhiTexture::RGBA8, QSize(width, height), 1, QRhiTexture::RenderTarget));
-        if (!color || !color->create()) throw std::runtime_error("screenshot texture failed");
-        std::unique_ptr<QRhiTextureRenderTarget> target(rhi->newTextureRenderTarget(
-            QRhiTextureRenderTargetDescription(QRhiColorAttachment(color.get()))));
-        std::unique_ptr<QRhiRenderPassDescriptor> pass(target->newCompatibleRenderPassDescriptor());
-        target->setRenderPassDescriptor(pass.get());
-        if (!target->create()) throw std::runtime_error("screenshot target failed");
-        QRhiReadbackResult readback;
-        if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess ||
-            !binner.bin(cb, grid, &error) ||
-            !binner.draw(cb, target.get(), mapping, &error))
-            throw std::runtime_error(QStringLiteral("screenshot render failed: %1").arg(error).toStdString());
-        auto *updates = rhi->nextResourceUpdateBatch();
-        updates->readBackTexture(QRhiReadbackDescription(color.get()), &readback);
-        cb->resourceUpdate(updates);
-        if (rhi->endOffscreenFrame() != QRhi::FrameOpSuccess ||
-            readback.data.size() != width * height * 4)
-            throw std::runtime_error("screenshot readback failed");
-        QImage image(reinterpret_cast<const uchar *>(readback.data.constData()),
-                     width, height, QImage::Format_RGBA8888);
-        QDir().mkpath(QFileInfo(path).absolutePath());
-        if (!image.save(path, "PNG")) throw std::runtime_error("PNG save failed");
-        print({{"screenshot", path}, {"width", width}, {"height", height},
-               {"timeframe_minutes", tfMinutes}, {"entries", double(data.rowSide.size())},
-               {"gpu_bytes", double(binner.gpuBytes())}, {"load_ms", data.loadMs}});
-        return 0;
-    } catch (const std::exception &e) {
-        print({{"error", QString::fromUtf8(e.what())}, {"screenshot", path}});
+int runScreenshot(int hours, const QString &layer, uint32_t synthetic, int tfMinutes, const QString &path,
+                  double panColumns) {
+    const QString output = QFileInfo(path).absoluteFilePath();
+    if (output.startsWith(QString::fromLatin1(kRecordingRoot))) {
+        print({{"error", QStringLiteral("recording directory is read-only")}, {"screenshot", path}});
         return 2;
     }
+    OffscreenQuick scene;
+    QString error;
+    if (!scene.create(QSize(1500, 880), &error)) {
+        print({{"error", error}, {"screenshot", path}});
+        return 2;
+    }
+    scene.window()->setColor(QColor(0x08, 0x0d, 0x12));
+    auto *item = new LabItem;
+    item->setParentItem(scene.window()->contentItem());
+    item->setSize(QSizeF(1500, 880));
+    item->setTimeframeMinutes(tfMinutes);
+    if (synthetic) item->loadSynthetic(int(synthetic));
+    else item->loadReal(hours, layer);
+    QElapsedTimer timer;
+    timer.start();
+    QImage image;
+    bool panned = panColumns == 0;
+    int settledFrames = 0;
+    while (timer.elapsed() < 120'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        item->update();
+        image = scene.renderFrame(&error);
+        if (image.isNull()) break;
+        if (!item->settled()) { settledFrames = 0; continue; }
+        if (!panned) { // exercise a sub-bin pan on the settled picture
+            item->pan(-panColumns * item->width() / std::max(1.0, item->metrics().value("columns").toDouble()), 0);
+            panned = true;
+            continue;
+        }
+        if (++settledFrames >= 2) break;
+    }
+    const auto metrics = item->metrics();
+    if (image.isNull() || !item->settled()) {
+        print({{"error", image.isNull() ? error : QStringLiteral("source did not settle within 120 s: ") + item->status()},
+               {"screenshot", path}});
+        return 2;
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    if (!image.save(path, "PNG")) {
+        print({{"error", QStringLiteral("PNG save failed")}, {"screenshot", path}});
+        return 2;
+    }
+    QJsonObject result = QJsonObject::fromVariantMap(metrics);
+    result.insert("screenshot", path);
+    result.insert("status", item->status());
+    result.insert("elapsed_ms", double(timer.elapsed()));
+    print(result);
+    return 0;
 }
 } // namespace lab

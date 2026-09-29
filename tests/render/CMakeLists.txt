@@ -129,3 +129,42 @@ target_include_directories(test_TradeOverlay PRIVATE ${CMAKE_SOURCE_DIR}/libs/gu
 target_link_libraries(test_TradeOverlay PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TradeOverlayTests COMMAND test_TradeOverlay)
 set_tests_properties(TradeOverlayTests PROPERTIES LABELS "render;servermodel")
+
+# S4 spike guard: compute recorded in QSGRenderNode::prepare() inside a real
+# scene graph (headless via QQuickRenderControl). Skips without a Metal device.
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate Quick)
+add_executable(test_qsg_compute_spike test_qsg_compute_spike.cpp)
+target_include_directories(test_qsg_compute_spike PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_qsg_compute_spike PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+qt_add_shaders(test_qsg_compute_spike spike_shaders
+    GLSL "440"
+    PREFIX "/spikeshaders"
+    BASE "shaders"
+    FILES
+        shaders/spike_fill.comp
+        shaders/spike_draw.vert
+        shaders/spike_draw.frag
+)
+add_test(NAME QsgComputeSpikeTests COMMAND test_qsg_compute_spike)
+set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")
+
+# S4: GPU price binning parity vs heatmap::binColumn, grid/threshold unit tests
+# and the HeatmapRenderNode scene test. GPU cases skip without a Metal device;
+# SENTINEL_HEATMAP_REAL_PARITY=1 adds the real-recording comparison.
+add_executable(test_heatmap_gpu_binner test_heatmap_gpu_binner.cpp)
+target_include_directories(test_heatmap_gpu_binner PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_gpu_binner PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+# Test-only kernel candidate that lets fast math fold float-float error terms:
+# the runtime precision self-test must reject it.
+qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/testshaders"
+    BASE "${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/shaders"
+    DEFINES HEATMAP_UNGUARDED
+    FILES "${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/shaders/heatmap_bin.comp"
+    OUTPUTS heatmap_bin_unguarded.comp.qsb
+)
+add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
+set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
