@@ -271,6 +271,35 @@ int64_t ServerDataModel::oldestHeatmapPersistedMs(const std::string& symbol,
     return m_heatmapStreamer->oldestPersistedMs(symbol, timeframeMs);
 }
 
+// Worker-only bounded snapshot. False means over budget, never a partial tape.
+bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t startMs,
+                                          int64_t endMs, size_t limit,
+                                          std::vector<FootprintTradeSample>& out,
+                                          int64_t* retainedFromMs) const {
+    out.clear();
+    if (retainedFromMs) *retainedFromMs = 0;
+    if (endMs <= startMs) return true;
+    {
+        std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
+        const auto it = m_recentFootprintTrades.find(symbol);
+        if (it == m_recentFootprintTrades.end()) return true;
+        // Arrival order need not match exchange time. Inspect every timestamp,
+        // but only copy and budget the requested half-open window.
+        for (const auto& trade : it->second) {
+            if (retainedFromMs && (*retainedFromMs == 0 || trade.timestampMs < *retainedFromMs))
+                *retainedFromMs = trade.timestampMs;
+            if (trade.timestampMs < startMs || trade.timestampMs >= endMs) continue;
+            if (out.size() == limit) {
+                out.clear(); // Never expose an over-budget partial snapshot.
+                return false;
+            }
+            out.push_back(trade);
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.timestampMs < b.timestampMs; });
+    return true;
+}
+
 bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
                                              int64_t startTimeMs,
                                              int64_t endTimeMs,

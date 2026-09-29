@@ -764,19 +764,9 @@ void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
             timeframeMs = renderer->getCurrentTimeframe();
         }
     }
-    if (timeframeMs <= 0) {
-        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
-        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
-            timeframeMs = serverConfig.heatmap.timeframesMs.front();
-        }
-    }
-    if (timeframeMs <= 0) {
-        timeframeMs = 1000;
-    }
-    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-    const int gridWidth = serverConfig.heatmap.gridWidth;
-    const int count = (gridWidth > 0) ? std::min(gridWidth, 256) : 256;
+    const auto& overlays = GuiConfigStore::instance().serverConfig().tradeOverlays;
+    if (timeframeMs <= 0) timeframeMs = overlays.footprintTimeframeMs;
+    const int count = std::clamp(overlays.gridWidth, 1, 256);
     sLog_Data("Footprint history request: symbol=" << symbol << " tfMs=" << timeframeMs
               << " count=" << count);
     m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);

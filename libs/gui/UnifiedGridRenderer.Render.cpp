@@ -272,12 +272,8 @@ void UnifiedGridRenderer::renderOverlays(
     m_footprintOverlay.render(window(),
                               texNode,
                               drawFootprint,
-                              frame.forceFull,
-                              snapshot.timeOffset,
-                              drawRect,
-                              srcRect,
-                              gridWidth,
-                              gridHeight,
+                              frame.mapping.viewStartMs, frame.mapping.viewEndMs,
+                              frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice, frame.surfaceBounds,
                               footprintUploads);
     // ── TPO / VP dispatch ──────────────────────────────────────────────────
     std::vector<float> localBins;
@@ -286,9 +282,9 @@ void UnifiedGridRenderer::renderOverlays(
 
     m_vpRenderer.render(texNode,
                         m_volumeProfileLayerEnabled && !localBins.empty(),
-                        drawRect,
-                        frame.viewport.minPrice,
-                        frame.viewport.maxPrice,
+                        frame.surfaceBounds,
+                        frame.mapping.viewMinPrice,
+                        frame.mapping.viewMaxPrice,
                         localBins,
                         localSnap);
 
@@ -314,12 +310,7 @@ void UnifiedGridRenderer::renderOverlays(
     m_tpoOverlay.render(window(),
                         texNode,
                         drawTpo,
-                        frame.forceFull,
-                        snapshot.timeOffset,
-                        drawRect,
-                        srcRect,
-                        gridWidth,
-                        gridHeight,
+                        frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice,
                         tpoUploads,
                         tpoSessionStart,
                         tpoSessionEnd,

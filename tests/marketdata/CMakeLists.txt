@@ -66,6 +66,12 @@ target_link_libraries(test_recording_history_wire PRIVATE sentinel_core GTest::g
 add_test(NAME RecordingHistoryWireTests COMMAND test_recording_history_wire)
 set_tests_properties(RecordingHistoryWireTests PROPERTIES LABELS "marketdata")
 
+add_executable(test_coinbase_rest_deadline test_coinbase_rest_deadline.cpp)
+target_include_directories(test_coinbase_rest_deadline PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_coinbase_rest_deadline PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME CoinbaseRestDeadlineTests COMMAND test_coinbase_rest_deadline)
+set_tests_properties(CoinbaseRestDeadlineTests PROPERTIES LABELS "marketdata" TIMEOUT 15)
+
 # Custom target to run all marketdata tests
 add_custom_target(marketdata_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L marketdata
@@ -75,6 +81,7 @@ add_custom_target(marketdata_tests
         test_protocol_validation
         test_sentinel_stream_client_parse_helpers
         test_recording_history_wire
+        test_coinbase_rest_deadline
     COMMENT "Running market data refactor tests"
 )
 

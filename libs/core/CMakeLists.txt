@@ -14,6 +14,7 @@ add_library(sentinel_core
     marketdata/ws/WsTransport.hpp
     marketdata/ws/BeastWsTransport.hpp
     marketdata/ws/BeastWsTransport.cpp
+    marketdata/rest/RestResolver.hpp
     marketdata/rest/CoinbaseRestClient.hpp
     marketdata/rest/CoinbaseRestClient.cpp
     marketdata/model/LiveOrderBook.cpp
@@ -24,6 +25,7 @@ add_library(sentinel_core
     marketdata/model/TradeData.h
     servermodel/ServerDataModel.hpp
     servermodel/ServerDataModel.cpp
+    servermodel/TradeOverlayPublisher.cpp
     servermodel/HeatmapTwapStreamer.hpp
     servermodel/HeatmapTwapStreamer.cpp
     servermodel/SymbolHotData.hpp

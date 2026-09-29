@@ -11,6 +11,11 @@ heatmap:
   persistence_fsync_every_n_records: 1
   persistence_fsync_every_ms: 1000
   persistence_retention_days: 0
+trade_overlays:
+  grid_width: 512
+  grid_height: 2048
+  tick_size: 5
+  footprint_timeframe_ms: 60000
 orderbook:
   tick_size: 0.1
   band_pct: 0.3

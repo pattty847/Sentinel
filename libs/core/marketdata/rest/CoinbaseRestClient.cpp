@@ -1,4 +1,5 @@
 #include "CoinbaseRestClient.hpp"
+#include "RestResolver.hpp"
 #include "../../SentinelLogging.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -8,6 +9,7 @@
 #include <boost/asio/ssl/stream.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <algorithm>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -16,6 +18,18 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 namespace {
+sentinel::rest::Resolver::Endpoints resolveBefore(const std::string& host, const std::string& port,
+                                                  std::chrono::steady_clock::time_point deadline) {
+    static sentinel::rest::Resolver resolver([](const std::string& host, const std::string& port) {
+        net::io_context context;
+        tcp::resolver resolver(context);
+        sentinel::rest::Resolver::Endpoints endpoints;
+        for (const auto& result : resolver.resolve(host, port)) endpoints.push_back(result.endpoint());
+        return endpoints;
+    });
+    return resolver.resolve(host, port, deadline);
+}
+
 std::string buildCandlesPath(const std::string& productId, bool usePublic) {
     std::ostringstream oss;
     if (usePublic) {
@@ -84,11 +98,13 @@ std::string resolveCaBundlePath(const std::string& configuredPath) {
 CoinbaseRestClient::CoinbaseRestClient(Authenticator& auth,
                                        std::string host,
                                        std::string port,
-                                       std::string sslCaBundle)
+                                       std::string sslCaBundle,
+                                       std::chrono::milliseconds requestTimeout)
     : m_auth(auth)
     , m_host(std::move(host))
     , m_port(std::move(port))
-    , m_sslCaBundle(std::move(sslCaBundle)) {
+    , m_sslCaBundle(std::move(sslCaBundle))
+    , m_requestTimeout(std::clamp(requestTimeout, std::chrono::milliseconds(1), std::chrono::milliseconds(10000))) {
 }
 
 CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& productId,
@@ -114,7 +130,10 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         return result;
     }
 
+    const auto deadline = std::chrono::steady_clock::now() + m_requestTimeout;
+    const char* stage = "DNS resolve";
     try {
+        const auto endpoints = resolveBefore(m_host, m_port, deadline);
         net::io_context ioc;
         ssl::context ctx{ssl::context::tlsv12_client};
         ctx.set_default_verify_paths();
@@ -125,11 +144,36 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
             sLog_Warning("REST TLS: Failed to load CA bundle [" << caPath << "]: " << ec.message());
         }
 
-        tcp::resolver resolver{ioc};
         beast::ssl_stream<beast::tcp_stream> stream{ioc, ctx};
-
-        auto const results = resolver.resolve(m_host, m_port);
-        beast::get_lowest_layer(stream).connect(results);
+        auto& transport = beast::get_lowest_layer(stream);
+        transport.expires_at(deadline);
+        // Synchronous facade, asynchronous transport: tcp_stream expiry does not
+        // apply to sync connect/handshake/read. Never reset the total deadline.
+        const auto await = [&](auto initiate) {
+            if (std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error("REST request deadline exceeded");
+            bool done = false;
+            beast::error_code operationError;
+            initiate([&](beast::error_code error, auto&&...) {
+                operationError = error;
+                done = true;
+            });
+            ioc.restart();
+            ioc.run_until(deadline);
+            if (!done) {
+                beast::error_code ignored;
+                transport.socket().close(ignored);
+                // Drain cancellation before the operation's buffers leave scope.
+                ioc.restart();
+                ioc.run();
+                throw std::runtime_error("REST request deadline exceeded");
+            }
+            if (operationError == beast::error::timeout || std::chrono::steady_clock::now() >= deadline)
+                throw std::runtime_error("REST request deadline exceeded");
+            if (operationError) throw beast::system_error(operationError);
+        };
+        stage = "connect";
+        await([&](auto complete) { transport.async_connect(endpoints, std::move(complete)); });
 
         if (!SSL_set_tlsext_host_name(stream.native_handle(), m_host.c_str())) {
             beast::error_code ec{static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()};
@@ -138,7 +182,8 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         }
 
         stream.set_verify_mode(ssl::verify_peer);
-        stream.handshake(ssl::stream_base::client);
+        stage = "TLS handshake";
+        await([&](auto complete) { stream.async_handshake(ssl::stream_base::client, std::move(complete)); });
 
         auto doRequest = [&](bool usePublic) -> std::optional<nlohmann::json> {
             const std::string path = buildCandlesPath(productId, usePublic);
@@ -154,11 +199,13 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
                 req.set(http::field::authorization, std::string("Bearer ") + jwt);
             }
 
-            http::write(stream, req);
+            stage = "HTTP write";
+            await([&](auto complete) { http::async_write(stream, req, std::move(complete)); });
 
             beast::flat_buffer buffer;
             http::response<http::string_body> res;
-            http::read(stream, buffer, res);
+            stage = "HTTP read";
+            await([&](auto complete) { http::async_read(stream, buffer, res, std::move(complete)); });
 
             if (res.result() != http::status::ok) {
                 std::ostringstream oss;
@@ -192,8 +239,7 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         }
 
         if (!jsonOpt) {
-            beast::error_code shutdownEc;
-            stream.shutdown(shutdownEc);
+            sLog_Warning("REST candles failed: product=" << productId << " error=" << result.error);
             return result;
         }
 
@@ -225,11 +271,14 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
                    "product=" << productId << " granularity=" << granularity
                    << " range=[" << startSec << ".." << endSec << "] limit=" << limit
                    << " received=" << arr.size() << " kept=" << result.candles.size());
-        beast::error_code shutdownEc;
-        stream.shutdown(shutdownEc);
+        // The complete HTTP response is the boundary. Close the one-shot socket
+        // on destruction; never wait for a peer's TLS close_notify.
         return result;
     } catch (const std::exception& e) {
-        result.error = e.what();
+        result.ok = false;
+        result.candles.clear();
+        result.error = std::string(stage) + ": " + e.what();
+        sLog_Warning("REST candles failed: product=" << productId << " error=" << result.error);
         return result;
     }
 }

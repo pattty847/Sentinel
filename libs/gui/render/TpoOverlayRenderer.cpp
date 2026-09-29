@@ -136,50 +136,10 @@ void TpoOverlayRenderer::setDisplayMode(TpoStreamState::DisplayMode mode) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  VerticalTimeline: compute the clipped draw rect
 // ─────────────────────────────────────────────────────────────────────────────
-QRectF TpoOverlayRenderer::computeTimelinedDrawRect(const QRectF& fullDrawRect,
-                                                     int64_t sessionStartMs,
-                                                     int64_t sessionEndMs,
-                                                     int64_t viewStartMs,
-                                                     int64_t viewEndMs) const {
-    if (viewEndMs <= viewStartMs || sessionEndMs <= sessionStartMs) {
-        return QRectF();
-    }
-
-    const double viewSpan    = static_cast<double>(viewEndMs    - viewStartMs);
-    const double sessStart   = static_cast<double>(sessionStartMs);
-    const double sessEnd     = static_cast<double>(sessionEndMs);
-    const double visStart    = static_cast<double>(viewStartMs);
-
-    // Fraction of the view width where the session starts and ends.
-    const double fracLeft    = (sessStart - visStart) / viewSpan;
-    const double fracRight   = (sessEnd   - visStart) / viewSpan;
-
-    const double drawLeft    = fullDrawRect.left()  + fracLeft  * fullDrawRect.width();
-    const double drawRight   = fullDrawRect.left()  + fracRight * fullDrawRect.width();
-
-    // Clamp to visible area.
-    const double clampedLeft  = std::clamp(drawLeft,  fullDrawRect.left(),  fullDrawRect.right());
-    const double clampedRight = std::clamp(drawRight, fullDrawRect.left(),  fullDrawRect.right());
-    if (clampedRight <= clampedLeft) {
-        return QRectF();
-    }
-
-    return QRectF(clampedLeft, fullDrawRect.top(),
-                  clampedRight - clampedLeft, fullDrawRect.height());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Main render hot-path
-// ─────────────────────────────────────────────────────────────────────────────
 void TpoOverlayRenderer::render(QQuickWindow* window,
                                 QSGNode* parentNode,
                                 bool drawTpo,
-                                bool forceFull,
-                                float timeOffset,
-                                const QRectF& drawRect,
-                                const QRectF& sourceRect,
-                                int sharedGridWidth,
-                                int sharedGridHeight,
+                                double viewMin, double viewMax,
                                 std::vector<PendingUpload>& pendingUploads,
                                 int64_t sessionStartMs,
                                 int64_t sessionEndMs,
@@ -193,6 +153,17 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     const bool useIncrementalGlUploads = rendererInterface &&
         rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
+    if (!pendingUploads.empty()) {
+        const auto next = pendingUploads.back().grid;
+        if (next.generation != m_grid.generation || next.maxPrice != m_grid.maxPrice || next.tick != m_grid.tick ||
+            next.startMs != m_grid.startMs) {
+            m_image = QImage(); m_textureDirty = true;
+        }
+        m_grid = next;
+        std::erase_if(pendingUploads, [&](const auto& u) {
+            return u.grid.generation != next.generation || u.grid.maxPrice != next.maxPrice || u.grid.tick != next.tick || u.grid.startMs != next.startMs;
+        });
+    }
     const bool hasPending = !pendingUploads.empty();
 
     sLog_Probe("tpo.overlay", "mode=" << static_cast<int>(m_displayMode)
@@ -219,12 +190,6 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                 m_lastWriteColumn = upload.x;
             }
         }
-    }
-
-    if ((m_gridWidth <= 0 || m_gridHeight <= 0) && sharedGridWidth > 0 && sharedGridHeight > 0) {
-        m_gridWidth    = sharedGridWidth;
-        m_gridHeight   = sharedGridHeight;
-        m_textureDirty = true;
     }
 
     if (!drawTpo && !hasPending) {
@@ -320,52 +285,15 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         }
     }
 
-    // ── Source rect (Y range always from shared viewport) ──────────────────
-    QRectF tpoSrcRect(0, 0, m_gridWidth, m_gridHeight);
-    if (sourceRect.width() > 0.0 && sourceRect.height() > 0.0) {
-        const qreal srcY = std::clamp(sourceRect.y(), 0.0, static_cast<qreal>(m_gridHeight - 1));
-        const qreal srcH = std::clamp(sourceRect.height(), 1.0,
-                                      static_cast<qreal>(m_gridHeight) - srcY);
-        if (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline &&
-            sessionStartMs > 0 && sessionEndMs > sessionStartMs &&
-            viewStartMs > 0 && viewEndMs > viewStartMs) {
-            // Map visible world-time interval inside session into texture X.
-            const int64_t visibleStart = std::max(viewStartMs, sessionStartMs);
-            const int64_t visibleEnd = std::min(viewEndMs, sessionEndMs);
-            if (visibleEnd > visibleStart) {
-                const double sessionSpanMs = static_cast<double>(sessionEndMs - sessionStartMs);
-                const double x0 = (static_cast<double>(visibleStart - sessionStartMs) / sessionSpanMs) *
-                                  static_cast<double>(m_gridWidth);
-                const double x1 = (static_cast<double>(visibleEnd - sessionStartMs) / sessionSpanMs) *
-                                  static_cast<double>(m_gridWidth);
-                const qreal srcX = std::clamp(static_cast<qreal>(x0), 0.0, static_cast<qreal>(m_gridWidth - 1));
-                const qreal srcW = std::clamp(static_cast<qreal>(x1 - x0), 1.0,
-                                              static_cast<qreal>(m_gridWidth) - srcX);
-                tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
-            } else {
-                tpoSrcRect = QRectF();
-            }
-        } else {
-            const qreal srcX = std::clamp(sourceRect.x(), 0.0, static_cast<qreal>(m_gridWidth - 1));
-            const qreal srcW = std::clamp(sourceRect.width(), 1.0, static_cast<qreal>(m_gridWidth) - srcX);
-            tpoSrcRect = QRectF(srcX, srcY, srcW, srcH);
-        }
+    auto grid = m_grid;
+    // Profiles rank columns horizontally; price still maps through their own band.
+    if (m_displayMode != TpoStreamState::DisplayMode::VerticalTimeline) {
+        grid.startMs = viewStartMs; grid.endMs = viewEndMs;
     }
-
-    // ── Draw rect: mode-specific positioning ────────────────────────────────
-    // VerticalTimeline projects session time onto screen using surfaceBounds (full item area,
-    // 0,0,w,h) + viewStart/End — the same base that candles and labels use.  drawRect is the
-    // heatmap's ring-clipped overlap rect and must NOT be used here; doing so causes the session
-    // to drift rightward as the ring buffer advances and to mis-scale relative to other layers.
-    QRectF effectiveDrawRect = drawRect;
-    if (m_displayMode == TpoStreamState::DisplayMode::VerticalTimeline &&
-        sessionStartMs > 0 && sessionEndMs > sessionStartMs &&
-        viewStartMs > 0    && viewEndMs > viewStartMs) {
-        const QRectF projectionBase = (!surfaceBounds.isEmpty()) ? surfaceBounds : drawRect;
-        effectiveDrawRect = computeTimelinedDrawRect(projectionBase,
-                                                     sessionStartMs, sessionEndMs,
-                                                     viewStartMs, viewEndMs);
-    }
+    const auto mapping = mapTradeOverlay(grid, m_gridWidth, m_gridHeight,
+        viewStartMs, viewEndMs, viewMin, viewMax, surfaceBounds);
+    const auto tpoSrcRect = mapping.source;
+    const auto effectiveDrawRect = mapping.draw;
 
     // ── Material parameters ─────────────────────────────────────────────────
     m_node->setColor(QColor(42, 50, 60, 255));         // alpha=255: letter alpha driven by shaped intensity
@@ -378,8 +306,6 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                          0.14f,
                          0.85f);
 
-    Q_UNUSED(forceFull);
-    Q_UNUSED(timeOffset);
     m_node->setTimeOffset(0.0f);
 
     if (drawTpo && !effectiveDrawRect.isEmpty()) {
@@ -393,9 +319,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     if (drawTpo) {
         sLog_Probe("tpo.mapping", "mode=" << static_cast<int>(m_displayMode)
                    << " grid=" << m_gridWidth << "x" << m_gridHeight
-                   << " drawX=" << drawRect.x() << " drawW=" << drawRect.width()
+                   << " drawX=" << surfaceBounds.x() << " drawW=" << surfaceBounds.width()
                    << " effX=" << effectiveDrawRect.x() << " effW=" << effectiveDrawRect.width()
-                   << " srcX=" << sourceRect.x() << " srcW=" << sourceRect.width()
+                   << " srcX=" << tpoSrcRect.x() << " srcW=" << tpoSrcRect.width()
                    << " tpoSrcX=" << tpoSrcRect.x() << " tpoSrcW=" << tpoSrcRect.width()
                    << " session=[" << sessionStartMs << ".." << sessionEndMs << "]"
                    << " view=[" << viewStartMs << ".." << viewEndMs << "]");

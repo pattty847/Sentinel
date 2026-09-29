@@ -3,6 +3,8 @@
 #include <QtEndian>
 
 #include <limits>
+#include <cmath>
+#include <algorithm>
 
 int FootprintStreamState::expectedBytesForGridHeight(int gridHeight) {
     if (gridHeight <= 0) {
@@ -27,7 +29,7 @@ void FootprintStreamState::setGridDimensions(int gridWidth, int gridHeight) {
 }
 
 void FootprintStreamState::updateRange(double minPrice, double maxPrice, double tickSize) {
-    if (tickSize <= 0.0 || maxPrice <= minPrice) {
+    if (!std::isfinite(tickSize) || !std::isfinite(maxPrice) || !std::isfinite(minPrice) || tickSize <= 0.0 || maxPrice <= minPrice) {
         return;
     }
     std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -56,7 +58,8 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
                                        double maxPrice,
                                        double tickSize,
                                        const QByteArray& deltaLevelsQ16) {
-    if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0) {
+    if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
+        bucketEndMs - bucketStartMs != timeframeMs || bucketStartMs % timeframeMs != 0) {
         return false;
     }
     if (gridWidth <= 0 || gridHeight <= 0) {
@@ -69,7 +72,7 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
     if (deltaLevelsQ16.size() != expectedBytes) {
         return false;
     }
-    if (tickSize <= 0.0 || maxPrice <= minPrice) {
+    if (!std::isfinite(tickSize) || !std::isfinite(maxPrice) || !std::isfinite(minPrice) || tickSize <= 0.0 || maxPrice <= minPrice) {
         return false;
     }
 
@@ -79,8 +82,9 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
     }
 
     const bool hasPrevious = (m_filledColumns > 0 && m_writeColumn >= 0);
-    const bool sameBucketUpdate = hasPrevious && (bucketStartMs == m_lastSliceStartMs);
-    bool shouldReset = !m_rangeValid;
+    bool sameBucketUpdate = hasPrevious && (bucketStartMs == m_lastSliceStartMs);
+    bool shouldReset = !m_rangeValid || m_tickSize != tickSize || m_maxPrice != maxPrice ||
+        m_minPrice != minPrice || m_timeframeMs != timeframeMs;
     if (hasPrevious && bucketStartMs < m_lastSliceStartMs) {
         shouldReset = true;
     }
@@ -92,6 +96,7 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
     }
     if (shouldReset) {
         resetLocked(m_gridWidth, m_gridHeight);
+        sameBucketUpdate = false;
     }
 
     m_minPrice = minPrice;
@@ -99,6 +104,22 @@ bool FootprintStreamState::ingestSlice(int64_t bucketStartMs,
     m_tickSize = tickSize;
     m_rangeValid = true;
 
+    // Explicit empty slots preserve elapsed time when publications skip buckets.
+    if (m_lastSliceStartMs > 0 && !sameBucketUpdate) {
+        const int missing = static_cast<int>(std::min<int64_t>(m_gridWidth - 1,
+            std::max<int64_t>(0, (bucketStartMs - m_lastSliceStartMs) / timeframeMs - 1)));
+        for (int i = 0; i < missing; ++i) {
+            m_writeColumn = (m_writeColumn + 1) % m_gridWidth;
+            auto& gap = m_columns[m_writeColumn];
+            gap.valid = true;
+            std::fill(gap.deltaQ16.begin(), gap.deltaQ16.end(), 0x8000);
+            ++m_filledColumns;
+            std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
+            m_pendingUploads.push_back({m_writeColumn, 0, 0});
+        }
+        m_filledColumns = std::min(m_filledColumns, m_gridWidth);
+    }
+    m_timeframeMs = timeframeMs;
     if (!sameBucketUpdate || m_writeColumn < 0) {
         m_writeColumn = (m_writeColumn + 1) % m_gridWidth;
         if (m_filledColumns < m_gridWidth) {
@@ -133,6 +154,7 @@ FootprintStreamState::Snapshot FootprintStreamState::snapshot() const {
         snap.writeColumn = m_writeColumn;
         snap.filledColumns = m_filledColumns;
         snap.lastSliceStartMs = m_lastSliceStartMs;
+        snap.timeframeMs = m_timeframeMs;
         snap.minPrice = m_minPrice;
         snap.maxPrice = m_maxPrice;
         snap.tickSize = m_tickSize;
@@ -193,6 +215,7 @@ void FootprintStreamState::resetLocked(int gridWidth, int gridHeight) {
     m_writeColumn = -1;
     m_filledColumns = 0;
     m_lastSliceStartMs = 0;
+    m_timeframeMs = 0;
     m_minPrice = 0.0;
     m_maxPrice = 0.0;
     m_tickSize = 0.0;

@@ -32,6 +32,7 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
+    friend struct TradeOverlayWireTest;
     Q_OBJECT
 public:
     struct HeatmapHistoryColumn {

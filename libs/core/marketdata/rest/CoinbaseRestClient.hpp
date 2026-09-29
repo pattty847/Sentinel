@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <chrono>
 #include "../../servermodel/TimeframeAggregator.hpp"
 #include "../auth/Authenticator.hpp"
 
@@ -16,7 +17,8 @@ public:
     explicit CoinbaseRestClient(Authenticator& auth,
                                 std::string host = "api.coinbase.com",
                                 std::string port = "443",
-                                std::string sslCaBundle = {});
+                                std::string sslCaBundle = {},
+                                std::chrono::milliseconds requestTimeout = std::chrono::seconds(10));
 
     CandleFetchResult fetchProductCandles(const std::string& productId,
                                           int64_t startSec,
@@ -31,4 +33,6 @@ private:
     std::string m_host;
     std::string m_port;
     std::string m_sslCaBundle;
+    // One total budget, including DNS and authenticated/public fallback.
+    std::chrono::milliseconds m_requestTimeout;
 };

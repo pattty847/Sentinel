@@ -1,5 +1,6 @@
 // Render-thread footprint overlay module used by the chart renderer host.
 #pragma once
+#include "TradeOverlayMapping.hpp"
 
 #include "IOverlayRenderer.hpp"
 
@@ -13,7 +14,8 @@
 class QQuickWindow;
 class QSGNode;
 class FootprintIntensityNode;
-
+
+
 class HeatmapColumnTexture;
 class FootprintOverlayRenderer : public IOverlayRenderer {
 public:
@@ -22,6 +24,7 @@ public:
         int gridWidth = 0;
         int gridHeight = 0;
         QByteArray data;
+        TradeOverlayGrid grid;
     };
 
     /// Thread-safe enqueue (called from GUI thread).
@@ -38,12 +41,8 @@ public:
     void render(QQuickWindow* window,
                 QSGNode* parentNode,
                 bool drawFootprint,
-                bool forceFull,
-                float timeOffset,
-                const QRectF& drawRect,
-                const QRectF& sharedSrcRect,
-                int sharedGridWidth,
-                int sharedGridHeight,
+                int64_t viewStartMs, int64_t viewEndMs,
+                double viewMin, double viewMax, const QRectF& surface,
                 std::vector<PendingUpload>& pendingUploads);
 
 private:
@@ -54,6 +53,7 @@ private:
     int m_gridHeight = 2048;
     int m_lastWriteColumn = -1;
     bool m_textureDirty = true;
+    TradeOverlayGrid m_grid;
     QImage m_image;                                   // CPU mirror for full uploads
     HeatmapColumnTexture* m_columnTexture = nullptr;  // RHI path; owned by the node
     std::atomic<bool> m_resetPending{false};

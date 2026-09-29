@@ -40,6 +40,13 @@ struct ServerHeatmapConfig {
     int persistenceRetentionDays = 0;
 };
 
+struct ServerTradeOverlayConfig {
+    int gridWidth = 512;
+    int gridHeight = 2048;
+    double tickSize = 5.0;
+    int64_t footprintTimeframeMs = 60000;
+};
+
 struct ServerOrderBookConfig {
     double tickSize = 0.10;
     double bandPct = 0.30;
@@ -104,6 +111,7 @@ struct ServerConfig {
     bool wasAdvertised(const std::string& key) const { return advertisedFields.contains(key); }
     ServerHeatmapConfig heatmap;
     ServerOrderBookConfig orderbook;
+    ServerTradeOverlayConfig tradeOverlays;
     ServerCandleGateConfig candles;
     ServerMdcConfig mdc;
     ServerTradingConfig trading;

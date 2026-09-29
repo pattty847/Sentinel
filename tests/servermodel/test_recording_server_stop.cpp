@@ -4,8 +4,11 @@
 #include "marketdata/auth/Authenticator.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QDir>
+#include <QFile>
 #include <gtest/gtest.h>
 #include <future>
+#include <boost/asio/read.hpp>
 #include <openssl/pem.h>
 
 // Drive the actual stop path without starting sockets or needing TLS credentials.
@@ -46,6 +49,72 @@ struct RecordingServerStopTest {
         session->on_write_complete(net::error::operation_aborted, 0);
         EXPECT_TRUE(session->write_queue_.empty());
         EXPECT_EQ(session->pendingWriteBytes_.load(), 0);
+    }
+    static void checkOverlayBounds(SentinelStreamServer& server, ServerDataModel& model) {
+        server.m_running = true;
+        server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
+        std::promise<void> release, entered1, entered2;
+        auto gate = release.get_future().share();
+        EXPECT_TRUE(server.submitHistoryTask([&] { entered1.set_value(); gate.wait(); }));
+        EXPECT_TRUE(server.submitHistoryTask([&] { entered2.set_value(); gate.wait(); }));
+        EXPECT_EQ(entered1.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(entered2.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        net::io_context ioc;
+        ssl::context ctx(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, &server);
+        session->subscriptions_.insert("BTC-USD");
+        session->overlayState("BTC-USD").request.grid.maxPrice = 120000;
+        const auto oldSelectionStopped = session->overlayStopRequested("BTC-USD");
+        EXPECT_FALSE(oldSelectionStopped());
+        session->requestOverlayHistory({{"symbol", "BTC-USD"}, {"timeframe_ms", 300000}, {"count", 2}}, false);
+        EXPECT_TRUE(oldSelectionStopped());
+        const auto currentSelectionStopped = session->overlayStopRequested("BTC-USD");
+        EXPECT_FALSE(currentSelectionStopped());
+        server.m_running = false;
+        EXPECT_TRUE(currentSelectionStopped()); // shutdown is visible before executor drain
+        server.m_running = true;
+        session->overlayHistory_.clear();
+        session->write_queue_.push_back({"in-flight", false});
+        session->pendingWriteBytes_ = 9;
+        session->pumpOverlays();
+        EXPECT_TRUE(session->overlayBusy_);
+        EXPECT_EQ(server.m_pendingHistoryTasks.load(), 3);
+        // A stalled worker never accumulates forming refreshes.
+        for (int i = 0; i < 100; ++i) session->pumpOverlays();
+        EXPECT_EQ(server.m_pendingHistoryTasks.load(), 3);
+        nlohmann::json request = {{"symbol", "BTC-USD"}, {"timeframe_ms", 60000}, {"count", 2}};
+        for (int i = 0; i < 9; ++i) session->requestOverlayHistory(request, false);
+        EXPECT_EQ(session->overlayHistory_.size(), 8);
+        for (int i = 0; i < 5; ++i) EXPECT_TRUE(server.submitHistoryTask([] {}));
+        EXPECT_FALSE(server.submitHistoryTask([] {})); // global admission cap is eight
+        session->armOverlayTimer();
+        session->beginClose("overlay cancellation test");
+        EXPECT_TRUE(currentSelectionStopped());
+        EXPECT_TRUE(session->overlayHistory_.empty());
+        release.set_value();
+        server.m_historyWorkers->join(); // force the queued completion to race with the closed session
+        server.stop(); // joins scans/builds before owner/model destruction
+        ioc.run(); // late completion and cancelled timer must not publish
+        EXPECT_EQ(session->write_queue_.size(), 1);
+    }
+    // Longer than the 3 s wait for the ClientHello below, so the fetch is
+    // still blocked in TLS when stop() runs.
+    static constexpr auto kStalledFetchDeadline = std::chrono::seconds(5);
+    static std::weak_ptr<Session> startCandleFetch(SentinelStreamServer& server, ServerDataModel& model,
+                                                  Authenticator& auth, unsigned short port) {
+        server.m_restClient = std::make_unique<CoinbaseRestClient>(auth, "127.0.0.1", std::to_string(port),
+                                                                 "", kStalledFetchDeadline);
+        server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
+        startExecutor(server);
+        std::promise<std::weak_ptr<Session>> created;
+        auto future = created.get_future();
+        net::post(server.m_ioc, [&] {
+            auto session = std::make_shared<Session>(tcp::socket(server.m_ioc), server.m_sslCtx, model, &server);
+            server.registerSession(session);
+            session->handle_message(R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_sec":60,"end_time_sec":172860,"limit":1})");
+            created.set_value(session);
+        });
+        return future.get();
     }
     static boost::asio::io_context& startExecutor(SentinelStreamServer& server) {
         server.m_running = true;
@@ -198,3 +267,97 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
         EXPECT_FALSE(sub->active.load());
     }
 }
+
+TEST(TradeOverlayServer, BoundedWorkersHistoryAndCloseDiscardLatePublication) {
+    int argc = 1; char name[] = "overlay-queue"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerConfig config; config.heatmap.persistenceEnabled = false; config.recording.enabled = false;
+    ServerDataModel model(config);
+    QTemporaryDir dir;
+    Authenticator auth(dir.path().toStdString() + "/no-credentials");
+    SentinelStreamServer server(model, auth, config, 0);
+    RecordingServerStopTest::checkOverlayBounds(server, model);
+}
+
+TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
+    int argc = 1; char name[] = "candle-stop"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+    struct RestoreDirectory { QString path = QDir::currentPath(); ~RestoreDirectory() { QDir::setCurrent(path); } } restore;
+    ASSERT_TRUE(QDir::setCurrent(directory.path()));
+    ServerConfig config; config.recording.enabled = false; config.heatmap.persistenceEnabled = false;
+    config.heatmap.timeframesMs = {60000};
+    ServerDataModel model(config);
+    Authenticator auth(directory.path().toStdString() + "/no-key");
+    net::io_context listener;
+    tcp::acceptor acceptor(listener, {net::ip::make_address("127.0.0.1"), 0});
+    tcp::socket peer(listener);
+    std::array<char, 65536> buffer{};
+    std::promise<unsigned char> clientHello;
+    std::promise<void> closed;
+    auto helloFuture = clientHello.get_future(); auto closedFuture = closed.get_future();
+    acceptor.async_accept(peer, [&](beast::error_code ec) {
+        if (ec) return;
+        peer.async_read_some(net::buffer(buffer), [&](beast::error_code ec, size_t size) {
+            clientHello.set_value(!ec && size > 0 ? static_cast<unsigned char>(buffer[0]) : 0);
+            if (ec) { closed.set_value(); return; }
+            // ClientHello arrived, but never answer it. The following read only
+            // observes closure after the stalled TLS request's deadline.
+            net::async_read(peer, net::buffer(buffer), [&](beast::error_code ec, size_t) {
+                if (ec) closed.set_value();
+            });
+        });
+    });
+    std::thread listenerThread([&] { listener.run(); });
+    struct Join { net::io_context& ioc; std::thread& thread; ~Join() { ioc.stop(); thread.join(); } } join{listener, listenerThread};
+    auto server = std::make_unique<SentinelStreamServer>(model, auth, config, 0);
+    auto session = RecordingServerStopTest::startCandleFetch(*server, model, auth, acceptor.local_endpoint().port());
+    ASSERT_EQ(helloFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_EQ(helloFuture.get(), 0x16); // TLS handshake record, not just TCP accept
+    const auto start = std::chrono::steady_clock::now();
+    server->stop();
+    EXPECT_TRUE(session.expired()); // no detached fetch retains a session/executor
+    server.reset();
+    EXPECT_LT(std::chrono::steady_clock::now() - start,
+              RecordingServerStopTest::kStalledFetchDeadline + std::chrono::seconds(2));
+    EXPECT_EQ(closedFuture.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+}
+
+#ifndef _WIN32
+TEST(RecordingServerStop, JoinedProcessWorkHonorsCancellationAndDeadline) {
+    int argc = 1; char name[] = "process-stop"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    EXPECT_EQ(kScreenerProcessBudget, std::chrono::seconds(90));
+    for (bool cancel : {true, false}) {
+        QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+        const auto pidFile = directory.path() + "/child.pid";
+        pid_t child = 0;
+        const auto readChild = [&] {
+            QFile file(pidFile);
+            if (file.open(QIODevice::ReadOnly)) child = static_cast<pid_t>(file.readAll().trimmed().toLongLong());
+        };
+        bool cancellationRequested = false;
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = runBoundedProcess("/bin/sh",
+            {"-c", "trap 'wait; exit' TERM; sleep 60 & echo $! > child.pid; wait"}, directory.path(), [&] {
+                if (cancel && !cancellationRequested) {
+                    readChild();
+                    cancellationRequested = child > 0 && ::kill(child, 0) == 0;
+                }
+                return cancellationRequested;
+            }, cancel ? std::chrono::seconds(5) : std::chrono::milliseconds(500));
+        EXPECT_EQ(result.error, cancel ? "process cancelled" : "process deadline exceeded");
+        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(3));
+        readChild();
+        ASSERT_GT(child, 0); // real shell -> sleep grandchild of this test process
+        const auto reapedBy = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (::kill(child, 0) == 0 && std::chrono::steady_clock::now() < reapedBy)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        errno = 0;
+        const auto status = ::kill(child, 0);
+        EXPECT_EQ(status, -1) << "grandchild survived process-group termination: " << child;
+        EXPECT_EQ(errno, ESRCH);
+        if (status == 0) ::kill(child, SIGKILL); // clean up on regression without hiding failure
+    }
+}
+#endif

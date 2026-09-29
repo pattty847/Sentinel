@@ -130,3 +130,26 @@ See the default files `config/server_config.yaml` and `config/client_config.yaml
 
 - **`docs/ARCHITECTURE.md`** — How server and client use config (e.g. `server_config` on connect).
 - **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading setup and hotkeys.
+
+## Trade overlays
+
+Footprint, TPO and volume profile use an independent trade grid. The server
+advertises these settings as `trade_overlays` in `server_config`:
+
+```yaml
+trade_overlays:
+  grid_width: 512
+  grid_height: 2048
+  tick_size: 5
+  footprint_timeframe_ms: 60000
+```
+
+Width and height are bounded to 2048. Footprint's selected chart timeframe is
+sent explicitly in its history request; the configured timeframe is the startup
+default. TPO uses its requested session and bracket duration, with at most 2048
+session columns; the bracket must divide the session duration. Price rows descend
+from `max_price`, with `min_price = max_price - grid_height * tick_size`.
+The first successful publication anchors the grid on the latest retained trade
+(or a candle close for TPO history after restart), rounded to its own tick. The grid remains fixed for that subscription; requests
+may explicitly change `price_min`, `tick_size` and `rows`. Recording heatmap zoom,
+re-bands and tick changes do not change this grid.

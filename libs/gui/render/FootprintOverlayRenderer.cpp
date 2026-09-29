@@ -43,12 +43,8 @@ void FootprintOverlayRenderer::requestNeutralReset() {
 void FootprintOverlayRenderer::render(QQuickWindow* window,
                                       QSGNode* parentNode,
                                       bool drawFootprint,
-                                      bool forceFull,
-                                      float timeOffset,
-                                      const QRectF& drawRect,
-                                      const QRectF& sharedSrcRect,
-                                      int sharedGridWidth,
-                                      int sharedGridHeight,
+                                      int64_t viewStartMs, int64_t viewEndMs,
+                                      double viewMin, double viewMax, const QRectF& surface,
                                       std::vector<PendingUpload>& pendingUploads) {
     if (!window || !parentNode) {
         return;
@@ -65,6 +61,16 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
         }
     }
 
+    if (!pendingUploads.empty()) {
+        const auto next = pendingUploads.back().grid;
+        if (next.generation != m_grid.generation || next.maxPrice != m_grid.maxPrice || next.tick != m_grid.tick) {
+            m_image = QImage(); m_textureDirty = true;
+        }
+        m_grid = next;
+        std::erase_if(pendingUploads, [&](const auto& u) {
+            return u.grid.generation != next.generation || u.grid.maxPrice != next.maxPrice || u.grid.tick != next.tick;
+        });
+    }
     const bool hasPending = !pendingUploads.empty();
     if (hasPending) {
         for (auto it = pendingUploads.rbegin(); it != pendingUploads.rend(); ++it) {
@@ -83,12 +89,6 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
                 m_lastWriteColumn = upload.x;
             }
         }
-    }
-
-    if ((m_gridWidth <= 0 || m_gridHeight <= 0) && sharedGridWidth > 0 && sharedGridHeight > 0) {
-        m_gridWidth = sharedGridWidth;
-        m_gridHeight = sharedGridHeight;
-        m_textureDirty = true;
     }
 
     if (!drawFootprint && !hasPending) {
@@ -173,32 +173,18 @@ void FootprintOverlayRenderer::render(QQuickWindow* window,
         }
     }
 
-    QRectF footprintSrcRect(0, 0, m_gridWidth, m_gridHeight);
-    if (m_gridWidth == sharedGridWidth && m_gridHeight == sharedGridHeight) {
-        footprintSrcRect = sharedSrcRect;
-    }
-
+    const auto mapping = mapTradeOverlay(m_grid, m_gridWidth, m_gridHeight,
+        viewStartMs, viewEndMs, viewMin, viewMax, surface);
     m_node->setColor(QColor(42, 50, 60, 180));
     m_node->setBidColor(QColor(46, 182, 230, 255));
     m_node->setAskColor(QColor(235, 92, 52, 255));
     m_node->setNeutralFloor(0.08f);
     m_node->setMagnitudeScale(20.0f);
     m_node->setMagnitudeGamma(0.75f);
-    float footprintTimeOffset = 0.0f;
-    if (!forceFull && m_gridWidth > 0 && m_lastWriteColumn >= 0 && m_lastWriteColumn < m_gridWidth) {
-        const float wrapped = timeOffset * static_cast<float>(m_gridWidth);
-        const float fractional = wrapped - std::floor(wrapped);
-        const int oldestColumn = (m_lastWriteColumn + 1) % m_gridWidth;
-        footprintTimeOffset = (static_cast<float>(oldestColumn) + fractional) /
-                              static_cast<float>(m_gridWidth);
-    }
-    m_node->setTimeOffset(footprintTimeOffset);
-    if (drawFootprint) {
-        m_node->setRect(drawRect);
-        m_node->setSourceRect(footprintSrcRect);
-    } else {
-        m_node->setRect(QRectF());
-    }
+    const float offset = m_gridWidth > 0 ? float((m_lastWriteColumn + 1) % m_gridWidth) / m_gridWidth : 0;
+    m_node->setTimeOffset(offset);
+    m_node->setRect(drawFootprint ? mapping.draw : QRectF());
+    m_node->setSourceRect(mapping.source);
 
     if (useIncrementalGlUploads && hasPending) {
         for (auto& upload : pendingUploads) {

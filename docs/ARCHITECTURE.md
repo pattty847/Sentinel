@@ -160,3 +160,40 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
 | `docs/FEATURES.md` | Feature overview and notable changes |
 | `docs/TRADING_SIMULATION_BLUEPRINT.md` | Long-term plan for shared live paper trading, replay, and future book-aware execution |
+
+## Trade overlays and recording heatmaps
+
+`servermodel/TradeOverlayPublisher` builds footprint deltas, session-relative TPO
+letters and volume profiles from a bounded immutable snapshot of the shared trade
+tape. The snapshot budget applies only to the requested time window. For TPO
+history before the retained tape, the worker fetches bounded REST minute-candle
+pages and fills their high/low ranges on the same independent grid. TPO history
+and live publication respect session close.
+`SentinelStreamServer::Session` owns timer cadence, request selection and
+bounded admission to the history worker pool. Workers read only atomic stop flags;
+replies return by executor post, with subscription/generation checks before write.
+REST uses asynchronous socket operations behind its synchronous worker API, with
+one 10-second deadline per call. Blocking system DNS lookups are isolated in at
+most four self-owned resolver threads process-wide, so a timed-out caller does
+not join a stuck OS resolver. Lookups are shared per host/port; successful
+endpoints have a five-minute fresh TTL and stay usable while refresh is pending
+or capacity is exhausted. Uncached callers wait within their request deadline
+for capacity. No resolver thread retains server/client state.
+Overlay pagination checks shutdown and selection cancellation between pages.
+Candle-history REST and screener work also use the joined, bounded history pool;
+no detached task retains a session or server executor. The screener uses blocking
+QProcess APIs with a 90-second process deadline (uv startup, the upstream
+30-second HTTP timeout, and serialization margin), cancellation checks every
+50 ms, and an 8 MiB output cap. On POSIX, the launched process starts its own
+process group; cancellation sends SIGTERM to the group, allows 250 ms of grace,
+then sends SIGKILL to the group and reaps the direct child. Shutdown joins admitted work before destroying the REST
+client or executor.
+The legacy heatmap streamer remains only for its heatmap path pending removal.
+
+The GUI carries `TradeOverlayGrid` with each immutable footprint/TPO upload.
+`TradeOverlayMapping` projects that grid against the frame's common world
+viewport and full surface. Texture dimensions do not imply shared price/time
+coordinates. Footprint inserts neutral missing time slots and resets on changes
+to its own grid; TPO clears its old band when its own price metadata changes.
+Volume profile also uses the full surface and its own price metadata. Recording
+re-bands do not reset these overlays or stretch them to the heatmap overlap rect.
