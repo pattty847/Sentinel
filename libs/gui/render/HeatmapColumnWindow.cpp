@@ -208,6 +208,8 @@ void ColumnWindow::clear() {
     m_liveGeneration = 0;
     m_projected.clear();
     m_recording = false;
+    m_recordingPublished = false;
+    m_rebandPending = false;
     m_bandGeneration = 0;
     m_requestId.clear();
     m_latestRecordingMs = 0;
@@ -436,6 +438,7 @@ bool ColumnWindow::setDisplayBand(const Band& band, uint64_t generation, Update&
     if (!std::isfinite(rowCount) || rowCount < 1 || rowCount > 16384 ||
         std::abs(rowCount - std::round(rowCount)) > 1e-6) return false;
     if (m_recording && generation == m_bandGeneration && band.sameAs(m_band)) return false;
+    m_rebandPending = m_recordingPublished;
     m_recording = true;
     m_bandGeneration = generation;
     m_recordingRepairs.clear();
@@ -451,7 +454,7 @@ bool ColumnWindow::setDisplayBand(const Band& band, uint64_t generation, Update&
     if (m_latestRecordingMs == 0 && m_placed) m_latestRecordingMs = m_windowEndMs;
     if (!m_placed) return false;
     emitWindow(true, {}, out);
-    return true;
+    return !m_rebandPending;
 }
 
 bool ColumnWindow::ingestRecording(const std::vector<Column>& columns, uint64_t generation,
@@ -598,7 +601,7 @@ bool ColumnWindow::place(Update& out, const std::vector<int64_t>& changed) {
     }
 
     const bool full = jump || !band.sameAs(m_band);
-    if (!full && end == m_windowEndMs && changed.empty()) {
+    if (!full && end == m_windowEndMs && changed.empty() && !m_rebandPending) {
         m_pinned = pin;
         return false;
     }
@@ -607,11 +610,32 @@ bool ColumnWindow::place(Update& out, const std::vector<int64_t>& changed) {
     m_windowEndMs = end;
     m_band = band;
     emitWindow(full, changed, out);
+    return !m_rebandPending;
+}
+
+bool ColumnWindow::recordingViewReady() const {
+    // A provisional/request band has no evidence yet, even if it does not
+    // overlap the time window. Never release it on a viewport-only update.
+    if (m_projected.empty() && m_known.empty() && m_floorMs <= 0) return false;
+    const int64_t start = m_hasView ? std::max(windowStartMs(), align(m_viewStartMs)) : windowStartMs();
+    const int64_t end = m_hasView ? std::min(m_windowEndMs, align(m_viewEndMs - 1)) : m_windowEndMs;
+    // Include partially visible buckets; exclude future time and off-ring
+    // prefetch. Scanned gaps (including the storage floor) resolve a bucket,
+    // whereas a zero/unknown row mask says nothing about time-page readiness.
+    for (int64_t bucket = start; bucket <= end; bucket += m_timeframeMs) {
+        if (!m_projected.count(bucket) && !isKnown(bucket)) return false;
+    }
     return true;
 }
 
 void ColumnWindow::emitWindow(bool full, const std::vector<int64_t>& changed, Update& out) {
     out = Update{};
+    if (m_rebandPending) {
+        if (!recordingViewReady()) return;
+        m_rebandPending = false;
+        full = true; // includes all live/history changes accumulated while held
+    }
+    if (m_recording && m_sizeFloor > 0) m_recordingPublished = true;
     out.timeframeMs = m_timeframeMs;
     out.width = m_width;
     out.rows = m_rows;

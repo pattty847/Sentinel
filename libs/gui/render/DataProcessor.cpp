@@ -280,6 +280,9 @@ void DataProcessor::resetHeatmapWindow() {
 
 void DataProcessor::publishHeatmapWindow(std::shared_ptr<heatmap_window::Update> update,
                                          bool firstPlacement) {
+    if (update->full && update->valueEncoding == heatmap_window::ValueEncoding::AbsoluteLogSize)
+        sLog_Probe("heatmap.recording.publish", "gen=" << update->bandGeneration
+                   << " end=" << update->windowEndMs << " tick=" << update->band.tickSize);
     if (firstPlacement) {
         // Placeholder viewport and axis init for a fresh window (FM-034).
         emit heatmapRangeReset(update->band.minPrice, update->band.maxPrice, update->band.tickSize,
@@ -733,7 +736,8 @@ void DataProcessor::applyRecordingBand() {
     m_recordingInFlight = false;
     m_recordingTimeout->stop();
     auto update = std::make_shared<heatmap_window::Update>();
-    // This provisional band only blanks old projections. The reply replaces it.
+    // Stage a provisional projection; keep the published picture until the
+    // reply's authoritative band has resolved the visible time range.
     const double tick = (band.maxPrice - band.minPrice) / recording_view::kRows;
     if (m_heatmapWindow.setDisplayBand({band.minPrice, band.maxPrice, tick}, m_bandGeneration, *update))
         publishHeatmapWindow(std::move(update), false);

@@ -135,7 +135,8 @@ public:
     WallsSnapshot captureWalls(const WallQuery& query) const;
 
     // Explicit recording projection; never clears the source/live cache or placement.
-    // A generation change invalidates projected data/known ranges and rewrites every slot.
+    // Re-bands stage projected data/known ranges while the GUI retains its last
+    // published ring + mapping. Publish every slot together once the view is known.
     bool setDisplayBand(const Band& band, uint64_t generation, Update& out);
     void setRecordingRequest(const std::string& requestId) { m_requestId = requestId; }
     bool ingestRecording(const std::vector<Column>& columns, uint64_t generation,
@@ -178,6 +179,7 @@ private:
     Band unionBand(int64_t startMs, int64_t endMs) const;
     const Column* newestCached() const;
     bool place(Update& out, const std::vector<int64_t>& changed);
+    bool recordingViewReady() const;
     void emitWindow(bool full, const std::vector<int64_t>& changed, Update& out);
     void writeSlot(int64_t bucketMs, SlotWrite& out);
     void evict();
@@ -189,6 +191,8 @@ private:
     int m_bytesPerCell = 0;
 
     bool m_recording = false;
+    bool m_recordingPublished = false;
+    bool m_rebandPending = false;
     uint64_t m_bandGeneration = 0;
     std::string m_requestId;
     double m_sizeFloor = 0.0, m_codesPerOctave = 0.0;

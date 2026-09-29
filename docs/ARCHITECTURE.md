@@ -74,6 +74,37 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 
 The server produces dense live columns and self-describing u16 persisted columns. The client uploads live data incrementally and replaces historical GPU pages in bounded batches; no per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
 
+### Recording heatmap re-band publication
+
+After the first recording picture, `heatmap_window::ColumnWindow` stages each new
+display band on the DataProcessor worker without publishing intermediate slot
+writes. The GUI keeps its existing ring, price/time mapping, coverage and texture.
+The worker continues to cache live arrivals and fetch history. A replacement is
+ready when every bucket intersecting the current visible time range and bounded
+window is loaded or proven missing by a scanned interval/storage floor. Partially
+visible buckets count; future time and off-screen prefetch do not. Row validity
+and intensity are not time-page readiness signals: valid zero values and proven
+gaps must both be allowed to replace the old picture.
+
+The ready generation publishes one full immutable window update, replacing data
+and mapping together through the existing snapshot/upload path. A newer re-band
+discards only the staged projection and restarts readiness; generation and request
+checks reject stale replies. Viewport changes re-evaluate readiness, and a reset
+cancels the hold. Initial loading and legacy publication keep their existing
+behavior. If a page fails, the old picture remains until fetching succeeds; it
+retains its original world coordinates, so newly exposed prices/times outside
+that picture remain uncovered. The walls API reads the worker's staged projection,
+which can differ from the retained picture during this interval.
+
+This first step uses an instant swap. Holding publication adds no GPU memory or
+per-frame rendering work, and causes one existing full upload at readiness instead
+of blanking uploads at re-band time. Readiness costs at most the window width in
+map lookups per worker update while waiting (no allocations). A future two-layer
+GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
+32 MiB at 8192 x 2048), its mapping and coverage, and draw a second blended quad
+during the fade. That option needs separate mapping/label lifecycle handling and
+live GPU measurement; it is not implemented here.
+
 ### Coordinate system: TimeAxisMapping
 
 All chart layers (heatmap, candles, labels, TPO, footprint) share one mapping: **TimeAxisMapping** (`libs/gui/render/TimeAxisMapping.hpp`). It is produced once per frame in `UnifiedGridRenderer::updatePaintNode()` and consumed by all renderers in that frame.
