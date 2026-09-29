@@ -190,7 +190,8 @@ Routing (starting defaults; the orchestrator recalibrates them as results come i
 - **Orchestrator (Claude Code session the owner is talking to):** direction, cross-cutting design, audits, merges, anything touching hot paths or several subsystems at once.
 - **Codex `gpt-6-sol`, effort high:** a well-specified bug fix or small feature with clear acceptance checks, in its own worktree.
 - **Codex `gpt-6-astra`, effort high or above:** harder self-contained work: deeper reasoning, larger isolated refactors, second-opinion reviews (`-s read-only`).
-- **Read-only review before merge:** a different model from the one that wrote the change.
+- **Claude subagents (the orchestrator's Agent tool, model `opus` or `sonnet`):** the same kinds of tasks as the Codex lieutenants, used to spread usage across the owner's Claude and ChatGPT subscriptions. Write tasks follow the same hand-off protocol in their own worktree (branch `lt-claude/...`); reviews run read-only.
+- **Read-only review before merge:** a different model from the one that wrote the change; prefer the other vendor (Claude reviews Codex work, Codex reviews Claude work).
 - A delegated agent does not delegate further unless its prompt explicitly allows it, and never merges its own branch.
 
 The owner's ChatGPT subscription can run Codex agents headless, to spread work across subscriptions.
@@ -207,7 +208,7 @@ Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
 - The delegating agent reviews the resulting diff and runs the verification ladder (section 4) before anything merges.
 
 Hand-off protocol (every delegated write task):
-1. Work in your own worktree and branch, created from current `main` with `scripts/dev/agent-worktree.sh create <branch>` (branches: `lt-sol/...` for Codex gpt-6-sol, `lt-astra/...` for gpt-6-astra). It puts the worktree on the T7 drive when mounted, supplies `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build take seconds. Remove it after merge with `... remove <branch>`.
+1. Work in your own worktree and branch, created from current `main` with `scripts/dev/agent-worktree.sh create <branch>` (branches: `lt-sol/...` for Codex gpt-6-sol, `lt-astra/...` for gpt-6-astra, `lt-claude/...` for Claude subagents). It puts the worktree on the T7 drive when mounted, supplies `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build take seconds. Remove it after merge with `... remove <branch>`.
 2. Before reporting ready, rebase onto the latest `main` (`git rebase main`; rerere is enabled for the repo, so a conflict you resolve once is reused), resolve any conflicts yourself, rebuild, and run `ctest` in `build/mac-clang`. Do not merge `main` into agent branches: they are local, single-owner and short-lived, so a rebase keeps history linear. Do not track `main` while you work; rebase once, at hand-off.
 3. Finish with a message whose first line is `READY: <branch>`, followed by: what changed and why, the tests you ran with their summary line, and anything you could not verify (visual checks, live runs). Say `BLOCKED: <branch>` with the reason instead if you cannot finish.
 4. The orchestrator reviews the diff with a different model, then lands it with `scripts/dev/agent-worktree.sh land <branch>`: rebase onto the current `main`, build, ctest, a `git range-diff` review gate when the rebase changed commits, a `--no-ff` merge, and worktree removal. Never merge your own branch.
