@@ -1161,7 +1161,15 @@ public:
                  if (const auto it = overlays_.find(symbol); it != overlays_.end())
                      it->second.cancelled->store(true);
                  overlays_.erase(symbol);
-                 std::erase_if(overlayHistory_, [&](const auto& q) { return q.symbol == symbol; });
+                 std::erase_if(overlayHistory_, [&](const auto& q) {
+                     if (q.symbol != symbol) return false;
+                     // Queued pages never reach pumpOverlays(); release their cancel flags here.
+                     if (const auto c = tpoRequestCancel_.find(q.requestId); c != tpoRequestCancel_.end()) {
+                         c->second->store(true);
+                         tpoRequestCancel_.erase(c);
+                     }
+                     return true;
+                 });
                  if (removed && owner_) {
                      owner_->notifyClientUnsubscribed(symbol);
                  }
