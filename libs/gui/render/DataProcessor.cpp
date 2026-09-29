@@ -664,11 +664,10 @@ void DataProcessor::resetRecordingRequest() {
     m_recordingTimeout->stop();
 }
 
-void DataProcessor::setRecordingConfig(bool requested, double minRowPx, double aspect) {
+void DataProcessor::setRecordingConfig(bool requested, double minRowPx) {
     const bool changed = m_recordingRequested != requested;
     m_recordingRequested = requested;
     m_recordingMinRowPx = std::clamp(minRowPx, 1.0, 64.0);
-    m_recordingAspect = std::clamp(aspect, 0.05, 4.0);
     if (changed) resetHeatmapWindow();
     scheduleRecordingBand();
 }
@@ -697,8 +696,7 @@ void DataProcessor::refreshRecordingHistory() {
 
 void DataProcessor::scheduleRecordingBand() {
     if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty()) return;
-    const auto wanted = recording_view::requestBand(m_recordingView, m_forcedTimeframeMs,
-                                                   m_recordingMinRowPx, m_recordingAspect);
+    const auto wanted = recording_view::requestBand(m_recordingView, m_recordingMinRowPx);
     if (!recording_view::needsReband(m_recordingView, m_recordingBand, wanted)) {
         m_recordingDebounce.cancel();
         m_recordingBandTimer->stop();
@@ -711,8 +709,7 @@ void DataProcessor::scheduleRecordingBand() {
 void DataProcessor::applyRecordingBand() {
     if (!recordingMode() || !m_recordingConnected || !m_recordingView.valid() ||
         !m_recordingDebounce.ready(m_recordingClock.elapsed())) return;
-    const auto band = recording_view::requestBand(m_recordingView, m_forcedTimeframeMs,
-                                                 m_recordingMinRowPx, m_recordingAspect);
+    const auto band = recording_view::requestBand(m_recordingView, m_recordingMinRowPx);
     if (!band.valid()) return;
     ensureHeatmapWindow(m_forcedTimeframeMs, m_heatmapGridWidth, recording_view::kRows);
     m_recordingBand = band;

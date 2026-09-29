@@ -38,7 +38,7 @@ protected:
         processor.setHeatmapGridDimensions(1024, 2048);
         processor.setActiveSymbol("BTC-USD");
         processor.setServerTimeframe(60'000);
-        processor.setRecordingConfig(true, 2, 0.75);
+        processor.setRecordingConfig(true, 2);
         processor.setRecordingConnected(true);
         processor.setHeatmapViewport(6'000'000, 12'000'000, false, 10000, 10100, 1000, 500);
     }
@@ -170,7 +170,7 @@ TEST_F(RecordingDataProcessor, BudgetWithoutProgressRetriesSameBoundaryWithNewId
 }
 
 TEST_F(RecordingDataProcessor, DefaultLegacyPayloadBytesStayUnchanged) {
-    processor.setRecordingConfig(false, 2, 0.75);
+    processor.setRecordingConfig(false, 2);
     processor.setRecordingCapability(true);
     HeatmapSlice live;
     live.symbol = "BTC-USD";

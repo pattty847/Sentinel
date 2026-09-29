@@ -1,6 +1,6 @@
 #pragma once
 
-#include "HeatmapRowGrouping.hpp"
+#include "../../core/servermodel/PriceLadder.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -24,22 +24,24 @@ struct BandRequest {
     bool valid() const { return maxPrice > minPrice && idealTick > 0; }
 };
 
-// Continuous square-cell target, rounded up to a decimal 1-2-5 step for stable
-// zoom triggers. This is a request hint, never a claim about the native grid.
-inline double stepTick(double tick) {
-    if (!(tick > 0) || !std::isfinite(tick)) return 0;
-    const double decade = std::pow(10.0, std::floor(std::log10(tick)));
-    for (double step : {1.0, 2.0, 5.0, 10.0})
-        if (tick <= decade * step * (1.0 + 1e-12)) return decade * step;
-    return 0;
+// Display tick rule (owner decision 2026-09-28): the smallest price-ladder tick
+// ({1,2,2.5,5} x 10^k) that is at least minRowPx tall on screen, so a zoomed-out
+// heatmap shows long thin order lines and a zoomed-in one reaches the native $1
+// grid (where rows grow tall and in-cell text appears). Computed on the finest
+// recorded grid; the server maps it onto the chosen layer's grid, and ladder
+// values at or above the deep native tick coincide on both grids.
+constexpr double kFinestNativeTick = 1.0;  // near layer, quote currency
+constexpr double kPriceScale = 100.0;      // price units per 1.0 (BTC-USD cents)
+inline double idealTick(const View& view, double minRowPx) {
+    if (!view.valid() || !(minRowPx > 0)) return 0;
+    const double pricePerPx = (view.maxPrice - view.minPrice) / view.heightPx;
+    return recording::ladderTick(pricePerPx * minRowPx, kFinestNativeTick, kPriceScale);
 }
-inline BandRequest requestBand(const View& view, int64_t tf, double minRowPx, double aspect) {
-    if (!view.valid() || tf <= 0) return {};
+inline BandRequest requestBand(const View& view, double minRowPx) {
+    if (!view.valid()) return {};
     const double span = view.maxPrice - view.minPrice;
-    const double columnPx = view.widthPx * static_cast<double>(tf) /
-                            (static_cast<double>(view.endMs) - static_cast<double>(view.startMs));
-    const double ideal = stepTick(heatmap_rows::squareCellTick(
-        span / view.heightPx, columnPx, minRowPx, aspect));
+    const double ideal = idealTick(view, minRowPx);
+    if (!(ideal > 0)) return {};
     // Leave two rows for the server's outward tick-grid alignment. An exact
     // rows*tick span can align to rows+1 cells and force the next ladder tick.
     const double half = std::min(std::max(span, ideal * kRows * 0.5),

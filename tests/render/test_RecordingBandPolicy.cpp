@@ -5,19 +5,23 @@ using namespace recording_view;
 
 TEST(RecordingBandPolicy, MarginExitAndTickStep) {
     View view{0, 6'000'000, 100, 200, 1000, 500, false};
-    const auto band = requestBand(view, 60'000, 2, 0.75);
+    const auto band = requestBand(view, 2);
     EXPECT_LE(band.minPrice, 50);
     EXPECT_GE(band.maxPrice, 250);
-    EXPECT_DOUBLE_EQ(band.idealTick, 2);
+    EXPECT_DOUBLE_EQ(band.idealTick, 1);  // $100 over 500 px -> 2 px rows need $0.4 -> native $1
     EXPECT_FALSE(needsReband(view, band, band));
     view.minPrice = band.minPrice - 1;
     view.maxPrice = view.minPrice + 100;
-    EXPECT_TRUE(needsReband(view, band, requestBand(view, 60'000, 2, 0.75)));
+    EXPECT_TRUE(needsReband(view, band, requestBand(view, 2)));
+    // Zooming time does not change the tick: only price-per-pixel does.
     view = {0, 6'000'000, 100, 200, 1000, 500, false};
     view.endMs /= 2;
-    const auto zoomed = requestBand(view, 60'000, 2, 0.75);
-    EXPECT_DOUBLE_EQ(zoomed.idealTick, 5);
-    EXPECT_TRUE(needsReband(view, band, zoomed));
+    EXPECT_DOUBLE_EQ(requestBand(view, 2).idealTick, 1);
+    // Zooming price out 20x does: $2,000 over 500 px -> $8 -> $10.
+    view = {0, 6'000'000, 100, 2'100, 1000, 500, false};
+    const auto zoomedOut = requestBand(view, 2);
+    EXPECT_DOUBLE_EQ(zoomedOut.idealTick, 10);
+    EXPECT_TRUE(needsReband(view, band, zoomedOut));
 }
 
 TEST(RecordingBandPolicy, TrailingDebounceAndCancellation) {
@@ -33,19 +37,22 @@ TEST(RecordingBandPolicy, TrailingDebounceAndCancellation) {
     EXPECT_FALSE(state.ready(500));
 }
 
-TEST(RecordingBandPolicy, SquareCellTargetAgreesWithRowGrouping) {
-    const double baseTick = 0.5, pxPerBase = 2.5, columnPx = 10;
-    const auto target = heatmap_rows::squareCellTick(baseTick / pxPerBase, columnPx, 2, 0.75);
-    const int group = heatmap_rows::rowsPerDisplayRow(pxPerBase, heatmap_rows::targetRowPx(columnPx, 2, 0.75));
-    EXPECT_GE(group * baseTick, target);
-    EXPECT_DOUBLE_EQ(target, 1.5);
-    EXPECT_FALSE(requestBand({}, 60'000, 2, 0.75).valid());
-    EXPECT_EQ(stepTick(std::numeric_limits<double>::infinity()), 0);
+TEST(RecordingBandPolicy, IdealTickIsLadderTickForTwoPixelRows) {
+    // $100 over 500 px: $0.2/px -> 2 px rows need $0.4 -> native $1.
+    EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 83'000, 83'100, 1000, 500, false}, 2), 1.0);
+    // $2,000 over 500 px: $4/px -> $8 -> $10.
+    EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 82'000, 84'000, 1000, 500, false}, 2), 10.0);
+    // $5,000 over 500 px: $10/px -> $20 (ladder has 20 and 25).
+    EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 80'000, 85'000, 1000, 500, false}, 2), 20.0);
+    // $11,000 over 500 px: $22/px -> $44 -> $50. Column width plays no part.
+    EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 78'000, 89'000, 20, 500, false}, 2), 50.0);
+    EXPECT_FALSE(requestBand({}, 2).valid());
+    EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 1, 2, 10, 10, false}, 0), 0.0);
 }
 
 TEST(RecordingBandPolicy, NonnegativeProtocolBandRetainsRequestedResolution) {
     View view{0, 6'000'000, 1, 2, 1000, 500, false};
-    const auto band = requestBand(view, 60'000, 2, 0.75);
+    const auto band = requestBand(view, 2);
     EXPECT_GE(band.minPrice, 0);
     EXPECT_LE(band.maxPrice - band.minPrice, (kRows - 2) * band.idealTick);
     EXPECT_TRUE(band.valid());

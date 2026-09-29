@@ -62,9 +62,9 @@ TEST_F(PageTest, TickChoiceClipsNeitherUpperEdgeNorExactGridMultiples) {
 }
 TEST_F(PageTest, ClientBandPreservesIdealTickThroughServerAlignment) {
     write({record(), record(0, "deep")});
-    for (const double width : {600.0, 1000.0, 3000.0, 6000.0}) {
-        recording_view::View view{0, 6'000'000, 10'000.37, 10'100.37, width, 500, false};
-        const auto band = recording_view::requestBand(view, minute, 2, 0.75);
+    for (const double width : {150.0, 300.0, 500.0, 900.0}) {  // plot heights
+        recording_view::View view{0, 6'000'000, 10'000.37, 10'100.37, 1000, width, false};
+        const auto band = recording_view::requestBand(view, 2);
         ASSERT_TRUE(band.valid());
         auto q = request(band.minPrice, band.maxPrice, recording_view::kRows);
         const auto result = buildPage(root(), q);

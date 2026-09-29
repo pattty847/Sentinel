@@ -43,7 +43,7 @@ public slots:
     void setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow,
                             double minPrice = 0, double maxPrice = 0,
                             double widthPx = 0, double heightPx = 0);
-    void setRecordingConfig(bool requested, double minRowPx, double aspect);
+    void setRecordingConfig(bool requested, double minRowPx);
     void setRecordingCapability(bool available);
     void setRecordingConnected(bool connected);
     void refreshRecordingHistory();
@@ -121,7 +121,7 @@ private:
     uint64_t m_bandGeneration = 0, m_recordingSerial = 0;
     QString m_recordingRequestId;
     int64_t m_recordingEndMs = 0;
-    double m_recordingMinRowPx = 2, m_recordingAspect = 0.75;
+    double m_recordingMinRowPx = 2;
     recording_view::View m_recordingView;
     recording_view::BandRequest m_recordingBand;
     heatmap_window::Band m_recordingDisplayBand;

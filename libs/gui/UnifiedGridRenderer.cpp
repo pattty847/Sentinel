@@ -820,7 +820,7 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   if (m_dataProcessor) {
     const auto heatmap = config.heatmap;
     QMetaObject::invokeMethod(m_dataProcessor.get(), [this, heatmap] {
-      m_dataProcessor->setRecordingConfig(heatmap.source == "recording", heatmap.targetRowPx, heatmap.cellAspect);
+      m_dataProcessor->setRecordingConfig(heatmap.source == "recording", heatmap.targetRowPx);
     }, Qt::QueuedConnection);
   }
   setHeatmapGamma(config.heatmap.gamma);
