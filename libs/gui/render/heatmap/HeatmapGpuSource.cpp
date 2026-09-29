@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
 
 namespace heatmap::gpu {
@@ -83,6 +84,16 @@ std::vector<FloatFloat> encodeThresholds(const recording::SizeScale& scale) {
         out.push_back(splitDouble(fromOrdered(hi)));
     }
     return out;
+}
+
+double commonTick(const GpuSource& source) {
+    int64_t lcm = 0;
+    for (const double tick : source.ticks) {
+        const auto units = static_cast<int64_t>(std::llround(tick * source.priceScale));
+        if (units <= 0) return 0;
+        lcm = lcm ? std::lcm(lcm, units) : units;
+    }
+    return lcm ? double(lcm) / source.priceScale : 0;
 }
 
 std::array<uint32_t, kMaxTicks> tickFactors(const GpuSource& source, double displayTick) {
@@ -202,6 +213,20 @@ GpuSource buildGpuSource(const SparseColumns& data, const GpuSourceOptions& opti
                 }
             }
             meta.entryEnd = static_cast<uint32_t>(out.entryCount);
+            if (meta.entryEnd > meta.entryBegin) {
+                auto relRow = [&](uint32_t i) {
+                    const uint32_t key = out.wide ? out.entries[size_t(i) * 3 + 2] : (out.entries[size_t(i) * 2 + 1] & 0x1ffffu);
+                    return key >> 1;
+                };
+                const uint32_t span = relRow(meta.entryEnd - 1) + 1;
+                meta.indexBegin = static_cast<uint32_t>(out.rowIndex.size());
+                meta.indexCount = (span + kRowIndexStride - 1) / kRowIndexStride;
+                uint32_t i = meta.entryBegin;
+                for (uint32_t step = 0; step < meta.indexCount; ++step) {
+                    while (i < meta.entryEnd && relRow(i) < step * kRowIndexStride) ++i;
+                    out.rowIndex.push_back(i);
+                }
+            }
             out.groups.push_back(meta);
         }
         out.columnGroups.push_back(static_cast<uint32_t>(out.groups.size()));

@@ -200,10 +200,10 @@ target_link_libraries(sentinel_heatmap_gpu
     PRIVATE Qt6::GuiPrivate
 )
 
-# The recording GPU experiment is isolated from the production GUI target.
+# Lab: benchmark/inspection harness around the production heatmap GPU path.
 add_library(sentinel_lab_lib
-    lab/GpuBinner.hpp
-    lab/GpuBinner.cpp
+    lab/LabSources.hpp
+    lab/LabSources.cpp
     lab/LabItem.hpp
     lab/LabItem.cpp
     lab/Bench.hpp
@@ -339,16 +339,6 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_msdf.frag
         render/shaders/footprint_intensity.vert
         render/shaders/footprint_intensity.frag
-)
-
-qt_add_shaders(sentinel_lab_lib lab_shaders
-    GLSL "440"
-    PREFIX "/labshaders"
-    BASE "lab/shaders"
-    FILES
-        lab/shaders/bin.comp
-        lab/shaders/display.vert
-        lab/shaders/display.frag
 )
 
 target_include_directories(sentinel_gui_lib

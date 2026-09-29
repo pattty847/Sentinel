@@ -41,8 +41,6 @@ add_library(sentinel_core
     servermodel/RecordingPage.hpp
     servermodel/RecordingChunks.cpp
     servermodel/RecordingChunks.hpp
-    servermodel/RecordingEntries.cpp
-    servermodel/RecordingEntries.hpp
     heatmap/SparseColumns.cpp
     heatmap/SparseColumns.hpp
     heatmap/ChunkCodec.cpp

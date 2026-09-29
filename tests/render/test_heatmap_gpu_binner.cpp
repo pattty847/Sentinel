@@ -405,6 +405,44 @@ TEST(HeatmapGpuParity, SyntheticMatchesBinColumnExactly) {
     EXPECT_TRUE(total.exact());
 }
 
+// Many entries per bin over a wide dynamic range: plain float sums flip codes
+// here (verified: the float-only and the un-laundered fast-math shaders fail
+// this test), so the always-on suite guards the float-float precision contract.
+TEST(HeatmapGpuParity, PrecisionStressManyEntriesPerBin) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    SparseColumns data{"BTC-USD", "near", minute, epoch, epoch + 240 * minute, {}, {{epoch, epoch + 240 * minute}}};
+    std::mt19937_64 rng(11);
+    std::uniform_int_distribution<int> code(1, 26'000);
+    for (int64_t i = 0; i < 240; ++i) {
+        NativeColumn n;
+        n.grid = {7, 100, 100}; // $1
+        n.observedMs = minute - (i % 3) * 7'001;
+        n.baseRow = 100'000;
+        n.coverage[0] = {{100'000, 101'999, n.observedMs}};
+        n.coverage[1] = {{100'000, 101'999, n.observedMs}};
+        for (int64_t row = 100'000; row < 102'000; ++row)
+            for (bool ask : {false, true})
+                if ((row + i + ask) % 5) n.entries.push_back({packRowSide(row, n.baseRow, ask), uint16_t(code(rng))});
+        data.columns.push_back({epoch + i * minute, n.observedMs, 0, {n}});
+    }
+    validate(data);
+    Tally total;
+    for (const int64_t tf : {minute, 5 * minute}) {
+        const auto composed = compose(data, tf);
+        auto source = std::make_shared<const GpuSource>(buildGpuSource(composed));
+        HeatmapGpuBinner binner(gpu.rhi.get());
+        uploadPaged(gpu.rhi.get(), binner, source, 1 << 20);
+        for (const double tick : {1.0, 5.0, 20.0, 100.0, 250.0}) {
+            const auto grid = gridFor(*source, tick, 100'000, uint32_t(2000 / tick), 0);
+            total.add(compareGrid(composed, *source, grid, binAndRead(gpu.rhi.get(), binner, grid), "stress"));
+        }
+    }
+    std::cout << "precision stress: " << total << '\n';
+    EXPECT_GT(total.valid, 100'000u);
+    EXPECT_TRUE(total.exact());
+}
+
 TEST(HeatmapGpuParity, OutputResizeKeepsSourceAndNewSourceSwapsOnlyWhenComplete) {
     Headless gpu;
     if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";

@@ -3,15 +3,18 @@
 // One invocation = one output cell. Output column x reads exactly one source
 // column (time is composed on the CPU); output row y sums the native rows of
 // display bin (firstBin + rows - 1 - y) for every native-tick group of that
-// column, per side, in float-float. Result per cell (uint):
+// column, per side, in float-float. Cost is linear in visible entries (each is
+// read once); a per-group row index replaces most of the entry search.
+// Result per cell (uint):
 //   bits 0..14 log code, bit 15 ask-dominant, bits 16..17 state
 //   state 0 = no data, 1 = loading, 2 = veil (scanned, not proven), 3 = valid.
-layout(local_size_x = 8, local_size_y = 8) in;
+layout(local_size_x = 16, local_size_y = 4) in; // 16 columns x 4 bins: measured best of 1x64..64x1 on M4
 
 struct GroupMeta {
     int baseRow;
     uint entryBegin, entryEnd, tickIndex;
     uint runBegin0, runBegin1, runEnd0, runEnd1;
+    uint indexBegin, indexCount, reserved0, reserved1;
 };
 layout(std430, binding = 0) readonly buffer Slots { uint slots[]; };
 layout(std430, binding = 1) readonly buffer ColumnGroups { uint columnGroups[]; };
@@ -20,32 +23,42 @@ layout(std430, binding = 3) readonly buffer Runs { ivec2 runs[]; };
 layout(std430, binding = 4) readonly buffer Entries { uint entries[]; };
 layout(std430, binding = 5) readonly buffer Thresholds { uvec2 thresholds[]; };
 layout(std430, binding = 6) writeonly buffer Output { uint cells[]; };
+layout(std430, binding = 8) readonly buffer RowIndex { uint rowIndex[]; };
+const uint kRowIndexStride = 16u; // HeatmapGpuSource.hpp
 layout(std140, binding = 7) uniform Params {
     uvec4 dims;    // columns, rows, source slots, flags (bit 0: wide entries)
     ivec4 time;    // slot of column 0, first available column, available end column, threshold count
-    ivec4 price;   // absolute display bin of the bottom row, clip bin lo, clip bin end, unused
+    ivec4 price;   // absolute display bin of the bottom row, clip bin lo, clip bin end, zero (see opaque())
     uvec4 factors[4]; // native rows per display bin, per tick index (0 = incompatible)
+    vec4 codeScale;   // output size floor, codes per octave (estimate only; the table decides)
 };
 
 const uint kNotLoaded = 0xffffffffu;
 const uint kGap = 0xfffffffeu;
 const uint kNoData = 0u, kLoading = 1u, kVeil = 2u, kValid = 3u;
 
-// Float-float arithmetic. `precise` makes SPIRV-Cross emit non-reassociable
-// adds (spvFAdd/spvFSub), so Metal fast-math cannot fold the error terms away.
+// Float-float arithmetic. Metal compiles with fast math (reassociation allowed),
+// which would fold the error terms of two-sum to zero. Every intermediate is
+// laundered through an integer XOR with a runtime zero (price.w), so no
+// algebraic rewrite can see through it; each add/sub rounds exactly once.
+// (GLSL `precise` also works but costs a non-inlined call per operation.)
+float opaque(float x) { return uintBitsToFloat(floatBitsToUint(x) ^ uint(price.w)); }
 vec2 fastTwoSum(float a, float b) { // |a| >= |b|
-    precise float s = a + b;
-    precise float z = s - a;
-    precise float e = b - z;
+    float s = opaque(a + b);
+    float e = opaque(b - opaque(s - a));
     return vec2(s, e);
 }
-vec2 ffAdd(vec2 acc, vec2 x) {
-    precise float s = acc.x + x.x;
-    precise float bb = s - acc.x;
-    precise float e = (acc.x - (s - bb)) + (x.x - bb);
-    precise float t = (e + acc.y) + x.y;
-    return fastTwoSum(s, t);
+// Compensated accumulation: acc.x is the running float sum, acc.y collects the
+// exact two-sum rounding errors plus the low parts. Renormalize once at the end
+// (ffNormalize). Error ~ n^2 * 2^-48 relative for n entries, below the 2^-38 of
+// the compact entry encoding for any realistic bin.
+vec2 ffAccumulate(vec2 acc, vec2 x) {
+    float s = opaque(acc.x + x.x);
+    float bb = opaque(s - acc.x);
+    float e = opaque(opaque(acc.x - opaque(s - bb)) + opaque(x.x - bb));
+    return vec2(s, acc.y + (e + x.y));
 }
+vec2 ffNormalize(vec2 acc) { return fastTwoSum(acc.x, acc.y); }
 bool ffGreater(vec2 a, vec2 b) { return a.x > b.x || (a.x == b.x && a.y > b.y); }
 bool ffGreaterEqual(vec2 a, vec2 b) { return a.x > b.x || (a.x == b.x && a.y >= b.y); }
 
@@ -74,13 +87,13 @@ bool covered(uint begin, uint end, int lo, int hi) {
 }
 uint encodeCode(vec2 v) {
     if (!(v.x > 0.0)) return 0u;
-    // Count thresholds <= v; code = 1 + count.
-    uint a = 0u, b = uint(time.w);
-    while (a < b) {
-        uint m = (a + b) >> 1;
-        vec2 t = uintBitsToFloat(thresholds[m]);
-        if (ffGreaterEqual(v, t)) a = m + 1u; else b = m;
-    }
+    // code = 1 + number of thresholds <= v. Start from the float log estimate and
+    // correct against the exact float-float table (usually 0-1 steps).
+    uint count = uint(time.w);
+    float estimate = floor(log2(v.x / codeScale.x) * codeScale.y + 0.5);
+    uint a = uint(clamp(estimate, 0.0, float(count)));
+    while (a < count && ffGreaterEqual(v, uintBitsToFloat(thresholds[a]))) ++a;
+    while (a > 0u && !ffGreaterEqual(v, uintBitsToFloat(thresholds[a - 1u]))) --a;
     return 1u + a;
 }
 void main() {
@@ -109,8 +122,13 @@ void main() {
                          covered(meta.runBegin1, meta.runEnd1, lo, hi);
         int relLo = lo - meta.baseRow, relHi = hi - meta.baseRow;
         if (relHi < 0) continue;
-        uint firstKey = uint(max(relLo, 0)) << 1u;
-        uint a = meta.entryBegin, b = meta.entryEnd;
+        // Row index narrows the search to <= kRowIndexStride rows of entries.
+        uint firstRow = uint(max(relLo, 0));
+        uint step = firstRow / kRowIndexStride;
+        if (step >= meta.indexCount) continue;
+        uint a = rowIndex[meta.indexBegin + step];
+        uint b = step + 1u < meta.indexCount ? rowIndex[meta.indexBegin + step + 1u] : meta.entryEnd;
+        uint firstKey = firstRow << 1u;
         while (a < b) {
             uint m = (a + b) >> 1;
             if (entryKey(m) < firstKey) a = m + 1u; else b = m;
@@ -118,10 +136,12 @@ void main() {
         for (uint i = a; i < meta.entryEnd; ++i) {
             uint key = entryKey(i);
             if (int(key >> 1u) > relHi) break;
-            if ((key & 1u) != 0u) ask = ffAdd(ask, entryValue(i));
-            else bid = ffAdd(bid, entryValue(i));
+            if ((key & 1u) != 0u) ask = ffAccumulate(ask, entryValue(i));
+            else bid = ffAccumulate(bid, entryValue(i));
         }
     }
+    bid = ffNormalize(bid);
+    ask = ffNormalize(ask);
     bool askSide = ffGreater(ask, bid);
     uint code = encodeCode(askSide ? ask : bid);
     cells[outIndex] = code | (askSide ? 0x8000u : 0u) | ((valid ? kValid : kVeil) << 16);

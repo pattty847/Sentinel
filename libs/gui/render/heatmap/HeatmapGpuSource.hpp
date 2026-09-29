@@ -25,6 +25,7 @@ namespace heatmap::gpu {
 inline constexpr uint32_t kSlotNotLoaded = 0xffffffffu; // bucket not scanned yet
 inline constexpr uint32_t kSlotGap = 0xfffffffeu;       // scanned, recorder had no column
 inline constexpr uint32_t kMaxTicks = 16;               // distinct native ticks per source
+inline constexpr uint32_t kRowIndexStride = 16;         // native rows per row-index step
 
 // std430 layout shared with heatmap_bin.comp. Rows are absolute native rows on
 // the group's tick (price = row * tick).
@@ -33,8 +34,12 @@ struct GroupMeta {
     uint32_t entryBegin = 0, entryEnd = 0;
     uint32_t tickIndex = 0;   // into GpuSource::ticks
     uint32_t runBegin[2] = {0, 0}, runEnd[2] = {0, 0}; // full-coverage runs, bid=0 ask=1
+    // rowIndex[indexBegin + s] = first entry with relative row >= s * kRowIndexStride,
+    // so a bin's first entry costs one lookup plus a search of <= 16 rows of entries.
+    uint32_t indexBegin = 0, indexCount = 0;
+    uint32_t reserved[2] = {0, 0};
 };
-static_assert(sizeof(GroupMeta) == 32);
+static_assert(sizeof(GroupMeta) == 48);
 
 struct GpuSourceOptions {
     // Advertised availability. Buckets outside [availableStartMs, availableEndMs)
@@ -60,6 +65,7 @@ struct GpuSource {
     std::vector<uint32_t> columnGroups;  // prefix offsets into groups, columns + 1
     std::vector<GroupMeta> groups;
     std::vector<std::array<int32_t, 2>> runs; // [lo, hi] absolute native rows, inclusive
+    std::vector<uint32_t> rowIndex;           // see GroupMeta::indexBegin
     // Compact (2 words per entry):  [hi float bits, side | rel row << 1 | loQ << 17]
     // Wide    (3 words per entry):  [hi float bits, lo float bits, side | rel row << 1]
     // Wide is used only when a group's relative row span exceeds 16 bits.
@@ -73,7 +79,7 @@ struct GpuSource {
     uint32_t wordsPerEntry() const { return wide ? 3u : 2u; }
     uint64_t bytes() const {
         return bucketSlots.size() * 4ull + columnGroups.size() * 4ull + groups.size() * sizeof(GroupMeta) +
-               runs.size() * 8ull + entries.size() * 4ull;
+               runs.size() * 8ull + rowIndex.size() * 4ull + entries.size() * 4ull;
     }
 };
 
@@ -93,6 +99,11 @@ float dequantizeLow(float hi, int32_t q);
 // split as float-float (hi, lo) pairs: index k - 2. A value v > 0 then encodes to
 // 1 + (number of thresholds <= v). Exact against the CPU encoder by construction.
 std::vector<FloatFloat> encodeThresholds(const recording::SizeScale& scale);
+
+// Smallest display tick every native grid of the source can build (LCM of the
+// native ticks in price units). Display-tick policy must pick multiples of it,
+// or columns on the other grid veil as incompatible. 0 if there are no ticks.
+double commonTick(const GpuSource& source);
 
 // Display tick -> per-tick native rows per display bin (0 = incompatible grid),
 // the same integrality rule binColumn applies.

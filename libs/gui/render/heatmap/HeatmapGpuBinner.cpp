@@ -37,6 +37,7 @@ struct alignas(16) ComputeParams {
     std::array<int32_t, 4> time;
     std::array<int32_t, 4> price;
     std::array<uint32_t, kMaxTicks> factors;
+    std::array<float, 4> codeScale;
 };
 struct alignas(16) DrawParams {
     float mvp[16];
@@ -45,7 +46,7 @@ struct alignas(16) DrawParams {
     uint32_t dims[4];
     float style[4];
 };
-static_assert(sizeof(ComputeParams) == 112 && sizeof(DrawParams) == 128);
+static_assert(sizeof(ComputeParams) == 128 && sizeof(DrawParams) == 128);
 
 int32_t clampToInt32(double value, double lo, double hi) {
     if (std::isnan(value)) return 0;
@@ -64,7 +65,7 @@ const std::vector<FloatFloat> &cachedThresholds(const recording::SizeScale &scal
 
 struct HeatmapGpuBinner::SourceBuffers {
     std::shared_ptr<const GpuSource> source;
-    std::unique_ptr<QRhiBuffer> bucketSlots, columnGroups, groups, runs, entries;
+    std::unique_ptr<QRhiBuffer> bucketSlots, columnGroups, groups, runs, rowIndex, entries;
     struct Part { QRhiBuffer *buffer; const char *data; uint64_t bytes; };
     std::vector<Part> parts;
     size_t part = 0;
@@ -72,7 +73,7 @@ struct HeatmapGpuBinner::SourceBuffers {
     bool complete() const { return part >= parts.size(); }
     uint64_t bytes() const {
         uint64_t total = 0;
-        for (auto *b : {bucketSlots.get(), columnGroups.get(), groups.get(), runs.get(), entries.get()})
+        for (auto *b : {bucketSlots.get(), columnGroups.get(), groups.get(), runs.get(), rowIndex.get(), entries.get()})
             if (b) total += b->size();
         return total;
     }
@@ -113,6 +114,7 @@ bool HeatmapGpuBinner::setSource(std::shared_ptr<const GpuSource> source, QStrin
         !make(buffers->columnGroups, s.columnGroups.data(), s.columnGroups.size() * 4ull) ||
         !make(buffers->groups, s.groups.data(), s.groups.size() * sizeof(GroupMeta)) ||
         !make(buffers->runs, s.runs.data(), s.runs.size() * 8ull) ||
+        !make(buffers->rowIndex, s.rowIndex.data(), s.rowIndex.size() * 4ull) ||
         !make(buffers->entries, s.entries.data(), s.entries.size() * 4ull)) return false;
     pending_ = std::move(buffers); // a superseded pending upload is simply dropped
     return true;
@@ -157,7 +159,8 @@ bool HeatmapGpuBinner::rebuildComputeBindings(QString *error) {
         QRhiShaderResourceBinding::bufferLoad(4, cs, active_->entries.get()),
         QRhiShaderResourceBinding::bufferLoad(5, cs, thresholds_.get()),
         QRhiShaderResourceBinding::bufferStore(6, cs, output_.get()),
-        QRhiShaderResourceBinding::uniformBuffer(7, cs, computeParams_.get())});
+        QRhiShaderResourceBinding::uniformBuffer(7, cs, computeParams_.get()),
+        QRhiShaderResourceBinding::bufferLoad(8, cs, active_->rowIndex.get())});
     if (!bindings->create()) return fail(error, QStringLiteral("heatmap compute bindings failed"));
     if (!compute_) {
         const QShader shader = loadShader(":/heatmapgpu/heatmap_bin.comp.qsb");
@@ -239,11 +242,12 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
                     clampToInt32(std::ceil(source.clipPriceLo / grid.displayTick - 1e-9), -big, big),
                     clampToInt32(std::floor(source.clipPriceHi / grid.displayTick + 1e-9), -big, big), 0};
     params.factors = factors;
+    params.codeScale = {float(outputScale.floor), float(outputScale.codesPerOctave), 0, 0};
     updates->updateDynamicBuffer(computeParams_.get(), 0, sizeof(params), &params);
     cb->beginComputePass(updates);
     cb->setComputePipeline(compute_.get());
     cb->setShaderResources(computeBindings_.get());
-    cb->dispatch(int((grid.columns + 7) / 8), int((grid.rows + 7) / 8), 1);
+    cb->dispatch(int((grid.columns + 15) / 16), int((grid.rows + 3) / 4), 1); // heatmap_bin.comp local size
     cb->endComputePass();
     binnedGrid_ = grid;
     binnedSourceId_ = source.id;
