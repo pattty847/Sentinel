@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
     parser.addOption({"hysteresis", "Auto tick hysteresis h (0..0.9; lab presets 0, 0.15, 0.25, 0.4)", "h", "0.25"});
     parser.addOption({"min-row-px", "Auto: smallest row height in physical pixels", "px", "2"});
     parser.addOption({"zoom-rows-px", "Once loaded: zoom price so one commonTick() row is this many physical px", "px"});
-    parser.addOption({"crossfade", "Crossfade old and new tick grids for 150 ms (experiment E2; default: hard switch)"});
+    parser.addOption({"no-crossfade", "Hard switch at a tick change (default: 150 ms crossfade, spec rule 8)"});
     parser.addOption({"tick-sweep", "Headless E1: zoom through row heights for each h, log every tick change (JSON)"});
     parser.addOption({"tick-change-frames", "Headless E2: force an Auto tick change, save ~25 ms frames for 300 ms", "dir"});
     parser.process(app);
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
         options.zoomRowsPx = parser.value("zoom-rows-px").toDouble(&ok);
         if (!ok || !(options.zoomRowsPx > 0)) return 2;
     }
-    options.crossfade = parser.isSet("crossfade");
+    options.crossfade = !parser.isSet("no-crossfade");
     options.panColumns = parser.value("pan-columns").toDouble();
     if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic, tf);
     if (parser.isSet("tick-sweep")) return lab::runTickSweep(options);

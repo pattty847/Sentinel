@@ -30,7 +30,7 @@ class LabItem : public QQuickItem {
     Q_PROPERTY(bool crossfade READ crossfade WRITE setCrossfade NOTIFY tickChanged)
     Q_PROPERTY(QVariantList offeredTicks READ offeredTicks NOTIFY presetsChanged)
 public:
-    static constexpr double kCrossfadeMs = 150; // experiment E2
+    static constexpr double kCrossfadeMs = 150; // spec rule 8 (owner chose it after E2)
     explicit LabItem(QQuickItem *parent = nullptr);
     ~LabItem() override;
     QString status() const { return status_; }
@@ -58,6 +58,10 @@ public:
     Q_INVOKABLE void loadSynthetic(int count);
     Q_INVOKABLE void pan(double dx, double dy);
     Q_INVOKABLE void zoom(double steps, bool priceOnly, double anchorX, double anchorY);
+    // Wheel input (angle deltas in 1/8 degree). priceOnly (Shift) scales the price
+    // axis only; macOS delivers Shift+wheel as horizontal scroll, so with Shift
+    // whichever axis moved is used.
+    Q_INVOKABLE void wheelZoom(double angleX, double angleY, bool priceOnly, double anchorX, double anchorY);
     // Price zoom about the view centre: one commonTick() row of the data in view
     // is `px` physical pixels tall (Manual clamps still apply).
     Q_INVOKABLE void zoomToRowPx(double px);
@@ -95,7 +99,7 @@ private:
     double manualTick_ = 0;
     bool explicitTickPending_ = false; // set before the symbol is known: store it on accept
     double hysteresis_ = 0.25, minRowPx_ = 2;
-    bool crossfade_ = false;
+    bool crossfade_ = true; // owner choice after E2 (spec rule 8)
     bool persistTickMemory_ = false;
     double initialRowPx_ = 0;
     heatmap::ManualTickMemory tickMemory_;

@@ -192,9 +192,9 @@ ApplicationWindow {
                     }
                 }
                 onWheel: function(wheel) {
-                    binLab.zoom(wheel.angleDelta.y / 120.0,
-                                (wheel.modifiers & Qt.ShiftModifier) !== 0,
-                                wheel.x / width, wheel.y / height)
+                    binLab.wheelZoom(wheel.angleDelta.x, wheel.angleDelta.y,
+                                     (wheel.modifiers & Qt.ShiftModifier) !== 0,
+                                     wheel.x / width, wheel.y / height)
                     wheel.accepted = true
                 }
             }

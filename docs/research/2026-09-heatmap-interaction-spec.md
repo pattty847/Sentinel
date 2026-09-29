@@ -22,7 +22,7 @@ contract for the GPU heatmap path (integration plan slices T, B1, S5-S8). Where 
      (2 px today; tune by feel in the lab). Zooming in reaches the finest preset the data
      supports, e.g. BTC $1. Hysteresis: step finer only when the finer preset would be at least
      `minRowPx x (1 + h)` tall; step coarser only when the current rows fall below
-     `minRowPx x (1 - h)`. `h` starts at 0.25 and is tuned in the lab (experiment E1).
+     `minRowPx x (1 - h)`. `h = 0.25` (owner chose it after lab experiment E1, 2026-09-29).
    - **Manual.** The user locks a preset. Zoom only scales rows. Price zoom-out stops at one row
      per pixel. Switching back to Auto resumes the Auto rule from the current zoom. The Manual
      tick is remembered per symbol and timeframe (BTC 1m can keep $1 while BTC 1h keeps $25), so
@@ -35,16 +35,14 @@ contract for the GPU heatmap path (integration plan slices T, B1, S5-S8). Where 
    to the viewport. Panning, zooming, chunk boundaries and reloads cannot shift bin boundaries: a
    given (tick, price) always maps to the same row. (Same for time: columns are anchored to UTC
    epoch multiples of the timeframe.)
-4. **Presets.** `{1, 2, 2.5, 5} x 10^k` in the asset's price units, offered only when they are
-   multiples of `commonTick()` of the data in view (so older BTC deep history recorded on a $10
-   grid offers $10, $20, $50 ...; recent near data offers $1, $2, $5 ...). A preset the visible
-   data cannot build is not offered (Manual) or skipped (Auto). No arbitrary floats. Per-asset
-   defaults for Manual (for example a sensible default tick per timeframe) are presets from the
-   same ladder.
-   *Clarification (slice T, pending owner confirmation):* "not offered" conflicts with rule 2's
-   veil case ($1 over older $10 history). The lab offers Manual every preset that at least part
-   of the loaded data can build; columns in view that cannot build it veil and the resolution
-   indicator names them.
+4. **Presets.** `{1, 2, 2.5, 5} x 10^k` in the asset's price units, multiples of `commonTick()`
+   of the data they are drawn from (older BTC deep history recorded on a $10 grid builds $10,
+   $20, $50 ...; recent near data builds $1, $2, $5 ...). **Auto** uses only presets that every
+   column in view can build (it skips the others). **Manual** offers every preset that some of
+   the loaded data can build (owner decision 2026-09-29, option B); columns in view that cannot
+   build the locked preset draw the veil and the resolution indicator names them (rule 2). No
+   arbitrary floats. Per-asset defaults for Manual (for example a sensible default tick per
+   timeframe) are presets from the same ladder.
 5. **Cell meaning.** A cell is time-weighted liquidity over the displayed timeframe, summed across
    the constituent native price rows that make up the selected tick. Only observed, valid source
    intervals contribute; incomplete required coverage is never silently treated as zero. Coarser
@@ -58,8 +56,9 @@ contract for the GPU heatmap path (integration plan slices T, B1, S5-S8). Where 
 7. **No freeze.** Once the required source data is local, a re-bin is a GPU pass (S4: about
    0.1-2 ms), so a tick change appears in the next frame. The active source keeps drawing until a
    replacement is ready; the chart is never blanked, stretched or rebuilt from scratch.
-8. **Transitions.** Hard switch by default. A short crossfade between the old and new tick grids
-   is added only if lab experiment E2 shows the hard switch is visually jarring.
+8. **Transitions.** A tick change crossfades the old and new tick grids over 150 ms (owner chose
+   the crossfade after lab experiment E2, 2026-09-29); a setting can turn it off (hard switch).
+   Both grids keep their absolute anchoring during the fade, and it costs no extra re-bin.
 9. **Axis drags and wheel follow the same limits.** Stretching an axis can never exceed the
    clamps in rules 1 and 2 (the legacy path allowed it; that inconsistency goes away).
 

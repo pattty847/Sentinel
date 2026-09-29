@@ -40,7 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
-- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench`, `--screenshot` and `--tick-sweep` modes and the slice T tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--crossfade`).
+- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench`, `--screenshot` and `--tick-sweep` modes and the slice T tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`).
 
 ## Data pipeline
 
@@ -156,7 +156,7 @@ selected timeframe. `HeatmapRenderNode::TickPolicy` applies it per frame to the
 active source (`commonTickInView`); Manual draws the locked preset and columns
 that cannot build it veil (it never coarsens). Re-bins happen only on the spec
 rule 6 triggers; a pan inside the prepared grid is a mapping change. An
-optional crossfade (lab experiment E2, default off) keeps the previous binned
+150 ms crossfade (spec rule 8, owner choice after E2; 0 = hard switch) keeps the previous binned
 grid in a second output slot and fades it out over the new one. The binner owns
 its readback results and registers a QRhi cleanup callback: whichever of the
 binner and its QRhi goes first, in-flight readbacks complete before their result

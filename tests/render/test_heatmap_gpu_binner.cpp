@@ -6,6 +6,7 @@
 #include "heatmap/HeatmapResolution.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
+#include "lab/LabItem.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapGpuSelfTest.hpp"
@@ -1268,6 +1269,45 @@ TEST(HeatmapRenderNodeScene, AutoTickHysteresisAndPansNeverRebin) {
     frame();
     EXPECT_FALSE(item->stats->crossfading.load());
     EXPECT_EQ(item->stats->errors.load(), 0u);
+}
+// Lab wheel input (spec rules 1, 2, 9): Shift+wheel scales price only, and
+// macOS delivers it as a horizontal delta; wheel zoom obeys the clamps.
+TEST(LabItemZoom, ShiftWheelScalesPriceOnlyWithinTheClamps) {
+    lab::LabItem item;
+    item.setSize(QSizeF(1000, 500));
+    item.loadSynthetic(1'000'000); // the lab's "Synthetic 1M" source ($10 then $5 grid)
+    for (int i = 0; i < 3000 && item.metrics().value("entries").toLongLong() == 0 &&
+                     !item.status().startsWith("Timeframe unavailable"); ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GT(item.metrics().value("entries").toLongLong(), 0) << item.status().toStdString();
+    auto span = [&](const char *key) { return item.metrics().value(key).toDouble(); };
+    const double time0 = span("timeSpanMin"), price0 = span("priceSpan");
+    item.wheelZoom(120, 0, true, 0.5, 0.5); // Shift+wheel as macOS sends it
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0) << "price only";
+    EXPECT_NEAR(span("priceSpan"), price0 * std::exp(-0.12), 1e-6 * price0);
+    const double price1 = span("priceSpan");
+    item.wheelZoom(0, 0, true, 0.5, 0.5);
+    item.wheelZoom(120, 0, false, 0.5, 0.5); // unshifted horizontal scroll is not a zoom
+    EXPECT_DOUBLE_EQ(span("priceSpan"), price1);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    item.wheelZoom(0, 120, true, 0.5, 0.5);  // a mouse that keeps the vertical delta
+    EXPECT_LT(span("priceSpan"), price1);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    // Manual $10: Shift+wheel zoom-out stops at one row per pixel (500 px -> $5000).
+    item.setManualTick(10);
+    for (int i = 0; i < 80; ++i) item.wheelZoom(-120, 0, true, 0.5, 0.5);
+    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6);
+    EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
+    // Plain wheel zoom-out stops at one column per pixel (1000 px at 1 m).
+    for (int i = 0; i < 80; ++i) item.wheelZoom(0, -120, false, 0.5, 0.5);
+    EXPECT_LE(span("timeSpanMin"), 1000 + 1e-9);
+    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6) << "Manual price clamp holds for plain wheel too";
+    // Back to Auto: price zoom-out is no longer clamped (Auto re-ticks instead).
+    item.setManualMode(false);
+    for (int i = 0; i < 10; ++i) item.wheelZoom(-120, 0, true, 0.5, 0.5);
+    EXPECT_GT(span("priceSpan"), 5000);
 }
 } // namespace
 

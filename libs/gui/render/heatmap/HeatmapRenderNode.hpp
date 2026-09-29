@@ -49,7 +49,7 @@ public:
         double minRowPx = 2;     // Auto: smallest preset at least this tall ...
         double hysteresis = 0.25; // ... with this hysteresis h (spec rule 2)
         double heightPx = 0;     // target height in physical pixels
-        double crossfadeMs = 0;  // > 0: crossfade old and new grids at a tick change
+        double crossfadeMs = 150; // spec rule 8; 0 = hard switch at a tick change
     };
     struct Frame {
         std::shared_ptr<const GpuSource> source; // newest wanted source; may still be uploading

@@ -17,7 +17,7 @@ struct LabRunOptions {
     bool hysteresisSet = false;
     double minRowPx = 2;       // --min-row-px
     double zoomRowsPx = 0;     // --zoom-rows-px: one commonTick() row this many physical px tall
-    bool crossfade = false;    // --crossfade
+    bool crossfade = true;     // 150 ms (spec rule 8); --no-crossfade for a hard switch
     double panColumns = 0;     // --pan-columns (screenshot only)
 };
 // Applies the tick options to an item (before or after its source loads).
@@ -35,6 +35,6 @@ int runScreenshot(const LabRunOptions &options, const QString &path);
 int runTickSweep(const LabRunOptions &options);
 // Experiment E2 headless: once settled, zooms price out 5x (forcing an Auto tick
 // change) and saves a frame roughly every 25 ms for 300 ms into `dir`
-// (hard switch by default, 150 ms crossfade with --crossfade).
+// (150 ms crossfade by default, hard switch with --no-crossfade).
 int runTickChangeSequence(const LabRunOptions &options, const QString &dir);
 } // namespace lab

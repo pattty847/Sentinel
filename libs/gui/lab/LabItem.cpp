@@ -342,6 +342,13 @@ void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY)
     update();
 }
 
+void LabItem::wheelZoom(double angleX, double angleY, bool priceOnly, double anchorX, double anchorY) {
+    double delta = angleY;
+    if (priceOnly && delta == 0) delta = angleX; // macOS: Shift turns the vertical wheel horizontal
+    if (delta == 0 || !std::isfinite(delta)) return;
+    zoom(delta / 120.0, priceOnly, anchorX, anchorY);
+}
+
 void LabItem::zoomToRowPx(double px) {
     if (!source_.gpu || !(px > 0) || !std::isfinite(px) || !(height() > 0)) return;
     const double common = heatmap::gpu::commonTickInView(*source_.gpu, view_.timeLoMs, view_.timeHiMs);
