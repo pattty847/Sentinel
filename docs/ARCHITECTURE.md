@@ -40,7 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
-- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench` and `--screenshot` modes.
+- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench`, `--screenshot` and `--tick-sweep` modes and the slice T tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--crossfade`).
 
 ## Data pipeline
 
@@ -139,11 +139,26 @@ keep zero-code-step page parity. Missing columns remain sparse, covered zero
 cells stay valid, incomplete coverage stays invalid, and incompatible grids
 make only their output column unknown. `binCell` remains the independent oracle;
 `binColumn` sweeps each native constituent once and bins the whole price range
-for labels/walls. Auto timeframe selection counts epoch buckets touched by the
-half-open viewport, including partial edge buckets, and returns no choice when
-even 1D exceeds the one-pixel-per-column limit, requiring a span clamp.
+for labels/walls.
 
-> Superseded as product policy: the auto-timeframe, viewport-driven display tick (`idealTick`, 2 px rule) and near/deep layer rule described in this file are rejected by the [owner decisions of 2026-09-29](research/2026-09-gpu-heatmap-integration-plan.md#owner-decisions-2026-09-29) (zoom is a camera operation; ticks are per-asset presets) and will be reshaped in slice T.
+### Heatmap tick and zoom contract (integration slice T)
+
+Product contract: [heatmap interaction spec](research/2026-09-heatmap-interaction-spec.md).
+`HeatmapResolution.hpp` holds the pure policy in integer price units: the preset
+ladder `{1, 2, 2.5, 5} x 10^k`, Auto (`autoTickUnits`: smallest preset that is a
+multiple of the common tick of the data in view and at least `minRowPx` tall;
+finer only at `minRowPx * (1 + h)`, coarser only below `minRowPx * (1 - h)`;
+stateful, a fixed point at any zoom), Manual preset offering (any preset some
+loaded grid can build), `ManualTickMemory` per (symbol, timeframe), and the
+clamps (time zoom-out one column per physical pixel; Manual price zoom-out one
+row per physical pixel). There is no auto-timeframe: a column is exactly the
+selected timeframe. `HeatmapRenderNode::TickPolicy` applies it per frame to the
+active source (`commonTickInView`); Manual draws the locked preset and columns
+that cannot build it veil (it never coarsens). Re-bins happen only on the spec
+rule 6 triggers; a pan inside the prepared grid is a mapping change. An
+optional crossfade (lab experiment E2, default off) keeps the previous binned
+grid in a second output slot and fades it out over the new one. `idealTick` and
+`layerFor` remain for the legacy page path and the near/deep migration only.
 
 ### GPU heatmap price binning (integration slice S4)
 

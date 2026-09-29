@@ -11,6 +11,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <rhi/qrhi.h>
@@ -204,50 +207,109 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
     }
 }
 
-int runScreenshot(int hours, const QString &layer, uint32_t synthetic, int tfMinutes, const QString &path,
-                  double panColumns) {
+void applyTickOptions(LabItem &item, const LabRunOptions &options) {
+    item.setHysteresis(options.hysteresis);
+    item.setMinRowPx(options.minRowPx);
+    item.setCrossfade(options.crossfade);
+    if (options.tick > 0) item.setManualTick(options.tick);
+    else if (options.manual) item.setManualMode(true);
+    if (options.zoomRowsPx > 0) item.setInitialRowPx(options.zoomRowsPx);
+}
+
+namespace {
+// Loads the source into a LabItem in an offscreen scene and renders until settled.
+struct HeadlessLab {
+    OffscreenQuick scene;
+    LabItem *item = nullptr;
+    QImage image;
+    QString error;
+    bool start(const LabRunOptions &options, QSize size) {
+        if (!scene.create(size, &error)) return false;
+        scene.window()->setColor(QColor(0x08, 0x0d, 0x12));
+        item = new LabItem;
+        item->setParentItem(scene.window()->contentItem());
+        item->setSize(QSizeF(size));
+        item->setTimeframeMinutes(options.tfMinutes);
+        applyTickOptions(*item, options);
+        if (options.synthetic) item->loadSynthetic(int(options.synthetic));
+        else item->loadReal(options.hours, options.layer);
+        return true;
+    }
+    bool frame() {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        item->update();
+        image = scene.renderFrame(&error);
+        return !image.isNull();
+    }
+    bool settle(qint64 timeoutMs) {
+        QElapsedTimer timer;
+        timer.start();
+        int settledFrames = 0;
+        while (timer.elapsed() < timeoutMs) {
+            if (!frame()) return false;
+            if (!item->settled()) { settledFrames = 0; continue; }
+            if (++settledFrames >= 3) return true;
+        }
+        error = QStringLiteral("source did not settle within %1 s: %2").arg(timeoutMs / 1000).arg(item->status());
+        return false;
+    }
+};
+
+QString money(double v) { return QStringLiteral("$") + QString::number(v, 'g', 12); }
+
+// Debug state stamped on screenshots (the QML panel is not part of the headless scene).
+void annotate(QImage &image, const QVariantMap &m, const QString &indicator) {
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    QFont font(QStringLiteral("Menlo"));
+    font.setPixelSize(15);
+    painter.setFont(font);
+    const QString line = QStringLiteral("mode=%1  tick=%2  h=%3  minRowPx=%4  commonTick(view)=%5  rows=%6px  "
+                                        "tf=%7m  last re-bin=%8 ms  bins=%9  tick changes=%10")
+        .arg(m.value("mode").toString(), money(m.value("tick").toDouble()))
+        .arg(m.value("hysteresis").toDouble()).arg(m.value("minRowPx").toDouble())
+        .arg(money(m.value("commonTick").toDouble()))
+        .arg(m.value("rowPx").toDouble(), 0, 'f', 2).arg(m.value("timeframeMinutes").toInt())
+        .arg(m.value("binSubmitMs").toDouble(), 0, 'f', 3).arg(m.value("rebins").toULongLong())
+        .arg(m.value("tickChanges").toULongLong());
+    const QFontMetrics fm(font);
+    auto box = [&](int y, const QString &text, QColor color) {
+        const QRect r(8, y, fm.horizontalAdvance(text) + 16, fm.height() + 8);
+        painter.fillRect(r, QColor(16, 24, 32, 220));
+        painter.setPen(color);
+        painter.drawText(r.adjusted(8, 4, -8, -4), Qt::AlignLeft | Qt::AlignVCenter, text);
+    };
+    box(8, line, QColor(0xa6, 0xe7, 0xe9));
+    if (!indicator.isEmpty()) box(8 + fm.height() + 14, indicator, QColor(0xf0, 0xb4, 0x6a));
+}
+
+double median(std::vector<double> v) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+} // namespace
+
+int runScreenshot(const LabRunOptions &options, const QString &path) {
     const QString output = QFileInfo(path).absoluteFilePath();
     if (output.startsWith(QString::fromLatin1(kRecordingRoot))) {
         print({{"error", QStringLiteral("recording directory is read-only")}, {"screenshot", path}});
         return 2;
     }
-    OffscreenQuick scene;
-    QString error;
-    if (!scene.create(QSize(1500, 880), &error)) {
-        print({{"error", error}, {"screenshot", path}});
+    HeadlessLab lab;
+    if (!lab.start(options, QSize(1500, 880)) || !lab.settle(120'000)) {
+        print({{"error", lab.error}, {"screenshot", path}});
         return 2;
     }
-    scene.window()->setColor(QColor(0x08, 0x0d, 0x12));
-    auto *item = new LabItem;
-    item->setParentItem(scene.window()->contentItem());
-    item->setSize(QSizeF(1500, 880));
-    item->setTimeframeMinutes(tfMinutes);
-    if (synthetic) item->loadSynthetic(int(synthetic));
-    else item->loadReal(hours, layer);
-    QElapsedTimer timer;
-    timer.start();
-    QImage image;
-    bool panned = panColumns == 0;
-    int settledFrames = 0;
-    while (timer.elapsed() < 120'000) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-        item->update();
-        image = scene.renderFrame(&error);
-        if (image.isNull()) break;
-        if (!item->settled()) { settledFrames = 0; continue; }
-        if (!panned) { // exercise a sub-bin pan on the settled picture
-            item->pan(-panColumns * item->width() / std::max(1.0, item->metrics().value("columns").toDouble()), 0);
-            panned = true;
-            continue;
-        }
-        if (++settledFrames >= 2) break;
+    if (options.panColumns != 0) { // exercise a sub-bin pan on the settled picture
+        auto *item = lab.item;
+        item->pan(-options.panColumns * item->width() / std::max(1.0, item->metrics().value("columns").toDouble()), 0);
+        for (int i = 0; i < 2; ++i)
+            if (!lab.frame()) { print({{"error", lab.error}, {"screenshot", path}}); return 2; }
     }
-    const auto metrics = item->metrics();
-    if (image.isNull() || !item->settled()) {
-        print({{"error", image.isNull() ? error : QStringLiteral("source did not settle within 120 s: ") + item->status()},
-               {"screenshot", path}});
-        return 2;
-    }
+    const auto metrics = lab.item->metrics();
+    QImage image = lab.image.convertToFormat(QImage::Format_RGBA8888);
+    annotate(image, metrics, lab.item->resolutionIndicator());
     QDir().mkpath(QFileInfo(path).absolutePath());
     if (!image.save(path, "PNG")) {
         print({{"error", QStringLiteral("PNG save failed")}, {"screenshot", path}});
@@ -255,9 +317,133 @@ int runScreenshot(int hours, const QString &layer, uint32_t synthetic, int tfMin
     }
     QJsonObject result = QJsonObject::fromVariantMap(metrics);
     result.insert("screenshot", path);
-    result.insert("status", item->status());
-    result.insert("elapsed_ms", double(timer.elapsed()));
+    result.insert("status", lab.item->status());
     print(result);
+    return 0;
+}
+
+int runTickSweep(const LabRunOptions &options) {
+    HeadlessLab lab;
+    LabRunOptions base = options;
+    base.manual = false;
+    base.tick = 0;
+    base.zoomRowsPx = 0;
+    base.crossfade = false;
+    if (!lab.start(base, QSize(1500, 880)) || !lab.settle(120'000)) {
+        print({{"error", lab.error}});
+        return 2;
+    }
+    auto *item = lab.item;
+    const std::vector<double> hs = options.hysteresisSet ? std::vector<double>{options.hysteresis}
+                                                         : std::vector<double>{0, 0.15, 0.25, 0.4};
+    // Row heights of one commonTick() row, physical px: 0.02 .. 40, 3 % per step
+    // (a fine trackpad zoom; a wheel notch is 12 %).
+    constexpr double kStep = 1.03, kLo = 0.02, kHi = 40;
+    QJsonArray summaries;
+    for (const double h : hs) {
+        item->setHysteresis(h);
+        item->zoomToRowPx(kLo);
+        for (int i = 0; i < 3; ++i) if (!lab.frame()) return 2;
+        struct Change { double rowPx; double to; };
+        std::vector<Change> inChanges;
+        std::vector<double> binMs, gpuMs;
+        int outChanges = 0, jitterFlips = 0;
+        bool monotonic = true;
+        double tick = item->metrics().value("tick").toDouble();
+        // 0 unchanged, -1 finer, +1 coarser, 2 render failure.
+        auto step = [&](double px, const char *phase) -> int {
+            item->zoomToRowPx(px);
+            if (!lab.frame()) return 2;
+            const auto m = item->metrics();
+            const double next = m.value("tick").toDouble();
+            if (next == tick) return 0;
+            const double ms = m.value("tickChangeBinMs").toDouble();
+            if (!lab.frame()) return 2; // Metal reports the previous frame's GPU time
+            const double gpu = item->metrics().value("gpuFrameMs").toDouble();
+            binMs.push_back(ms);
+            gpuMs.push_back(gpu);
+            print({{"h", h}, {"phase", phase}, {"common_row_px", px}, {"from", tick}, {"to", next},
+                   {"new_row_px", m.value("rowPx").toDouble()}, {"rebin_submit_ms", ms}, {"gpu_frame_ms", gpu}});
+            const int direction = next < tick ? -1 : 1;
+            tick = next;
+            return direction;
+        };
+        for (double px = kLo; px <= kHi; px *= kStep) {
+            const int d = step(px, "in");
+            if (d == 2) return 2;
+            if (d == 1) monotonic = false;
+            if (d == -1) inChanges.push_back({px, tick});
+        }
+        for (double px = kHi; px >= kLo / 3; px /= kStep) {
+            const int d = step(px, "out");
+            if (d == 2) return 2;
+            if (d == -1) monotonic = false;
+            if (d == 1) ++outChanges;
+        }
+        // Jitter one step either side of every zoom-in change point.
+        for (const auto &c : inChanges) {
+            item->zoomToRowPx(c.rowPx);
+            if (!lab.frame()) return 2;
+            tick = item->metrics().value("tick").toDouble();
+            for (int i = 0; i < 10; ++i)
+                for (const double px : {c.rowPx * kStep, c.rowPx, c.rowPx / kStep, c.rowPx}) {
+                    const int d = step(px, "jitter");
+                    if (d == 2) return 2;
+                    jitterFlips += d != 0;
+                }
+        }
+        const QJsonObject summary{{"h", h}, {"changes_in", int(inChanges.size())}, {"changes_out", outChanges},
+                                  {"jitter_flips", jitterFlips}, {"monotonic", monotonic},
+                                  {"rebin_submit_ms_median", median(binMs)},
+                                  {"rebin_submit_ms_max", binMs.empty() ? 0 : *std::max_element(binMs.begin(), binMs.end())},
+                                  {"gpu_frame_ms_median", median(gpuMs)},
+                                  {"gpu_frame_ms_max", gpuMs.empty() ? 0 : *std::max_element(gpuMs.begin(), gpuMs.end())}};
+        print(QJsonObject{{"summary", summary}});
+        summaries.append(summary);
+    }
+    const auto m = item->metrics();
+    print({{"sweep", summaries}, {"source", options.synthetic ? QStringLiteral("synthetic") : options.layer},
+           {"hours", options.hours}, {"timeframe_minutes", options.tfMinutes}, {"min_row_px", options.minRowPx},
+           {"step", kStep}, {"errors", m.value("errors").toDouble()}});
+    return 0;
+}
+int runTickChangeSequence(const LabRunOptions &options, const QString &dir) {
+    if (QFileInfo(dir).absoluteFilePath().startsWith(QString::fromLatin1(kRecordingRoot))) {
+        print({{"error", QStringLiteral("recording directory is read-only")}});
+        return 2;
+    }
+    HeadlessLab lab;
+    if (!lab.start(options, QSize(1500, 880)) || !lab.settle(120'000)) {
+        print({{"error", lab.error}});
+        return 2;
+    }
+    QDir().mkpath(dir);
+    auto *item = lab.item;
+    const double before = item->metrics().value("tick").toDouble();
+    // Common-tick rows shrink 5x: Auto rows fall below minRowPx * (1 - h) for any h <= 0.4.
+    const double common = item->metrics().value("commonTick").toDouble();
+    const double rowPx = item->metrics().value("rowPx").toDouble() * common / std::max(before, 1e-12);
+    item->zoomToRowPx(rowPx / 5);
+    QElapsedTimer timer;
+    timer.start();
+    QJsonArray frames;
+    int next = 0;
+    while (timer.elapsed() <= 300) {
+        if (!lab.frame()) { print({{"error", lab.error}}); return 2; }
+        const qint64 ms = timer.elapsed();
+        if (ms < next) continue;
+        const auto m = item->metrics();
+        QImage image = lab.image.convertToFormat(QImage::Format_RGBA8888);
+        annotate(image, m, QStringLiteral("t=%1 ms after the zoom  crossfading=%2")
+                               .arg(ms).arg(m.value("crossfading").toBool() ? "yes" : "no"));
+        const QString path = QStringLiteral("%1/tick-change-%2ms.png").arg(dir).arg(ms, 3, 10, QLatin1Char('0'));
+        if (!image.save(path, "PNG")) { print({{"error", QStringLiteral("PNG save failed")}}); return 2; }
+        frames.append(QJsonObject{{"ms", double(ms)}, {"tick", m.value("tick").toDouble()},
+                                  {"crossfading", m.value("crossfading").toBool()}, {"path", path}});
+        next = int(ms) + 25;
+    }
+    print({{"from_tick", before}, {"to_tick", item->metrics().value("tick").toDouble()},
+           {"crossfade_ms", options.crossfade ? LabItem::kCrossfadeMs : 0.0}, {"frames", frames}});
     return 0;
 }
 } // namespace lab

@@ -15,9 +15,20 @@ ApplicationWindow {
     property var metrics: ({})
     property var frameHistory: []
     property string screenshotNotice: ""
+    readonly property var hysteresisPresets: [0, 0.15, 0.25, 0.4]
+    readonly property var minRowPresets: [1, 1.5, 2, 3, 4]
+    function money(v) { return "$" + Number(v).toString() }
+    function syncTickControls() {
+        tickMode.currentIndex = binLab.manualMode ? 1 : 0
+        manualPreset.currentIndex = binLab.offeredTicks.indexOf(binLab.manualTick)
+        hysteresisBox.currentIndex = hysteresisPresets.indexOf(binLab.hysteresis)
+        minRowBox.currentIndex = minRowPresets.indexOf(binLab.minRowPx)
+        crossfadeBox.checked = binLab.crossfade
+    }
 
     Component.onCompleted: {
         binLab.timeframeMinutes = initialTf
+        syncTickControls()
         var presets = [1, 5, 15, 60, 240, 1440]
         timeframe.currentIndex = presets.indexOf(initialTf)
         if (timeframe.currentIndex < 0) {
@@ -59,9 +70,8 @@ ApplicationWindow {
             timeframe.currentIndex = preset >= 0 ? preset : 6
             if (preset < 0) customTf.text = String(binLab.timeframeMinutes)
         }
-        function onTickChanged() {
-            priceTick.currentIndex = [0, 1, 5, 10, 20, 50, 100].indexOf(binLab.manualTick)
-        }
+        function onTickChanged() { root.syncTickControls() }
+        function onPresetsChanged() { root.syncTickControls() }
     }
 
     header: Rectangle {
@@ -101,10 +111,8 @@ ApplicationWindow {
                     model: ["1m", "5m", "15m", "1h", "4h", "1D", "Custom"]
                     Layout.preferredWidth: 100
                     onActivated: {
-                        if (currentIndex < 6) {
-                            binLab.autoTimeframe = false
-                            binLab.timeframeMinutes = [1, 5, 15, 60, 240, 1440][currentIndex]
-                        } else customTf.forceActiveFocus()
+                        if (currentIndex < 6) binLab.timeframeMinutes = [1, 5, 15, 60, 240, 1440][currentIndex]
+                        else customTf.forceActiveFocus()
                     }
                 }
                 TextField {
@@ -114,28 +122,45 @@ ApplicationWindow {
                     validator: IntValidator { bottom: 1; top: 1440 }
                     onEditingFinished: {
                         if (acceptableInput) {
-                            binLab.autoTimeframe = false
                             binLab.timeframeMinutes = Number(text)
                             timeframe.currentIndex = 6
                         }
                     }
                 }
-                CheckBox {
-                    id: autoTf
-                    text: "Auto"
-                    checked: binLab.autoTimeframe
-                    onToggled: binLab.autoTimeframe = checked
-                }
-                Label { text: "Active " + binLab.timeframeMinutes + "m"; color: "#a6e7e9"; font.pixelSize: 12 }
-                Label { text: "Min col px"; color: "#aab7c0" }
-                SpinBox { from: 1; to: 8; value: 1; Layout.preferredWidth: 65
-                          onValueModified: binLab.minColumnPx = value }
-                Label { text: "Price tick"; color: "#aab7c0" }
+                Label { text: "Tick"; color: "#aab7c0"; Layout.leftMargin: 10 }
                 ComboBox {
-                    id: priceTick
-                    model: ["Auto", "$1", "$5", "$10", "$20", "$50", "$100"]
+                    id: tickMode
+                    model: ["Auto", "Manual"]
+                    Layout.preferredWidth: 100
+                    onActivated: binLab.manualMode = currentIndex === 1
+                }
+                ComboBox {
+                    id: manualPreset
+                    model: binLab.offeredTicks.map(function(v) { return root.money(v) })
+                    displayText: binLab.manualMode ? root.money(binLab.manualTick) : "preset"
                     Layout.preferredWidth: 90
-                    onActivated: binLab.manualTick = [0, 1, 5, 10, 20, 50, 100][currentIndex]
+                    onActivated: binLab.manualTick = binLab.offeredTicks[currentIndex]
+                }
+                Label { text: "h"; color: "#aab7c0" }
+                ComboBox {
+                    id: hysteresisBox
+                    model: root.hysteresisPresets.map(function(v) { return String(v) })
+                    Layout.preferredWidth: 80
+                    enabled: !binLab.manualMode
+                    onActivated: binLab.hysteresis = root.hysteresisPresets[currentIndex]
+                }
+                Label { text: "Min row px"; color: "#aab7c0" }
+                ComboBox {
+                    id: minRowBox
+                    model: root.minRowPresets.map(function(v) { return String(v) })
+                    Layout.preferredWidth: 70
+                    enabled: !binLab.manualMode
+                    onActivated: binLab.minRowPx = root.minRowPresets[currentIndex]
+                }
+                CheckBox {
+                    id: crossfadeBox
+                    text: "Crossfade 150 ms"
+                    onToggled: binLab.crossfade = checked
                 }
                 Button { text: "Screenshot  S"; onClicked: root.screenshotNotice =
                              binLab.saveScreenshot("") ? "Screenshot saved" : "Screenshot failed" }
@@ -193,6 +218,22 @@ ApplicationWindow {
                 color: "#ba101820"
                 Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price     S  screenshot"; color: "#9fb4bf"; font.pixelSize: 12 }
             }
+            // Resolution indicator (Manual): columns that cannot build the locked tick veil.
+            Rectangle {
+                anchors.left: parent.left; anchors.top: parent.top
+                anchors.margins: 14
+                visible: (root.metrics.indicator || "") !== ""
+                width: Math.min(parent.width - 28, indicator.implicitWidth + 20); height: indicator.implicitHeight + 12
+                color: "#dd1c1408"
+                border.color: "#f0b46a"
+                Label {
+                    id: indicator
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, parent.parent.width - 48)
+                    text: root.metrics.indicator || ""
+                    color: "#f0b46a"; font.pixelSize: 13; wrapMode: Text.WordWrap
+                }
+            }
         }
         Rectangle {
             Layout.preferredWidth: 304
@@ -201,8 +242,8 @@ ApplicationWindow {
             border.color: "#2c3d49"
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 16
-                spacing: 12
+                anchors.margins: 14
+                spacing: 3
                 Label { text: "RENDER TELEMETRY"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 14 }
                 Label { text: "Frame time · last 90 samples"; color: "#aab7c0"; font.pixelSize: 12 }
                 Canvas {
@@ -224,12 +265,40 @@ ApplicationWindow {
                         ctx.stroke()
                     }
                 }
+                Label { text: "TICK (E1-E3)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                Repeater {
+                    model: [
+                        ["Mode", "mode", ""], ["Tick", "tick", " $"], ["h", "hysteresis", ""],
+                        ["Min row px", "minRowPx", ""], ["Row height", "rowPx", " px"],
+                        ["commonTick (view)", "commonTick", " $"], ["Last re-bin", "binSubmitMs", " ms"],
+                        ["Tick-change re-bin", "tickChangeBinMs", " ms"], ["Bins since start", "rebins", ""],
+                        ["Tick changes", "tickChanges", ""], ["Crossfade", "crossfadeMs", " ms"]
+                    ]
+                    delegate: RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: modelData[0]; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
+                        Label {
+                            text: {
+                                var value = root.metrics[modelData[1]]
+                                if (value === undefined) return "—"
+                                return typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 3) + modelData[2] : String(value)
+                            }
+                            color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12
+                        }
+                    }
+                }
+                Label {
+                    visible: (root.metrics.indicator || "") !== ""
+                    text: root.metrics.indicator || ""
+                    color: "#f0b46a"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
+                }
+                Label { text: "RENDER"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
                 Repeater {
                     model: [
                         ["FPS", "fps", ""], ["Frame", "frameMs", " ms"],
-                        ["Re-bin submit", "binSubmitMs", " ms"], ["GPU frame", "gpuFrameMs", " ms"], ["Re-bins", "rebins", ""],
+                        ["GPU frame", "gpuFrameMs", " ms"],
                         ["Loaded entries", "entries", ""], ["GPU buffers", "gpuBytes", " bytes"],
-                        ["Ticks / bin", "group", ""], ["Display tick", "tick", " $"],
+                        ["Ticks / bin", "group", ""],
                         ["Grid", "columns", " cols"], ["Rows", "rows", ""],
                         ["Load", "loadMs", " ms"], ["Compose", "composeMs", " ms"], ["GPU source build", "buildMs", " ms"],
                         ["First painted", "firstFrameMs", " ms"]
@@ -249,7 +318,7 @@ ApplicationWindow {
                 }
                 Item { Layout.fillHeight: true }
                 Label {
-                    text: "Time is composed on the CPU at the selected timeframe; the GPU bins price only. Grey veil: scanned but unproven. Blue hatch: not loaded yet. Empty: no data before the oldest recording. Pans inside the grid only move the picture; re-bins happen on tick, timeframe or source change."
+                    text: "A column is exactly the timeframe: zoom never changes it; time zoom-out stops at 1 column/px. Auto tick: smallest preset >= min row px, hysteresis h. Manual: locked preset, zoom only scales, price zoom-out stops at 1 row/px, remembered per symbol + timeframe; history that cannot build it is veiled, never coarsened. Grey veil: unproven or unbuildable. Blue hatch: not loaded."
                     color: "#8198a6"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
                 }
             }

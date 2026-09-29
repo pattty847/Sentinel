@@ -41,6 +41,10 @@ contract for the GPU heatmap path (integration plan slices T, B1, S5-S8). Where 
    data cannot build is not offered (Manual) or skipped (Auto). No arbitrary floats. Per-asset
    defaults for Manual (for example a sensible default tick per timeframe) are presets from the
    same ladder.
+   *Clarification (slice T, pending owner confirmation):* "not offered" conflicts with rule 2's
+   veil case ($1 over older $10 history). The lab offers Manual every preset that at least part
+   of the loaded data can build; columns in view that cannot build it veil and the resolution
+   indicator names them.
 5. **Cell meaning.** A cell is time-weighted liquidity over the displayed timeframe, summed across
    the constituent native price rows that make up the selected tick. Only observed, valid source
    intervals contribute; incomplete required coverage is never silently treated as zero. Coarser
