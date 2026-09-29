@@ -1,4 +1,5 @@
 #include "servermodel/RecordingPage.hpp"
+#include "render/RecordingBandPolicy.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <chrono>
@@ -58,6 +59,18 @@ TEST_F(PageTest, TickChoiceClipsNeitherUpperEdgeNorExactGridMultiples) {
     q = request(9.5, 11.5, 2);
     q.displayTick = 1;
     EXPECT_EQ(buildPage(root(), q).status, BuildStatus::InvalidRequest);
+}
+TEST_F(PageTest, ClientBandPreservesIdealTickThroughServerAlignment) {
+    write({record(), record(0, "deep")});
+    for (const double width : {600.0, 1000.0, 3000.0, 6000.0}) {
+        recording_view::View view{0, 6'000'000, 10'000.37, 10'100.37, width, 500, false};
+        const auto band = recording_view::requestBand(view, minute, 2, 0.75);
+        ASSERT_TRUE(band.valid());
+        auto q = request(band.minPrice, band.maxPrice, recording_view::kRows);
+        const auto result = buildPage(root(), q);
+        EXPECT_EQ(result.status, BuildStatus::Complete) << width;
+        EXPECT_DOUBLE_EQ(result.band.tick, band.idealTick) << width;
+    }
 }
 TEST_F(PageTest, LayerSelectionAndAbsoluteGrid) {
     write({record(), record(0, "deep")});

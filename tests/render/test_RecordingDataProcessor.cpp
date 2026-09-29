@@ -6,6 +6,8 @@
 #include <QTemporaryFile>
 #include "ConfigLoader.hpp"
 #include "render/DataProcessor.hpp"
+#include "render/HeatmapStreamService.hpp"
+#include "render/GridViewState.hpp"
 
 namespace {
 void events(int ms) {
@@ -23,7 +25,10 @@ protected:
     std::vector<protocol::recordingwire::Request> requests;
     std::vector<recording::LiveView> views;
     std::vector<heatmap_window::UpdatePtr> updates;
+    int rangeResets = 0;
     void SetUp() override {
+        QObject::connect(&processor, &DataProcessor::heatmapRangeReset, &processor,
+                         [this](auto...) { ++rangeResets; });
         QObject::connect(&processor, &DataProcessor::recordingViewNeeded, &processor,
                          [this](const auto& view) { views.push_back(view); });
         QObject::connect(&processor, &DataProcessor::recordingHistoryFetchNeeded, &processor,
@@ -79,6 +84,7 @@ TEST_F(RecordingDataProcessor, CapabilityGatesRequestsAndLegacySlicesStayOut) {
     EXPECT_GE(requests[0].priceMin, 0);
     EXPECT_FALSE(requests[0].displayTick.has_value());
     EXPECT_EQ(requests[0].rows, 2048);
+    EXPECT_EQ(requests[0].count, 116);
     HeatmapSlice live;
     live.symbol = "BTC-USD";
     live.timeframeMs = 60'000;
@@ -92,6 +98,7 @@ TEST_F(RecordingDataProcessor, CapabilityGatesRequestsAndLegacySlicesStayOut) {
     live.column = QByteArray(4096, 0);
     processor.onHeatmapSliceReceived(live);
     EXPECT_TRUE(updates.empty());
+    EXPECT_EQ(rangeResets, 0);
 }
 
 TEST_F(RecordingDataProcessor, PagingPinsAuthoritativeBandAndPriceOnlyRebandRejectsOldReply) {
@@ -120,6 +127,30 @@ TEST_F(RecordingDataProcessor, PagingPinsAuthoritativeBandAndPriceOnlyRebandReje
     processor.setRecordingConnected(false);
     processor.onRecordingHistoryReceived(page(requests.back()));
     EXPECT_EQ(updates.size(), count);
+}
+
+TEST_F(RecordingDataProcessor, VisibleFirstPagePublishesBeforeOlderBackfill) {
+    processor.setRecordingCapability(true);
+    events(180);
+    ASSERT_EQ(requests.size(), 1);
+    EXPECT_EQ(requests[0].count, 116);
+    auto first = page(requests[0]);
+    const auto sample = first.columns.front();
+    first.columns.clear();
+    for (int64_t bucket = 6'000'000; bucket < 12'000'000; bucket += 60'000) {
+        auto column = sample;
+        column.bucketStartMs = bucket;
+        first.columns.push_back(std::move(column));
+    }
+    first.scannedStartMs = 6'000'000;
+    first.scannedEndMs = 12'060'000;
+    first.nextEndMs = 5'940'000;
+    processor.onRecordingHistoryReceived(first);
+    ASSERT_FALSE(updates.empty());
+    EXPECT_TRUE(updates.back()->full);
+    ASSERT_EQ(requests.size(), 2);
+    EXPECT_EQ(requests[1].endTimeMs, 5'940'000);
+    EXPECT_GT(requests[1].count, requests[0].count);
 }
 
 TEST_F(RecordingDataProcessor, BudgetWithoutProgressRetriesSameBoundaryWithNewId) {
@@ -176,6 +207,22 @@ TEST(RecordingClientConfig, SourceDefaultsAndParsing) {
         ASSERT_TRUE(ConfigLoader::loadClientConfig(file.fileName().toStdString(), &config));
         EXPECT_EQ(config.heatmap.source, std::string(source) == "recording" ? "recording" : "legacy");
     }
+}
+
+TEST(RecordingStartup, WaitsForLiveMidBeforeFirstViewportRequest) {
+    HeatmapStreamService service;
+    service.init(1024, 2048, 60'000, 2);
+    service.setRecordingMode(true);
+    service.setInitialPricePct(5);
+    GridViewState view;
+    view.setViewport(6'000'000, 12'000'000, 62'000, 103'000);
+    const auto version = view.getViewportVersion();
+    EXPECT_FALSE(service.recordingViewportReady(&view));
+    service.setLiveBook(83'186, 83'188, &view);
+    EXPECT_TRUE(service.recordingViewportReady(&view));
+    EXPECT_GT(view.getViewportVersion(), version);
+    EXPECT_DOUBLE_EQ((view.getMinPrice() + view.getMaxPrice()) * 0.5, 83'187);
+    EXPECT_DOUBLE_EQ(view.getMaxPrice() - view.getMinPrice(), 2'050);
 }
 
 TEST_F(RecordingDataProcessor, LiveAdvancesAndStaleGenerationCannotOverwriteIt) {

@@ -116,7 +116,7 @@ private:
     void sendRecordingRequest(int64_t endMs, bool finalRepair = false);
     void resetRecordingRequest();
     bool m_recordingRequested = false, m_recordingAvailable = false;
-    bool m_recordingConnected = false, m_recordingBootstrapped = false;
+    bool m_recordingConnected = false;
     bool m_recordingInFlight = false, m_recordingBandConfirmed = false;
     uint64_t m_bandGeneration = 0, m_recordingSerial = 0;
     QString m_recordingRequestId;
