@@ -27,6 +27,8 @@ class ScreenerDock;
 class StockChartDock;
 class OrderBookDock;
 
+class QDockWidget;
+
 class MenuBuilder {
 public:
     struct DockWidgets {
@@ -39,6 +41,7 @@ public:
         ScreenerDock* screenerDock = nullptr;
         StockChartDock* stockChartDock = nullptr;
         OrderBookDock* orderBookDock = nullptr;
+        QDockWidget* paperTradingDock = nullptr;
     };
 
     struct Callbacks {
@@ -47,6 +50,7 @@ public:
         std::function<void()> resetLayout;
         std::function<void()> openSecFilingViewer;
         std::function<void()> openFontSettings;
+        std::function<void()> toggleSidePanel;
     };
 
     explicit MenuBuilder(QMenuBar* menuBar);
@@ -55,7 +59,7 @@ public:
     void setChartDock(ChartDock* heatmapDock) { m_heatmapDock = heatmapDock; }
 
 private:
-    void buildViewMenu(const DockWidgets& docks);
+    void buildViewMenu(const DockWidgets& docks, const Callbacks& callbacks);
     void buildLayoutsMenu(const Callbacks& callbacks);
     void buildToolsMenu(const Callbacks& callbacks);
     void buildDebugMenu();

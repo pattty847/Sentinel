@@ -1,4 +1,7 @@
 #include "MenuBuilder.h"
+#include <QDockWidget>
+#include <QKeySequence>
+#include <QAction>
 #include "../widgets/ChartDock.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
@@ -18,13 +21,13 @@ MenuBuilder::MenuBuilder(QMenuBar* menuBar) : m_menuBar(menuBar) {
 }
 
 void MenuBuilder::buildMenus(const DockWidgets& docks, const Callbacks& callbacks) {
-    buildViewMenu(docks);
+    buildViewMenu(docks, callbacks);
     buildLayoutsMenu(callbacks);
     buildToolsMenu(callbacks);
     buildDebugMenu();
 }
 
-void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
+void MenuBuilder::buildViewMenu(const DockWidgets& docks, const Callbacks& callbacks) {
     m_viewMenu = m_menuBar->addMenu("&View");
     
     if (docks.heatmapDock) {
@@ -53,6 +56,16 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks) {
     }
     if (docks.orderBookDock) {
         m_viewMenu->addAction(docks.orderBookDock->toggleViewAction());
+    }
+    if (docks.paperTradingDock) {
+        m_viewMenu->addAction(docks.paperTradingDock->toggleViewAction());
+    }
+    if (callbacks.toggleSidePanel) {
+        m_viewMenu->addSeparator();
+        // Hides every right-area dock at once so the chart gets the full width.
+        QAction* sidePanel = m_viewMenu->addAction("Hide/Show &Side Panel");
+        sidePanel->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Backslash));
+        QObject::connect(sidePanel, &QAction::triggered, callbacks.toggleSidePanel);
     }
 }
 

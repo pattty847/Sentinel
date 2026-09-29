@@ -1,5 +1,7 @@
 /* Main GUI window; main thread only. Hosts QML GPU chart and dockable widgets. */
 #pragma once
+#include <QDockWidget>
+#include <QList>
 
 #include <QMainWindow>
 #include <QVBoxLayout>
@@ -79,6 +81,7 @@ private:
     void setupUI();
     void setupMenuBar();
     void setupShortcuts();
+    void toggleSidePanel();
     void setupConnections();
     void connectMarketDataSignals();
     void setWindowProperties();
@@ -125,6 +128,7 @@ private:
     StockChartDock* m_stockChartDock = nullptr;
     OrderBookDock* m_orderBookDock = nullptr;
     PaperTradingDock* m_paperTradingDock = nullptr;
+    QList<QPointer<QDockWidget>> m_sidePanelHidden;
 
     // UI Controls (accessed through ChartDock)
     QLineEdit* m_symbolInput = nullptr;

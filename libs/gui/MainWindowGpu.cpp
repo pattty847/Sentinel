@@ -900,6 +900,7 @@ void MainWindowGPU::setupMenuBar() {
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
+    docks.paperTradingDock = m_paperTradingDock;
 
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
@@ -907,6 +908,7 @@ void MainWindowGPU::setupMenuBar() {
     callbacks.resetLayout = [this]() { onResetLayout(); };
     callbacks.openSecFilingViewer = [this]() { onOpenSecFilingViewer(); };
     callbacks.openFontSettings = [this]() { onOpenFontSettings(); };
+    callbacks.toggleSidePanel = [this]() { toggleSidePanel(); };
     m_menuBuilder->setChartDock(m_heatmapDock);
 
     m_menuBuilder->buildMenus(docks, callbacks);
@@ -1410,4 +1412,22 @@ AgentApi::BookSnapshot MainWindowGPU::agentApiBookSnapshot(int levels) const {
 
 AgentApi::TradesSnapshot MainWindowGPU::agentApiTradesSnapshot(qint64 windowMs, int limit) const {
     return m_agentApiTradeTape.snapshot(agentApiMetadata(), windowMs, static_cast<size_t>(limit));
+}
+
+void MainWindowGPU::toggleSidePanel() {
+    // Hide every visible right-area dock, or restore exactly the ones that were hidden.
+    if (m_sidePanelHidden.isEmpty()) {
+        for (auto* dock : findChildren<QDockWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+            if (dockWidgetArea(dock) == Qt::RightDockWidgetArea && dock->isVisible() && !dock->isFloating()) {
+                m_sidePanelHidden.push_back(dock);
+                dock->hide();
+            }
+        }
+        sLog_App("ui: side panel hidden docks=" << m_sidePanelHidden.size());
+    } else {
+        for (const auto& dock : std::as_const(m_sidePanelHidden))
+            if (dock) dock->show();
+        sLog_App("ui: side panel restored docks=" << m_sidePanelHidden.size());
+        m_sidePanelHidden.clear();
+    }
 }
