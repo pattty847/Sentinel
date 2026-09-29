@@ -1,19 +1,127 @@
 #version 440
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(std430, binding = 0) readonly buffer Columns { uint col[]; };
-layout(std430, binding = 1) readonly buffer Rows { uint row[]; };
-layout(std430, binding = 2) readonly buffer Sides { uint side[]; };
-layout(std430, binding = 3) readonly buffer Sizes { float size[]; };
-layout(std430, binding = 4) readonly buffer Offsets { uint offset[]; };
-layout(std430, binding = 5) readonly buffer Coverage { ivec4 coverage[]; };
-layout(std430, binding = 6) readonly buffer Durations { uint observedMs[]; };
-layout(std430, binding = 7) writeonly buffer Output { vec4 cell[]; };
-layout(std140, binding = 8) uniform Params {
+layout(std430, binding = 0) readonly buffer Packed { uint packed[]; };
+layout(std430, binding = 1) readonly buffer Offsets { uint offset[]; };
+layout(std430, binding = 2) readonly buffer Coverage { ivec4 coverage[]; };
+layout(std430, binding = 3) readonly buffer Durations { uint observedMs[]; };
+layout(std430, binding = 4) readonly buffer LodRows { uint lodRowSide[]; };
+layout(std430, binding = 5) readonly buffer LodSizes { float lodWeighted[]; };
+layout(std430, binding = 6) readonly buffer LodOffsets { uint lodOffset[]; };
+layout(std430, binding = 7) readonly buffer LodCoverage { ivec4 lodCoverage[]; };
+layout(std430, binding = 8) readonly buffer LodDurations { uint lodObservedMs[]; };
+layout(std430, binding = 9) readonly buffer PriceRows { uint priceRowSide[]; };
+layout(std430, binding = 10) readonly buffer PriceSizes { float priceSize[]; };
+layout(std430, binding = 11) readonly buffer PriceOffsets { uint priceOffset[]; };
+layout(std430, binding = 12) readonly buffer TimePriceRows { uint timePriceRowSide[]; };
+layout(std430, binding = 13) readonly buffer TimePriceSizes { float timePriceSize[]; };
+layout(std430, binding = 14) readonly buffer TimePriceOffsets { uint timePriceOffset[]; };
+layout(std430, binding = 15) readonly buffer Dense50 { vec2 dense50[]; };
+layout(std430, binding = 16) readonly buffer Dense50Meta { ivec2 dense50Meta[]; };
+layout(std430, binding = 17) readonly buffer Dense100 { vec2 dense100[]; };
+layout(std430, binding = 18) readonly buffer Dense100Meta { ivec2 dense100Meta[]; };
+layout(std430, binding = 19) readonly buffer TimeDense50 { vec2 timeDense50[]; };
+layout(std430, binding = 20) readonly buffer TimeDense50Meta { ivec2 timeDense50Meta[]; };
+layout(std430, binding = 21) readonly buffer TimeDense100 { vec2 timeDense100[]; };
+layout(std430, binding = 22) readonly buffer TimeDense100Meta { ivec2 timeDense100Meta[]; };
+layout(std430, binding = 23) writeonly buffer Output { vec4 cell[]; };
+layout(std140, binding = 24) uniform Params {
     uvec4 dims; // output columns, output rows, source columns, native rows per display row
     vec4 timeView; // source-column start, end
     ivec4 priceView; // first output row's native index relative to base row
 };
+
+float decodedSize(uint value) {
+    return value == 0u ? 0.0 : timeView.z * exp2((float(value & 0x7fffu) - 1.0) / timeView.w);
+}
+uint rawRowSide(uint i) { return packed[(i >> 1u) * 3u + (i & 1u)]; }
+uint rawCode(uint i) { return (packed[(i >> 1u) * 3u + 2u] >> ((i & 1u) * 16u)) & 0xffffu; }
+
+vec2 denseValue(uint column, int group, bool coarse) {
+    ivec2 meta;
+    int end;
+    if (dims.w == 50u) {
+        meta = coarse ? timeDense50Meta[column] : dense50Meta[column];
+        end = coarse ? timeDense50Meta[column + 1u].x : dense50Meta[column + 1u].x;
+    } else {
+        meta = coarse ? timeDense100Meta[column] : dense100Meta[column];
+        end = coarse ? timeDense100Meta[column + 1u].x : dense100Meta[column + 1u].x;
+    }
+    int index = meta.x + group - meta.y;
+    if (index < meta.x || index >= end) return vec2(0.0);
+    if (dims.w == 50u) return coarse ? timeDense50[index] : dense50[index];
+    return coarse ? timeDense100[index] : dense100[index];
+}
+
+vec2 rawRange(uint c, uint lo, uint hi, float weight) {
+    if (lo > hi) return vec2(0.0);
+    uint a = offset[c], b = offset[c + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if ((rawRowSide(m) & 0x7fffffffu) < lo) a = m + 1u;
+        else b = m;
+    }
+    vec2 sums = vec2(0.0);
+    uint stop = offset[c + 1u];
+    for (uint i = a; i < stop && (rawRowSide(i) & 0x7fffffffu) <= hi; ++i) {
+        float quantity = decodedSize(rawCode(i)) * weight;
+        if ((rawRowSide(i) & 0x80000000u) == 0u) sums.x += quantity;
+        else sums.y += quantity;
+    }
+    return sums;
+}
+
+vec2 priceRange(uint c, uint lo, uint end, float weight) {
+    if (lo >= end) return vec2(0.0);
+    uint a = priceOffset[c], b = priceOffset[c + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if ((priceRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
+        else b = m;
+    }
+    vec2 sums = vec2(0.0);
+    uint stop = priceOffset[c + 1u];
+    for (uint i = a; i < stop && (priceRowSide[i] & 0x7fffffffu) < end; ++i) {
+        float quantity = priceSize[i] * weight;
+        if ((priceRowSide[i] & 0x80000000u) == 0u) sums.x += quantity;
+        else sums.y += quantity;
+    }
+    return sums;
+}
+
+vec2 lodRange(uint g, uint lo, uint hi) {
+    if (lo > hi) return vec2(0.0);
+    uint a = lodOffset[g], b = lodOffset[g + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if ((lodRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
+        else b = m;
+    }
+    vec2 sums = vec2(0.0);
+    uint stop = lodOffset[g + 1u];
+    for (uint i = a; i < stop && (lodRowSide[i] & 0x7fffffffu) <= hi; ++i) {
+        if ((lodRowSide[i] & 0x80000000u) == 0u) sums.x += lodWeighted[i];
+        else sums.y += lodWeighted[i];
+    }
+    return sums;
+}
+
+vec2 timePriceRange(uint g, uint lo, uint end) {
+    if (lo >= end) return vec2(0.0);
+    uint a = timePriceOffset[g], b = timePriceOffset[g + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if ((timePriceRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
+        else b = m;
+    }
+    vec2 sums = vec2(0.0);
+    uint stop = timePriceOffset[g + 1u];
+    for (uint i = a; i < stop && (timePriceRowSide[i] & 0x7fffffffu) < end; ++i) {
+        if ((timePriceRowSide[i] & 0x80000000u) == 0u) sums.x += timePriceSize[i];
+        else sums.y += timePriceSize[i];
+    }
+    return sums;
+}
 
 void main() {
     uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
@@ -25,26 +133,58 @@ void main() {
     int hi = lo + int(dims.w) - 1;
     float bid = 0.0, ask = 0.0, totalMs = 0.0;
     bool valid = end > first && lo >= 0;
-    for (uint c = first; c < end; ++c) {
+    for (uint c = first; c < end;) {
+        // Aligned whole K-minute groups use duration-weighted sparse sums.
+        // Raw boundary minutes keep arbitrary pan/zoom partitions identical.
+        if (c % uint(priceView.y) == 0u && c + uint(priceView.y) <= end) {
+            uint g = c / uint(priceView.y);
+            ivec4 cov = lodCoverage[g];
+            valid = valid && cov.x <= lo && cov.y >= hi && cov.z <= lo && cov.w >= hi;
+            totalMs += float(lodObservedMs[g]);
+            if (hi < 0) { c += uint(priceView.y); continue; }
+            uint safeLo = uint(max(lo, 0)), safeHi = uint(hi);
+            vec2 sums;
+            if (dims.w == 50u || dims.w == 100u) {
+                sums = denseValue(g, (lo + priceView.w) / int(dims.w), true);
+            } else if (dims.w >= 32u) {
+                uint blockLo = (safeLo + uint(priceView.z) - 1u) / uint(priceView.z);
+                uint blockEnd = (safeHi + 1u) / uint(priceView.z);
+                if (blockLo < blockEnd) {
+                    sums = vec2(0.0);
+                    if (blockLo * uint(priceView.z) > safeLo)
+                        sums += lodRange(g, safeLo, blockLo * uint(priceView.z) - 1u);
+                    sums += timePriceRange(g, blockLo, blockEnd);
+                    if (blockEnd * uint(priceView.z) <= safeHi)
+                        sums += lodRange(g, blockEnd * uint(priceView.z), safeHi);
+                } else sums = lodRange(g, safeLo, safeHi);
+            } else sums = lodRange(g, safeLo, safeHi);
+            bid += sums.x; ask += sums.y;
+            c += uint(priceView.y);
+            continue;
+        }
         ivec4 cov = coverage[c];
         valid = valid && cov.x <= lo && cov.y >= hi && cov.z <= lo && cov.w >= hi;
         float weight = float(observedMs[c]);
         totalMs += weight;
-        if (hi < 0) continue;
-        uint a = offset[c], b = offset[c + 1u];
-        // Entries are sorted by (column,row,side). Binary search skips all
-        // rows below this display bin; each entry in the bin is visited once.
-        while (a < b) {
-            uint m = a + (b - a) / 2u;
-            if (row[m] < uint(max(lo, 0))) a = m + 1u;
-            else b = m;
-        }
-        uint stop = offset[c + 1u];
-        for (uint i = a; i < stop && row[i] <= uint(max(hi, -1)); ++i) {
-            if (col[i] != c) continue;
-            if (side[i] == 0u) bid += size[i] * weight;
-            else ask += size[i] * weight;
-        }
+        if (hi < 0) { ++c; continue; }
+        vec2 sums;
+        uint safeLo = uint(max(lo, 0)), safeHi = uint(hi);
+        if (dims.w == 50u || dims.w == 100u) {
+            sums = denseValue(c, (lo + priceView.w) / int(dims.w), false) * weight;
+        } else if (dims.w >= 32u) {
+            uint blockLo = (safeLo + uint(priceView.z) - 1u) / uint(priceView.z);
+            uint blockEnd = (safeHi + 1u) / uint(priceView.z);
+            if (blockLo < blockEnd) {
+                sums = vec2(0.0);
+                if (blockLo * uint(priceView.z) > safeLo)
+                    sums += rawRange(c, safeLo, blockLo * uint(priceView.z) - 1u, weight);
+                sums += priceRange(c, blockLo, blockEnd, weight);
+                if (blockEnd * uint(priceView.z) <= safeHi)
+                    sums += rawRange(c, blockEnd * uint(priceView.z), safeHi, weight);
+            } else sums = rawRange(c, safeLo, safeHi, weight);
+        } else sums = rawRange(c, safeLo, safeHi, weight);
+        bid += sums.x; ask += sums.y;
+        ++c;
     }
     float divisor = max(totalMs, 1.0);
     cell[y * dims.x + x] = vec4(bid / divisor, ask / divisor, valid ? 1.0 : 0.0, 0.0);

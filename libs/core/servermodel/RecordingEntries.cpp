@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
+#include <iterator>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <stdexcept>
 
 namespace recording {
@@ -42,23 +45,23 @@ void finish(RecordingEntries &out, std::vector<Entry> &entries,
         if (a.row != b.row) return a.row < b.row;
         return a.side < b.side;
     });
-    out.column.reserve(entries.size()); out.row.reserve(entries.size());
-    out.side.reserve(entries.size()); out.size.reserve(entries.size());
+    out.rowSide.reserve(entries.size()); out.code.reserve(entries.size());
     out.offsets.resize(out.columns() + 1);
     size_t next = 0;
     for (uint32_t c = 0; c < out.columns(); ++c) {
-        out.offsets[c] = static_cast<uint32_t>(out.column.size());
+        out.offsets[c] = static_cast<uint32_t>(out.rowSide.size());
         while (next < entries.size() && entries[next].col == c) {
             const auto &e = entries[next++];
             const auto rel = e.row - out.baseRow;
-            if (rel < 0 || rel > std::numeric_limits<uint32_t>::max())
+            if (rel < 0 || rel > 0x7fffffffu)
                 throw std::runtime_error("recording native row range exceeds GPU index width");
-            if (!out.column.empty() && out.column.back() == e.col && out.row.back() == uint32_t(rel) &&
-                out.side.back() == e.side) {
-                out.size.back() += e.size;
+            const uint32_t key = uint32_t(rel) | (e.side << 31);
+            if (out.rowSide.size() > out.offsets[c] && out.rowSide.back() == key) {
+                const double previous = decodeSize(uint16_t(out.code.back()), out.sizeScale);
+                out.code.back() = encodeSize(previous + e.size, out.sizeScale);
             } else {
-                out.column.push_back(e.col); out.row.push_back(static_cast<uint32_t>(rel));
-                out.side.push_back(e.side); out.size.push_back(e.size);
+                out.rowSide.push_back(key);
+                out.code.push_back(encodeSize(e.size, out.sizeScale));
             }
         }
         const auto &b = bounds[c];
@@ -72,7 +75,217 @@ void finish(RecordingEntries &out, std::vector<Entry> &entries,
         const auto bid = convert(0), ask = convert(2);
         out.coverage[c] = {bid.first, bid.second, ask.first, ask.second};
     }
-    out.offsets.back() = static_cast<uint32_t>(out.column.size());
+    out.offsets.back() = static_cast<uint32_t>(out.rowSide.size());
+}
+
+uint32_t rowKey(uint32_t packed) { return ((packed & 0x7fffffffu) << 1) | (packed >> 31); }
+
+void buildLod(RecordingEntries &out) {
+    auto &lod = out.lod;
+    const uint32_t count = (out.columns() + RecordingEntries::kLodMinutes - 1) / RecordingEntries::kLodMinutes;
+    lod.offsets.reserve(count + 1); lod.coverage.reserve(count); lod.observedMs.reserve(count);
+    lod.rowSide.reserve(out.rowSide.size() / RecordingEntries::kLodMinutes + 1024);
+    lod.weightedSize.reserve(lod.rowSide.capacity());
+    struct Cursor { uint32_t packed, index, end, column; };
+    auto later = [](const Cursor &a, const Cursor &b) { return rowKey(a.packed) > rowKey(b.packed); };
+    std::vector<Cursor> storage;
+    storage.reserve(RecordingEntries::kLodMinutes);
+    for (uint32_t g = 0; g < count; ++g) {
+        const uint32_t first = g * RecordingEntries::kLodMinutes;
+        const uint32_t end = std::min(first + RecordingEntries::kLodMinutes, out.columns());
+        lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+        auto cov = out.coverage[first];
+        uint32_t duration = 0;
+        std::priority_queue<Cursor, std::vector<Cursor>, decltype(later)> queue(later, std::move(storage));
+        for (uint32_t c = first; c < end; ++c) {
+            const auto &v = out.coverage[c];
+            cov.bidLo = std::max(cov.bidLo, v.bidLo); cov.bidHi = std::min(cov.bidHi, v.bidHi);
+            cov.askLo = std::max(cov.askLo, v.askLo); cov.askHi = std::min(cov.askHi, v.askHi);
+            duration += out.observedMs[c];
+            if (out.offsets[c] < out.offsets[c + 1])
+                queue.push({out.rowSide[out.offsets[c]], out.offsets[c], out.offsets[c + 1], c});
+        }
+        uint32_t current = 0;
+        double weighted = 0;
+        bool hasCurrent = false;
+        while (!queue.empty()) {
+            auto item = queue.top(); queue.pop();
+            if (hasCurrent && item.packed != current) {
+                lod.rowSide.push_back(current); lod.weightedSize.push_back(float(weighted)); weighted = 0;
+            }
+            current = item.packed; hasCurrent = true;
+            weighted += decodeSize(uint16_t(out.code[item.index]), out.sizeScale) * out.observedMs[item.column];
+            if (++item.index < item.end) {
+                item.packed = out.rowSide[item.index]; queue.push(item);
+            }
+        }
+        if (hasCurrent) { lod.rowSide.push_back(current); lod.weightedSize.push_back(float(weighted)); }
+        lod.coverage.push_back(cov); lod.observedMs.push_back(duration);
+    }
+    lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+}
+
+struct DenseColumn {
+    int64_t base = 0;
+    uint32_t group = 0;
+    std::vector<std::array<double, 2>> sums;
+    DenseColumn(const RecordingEntries &data, const std::vector<uint32_t> &rows,
+                uint32_t start, uint32_t end, uint32_t nativeRows) : group(nativeRows) {
+        if (start == end) return;
+        base = floorDiv(data.baseRow + (rows[start] & 0x7fffffffu), group);
+        const int64_t last = floorDiv(data.baseRow + (rows[end - 1] & 0x7fffffffu), group);
+        if (base < std::numeric_limits<int32_t>::min() || last > std::numeric_limits<int32_t>::max() ||
+            last - base > 1'000'000) throw std::runtime_error("dense price LOD range exceeds GPU index width");
+        sums.resize(size_t(last - base + 1), {0, 0});
+    }
+    void add(const RecordingEntries &data, uint32_t rowSide, double size) {
+        const auto index = floorDiv(data.baseRow + (rowSide & 0x7fffffffu), group) - base;
+        sums[size_t(index)][rowSide >> 31] += size;
+    }
+    void append(RecordingEntries::DensePriceLod &dst) const {
+        if (dst.sums.size() + sums.size() > uint64_t(std::numeric_limits<int32_t>::max()))
+            throw std::runtime_error("dense price LOD exceeds GPU index width");
+        dst.meta.push_back({int32_t(dst.sums.size()), int32_t(base)});
+        for (const auto &pair : sums) dst.sums.push_back({float(pair[0]), float(pair[1])});
+    }
+};
+
+void buildPriceLod(RecordingEntries &out) {
+    auto &lod = out.priceLod;
+    lod.offsets.reserve(out.columns() + 1);
+    lod.rowSide.reserve(out.rowSide.size() / RecordingEntries::kPriceBlockRows + 1024);
+    lod.size.reserve(lod.rowSide.capacity());
+    out.dense50.meta.reserve(out.columns() + 1); out.dense100.meta.reserve(out.columns() + 1);
+    for (uint32_t c = 0; c < out.columns(); ++c) {
+        lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+        DenseColumn dense50(out, out.rowSide, out.offsets[c], out.offsets[c + 1], 50);
+        DenseColumn dense100(out, out.rowSide, out.offsets[c], out.offsets[c + 1], 100);
+        uint32_t current = 0;
+        double bid = 0, ask = 0;
+        bool seen = false;
+        auto flush = [&] {
+            if (!seen) return;
+            if (bid > 0) { lod.rowSide.push_back(current); lod.size.push_back(float(bid)); }
+            if (ask > 0) { lod.rowSide.push_back(current | 0x80000000u); lod.size.push_back(float(ask)); }
+        };
+        for (uint32_t i = out.offsets[c]; i < out.offsets[c + 1]; ++i) {
+            const uint32_t block = (out.rowSide[i] & 0x7fffffffu) / RecordingEntries::kPriceBlockRows;
+            if (seen && block != current) { flush(); bid = ask = 0; }
+            current = block; seen = true;
+            const double size = decodeSize(uint16_t(out.code[i]), out.sizeScale);
+            (out.rowSide[i] & 0x80000000u ? ask : bid) += size;
+            dense50.add(out, out.rowSide[i], size);
+            dense100.add(out, out.rowSide[i], size);
+        }
+        flush();
+        dense50.append(out.dense50); dense100.append(out.dense100);
+    }
+    lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+    out.dense50.meta.push_back({int32_t(out.dense50.sums.size()), 0});
+    out.dense100.meta.push_back({int32_t(out.dense100.sums.size()), 0});
+}
+
+void buildTimePriceLod(RecordingEntries &out) {
+    auto &lod = out.timePriceLod;
+    const auto &source = out.lod;
+    lod.offsets.reserve(source.coverage.size() + 1);
+    lod.rowSide.reserve(source.rowSide.size() / RecordingEntries::kPriceBlockRows + 1024);
+    lod.size.reserve(lod.rowSide.capacity());
+    out.timeDense50.meta.reserve(source.coverage.size() + 1);
+    out.timeDense100.meta.reserve(source.coverage.size() + 1);
+    for (uint32_t c = 0; c < source.coverage.size(); ++c) {
+        lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+        DenseColumn dense50(out, source.rowSide, source.offsets[c], source.offsets[c + 1], 50);
+        DenseColumn dense100(out, source.rowSide, source.offsets[c], source.offsets[c + 1], 100);
+        uint32_t current = 0;
+        double bid = 0, ask = 0;
+        bool seen = false;
+        auto flush = [&] {
+            if (!seen) return;
+            if (bid > 0) { lod.rowSide.push_back(current); lod.size.push_back(float(bid)); }
+            if (ask > 0) { lod.rowSide.push_back(current | 0x80000000u); lod.size.push_back(float(ask)); }
+        };
+        for (uint32_t i = source.offsets[c]; i < source.offsets[c + 1]; ++i) {
+            const uint32_t block = (source.rowSide[i] & 0x7fffffffu) / RecordingEntries::kPriceBlockRows;
+            if (seen && block != current) { flush(); bid = ask = 0; }
+            current = block; seen = true;
+            const double size = source.weightedSize[i];
+            (source.rowSide[i] & 0x80000000u ? ask : bid) += size;
+            dense50.add(out, source.rowSide[i], size);
+            dense100.add(out, source.rowSide[i], size);
+        }
+        flush();
+        dense50.append(out.timeDense50); dense100.append(out.timeDense100);
+    }
+    lod.offsets.push_back(uint32_t(lod.rowSide.size()));
+    out.timeDense50.meta.push_back({int32_t(out.timeDense50.sums.size()), 0});
+    out.timeDense100.meta.push_back({int32_t(out.timeDense100.sums.size()), 0});
+}
+
+struct ScanChunk {
+    std::vector<Entry> entries;
+    std::vector<std::array<int64_t, 4>> bounds;
+    std::vector<int64_t> nativeUnits;
+    std::vector<uint32_t> observedMs;
+    double priceScale = 0, decodeMs = 0;
+    SizeScale sizeScale;
+    int64_t commonUnits = 0;
+};
+
+ScanChunk scanChunk(const std::filesystem::path &root, const std::string &symbol,
+                    const std::string &layer, int64_t rangeStart, int64_t chunkStart,
+                    int64_t chunkEnd, uint32_t columns) {
+    ScanChunk chunk;
+    chunk.bounds.resize(columns, {1, 0, 1, 0});
+    chunk.nativeUnits.resize(columns);
+    chunk.observedMs.resize(columns);
+    std::string failure;
+    Hmc2Reader reader(root); // reader/index/cache belongs to this worker
+    ReadControl control;
+    const auto scan = reader.visit(symbol, layer, minute, chunkStart, chunkEnd, [&](const Hmc2Record &r) {
+        if (!failure.empty()) return;
+        const auto decoded = Clock::now();
+        const double tick = r.header.rowTickUnits / r.header.priceScale;
+        if (!std::isfinite(tick) || tick <= 0 || !std::isfinite(r.header.priceScale) ||
+            r.header.priceScale <= 0) { failure = "bad recording native grid"; return; }
+        if (!chunk.commonUnits) { chunk.priceScale = r.header.priceScale; chunk.sizeScale = r.header.sizeScale; }
+        else if (r.header.priceScale != chunk.priceScale) { failure = "mixed price scales in recording range"; return; }
+        const int64_t units = r.header.rowTickUnits;
+        if (chunk.commonUnits) {
+            const int64_t gcd = std::gcd(chunk.commonUnits, units);
+            if (chunk.commonUnits / gcd > std::numeric_limits<int64_t>::max() / units) {
+                failure = "common native grid overflow"; return;
+            }
+            chunk.commonUnits = chunk.commonUnits / gcd * units;
+        } else chunk.commonUnits = units;
+        const auto col = static_cast<uint32_t>((r.bucketStartMs - rangeStart) / minute);
+        if (col >= columns || !r.observedMs) return;
+        chunk.bounds[col] = {r.bidRowLo, r.bidRowHi, r.askRowLo, r.askRowHi};
+        chunk.nativeUnits[col] = units;
+        chunk.observedMs[col] = r.observedMs;
+        for (const auto &e : r.entries) {
+            const auto lo = e.isAsk ? r.askRowLo : r.bidRowLo;
+            const auto hi = e.isAsk ? r.askRowHi : r.bidRowHi;
+            if (e.row < lo || e.row > hi) continue;
+            const double decodedSize = decodeSize(e.twapCode, r.header.sizeScale);
+            if (!std::isfinite(decodedSize) || decodedSize < 0 ||
+                decodedSize > std::numeric_limits<float>::max()) {
+                failure = "nonfinite recording size"; return;
+            }
+            if (decodedSize > 0) {
+                if (e.row > std::numeric_limits<int64_t>::max() / units ||
+                    e.row < std::numeric_limits<int64_t>::min() / units) {
+                    failure = "native price unit overflow"; return;
+                }
+                chunk.entries.push_back({col, e.row * units, uint32_t(e.isAsk), float(decodedSize)});
+            }
+        }
+        chunk.decodeMs += elapsed(decoded);
+    }, control);
+    if (!failure.empty()) throw std::runtime_error(failure);
+    if (scan.status != ReadStatus::Complete)
+        throw std::runtime_error("recording reader did not complete range scan");
+    return chunk;
 }
 } // namespace
 
@@ -91,58 +304,46 @@ RecordingEntries loadRecordingEntries(const std::filesystem::path &root,
     std::vector<std::array<int64_t, 4>> bounds(out.columns(), {1, 0, 1, 0});
     std::vector<int64_t> nativeUnits(out.columns(), 0);
     std::vector<Entry> entries;
-    std::string failure;
     int64_t commonUnits = 0;
-    Hmc2Reader reader(root);
-    ReadControl control;
-    const auto scan = reader.visit(symbol, layer, minute, startMs, endMs, [&](const Hmc2Record &r) {
-        if (!failure.empty()) return;
-        const auto decoded = Clock::now();
-        const double tick = r.header.rowTickUnits / r.header.priceScale;
-        if (!std::isfinite(tick) || tick <= 0 || !std::isfinite(r.header.priceScale) ||
-            r.header.priceScale <= 0) { failure = "bad recording native grid"; return; }
-        if (out.priceScale == 100 && commonUnits == 0) {
-            out.priceScale = r.header.priceScale; out.sizeScale = r.header.sizeScale;
-        } else if (r.header.priceScale != out.priceScale) {
-            failure = "mixed price scales in recording range"; return;
+    const uint32_t totalMinutes = out.columns();
+    const uint32_t workers = std::min<uint32_t>(4, std::max<uint32_t>(1, totalMinutes / 360));
+    const uint32_t chunkMinutes = (totalMinutes + workers - 1) / workers;
+    std::vector<std::future<ScanChunk>> tasks;
+    tasks.reserve(workers);
+    for (uint32_t worker = 0; worker < workers; ++worker) {
+        const auto from = startMs + int64_t(worker * chunkMinutes) * minute;
+        const auto to = std::min(endMs, from + int64_t(chunkMinutes) * minute);
+        if (from >= to) break;
+        tasks.push_back(std::async(std::launch::async, [&, from, to] {
+            return scanChunk(root, symbol, layer, startMs, from, to, totalMinutes);
+        }));
+    }
+    bool selectedScale = false;
+    for (auto &task : tasks) {
+        auto chunk = task.get();
+        if (chunk.commonUnits) {
+            if (!selectedScale) { out.priceScale = chunk.priceScale; out.sizeScale = chunk.sizeScale; selectedScale = true; }
+            else if (out.priceScale != chunk.priceScale) throw std::runtime_error("mixed price scales in recording range");
+            if (commonUnits) {
+                const int64_t gcd = std::gcd(commonUnits, chunk.commonUnits);
+                if (commonUnits / gcd > std::numeric_limits<int64_t>::max() / chunk.commonUnits)
+                    throw std::runtime_error("common native grid overflow");
+                commonUnits = commonUnits / gcd * chunk.commonUnits;
+            } else commonUnits = chunk.commonUnits;
         }
-        const int64_t units = r.header.rowTickUnits;
-        if (commonUnits) {
-            const int64_t gcd = std::gcd(commonUnits, units);
-            if (commonUnits / gcd > std::numeric_limits<int64_t>::max() / units) {
-                failure = "common native grid overflow"; return;
-            }
-            commonUnits = commonUnits / gcd * units;
-        } else commonUnits = units;
-        const auto col = static_cast<uint32_t>((r.bucketStartMs - startMs) / minute);
-        if (col >= out.columns() || !r.observedMs) return;
-        bounds[col] = {r.bidRowLo, r.bidRowHi, r.askRowLo, r.askRowHi};
-        nativeUnits[col] = units;
-        out.observedMs[col] = r.observedMs;
-        for (const auto &e : r.entries) {
-            const auto lo = e.isAsk ? r.askRowLo : r.bidRowLo;
-            const auto hi = e.isAsk ? r.askRowHi : r.bidRowHi;
-            if (e.row < lo || e.row > hi) continue;
-            const double decodedSize = decodeSize(e.twapCode, r.header.sizeScale);
-            if (!std::isfinite(decodedSize) || decodedSize < 0 ||
-                decodedSize > std::numeric_limits<float>::max()) {
-                failure = "nonfinite recording size"; return;
-            }
-            if (decodedSize > 0) {
-                if (e.row > std::numeric_limits<int64_t>::max() / units ||
-                    e.row < std::numeric_limits<int64_t>::min() / units) {
-                    failure = "native price unit overflow"; return;
-                }
-                entries.push_back({col, e.row * units, uint32_t(e.isAsk), float(decodedSize)});
-            }
+        out.decodeMs += chunk.decodeMs;
+        for (uint32_t c = 0; c < totalMinutes; ++c) if (chunk.nativeUnits[c]) {
+            bounds[c] = chunk.bounds[c]; nativeUnits[c] = chunk.nativeUnits[c];
+            out.observedMs[c] = chunk.observedMs[c];
         }
-        out.decodeMs += elapsed(decoded);
-    }, control);
-    if (!failure.empty()) throw std::runtime_error(failure);
-    if (scan.status != ReadStatus::Complete)
-        throw std::runtime_error("recording reader did not complete range scan");
+        entries.insert(entries.end(), std::make_move_iterator(chunk.entries.begin()),
+                       std::make_move_iterator(chunk.entries.end()));
+    }
     if (commonUnits) out.nativeTick = commonUnits / out.priceScale;
     finish(out, entries, bounds, nativeUnits, commonUnits ? commonUnits : 1);
+    buildLod(out);
+    buildPriceLod(out);
+    buildTimePriceLod(out);
     out.loadMs = elapsed(started);
     return out;
 }
@@ -158,18 +359,66 @@ RecordingEntries syntheticRecordingEntries(uint32_t count) {
     out.coverage.resize(cols, {0, int32_t(rows - 1), 0, int32_t(rows - 1)});
     out.observedMs.resize(cols, 60'000);
     out.offsets.resize(cols + 1);
-    out.column.reserve(count); out.row.reserve(count); out.side.reserve(count); out.size.reserve(count);
+    out.rowSide.reserve(count); out.code.reserve(count);
     for (uint32_t c = 0; c < cols; ++c) {
-        out.offsets[c] = static_cast<uint32_t>(out.column.size());
-        for (uint32_t r = 0; r < rows && out.column.size() < count; ++r) {
-            out.column.push_back(c); out.row.push_back(r);
-            out.side.push_back(r > rows / 2 ? 1u : 0u);
+        out.offsets[c] = static_cast<uint32_t>(out.rowSide.size());
+        for (uint32_t r = 0; r < rows && out.rowSide.size() < count; ++r) {
+            out.rowSide.push_back(r | ((r > rows / 2 ? 1u : 0u) << 31));
             const bool wall = r == rows / 3 || r == rows * 2 / 3 || r == rows / 2 + 41;
-            out.size.push_back(wall ? 116'000.0f : float(0.01 + ((r * 17u + c * 13u) % 100u) * 0.003));
+            out.code.push_back(encodeSize(wall ? 116'000.0 : 0.01 + ((r * 17u + c * 13u) % 100u) * 0.003,
+                                          out.sizeScale));
         }
     }
     out.offsets.back() = count;
+    buildLod(out);
+    buildPriceLod(out);
+    buildTimePriceLod(out);
     out.loadMs = elapsed(started);
     return out;
+}
+
+BinCell binRecordingCell(const RecordingEntries &data, uint32_t first, uint32_t end,
+                         uint32_t rowLo, uint32_t rowHi, bool useLod, bool usePriceLod) {
+    if (first >= end || end > data.columns() || rowLo > rowHi) return {};
+    double bid = 0, ask = 0, duration = 0;
+    bool valid = true;
+    auto visit = [&](uint32_t column, uint32_t start, uint32_t stop, const std::vector<uint32_t> &rowSide,
+                     const RecordingEntries::Coverage &cov,
+                     uint32_t ms, bool coarse) {
+        valid &= cov.bidLo <= int64_t(rowLo) && cov.bidHi >= int64_t(rowHi) &&
+                 cov.askLo <= int64_t(rowLo) && cov.askHi >= int64_t(rowHi);
+        duration += ms;
+        const bool spatial = usePriceLod && rowHi - rowLo + 1 >= 32;
+        const uint32_t blockRows = RecordingEntries::kPriceBlockRows;
+        const uint32_t fullLo = (rowLo + blockRows - 1) / blockRows, fullEnd = (rowHi + 1) / blockRows;
+        for (uint32_t i = start; i < stop; ++i) {
+            const auto row = rowSide[i] & 0x7fffffffu;
+            if (row < rowLo || row > rowHi) continue;
+            if (spatial && row / blockRows >= fullLo && row / blockRows < fullEnd) continue;
+            const double amount = coarse ? data.lod.weightedSize[i] :
+                decodeSize(uint16_t(data.code[i]), data.sizeScale) * ms;
+            (rowSide[i] & 0x80000000u ? ask : bid) += amount;
+        }
+        const auto &spatialSource = coarse ? data.timePriceLod : data.priceLod;
+        if (spatial) for (uint32_t i = spatialSource.offsets[column]; i < spatialSource.offsets[column + 1]; ++i) {
+            const uint32_t block = spatialSource.rowSide[i] & 0x7fffffffu;
+            if (block < fullLo || block >= fullEnd) continue;
+            (spatialSource.rowSide[i] & 0x80000000u ? ask : bid) += spatialSource.size[i] * (coarse ? 1.0 : ms);
+        }
+    };
+    for (uint32_t c = first; c < end;) {
+        if (useLod && c % RecordingEntries::kLodMinutes == 0 &&
+            c + RecordingEntries::kLodMinutes <= end) {
+            const uint32_t g = c / RecordingEntries::kLodMinutes;
+            visit(g, data.lod.offsets[g], data.lod.offsets[g + 1], data.lod.rowSide,
+                  data.lod.coverage[g], data.lod.observedMs[g], true);
+            c += RecordingEntries::kLodMinutes;
+        } else {
+            visit(c, data.offsets[c], data.offsets[c + 1], data.rowSide,
+                  data.coverage[c], data.observedMs[c], false);
+            ++c;
+        }
+    }
+    return {float(bid / std::max(duration, 1.0)), float(ask / std::max(duration, 1.0)), valid};
 }
 } // namespace recording

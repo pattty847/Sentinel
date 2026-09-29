@@ -59,6 +59,7 @@ public:
         Grid grid;
         grid.timeLo = float(view_.timeLo); grid.timeHi = float(view_.timeHi);
         grid.rowLo = int32_t(firstRow - data_->baseRow);
+        grid.rowAlignment = int32_t((data_->baseRow % group + group) % group);
         grid.group = group; grid.columns = cols; grid.rows = rows;
         grid.sizeFloor = float(data_->sizeScale.floor);
         grid.codesPerOctave = float(data_->sizeScale.codesPerOctave);
@@ -111,7 +112,7 @@ void LabItem::accept(std::shared_ptr<const recording::RecordingEntries> data) {
     const double margin = std::max(2.0, (high - low) * 0.04);
     view_.priceLo = low * data_->nativeTick - margin;
     view_.priceHi = (high + 1) * data_->nativeTick + margin;
-    status_ = QStringLiteral("Ready: %1 entries").arg(data_->size.size());
+    status_ = QStringLiteral("Ready: %1 entries").arg(data_->rowSide.size());
     ++version_; emit statusChanged(); update();
 }
 
@@ -188,7 +189,7 @@ QVariantMap LabItem::metrics() const {
     const double frameMs = telemetry_->frameMs.load();
     return {{"fps", frameMs > 0 ? 1000.0 / frameMs : 0.0}, {"frameMs", frameMs},
             {"binSubmitMs", telemetry_->binSubmitMs.load()}, {"gpuFrameMs", telemetry_->gpuFrameMs.load()},
-            {"firstFrameMs", telemetry_->firstFrameMs.load()}, {"entries", data_ ? qlonglong(data_->size.size()) : 0},
+            {"firstFrameMs", telemetry_->firstFrameMs.load()}, {"entries", data_ ? qlonglong(data_->rowSide.size()) : 0},
             {"gpuBytes", qulonglong(telemetry_->gpuBytes.load())},
             {"columns", telemetry_->columns.load()}, {"rows", telemetry_->rows.load()},
             {"group", telemetry_->group.load()}, {"tick", telemetry_->tick.load()},

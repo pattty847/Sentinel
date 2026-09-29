@@ -1,5 +1,6 @@
 #pragma once
 #include "servermodel/RecordingEntries.hpp"
+#include <array>
 #include <memory>
 #include <QString>
 
@@ -15,6 +16,7 @@ namespace lab {
 struct Grid {
     float timeLo = 0, timeHi = 1;
     int32_t rowLo = 0;
+    int32_t rowAlignment = 0; // baseRow modulo group for globally aligned price LOD
     uint32_t group = 1, columns = 1, rows = 1;
     float sizeFloor = 1e-6f, codesPerOctave = 819;
 };
@@ -34,7 +36,12 @@ public:
     uint64_t sourceBytes() const { return bytes_; }
 private:
     QRhi *rhi_ = nullptr;
-    std::unique_ptr<QRhiBuffer> col_, row_, side_, size_, offsets_, coverage_, observed_, output_, params_;
+    std::unique_ptr<QRhiBuffer> packed_, offsets_, coverage_, observed_;
+    std::unique_ptr<QRhiBuffer> lodRowSide_, lodWeighted_, lodOffsets_, lodCoverage_, lodObserved_;
+    std::unique_ptr<QRhiBuffer> priceRowSide_, priceSize_, priceOffsets_;
+    std::unique_ptr<QRhiBuffer> timePriceRowSide_, timePriceSize_, timePriceOffsets_;
+    std::array<std::unique_ptr<QRhiBuffer>, 8> dense_;
+    std::unique_ptr<QRhiBuffer> output_, params_;
     std::unique_ptr<QRhiShaderResourceBindings> computeBindings_, drawBindings_;
     std::unique_ptr<QRhiComputePipeline> compute_;
     std::unique_ptr<QRhiGraphicsPipeline> graphics_;

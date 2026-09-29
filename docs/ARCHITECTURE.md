@@ -110,15 +110,20 @@ live GPU measurement; it is not implemented here.
 
 ### GPU bin lab (isolated experiment)
 
-`RecordingEntries` reads one HMC2 minute layer without a writer lock and uploads
-sorted sparse `(column,row,side,size)` arrays, per-column offsets, coverage, and
-observed durations to storage buffers. The lab compute shader assigns one invocation
-to each visible output cell, binary-searches row ranges within each source column,
-sums sizes by side, weights multiple columns by observed duration, and marks any
-cell without complete source coverage unknown. It normalizes mixed $5/$10 deep
-history onto a compatible common tick before upload. The screen-sized result is
-discardable; pan and zoom rebuild it without a server request. The gather design
-is deterministic and avoids float atomics, which are not portable to Metal.
+`RecordingEntries` reads one HMC2 minute layer without a writer lock. Four
+independent readers decode separate time chunks on worker threads; loading also
+builds eight-minute duration-weighted, 16-native-row sparse, and aligned 50/100-row
+dense price sums. Each raw
+GPU entry occupies six bytes: a row with the side bit and a 15-bit HMC2 size
+code, packed two entries per three words. Minute offsets supply the column.
+The compute shader assigns one invocation to each visible output cell and
+gathers raw entries at arbitrary time/price boundaries, using coarse sums only
+for aligned interiors. The common 50/100-row ladder ticks read one precomputed
+bid/ask pair per source column. It preserves separate side sums, duration-weighted
+time averages, and conservative validity. Mixed $5/$10 deep history uses a
+compatible common row tick. The screen-sized result is disposable; pan and
+zoom rebuild it without a server request. Gather is deterministic and avoids
+float atomics, which are not portable to Metal.
 The existing server-side recording re-band path remains the production path until
 Metal timing and visual checks justify a change.
 

@@ -5,9 +5,15 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
 #include <QtQml/qqml.h>
+#include <chrono>
+#include <iostream>
 
 int main(int argc, char **argv) {
+    const auto launched = std::chrono::steady_clock::now();
     bool benchmark = false;
     for (int i = 1; i < argc; ++i) benchmark |= QByteArray(argv[i]) == "--bench";
     if (benchmark) qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -16,6 +22,7 @@ int main(int argc, char **argv) {
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption({"bench", "Run 200 headless Metal bin passes and emit JSON"});
+    parser.addOption({"first-paint", "Exit after the first lab frame and emit launch timing JSON"});
     parser.addOption({"hours", "Hours back from now", "hours", "24"});
     parser.addOption({"layer", "Recording layer: near or deep", "layer", "near"});
     parser.addOption({"synthetic", "Generate this many synthetic entries", "entries"});
@@ -40,5 +47,25 @@ int main(int argc, char **argv) {
     engine.rootContext()->setContextProperty("initialSynthetic", synthetic);
     engine.load(QUrl(QStringLiteral("qrc:/lab/Main.qml")));
     if (engine.rootObjects().isEmpty()) return 2;
+    if (parser.isSet("first-paint")) {
+        auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        if (!item || !window) return 2;
+        QObject::connect(window, &QQuickWindow::frameSwapped, &app, [item, &app, hours, layer, launched] {
+            const auto metrics = item->metrics();
+            if (metrics.value("firstFrameMs").toDouble() <= 0) return;
+            const auto presentedMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - launched).count();
+            const QJsonObject result{{"hours", hours}, {"layer", layer},
+                                     {"entries", metrics.value("entries").toDouble()},
+                                     {"load_ms", metrics.value("loadMs").toDouble()},
+                                     {"decode_ms", metrics.value("decodeMs").toDouble()},
+                                     {"first_draw_submit_ms", metrics.value("firstFrameMs").toDouble()},
+                                     {"launch_to_first_frame_ms", presentedMs}};
+            std::cout << QJsonDocument(result).toJson(QJsonDocument::Compact).constData() << std::endl;
+            app.quit();
+        }, Qt::QueuedConnection);
+        QTimer::singleShot(30'000, &app, [&app] { app.exit(2); });
+    }
     return app.exec();
 }

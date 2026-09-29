@@ -77,7 +77,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             color: "#080d12"
             border.color: "#2c3d49"
-            BinLab { id: binLab; anchors.fill: parent }
+            BinLab { id: binLab; objectName: "binLab"; anchors.fill: parent }
             MouseArea {
                 anchors.fill: parent
                 hoverEnabled: true
