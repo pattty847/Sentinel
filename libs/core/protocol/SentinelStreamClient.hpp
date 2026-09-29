@@ -34,6 +34,7 @@ using tcp = net::ip::tcp;
 class SentinelStreamClient : public QObject {
     friend struct TradeOverlayWireTest;
     friend struct CandleDataSourceTest;
+    friend struct SentinelStreamClientWriteTest;
     Q_OBJECT
 public:
     struct HeatmapHistoryColumn {
@@ -209,11 +210,16 @@ private:
     std::thread m_thread;
     
     ssl::context m_sslCtx{ssl::context::tlsv13_client};
-    boost::beast::websocket::stream<
-        boost::beast::ssl_stream<boost::beast::tcp_stream>> m_ws{m_strand, m_sslCtx};
+    using WebSocket = boost::beast::websocket::stream<
+        boost::beast::ssl_stream<boost::beast::tcp_stream>>;
+    // A canceled TLS/WebSocket session is not reusable. Recreate only after
+    // disconnect has drained every callback borrowing its buffers.
+    std::unique_ptr<WebSocket> m_ws;
     boost::beast::flat_buffer m_buffer;
     
     std::deque<std::string> m_writeQueue;
+    // Strand-owned; a nonempty queue does not prove that a write is idle.
+    bool m_writeInFlight = false;
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};

@@ -158,3 +158,25 @@ add_executable(test_price_ladder test_price_ladder.cpp)
 target_include_directories(test_price_ladder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_price_ladder PRIVATE GTest::gtest_main)
 add_test(NAME PriceLadderTests COMMAND test_price_ladder)
+
+# Disposable storage research harness; no application links this library.
+add_library(storage_probe_encoders STATIC storage_probe/Encoders.cpp)
+target_include_directories(storage_probe_encoders PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/storage_probe
+    ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(storage_probe_encoders PUBLIC sentinel_core
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
+add_executable(storage_probe storage_probe/main.cpp)
+target_link_libraries(storage_probe PRIVATE storage_probe_encoders Qt6::Core)
+add_executable(test_storage_probe storage_probe/test_encoders.cpp)
+target_link_libraries(test_storage_probe PRIVATE storage_probe_encoders GTest::gtest_main Qt6::Core)
+add_test(NAME StorageProbeTests COMMAND test_storage_probe)
+set_tests_properties(StorageProbeTests PROPERTIES LABELS "servermodel")
+add_dependencies(servermodel_tests test_storage_probe)
+
+add_executable(test_storage_probe_cli storage_probe/test_cli.cpp)
+target_link_libraries(test_storage_probe_cli PRIVATE GTest::gtest_main Qt6::Core nlohmann_json::nlohmann_json)
+target_compile_definitions(test_storage_probe_cli PRIVATE STORAGE_PROBE_EXECUTABLE="$<TARGET_FILE:storage_probe>")
+add_dependencies(test_storage_probe_cli storage_probe)
+add_test(NAME StorageProbeCliTests COMMAND test_storage_probe_cli)
+set_tests_properties(StorageProbeCliTests PROPERTIES LABELS "servermodel" TIMEOUT 45)
+add_dependencies(servermodel_tests test_storage_probe_cli)
