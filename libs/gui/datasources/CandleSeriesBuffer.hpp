@@ -34,8 +34,8 @@ public:
                      int64_t seq,
                      bool isClosed);
 
-    // Merges history bars by bar start time. A still-forming live bar wins over a
-    // history copy of the same bucket; the live seq stream is not touched.
+    // Merges history by start time. Live-owned buckets always win, including
+    // against "closed" REST snapshots; the live seq stream is not touched.
     void applyHistory(const QString& symbol,
                       int64_t timeframeSec,
                       const std::vector<CandleBar>& bars);

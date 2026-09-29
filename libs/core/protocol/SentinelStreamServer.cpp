@@ -915,10 +915,14 @@ public:
                     std::vector<OHLCVBar> filtered;
                     filtered.reserve(history.size());
                     for (const auto& bar : history) {
-                        if (bar.timestamp_ms >= endMs - limit * 1000LL && bar.timestamp_ms < endMs) {
+                        if (bar.timestamp_ms <= endMs) {
                             filtered.push_back(bar);
                         }
                     }
+                    // Existing contract: inclusive end and limit counts retained
+                    // bars, not seconds. Sparse series may span a wider interval.
+                    if (filtered.size() > static_cast<size_t>(limit))
+                        filtered.erase(filtered.begin(), filtered.end() - limit);
 
                     const int64_t tfMs = 1000;
                     const int64_t nowMs = static_cast<int64_t>(

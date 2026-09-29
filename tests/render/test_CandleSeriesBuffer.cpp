@@ -55,15 +55,51 @@ TEST(CandleSeriesBuffer, HistoryAfterLiveStaysSortedAndLiveKeepsFlowing) {
     EXPECT_DOUBLE_EQ(bars.back().close, 2.0);
 }
 
-TEST(CandleSeriesBuffer, FormingLiveBarBeatsOpenHistoryCopyButFinalHistoryWins) {
+TEST(CandleSeriesBuffer, RestFetchedBeforeBoundaryCannotCloseOrRegressNewerLiveBar) {
     CandleSeriesBuffer buffer;
-    buffer.applyUpdate(kSym, kTfSec, bar(5, 9.0, false), 1, false);
-    buffer.applyHistory(kSym, kTfSec, {bar(5, 1.0, false)});
-    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
+    auto snapshot = bar(5, 11.0, true); // fetched while open, labelled closed after fetch
+    snapshot.high = 12.0;
+    snapshot.low = 9.0;
+    snapshot.volume = 10.0;
+    auto live = bar(5, 13.0, false);
+    live.high = 15.0;
+    live.low = 8.0;
+    live.volume = 20.0;
+    buffer.applyUpdate(kSym, kTfSec, bar(5, 10.0, false), 1, false);
+    buffer.applyUpdate(kSym, kTfSec, live, 2, false); // arrives while REST is in flight
+    buffer.applyHistory(kSym, kTfSec, {snapshot});
+    auto actual = visible(buffer).back();
+    EXPECT_FALSE(actual.isClosed);
+    EXPECT_DOUBLE_EQ(actual.close, 13.0);
+    EXPECT_DOUBLE_EQ(actual.high, 15.0);
+    EXPECT_DOUBLE_EQ(actual.low, 8.0);
+    EXPECT_DOUBLE_EQ(actual.volume, 20.0);
+    EXPECT_EQ(actual.seq, 2);
 
+    live.close = 14.0;
+    live.high = 16.0;
+    live.low = 7.0;
+    live.volume = 25.0;
+    buffer.applyUpdate(kSym, kTfSec, live, 3, true); // real live final still takes effect
+    actual = visible(buffer).back();
+    EXPECT_TRUE(actual.isClosed);
+    EXPECT_DOUBLE_EQ(actual.close, 14.0);
+    EXPECT_DOUBLE_EQ(actual.high, 16.0);
+    EXPECT_DOUBLE_EQ(actual.low, 7.0);
+    EXPECT_DOUBLE_EQ(actual.volume, 25.0);
+    buffer.resetSequences();
+    buffer.applyHistory(kSym, kTfSec, {snapshot});
+    EXPECT_DOUBLE_EQ(visible(buffer).back().volume, 25.0);
+}
+
+TEST(CandleSeriesBuffer, LiveTakesOwnershipOfPreviouslyClosedHistorySnapshot) {
+    CandleSeriesBuffer buffer;
     buffer.applyHistory(kSym, kTfSec, {bar(5, 3.0, true)});
-    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 3.0);
-    EXPECT_TRUE(visible(buffer).back().isClosed);
+    buffer.applyUpdate(kSym, kTfSec, bar(5, 9.0, false), 1, false);
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
+    EXPECT_FALSE(visible(buffer).back().isClosed);
+    buffer.applyHistory(kSym, kTfSec, {bar(5, 4.0, true)});
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
 }
 
 TEST(CandleSeriesBuffer, NewServerSessionSeqIsAcceptedAfterReset) {

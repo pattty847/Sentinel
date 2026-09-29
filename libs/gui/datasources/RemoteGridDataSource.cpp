@@ -81,7 +81,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     connect(&m_client, &SentinelStreamClient::candleHistoryFailed, this,
             [this](const QString& symbol) {
                 if (m_candleBackfill.fail(symbol, QDateTime::currentMSecsSinceEpoch()))
-                    m_candleBackfillTimer.start(2000);
+                    requestNextCandlePage();
             }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
@@ -195,7 +195,7 @@ void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64
     m_candleTimeframeSec = timeframeSec;
     m_candleHistoryReady = endMs > startMs && startMs > 0;
     if (m_candleBackfill.setViewport(symbol, timeframeSec, startMs, endMs)) {
-        if (m_candleHistoryReady) m_candleBackfillTimer.start(100);
+        if (m_candleHistoryReady) requestNextCandlePage();
         else m_candleBackfillTimer.stop();
     }
 }
@@ -204,7 +204,9 @@ void RemoteGridDataSource::requestNextCandlePage() {
     if (!m_candleHistoryReady) return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (const auto delay = m_candleBackfill.retryDelayMs(now); delay > 0) {
-        m_candleBackfillTimer.start(static_cast<int>(delay));
+        // Keep the earliest trailing deadline while movement continues.
+        if (!m_candleBackfillTimer.isActive() || m_candleBackfillTimer.remainingTime() > delay)
+            m_candleBackfillTimer.start(static_cast<int>(delay));
         return;
     }
     const auto request = m_candleBackfill.next(
@@ -212,6 +214,7 @@ void RemoteGridDataSource::requestNextCandlePage() {
         m_candleBuffer->historyCapacityReached(m_candleSymbol, m_candleTimeframeSec),
         now);
     if (!request) return;
+    m_candleBackfillTimer.stop();
     m_client.requestCandleHistory(request->symbol.toStdString(), request->timeframeSec,
                                  request->endSec, request->limit);
 }
@@ -396,18 +399,18 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
     }
     qint64 oldestReplyMs = 0;
     for (const auto& bar : candles) {
-        if (bar.timeStartMs >= startTimeSec * 1000 && bar.timeStartMs <= endTimeSec * 1000 &&
+        if ((timeframeSec == 1 || bar.timeStartMs >= startTimeSec * 1000) &&
+            bar.timeStartMs > 0 && bar.timeStartMs <= endTimeSec * 1000 &&
             (oldestReplyMs == 0 || bar.timeStartMs < oldestReplyMs)) oldestReplyMs = bar.timeStartMs;
     }
     const bool accepted = m_candleBackfill.accept(symbol, timeframeSec, startTimeSec, endTimeSec,
-                                                 oldestReplyMs);
-    // Also resumes the latest selection after a discarded stale reply.
-    if (m_candleHistoryReady) m_candleBackfillTimer.start(100);
+                                                 oldestReplyMs, QDateTime::currentMSecsSinceEpoch());
     if (!accepted) {
         sLog_Probe("candles.history", "stale reply symbol=" << symbol << " tfSec=" << timeframeSec);
+        requestNextCandlePage(); // resume the latest selection after the stale flight
         return;
     }
-    if (oldestReplyMs == 0 || oldestReplyMs >= endTimeSec * 1000) {
+    if (m_candleBackfill.floorReached()) {
         sLog_Data("Candle history floor: symbol=" << symbol << " tfSec=" << timeframeSec
                   << " endSec=" << endTimeSec);
     }
@@ -415,7 +418,8 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     bars.reserve(static_cast<size_t>(candles.size()));
     for (const auto& bar : candles) {
-        if (bar.timeStartMs < startTimeSec * 1000 || bar.timeStartMs > endTimeSec * 1000) continue;
+        if (bar.timeStartMs <= 0 || bar.timeStartMs > endTimeSec * 1000 ||
+            (timeframeSec != 1 && bar.timeStartMs < startTimeSec * 1000)) continue;
         CandleSeriesBuffer::CandleBar out;
         out.timeStartMs = bar.timeStartMs;
         out.timeEndMs = bar.timeEndMs;
@@ -432,6 +436,7 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
                "applied symbol=" << symbol << " tfSec=" << timeframeSec
                << " t=[" << startTimeSec << ".." << endTimeSec << "]"
                << " count=" << candles.size());
+    requestNextCandlePage(); // merge first so the next page sees the new oldest bar
 }
 
 void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,

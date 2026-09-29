@@ -81,7 +81,9 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
         size_t idx = lowerBound(series, updated.timeStartMs);
         if (idx < series.count && getAt(series, idx).timeStartMs == updated.timeStartMs) {
             CandleBar& existing = getAt(series, idx);
-            if (!existing.isClosed) {
+            // A REST snapshot can be labelled closed after crossing a boundary
+            // in flight. The first live update still takes ownership of it.
+            if (!existing.isClosed || existing.seq == 0) {
                 existing = updated;
             }
             updatedExisting = true;
@@ -151,6 +153,7 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
     }
     auto& series = seriesFor(symbol, timeframeSec);
     std::vector<CandleBar> page = history;
+    for (auto& bar : page) bar.seq = 0; // Only applyUpdate grants live ownership.
     page.erase(std::remove_if(page.begin(), page.end(), [](const CandleBar& bar) {
         return bar.timeStartMs <= 0;
     }), page.end());
@@ -165,8 +168,11 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
         while (existing < series.count && getAt(series, existing).timeStartMs <= bar.timeStartMs)
             merged.push_back(getAt(series, existing++));
         if (!merged.empty() && merged.back().timeStartMs == bar.timeStartMs) {
-            // Preserve live values, except a final history bucket can close an open one.
-            if (bar.isClosed && !merged.back().isClosed) merged.back() = bar;
+            // History must never close or replace a live-owned bucket. A REST
+            // response fetched before the boundary may be older than live even
+            // when the server labels it final after the fetch completes.
+            if (merged.back().seq == 0 && bar.isClosed && !merged.back().isClosed)
+                merged.back() = bar;
         } else {
             merged.push_back(bar);
         }

@@ -104,24 +104,33 @@ struct RecordingServerStopTest {
         // Hold a fake write in flight so posted replies stay inspectable without a socket.
         session->write_queue_.push_back({"in-flight", false});
         session->pendingWriteBytes_ = 9;
-        for (const auto [endSec, expectedCount] : {std::pair{1001, 350}, {651, 350}, {301, 300}, {1, 0}}) {
-            nlohmann::json request = {{"type", "candle_history_request"}, {"symbol", "BTC-USD"},
-                {"timeframe_sec", 1}, {"end_time_sec", endSec}, {"limit", 350}};
+        const auto fetch = [&](const char* symbol, int endSec, int limit) {
+            nlohmann::json request = {{"type", "candle_history_request"}, {"symbol", symbol},
+                {"timeframe_sec", 1}, {"end_time_sec", endSec}, {"limit", limit}};
             session->handle_message(request.dump());
             ioc.restart();
             ioc.poll();
-            const auto reply = nlohmann::json::parse(session->write_queue_.back().payload);
+            return nlohmann::json::parse(session->write_queue_.back().payload);
+        };
+        // Client walks backward with oldestStart - 1; the server end remains inclusive.
+        for (const auto [endSec, expectedCount] : {std::pair{1000, 350}, {650, 350}, {300, 300}, {1, 1}}) {
+            const auto reply = fetch("BTC-USD", endSec, 350);
             ASSERT_EQ(reply.at("type"), "candle_history_chunk");
             EXPECT_EQ(reply.at("end_time_sec"), endSec);
             const auto& candles = reply.at("candles");
             ASSERT_EQ(candles.size(), expectedCount);
-            for (size_t i = 0; i < candles.size(); ++i) {
-                const auto start = candles[i].at("time_start_ms").get<int64_t>();
-                EXPECT_GE(start, std::max(0, endSec - 350) * 1000LL);
-                EXPECT_LT(start, endSec * 1000LL);
-                if (i > 0) EXPECT_EQ(start, candles[i - 1].at("time_start_ms").get<int64_t>() + 1000);
-            }
+            EXPECT_EQ(candles.back().at("time_start_ms"), endSec * 1000LL);
+            for (size_t i = 1; i < candles.size(); ++i)
+                EXPECT_EQ(candles[i].at("time_start_ms").get<int64_t>(),
+                          candles[i - 1].at("time_start_ms").get<int64_t>() + 1000);
         }
+        const auto sparse = fetch("ETH-USD", 20, 2);
+        const auto& candles = sparse.at("candles");
+        ASSERT_EQ(candles.size(), 2);
+        EXPECT_EQ(candles[0].at("time_start_ms"), 10'000);
+        EXPECT_EQ(candles[1].at("time_start_ms"), 20'000);
+        EXPECT_EQ(sparse.at("start_time_sec"), 18); // metadata, not a sparse-bar lower bound
+        EXPECT_TRUE(fetch("UNKNOWN-USD", 20, 2).at("candles").empty());
         session->beginClose("candle paging test");
     }
     // Longer than the 3 s wait for the ClientHello below, so the fetch is
@@ -406,6 +415,14 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
     for (int second = 1; second <= 1001; ++second) {
         Trade trade{};
         trade.product_id = "BTC-USD";
+        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::seconds(second));
+        trade.price = 100;
+        trade.size = 1;
+        model.onTrade(trade);
+    }
+    for (const int second : {1, 10, 20, 30}) {
+        Trade trade{};
+        trade.product_id = "ETH-USD";
         trade.timestamp = std::chrono::system_clock::time_point(std::chrono::seconds(second));
         trade.price = 100;
         trade.size = 1;
