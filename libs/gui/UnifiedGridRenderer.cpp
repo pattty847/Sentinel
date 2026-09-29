@@ -9,9 +9,12 @@
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
 #include "render/HeatmapStreamState.hpp"
+#include "render/RecordingBandPolicy.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/ViewportAutoScrollController.hpp"
 #include <QMetaObject>
+#include <algorithm>
+#include <cmath>
 #include <QMetaType>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
@@ -109,9 +112,35 @@ void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
 }
 
 void UnifiedGridRenderer::setLiveBookTop(double bestBid, double bestAsk) {
-  if (m_heatmapStreamService) {
-    m_heatmapStreamService->setLiveBook(bestBid, bestAsk, m_viewState.get());
+  if (!m_heatmapStreamService) return;
+  // Recording mode ignores legacy slices, so nothing else places the first
+  // window: seed the viewport from the live mid (a kRows band at the finest
+  // native tick, the geometry the legacy bootstrap used) before centering.
+  if (m_recordingSource && m_viewState && !m_viewState->isTimeWindowValid() &&
+      std::isfinite(bestBid) && std::isfinite(bestAsk) && bestBid > 0 && bestAsk >= bestBid) {
+    const double tick = recording_view::kFinestNativeTick;
+    const double half = tick * recording_view::kRows * 0.5;
+    const double mid = std::round((bestBid + bestAsk) * 0.5 / tick) * tick;
+    applyHeatmapRangeReset(std::max(0.0, mid - half), mid + half, tick, 0, recording_view::kRows);
   }
+  m_heatmapStreamService->setLiveBook(bestBid, bestAsk, m_viewState.get());
+}
+
+void UnifiedGridRenderer::applyHeatmapRangeReset(double minPrice, double maxPrice, double tickSize,
+                                                 int gridWidth, int gridHeight) {
+  if (!m_useGpuHeatmap) {
+    m_useGpuHeatmap = true;
+    m_heatmapOverlay.requestFullTextureRebuild();
+    m_heatmapStreamService->ensureClockStarted();
+  }
+  auto result = m_heatmapStreamService->handleRangeReset(
+      minPrice, maxPrice, tickSize, gridWidth, gridHeight, m_viewState.get(), m_heatmapOverlay);
+  if (result.tickSizeChanged) emit heatmapTickSizeChanged();
+  if (m_axisTextService) {
+    if (m_axisTextService->timeAxisModel()) m_axisTextService->timeAxisModel()->recalculateTicks();
+    if (m_axisTextService->priceAxisModel()) m_axisTextService->priceAxisModel()->recalculateTicks();
+  }
+  update();
 }
 
 void UnifiedGridRenderer::resetLivePriceCenter() {

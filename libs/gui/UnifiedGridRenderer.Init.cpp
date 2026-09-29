@@ -142,24 +142,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
             Qt::QueuedConnection);
 
     connect(m_dataProcessor.get(), &DataProcessor::heatmapRangeReset,
-            this,
-            [this](double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight) {
-                if (!m_useGpuHeatmap) {
-                    m_useGpuHeatmap = true;
-                    m_heatmapOverlay.requestFullTextureRebuild();
-                    m_heatmapStreamService->ensureClockStarted();
-                }
-                auto result = m_heatmapStreamService->handleRangeReset(
-                    minPrice, maxPrice, tickSize, gridWidth, gridHeight,
-                    m_viewState.get(), m_heatmapOverlay);
-                if (result.tickSizeChanged) emit heatmapTickSizeChanged();
-                if (m_axisTextService) {
-                    if (m_axisTextService->timeAxisModel()) m_axisTextService->timeAxisModel()->recalculateTicks();
-                    if (m_axisTextService->priceAxisModel()) m_axisTextService->priceAxisModel()->recalculateTicks();
-                }
-                update();
-            },
-            Qt::QueuedConnection);
+            this, &UnifiedGridRenderer::applyHeatmapRangeReset, Qt::QueuedConnection);
 
     connect(m_dataProcessor.get(), &DataProcessor::footprintColumnReady,
             this,
