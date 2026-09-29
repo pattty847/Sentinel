@@ -75,6 +75,7 @@ Rectangle {
         anchors.fill: parent
         anchors.rightMargin: priceAxisChrome.width
         anchors.bottomMargin: timeAxisChrome.height
+        clip: true
         visible: true
         intensityScale: 1.0
         maxCells: 500000
@@ -142,6 +143,7 @@ Rectangle {
     CandlestickOverlayItem {
         id: candleOverlay
         anchors.fill: unifiedGridRenderer
+        clip: true
         visible: root.showCandles
         mappingProvider: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
@@ -155,6 +157,7 @@ Rectangle {
         id: algoOverlayRenderer
         objectName: "algoOverlayRenderer"
         anchors.fill: unifiedGridRenderer
+        clip: true
         mappingProvider: unifiedGridRenderer
         enabled: true
         z: 3
@@ -171,6 +174,7 @@ Rectangle {
         id: paperTradeOverlayRenderer
         objectName: "paperTradeOverlayRenderer"
         anchors.fill: unifiedGridRenderer
+        clip: true
         mappingProvider: unifiedGridRenderer
         overlayModel: paperTradeOverlayModel
         enabled: true
@@ -180,6 +184,7 @@ Rectangle {
     Item {
         id: paperTradeOverlayLayer
         anchors.fill: unifiedGridRenderer
+        clip: true
         z: 5
 
         function formatQty(value) {
@@ -552,6 +557,7 @@ Rectangle {
     Item {
         id: gridLines
         anchors.fill: unifiedGridRenderer
+        clip: true
         visible: root.showTimeGrid
         z: 3
         enabled: false
