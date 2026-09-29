@@ -409,3 +409,65 @@ TEST_F(RecordingDataProcessor, FinalRepairCancelsASupersededHistoryBudgetTimer) 
     EXPECT_EQ(requests.size(), 3); // stale 250ms timer cannot bypass repair backoff
     processor.setRecordingConnected(false);
 }
+
+
+TEST_F(RecordingDataProcessor, RebandsKeepPublishedPictureUntilLatestViewIsCovered) {
+    processor.setRecordingCapability(true);
+    events(180);
+    ASSERT_EQ(requests.size(), 1);
+    auto original = page(requests.back());
+    original.status = "complete";
+    original.exhausted = true;
+    original.scannedStartMs = original.oldestAvailableMs = 60'000;
+    original.columns[0].intensity.fill('\x11');
+    processor.onRecordingHistoryReceived(original);
+    ASSERT_EQ(updates.size(), 1);
+    const auto displayed = updates.back();
+
+    auto bandPage = [&](const auto& request, double lo) {
+        auto p = page(request);
+        p.bandLo = lo;
+        p.columns[0].minPrice = lo;
+        p.columns[0].maxPrice = lo + p.bandRows * p.bandTick;
+        p.columns[0].intensity.fill('\x22');
+        return p;
+    };
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 20000, 20100, 1000, 500);
+    events(180);
+    ASSERT_EQ(requests.size(), 2);
+    EXPECT_EQ(updates.size(), 1); // no provisional-band blank update
+    processor.onRecordingHistoryReceived(bandPage(requests.back(), 18000));
+    EXPECT_EQ(updates.size(), 1); // first page is insufficient
+    ASSERT_EQ(requests.size(), 3); // continuations still run while publication is held
+    const auto stale = bandPage(requests.back(), 18000);
+
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 30000, 30100, 1000, 500);
+    events(180);
+    ASSERT_EQ(requests.size(), 4);
+    const auto latestGeneration = requests.back().bandGeneration;
+    processor.onRecordingHistoryReceived(stale);
+    EXPECT_EQ(updates.size(), 1);
+    processor.onRecordingHistoryReceived(bandPage(requests.back(), 28000));
+    EXPECT_EQ(updates.size(), 1);
+    ASSERT_EQ(requests.size(), 5);
+    auto rest = bandPage(requests.back(), 28000);
+    rest.columns.clear(); // known gaps are sufficient evidence for the rest
+    rest.scannedStartMs = 6'000'000;
+    rest.scannedEndMs = 11'940'000;
+    rest.nextEndMs = 5'940'000;
+    processor.onRecordingHistoryReceived(rest);
+    ASSERT_EQ(updates.size(), 2);
+    EXPECT_TRUE(updates.back()->full);
+    EXPECT_EQ(updates.back()->bandGeneration, latestGeneration);
+    EXPECT_DOUBLE_EQ(updates.back()->band.minPrice, 28000);
+    ASSERT_EQ(updates.back()->writes.size(), 1024);
+    EXPECT_EQ(displayed->bandGeneration, original.bandGeneration);
+    EXPECT_DOUBLE_EQ(displayed->band.minPrice, original.bandLo);
+    const auto& oldWrites = displayed->writes;
+    auto oldColumn = std::find_if(oldWrites.begin(), oldWrites.end(), [](const auto& w) {
+        return w.bucketStartMs == 12'000'000;
+    });
+    ASSERT_NE(oldColumn, oldWrites.end());
+    EXPECT_EQ(oldColumn->intensity, QByteArray(4096, '\x11'));
+    processor.setRecordingConnected(false);
+}

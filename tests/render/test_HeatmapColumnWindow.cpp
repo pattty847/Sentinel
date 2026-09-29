@@ -343,8 +343,8 @@ TEST(HeatmapRecordingWindow, KeepsCodesAndValidityAndRejectsStaleReplies) {
     EXPECT_DOUBLE_EQ(u.sizeFloor, 1e-6);
     EXPECT_DOUBLE_EQ(u.codesPerOctave, 819);
     EXPECT_EQ(u.bandGeneration, 3);
-    ASSERT_TRUE(w.setDisplayBand({200, 200 + kRows, 1}, 4, u));
-    EXPECT_FALSE(writeFor(u, bucket(10))->recorded);
+    EXPECT_FALSE(w.setDisplayBand({200, 200 + kRows, 1}, 4, u));
+    EXPECT_TRUE(u.writes.empty()); // previous ring remains published during the re-band
     EXPECT_FALSE(w.ingestRecording({col}, 3, "current", bucket(10), bucket(11), false,
                                    0, bucket(10), 1e-6, 819, u, first));
     FetchRequest fetch;
@@ -603,4 +603,152 @@ TEST(HeatmapRecordingWindow, MissingOrFailedHistorySettlesUnknownAndDoesNotBlock
     EXPECT_EQ(w.unfinishedRecordingBucket(), 0); // current bucket is never retired
     w.nextRecordingRepair(100000, requested, u);
     EXPECT_EQ(requested, 0);
+}
+
+
+namespace {
+class RecordingReband : public testing::Test {
+protected:
+    ColumnWindow window = makeWindow();
+    Update update;
+    bool first = false;
+
+    Column column(int i, double lo = 200, uint16_t value = 2000) {
+        auto c = makeColumn(i, lo, 3, value);
+        c.validity = QByteArray((kRows + 7) / 8, '\xff');
+        return c;
+    }
+    bool page(const std::vector<Column>& columns, int start, int end,
+              uint64_t generation = 2, const std::string& id = "new", bool exhausted = false) {
+        return window.ingestRecording(columns, generation, id, bucket(start), bucket(end),
+                                      exhausted, exhausted ? bucket(start) : 0, bucket(10),
+                                      1e-6, 819, update, first);
+    }
+    void SetUp() override {
+        window.setDisplayBand({100, 116, 1}, 1, update);
+        window.setRecordingRequest("old");
+        ASSERT_TRUE(page({column(8, 100), column(9, 100), column(10, 100)}, 8, 11, 1, "old"));
+        window.setViewport(bucket(8), bucket(11), true, update);
+        ASSERT_FALSE(window.setDisplayBand({200, 216, 1}, 2, update));
+        ASSERT_TRUE(update.writes.empty());
+        window.setRecordingRequest("new");
+    }
+};
+}
+
+TEST_F(RecordingReband, HoldsUntilWholeViewKnownThenPublishesOneFullReplacement) {
+    EXPECT_FALSE(page({column(10)}, 10, 11));
+    EXPECT_TRUE(update.writes.empty());
+    FetchRequest fetch;
+    ASSERT_TRUE(window.nextFetch(fetch));
+    EXPECT_EQ(fetch.endMs, bucket(9)); // fetching continues while the old picture stays visible
+    EXPECT_FALSE(page({column(9)}, 9, 10));
+    EXPECT_TRUE(update.writes.empty());
+    ASSERT_TRUE(page({column(8)}, 8, 9));
+    EXPECT_FALSE(first);
+    EXPECT_TRUE(update.full);
+    EXPECT_EQ(update.bandGeneration, 2);
+    EXPECT_DOUBLE_EQ(update.band.minPrice, 200);
+    ASSERT_EQ(update.writes.size(), kWidth);
+    for (int i : {8, 9, 10}) {
+        ASSERT_NE(writeFor(update, bucket(i)), nullptr);
+        EXPECT_EQ(writeFor(update, bucket(i))->intensity, column(i).intensity);
+        EXPECT_EQ(coverageAt(update, bucket(i)), 1);
+    }
+    ASSERT_TRUE(page({column(10, 200, 3000)}, 10, 11));
+    EXPECT_FALSE(update.full); // ordinary incremental uploads resume
+    ASSERT_EQ(update.writes.size(), 1);
+    EXPECT_EQ(cell(update.writes[0].intensity, 3), 3000);
+}
+
+TEST_F(RecordingReband, RejectsStaleGenerationAndRequestAndCollapsesSuccessiveBands) {
+    EXPECT_FALSE(page({column(10)}, 10, 11));
+    EXPECT_FALSE(window.setDisplayBand({300, 316, 1}, 3, update));
+    window.setRecordingRequest("latest");
+    EXPECT_FALSE(page({column(8), column(9)}, 8, 11)); // abandoned generation
+    EXPECT_FALSE(window.setDisplayBand({200, 216, 1}, 2, update));
+    EXPECT_FALSE(page({column(8, 300)}, 8, 11, 3, "new")); // stale request
+    EXPECT_FALSE(page({column(8, 300), column(9, 300)}, 8, 10, 3, "latest"));
+    EXPECT_TRUE(update.writes.empty()); // generation 2's bucket 10 cannot satisfy readiness
+    ASSERT_TRUE(page({column(10, 300)}, 10, 11, 3, "latest"));
+    EXPECT_TRUE(update.full);
+    EXPECT_EQ(update.bandGeneration, 3);
+    EXPECT_DOUBLE_EQ(update.band.minPrice, 300);
+    EXPECT_EQ(writeFor(update, bucket(10))->intensity, column(10, 300).intensity);
+}
+
+TEST_F(RecordingReband, AuthoritativeBandCorrectionWithinGenerationStillHolds) {
+    EXPECT_FALSE(window.setDisplayBand({198, 230, 2}, 2, update));
+    auto c = column(10, 198);
+    c.maxPrice = 230;
+    c.tickSize = 2;
+    EXPECT_FALSE(page({c}, 10, 11));
+    EXPECT_TRUE(update.writes.empty());
+    ASSERT_TRUE(page({}, 8, 10)); // proven gaps resolve the rest of the view
+    EXPECT_TRUE(update.full);
+    EXPECT_DOUBLE_EQ(update.band.tickSize, 2);
+    EXPECT_EQ(writeFor(update, bucket(10))->intensity, c.intensity);
+    EXPECT_FALSE(writeFor(update, bucket(8))->recorded);
+}
+
+TEST_F(RecordingReband, ZeroAndUnknownRowsAreDataAndScannedGapsResolveTheView) {
+    auto zero = column(10);
+    zero.intensity.fill(0);
+    zero.validity.fill(0);
+    EXPECT_FALSE(page({zero}, 10, 11));
+    ASSERT_TRUE(page({}, 8, 10));
+    EXPECT_EQ(coverageAt(update, bucket(10)), 1);
+    EXPECT_EQ(coverageAt(update, bucket(9)), 0);
+    EXPECT_EQ(writeFor(update, bucket(10))->validity, zero.validity);
+}
+
+TEST_F(RecordingReband, StorageFloorResolvesOlderViewWithoutWaitingForPrefetchOrFuture) {
+    window.setViewport(bucket(4), bucket(20), true, update);
+    ASSERT_TRUE(page({column(10)}, 10, 11, 2, "new", true));
+    EXPECT_TRUE(update.full);
+    EXPECT_EQ(coverageAt(update, bucket(10)), 1);
+    EXPECT_EQ(coverageAt(update, bucket(4)), 0);
+}
+
+TEST_F(RecordingReband, ViewChangesReevaluateCoverageEvenWithoutPlacementChange) {
+    EXPECT_FALSE(page({column(10)}, 10, 11));
+    EXPECT_FALSE(window.setViewport(bucket(9) + 1, bucket(11), true, update));
+    EXPECT_TRUE(update.writes.empty()); // partially visible bucket 9 is still needed
+    ASSERT_TRUE(window.setViewport(bucket(10), bucket(11), true, update));
+    EXPECT_TRUE(update.full);
+    // Half-open end: bucket 10 is excluded, but a partial bucket 9 is included.
+    EXPECT_FALSE(window.setDisplayBand({300, 316, 1}, 3, update));
+    window.setViewport(bucket(8), bucket(10), true, update);
+    ASSERT_TRUE(page({column(8, 300), column(9, 300)}, 8, 10, 3));
+    EXPECT_TRUE(update.full);
+}
+
+TEST_F(RecordingReband, LiveDuringHoldIsIncludedAndLiveOutsideViewSurvivesReturn) {
+    auto liveColumn = column(11, 200, 4000);
+    ASSERT_FALSE(window.ingestRecording({liveColumn}, 2, {}, 0, 0, false, 0, bucket(11),
+                                       1e-6, 819, update, first, true));
+    EXPECT_TRUE(update.writes.empty());
+    // Pan into history while new-band live continues outside the ring.
+    EXPECT_FALSE(window.setViewport(bucket(-10), bucket(-8), false, update));
+    auto later = column(12, 200, 5000);
+    EXPECT_FALSE(window.ingestRecording({later}, 2, {}, 0, 0, false, 0, bucket(12),
+                                       1e-6, 819, update, first, true));
+    ASSERT_TRUE(page({column(-10), column(-9)}, -10, -8));
+    EXPECT_TRUE(update.full);
+    ASSERT_TRUE(window.setViewport(bucket(11), bucket(13), true, update));
+    EXPECT_EQ(writeFor(update, bucket(11))->intensity, liveColumn.intensity);
+    EXPECT_EQ(writeFor(update, bucket(12))->intensity, later.intensity);
+}
+
+TEST_F(RecordingReband, ResetCancelsHoldAndDoesNotLeakIntoLegacyOrFreshRecording) {
+    window.clear();
+    ASSERT_TRUE(live(window, makeColumn(10), update));
+    EXPECT_EQ(update.valueEncoding, ValueEncoding::LegacyIntensity);
+    EXPECT_EQ(writeFor(update, bucket(10))->intensity, makeColumn(10).intensity);
+    window.clear();
+    window.setDisplayBand({200, 216, 1}, 4, update);
+    window.setRecordingRequest("fresh");
+    ASSERT_TRUE(page({column(10)}, 10, 11, 4, "fresh"));
+    EXPECT_TRUE(first);
+    EXPECT_EQ(update.bandGeneration, 4);
 }
