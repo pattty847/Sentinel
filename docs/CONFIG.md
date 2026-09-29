@@ -168,5 +168,6 @@ session columns; the bracket must divide the session duration. Price rows descen
 from `max_price`, with `min_price = max_price - grid_height * tick_size`.
 The first successful publication anchors the grid on the latest retained trade
 (or a candle close for TPO history after restart), rounded to its own tick. The grid remains fixed for that subscription; requests
-may explicitly change `price_min`, `tick_size` and `rows`. Recording heatmap zoom,
+may explicitly change `price_min`, `tick_size` and `rows`. Weekly and monthly TPO
+sessions use the same rows at a 5x / 10x tick, centred on this grid. Recording heatmap zoom,
 re-bands and tick changes do not change this grid.

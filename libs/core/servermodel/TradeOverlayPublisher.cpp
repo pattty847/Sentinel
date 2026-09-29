@@ -12,6 +12,18 @@ bool Grid::valid() const {
         std::isfinite(tick) && tick > 0 && tick <= 1e6 &&
         std::isfinite(maxPrice) && maxPrice > 0 && maxPrice <= 1e12 && minPrice() >= 0;
 }
+Grid tpoGridFor(const Grid& base, SessionManager::SessionType session) {
+    const int k = session == SessionManager::SessionType::M1 ? 10
+                : session == SessionManager::SessionType::W1 ? 5 : 1;
+    if (k == 1 || !base.valid()) return base;
+    // Same row count, coarser tick, centred on the base band, aligned to its own tick.
+    Grid grid = base;
+    grid.tick = base.tick * k;
+    const double centre = base.maxPrice - base.rows * base.tick / 2;
+    grid.maxPrice = std::ceil((centre + base.rows * grid.tick / 2) / grid.tick) * grid.tick;
+    if (grid.minPrice() < 0) grid.maxPrice = grid.rows * grid.tick;
+    return grid.valid() ? grid : base;
+}
 std::vector<int64_t> liveBuckets(int64_t now, int64_t previous, int64_t tf, int64_t origin) {
     if (tf <= 0 || now < origin || now <= 0) return {};
     const auto bucket = origin + (now - origin) / tf * tf;
@@ -98,49 +110,51 @@ struct Builder {
     const std::vector<OHLCVBar>& candles;
     int64_t retainedFromMs;
     Result out;
+    Grid tpoGrid;
     size_t bytes = 0;
     void send(Json j) {
         auto data = j.dump();
         if (bytes + data.size() > kMaxBytes) { out.error = "overlay output budget exceeded"; return; }
         bytes += data.size(); out.messages.push_back(std::move(data));
     }
-    template<class F> void scan(int64_t start, int64_t end, F fn) const {
+    template<class F> void scan(const Grid& grid, int64_t start, int64_t end, F fn) const {
         auto it = std::lower_bound(trades.begin(), trades.end(), start,
             [](const Trade& t, int64_t ms) { return t.timestampMs < ms; });
         for (; it != trades.end() && it->timestampMs < end; ++it) {
             if (!std::isfinite(it->price) || !std::isfinite(it->size) || it->size <= 0) continue;
-            const double row = std::floor((out.grid.maxPrice - it->price) / out.grid.tick);
-            if (row >= 0 && row < out.grid.rows) fn(static_cast<int>(row), *it);
+            const double row = std::floor((grid.maxPrice - it->price) / grid.tick);
+            if (row >= 0 && row < grid.rows) fn(static_cast<int>(row), *it);
         }
     }
     Json column(int64_t start, int64_t tf, bool tpo) const {
+        const Grid& grid = tpo ? tpoGrid : out.grid;
         Json j = {{"time_start", start}, {"time_end", start + tf},
-                  {"min_price", out.grid.minPrice()}, {"max_price", out.grid.maxPrice},
-                  {"tick_size", out.grid.tick}};
+                  {"min_price", grid.minPrice()}, {"max_price", grid.maxPrice},
+                  {"tick_size", grid.tick}};
         if (tpo) {
-            QByteArray letters(out.grid.rows, '\0');
+            QByteArray letters(grid.rows, '\0');
             const auto session = SessionManager::sessionContaining(start, q.session);
             const auto origin = session.valid ? session.startMs : 0;
             const char letter = 'A' + ((start - origin) / tf) % 26;
-            scan(start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+            scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
             if (q.kind == Kind::TpoHistory) {
                 auto bar = std::lower_bound(candles.begin(), candles.end(), start - 59999,
                     [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
                 for (; bar != candles.end() && bar->timestamp_ms < start + tf; ++bar) {
                     if (retainedFromMs > 0 && bar->timestamp_ms >= retainedFromMs) continue;
                     if (!std::isfinite(bar->high) || !std::isfinite(bar->low) || bar->high < bar->low) continue;
-                    const double first = std::floor((out.grid.maxPrice - bar->high) / out.grid.tick);
-                    const double last = std::floor((out.grid.maxPrice - bar->low) / out.grid.tick);
-                    if (last < 0 || first >= out.grid.rows) continue;
+                    const double first = std::floor((grid.maxPrice - bar->high) / grid.tick);
+                    const double last = std::floor((grid.maxPrice - bar->low) / grid.tick);
+                    if (last < 0 || first >= grid.rows) continue;
                     const int lo = static_cast<int>(std::max(0.0, first));
-                    const int hi = static_cast<int>(std::min(double(out.grid.rows - 1), last));
+                    const int hi = static_cast<int>(std::min(double(grid.rows - 1), last));
                     for (int row = lo; row <= hi; ++row) letters[row] = letter;
                 }
             }
             j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
         } else {
             std::vector<double> delta(out.grid.rows, 0);
-            scan(start, start + tf, [&](int row, const Trade& t) {
+            scan(out.grid, start, start + tf, [&](int row, const Trade& t) {
                 if (t.side == AggressorSide::Buy) delta[row] += t.size;
                 else if (t.side == AggressorSide::Sell) delta[row] -= t.size;
             });
@@ -199,7 +213,7 @@ struct Builder {
         const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
         if (!session.valid) return;
         std::vector<double> bins(out.grid.rows, 0);
-        scan(session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
+        scan(out.grid, session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
         double total = 0; int poc = 0;
         for (int i = 0; i < out.grid.rows; ++i) { total += bins[i]; if (bins[i] > bins[poc]) poc = i; }
         int lo = poc, hi = poc; double covered = bins[poc];
@@ -242,6 +256,7 @@ Result build(const Request& q, const std::vector<Trade>& trades,
         b.out.grid.maxPrice = (bottom + b.out.grid.rows) * b.out.grid.tick;
     }
     if (!b.out.grid.valid()) { b.out.error = "overlay grid unavailable or invalid"; return b.out; }
+    b.tpoGrid = tpoGridFor(b.out.grid, q.session);
     if (q.kind != Kind::TpoHistory) b.columns(false, q.kind == Kind::Live);
     if (q.kind != Kind::FootprintHistory) b.columns(true, q.kind == Kind::Live);
     if (q.kind == Kind::Live) b.profile();

@@ -32,7 +32,7 @@ UGR implements the `QSGNode` lifecycle via `updatePaintNode()`.
 Overlays are independent C++ classes that manage their respective GPU resources (textures, materials, geometry) and write onto the UGR canvas.
 *   **HeatmapOverlayRenderer:** Uploads rank-indexed byte columns into highly volatile QSG textures, mapped via custom shaders.
 *   **FootprintOverlayRenderer:** Similar ring-buffer texture upload, visually distinct from heatmap, overlaying text-based order flow geometry.
-*   **TpoOverlayRenderer:** Supports two Display Modes (`HorizontalProfile` and `VerticalTimeline`). It projects letter distributions onto the GPU.
+*   **TpoOverlayRenderer:** Draws one market profile per retained session as vertex-colour letter cells plus MSDF letters, in `split` (periods in their time columns) or `collapsed` (letters packed per row from the session start) layout. POC and the 70% value area come from `TpoProfileModel` on the displayed rows.
 *   **VolumeProfileRenderer:** Driven by `VolumeProfileState`, visualizing price-domain histograms on the horizontal bounds.
 
 ## 4. Coordinate Systems and Mapping

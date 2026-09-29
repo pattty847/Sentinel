@@ -48,6 +48,10 @@ CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs
 // Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
 Result build(const Request& request, const std::vector<ServerDataModel::FootprintTradeSample>& trades,
              const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);
+// TPO grid for a session type: the base grid for daily sessions; for W1 (x5)
+// and M1 (x10) the same rows at a coarser tick, centred on the base band, so a
+// whole week or month fits. Footprint and volume profile keep the base grid.
+Grid tpoGridFor(const Grid& base, SessionManager::SessionType session);
 // At most two buckets: previous close when crossing a boundary, then forming.
 std::vector<int64_t> liveBuckets(int64_t nowMs, int64_t previousMs, int64_t tfMs,
                                  int64_t originMs = 0);

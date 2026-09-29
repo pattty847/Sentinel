@@ -324,8 +324,12 @@ The existing `footprint_slice`, `tpo_slice`, `volume_profile_slice`, and history
 chunk wire families retain self-describing grid metadata. Overlay history requests
 may additionally specify `price_min`, `tick_size`, and `rows`; defaults come from
 `trade_overlays`, independently of heatmap settings. History and live publications
-share the selected overlay grid. The GUI maps footprint time slots, TPO session
-columns and VP prices through their own metadata and the common viewport.
+share the selected overlay grid. Weekly (`session_type` 5) and monthly (6, the
+UTC calendar month) TPO columns use the same rows at a 5x / 10x coarser tick,
+centred on that grid and aligned to their own tick (`tpoGridFor`), so a whole
+week or month fits; footprint and VP keep the base grid. The GUI maps footprint
+time slots, TPO session columns and VP prices through their own metadata and the
+common viewport. Clients page W1/M1 TPO history in windows of at most 7 days.
 
 Live overlays and footprint history derive from the retained server trade tape.
 TPO history additionally fills price rows from REST minute-candle high/low ranges

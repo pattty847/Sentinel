@@ -264,8 +264,8 @@ Rgba cellColor(Theme theme, int period, int periods, bool inValueArea, bool poc)
     }
     case Theme::Calm: {
         // Single blue hue; periods walk a gentle lightness ramp so letters stay distinct.
-        const Rgba early = inValueArea ? Rgba{66, 104, 168, 255} : Rgba{42, 58, 86, 255};
-        const Rgba late = inValueArea ? Rgba{92, 132, 196, 255} : Rgba{52, 70, 100, 255};
+        const Rgba early = inValueArea ? Rgba{70, 112, 182, 255} : Rgba{40, 54, 80, 255};
+        const Rgba late = inValueArea ? Rgba{98, 142, 210, 255} : Rgba{50, 66, 94, 255};
         return mix(early, late, t);
     }
     case Theme::Sage: {

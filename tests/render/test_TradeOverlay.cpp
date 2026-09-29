@@ -302,3 +302,44 @@ TEST_F(TradeOverlay, CancelledCandleHistoryDoesNotFetchAnotherPageOrReturnPartia
     result = fetchTpoCandles(q, 0, fetch, [&] { return stopped; });
     EXPECT_EQ(calls, 1); EXPECT_FALSE(result.ok); EXPECT_TRUE(result.candles.empty());
 }
+
+TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase) {
+    const Grid base{16, 10, 2, 120};  // [100, 120)
+    EXPECT_DOUBLE_EQ(tpoGridFor(base, SessionManager::SessionType::H24).tick, 2);
+    const auto week = tpoGridFor(base, SessionManager::SessionType::W1);
+    EXPECT_EQ(week.rows, 10);
+    EXPECT_DOUBLE_EQ(week.tick, 10);
+    EXPECT_DOUBLE_EQ(week.maxPrice, 160);  // centre 110, +/- 50, aligned to 10
+    EXPECT_DOUBLE_EQ(week.minPrice(), 60);
+    const auto month = tpoGridFor(base, SessionManager::SessionType::M1);
+    EXPECT_DOUBLE_EQ(month.tick, 20);
+    EXPECT_GE(month.minPrice(), 0);  // never below zero
+    EXPECT_TRUE(month.valid());
+
+    // Monday 2026-09-28 00:00 UTC lies inside the W1 session opened Sunday 21:00.
+    constexpr int64_t monday = 1790553600000;
+    auto q = request(); q.kind = Kind::Live; q.session = SessionManager::SessionType::W1;
+    q.tpoMs = 3600000; q.nowMs = monday + 120001; q.previousMs = monday + 119001;
+    const std::vector<ServerDataModel::FootprintTradeSample> trades{
+        {monday + 60000, 115, 3, AggressorSide::Buy}, {monday + 119999, 111, 1, AggressorSide::Sell}};
+    const auto result = build(q, trades);
+    ASSERT_TRUE(result.error.empty()) << result.error;
+    bool sawTpo = false, sawFootprint = false;
+    for (const auto& message : result.messages) {
+        const auto j = nlohmann::json::parse(message);
+        if (j["type"] == "tpo_slice") {
+            sawTpo = true;
+            EXPECT_DOUBLE_EQ(j["tick_size"].get<double>(), 10);
+            EXPECT_DOUBLE_EQ(j["max_price"].get<double>(), 160);
+            const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(j["letters"].get<std::string>()));
+            // 115 and 111 fall in row floor((160 - p) / 10) = 4.
+            EXPECT_NE(letters[4], '\0');
+            EXPECT_EQ(letters[3], '\0');
+        } else if (j["type"] == "footprint_slice") {
+            sawFootprint = true;
+            EXPECT_DOUBLE_EQ(j["tick_size"].get<double>(), 2);
+        }
+    }
+    EXPECT_TRUE(sawTpo);
+    EXPECT_TRUE(sawFootprint);
+}
