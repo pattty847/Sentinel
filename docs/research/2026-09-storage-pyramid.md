@@ -79,6 +79,15 @@ Capture contract:
 4. Report frames per second (mean and p99), bytes per day as received, gaps, reconnects and
    snapshot sizes.
 
+Implementation: `sentinel-capture` is a standalone QtCore process with its own
+Coinbase engine/connection. It writes pristine messages and transport/validity
+markers to append-only hourly RAWL2 segments under
+`/Volumes/T7/sentinel-data/raw-l2/BTC-USD`, with independent zstd blocks, CRCs and a
+rebuildable index. It never uses the running server or its recording directory.
+See [capture start/stop/verify commands and format](../RAW_CAPTURE.md). The offline
+fixture tests establish the format/replay contract; the owner/orchestrator must
+still run and verify the live 24-hour measurement before drawing capacity conclusions.
+
 **Decided (owner, 2026-09-29 PM): raw deltas + periodic keyframes (option A) is the storage
 method.** Per-second snapshots lose everything inside a second, so they cannot meet "full
 fine-detail history recoverable". Option B is still measured below, only as a reference point

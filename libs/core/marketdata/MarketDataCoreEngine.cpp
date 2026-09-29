@@ -56,6 +56,7 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
              << " target=" << m_target << " jwt=" << m_useJwt);
     m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
     m_transport->onStatus([this](bool up){
+        if (m_ingestObserver) observeIngest(up ? IngestKind::TransportUp : IngestKind::TransportDown);
         m_connected.store(up);
         sLog_Data("WebSocket transport status changed: " << (up ? "UP" : "DOWN")
                   << " host=" << m_host);
@@ -76,6 +77,7 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
     });
     m_transport->onError([this](std::string err){ emitError(std::move(err)); });
     m_transport->onMessage([this](std::string payload){
+        if (m_ingestObserver) observeIngest(IngestKind::Frame, payload);
         try {
             auto j = nlohmann::json::parse(payload);
             dispatch(j);
@@ -91,6 +93,21 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
 
 MarketDataCoreEngine::~MarketDataCoreEngine() {
     stop();
+}
+
+void MarketDataCoreEngine::observeIngest(IngestKind kind, std::string_view payload,
+                                         std::string_view product, std::string_view reason) noexcept {
+    const auto systemNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto steadyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    try {
+        m_ingestObserver({kind, systemNs, steadyNs, payload, product, reason});
+    } catch (const std::exception& e) {
+        sLog_Error("Ingest observer exception: " << e.what());
+    } catch (...) {
+        sLog_Error("Ingest observer exception (unknown)");
+    }
 }
 
 inline void MarketDataCoreEngine::emitError(std::string msg) {
@@ -289,6 +306,7 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
 }
 
 void MarketDataCoreEngine::emitBookInvalidated(const std::string& productId, const std::string& reason) {
+    if (m_ingestObserver) observeIngest(IngestKind::BookInvalidated, {}, productId, reason);
     sLog_Warning("Order book invalidated: product=" << (productId.empty() ? std::string("*") : productId)
                  << " reason=" << reason);
     if (m_onLiveOrderBookInvalidated) {
@@ -570,6 +588,7 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
 
 void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     net::post(m_strand, [this, r = std::string(reason)](){
+        if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, {}, r);
         sLog_Data("Immediate reconnect: reason=" << r);
         // Use 5s backoff for stale heartbeat to avoid hammering Coinbase when they're slow.
         m_backoffDuration = (r == "stale heartbeat")
@@ -582,4 +601,3 @@ void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
         }
     });
 }
-

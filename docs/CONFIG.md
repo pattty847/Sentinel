@@ -171,3 +171,14 @@ The first successful publication anchors the grid on the latest retained trade
 may explicitly change `price_min`, `tick_size` and `rows`. Weekly and monthly TPO
 sessions use the same rows at a 5x / 10x tick, centred on this grid. Recording heatmap zoom,
 re-bands and tick changes do not change this grid.
+
+## Standalone pristine capture
+
+`sentinel-capture` uses CLI options only and does not read or edit these YAML
+files. Its default root is `/Volumes/T7/sentinel-data/raw-l2`; it refuses an
+unmounted external volume and the server's recording directory. Defaults are
+1-second/1-MiB zstd blocks, a 64-MiB disk queue and fsync after every block.
+Use `--root`, `--symbol`, `--block-ms`, `--block-bytes`, `--fsync-blocks`,
+`--zstd-level`, `--queue-mib`, `--duration`, `--key-file`, `--jwt` and `--ca-bundle`
+to override them. See [the capture runbook](RAW_CAPTURE.md) for detached startup,
+SIGTERM shutdown, offline verification and the RAWL2 format.

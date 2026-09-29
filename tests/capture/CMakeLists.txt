@@ -1,0 +1,5 @@
+add_executable(test_raw_capture test_raw_capture.cpp)
+target_include_directories(test_raw_capture PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_raw_capture PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RawCaptureTests COMMAND test_raw_capture)
+set_tests_properties(RawCaptureTests PROPERTIES LABELS "capture" TIMEOUT 60)

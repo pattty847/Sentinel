@@ -15,6 +15,7 @@
 #include <mutex>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "auth/Authenticator.hpp"
 #include "ws/SubscriptionManager.hpp"
@@ -45,6 +46,20 @@ public:
     using ErrorCb = std::function<void(const std::string&)>;
     using LatencyCb = std::function<void(int)>;
 
+    // Optional pre-parse capture tap. Views are valid only for the callback; set
+    // before start(). Runs on the I/O thread. No clocks/copies when unset.
+    enum class IngestKind { Frame, TransportUp, TransportDown, BookInvalidated, ResyncRequested };
+    struct IngestObservation {
+        IngestKind kind;
+        int64_t systemNs;
+        int64_t steadyNs;
+        std::string_view payload;
+        std::string_view product;
+        std::string_view reason;
+    };
+    using IngestObserver = std::function<void(const IngestObservation&)>;
+    void onIngest(IngestObserver cb) { m_ingestObserver = std::move(cb); }
+
     explicit MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config);
 
     ~MarketDataCoreEngine();
@@ -69,6 +84,8 @@ public:
     void onLatency(LatencyCb cb) { m_onLatency = std::move(cb); }
 
 private:
+    void observeIngest(IngestKind kind, std::string_view payload = {},
+                       std::string_view product = {}, std::string_view reason = {}) noexcept;
     void run();
     void scheduleReconnect();
 
@@ -139,4 +156,5 @@ private:
     ConnectionStatusCb               m_onConnectionStatus;
     ErrorCb                          m_onError;
     LatencyCb                        m_onLatency;
+    IngestObserver                   m_ingestObserver;
 };
