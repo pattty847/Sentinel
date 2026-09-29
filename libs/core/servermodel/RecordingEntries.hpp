@@ -71,6 +71,10 @@ BinCell binRecordingCell(const RecordingEntries &data, uint32_t first, uint32_t 
 RecordingEntries loadRecordingEntries(const std::filesystem::path &root,
                                       const std::string &symbol, const std::string &layer,
                                       int64_t startMs, int64_t endMs);
+// Concatenate adjacent independently decoded ranges without rereading the
+// already painted recent range. Rebuilds the disposable LODs on a common grid.
+RecordingEntries joinRecordingEntries(const RecordingEntries &older,
+                                      const RecordingEntries &recent);
 RecordingEntries syntheticRecordingEntries(uint32_t count);
 
 } // namespace recording

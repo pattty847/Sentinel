@@ -16,16 +16,16 @@ The packed raw stream uses 6 bytes per entry: two row/side words plus two 16-bit
 
 ## GPU readback parity
 
-`test_recording_gpu_parity` compared 8,424 output cells from a synthetic temporary HMC2 store and 8,424 from the real deep recording against `recording::buildPage`. The synthetic store has a base row around 20,000, partial bid/ask row coverage, missing minutes, $5/$10 native grids, and changing log-code size floors. Views cover a full day at 15-minute output bins, one hour at 5-minute bins, and ten minutes at 1-minute bins, at native row groups 2, 10, 20, 40, 50, and 200. Both sources had **maximum log-code deviation 0, zero dominant-side mismatches, and zero validity/veil mismatches**. The real root is skipped if absent; a missing Metal device skips the test with a clear message.
+`test_recording_gpu_parity` compared 8,424 output cells from a synthetic temporary HMC2 store and 8,496 from the real deep recording against `recording::buildPage`. The synthetic store has a base row around 20,000, partial bid/ask row coverage, missing minutes, $5/$10 native grids, and changing log-code size floors. Its full-day source is joined from two separately decoded 12-hour ranges. Views cover a full day at 15-minute output bins, one hour at 5-minute bins, and ten minutes at 1-minute bins, at native row groups 2, 10, 20, 40, 50, and 200. Both sources had **maximum log-code deviation 0, zero dominant-side mismatches, and zero validity/veil mismatches**. The real root is skipped if absent; a missing Metal device skips the test with a clear message.
 
 ## First painted frame
 
 | Real source | Initial visible entries | Initial load ms | Launch to first swapped frame |
 |---|---:|---:|---:|
-| 24 h near | 525,566 | 50.6 | 668.3 ms |
-| 24 h deep | 2,170,818 | 146.2 | 494.8 ms |
+| 24 h near | 521,975 | 40.1 | 408.6 ms |
+| 24 h deep | 2,170,330 | 101.9 | 435.8 ms |
 
-`--first-paint` launched the actual QQuick window and exited at the first `frameSwapped` after a data-backed draw. The latest two hours load first; the full 24-hour decode starts after the first data-backed draw. The previous source keeps drawing while the replacement buffers upload in 2 MiB steps per frame. A resize on the same QRhi keeps source buffers. A visual screenshot and interaction review remain for the orchestrator.
+`--first-paint` launched the actual QQuick window and exited at the first `frameSwapped` after a data-backed draw. The latest two hours load first; the older 22 hours decode after the first data-backed draw and join the initial snapshot on a common grid without rereading it. The previous source keeps drawing while the replacement buffers upload in 2 MiB steps per frame. A resize on the same QRhi keeps source buffers. A visual screenshot and interaction review remain for the orchestrator.
 
 ## Per-zoom GPU timestamps
 

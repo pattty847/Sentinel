@@ -164,8 +164,9 @@ void LabItem::loadReal(int hours, const QString &layer) {
     const auto telemetry = telemetry_;
     const auto firstPaintVersion = std::make_shared<std::atomic<uint64_t>>(std::numeric_limits<uint64_t>::max());
     const int64_t end = QDateTime::currentMSecsSinceEpoch() / 60'000 * 60'000;
+    const int64_t visibleStart = end - int64_t(std::min(hours, 2)) * 3'600'000;
     QThreadPool::globalInstance()->start([self, guard, mutex, telemetry, firstPaintVersion,
-                                          generation, hours, layer, end] {
+                                          generation, hours, layer, end, visibleStart] {
         std::scoped_lock lock(*mutex);
         if (guard->load() != generation) return;
         std::shared_ptr<recording::RecordingEntries> result;
@@ -173,7 +174,7 @@ void LabItem::loadReal(int hours, const QString &layer) {
         try {
             result = std::make_shared<recording::RecordingEntries>(recording::loadRecordingEntries(
                 "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
-                end - int64_t(std::min(hours, 2)) * 3'600'000, end));
+                visibleStart, end));
         } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
         QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error, firstPaintVersion] {
             if (!self || guard->load() != generation) return;
@@ -193,11 +194,14 @@ void LabItem::loadReal(int hours, const QString &layer) {
         if (guard->load() != generation) return;
         if (initialHasEntries && telemetry->paintedVersion.load() < firstPaintVersion->load())
             qWarning("sentinel-lab: initial visible range did not paint within 30 s");
-        result.reset();
+        const auto initial = result;
         try {
-            result = std::make_shared<recording::RecordingEntries>(recording::loadRecordingEntries(
+            auto older = recording::loadRecordingEntries(
                 "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
-                end - int64_t(hours) * 3'600'000, end));
+                end - int64_t(hours) * 3'600'000, visibleStart);
+            if (guard->load() != generation) return;
+            result = std::make_shared<recording::RecordingEntries>(
+                recording::joinRecordingEntries(older, *initial));
         } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
         QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error] {
             if (!self || guard->load() != generation) return;

@@ -132,6 +132,18 @@ TEST(RecordingEntries, MixedFiveAndTenDollarGridsUseCommonRows) {
     EXPECT_EQ(entries.nativeFactor, (std::vector<uint32_t>{2, 1}));
     EXPECT_EQ(entries.coverage[1].bidLo, 0);
     EXPECT_EQ(entries.coverage[1].bidHi, 1);
+    const auto older = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs, kHmc2MinMs + minute);
+    const auto recent = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs + minute,
+                                             kHmc2MinMs + 2 * minute);
+    const auto joined = joinRecordingEntries(older, recent);
+    EXPECT_EQ(joined.nativeTick, entries.nativeTick);
+    EXPECT_EQ(joined.baseRow, entries.baseRow);
+    EXPECT_EQ(joined.rowSide, entries.rowSide);
+    EXPECT_EQ(joined.code, entries.code);
+    EXPECT_EQ(joined.offsets, entries.offsets);
+    EXPECT_EQ(joined.nativeFactor, entries.nativeFactor);
+    EXPECT_EQ(joined.coverage[1].bidLo, entries.coverage[1].bidLo);
+    EXPECT_EQ(joined.coverage[1].bidHi, entries.coverage[1].bidHi);
 }
 
 TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {
@@ -167,6 +179,38 @@ TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {
     const double expected = (decodeSize(firstCode, data.columnScale[0]) +
                              decodeSize(r.entries[0].twapCode, data.columnScale[1])) * 0.5;
     EXPECT_NEAR(cell.bid, expected, expected * 1e-6);
+    const auto older = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs, kHmc2MinMs + minute);
+    const auto recent = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs + minute,
+                                             kHmc2MinMs + 2 * minute);
+    const auto joined = joinRecordingEntries(older, recent);
+    EXPECT_EQ(joined.code, data.code);
+    EXPECT_EQ(joined.rowSide, data.rowSide);
+    EXPECT_DOUBLE_EQ(joined.columnScale[0].floor, 1e-6);
+    EXPECT_DOUBLE_EQ(joined.columnScale[1].floor, 1e-8);
+}
+
+TEST(RecordingEntries, JoinPreservesEmptyOlderColumns) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const std::filesystem::path root(dir.path().toStdString());
+    Hmc2Record r;
+    r.header = {"BTC-USD", "deep", minute, 100, 500, {}, 42};
+    r.bucketStartMs = kHmc2MinMs + minute;
+    r.observedMs = minute;
+    r.bidRowLo = r.bidRowHi = r.askRowLo = r.askRowHi = 20'000;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 100'000;
+    r.entries = {{20'000, false, encodeSize(3), 0}};
+    { Hmc2Store writer(root); writer.append(r); }
+    const auto older = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs, kHmc2MinMs + minute);
+    const auto recent = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs + minute,
+                                             kHmc2MinMs + 2 * minute);
+    ASSERT_EQ(older.nativeTick, 0);
+    const auto joined = joinRecordingEntries(older, recent);
+    EXPECT_EQ(joined.columns(), 2u);
+    EXPECT_EQ(joined.offsets, (std::vector<uint32_t>{0, 0, 1}));
+    EXPECT_EQ(joined.observedMs, (std::vector<uint32_t>{0, uint32_t(minute)}));
+    EXPECT_EQ(joined.baseRow, 20'000);
+    EXPECT_EQ(joined.code[0], encodeSize(3));
 }
 
 TEST(RecordingEntries, EightMinuteLodMatchesRawWithUnalignedTimeAndPriceBins) {

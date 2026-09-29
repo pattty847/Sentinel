@@ -361,6 +361,109 @@ RecordingEntries loadRecordingEntries(const std::filesystem::path &root,
     return out;
 }
 
+RecordingEntries joinRecordingEntries(const RecordingEntries &older, const RecordingEntries &recent) {
+    const auto started = Clock::now();
+    if (older.startMs + int64_t(older.columns()) * minute != recent.startMs ||
+        older.columns() + uint64_t(recent.columns()) > 100'000 ||
+        (older.nativeTick > 0 && recent.nativeTick > 0 && older.priceScale != recent.priceScale))
+        throw std::invalid_argument("recording entry ranges are not adjacent compatible layers");
+    RecordingEntries out;
+    out.startMs = older.startMs;
+    out.priceScale = recent.nativeTick > 0 ? recent.priceScale : older.priceScale;
+    out.sizeScale = recent.nativeTick > 0 ? recent.sizeScale : older.sizeScale;
+    auto units = [&](const RecordingEntries &source) -> int64_t {
+        if (!(source.nativeTick > 0)) return 0;
+        const double value = source.nativeTick * out.priceScale;
+        if (!std::isfinite(value) || value < 1 || value > double(std::numeric_limits<int64_t>::max()))
+            throw std::runtime_error("recording common-grid units out of range");
+        return std::llround(value);
+    };
+    const int64_t olderUnits = units(older), recentUnits = units(recent);
+    const int64_t commonUnits = olderUnits && recentUnits ? std::gcd(olderUnits, recentUnits) :
+                                (olderUnits ? olderUnits : recentUnits);
+    if (!commonUnits) throw std::invalid_argument("both recording entry ranges are empty");
+    out.nativeTick = commonUnits / out.priceScale;
+    const int64_t olderRatio = olderUnits ? olderUnits / commonUnits : 1;
+    const int64_t recentRatio = recentUnits ? recentUnits / commonUnits : 1;
+    const auto checkedAdd = [](int64_t a, int64_t b) -> int64_t {
+        if ((b > 0 && a > std::numeric_limits<int64_t>::max() - b) ||
+            (b < 0 && a < std::numeric_limits<int64_t>::min() - b))
+            throw std::runtime_error("joined recording row addition overflows int64");
+        return a + b;
+    };
+    const auto checkedScale = [](int64_t row, int64_t ratio) -> int64_t {
+        if (ratio < 1 || row > std::numeric_limits<int64_t>::max() / ratio ||
+            row < std::numeric_limits<int64_t>::min() / ratio)
+            throw std::runtime_error("joined recording row scaling overflows int64");
+        return row * ratio;
+    };
+    const auto checkedSub = [](int64_t a, int64_t b) -> int64_t {
+        if ((b > 0 && a < std::numeric_limits<int64_t>::min() + b) ||
+            (b < 0 && a > std::numeric_limits<int64_t>::max() + b))
+            throw std::runtime_error("joined recording row subtraction overflows int64");
+        return a - b;
+    };
+    const auto scaledRow = [&](int64_t base, int64_t relative, int64_t ratio) {
+        return checkedScale(checkedAdd(base, relative), ratio);
+    };
+    out.baseRow = olderUnits && recentUnits ?
+        std::min(checkedScale(older.baseRow, olderRatio),
+                 checkedScale(recent.baseRow, recentRatio)) :
+        (olderUnits ? checkedScale(older.baseRow, olderRatio) :
+                      checkedScale(recent.baseRow, recentRatio));
+    const size_t columns = size_t(older.columns()) + recent.columns();
+    out.offsets.resize(columns + 1);
+    out.coverage.reserve(columns); out.observedMs.reserve(columns);
+    out.nativeFactor.reserve(columns); out.columnScale.reserve(columns);
+    out.rowSide.reserve(older.rowSide.size() + recent.rowSide.size());
+    out.code.reserve(older.code.size() + recent.code.size());
+    uint32_t outputColumn = 0;
+    auto append = [&](const RecordingEntries &source, int64_t ratio) {
+        if (source.offsets.size() != size_t(source.columns()) + 1 ||
+            source.code.size() != source.rowSide.size() ||
+            source.observedMs.size() != source.columns() ||
+            source.nativeFactor.size() != source.columns() ||
+            source.columnScale.size() != source.columns())
+            throw std::invalid_argument("invalid source recording entry arrays");
+        auto project = [&](int32_t lo, int32_t hi) -> std::pair<int32_t, int32_t> {
+            if (lo > hi) return {1, 0};
+            const auto first = checkedSub(scaledRow(source.baseRow, lo, ratio), out.baseRow);
+            const auto last = checkedSub(checkedSub(scaledRow(source.baseRow, int64_t(hi) + 1, ratio),
+                                                   out.baseRow), 1);
+            if (first < 0 || last > std::numeric_limits<int32_t>::max())
+                throw std::runtime_error("joined recording coverage exceeds GPU row width");
+            return {int32_t(first), int32_t(last)};
+        };
+        for (uint32_t c = 0; c < source.columns(); ++c, ++outputColumn) {
+            out.offsets[outputColumn] = uint32_t(out.rowSide.size());
+            const auto &cov = source.coverage[c];
+            const auto bid = project(cov.bidLo, cov.bidHi), ask = project(cov.askLo, cov.askHi);
+            out.coverage.push_back({bid.first, bid.second, ask.first, ask.second});
+            out.observedMs.push_back(source.observedMs[c]);
+            const uint64_t factor = uint64_t(source.nativeFactor[c]) * ratio;
+            if (factor > std::numeric_limits<uint32_t>::max())
+                throw std::runtime_error("joined recording native factor exceeds GPU width");
+            out.nativeFactor.push_back(uint32_t(factor));
+            out.columnScale.push_back(source.columnScale[c]);
+            for (uint32_t i = source.offsets[c]; i < source.offsets[c + 1]; ++i) {
+                const auto row = checkedSub(scaledRow(source.baseRow, source.rowSide[i] & 0x7fffffffu, ratio),
+                                            out.baseRow);
+                if (row < 0 || row > 0x7fffffffu)
+                    throw std::runtime_error("joined recording entry exceeds GPU row width");
+                out.rowSide.push_back(uint32_t(row) | (source.rowSide[i] & 0x80000000u));
+                out.code.push_back(source.code[i]);
+            }
+        }
+    };
+    append(older, olderRatio);
+    append(recent, recentRatio);
+    out.offsets.back() = uint32_t(out.rowSide.size());
+    buildLod(out); buildPriceLod(out); buildTimePriceLod(out);
+    out.decodeMs = older.decodeMs + recent.decodeMs;
+    out.loadMs = older.loadMs + recent.loadMs + elapsed(started);
+    return out;
+}
+
 RecordingEntries syntheticRecordingEntries(uint32_t count) {
     const auto started = Clock::now();
     if (!count || count > 100'000'000) throw std::invalid_argument("synthetic entry count out of range");

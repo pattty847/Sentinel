@@ -161,8 +161,11 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     const std::filesystem::path root(dir.path().toStdString());
     writeFixture(root);
     const int64_t syntheticEnd = recording::kHmc2MinMs + 24 * hour;
-    const auto fixture = recording::loadRecordingEntries(root, "BTC-USD", "deep",
-                                                          recording::kHmc2MinMs, syntheticEnd);
+    const auto older = recording::loadRecordingEntries(root, "BTC-USD", "deep",
+                                                        recording::kHmc2MinMs, syntheticEnd - 12 * hour);
+    const auto recent = recording::loadRecordingEntries(root, "BTC-USD", "deep",
+                                                         syntheticEnd - 12 * hour, syntheticEnd);
+    const auto fixture = recording::joinRecordingEntries(older, recent);
     Deviation synthetic;
     compareViews(rhi.get(), root, fixture, syntheticEnd, synthetic);
     std::cout << "synthetic GPU parity: cells=" << synthetic.cells << " max_code_delta=" << synthetic.code
