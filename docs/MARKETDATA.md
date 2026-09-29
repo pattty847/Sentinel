@@ -296,14 +296,17 @@ there, never on the network executor or recording live callback. Only immutable
 bounded replies return to the session executor. Closing/unsubscribing discards
 late replies, and selection generations prevent obsolete grids from publishing.
 
-Each job reads at most 250,000 retained trades and produces at most 8 MiB. An
-oversized tape fails explicitly instead of producing a partial profile. History
+Each job copies at most 250,000 trades inside its requested half-open time window
+and produces at most 8 MiB. Trades outside that window do not consume the budget;
+only matching trades are sorted. An oversized window fails explicitly instead of
+producing a partial profile. History
 pages contain at most 512 columns. Saturation rejects history requests with a
 `trade_overlay` error; live refreshes coalesce until the next timer turn. A live
 refresh sends the forming bucket and, when a boundary was crossed, the preceding
 closed bucket. Long stalls do not enqueue a bucket backlog; older ranges use
 history requests. Footprint uses UTC epoch-aligned half-open buckets; TPO letters
-and brackets align to its own session open. VP aggregates the current session.
+and brackets align to its own session open. TPO history ends at session close,
+and live TPO never publishes periods outside the session. VP aggregates the current session.
 
 The existing `footprint_slice`, `tpo_slice`, `volume_profile_slice`, and history
 chunk wire families retain self-describing grid metadata. Overlay history requests
@@ -312,8 +315,13 @@ may additionally specify `price_min`, `tick_size`, and `rows`; defaults come fro
 share the selected overlay grid. The GUI maps footprint time slots, TPO session
 columns and VP prices through their own metadata and the common viewport.
 
-All three quantities derive from the retained server trade tape. TPO history no
-longer fills price rows from REST candle high/low ranges; that approximation has
-been removed. This is not a new persisted trade-history reader: periods outside
-the retained tape have no trade observations, and an empty profile must not be
-interpreted as proof of complete historical coverage.
+Live overlays and footprint history derive from the retained server trade tape.
+TPO history additionally fills price rows from REST minute-candle high/low ranges
+before the oldest retained trade, including its partially retained minute. With
+no retained tape (for example after restart), candles cover the entire requested
+history window. Fetches run on the history worker, in pages of at most 350 minutes;
+fetch errors fail the request explicitly. Candle ranges and retained trades map
+onto the same independent overlay grid, anchored from a candle close when no
+trade is available. This preserves session history without introducing persisted
+trade-history storage. Footprint and VP still have no observations outside the
+retained tape; an empty profile does not establish complete historical coverage.

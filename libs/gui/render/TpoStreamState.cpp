@@ -120,15 +120,6 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         return false;
     }
 
-    // ── Grid resize if session period count changed ──────────────────────────
-    const int targetWidth = (m_displayMode == DisplayMode::VerticalTimeline)
-        ? sessionPeriods
-        : gridWidth;
-
-    if (m_gridWidth != targetWidth || m_gridHeight != gridHeight) {
-        resetLocked(targetWidth, gridHeight);
-    }
-
     // ── Session boundary alignment ──────────────────────────────────────────
     // Match server boundary semantics (SessionManager::sessionContaining).
     const auto boundary = SessionManager::sessionContaining(
@@ -140,6 +131,19 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
     const int64_t sessionEndMs = boundary.valid
         ? boundary.endMs
         : (sessionStartMs + sessionMs);
+
+    // A completed session must never fold later buckets into its last column.
+    if (bucketStartMs < sessionStartMs || bucketStartMs >= sessionEndMs || bucketEndMs > sessionEndMs)
+        return false;
+
+    // ── Grid resize if session period count changed ──────────────────────────
+    const int targetWidth = (m_displayMode == DisplayMode::VerticalTimeline)
+        ? sessionPeriods
+        : gridWidth;
+
+    if (m_gridWidth != targetWidth || m_gridHeight != gridHeight) {
+        resetLocked(targetWidth, gridHeight);
+    }
 
     if (m_sessionStartMs <= 0) {
         m_sessionStartMs = sessionStartMs;

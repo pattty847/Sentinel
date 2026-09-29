@@ -2,6 +2,8 @@
 #include "ServerDataModel.hpp"
 #include "SessionManager.hpp"
 #include <nlohmann/json.hpp>
+#include "../marketdata/rest/CoinbaseRestClient.hpp"
+#include <functional>
 
 namespace trade_overlay {
 constexpr int64_t kRefreshMs = 1000;
@@ -31,8 +33,20 @@ struct Result {
     std::vector<std::string> messages;
     std::string error;
 };
-// Pure worker-side builder. The caller supplies one bounded immutable trade snapshot.
-Result build(const Request& request, const std::vector<ServerDataModel::FootprintTradeSample>& trades);
+struct TimeWindow {
+    int64_t startMs = 0, endMs = 0;
+    bool empty() const { return endMs <= startMs; }
+};
+// Exact input interval for the requested output; no blanket retained-tape copy.
+TimeWindow tradeWindow(const Request& request);
+using CandleFetcher = std::function<CandleFetchResult(int64_t startSec, int64_t endSec, int limit)>;
+// Worker-only REST paging for TPO history preceding the retained tape. Empty tape
+// (retainedFromMs == 0) backfills the entire requested historical window.
+CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
+                                const CandleFetcher& fetch);
+// Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
+Result build(const Request& request, const std::vector<ServerDataModel::FootprintTradeSample>& trades,
+             const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);
 // At most two buckets: previous close when crossing a boundary, then forming.
 std::vector<int64_t> liveBuckets(int64_t nowMs, int64_t previousMs, int64_t tfMs,
                                  int64_t originMs = 0);

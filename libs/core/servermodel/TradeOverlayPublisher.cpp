@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 namespace trade_overlay {
 bool Grid::valid() const {
@@ -21,11 +22,75 @@ std::vector<int64_t> liveBuckets(int64_t now, int64_t previous, int64_t tf, int6
     return result;
 }
 namespace {
+TimeWindow historyWindow(const Request& q, bool tpo) {
+    const auto anchor = q.endMs > 0 ? std::min(q.endMs, q.nowMs) : q.nowMs;
+    const auto session = SessionManager::sessionContaining(anchor - 1, q.session);
+    const int64_t origin = tpo ? session.startMs : 0;
+    const int64_t tf = tpo ? q.tpoMs : q.footprintMs;
+    if (tf <= 0 || !session.valid || anchor < origin || q.count <= 0) return {};
+    const int64_t limit = tpo ? std::min(anchor, session.endMs) : anchor;
+    const int64_t end = origin + (limit - origin) / tf * tf;
+    const int64_t width = tpo ? (session.endMs - origin) / tf : q.grid.width;
+    const auto count = std::min<int64_t>({q.count, width, kMaxColumns});
+    return {std::max<int64_t>(tpo ? origin : 0, end - count * tf), end};
+}
+}
+TimeWindow tradeWindow(const Request& q) {
+    if (q.kind != Kind::Live) return historyWindow(q, q.kind == Kind::TpoHistory);
+    const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
+    auto start = session.startMs; // VP needs the session; footprint may precede its open.
+    for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.footprintMs))
+        start = std::min(start, bucket);
+    return {std::max<int64_t>(0, start), q.nowMs + 1};
+}
+CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
+                                const CandleFetcher& fetch) {
+    CandleFetchResult result;
+    result.ok = true;
+    if (q.kind != Kind::TpoHistory) return result;
+    auto window = historyWindow(q, true);
+    if (retainedFromMs > 0) {
+        // Include the first partially retained minute, without widening the page.
+        const auto minuteEnd = retainedFromMs / 60000 * 60000 + (retainedFromMs % 60000 ? 60000 : 0);
+        window.endMs = std::min(window.endMs, minuteEnd);
+    }
+    if (window.empty()) return result;
+    // Requests may partition a session at non-minute boundaries; REST still
+    // requires whole minute pages. Apply each candle to the periods it overlaps.
+    window.startMs = window.startMs / 60000 * 60000;
+    window.endMs = (window.endMs + 59999) / 60000 * 60000;
+    // SessionManager's longest session is five days. Keep a hard input bound.
+    if (window.endMs - window.startMs > 7LL * 86400000) {
+        result.ok = false; result.error = "TPO candle history exceeds input budget"; return result;
+    }
+    std::map<int64_t, OHLCVBar> minutes;
+    constexpr int batch = 350;
+    for (auto cursor = window.startMs; cursor < window.endMs;) {
+        const auto end = std::min<int64_t>(window.endMs, cursor + batch * 60000LL);
+        auto page = fetch(cursor / 1000, end / 1000, static_cast<int>((end - cursor) / 60000));
+        if (!page.ok || page.candles.size() > batch) {
+            result.ok = false;
+            result.error = page.ok ? "TPO candle response exceeds page budget" : page.error;
+            return result;
+        }
+        for (const auto& bar : page.candles) {
+            if (bar.timestamp_ms >= cursor && bar.timestamp_ms < end && bar.timestamp_ms % 60000 == 0)
+                minutes[bar.timestamp_ms] = bar;
+        }
+        cursor = end;
+    }
+    result.candles.reserve(minutes.size());
+    for (const auto& [_, bar] : minutes) result.candles.push_back(bar);
+    return result;
+}
+namespace {
 using Json = nlohmann::json;
 using Trade = ServerDataModel::FootprintTradeSample;
 struct Builder {
     const Request& q;
     const std::vector<Trade>& trades;
+    const std::vector<OHLCVBar>& candles;
+    int64_t retainedFromMs;
     Result out;
     size_t bytes = 0;
     void send(Json j) {
@@ -52,6 +117,20 @@ struct Builder {
             const auto origin = session.valid ? session.startMs : 0;
             const char letter = 'A' + ((start - origin) / tf) % 26;
             scan(start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+            if (q.kind == Kind::TpoHistory) {
+                auto bar = std::lower_bound(candles.begin(), candles.end(), start - 59999,
+                    [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
+                for (; bar != candles.end() && bar->timestamp_ms < start + tf; ++bar) {
+                    if (retainedFromMs > 0 && bar->timestamp_ms >= retainedFromMs) continue;
+                    if (!std::isfinite(bar->high) || !std::isfinite(bar->low) || bar->high < bar->low) continue;
+                    const double first = std::floor((out.grid.maxPrice - bar->high) / out.grid.tick);
+                    const double last = std::floor((out.grid.maxPrice - bar->low) / out.grid.tick);
+                    if (last < 0 || first >= out.grid.rows) continue;
+                    const int lo = static_cast<int>(std::max(0.0, first));
+                    const int hi = static_cast<int>(std::min(double(out.grid.rows - 1), last));
+                    for (int row = lo; row <= hi; ++row) letters[row] = letter;
+                }
+            }
             j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
         } else {
             std::vector<double> delta(out.grid.rows, 0);
@@ -82,14 +161,17 @@ struct Builder {
         const int width = tpo ? static_cast<int>((session.endMs - session.startMs + tf - 1) / tf) : out.grid.width;
         if (width <= 0 || width > kMaxGridWidth) { out.error = "overlay timeframe exceeds session column budget"; return; }
         std::vector<int64_t> starts;
-        if (live) starts = liveBuckets(q.nowMs, q.previousMs, tf, origin);
-        else {
-            const auto end = origin + (std::min(anchor, q.nowMs) - origin) / tf * tf;
-            const int count = std::min({q.count, width, kMaxColumns});
-            for (int i = count; i > 0; --i) {
-                const auto start = end - i * tf;
-                if (start > 0 && (!tpo || start >= origin)) starts.push_back(start);
+        if (live) {
+            starts = liveBuckets(q.nowMs, q.previousMs, tf, origin);
+            if (tpo) {
+                std::erase_if(starts, [&](int64_t start) {
+                    return start < session.startMs || start >= session.endMs || start + tf > session.endMs;
+                });
             }
+        } else {
+            const auto window = historyWindow(q, tpo);
+            for (auto start = window.startMs; start < window.endMs; start += tf)
+                if (start > 0) starts.push_back(start);
         }
         auto columns = Json::array();
         for (auto start : starts) columns.push_back(column(start, tf, tpo));
@@ -137,16 +219,20 @@ struct Builder {
     }
 };
 }
-Result build(const Request& q, const std::vector<Trade>& trades) {
-    Builder b{q, trades, {q.grid, {}, {}}};
+Result build(const Request& q, const std::vector<Trade>& trades,
+             const std::vector<OHLCVBar>& candles, int64_t retainedFromMs) {
+    if (retainedFromMs == 0 && !trades.empty()) retainedFromMs = trades.front().timestampMs;
+    Builder b{q, trades, candles, retainedFromMs, {q.grid, {}, {}}};
     if (q.symbol.empty() || q.nowMs <= 0 || q.footprintMs < 1000 || q.footprintMs > 86400000 ||
-        q.tpoMs < 60000 || q.tpoMs > 86400000 || q.count <= 0 || trades.size() > kMaxTrades) {
+        q.tpoMs < 60000 || q.tpoMs > 86400000 || q.count <= 0 || trades.size() > kMaxTrades || candles.size() > 7 * 1440) {
         b.out.error = "invalid overlay request or trade budget exceeded"; return b.out;
     }
-    // Anchor once from trades; grid stays fixed until the client requests a new one.
-    if (b.out.grid.maxPrice == 0 && !trades.empty() && std::isfinite(trades.back().price) &&
+    // Restart history can have candles before any retained trade has arrived.
+    const double anchorPrice = !trades.empty() ? trades.back().price
+        : (!candles.empty() ? candles.back().close : 0.0);
+    if (b.out.grid.maxPrice == 0 && std::isfinite(anchorPrice) && anchorPrice > 0 &&
         b.out.grid.tick > 0 && std::isfinite(b.out.grid.tick)) {
-        const double bottom = std::max(0.0, std::floor(trades.back().price / b.out.grid.tick) - b.out.grid.rows / 2);
+        const double bottom = std::max(0.0, std::floor(anchorPrice / b.out.grid.tick) - b.out.grid.rows / 2);
         b.out.grid.maxPrice = (bottom + b.out.grid.rows) * b.out.grid.tick;
     }
     if (!b.out.grid.valid()) { b.out.error = "overlay grid unavailable or invalid"; return b.out; }

@@ -388,15 +388,26 @@ class Session : public std::enable_shared_from_this<Session> {
         const auto generation = overlays_.at(q.symbol).generation;
         const auto executor = ws_.get_executor();
         auto* model = &model_;
-        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, q, generation] {
+        auto* rest = &owner_->restClient();
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation] {
             trade_overlay::Result result;
             try {
                 std::vector<ServerDataModel::FootprintTradeSample> trades;
-                const auto anchor = q.endMs > 0 ? q.endMs : q.nowMs;
-                const auto start = std::max<int64_t>(0, anchor - 7 * 86400000LL);
-                if (!model->collectOverlayTrades(q.symbol, start, q.nowMs + 1, trade_overlay::kMaxTrades, trades))
+                const auto window = trade_overlay::tradeWindow(q);
+                int64_t retainedFromMs = 0;
+                if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
+                                                 trade_overlay::kMaxTrades, trades, &retainedFromMs)) {
                     result.error = "overlay trade budget exceeded";
-                else result = trade_overlay::build(q, trades);
+                } else {
+                    const auto candles = trade_overlay::fetchTpoCandles(q, retainedFromMs,
+                        [rest, &q](int64_t startSec, int64_t endSec, int limit) {
+                            return rest->fetchProductCandles(q.symbol, startSec, endSec, "ONE_MINUTE", limit);
+                        });
+                    if (!candles.ok) {
+                        result.error = "TPO candle history fetch failed: " + candles.error;
+                        sLog_Warning("Trade overlay candle fetch failed: symbol=" << q.symbol << " error=" << candles.error);
+                    } else result = trade_overlay::build(q, trades, candles.candles, retainedFromMs);
+                }
             } catch (const std::exception& e) { result.error = e.what(); }
             net::post(executor, [weak, q, generation, result = std::move(result)]() mutable {
                 const auto self = weak.lock();

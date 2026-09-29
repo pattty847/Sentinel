@@ -4,7 +4,7 @@ Branch: `lt-astra/remove-legacy-heatmap`. Status: phase 1 implemented; phase 2 r
 
 ## Phase 1 checklist
 
-- [x] Extract trade-only footprint/TPO/VP builder from legacy heatmap publication.
+- [x] Extract footprint/TPO/VP builder from legacy heatmap publication.
 - [x] Independent bounded session timer, fair live/history scheduling, two-worker
   admission, one in-flight job per session, bounded tape/output, stale-result checks.
 - [x] Independent `trade_overlays` defaults and optional explicit request grid.
@@ -14,15 +14,21 @@ Branch: `lt-astra/remove-legacy-heatmap`. Status: phase 1 implemented; phase 2 r
 - [x] Preserve neutral footprint time gaps and reset only on its own grid changes.
 - [x] Tests for cadence, half-open bucket boundaries, actual client wire parsing,
   grid reset/gaps, recording-independent mapping and bounded worker shutdown.
+- [x] Review fixes: budget only requested trades; cap TPO at session close;
+  restore worker-side minute-candle history before the retained tape.
+- [x] Regressions for an over-cap retained deque with a small requested window,
+  closed-session history/live, partial-minute candle coverage and restart history.
 - [ ] Orchestrator live continuity checks below.
 
 The original blocker was that `on_heatmap_slice` also produced all three live
 trade overlays. That coupling and the footprint-history HMCL grid lookup are now
-removed. TPO's candle-range bootstrap approximation was removed: results come
-from retained trades only. This phase does not implement persisted trade history.
+removed. TPO retains REST minute-candle high/low history before the retained tape,
+fetched on the worker in bounded pages. This phase does not implement persisted
+trade history.
 
 The new publisher retains a fixed per-subscription trade grid, anchored to the
-latest trade unless an explicit grid was requested. It rejects oversized inputs
+latest trade (or candle close for restart history) unless an explicit grid was
+requested. It rejects oversized requested trade windows
 rather than truncating a profile. See MARKETDATA.md and CONFIG.md for bounds and
 request semantics. Source references below describe the original inventory;
 line numbers moved during extraction.
@@ -34,7 +40,7 @@ line numbers moved during extraction.
 | Footprint live | SentinelStreamServer.cpp:1805; DataProcessor.cpp:322 | Phase 1 done: independent publisher and grid; trade quantities retained. |
 | Footprint history | streamFootprintHistory:762 calls resolveTpoGridAndRange:409, which reads HMCL/RAM history at :431 | Phase 1 done: no legacy grid lookup. |
 | TPO live | SentinelStreamServer.cpp:1837 | Phase 1 done: independent publisher, session/letter/trade calculation retained. |
-| TPO history | SentinelStreamServer.cpp:843 | Phase 1 done: own grid and trade tape; candle approximation removed. |
+| TPO history | SentinelStreamServer.cpp:843 | Phase 1 done: own grid, retained trades and restored REST minute-candle ranges before tape coverage; bounded worker fetches. |
 | Volume profile live | SentinelStreamServer.cpp:1886 | Phase 1 done: independent publisher; session aggregation and POC/value area retained. |
 | Liquidity labels | HeatmapLabelRenderer.cpp; UnifiedGridRenderer.Render.cpp | Keep recording absolute quantity, validity, and sensitivity-aware coloring; remove only normalized-intensity/grouping branches. |
 | Liquidity threshold | UnifiedGridRenderer.Render.cpp:146; HeatmapStreamService.cpp:420; MainWindowGpu.cpp:302 | Applies to recording uploads as well; keep unless separately retiring this user feature. |

@@ -165,7 +165,11 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 
 `servermodel/TradeOverlayPublisher` builds footprint deltas, session-relative TPO
 letters and volume profiles from a bounded immutable snapshot of the shared trade
-tape. `SentinelStreamServer::Session` owns timer cadence, request selection and
+tape. The snapshot budget applies only to the requested time window. For TPO
+history before the retained tape, the worker fetches bounded REST minute-candle
+pages and fills their high/low ranges on the same independent grid. TPO history
+and live publication respect session close.
+`SentinelStreamServer::Session` owns timer cadence, request selection and
 bounded admission to the history worker pool. Workers never access Session state;
 replies return by executor post, with subscription/generation checks before write.
 The legacy heatmap streamer remains only for its heatmap path pending removal.

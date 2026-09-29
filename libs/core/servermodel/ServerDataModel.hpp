@@ -25,6 +25,7 @@
 
 class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
+    friend struct TradeOverlayModelTest;
 public:
     struct FootprintTradeSample {
         int64_t timestampMs = 0;
@@ -57,7 +58,8 @@ public:
     int64_t oldestHeatmapPersistedMs(const std::string& symbol,
                                      int64_t timeframeMs) const;
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
-                              size_t limit, std::vector<FootprintTradeSample>& out) const;
+                              size_t limit, std::vector<FootprintTradeSample>& out,
+                              int64_t* retainedFromMs = nullptr) const;
     bool collectFootprintTrades(const std::string& symbol,
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,
