@@ -169,6 +169,57 @@ S2 opt-in real-recording benchmark (`SENTINEL_CHUNK_BENCH=1`, latest complete 24
 - The test renders through `QQuickRenderControl` into a Metal texture (`libs/gui/lab/OffscreenQuick`), so it runs headless and with the screen locked. The same batch renderer drives an on-screen `QQuickWindow`. Under the offscreen QPA, the harness must call `QQuickWindow::setSceneGraphBackend("rhi")`, or Qt Quick selects the software adaptation.
 - Result: `HeatmapRenderNode` uses this mechanism. The `beforeRendering` fallback is not needed. D3D11 is unverified: the owner runs the same test on Windows.
 
+**S4 result (2026-09-29, `lt-claude/s4-gpu-binner`).** Code is in `libs/gui/render/heatmap/` (target `sentinel_heatmap_gpu`):
+- `HeatmapGpuSource`: a worker-built, immutable upload image of one composed `SparseColumns`.
+  - Time slots mark each bucket as column, `NotLoaded` or `Gap`.
+  - Same-tick constituents are pooled exactly as `binColumn` pools them.
+  - Each entry is a per-row value `numerator / pooled coverage * group weight`, computed in double and shipped as float-float: a float hi part plus a 15-bit low part quantized to ulp(hi)·2⁻¹⁴, which gives about 2⁻³⁸ relative error. An entry takes 8 bytes (12 bytes if a group's row span exceeds 16 bits).
+  - Coverage is stored as merged full-coverage runs. A row index (one entry per 16 rows) finds the first entry of a bin.
+  - The source records its advertised availability and an optional row clip.
+- `HeatmapGpuBinner`:
+  - Pages sources in within a per-frame byte budget, into fresh buffers. The active source keeps drawing until the new one is complete.
+  - The output buffer only grows. A resize does not touch the source buffers.
+  - Output is one `uint` per cell: code, side, and one of four states. The states are *data*, *veil* (scanned but unproven, or an incompatible grid), *loading* (not scanned yet, or outside the row clip) and *no data* (outside availability). On screen: palette, grey veil, blue diagonal hatch in screen pixels, and nothing drawn.
+- `HeatmapBinGrid`: absolute bucket and price-bin anchoring, with a 2-bin guard. A pan inside the guard changes only the draw mapping.
+- `HeatmapRenderNode`: compute in `prepare()`, draw in `render()`. While a new timeframe uploads, the grid uses the active source's timeframe, so old columns keep their true time extent and are never stretched.
+
+Findings the later slices need:
+- **Exact codes need float-float, and Metal fast math breaks naive float-float.** Qt compiles MSL with fast math on, which folds two-sum error terms to zero. GLSL `precise` survives (SPIRV-Cross emits `[[clang::optnone]]` `spvFAdd`), but it doubles the kernel time. The kernel instead passes every intermediate through an XOR with a runtime zero. Evidence:
+
+  | Kernel | Code mismatches, 10.2M real cells | Code mismatches, always-on stress test |
+  |---|---|---|
+  | float-only sums | 381 | not run |
+  | float-float without the XOR | 381 | 9 |
+  | shipped (XOR laundering) | 0 | 0 |
+
+- **Display ticks must be multiples of `commonTick()`**, the LCM of a source's native ticks. The last deep day mixes $10 and $5 grids. A ladder tick of $25 would veil every $10 column as incompatible. S7's tick policy must use it.
+- **Parity:**
+  - Synthetic: 529k cells covering gaps, grid and size-scale changes, NotLoaded ranges, hour+minute levels, row clip and an incompatible tick. Stress test: 728k cells.
+  - Real data, opt-in (`SENTINEL_HEATMAP_REAL_PARITY=1`, previous closed UTC day, deep 1m/5m/1h and near 1m): 10.2M cells.
+  - All have zero state, code, side or validity mismatches against `bucketState` + `binColumn`.
+- **Bench** (`sentinel-lab --bench`, base Apple M4 at 120 GB/s, last 24 h, 25 zoom levels × 200 compute passes per grid, GPU timestamps). Targets: p95 < 1 ms at 1x, p95 < 2 ms at 2x.
+
+  | Case | Entries | GPU source | 1x p95 / max (ms) | 2x p95 / max (ms) | Result |
+  |---|---|---|---|---|---|
+  | deep 1m | 20.4M | 178 MB | 1.96 / 2.27 | 1.93 / 2.45 | **1x missed**, 2x met |
+  | deep 5m | 4.1M | 36 MB | 0.56 / 0.67 | 0.52 / 0.59 | met |
+  | deep 1h | 0.35M | 3 MB | 0.06 / 0.10 | 0.05 / 0.07 | met |
+  | near 1m | 6.5M | 55 MB | 0.93 / 1.13 | 1.09 / 1.38 | met |
+
+  - Why deep 1m misses: cost is linear in visible entries. The full-day zoom level reads 17.9M entries (143 MB) in 2.27 ms. The memory bandwidth floor for that level alone is about 1.2 ms, so p95 < 1 ms is physically out of reach whenever the view shows a full deep day at 1m.
+  - The cost is per re-bin (tick, timeframe or source change, or leaving the guard), not per frame. A pan inside the guard does no compute.
+  - Levels that show ≤ 5M entries run under 1 ms.
+  - Options for the owner: accept about 2 ms re-bins at maximum zoom-out, or let the auto timeframe step up (1m → 5m) above a visible-entry budget.
+- **Kernel changes tried and measured.**
+  - Kept: compensated accumulation with one renormalization, the row index, and a log-estimated code corrected against the threshold table. Workgroup size (1×64 through 64×1) moves the time by only ±5%.
+  - Rejected, slower: one thread per strip of 8 bins with walking cursors (3.7 ms), and an interpolation or galloping search (4.7 ms).
+- **Lab:** `sentinel-lab` now hosts `HeatmapRenderNode` in a plain `QQuickItem`, which exercises the production path. This replaces `QQuickRhiItem`. `--screenshot` renders headless through `QQuickRenderControl`.
+- **Deleted:** the lab `GpuBinner` and its shaders, `servermodel/RecordingEntries`, and their tests.
+- **Unverified:**
+  - The on-screen interactive lab window: the screen was locked, so no manual pan or zoom was done.
+  - D3D11: HLSL 5.0 shaders compile, but nothing has run. The entry buffer is one buffer, not paged to ≤ 128 MB.
+  - Memory at 2x with several charts.
+
 - **Order:** S1 → (S2 ‖ S4 ‖ S5) → S3 (after L) → S6 → S7 → S8, then S9.
 - **Parallel by files:** L with S1/S2/S4/S5; S2, S4 and S5 with each other.
 - **Serial:** S3/L (SentinelStreamServer.cpp) and S6/S7/S8 (hot GUI files).

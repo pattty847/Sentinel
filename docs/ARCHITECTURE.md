@@ -21,7 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
-- **`servermodel/RecordingEntries`:** Read-only HMC2 range projection for the GPU bin lab. It decodes sparse sizes, keeps minute coverage and durations, and normalizes mixed native grids to a common compatible row tick without any Qt GUI dependency.
+- **`heatmap`:** GUI-independent sparse heatmap model (`SparseColumns`, `TimeComposer`, `binCell`/`binColumn` CPU reference, `ChunkCodec`, `HeatmapResolution`); see "Sparse heatmap core model" below.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
 
@@ -40,7 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
-- **`sentinel-lab`:** Standalone QQuickRhiItem experiment and headless Metal benchmark for the sparse recording GPU path.
+- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench` and `--screenshot` modes.
 
 ## Data pipeline
 
@@ -143,29 +143,32 @@ for labels/walls. Auto timeframe selection counts epoch buckets touched by the
 half-open viewport, including partial edge buckets, and returns no choice when
 even 1D exceeds the one-pixel-per-column limit, requiring a span clamp.
 
-The lab remains on `RecordingEntries` until its GPU upload contract is migrated
-in S4; S1 does not alter rendering, live transport, or the existing page path.
+### GPU heatmap price binning (integration slice S4)
 
-### GPU bin lab (isolated experiment)
-
-`RecordingEntries` reads HMC2 without a writer lock and decodes independent
-time chunks on worker threads. The lab explicitly composes columns at the
-selected UTC-epoch-aligned timeframe: 1m from minute records, 5m/15m and custom
-sub-hour frames from minutes, and deep 1h/4h/1D from hour rollups when present.
-It preserves per-row/side covered duration, mixed $5/$10 native grids, and
-unknown coverage. Raw minute GPU entries use four bytes when the relative row
-fits 16 bits and six bytes otherwise; composed entries also carry covered
-duration. There is no hidden time LOD or pre-summed price grid.
-
-One compute invocation gathers sparse entries for each visible price/time cell
-at the selected display tick. Separate bid and ask sums use deterministic float
-arithmetic without float atomics. Time and price bin edges stay anchored to
-absolute UTC and ladder coordinates. Guard cells let a fractional pan translate
-the fragment mapping without re-binning; a changed bin width or a view leaving
-the guard triggers a new disposable screen-sized grid. The lab remains isolated
-from `UnifiedGridRenderer` and the production server re-band path. The
-[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md)
-specifies the production design, including worker-side timeframe composition.
+`libs/gui/render/heatmap` (target `sentinel_heatmap_gpu`) bins price on the GPU.
+Time is never binned there: a worker composes `SparseColumns` at exactly the
+selected timeframe (`TimeComposer`), and `buildGpuSource` turns it into an
+immutable `HeatmapGpuSource`. That source holds per-bucket slots (column,
+`NotLoaded` or `Gap`), native-tick groups pooled exactly as `binColumn` pools
+them, merged full-coverage runs, a 16-row entry index, and per-row values
+(numerator / pooled coverage * group weight, in double) as 8-byte float-float
+entries. `HeatmapGpuBinner` pages a source into fresh buffers within a per-frame
+byte budget while the previous source keeps drawing. One compute invocation per
+output cell sums its bin's rows per side in float-float and encodes the 15-bit
+code through a threshold table that is exact against `recording::encodeSize`.
+Codes, side and validity therefore equal `binColumn`. Metal compiles with fast
+math, so the kernel launders float-float intermediates through an XOR with a
+runtime zero; without it, two-sum error terms fold away (see FM entries).
+Each cell carries one of four states: data, veil (scanned but unproven, or an
+incompatible grid), loading (not scanned, or outside the row clip) and no data
+(outside the advertised availability). The grid is anchored to absolute UTC
+buckets and price bins with a guard margin, so a pan inside it only changes the
+draw mapping. `HeatmapRenderNode` records the compute pass in
+`QSGRenderNode::prepare()` and draws in `render()` inside the normal scene graph;
+`tests/render/test_qsg_compute_spike.cpp` guards that mechanism. Display ticks
+must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
+into `UnifiedGridRenderer` (S6). Results and limits:
+[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md), S4.
 
 ### Coordinate system: TimeAxisMapping
 
