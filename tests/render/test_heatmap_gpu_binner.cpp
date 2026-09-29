@@ -24,6 +24,7 @@
 #include <iostream>
 #include <map>
 #include <random>
+#include <set>
 #include <thread>
 
 namespace {
@@ -154,14 +155,15 @@ std::vector<uint32_t> binAndRead(QRhi *rhi, HeatmapGpuBinner &binner, const BinG
                                  const recording::SizeScale &scale = {}) {
     QString error;
     QRhiCommandBuffer *cb = nullptr;
-    QRhiReadbackResult readback;
     EXPECT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
     EXPECT_TRUE(binner.bin(cb, grid, scale, &error)) << error.toStdString();
-    EXPECT_TRUE(binner.readBack(cb, &readback, &error)) << error.toStdString();
+    EXPECT_TRUE(binner.readBack(cb, &error)) << error.toStdString();
     EXPECT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    EXPECT_FALSE(binner.readBackPending());
+    const QByteArray data = binner.readBackData();
     std::vector<uint32_t> cells(size_t(grid.columns) * grid.rows);
-    if (readback.data.size() == qsizetype(cells.size() * 4)) std::memcpy(cells.data(), readback.data.constData(), cells.size() * 4);
-    else ADD_FAILURE() << "readback size " << readback.data.size();
+    if (data.size() == qsizetype(cells.size() * 4)) std::memcpy(cells.data(), data.constData(), cells.size() * 4);
+    else ADD_FAILURE() << "readback size " << data.size();
     return cells;
 }
 
@@ -690,19 +692,66 @@ TEST(HeatmapGpuSelfTest, DestroyingTheBinnerWithTheReadbackInFlightCompletesItFi
     for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     ASSERT_TRUE(precisionSelfTestIfReady());
     uploadPaged(gpu.rhi.get(), *binner, smallSource(), 1 << 20);
-    const uint64_t drained = HeatmapGpuBinner::drainedSelfTestReadbacksForTest();
+    const uint64_t drained = HeatmapGpuBinner::drainedReadbacksForTest();
     QRhiCommandBuffer *cb = nullptr;
     ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
     binner->runPrecisionSelfTest(cb);
     ASSERT_TRUE(binner->selfTestInFlightForTest()) << "the readback is recorded, not yet completed";
     binner.reset();
-    EXPECT_EQ(HeatmapGpuBinner::drainedSelfTestReadbacksForTest(), drained + 1);
+    EXPECT_EQ(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1);
     ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
     gpu.rhi.reset(); // ~QRhi finishes no stale readback
     // A binner destroyed with nothing in flight does not stall the GPU.
     Headless again;
     { HeatmapGpuBinner idle(again.rhi.get()); }
-    EXPECT_EQ(HeatmapGpuBinner::drainedSelfTestReadbacksForTest(), drained + 1);
+    EXPECT_EQ(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1);
+}
+
+// Scene graph invalidation can destroy the QRhi before the render node (or a
+// backend can skip QSGRenderNode::releaseResources). With readbacks in flight
+// (an explicit one and the precision self-test's), destroying the QRhi must
+// complete them into the binner-owned results, leave the binners inert, and the
+// binners' later destruction must not call into the dead QRhi.
+TEST(HeatmapGpuLifetime, QRhiDestroyedFirstWithReadbacksInFlight) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(precisionSelfTestIfReady());
+    auto explicitReadback = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    explicitReadback->forceKernel(KernelVariant::Precise);
+    auto selfTesting = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    const auto source = smallSource();
+    uploadPaged(gpu.rhi.get(), *explicitReadback, source, 1 << 20);
+    uploadPaged(gpu.rhi.get(), *selfTesting, source, 1 << 20);
+    const auto grid = gridFor(*source, 10, 99'900, 30, 1);
+    const uint64_t drained = HeatmapGpuBinner::drainedReadbacksForTest();
+    QString error;
+    QRhiCommandBuffer *cb = nullptr;
+    ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+    ASSERT_TRUE(explicitReadback->bin(cb, grid, {}, &error)) << error.toStdString();
+    ASSERT_TRUE(explicitReadback->readBack(cb, &error)) << error.toStdString();
+    EXPECT_FALSE(explicitReadback->readBack(cb, &error)) << "one readback at a time";
+    selfTesting->runPrecisionSelfTest(cb);
+    ASSERT_TRUE(explicitReadback->readBackPending());
+    ASSERT_TRUE(selfTesting->selfTestInFlightForTest());
+    gpu.rhi.reset(); // the QRhi goes first, mid-frame
+    // The first cleanup callback's finish() completes every readback in flight
+    // (both results are alive); the second finds nothing pending.
+    EXPECT_GE(HeatmapGpuBinner::drainedReadbacksForTest(), drained + 1) << "readbacks completed before ~QRhi";
+    EXPECT_EQ(explicitReadback->rhi(), nullptr);
+    EXPECT_EQ(selfTesting->rhi(), nullptr);
+    EXPECT_FALSE(explicitReadback->readBackPending());
+    EXPECT_EQ(explicitReadback->readBackData().size(), qsizetype(grid.columns * grid.rows * 4));
+    EXPECT_FALSE(explicitReadback->canDraw());
+    EXPECT_FALSE(explicitReadback->setSource(source, &error)) << "inert after the QRhi is gone";
+    explicitReadback.reset(); // must not call into the destroyed QRhi
+    selfTesting.reset();
+    // A new QRhi, possibly at the old address: a fresh binner works as usual.
+    Headless again;
+    HeatmapGpuBinner fresh(again.rhi.get());
+    uploadPaged(again.rhi.get(), fresh, source, 1 << 20);
+    EXPECT_EQ(binAndRead(again.rhi.get(), fresh, grid).size(), size_t(grid.columns) * grid.rows);
 }
 
 TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
@@ -827,6 +876,9 @@ TEST(HeatmapGpuParity, RealRecordingOptIn) {
 }
 
 // ---------------------------------------------------------------- scene graph
+int colorDistance(const QColor &a, const QColor &b) {
+    return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
+}
 class HeatmapTestItem final : public QQuickItem {
 public:
     std::shared_ptr<HeatmapRenderStats> stats = std::make_shared<HeatmapRenderStats>();
@@ -907,11 +959,22 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     const QColor loadA = at(50), loadB = at(55); // 5 px diagonal stripes
     EXPECT_NE(loadA, loadB) << "loading is a hatch, not a flat fill";
     EXPECT_NE(loadA, QColor(Qt::black));
+    // The veil must read as "unknown", not as background: a neutral grey hatch
+    // clearly brighter than the background and unlike the blue loading hatch.
+    std::set<QRgb> veilTones;
+    for (int x = 81; x < 99; ++x)
+        for (int yy = 41; yy < 49; ++yy) {
+            const QColor v = at(x, yy);
+            veilTones.insert(v.rgb());
+            EXPECT_GE(colorDistance(v, QColor(Qt::black)), 150) << "veil vs background at " << x << "," << yy;
+            EXPECT_GE(colorDistance(v, QColor(0x08, 0x0d, 0x12)), 130) << "veil vs the lab background";
+            EXPECT_LE(std::max({v.red(), v.green(), v.blue()}) - std::min({v.red(), v.green(), v.blue()}), 12)
+                << "veil is neutral grey";
+            EXPECT_GE(colorDistance(v, loadA), 40);
+            EXPECT_GE(colorDistance(v, loadB), 40);
+        }
+    EXPECT_EQ(veilTones.size(), 2u) << "veil is a two-tone hatch";
     const QColor veil = at(90);
-    EXPECT_NE(veil, QColor(Qt::black));
-    EXPECT_EQ(veil, at(95));
-    EXPECT_NE(veil, loadA);
-    EXPECT_NE(veil, loadB);
     const QColor data = at(150);
     EXPECT_GT(data.green(), 100) << "large bid in the bid palette";
     EXPECT_EQ(at(150, 5), QColor(Qt::black)) << "valid empty cell above the band draws nothing";
@@ -956,6 +1019,18 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     item->update();
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
     EXPECT_EQ(item->stats->rebins.load(), baseRebins + 2) << "same scale again: no re-bin";
+    // Manual $5 over this $10 grid: the present columns cannot build it and veil
+    // (never coarsened), visibly distinct from the background.
+    item->tick = 5;
+    item->update();
+    const QImage manual = scene.renderFrame(&error);
+    ASSERT_FALSE(manual.isNull());
+    EXPECT_EQ(item->stats->tick.load(), 5);
+    for (const int x : {120, 150, 180}) {
+        const QColor v = manual.pixelColor(x, y);
+        EXPECT_GE(colorDistance(v, QColor(Qt::black)), 150) << x;
+        EXPECT_LE(std::max({v.red(), v.green(), v.blue()}) - std::min({v.red(), v.green(), v.blue()}), 12) << x;
+    }
 }
 
 // ---------------------------------------------------------------- slice T
@@ -1089,6 +1164,31 @@ TEST(HeatmapTickPolicyNode, ManualKeepsItsTickAutoFollowsTheDataInView) {
 // Auto in the real scene graph: pans inside the prepared grid never re-bin;
 // the tick changes only past the hysteresis thresholds, once per crossing;
 // jitter around a threshold never flips it; a crossfade costs no extra bin.
+// Scene graph invalidation (window teardown) right after the first frame, with
+// the precision self-test started in that frame: node, binner and QRhi go away
+// in scene-graph order without touching freed readback results.
+TEST(HeatmapRenderNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (int frames = 1; frames <= 3; ++frames) {
+        HeatmapGpuBinner::clearSelfTestCacheForTest();
+        auto scene = std::make_unique<lab::OffscreenQuick>();
+        QString error;
+        ASSERT_TRUE(scene->create(QSize(200, 100), &error)) << error.toStdString();
+        auto *item = new HeatmapTestItem;
+        item->setParentItem(scene->window()->contentItem());
+        item->setSize(QSizeF(200, 100));
+        item->source = stateSource();
+        item->view = {double(epoch), double(epoch + 10 * minute), 99'950, 100'050};
+        for (int i = 0; i < frames; ++i) {
+            item->update();
+            ASSERT_FALSE(scene->renderFrame(&error).isNull()) << error.toStdString();
+        }
+        scene.reset();
+    }
+}
+
 TEST(HeatmapRenderNodeScene, AutoTickHysteresisAndPansNeverRebin) {
     if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
     lab::OffscreenQuick scene;

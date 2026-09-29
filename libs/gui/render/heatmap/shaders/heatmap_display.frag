@@ -37,7 +37,14 @@ vec4 shade() {
         vec3 c = stripe ? vec3(0.13, 0.20, 0.30) : vec3(0.07, 0.10, 0.15);
         return vec4(c * 0.8, 0.8);
     }
-    if (state == 2u) return vec4(vec3(0.16, 0.18, 0.22) * 0.35, 0.35); // veil
+    if (state == 2u) {
+        // Veil (scanned but unproven, or a grid that cannot build this tick):
+        // neutral mid-grey with a fine anti-diagonal hatch, distinct from the
+        // background, from data, and from the blue loading hatch (other slope).
+        bool stripe = mod(floor((gl_FragCoord.x - gl_FragCoord.y) / 3.0), 2.0) < 1.0;
+        vec3 c = stripe ? vec3(0.36, 0.36, 0.38) : vec3(0.27, 0.27, 0.29);
+        return vec4(c * 0.9, 0.9);
+    }
     float code = float(cell & 0x7fffu);
     if (code <= 0.0) return vec4(0.0);
     float magnitude = clamp((code - style.x) / style.y, 0.0, 1.0);

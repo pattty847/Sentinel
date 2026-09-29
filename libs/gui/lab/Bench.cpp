@@ -265,7 +265,7 @@ void annotate(QImage &image, const QVariantMap &m, const QString &indicator) {
     font.setPixelSize(15);
     painter.setFont(font);
     const QString line = QStringLiteral("mode=%1  tick=%2  h=%3  minRowPx=%4  commonTick(view)=%5  rows=%6px  "
-                                        "tf=%7m  last re-bin=%8 ms  bins=%9  tick changes=%10")
+                                        "tf=%7m  re-bin CPU submit=%8 ms  bins=%9  tick changes=%10")
         .arg(m.value("mode").toString(), money(m.value("tick").toDouble()))
         .arg(m.value("hysteresis").toDouble()).arg(m.value("minRowPx").toDouble())
         .arg(money(m.value("commonTick").toDouble()))

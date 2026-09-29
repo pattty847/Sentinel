@@ -13,6 +13,15 @@
 // - Re-requesting the active source cancels a pending upload (A -> B -> A).
 // - The output grid buffer only grows; a resize never touches source buffers.
 // - Entries are split into <= 64 MiB pages (D3D11 guarantees 128 MB per buffer).
+// - QRhi lifetime: the binner registers a keyed cleanup callback on its QRhi. If
+//   the QRhi is destroyed first (scene graph invalidation, backends that skip
+//   QSGRenderNode::releaseResources), the callback completes any in-flight
+//   readback and releases every resource while the QRhi still works; the binner
+//   is then inert (rhi() == nullptr) and its destructor never calls into it.
+//   A binner destroyed while its QRhi lives completes an in-flight readback
+//   first (rhi->finish()), because QRhi writes into the result when the frame
+//   completes (FM-099).
+// - Readbacks: the binner owns the QRhiReadbackResult; callers copy the data.
 // Precision: once an active source exists, the first frame per QRhi
 // backend/device runs a precision self-test (HeatmapGpuSelfTest; its CPU fixture
 // is built on a worker, so the render thread only records the dispatch and the
@@ -69,6 +78,7 @@ public:
     HeatmapGpuBinner(const HeatmapGpuBinner &) = delete;
     HeatmapGpuBinner &operator=(const HeatmapGpuBinner &) = delete;
 
+    // nullptr once the QRhi was destroyed (the binner is then inert).
     QRhi *rhi() const { return rhi_; }
     // No-op if `source` is already pending; cancels the pending upload if it is
     // the active source; otherwise replaces any pending source. nullptr is a no-op.
@@ -96,8 +106,13 @@ public:
     // True if the last bin() used this source and output scale and the kernel
     // that would be used now (a resolved self-test switches kernels: re-bin).
     bool binnedMatches(uint64_t sourceId, const recording::SizeScale &outputScale) const;
-    // Queues a readback of the binned grid: columns * rows uint32 cells, row 0 = top.
-    bool readBack(QRhiCommandBuffer *cb, QRhiReadbackResult *result, QString *error);
+    // Queues a readback of the binned grid (columns * rows uint32 cells, row 0 =
+    // top) into a binner-owned result; one at a time (refused while in flight).
+    // It completes when the recording frame completes (offscreen: at
+    // endOffscreenFrame), then readBackData() returns a copy.
+    bool readBack(QRhiCommandBuffer *cb, QString *error);
+    bool readBackPending() const { return readbackPending_; }
+    QByteArray readBackData() const; // empty while pending or before any readback
 
     bool prepareDraw(QRhiRenderPassDescriptor *pass, int sampleCount, QString *error);
     void updateDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp, const QRectF &itemRect,
@@ -123,10 +138,10 @@ public:
     // the per-device self-test cache so the candidate is actually tested.
     void setFastKernelShaderForTest(const QString &qsbPath) { fastShaderPath_ = qsbPath; testShader_ = true; }
     static void clearSelfTestCacheForTest();
-    // Tests: a self-test readback is recorded and not yet consumed; and how many
-    // in-flight self-test readbacks a destructor completed before freeing them.
+    // Tests: a self-test run is recorded and not yet consumed; and how many
+    // in-flight readbacks a destructor or QRhi cleanup completed before freeing them.
     bool selfTestInFlightForTest() const;
-    static uint64_t drainedSelfTestReadbacksForTest();
+    static uint64_t drainedReadbacksForTest();
     // Starts (first call) or polls the precision self-test. bin() also calls it;
     // call it every frame so a static view still resolves to the fast kernel.
     void runPrecisionSelfTest(QRhiCommandBuffer *cb) { driveSelfTest(cb); }
@@ -145,6 +160,9 @@ public:
 private:
     struct SourceBuffers;
     struct SelfTestRun;
+    std::unique_ptr<QRhiReadbackResult> readback_;
+    bool readbackPending_ = false;
+    void releaseForDeadRhi(); // QRhi cleanup callback
     QRhi *rhi_ = nullptr;
     std::unique_ptr<SourceBuffers> active_, spare_;
     bool pending_ = false;

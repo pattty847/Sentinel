@@ -12,9 +12,11 @@ HeatmapRenderNode::HeatmapRenderNode(std::shared_ptr<HeatmapRenderStats> stats)
 }
 HeatmapRenderNode::~HeatmapRenderNode() { releaseResources(); }
 
+// Called while the QRhi is still valid: the binner completes any in-flight
+// readback and releases its resources. Backends or paths that skip this are
+// covered by the binner's QRhi cleanup callback.
 void HeatmapRenderNode::releaseResources() {
     binner_.reset();
-    rhi_ = nullptr;
     drawable_ = false;
 }
 
@@ -49,10 +51,10 @@ void HeatmapRenderNode::prepare() {
     QRhiRenderTarget *rt = renderTarget();
     if (!cb || !rt) return;
     QRhi *rhi = rt->rhi();
-    if (!binner_ || rhi != rhi_) {
-        binner_ = std::make_unique<HeatmapGpuBinner>(rhi);
-        rhi_ = rhi;
-    }
+    // A new QRhi (or the old one destroyed: binner rhi() == nullptr, which also
+    // covers a new QRhi reusing the old address): replace the binner. Its
+    // destructor calls into the old QRhi only if that QRhi is still alive.
+    if (!binner_ || binner_->rhi() != rhi) binner_ = std::make_unique<HeatmapGpuBinner>(rhi);
     stats_->frames.fetch_add(1);
     binner_->setMemoryCap(frame_.gpuMemoryCapBytes);
     QString error;

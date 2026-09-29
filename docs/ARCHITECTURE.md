@@ -157,7 +157,11 @@ active source (`commonTickInView`); Manual draws the locked preset and columns
 that cannot build it veil (it never coarsens). Re-bins happen only on the spec
 rule 6 triggers; a pan inside the prepared grid is a mapping change. An
 optional crossfade (lab experiment E2, default off) keeps the previous binned
-grid in a second output slot and fades it out over the new one. `idealTick` and
+grid in a second output slot and fades it out over the new one. The binner owns
+its readback results and registers a QRhi cleanup callback: whichever of the
+binner and its QRhi goes first, in-flight readbacks complete before their result
+is freed and nothing calls into a destroyed QRhi (FM-099). The veil is a neutral
+grey hatch, distinct from the background, data and the blue loading hatch. `idealTick` and
 `layerFor` remain for the legacy page path and the near/deep migration only.
 
 ### GPU heatmap price binning (integration slice S4)

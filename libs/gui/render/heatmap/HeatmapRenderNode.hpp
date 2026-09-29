@@ -23,6 +23,10 @@ struct HeatmapRenderStats {
     std::atomic<uint64_t> refusedSourceId{0}; // source the binner refused or is backing off
     std::atomic<bool> uploadPending{false};
     std::atomic<uint64_t> drawnSourceId{0}, gpuBytes{0};
+    // binSubmitMs: CPU wall time around HeatmapGpuBinner::bin() (setup, buffer
+    // growth, uniform upload, recording the dispatch), not GPU execution time.
+    // gpuFrameMs: GPU time of the last completed command buffer (the whole scene
+    // frame, all passes); QRhi has no per-pass timestamps.
     std::atomic<double> binSubmitMs{0}, gpuFrameMs{0};
     std::atomic<uint32_t> columns{0}, rows{0}, factor{0};
     std::atomic<double> tick{0};             // tick of the binned grid
@@ -76,7 +80,6 @@ public:
 private:
     std::shared_ptr<HeatmapRenderStats> stats_;
     std::unique_ptr<HeatmapGpuBinner> binner_;
-    QRhi *rhi_ = nullptr;
     Frame frame_;
     bool drawable_ = false;
     double autoTick_ = 0;   // Auto state; reset in Manual so Auto resumes fresh

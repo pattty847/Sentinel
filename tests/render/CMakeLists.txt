@@ -168,11 +168,12 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
 )
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
-# FM-099: a self-test readback freed before its frame completes is a silent heap
-# write without Guard Malloc; under it the unfixed teardown order crashes.
+# FM-099: a readback result freed before its frame completes is a silent heap
+# write without Guard Malloc; under it a wrong teardown order crashes. Covers the
+# binner-first, QRhi-first and scene-graph invalidation orders.
 if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
     add_test(NAME HeatmapGpuReadbackTeardownGuardMalloc COMMAND test_heatmap_gpu_binner
-             --gtest_filter=HeatmapGpuSelfTest.DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst)
+             "--gtest_filter=HeatmapGpuSelfTest.DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst:HeatmapGpuLifetime.*:HeatmapRenderNodeScene.SceneGraphInvalidation*")
     set_tests_properties(HeatmapGpuReadbackTeardownGuardMalloc PROPERTIES LABELS "render;heatmap"
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
 endif()

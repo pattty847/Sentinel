@@ -26,12 +26,12 @@ void applyTickOptions(LabItem &item, const LabRunOptions &options);
 int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes = 1);
 // Renders the lab item (HeatmapRenderNode in a real scene graph) offscreen once
 // its full source is uploaded and drawn, stamps the debug state (mode, tick, h,
-// commonTick, last re-bin, resolution indicator) on the image, and writes a PNG.
+// commonTick, re-bin CPU submit time, resolution indicator) on the image, and writes a PNG.
 int runScreenshot(const LabRunOptions &options, const QString &path);
 // Experiment E1 headless: zooms the price axis in and out through a range of row
 // heights (and jitters one step around every change point) for each h in
 // {0, 0.15, 0.25, 0.4} (or --hysteresis), logging every tick change as a JSON line
-// and a summary per h (tick changes, jitter flips, re-bin ms).
+// and a summary per h (tick changes, jitter flips, re-bin CPU submit ms, GPU frame ms).
 int runTickSweep(const LabRunOptions &options);
 // Experiment E2 headless: once settled, zooms price out 5x (forcing an Auto tick
 // change) and saves a frame roughly every 25 ms for 300 ms into `dir`

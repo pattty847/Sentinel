@@ -270,8 +270,8 @@ ApplicationWindow {
                     model: [
                         ["Mode", "mode", ""], ["Tick", "tick", " $"], ["h", "hysteresis", ""],
                         ["Min row px", "minRowPx", ""], ["Row height", "rowPx", " px"],
-                        ["commonTick (view)", "commonTick", " $"], ["Last re-bin", "binSubmitMs", " ms"],
-                        ["Tick-change re-bin", "tickChangeBinMs", " ms"], ["Bins since start", "rebins", ""],
+                        ["commonTick (view)", "commonTick", " $"], ["Re-bin CPU submit", "binSubmitMs", " ms"],
+                        ["Tick-change CPU submit", "tickChangeBinMs", " ms"], ["Bins since start", "rebins", ""],
                         ["Tick changes", "tickChanges", ""], ["Crossfade", "crossfadeMs", " ms"]
                     ]
                     delegate: RowLayout {
@@ -296,7 +296,7 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         ["FPS", "fps", ""], ["Frame", "frameMs", " ms"],
-                        ["GPU frame", "gpuFrameMs", " ms"],
+                        ["GPU frame (all passes)", "gpuFrameMs", " ms"],
                         ["Loaded entries", "entries", ""], ["GPU buffers", "gpuBytes", " bytes"],
                         ["Ticks / bin", "group", ""],
                         ["Grid", "columns", " cols"], ["Rows", "rows", ""],
