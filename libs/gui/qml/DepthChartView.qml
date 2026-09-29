@@ -75,7 +75,7 @@ Rectangle {
         anchors.fill: parent
         anchors.rightMargin: priceAxisChrome.width
         anchors.bottomMargin: timeAxisChrome.height
-        clip: true
+        // No clip here: the renderer draws the price/time axis text into the gutters.
         visible: true
         intensityScale: 1.0
         maxCells: 500000
