@@ -21,6 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
+- **`servermodel/RecordingEntries`:** Read-only HMC2 range projection for the GPU bin lab. It decodes sparse sizes, keeps minute coverage and durations, and normalizes mixed native grids to a common compatible row tick without any Qt GUI dependency.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
 
@@ -30,6 +31,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
 - **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives heatmap slices and buffers them before dispatching to the renderer.
 - **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapIntensityNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
+- **`lab`:** Isolated QRhi compute/render path for measuring client-side binning over recording entries. It is not wired into `UnifiedGridRenderer` or the server stream.
 - **`qml` & `widgets`:** Owns the declarative scenes (e.g., `CandleChartView`) and the dockable window management (e.g., `ChartDock`, `OrderBookDock`).
 
 ### 3. Application Bootstraps (`apps/`)
@@ -38,6 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
+- **`sentinel-lab`:** Standalone QQuickRhiItem experiment and headless Metal benchmark for the sparse recording GPU path.
 
 ## Data pipeline
 
@@ -104,6 +107,27 @@ GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
 32 MiB at 8192 x 2048), its mapping and coverage, and draw a second blended quad
 during the fade. That option needs separate mapping/label lifecycle handling and
 live GPU measurement; it is not implemented here.
+
+### GPU bin lab (isolated experiment)
+
+`RecordingEntries` reads HMC2 without a writer lock and decodes independent
+time chunks on worker threads. The lab explicitly composes columns at the
+selected UTC-epoch-aligned timeframe: 1m from minute records, 5m/15m and custom
+sub-hour frames from minutes, and deep 1h/4h/1D from hour rollups when present.
+It preserves per-row/side covered duration, mixed $5/$10 native grids, and
+unknown coverage. Raw minute GPU entries use four bytes when the relative row
+fits 16 bits and six bytes otherwise; composed entries also carry covered
+duration. There is no hidden time LOD or pre-summed price grid.
+
+One compute invocation gathers sparse entries for each visible price/time cell
+at the selected display tick. Separate bid and ask sums use deterministic float
+arithmetic without float atomics. Time and price bin edges stay anchored to
+absolute UTC and ladder coordinates. Guard cells let a fractional pan translate
+the fragment mapping without re-binning; a changed bin width or a view leaving
+the guard triggers a new disposable screen-sized grid. The lab remains isolated
+from `UnifiedGridRenderer` and the production server re-band path. The
+[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md)
+specifies the production design, including worker-side timeframe composition.
 
 ### Coordinate system: TimeAxisMapping
 
