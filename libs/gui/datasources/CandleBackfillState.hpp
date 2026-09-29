@@ -13,6 +13,9 @@ public:
     static constexpr qint64 kThrottleMs = 100;
     static constexpr int kMaxEmptyPages = 3;
     static constexpr qint64 kFloorRetryMs = 60'000;
+    static constexpr qint64 kDefaultEmptyLookbackSec = 7 * 24 * 60 * 60;
+    explicit CandleBackfillState(qint64 emptyLookbackSec = kDefaultEmptyLookbackSec)
+        : m_emptyLookbackSec(std::max<qint64>(2, emptyLookbackSec)) {}
     struct Request {
         QString symbol;
         qint64 timeframeSec = 0;
@@ -42,27 +45,32 @@ public:
     }
 
     std::optional<Request> next(qint64 oldestMs, bool cacheFull, qint64 nowMs) {
-        if (m_pending || m_symbol.isEmpty() || m_tfSec <= 0 || m_endSec <= m_startSec ||
-            cacheFull || retryDelayMs(nowMs) > 0) return std::nullopt;
+        if (m_pending || !needsOlderData(oldestMs, cacheFull, nowMs) ||
+            retryDelayMs(nowMs) > 0) return std::nullopt;
         auto& history = m_history[{m_symbol, m_tfSec}];
         if (history.emptyPages >= kMaxEmptyPages) {
-            if (nowMs < history.retryAfterMs) return std::nullopt;
-            // A bounded empty scan is only a soft floor. Recheck on later demand
-            // because neither a transient REST empty nor a trading gap proves listing time.
-            history = {};
+            // Resume the same scan after the pause, never revisit its empty prefix.
+            history.emptyPages = 0;
+            history.retryAfterMs = 0;
         }
         const qint64 nowEnd = ((nowMs / 1000) / m_tfSec + 1) * m_tfSec;
         qint64 boundary = oldestMs > 0 ? oldestMs / 1000 : std::min(m_endSec, nowEnd);
         if (history.cursorSec > 0) boundary = std::min(boundary, history.cursorSec);
-        if (boundary <= m_startSec && history.emptyPages == 0) return std::nullopt;
+        if (boundary <= m_startSec && history.emptyScanStartSec == 0) return std::nullopt;
         const qint64 pageCap = std::clamp<qint64>(350 * 60 / m_tfSec, 1, 350);
         // After an empty window, probe full pages beyond it (bounded below).
-        const qint64 bars = history.emptyPages > 0 ? pageCap
+        const qint64 bars = history.emptyScanStartSec > 0 ? pageCap
             : (boundary - m_startSec + m_tfSec - 1) / m_tfSec;
-        const int limit = static_cast<int>(std::min(pageCap, bars));
+        int limit = static_cast<int>(std::min(pageCap, bars));
         // 1s history uses inclusive end and retained-bar count. Exclude the
         // oldest loaded bucket explicitly; REST rollup windows already exclude it.
         const qint64 end = boundary - (m_tfSec == 1 ? 1 : 0);
+        if (m_tfSec == 1) {
+            const qint64 scanStart = history.emptyScanStartSec > 0 ? history.emptyScanStartSec : boundary;
+            const qint64 scanFloor = std::max<qint64>(0, scanStart - m_emptyLookbackSec);
+            limit = static_cast<int>(std::min<qint64>(limit, end - scanFloor));
+            if (limit <= 0) return std::nullopt;
+        }
         const qint64 start = std::max<qint64>(0, end - limit * m_tfSec);
         if (end <= 0 || (m_tfSec != 1 && start <= 0)) return std::nullopt;
         m_pending = Request{m_symbol, m_tfSec, start, end, limit, m_generation, boundary};
@@ -80,8 +88,9 @@ public:
         if (!current) return false;
         auto& history = m_history[{symbol, tfSec}];
         if (oldestReplyMs > 0 && oldestReplyMs / 1000 < boundary) {
-            history = {oldestReplyMs / 1000, 0, 0};
+            history = {oldestReplyMs / 1000, 0, 0, 0};
         } else {
+            if (history.emptyScanStartSec == 0) history.emptyScanStartSec = boundary;
             history.cursorSec = startSec;
             if (++history.emptyPages >= kMaxEmptyPages)
                 history.retryAfterMs = nowMs + kFloorRetryMs;
@@ -89,7 +98,7 @@ public:
         return true;
     }
 
-    bool floorReached() const {
+    bool scanPaused() const {
         const auto it = m_history.find({m_symbol, m_tfSec});
         return it != m_history.end() && it->second.emptyPages >= kMaxEmptyPages;
     }
@@ -102,7 +111,20 @@ public:
     }
 
     qint64 retryDelayMs(qint64 nowMs) const {
-        return std::max<qint64>(0, std::max(m_retryAfterMs, m_nextSendMs) - nowMs);
+        qint64 deadline = std::max(m_retryAfterMs, m_nextSendMs);
+        const auto it = m_history.find({m_symbol, m_tfSec});
+        if (it != m_history.end() && !emptyLookbackExhausted(it->second))
+            deadline = std::max(deadline, it->second.retryAfterMs);
+        return std::max<qint64>(0, deadline - nowMs);
+    }
+
+    bool needsOlderData(qint64 oldestMs, bool cacheFull, qint64 nowMs) const {
+        if (m_symbol.isEmpty() || m_tfSec <= 0 || m_endSec <= m_startSec || cacheFull) return false;
+        const qint64 nowEnd = ((nowMs / 1000) / m_tfSec + 1) * m_tfSec;
+        const qint64 loadedEdge = oldestMs > 0 ? oldestMs / 1000 : std::min(m_endSec, nowEnd);
+        if (loadedEdge <= m_startSec) return false;
+        const auto it = m_history.find({m_symbol, m_tfSec});
+        return it == m_history.end() || !emptyLookbackExhausted(it->second);
     }
 
     void disconnect() {
@@ -118,12 +140,18 @@ private:
     QString m_symbol;
     qint64 m_tfSec = 0, m_startSec = 0, m_endSec = 0, m_retryAfterMs = 0;
     qint64 m_nextSendMs = 0;
+    qint64 m_emptyLookbackSec;
     quint64 m_generation = 0;
     std::optional<Request> m_pending;
     struct History {
         qint64 cursorSec = 0;
         int emptyPages = 0;
         qint64 retryAfterMs = 0;
+        qint64 emptyScanStartSec = 0;
     };
+    bool emptyLookbackExhausted(const History& history) const {
+        return m_tfSec == 1 && history.emptyScanStartSec > 0 &&
+            history.cursorSec <= std::max<qint64>(0, history.emptyScanStartSec - m_emptyLookbackSec) + 1;
+    }
     std::map<std::pair<QString, qint64>, History> m_history;
 };

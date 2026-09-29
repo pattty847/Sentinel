@@ -75,6 +75,7 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
     CandleBar updated = bar;
     updated.isClosed = isClosed || bar.isClosed;
     updated.seq = seq;
+    updated.historyRefreshable = false;
 
     bool updatedExisting = false;
     if (series.count > 0) {
@@ -153,7 +154,10 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
     }
     auto& series = seriesFor(symbol, timeframeSec);
     std::vector<CandleBar> page = history;
-    for (auto& bar : page) bar.seq = 0; // Only applyUpdate grants live ownership.
+    for (auto& bar : page) {
+        bar.seq = 0; // Only applyUpdate grants live ownership.
+        bar.historyRefreshable = false;
+    }
     page.erase(std::remove_if(page.begin(), page.end(), [](const CandleBar& bar) {
         return bar.timeStartMs <= 0;
     }), page.end());
@@ -171,7 +175,8 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
             // History must never close or replace a live-owned bucket. A REST
             // response fetched before the boundary may be older than live even
             // when the server labels it final after the fetch completes.
-            if (merged.back().seq == 0 && bar.isClosed && !merged.back().isClosed)
+            if (merged.back().seq == 0 &&
+                (merged.back().historyRefreshable || (bar.isClosed && !merged.back().isClosed)))
                 merged.back() = bar;
         } else {
             merged.push_back(bar);
@@ -194,7 +199,21 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
 
 void CandleSeriesBuffer::resetSequences() {
     for (auto& [key, series] : m_series) {
-        series.lastSeq = 0;
+        resetOwnership(series);
+    }
+}
+
+void CandleSeriesBuffer::resetSeriesForSelection(const QString& symbol, int64_t timeframeSec) {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeSec});
+    if (it != m_series.end()) resetOwnership(it->second);
+}
+
+void CandleSeriesBuffer::resetOwnership(Series& series) {
+    series.lastSeq = 0;
+    for (size_t i = 0; i < series.count; ++i) {
+        auto& bar = getAt(series, i);
+        bar.seq = 0;
+        bar.historyRefreshable = true;
     }
 }
 

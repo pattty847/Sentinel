@@ -191,6 +191,8 @@ void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
 
 void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
                                                     qint64 startMs, qint64 endMs) {
+    if (!m_candleSymbol.isEmpty() && (symbol != m_candleSymbol || timeframeSec != m_candleTimeframeSec))
+        m_candleBuffer->resetSeriesForSelection(symbol, timeframeSec);
     m_candleSymbol = symbol;
     m_candleTimeframeSec = timeframeSec;
     m_candleHistoryReady = endMs > startMs && startMs > 0;
@@ -203,16 +205,19 @@ void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64
 void RemoteGridDataSource::requestNextCandlePage() {
     if (!m_candleHistoryReady) return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 oldest = m_candleBuffer->oldestTimeMs(m_candleSymbol, m_candleTimeframeSec);
+    const bool full = m_candleBuffer->historyCapacityReached(m_candleSymbol, m_candleTimeframeSec);
+    if (!m_candleBackfill.needsOlderData(oldest, full, now)) {
+        m_candleBackfillTimer.stop();
+        return;
+    }
     if (const auto delay = m_candleBackfill.retryDelayMs(now); delay > 0) {
         // Keep the earliest trailing deadline while movement continues.
         if (!m_candleBackfillTimer.isActive() || m_candleBackfillTimer.remainingTime() > delay)
             m_candleBackfillTimer.start(static_cast<int>(delay));
         return;
     }
-    const auto request = m_candleBackfill.next(
-        m_candleBuffer->oldestTimeMs(m_candleSymbol, m_candleTimeframeSec),
-        m_candleBuffer->historyCapacityReached(m_candleSymbol, m_candleTimeframeSec),
-        now);
+    const auto request = m_candleBackfill.next(oldest, full, now);
     if (!request) return;
     m_candleBackfillTimer.stop();
     m_client.requestCandleHistory(request->symbol.toStdString(), request->timeframeSec,
@@ -410,8 +415,8 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString& symbol,
         requestNextCandlePage(); // resume the latest selection after the stale flight
         return;
     }
-    if (m_candleBackfill.floorReached()) {
-        sLog_Data("Candle history floor: symbol=" << symbol << " tfSec=" << timeframeSec
+    if (m_candleBackfill.scanPaused()) {
+        sLog_Data("Candle history scan paused: symbol=" << symbol << " tfSec=" << timeframeSec
                   << " endSec=" << endTimeSec);
     }
     // History is merged by time and never touches the live seq stream.

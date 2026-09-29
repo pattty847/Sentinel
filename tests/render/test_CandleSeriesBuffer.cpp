@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "datasources/CandleSeriesBuffer.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
+#include <QCoreApplication>
+#include <QEvent>
 
 #include <vector>
 
@@ -87,7 +90,6 @@ TEST(CandleSeriesBuffer, RestFetchedBeforeBoundaryCannotCloseOrRegressNewerLiveB
     EXPECT_DOUBLE_EQ(actual.high, 16.0);
     EXPECT_DOUBLE_EQ(actual.low, 7.0);
     EXPECT_DOUBLE_EQ(actual.volume, 25.0);
-    buffer.resetSequences();
     buffer.applyHistory(kSym, kTfSec, {snapshot});
     EXPECT_DOUBLE_EQ(visible(buffer).back().volume, 25.0);
 }
@@ -151,4 +153,56 @@ TEST(CandleSeriesBuffer, CapacityGuardStopsBackfillThatWouldBeImmediatelyEvicted
     EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 60'000);
     buffer.applyUpdate(kSym, kTfSec, bar(20001, 2.0, false), 1, false);
     EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 120'000);
+}
+
+
+TEST(CandleSeriesBuffer, ReconnectRevokesAllCachedOwnershipAndAllowsHistoryCorrection) {
+    int argc = 1;
+    char name[] = "candle-reconnect";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    ASSERT_NE(buffer, nullptr);
+    buffer->applyUpdate(kSym, kTfSec, bar(4, 1.0, true), 49, true);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 2.0, true), 50, true);
+    // Exercise the actual queued reconnect hook without opening a connection.
+    source.streamClient()->connected();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    for (const auto& cached : visible(*buffer)) EXPECT_EQ(cached.seq, 0);
+    buffer->applyHistory(kSym, kTfSec, {bar(4, 3.0, true), bar(5, 4.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).front().close, 3.0);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 4.0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 5.0, false), 1, false);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 5.0);
+    EXPECT_EQ(visible(*buffer).back().seq, 1);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 1.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 5.0); // current-session ownership restored
+}
+
+TEST(CandleSeriesBuffer, SelectionReentryRevokesCachedOwnershipButOrdinaryViewportChangesDoNot) {
+    int argc = 1;
+    char name[] = "candle-selection";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    ASSERT_NE(buffer, nullptr);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 2.0, true), 50, true);
+    source.setCandleHistoryViewport("ETH-USD", kTfSec, 0, 0);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    EXPECT_EQ(visible(*buffer).back().seq, 0);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 3.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 3.0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 4.0, false), 1, false);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 1); // same selection, no valid history request
+    EXPECT_EQ(visible(*buffer).back().seq, 1);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 1.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 4.0);
+    source.setCandleHistoryViewport(kSym, 300, 0, 0);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    EXPECT_EQ(visible(*buffer).back().seq, 0); // timeframe reentry also revokes ownership
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 6.0, true), 1, true);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 6.0);
 }
