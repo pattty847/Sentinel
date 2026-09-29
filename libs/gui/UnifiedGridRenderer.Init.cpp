@@ -181,28 +181,18 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                                  << " bytes=" << letters.size());
                     return;
                 }
-                m_tpoOverlay.enqueue(
-                    TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters), grid},
-                    sessionStartMs, sessionEndMs, timeframeMs, gridWidth);
+                if (grid.startMs != sessionStartMs || grid.endMs != sessionEndMs) {
+                    sLog_RenderN(1000, "tpo column dropped: session mismatch grid=["
+                                 << grid.startMs << ".." << grid.endMs << "] session=["
+                                 << sessionStartMs << ".." << sessionEndMs << "]");
+                    return;
+                }
+                m_tpoOverlay.enqueue(TpoOverlayRenderer::PendingUpload{
+                    x, gridWidth, gridHeight, std::move(letters), grid, timeframeMs});
                 update();
             },
             Qt::QueuedConnection);
 
-    // ── TPO POC/VAH/VAL ────────────────────────────────────────────────────
-    connect(m_dataProcessor.get(), &DataProcessor::tpoPocVahValReady,
-            this,
-            [this](int pocRow, int vahRow, int valRow,
-                   int gridHeight, double maxPrice, double tickSize) {
-                std::lock_guard<std::mutex> lock(m_tpoPendingMutex);
-                m_tpoPocRow = pocRow;
-                m_tpoVahRow = vahRow;
-                m_tpoValRow = valRow;
-                m_tpoPvvGridHeight = gridHeight;
-                m_tpoPvvMaxPrice = maxPrice;
-                m_tpoPvvTickSize = tickSize;
-                m_tpoPvvDirty = true;
-            },
-            Qt::QueuedConnection);
     connect(m_dataProcessor.get(), &DataProcessor::volumeProfileReady,
             this,
             [this](std::vector<float> bins, VolumeProfileState::Snapshot snap) {

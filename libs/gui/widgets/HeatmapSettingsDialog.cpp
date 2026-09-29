@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <algorithm>
 
 namespace {
 struct SliderWithLabel {
@@ -93,6 +94,9 @@ void HeatmapSettingsDialog::buildUi() {
     m_tpoTimeframeCombo = new QComboBox(this);
     m_tpoTimeframeCombo->addItem("15m", 900000);
     m_tpoTimeframeCombo->addItem("30m", 1800000);
+    m_tpoTimeframeCombo->addItem("1h", 3600000);
+    m_tpoTimeframeCombo->addItem("4h", 14400000);
+    m_tpoTimeframeCombo->addItem("1D", 86400000);
     form->addRow("TPO Bracket", m_tpoTimeframeCombo);
 
     m_tpoSessionCombo = new QComboBox(this);
@@ -102,7 +106,19 @@ void HeatmapSettingsDialog::buildUi() {
     m_tpoSessionCombo->addItem("Australia", 3);
     m_tpoSessionCombo->addItem("24H", 4);
     m_tpoSessionCombo->addItem("1W", 5);
+    m_tpoSessionCombo->addItem("1M", 6);
     form->addRow("TPO Session", m_tpoSessionCombo);
+
+    m_tpoLayoutCombo = new QComboBox(this);
+    m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
+    m_tpoLayoutCombo->addItem("Split", "split");
+    form->addRow("TPO Layout", m_tpoLayoutCombo);
+
+    m_tpoThemeCombo = new QComboBox(this);
+    m_tpoThemeCombo->addItem("Rainbow", "rainbow");
+    m_tpoThemeCombo->addItem("Calm", "calm");
+    m_tpoThemeCombo->addItem("Sage", "sage");
+    form->addRow("TPO Theme", m_tpoThemeCombo);
 
     layout->addLayout(form);
 
@@ -137,6 +153,12 @@ void HeatmapSettingsDialog::buildUi() {
                 }
                 m_renderer->setTpoSessionType(m_tpoSessionCombo->itemData(idx).toInt());
             });
+    connect(m_tpoLayoutCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+        if (m_renderer && idx >= 0) m_renderer->setTpoLayout(m_tpoLayoutCombo->itemData(idx).toString());
+    });
+    connect(m_tpoThemeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+        if (m_renderer && idx >= 0) m_renderer->setTpoTheme(m_tpoThemeCombo->itemData(idx).toString());
+    });
     connect(m_logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
@@ -166,6 +188,14 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
         if (sessionIdx >= 0) {
             m_tpoSessionCombo->setCurrentIndex(sessionIdx);
         }
+    }
+    if (m_tpoLayoutCombo) {
+        const QSignalBlocker block(m_tpoLayoutCombo);
+        m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));
+    }
+    if (m_tpoThemeCombo) {
+        const QSignalBlocker block(m_tpoThemeCombo);
+        m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpoTheme())));
     }
 }
 

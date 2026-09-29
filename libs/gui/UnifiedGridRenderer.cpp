@@ -12,6 +12,7 @@
 #include "render/RecordingBandPolicy.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/ViewportAutoScrollController.hpp"
+#include "../core/servermodel/SessionManager.hpp"
 #include <QMetaObject>
 #include <algorithm>
 #include <cmath>
@@ -404,21 +405,52 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
 }
 
 void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
-  const int clamped = (timeframeMs == 1800000) ? 1800000 : 900000;
-  if (m_tpoTimeframeMs == clamped) {
+  const int resolved = static_cast<int>(tpo::resolvePeriodMs(m_tpoSessionType, timeframeMs));
+  if (m_tpoTimeframeMs == resolved) {
     return;
   }
-  m_tpoTimeframeMs = clamped;
+  m_tpoTimeframeMs = resolved;
   emit tpoConfigChanged();
 }
 
 void UnifiedGridRenderer::setTpoSessionType(int sessionType) {
-  const int clamped = (sessionType >= 0 && sessionType <= 5) ? sessionType : 4;
-  if (m_tpoSessionType == clamped) {
+  const int clamped = (sessionType >= 0 &&
+                       sessionType <= static_cast<int>(SessionManager::SessionType::M1)) ? sessionType : 4;
+  const int period = static_cast<int>(tpo::resolvePeriodMs(clamped, m_tpoTimeframeMs));
+  if (m_tpoSessionType == clamped && m_tpoTimeframeMs == period) {
     return;
   }
   m_tpoSessionType = clamped;
+  m_tpoTimeframeMs = period;
   emit tpoConfigChanged();
+}
+
+void UnifiedGridRenderer::setTpoLayout(const QString& layout) {
+  auto style = m_tpoOverlay.style();
+  const auto next = tpo::parseLayout(layout.toStdString(), style.layout);
+  if (next == style.layout) return;
+  style.layout = next;
+  m_tpoOverlay.setStyle(style);
+  sLog_Render("TPO layout=" << tpo::layoutName(next));
+  update();
+}
+
+void UnifiedGridRenderer::setTpoTheme(const QString& theme) {
+  auto style = m_tpoOverlay.style();
+  const auto next = tpo::parseTheme(theme.toStdString(), style.theme);
+  if (next == style.theme) return;
+  style.theme = next;
+  m_tpoOverlay.setStyle(style);
+  sLog_Render("TPO theme=" << tpo::themeName(next));
+  update();
+}
+
+QString UnifiedGridRenderer::tpoLayout() const {
+  return QString::fromLatin1(tpo::layoutName(m_tpoOverlay.style().layout));
+}
+
+QString UnifiedGridRenderer::tpoTheme() const {
+  return QString::fromLatin1(tpo::themeName(m_tpoOverlay.style().theme));
 }
 
 void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
@@ -868,6 +900,27 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   if (m_axisTextService) {
     m_axisTextService->setAxisLabelPxOverride(config.gui.axisLabelPx);
     m_axisTextService->refreshAxisLayout();
+  }
+  {
+    TpoOverlayRenderer::Style style = m_tpoOverlay.style();
+    style.layout = tpo::parseLayout(config.tpo.layout, tpo::Layout::Collapsed);
+    style.theme = tpo::parseTheme(config.tpo.theme, tpo::Theme::Rainbow);
+    style.rowPx = config.tpo.rowPx;
+    style.maxSessions = config.tpo.sessions;
+    m_tpoOverlay.setStyle(style);
+    const int sessionType = tpo::parseSessionType(config.tpo.session, 4);
+    const int period = static_cast<int>(tpo::resolvePeriodMs(
+        sessionType, static_cast<int64_t>(std::max(1, config.tpo.periodMinutes)) * 60000));
+    if (sessionType != m_tpoSessionType || period != m_tpoTimeframeMs) {
+      m_tpoSessionType = sessionType;
+      m_tpoTimeframeMs = period;
+      emit tpoConfigChanged();
+    }
+    sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
+                << " theme=" << tpo::themeName(style.theme)
+                << " session=" << tpo::sessionTypeName(sessionType)
+                << " periodMs=" << period << " sessions=" << m_tpoOverlay.style().maxSessions
+                << " rowPx=" << m_tpoOverlay.style().rowPx);
   }
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;

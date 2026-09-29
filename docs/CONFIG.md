@@ -126,6 +126,23 @@ trading:
 
 See the default files `config/server_config.yaml` and `config/client_config.yaml` for every key and comment. Override only what you need in the `.server_config.yaml` / `.client_config.yaml` copies.
 
+## TPO (market profile)
+
+Client-only look and session selection for the TPO layer (`tpo:` in `client_config.yaml`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `layout` | `collapsed` | `collapsed`: each price row's letters pack left-to-right from the session start (one profile per session; it sticks to the plot's left edge while its session is on screen). `split`: every period keeps its own time column, aligned with candles. |
+| `theme` | `rainbow` | `rainbow`: cell colour walks red to violet across the session's periods. `calm`: single blue hue. `sage`: single green hue. In every theme the POC row is light and cells outside the 70% value area are dimmed. |
+| `session` | `h24` | `ny`, `london`, `asia`, `australia`, `h24`, `w1` (7 days from Monday 00:00 UTC) or `m1` (calendar month, UTC). |
+| `period_minutes` | `30` | Letter bracket. It must divide the session (for `w1`/`m1`, a UTC day) into at most 2048 periods; otherwise the largest valid standard bracket (15, 30, 60, 120, 240, 480, 1440 minutes) below it is used. |
+| `sessions` | `5` | Sessions shown: the current one plus earlier ones (1-8). History is requested newest first in pages of at most 7 days and 512 periods, one page in flight at a time (the next page is sent when the reply arrives; a failed or silent page is skipped after an error or 45 s and cancelled on the server). The page budget covers every configured session, capped at 64 pages. Re-requesting the selection that is already loading is a no-op. |
+| `row_px` | `14` | Price rows (trade grid ticks) merge in 1-2-5 steps until a row is at least this tall. POC and value area are computed on the merged rows. |
+
+Letters are session-relative: `A`-`Z`, then `a`-`z`, then repeat. They fade out
+when a cell is too small to read; the coloured cells remain. `m1` needs a server
+that accepts session type 6.
+
 ## Related documentation
 
 - **`docs/ARCHITECTURE.md`** — How server and client use config (e.g. `server_config` on connect).
@@ -151,5 +168,6 @@ session columns; the bracket must divide the session duration. Price rows descen
 from `max_price`, with `min_price = max_price - grid_height * tick_size`.
 The first successful publication anchors the grid on the latest retained trade
 (or a candle close for TPO history after restart), rounded to its own tick. The grid remains fixed for that subscription; requests
-may explicitly change `price_min`, `tick_size` and `rows`. Recording heatmap zoom,
+may explicitly change `price_min`, `tick_size` and `rows`. Weekly and monthly TPO
+sessions use the same rows at a 5x / 10x tick, centred on this grid. Recording heatmap zoom,
 re-bands and tick changes do not change this grid.

@@ -15,7 +15,7 @@ Threading: render thread only (one instance per renderer).
 
 class FrameProfiler {
 public:
-    enum Stage { Context, Mapping, Uploads, Overlays, AxisText, Labels, TextEnd, TpoLines, StageCount };
+    enum Stage { Context, Mapping, Uploads, Overlays, AxisText, Labels, TextEnd, StageCount };
 
     static bool enabled() {
         static const bool on = qEnvironmentVariableIsSet("SENTINEL_FRAME_PROFILE");
@@ -46,7 +46,7 @@ public:
         if (m_window.elapsed() < 1000 || m_frames == 0) return {};
 
         static const char* kNames[StageCount] = {"context", "mapping", "uploads", "overlays",
-                                                 "axis", "labels", "textEnd", "tpo"};
+                                                 "axis", "labels", "textEnd"};
         auto ms = [](qint64 ns) { return QString::number(ns / 1e6, 'f', 2); };
         QString line = QString("FRAME PROFILE frames=%1 total avg=%2 max=%3 ms |")
                            .arg(m_frames).arg(ms(m_totalSumNs / m_frames)).arg(ms(m_totalMaxNs));

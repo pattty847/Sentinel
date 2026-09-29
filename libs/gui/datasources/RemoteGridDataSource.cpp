@@ -95,6 +95,11 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
             this, &RemoteGridDataSource::onTpoSliceReceived, Qt::QueuedConnection);
+    // Queued after the chunk's slices, so pacing never outruns their delivery.
+    connect(&m_client, &SentinelStreamClient::tpoHistoryChunkReceived,
+            this, &IGridDataSource::tpoHistoryChunkReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tpoHistoryFailed,
+            this, &IGridDataSource::tpoHistoryFailed, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::volumeProfileSliceReceived,
             this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
@@ -242,8 +247,14 @@ void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
                                              int64_t timeframeMs,
                                              int sessionType,
                                              int64_t endTimeMs,
-                                             int count) {
-    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, sessionType, endTimeMs, count);
+                                             int count,
+                                             const QString& requestId) {
+    m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, sessionType, endTimeMs, count,
+                               requestId.toStdString());
+}
+
+void RemoteGridDataSource::cancelTpoHistory(const QString& symbol, const QString& requestId) {
+    m_client.cancelTpoHistory(symbol.toStdString(), requestId.toStdString());
 }
 
 

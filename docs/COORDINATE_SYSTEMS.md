@@ -35,18 +35,7 @@ Use when data is a dense 2D grid and incremental column texture uploads matter.
 - May share `srcRect` when dimensions match the heatmap grid; computes its own wrapped time offset for ring alignment.  
 - Ring-coupled behavior is intentional; do not treat as session-timeline.
 
-**TPO texture path (`TpoOverlayRenderer`)**  
-Two distinct contracts:
-
-1. **HorizontalProfile**  
-   - Rank-indexed profile columns.  
-   - Texture-space semantic is not candle-time aligned.
-
-2. **VerticalTimeline**  
-   - Session-time anchored columns; X-domain is the session time range `[sessionStartMs, sessionEndMs]` (texture columns map to period indices).  
-   - **Must not** sample texture X from the heatmap `srcRect.x`; doing so causes TPO to drift/stretch on pan.  
-   - Texture X must use full session coverage; only Y clipping may be taken from the viewport `sourceRect`.  
-   - Draw rect is clipped to the visible portion of the session range via `computeTimelinedDrawRect()`.
+**TPO (`TpoOverlayRenderer`)** is a geometry overlay: see 3.2.
 
 ### 3.2 Geometry overlays
 
@@ -56,6 +45,11 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 - Contract: world-semantic.  
 - X: `mapping.timeToScreenX(...)`; Y: `mapping.priceToScreenY(...)`.  
 - Does not use heatmap `timeOffset`.
+
+**TPO profiles (`TpoOverlayRenderer`)**  
+- Contract: world-semantic per session, from `surfaceBounds` + view time/price (INV-037), never the heatmap `drawRect`/`srcRect`.  
+- Geometry is built in session layout space: x from the session start (split: `period * periodPx`; collapsed: `k * cellW`), y from the top of the trade grid (`(topAbs - (G+1)*group) * tickPx`). A per-session `QSGTransformNode` translates it to the screen, so panning only changes the matrix.  
+- Split keeps the session X-domain `[sessionStartMs, sessionEndMs]` (INV-034). Collapsed profiles anchor at the session start and stick to the plot's left edge while the session is still on screen.
 
 **Labels / axis text**  
 - Contract: world-semantic placement with pixel-density constraints.  

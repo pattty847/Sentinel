@@ -389,24 +389,41 @@ void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
                                              int64_t timeframeMs,
                                              int sessionType,
                                              int64_t endTimeMs,
-                                             int count) {
-    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
+                                             int count,
+                                             const std::string& requestId) {
+    if (symbol.empty() || timeframeMs <= 0 || count <= 0 || requestId.empty() || requestId.size() > 64) {
         sLog_Warning("TPO history request not sent: invalid args symbol=" << symbol
-                     << " tfMs=" << timeframeMs << " count=" << count);
+                     << " tfMs=" << timeframeMs << " count=" << count << " requestId=" << requestId);
         return;
     }
     sLog_Data("TPO history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " sessionType=" << sessionType << " end=" << endTimeMs << " count=" << count);
+              << " sessionType=" << sessionType << " end=" << endTimeMs << " count=" << count
+              << " requestId=" << requestId);
     nlohmann::json msg = {
         {"type", "tpo_history_request"},
         {"symbol", symbol},
         {"timeframe_ms", timeframeMs},
         {"session_type", sessionType},
         {"end_time", endTimeMs},
-        {"count", count}
+        {"count", count},
+        {"request_id", requestId}
     };
     std::string str = msg.dump();
-    net::post(m_strand, [this, payload = std::move(str)]() mutable {
+    net::post(m_strand, [this, requestId, payload = std::move(str)]() mutable {
+        m_expectedTpoRequestId = requestId;
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) {
+            doWrite();
+        }
+    });
+}
+
+void SentinelStreamClient::cancelTpoHistory(const std::string& symbol, const std::string& requestId) {
+    if (symbol.empty() || requestId.empty()) return;
+    std::string str = nlohmann::json{{"type", "tpo_history_cancel"}, {"symbol", symbol},
+                                     {"request_id", requestId}}.dump();
+    net::post(m_strand, [this, requestId, payload = std::move(str)]() mutable {
+        if (m_expectedTpoRequestId == requestId) m_expectedTpoRequestId.clear();
         m_writeQueue.push_back(std::move(payload));
         if (m_isConnected && m_writeQueue.size() == 1) {
             doWrite();
@@ -679,6 +696,15 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                         QString::fromStdString(msg["request_id"].get<std::string>()),
                         msg.value("band_generation", uint64_t{0}),
                         QString::fromStdString(msg.value("message", "")));
+                }
+                if (msg.value("context", "") == "trade_overlay" &&
+                    msg.contains("request_id") && msg["request_id"].is_string() &&
+                    !m_expectedTpoRequestId.empty() &&
+                    msg["request_id"].get<std::string>() == m_expectedTpoRequestId) {
+                    m_expectedTpoRequestId.clear();
+                    emit tpoHistoryFailed(QString::fromStdString(msg.value("symbol", "")),
+                                          QString::fromStdString(msg["request_id"].get<std::string>()),
+                                          QString::fromStdString(msg.value("message", "")));
                 }
                 if (msg.value("context", "") == "candle_history_request") {
                     emit candleHistoryFailed(QString::fromStdString(msg.value("symbol", "")));
@@ -1377,6 +1403,17 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
 
     int emitted = 0;
     int skipped = 0;
+    int64_t lastEndMs = 0;
+    const std::string requestId = (msg.contains("request_id") && msg["request_id"].is_string())
+        ? msg["request_id"].get<std::string>() : std::string{};
+    // Only the in-flight page is accepted; stale, cancelled or untagged replies
+    // are dropped before any slice reaches the GUI.
+    if (requestId.empty() || requestId != m_expectedTpoRequestId) {
+        sLog_DataN(5000, "Dropping tpo_history_chunk: request_id=" << requestId
+                   << " expected=" << m_expectedTpoRequestId << " symbol=" << symbol);
+        return;
+    }
+    m_expectedTpoRequestId.clear();
     for (const auto& item : columns) {
         const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
         const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
@@ -1420,10 +1457,13 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.letters = std::move(letters);
         emit tpoSliceReceived(slice);
         ++emitted;
+        lastEndMs = std::max(lastEndMs, endMs);
     }
     sLog_Data("TPO history recv: symbol=" << symbol << " tfMs=" << timeframeMs
               << " sessionType=" << sessionType << " columns=" << columns.size()
-              << " emitted=" << emitted);
+              << " emitted=" << emitted << " requestId=" << requestId);
+    emit tpoHistoryChunkReceived(QString::fromStdString(symbol), QString::fromStdString(requestId),
+                                 timeframeMs, sessionType, lastEndMs, emitted);
     if (skipped > 0) {
         sLog_Warning("TPO history recv: skipped " << skipped
                      << " columns with invalid metadata or letter count, symbol=" << symbol

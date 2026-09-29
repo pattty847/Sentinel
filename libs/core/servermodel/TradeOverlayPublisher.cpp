@@ -12,6 +12,43 @@ bool Grid::valid() const {
         std::isfinite(tick) && tick > 0 && tick <= 1e6 &&
         std::isfinite(maxPrice) && maxPrice > 0 && maxPrice <= 1e12 && minPrice() >= 0;
 }
+SessionManager::SessionType volumeProfileSession(SessionManager::SessionType tpoSession) {
+    const auto duration = SessionManager::sessionDurationMs(tpoSession);
+    return (duration > 0 && duration <= 86400000) ? tpoSession : SessionManager::SessionType::H24;
+}
+const char* candleGranularityName(int64_t granularitySec) {
+    switch (granularitySec) {
+    case 60: return "ONE_MINUTE";
+    case 300: return "FIVE_MINUTE";
+    case 900: return "FIFTEEN_MINUTE";
+    case 1800: return "THIRTY_MINUTE";
+    case 3600: return "ONE_HOUR";
+    case 7200: return "TWO_HOUR";
+    case 21600: return "SIX_HOUR";
+    case 86400: return "ONE_DAY";
+    default: return nullptr;
+    }
+}
+int64_t tpoCandleGranularityMs(int64_t periodMs, int64_t sessionStartMs) {
+    int64_t best = 60000;
+    for (const auto sec : kCandleGranularitiesSec) {
+        const int64_t ms = sec * 1000;
+        if (ms <= periodMs && periodMs % ms == 0 && sessionStartMs % ms == 0) best = ms;
+    }
+    return best;
+}
+Grid tpoGridFor(const Grid& base, SessionManager::SessionType session) {
+    const int k = session == SessionManager::SessionType::M1 ? 10
+                : session == SessionManager::SessionType::W1 ? 5 : 1;
+    if (k == 1 || !base.valid()) return base;
+    // Same row count, coarser tick, centred on the base band, aligned to its own tick.
+    Grid grid = base;
+    grid.tick = base.tick * k;
+    const double centre = base.maxPrice - base.rows * base.tick / 2;
+    grid.maxPrice = std::ceil((centre + base.rows * grid.tick / 2) / grid.tick) * grid.tick;
+    if (grid.minPrice() < 0) grid.maxPrice = grid.rows * grid.tick;
+    return grid.valid() ? grid : base;
+}
 std::vector<int64_t> liveBuckets(int64_t now, int64_t previous, int64_t tf, int64_t origin) {
     if (tf <= 0 || now < origin || now <= 0) return {};
     const auto bucket = origin + (now - origin) / tf * tf;
@@ -37,10 +74,14 @@ TimeWindow historyWindow(const Request& q, bool tpo) {
 }
 TimeWindow tradeWindow(const Request& q) {
     if (q.kind != Kind::Live) return historyWindow(q, q.kind == Kind::TpoHistory);
-    const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
-    auto start = session.startMs; // VP needs the session; footprint may precede its open.
+    // VP needs its UTC day; live footprint and TPO need only their last buckets.
+    auto start = SessionManager::sessionContaining(q.nowMs, volumeProfileSession(q.session)).startMs;
     for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.footprintMs))
         start = std::min(start, bucket);
+    const auto tpoSession = SessionManager::sessionContaining(q.nowMs, q.session);
+    if (tpoSession.valid)
+        for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.tpoMs, tpoSession.startMs))
+            start = std::min(start, bucket);
     return {std::max<int64_t>(0, start), q.nowMs + 1};
 }
 CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
@@ -49,17 +90,19 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
     result.ok = true;
     if (q.kind != Kind::TpoHistory) return result;
     auto window = historyWindow(q, true);
+    const auto session = SessionManager::sessionContaining(window.startMs, q.session);
+    const int64_t g = tpoCandleGranularityMs(q.tpoMs, session.valid ? session.startMs : 0);
     if (retainedFromMs > 0) {
-        // Include the first partially retained minute, without widening the page.
-        const auto minuteEnd = retainedFromMs / 60000 * 60000 + (retainedFromMs % 60000 ? 60000 : 0);
-        window.endMs = std::min(window.endMs, minuteEnd);
+        // Include the first partially retained candle, without widening the page.
+        const auto candleEnd = retainedFromMs / g * g + (retainedFromMs % g ? g : 0);
+        window.endMs = std::min(window.endMs, candleEnd);
     }
     if (window.empty()) return result;
-    // Requests may partition a session at non-minute boundaries; REST still
-    // requires whole minute pages. Apply each candle to the periods it overlaps.
-    window.startMs = window.startMs / 60000 * 60000;
-    window.endMs = (window.endMs + 59999) / 60000 * 60000;
-    // SessionManager's longest session is five days. Keep a hard input bound.
+    // Period boundaries are multiples of g from the session open, so these
+    // roundings only matter for the one-minute fallback.
+    window.startMs = window.startMs / g * g;
+    window.endMs = (window.endMs + g - 1) / g * g;
+    // Clients page long sessions (W1, M1) in windows of at most seven days.
     if (window.endMs - window.startMs > 7LL * 86400000) {
         result.ok = false; result.error = "TPO candle history exceeds input budget"; return result;
     }
@@ -69,8 +112,8 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
         if (stopped && stopped()) {
             result.ok = false; result.error = "overlay history cancelled"; return result;
         }
-        const auto end = std::min<int64_t>(window.endMs, cursor + batch * 60000LL);
-        auto page = fetch(cursor / 1000, end / 1000, static_cast<int>((end - cursor) / 60000));
+        const auto end = std::min<int64_t>(window.endMs, cursor + batch * g);
+        auto page = fetch(cursor / 1000, end / 1000, g / 1000, static_cast<int>((end - cursor) / g));
         if (stopped && stopped()) {
             result.ok = false; result.error = "overlay history cancelled"; return result;
         }
@@ -80,7 +123,7 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
             return result;
         }
         for (const auto& bar : page.candles) {
-            if (bar.timestamp_ms >= cursor && bar.timestamp_ms < end && bar.timestamp_ms % 60000 == 0)
+            if (bar.timestamp_ms >= cursor && bar.timestamp_ms < end && bar.timestamp_ms % g == 0)
                 minutes[bar.timestamp_ms] = bar;
         }
         cursor = end;
@@ -98,49 +141,51 @@ struct Builder {
     const std::vector<OHLCVBar>& candles;
     int64_t retainedFromMs;
     Result out;
+    Grid tpoGrid;
     size_t bytes = 0;
     void send(Json j) {
         auto data = j.dump();
         if (bytes + data.size() > kMaxBytes) { out.error = "overlay output budget exceeded"; return; }
         bytes += data.size(); out.messages.push_back(std::move(data));
     }
-    template<class F> void scan(int64_t start, int64_t end, F fn) const {
+    template<class F> void scan(const Grid& grid, int64_t start, int64_t end, F fn) const {
         auto it = std::lower_bound(trades.begin(), trades.end(), start,
             [](const Trade& t, int64_t ms) { return t.timestampMs < ms; });
         for (; it != trades.end() && it->timestampMs < end; ++it) {
             if (!std::isfinite(it->price) || !std::isfinite(it->size) || it->size <= 0) continue;
-            const double row = std::floor((out.grid.maxPrice - it->price) / out.grid.tick);
-            if (row >= 0 && row < out.grid.rows) fn(static_cast<int>(row), *it);
+            const double row = std::floor((grid.maxPrice - it->price) / grid.tick);
+            if (row >= 0 && row < grid.rows) fn(static_cast<int>(row), *it);
         }
     }
     Json column(int64_t start, int64_t tf, bool tpo) const {
+        const Grid& grid = tpo ? tpoGrid : out.grid;
         Json j = {{"time_start", start}, {"time_end", start + tf},
-                  {"min_price", out.grid.minPrice()}, {"max_price", out.grid.maxPrice},
-                  {"tick_size", out.grid.tick}};
+                  {"min_price", grid.minPrice()}, {"max_price", grid.maxPrice},
+                  {"tick_size", grid.tick}};
         if (tpo) {
-            QByteArray letters(out.grid.rows, '\0');
+            QByteArray letters(grid.rows, '\0');
             const auto session = SessionManager::sessionContaining(start, q.session);
             const auto origin = session.valid ? session.startMs : 0;
             const char letter = 'A' + ((start - origin) / tf) % 26;
-            scan(start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+            scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
             if (q.kind == Kind::TpoHistory) {
-                auto bar = std::lower_bound(candles.begin(), candles.end(), start - 59999,
+                auto bar = std::lower_bound(candles.begin(), candles.end(), start,
                     [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
                 for (; bar != candles.end() && bar->timestamp_ms < start + tf; ++bar) {
                     if (retainedFromMs > 0 && bar->timestamp_ms >= retainedFromMs) continue;
                     if (!std::isfinite(bar->high) || !std::isfinite(bar->low) || bar->high < bar->low) continue;
-                    const double first = std::floor((out.grid.maxPrice - bar->high) / out.grid.tick);
-                    const double last = std::floor((out.grid.maxPrice - bar->low) / out.grid.tick);
-                    if (last < 0 || first >= out.grid.rows) continue;
+                    const double first = std::floor((grid.maxPrice - bar->high) / grid.tick);
+                    const double last = std::floor((grid.maxPrice - bar->low) / grid.tick);
+                    if (last < 0 || first >= grid.rows) continue;
                     const int lo = static_cast<int>(std::max(0.0, first));
-                    const int hi = static_cast<int>(std::min(double(out.grid.rows - 1), last));
+                    const int hi = static_cast<int>(std::min(double(grid.rows - 1), last));
                     for (int row = lo; row <= hi; ++row) letters[row] = letter;
                 }
             }
             j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
         } else {
             std::vector<double> delta(out.grid.rows, 0);
-            scan(start, start + tf, [&](int row, const Trade& t) {
+            scan(out.grid, start, start + tf, [&](int row, const Trade& t) {
                 if (t.side == AggressorSide::Buy) delta[row] += t.size;
                 else if (t.side == AggressorSide::Sell) delta[row] -= t.size;
             });
@@ -186,6 +231,7 @@ struct Builder {
             {"symbol", q.symbol}, {"timeframe_ms", tf}, {"session_type", static_cast<int>(q.session)},
             {"grid_width", width}, {"grid_height", out.grid.rows},
             {"format", tpo ? "tpo_ascii" : "q16_delta"}, {"encoding", "base64"}, {"columns", std::move(columns)}};
+        if (tpo && !live && !q.requestId.empty()) j["request_id"] = q.requestId;
         // Live uses the existing per-column messages, preserving consumer routing.
         if (live) {
             for (auto& col : j["columns"]) {
@@ -196,10 +242,11 @@ struct Builder {
         } else send(std::move(j));
     }
     void profile() {
-        const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
+        const auto vpSession = volumeProfileSession(q.session);
+        const auto session = SessionManager::sessionContaining(q.nowMs, vpSession);
         if (!session.valid) return;
         std::vector<double> bins(out.grid.rows, 0);
-        scan(session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
+        scan(out.grid, session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
         double total = 0; int poc = 0;
         for (int i = 0; i < out.grid.rows; ++i) { total += bins[i]; if (bins[i] > bins[poc]) poc = i; }
         int lo = poc, hi = poc; double covered = bins[poc];
@@ -216,7 +263,7 @@ struct Builder {
         }
         send({{"type", "volume_profile_slice"}, {"schema_version", protocol::SentinelProtocol::kVolumeProfileSchemaVersion},
             {"symbol", q.symbol}, {"session_start_ms", session.startMs}, {"session_end_ms", session.endMs},
-            {"session_type", static_cast<int>(q.session)}, {"grid_height", out.grid.rows},
+            {"session_type", static_cast<int>(vpSession)}, {"grid_height", out.grid.rows},
             {"min_price", out.grid.minPrice()}, {"max_price", out.grid.maxPrice}, {"tick_size", out.grid.tick},
             {"total_volume", total}, {"poc_price", out.grid.maxPrice - (poc + .5) * out.grid.tick},
             {"vah_price", out.grid.maxPrice - lo * out.grid.tick},
@@ -242,6 +289,7 @@ Result build(const Request& q, const std::vector<Trade>& trades,
         b.out.grid.maxPrice = (bottom + b.out.grid.rows) * b.out.grid.tick;
     }
     if (!b.out.grid.valid()) { b.out.error = "overlay grid unavailable or invalid"; return b.out; }
+    b.tpoGrid = tpoGridFor(b.out.grid, q.session);
     if (q.kind != Kind::TpoHistory) b.columns(false, q.kind == Kind::Live);
     if (q.kind != Kind::FootprintHistory) b.columns(true, q.kind == Kind::Live);
     if (q.kind == Kind::Live) b.profile();

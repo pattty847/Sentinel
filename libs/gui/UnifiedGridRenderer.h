@@ -166,19 +166,7 @@ private:
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
     std::vector<IOverlayRenderer*> m_overlays;  // non-owning; points to inline members above
-    // POC/VAH/VAL profile markers — written on main thread, read on render thread under m_tpoPendingMutex.
-    mutable std::mutex m_tpoPendingMutex;
-    int m_tpoPocRow = -1;
-    int m_tpoVahRow = -1;
-    int m_tpoValRow = -1;
-    int m_tpoPvvGridHeight = 0;
-    double m_tpoPvvMaxPrice = 0.0;
-    double m_tpoPvvTickSize = 0.0;
-    bool m_tpoPvvDirty = false;
-    // QSG nodes for POC/VAH/VAL horizontal lines — owned by render tree, nulled in onRootRebuilt.
-    // [0] = POC (gold), [1] = VAH (cyan), [2] = VAL (cyan)
-    QSGGeometryNode* m_pvvLineNodes[3] = {nullptr, nullptr, nullptr};
-    int m_tpoTimeframeMs = 900000;            // standard 15m
+    int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
     QElapsedTimer m_uploadTimer;
@@ -239,6 +227,12 @@ public:
     Q_INVOKABLE void setVolumeProfileLayerEnabled(bool enabled);
     Q_INVOKABLE void setTpoTimeframeMs(int timeframeMs);
     Q_INVOKABLE void setTpoSessionType(int sessionType);
+    // TPO look: layout "split"|"collapsed", theme "rainbow"|"calm"|"sage". Unknown names are ignored.
+    Q_INVOKABLE void setTpoLayout(const QString& layout);
+    Q_INVOKABLE void setTpoTheme(const QString& theme);
+    QString tpoLayout() const;
+    QString tpoTheme() const;
+    int tpoSessions() const { return m_tpoOverlay.style().maxSessions; }
     
     GridViewState* getViewState() const { return m_viewState.get(); }
     QObject* viewState() const { return m_viewState.get(); }
@@ -413,8 +407,7 @@ private:
                                      int gridHeight);
     void publishFrameContext(const FrameContext& frame);
     void drainFrameUploads(std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
-                           std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
+                           std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
     void renderOverlays(HeatmapIntensityNode* texNode,
                         const FrameContext& frame,
                         bool drawHeatmap,
@@ -423,11 +416,7 @@ private:
                         int gridWidth,
                         int gridHeight,
                         std::vector<HeatmapOverlayRenderer::PendingUpload>& heatmapUploads,
-                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads,
-                        std::vector<TpoOverlayRenderer::PendingUpload>& tpoUploads);
-    void renderTpoPocVahValLines(HeatmapIntensityNode* texNode,
-                                 const FrameContext& frame,
-                                 bool show);
+                        std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
     void updateLabelGeometry(HeatmapIntensityNode* texNode,
                              const FrameContext& frame,
                              const HeatmapStreamState::Snapshot& snapshot,

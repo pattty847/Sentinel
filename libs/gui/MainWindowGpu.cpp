@@ -18,6 +18,7 @@
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "../core/servermodel/SessionManager.hpp"
+#include "render/TpoProfileModel.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "render/GridViewState.hpp"
@@ -781,27 +782,69 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    int64_t timeframeMs = 900000;
+    int64_t timeframeMs = 1800000;
     int sessionType = 4;
+    int sessions = 5;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             timeframeMs = renderer->tpoTimeframeMs();
             sessionType = renderer->tpoSessionType();
+            sessions = renderer->tpoSessions();
         }
     }
-    if (timeframeMs != 900000 && timeframeMs != 1800000) {
-        timeframeMs = 900000;
+    timeframeMs = tpo::resolvePeriodMs(sessionType, timeframeMs);
+    if (m_qmlController) {
+        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
+            if (auto* processor = renderer->getDataProcessor()) {
+                QMetaObject::invokeMethod(processor, [processor, timeframeMs, sessionType] {
+                    processor->setTpoSelection(timeframeMs, sessionType);
+                }, Qt::QueuedConnection);
+            }
+        }
     }
-    if (sessionType < static_cast<int>(SessionManager::SessionType::NY) ||
-        sessionType > static_cast<int>(SessionManager::SessionType::W1)) {
-        sessionType = 4;
+    // Long sessions (W1, M1) arrive in pages of <= 7 days; pages are sent one at a
+    // time (the server rejects more than eight queued overlay history requests).
+    const int64_t nowMs = QDateTime::currentMSecsSinceEpoch();
+    const auto pages = tpo::historyPages(sessionType, timeframeMs, nowMs, sessions,
+                                         tpo::historyPageBudget(sessionType, timeframeMs, sessions));
+    const tpo::HistoryPager::Selection selection{symbol.toStdString(), timeframeMs, sessionType, sessions};
+    const bool running = m_tpoPager.busy();
+    const auto first = m_tpoPager.start(selection, pages, nowMs);
+    sLog_Data("TPO history: symbol=" << symbol << " tfMs=" << timeframeMs
+              << " session=" << tpo::sessionTypeName(sessionType) << " sessions=" << sessions
+              << " pages=" << pages.size()
+              << (running && !first ? " (already paging this selection)" : "")
+              << " generation=" << m_tpoPager.generation());
+    sendTpoHistoryPage(first);
+}
+
+void MainWindowGPU::sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Request>& request) {
+    if (m_dataSource) {
+        for (const auto& abandoned : m_tpoPager.takeAbandoned()) {
+            sLog_Probe("tpo.history", "cancel id=" << abandoned.requestId);
+            m_dataSource->cancelTpoHistory(QString::fromStdString(abandoned.symbol),
+                                           QString::fromStdString(abandoned.requestId));
+        }
     }
-    const int64_t sessionMs = SessionManager::sessionDurationMs(
-        static_cast<SessionManager::SessionType>(sessionType));
-    const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
-    sLog_Data("TPO history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " sessionType=" << sessionType << " count=" << count);
-    m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, 0, count);
+    if (!request || !m_dataSource) {
+        if (m_tpoPagerTimer && !m_tpoPager.busy()) m_tpoPagerTimer->stop();
+        return;
+    }
+    sLog_Probe("tpo.history", "send id=" << request->requestId << " end=" << request->endMs
+               << " count=" << request->count << " pending=" << m_tpoPager.pending());
+    m_dataSource->requestTpoHistory(QString::fromStdString(request->symbol), request->periodMs,
+                                    request->sessionType, request->endMs, request->count,
+                                    QString::fromStdString(request->requestId));
+    if (!m_tpoPagerTimer) {
+        m_tpoPagerTimer = new QTimer(this);
+        m_tpoPagerTimer->setInterval(5000);
+        connect(m_tpoPagerTimer, &QTimer::timeout, this, [this] {
+            const auto next = m_tpoPager.onTick(QDateTime::currentMSecsSinceEpoch());
+            if (next) sLog_Warning("TPO history page timed out; continuing with the next page");
+            sendTpoHistoryPage(next);
+        });
+    }
+    if (!m_tpoPagerTimer->isActive()) m_tpoPagerTimer->start();
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -1056,6 +1099,22 @@ void MainWindowGPU::connectMarketDataSignals() {
 
     connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
             this, &MainWindowGPU::onConnectionStatusChanged);
+    connect(m_dataSource.get(), &IGridDataSource::tpoHistoryChunkReceived, this,
+            [this](const QString& symbol, const QString& requestId, qint64 timeframeMs, int sessionType,
+                   qint64 lastEndMs, int columns) {
+                sLog_Probe("tpo.history", "reply id=" << requestId << " lastEnd=" << lastEndMs
+                           << " columns=" << columns);
+                sendTpoHistoryPage(m_tpoPager.onChunk(symbol.toStdString(), requestId.toStdString(),
+                                                      timeframeMs, sessionType,
+                                                      QDateTime::currentMSecsSinceEpoch()));
+            });
+    connect(m_dataSource.get(), &IGridDataSource::tpoHistoryFailed, this,
+            [this](const QString& symbol, const QString& requestId, const QString& message) {
+                sLog_Warning("TPO history page failed: symbol=" << symbol << " id=" << requestId
+                             << " message=" << message);
+                sendTpoHistoryPage(m_tpoPager.onError(requestId.toStdString(),
+                                                      QDateTime::currentMSecsSinceEpoch()));
+            });
 
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [this](const QString& error) {
@@ -1095,6 +1154,9 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         m_subscribeButton->setEnabled(true);
     }
 
+    if (!connected) {
+        m_tpoPager.cancel();  // replies to in-flight pages are gone; reconnect restarts
+    }
     if (connected) {
         // Auto-subscribe to default symbol on first connection if user hasn't done so manually.
         if (!m_userSubscribed && !m_currentSymbol.isEmpty()) {
@@ -1230,6 +1292,8 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
             s.heatmapLayer = renderer->heatmapLayerEnabled();
             s.footprintLayer = renderer->footprintLayerEnabled();
             s.tpoLayer = renderer->tpoLayerEnabled();
+            s.tpoLayout = renderer->tpoLayout();
+            s.tpoTheme = renderer->tpoTheme();
             s.volumeProfileLayer = renderer->volumeProfileLayerEnabled();
         }
     }
@@ -1301,6 +1365,8 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
             const bool enabled = it.value().toBool();
+            if (it.key() == "tpoLayout") { renderer->setTpoLayout(it.value().toString()); continue; }
+            if (it.key() == "tpoTheme") { renderer->setTpoTheme(it.value().toString()); continue; }
             if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->setHeatmapLayerEnabled(enabled); }
             else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->setFootprintLayerEnabled(enabled); }
             else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->setTpoLayerEnabled(enabled); }
@@ -1314,7 +1380,9 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"candles", state.candlesLayer.value_or(false)},
                                           {"footprint", state.footprintLayer.value_or(false)},
                                           {"tpo", state.tpoLayer.value_or(false)},
-                                          {"volumeProfile", state.volumeProfileLayer.value_or(false)}};
+                                          {"volumeProfile", state.volumeProfileLayer.value_or(false)},
+                                          {"tpoLayout", state.tpoLayout.value_or(QString())},
+                                          {"tpoTheme", state.tpoTheme.value_or(QString())}};
     }
     if (!out.viewportVersion) out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
     return out;

@@ -404,6 +404,16 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
     }
 }
 
+void DataProcessor::setTpoSelection(qint64 timeframeMs, int sessionType) {
+    if (timeframeMs == m_tpoSelectedTimeframeMs && sessionType == m_tpoSelectedSessionType) {
+        return;
+    }
+    sLog_Data("TPO selection: tf=" << m_tpoSelectedTimeframeMs << "->" << timeframeMs
+              << " session=" << m_tpoSelectedSessionType << "->" << sessionType);
+    m_tpoSelectedTimeframeMs = timeframeMs;
+    m_tpoSelectedSessionType = sessionType;
+}
+
 void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
     if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
     if (m_shuttingDown.load()) {
@@ -436,6 +446,12 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                << " grid=" << resolvedWidth << "x" << resolvedHeight
                << " letters=" << slice.letters.size());
 
+    if (m_tpoSelectedTimeframeMs > 0 &&
+        (slice.timeframeMs != m_tpoSelectedTimeframeMs || slice.sessionType != m_tpoSelectedSessionType)) {
+        sLog_Probe("tpo.slice", "dropped: selection tf=" << slice.timeframeMs << " session=" << slice.sessionType
+                   << " selected tf=" << m_tpoSelectedTimeframeMs << " session=" << m_tpoSelectedSessionType);
+        return;
+    }
     const auto previous = m_tpoStream->snapshot();
     if (m_tpoMaxPrice != slice.maxPrice || m_tpoTickSize != slice.tickSize ||
         (previous.timeframeMs && previous.timeframeMs != slice.timeframeMs)) {
@@ -468,36 +484,20 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
         return;
     }
 
-    // Emit POC/VAH/VAL after each successful ingest.
-    if (m_tpoMaxPrice > 0.0 && m_tpoTickSize > 0.0) {
-        const auto pvv = m_tpoStream->computePocVahVal();
-        if (pvv.valid) {
-            emit tpoPocVahValReady(pvv.pocRow, pvv.vahRow, pvv.valRow,
-                                   m_tpoGridHeight,
-                                   m_tpoMaxPrice, m_tpoTickSize);
-        }
-    }
-
     std::vector<TpoStreamState::PendingUpload> pendingUploads;
     m_tpoStream->takePendingUploads(pendingUploads);
-    if (pendingUploads.empty()) {
-        return;
-    }
-
-    const auto snap = m_tpoStream->snapshot();
-    sLog_Probe("tpo.snapshot", "session=[" << snap.sessionStartMs << ".." << snap.sessionEndMs << "]"
-               << " tf=" << snap.timeframeMs
-               << " grid=" << snap.gridWidth << "x" << snap.gridHeight
-               << " pending=" << pendingUploads.size());
+    // POC and value area are computed by the renderer at the displayed row grouping.
     for (auto& upload : pendingUploads) {
+        sLog_Probe("tpo.emit", "session=[" << upload.sessionStartMs << ".." << upload.sessionEndMs << "]"
+                   << " period=" << upload.x << "/" << upload.periods << " tf=" << slice.timeframeMs);
         emit tpoColumnReady(upload.x,
-                            snap.gridWidth,
-                            snap.gridHeight,
+                            upload.periods,
+                            m_tpoGridHeight,
                             std::move(upload.data),
-                            snap.sessionStartMs,
-                            snap.sessionEndMs,
-                            snap.timeframeMs,
-                            {snap.sessionStartMs, snap.sessionEndMs, m_tpoMaxPrice, m_tpoTickSize, m_tpoGridGeneration});
+                            upload.sessionStartMs,
+                            upload.sessionEndMs,
+                            slice.timeframeMs,
+                            {upload.sessionStartMs, upload.sessionEndMs, m_tpoMaxPrice, m_tpoTickSize, m_tpoGridGeneration});
     }
 }
 

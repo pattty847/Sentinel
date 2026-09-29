@@ -18,6 +18,7 @@
 #include "mainwindow/AgentApiTypes.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
+#include "render/TpoHistoryPager.hpp"
 #include "../core/trading/TradingTypes.hpp"
 
 // Forward declarations
@@ -109,6 +110,10 @@ private:
     void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
+    // TPO history: one paced page in flight; see TpoHistoryPager.
+    tpo::HistoryPager m_tpoPager;
+    class QTimer* m_tpoPagerTimer = nullptr;
+    void sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Request>& request);
     ChartDock* m_heatmapDock = nullptr;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;

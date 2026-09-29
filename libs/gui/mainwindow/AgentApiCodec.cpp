@@ -338,6 +338,16 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
+            if (key == "tpoLayout" || key == "tpoTheme") {
+                static const QStringList kLayouts{"split", "collapsed"};
+                static const QStringList kThemes{"rainbow", "calm", "sage"};
+                const auto& allowed = key == "tpoLayout" ? kLayouts : kThemes;
+                if (!v.isString() || !allowed.contains(v.toString()))
+                    return reject("invalid_layer", key == "tpoLayout" ? "tpoLayout must be split or collapsed"
+                                                                      : "tpoTheme must be rainbow, calm or sage");
+                result.body.layers.insert(key, v);
+                continue;
+            }
             if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile")
                 return reject("invalid_field", "Unknown layer");
             if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
@@ -430,7 +440,9 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"trades", integer(s.tradesReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)}, {"tpo", boolean(s.tpoLayer)},
-            {"volumeProfile", boolean(s.volumeProfileLayer)}}}
+            {"volumeProfile", boolean(s.volumeProfileLayer)},
+            {"tpoLayout", s.tpoLayout ? QJsonValue(*s.tpoLayout) : QJsonValue()},
+            {"tpoTheme", s.tpoTheme ? QJsonValue(*s.tpoTheme) : QJsonValue()}}}
     };
     return envelope(s.meta, data);
 }

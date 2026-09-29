@@ -168,3 +168,9 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
 )
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
+
+add_executable(test_TpoProfileModel test_TpoProfileModel.cpp)
+target_include_directories(test_TpoProfileModel PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_TpoProfileModel PRIVATE sentinel_gui_lib GTest::gtest_main)
+add_test(NAME TpoProfileModelTests COMMAND test_TpoProfileModel)
+set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")

@@ -92,11 +92,17 @@ public:
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
                                  int count);
+    // requestId (required, 1..64 chars) is echoed on the reply chunk and on errors.
+    // Only the most recently requested id is accepted: a chunk with any other id
+    // (or none) is dropped before a single slice is emitted.
     void requestTpoHistory(const std::string& symbol,
                            int64_t timeframeMs,
                            int sessionType,
                            int64_t endTimeMs,
-                           int count);
+                           int count,
+                           const std::string& requestId);
+    // Stops an abandoned or superseded page on the server; its reply, if any, is dropped.
+    void cancelTpoHistory(const std::string& symbol, const std::string& requestId);
     void requestCandleHistory(const std::string& symbol,
                               int64_t timeframeSec,
                               int64_t endTimeSec,
@@ -127,6 +133,11 @@ signals:
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    // After the in-flight tpo_history_chunk's slices were emitted (requestId always set).
+    void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
+                                 int sessionType, qint64 lastEndMs, int columns);
+    // A trade_overlay error that carries a TPO history request_id.
+    void tpoHistoryFailed(const QString& symbol, const QString& requestId, const QString& message);
     void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,
@@ -220,6 +231,7 @@ private:
     std::deque<std::string> m_writeQueue;
     // Strand-owned; a nonempty queue does not prove that a write is idle.
     bool m_writeInFlight = false;
+    std::string m_expectedTpoRequestId;  // strand-only: the one TPO history page accepted
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};

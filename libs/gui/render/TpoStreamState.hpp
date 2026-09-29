@@ -2,75 +2,58 @@
 
 #include <QByteArray>
 #include <cstdint>
+#include <map>
 #include <mutex>
-#include <unordered_map>
 #include <vector>
 
-// Forward-declared to avoid pulling <SessionManager.hpp> into every TU.
-namespace SessionManager { enum class SessionType : int; }
-
+/*
+ * TpoStreamState
+ *
+ * GUI-side store of TPO letter columns, one column per session period
+ * (column x = period index since the session open, row 0 = highest price).
+ * Keeps the most recent `maxSessions` sessions so collapsed profiles of earlier
+ * sessions stay on the chart next to the live one. Changed columns are queued
+ * as pending uploads for the render thread, each tagged with its session.
+ *
+ * Threading: ingest on the data thread; every accessor takes the internal lock.
+ */
 class TpoStreamState {
 public:
-    // Display mode controls how m_columns are indexed.
-    enum class DisplayMode : int {
-        // Horizontal Market Profile: column[rank] holds all price levels visited
-        // at least (rank+1) times within the session.  The horizontal width of
-        // each row reflects how many unique time-brackets visited that level.
-        // Letters are preserved as the ASCII char from the server.
-        HorizontalProfile = 0,
-
-        // Vertical timeline: column[periodIdx] mirrors the server bucket directly.
-        // The renderer can align each column with its time position on the chart.
-        VerticalTimeline  = 1,
-    };
-
     struct PendingUpload {
-        int x = 0;
+        int x = 0;                  // period index within the session
+        int periods = 0;            // session duration / period duration
+        int64_t sessionStartMs = 0;
+        int64_t sessionEndMs = 0;
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;
-        QByteArray data;
+        QByteArray data;            // one letter byte per row, '\0' = not visited
     };
 
     struct Snapshot {
-        int gridWidth = 0;
         int gridHeight = 0;
-        int filledColumns = 0;
-        int writeColumn = -1;
+        int sessions = 0;
+        int64_t latestSessionStartMs = 0;
+        int64_t latestSessionEndMs = 0;
         int64_t lastSliceStartMs = 0;
-        int64_t sessionStartMs = 0;
-        int64_t sessionEndMs = 0;
         int64_t timeframeMs = 0;
-        DisplayMode displayMode = DisplayMode::VerticalTimeline;
         int pendingUploads = 0;
     };
 
-    // POC/VAH/VAL profile markers computed from accumulated session letters.
-    // Row indices are in grid space (0 = highest price, gridHeight-1 = lowest price).
-    // valid is false when there is not enough data to compute.
-    struct PocVahVal {
-        int pocRow = -1;   // Point of Control: price level with most time-at-price
-        int vahRow = -1;   // Value Area High: upper bound of 70% value area
-        int valRow = -1;   // Value Area Low:  lower bound of 70% value area
-        bool valid = false;
-    };
-
-    // Compute POC/VAH/VAL from the current session column data.
-    // Thread-safe: acquires m_mutex internally.
-    PocVahVal computePocVahVal() const;
+    static constexpr int kDefaultMaxSessions = 8;  // the renderer trims to tpo.sessions
+    static constexpr int kMaxSessionsLimit = 8;
 
     void clear();
+    // gridWidth is ignored: the period count comes from the session and timeframe.
     void reset(int gridWidth, int gridHeight);
 
-    // ── Session configuration ──────────────────────────────────────────────
-    // Set a custom session duration (overrides SessionType).
-    void setSessionMs(int64_t sessionMs);
-    // Set a named session type; resolves duration via SessionManager.
-    void setSessionType(int sessionType);  // SessionManager::SessionType cast to int
+    // Named session type (SessionManager::SessionType cast to int).
+    void setSessionType(int sessionType);
+    // Number of sessions retained (1..kMaxSessionsLimit). Older sessions are evicted.
+    void setMaxSessions(int sessions);
+    int maxSessions() const;
 
-    // ── Display mode ──────────────────────────────────────────────────────
-    void setDisplayMode(DisplayMode mode);
-    DisplayMode displayMode() const;
-
+    // Returns false when the slice is malformed, outside its session, or older
+    // than every retained session while the store is full.
     bool ingestSlice(int64_t bucketStartMs,
                      int64_t bucketEndMs,
                      int64_t timeframeMs,
@@ -81,31 +64,19 @@ public:
     Snapshot snapshot() const;
 
 private:
-    struct LevelState {
-        int row = -1;
-        // Each entry is the periodIdx of one unique visit; the index of this
-        // entry is the "rank" used when building HorizontalProfile columns.
-        std::vector<int> periodIndices;
-        // Parallel array: the actual letter byte for each visit.
-        std::vector<char> letters;
+    struct Session {
+        int64_t endMs = 0;
+        std::vector<QByteArray> columns;
     };
 
-    void resetLocked(int gridWidth, int gridHeight);
+    void clearLocked();
 
     mutable std::mutex m_mutex;
-    mutable std::mutex m_uploadMutex;
-    int m_gridWidth = 0;
     int m_gridHeight = 0;
-    int m_filledColumns = 0;
-    int m_writeColumn = -1;
-    int64_t m_sessionStartMs = 0;
-    int64_t m_sessionEndMs   = 0;
-    int64_t m_sessionMs = 86'400'000;  // default H24 session fallback
-    int m_sessionType = 4;             // SessionManager::SessionType::H24 fallback
-    int64_t m_lastSliceStartMs = 0;
+    int m_sessionType = 4;  // SessionManager::SessionType::H24
+    int m_maxSessions = kDefaultMaxSessions;
     int64_t m_timeframeMs = 0;
-    DisplayMode m_displayMode = DisplayMode::VerticalTimeline;
-    std::vector<QByteArray> m_columns;
-    std::unordered_map<int64_t, LevelState> m_levelsByTick;
+    int64_t m_lastSliceStartMs = 0;
+    std::map<int64_t, Session> m_sessions;  // keyed by session start
     std::vector<PendingUpload> m_pending;
 };
