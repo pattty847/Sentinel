@@ -12,6 +12,107 @@ need conditions. Do not select 100 ms retention from the current ~15 MB/day minu
 measurement by multiplying by 600; change frequency, temporal deltas, headers,
 keyframe cadence, sparsity and peak retention change the ratio.
 
+## Owner decisions (2026-09-29)
+
+These decisions override the rest of this document where they conflict. The heatmap side is in
+`2026-09-gpu-heatmap-integration-plan.md`, section "Owner decisions (2026-09-29)".
+
+**Direction**
+- Raw pristine accepted L2 is the target durable source of truth. This settles the "two
+  products" question below: full fine-detail book history must be recoverable. The paint
+  pyramid is derived from raw.
+- Never throw away finer book detail than the UI shows. Store the finest useful source data.
+  What a user may see (entitlement) is a separate question.
+- Raw L2 stays sparse: snapshots, absolute quantity updates, zero deletes, and
+  gap/reset/validity markers. No dense price arrays.
+- Server serving levels: raw L2 -> 1s / 1m / 1h rollups -> immutable chunks -> client.
+  Sub-second levels (including 100 ms) come later. Deleting fine source data must never be a
+  requirement of the design.
+- Storage is not scarce, but compress properly: sparse absolute updates, timestamp deltas,
+  integer tick prices, varints, periodic keyframes, independently decodable blocks, zstd,
+  bounded reconstruction chains, random-access indexes.
+- **100 ms retention is undecided** until the pristine capture below is measured. Do not
+  finalize any capacity assumption before it.
+
+**The 60-minute probe is not sufficient.** It measured the coalesced local stream downstream of
+`SentinelStreamServer` (band-clipped `liveBook`, `BookDelta` with `float` quantity, no upstream
+sequence, dequeue time). See "Critical local-feed limitation" below. Its 169 MB/day raw figure
+is a lower bound, not a capacity number.
+
+**Next measurement: capture at the true Coinbase ingest seam.**
+
+The seam is the `m_transport->onMessage` lambda in the `MarketDataCoreEngine` constructor
+(`libs/core/marketdata/MarketDataCoreEngine.cpp`). It receives each Coinbase WebSocket text
+frame as a `std::string`, before `nlohmann::json::parse` and `dispatch()`. The capture also
+needs two engine events that are not frames: transport up/down (`m_transport->onStatus`) and
+`emitBookInvalidated`. Adding this tap changes server code, so it is its own authorized slice.
+
+What exists at each layer:
+
+| Field | Raw frame at the seam | Engine callbacks (`onLiveOrderBook*`; what `BookRecorder` receives) | Local stream (the probe) |
+|---|---|---|---|
+| Envelope `sequence_num` | Yes. Per connection, contiguous across **all** channels (`l2_data`, `market_trades`, `heartbeats`, acks), starts at 0 | Checked in `dispatch()`; not forwarded | No |
+| Envelope `timestamp` | Exact ISO 8601 text | `Cpp20Utils::parseISO8601` keeps microseconds; callbacks pass ms | No (dequeue time) |
+| Per-update `event_time` | Yes (snapshot entries carry `1970-01-01T00:00:00Z`, per `tests/marketdata/fixtures/coinbase_messages.hpp`) | Ignored | No |
+| `price_level`, `new_quantity` | Exact decimal strings | `double` via `fastStringToDouble` | Indexed price, `float` quantity |
+| Snapshot vs update | `events[].type` | `onLiveOrderBookInitialized` / `onLiveOrderBookLevelUpdates` | One snapshot, then deltas |
+| Zero-quantity snapshot entries | Present | Dropped | Dropped |
+| Validity and resync | Derivable from sequence and frames | `onLiveOrderBookInvalidated(product, reason)`: `disconnected`, `sequence gap expected=N got=M`, `malformed snapshot entries=N`, `malformed update level` | None |
+| Local receive time | The capture must stamp it (system and steady clock) | Not forwarded | Dequeue time |
+
+Reset semantics: a sequence gap, a malformed level or a stale heartbeat makes the engine close
+the transport and reconnect. A new connection restarts `sequence_num` at 0 and resubscribes,
+and Coinbase sends a fresh `snapshot`. A transport down emits `disconnected` for every product.
+The book is valid again only at the next snapshot for that product.
+
+Precision: Sentinel does not fetch the product's `quote_increment` or `base_increment` today.
+Integer tick prices and integer quantity atoms need them, so the capture records them (from
+Coinbase product metadata) or proves them from the decimal strings.
+
+Capture contract:
+1. Record every frame on the connection, all channels. The sequence is shared, so an
+   `l2_data`-only capture cannot prove completeness.
+2. Store the exact frame bytes, local system-clock and steady-clock receive times, and the
+   up/down and invalidation events, in length-prefixed zstd blocks.
+3. Run at least 24 hours of BTC-USD, including a volatile period. Record the subscribed
+   products and the connection count.
+4. Report frames per second (mean and p99), bytes per day as received, gaps, reconnects and
+   snapshot sizes.
+
+**Benchmark: raw deltas + periodic keyframes vs full-book snapshots every second.** Replay the
+capture offline through both encoders:
+- **A.** Canonical events (integer ticks, integer quantity atoms, varint timestamp and sequence
+  deltas, side bits, validity markers), plus a full-book keyframe every K seconds or bytes.
+  Independently decodable blocks with a bounded chain.
+- **B.** An explicit full-book snapshot every second, with the same integer and zstd techniques.
+- **Baseline.** zstd of the exact frame text (upper bound, no parse loss).
+
+Judge them on:
+- full fine-detail book recoverability: the exact book at any event time, including
+  sub-second changes, peaks and exact TWAP. B cannot recover changes inside a second by
+  construction, so state what it loses;
+- bytes per day;
+- encode and decode CPU;
+- random-access cost: the time and bytes to rebuild the book at an arbitrary time, and to
+  build one 1s, 1m and 1h column.
+
+Pick whichever reaches the fidelity target most efficiently. A hybrid (deltas + frequent
+keyframes) is allowed.
+
+Also evaluate a numeric column codec in the style of pcodec for A, B and the serving chunks.
+Prior art (`2026-09-marketlens-har.md`, observed): MarketLens ships each 64-column order-book
+chunk as one pcodec file, 16-237 KB per market-chunk, and zstd on top adds almost nothing. If
+the chosen codec is already entropy-coded, do not add zstd over it. Whether MarketLens stores
+dense grids or sparse levels inside pcodec is not observed.
+
+**Terminology correction.** About 0.0423% is the **half-code relative quantization error** of
+the 15-bit log magnitude encoding (`2^(1/(2*819))-1`). One code step is about 0.085%. It is
+not a cumulative drift. The real limit: HMC2 stores a quantized **mean**, not the time integral,
+so decode -> aggregate -> re-encode cannot be exact. The future mergeable representation is
+A (quantity x time integral), D (observed duration or coverage) and P (peak), with explicit
+validity and coverage. That is the next storage generation. **It does not block the current
+GPU and chunk integration.**
+
 ## Recommendation and decisions still open
 
 Prototype a 100 ms / 1 s / 1 m / 1 h pyramid of mergeable aggregate state, with a
@@ -28,7 +129,8 @@ both sides, and coverage. Sending every fine sparse column to the browser merely
 moves the amplification problem to transport and the GPU. Cache immutable source
 chunks on both sides, then choose where composition costs least.
 
-Decide explicitly between two products:
+Decide explicitly between two products (decided 2026-09-29: raw replay-grade source of
+truth, paint pyramid derived; see "Owner decisions"):
 
 - **Paint history:** time means, temporal peaks, valid zero/missing distinction,
   with declared quantity quantization. A pyramid can be the durable archive.
@@ -392,6 +494,8 @@ option that can rebuild any level and replay the book. Proposal for the owner's 
 keep the raw log as the source of truth; keep 1 m and 1 h forever; keep 1 s rolling (about
 30 days, ~4.4 GB); build 100 ms on demand from raw (or keep about 7 days, ~3.7 GB). Measure
 the true exchange feed size before committing, since this stream is already coalesced.
+(2026-09-29: the owner accepted raw as the source of truth; retention numbers here wait for
+the pristine capture specified in "Owner decisions".)
 
 Synthetic traffic is deterministic (4,000 initial levels, 50 single-level updates/sec,
 static best-price neighborhood with rotating sizes). It is a regression fixture,

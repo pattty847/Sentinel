@@ -143,6 +143,8 @@ for labels/walls. Auto timeframe selection counts epoch buckets touched by the
 half-open viewport, including partial edge buckets, and returns no choice when
 even 1D exceeds the one-pixel-per-column limit, requiring a span clamp.
 
+> Superseded as product policy: the auto-timeframe, viewport-driven display tick (`idealTick`, 2 px rule) and near/deep layer rule described in this file are rejected by the [owner decisions of 2026-09-29](research/2026-09-gpu-heatmap-integration-plan.md#owner-decisions-2026-09-29) (zoom is a camera operation; ticks are per-asset presets) and will be reshaped in slice T.
+
 ### GPU heatmap price binning (integration slice S4)
 
 `libs/gui/render/heatmap` (target `sentinel_heatmap_gpu`) bins price on the GPU.
