@@ -97,6 +97,33 @@ struct RecordingServerStopTest {
         ioc.run(); // late completion and cancelled timer must not publish
         EXPECT_EQ(session->write_queue_.size(), 1);
     }
+    static void checkCandlePages(ServerDataModel& model) {
+        net::io_context ioc;
+        ssl::context ctx(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, nullptr);
+        // Hold a fake write in flight so posted replies stay inspectable without a socket.
+        session->write_queue_.push_back({"in-flight", false});
+        session->pendingWriteBytes_ = 9;
+        for (const auto [endSec, expectedCount] : {std::pair{1001, 350}, {651, 350}, {301, 300}, {1, 0}}) {
+            nlohmann::json request = {{"type", "candle_history_request"}, {"symbol", "BTC-USD"},
+                {"timeframe_sec", 1}, {"end_time_sec", endSec}, {"limit", 350}};
+            session->handle_message(request.dump());
+            ioc.restart();
+            ioc.poll();
+            const auto reply = nlohmann::json::parse(session->write_queue_.back().payload);
+            ASSERT_EQ(reply.at("type"), "candle_history_chunk");
+            EXPECT_EQ(reply.at("end_time_sec"), endSec);
+            const auto& candles = reply.at("candles");
+            ASSERT_EQ(candles.size(), expectedCount);
+            for (size_t i = 0; i < candles.size(); ++i) {
+                const auto start = candles[i].at("time_start_ms").get<int64_t>();
+                EXPECT_GE(start, std::max(0, endSec - 350) * 1000LL);
+                EXPECT_LT(start, endSec * 1000LL);
+                if (i > 0) EXPECT_EQ(start, candles[i - 1].at("time_start_ms").get<int64_t>() + 1000);
+            }
+        }
+        session->beginClose("candle paging test");
+    }
     // Longer than the 3 s wait for the ClientHello below, so the fetch is
     // still blocked in TLS when stop() runs.
     static constexpr auto kStalledFetchDeadline = std::chrono::seconds(5);
@@ -361,3 +388,28 @@ TEST(RecordingServerStop, JoinedProcessWorkHonorsCancellationAndDeadline) {
     }
 }
 #endif
+
+TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
+    int argc = 1;
+    char name[] = "candle-pages";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    struct RestoreDirectory { QString path = QDir::currentPath(); ~RestoreDirectory() { QDir::setCurrent(path); } } restore;
+    ASSERT_TRUE(QDir::setCurrent(directory.path()));
+    ServerConfig config;
+    config.recording.enabled = false;
+    config.heatmap.persistenceEnabled = false;
+    config.heatmap.timeframesMs = {1000, 60000};
+    ServerDataModel model(config);
+    for (int second = 1; second <= 1001; ++second) {
+        Trade trade{};
+        trade.product_id = "BTC-USD";
+        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::seconds(second));
+        trade.price = 100;
+        trade.size = 1;
+        model.onTrade(trade);
+    }
+    RecordingServerStopTest::checkCandlePages(model);
+}

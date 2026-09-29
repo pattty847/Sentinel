@@ -660,7 +660,10 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                         msg.value("band_generation", uint64_t{0}),
                         QString::fromStdString(msg.value("message", "")));
                 }
-                // Not surfaced to the GUI; log it so server-side refusals are visible.
+                if (msg.value("context", "") == "candle_history_request") {
+                    emit candleHistoryFailed(QString::fromStdString(msg.value("symbol", "")));
+                }
+                // Log server-side refusals as well as surfacing correlated failures.
                 sLog_Warning("Server error: context=" << msg.value("context", "")
                              << " symbol=" << msg.value("symbol", "")
                              << " message=" << msg.value("message", ""));

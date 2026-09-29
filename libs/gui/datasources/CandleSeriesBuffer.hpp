@@ -43,6 +43,9 @@ public:
     // Live seq numbers restart with each server session; call on (re)connect.
     void resetSequences();
 
+    qint64 oldestTimeMs(const QString& symbol, int64_t timeframeSec) const;
+    bool historyCapacityReached(const QString& symbol, int64_t timeframeSec) const;
+
     bool getVisibleSlice(const QString& symbol,
                          int64_t timeframeSec,
                          qint64 timeStartMs,

@@ -140,6 +140,7 @@ signals:
                                int64_t startTimeSec,
                                int64_t endTimeSec,
                                const QVector<CandleBar>& candles);
+    void candleHistoryFailed(const QString& symbol);
     void candleBarUpdateReceived(const QString& symbol,
                                  int64_t timeframeSec,
                                  int64_t bucketStartMs,

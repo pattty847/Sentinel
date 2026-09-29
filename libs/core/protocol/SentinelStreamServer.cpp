@@ -909,11 +909,13 @@ public:
                     if (limit > 10000) {
                         limit = 10000;
                     }
-                    const auto history = model_.getHistory(symbol, 1000, static_cast<size_t>(limit));
+                    // Page the retained 1s series, not just its newest `limit`
+                    // bars; otherwise the second backward page appears empty.
+                    const auto history = model_.getHistory(symbol, 1000, 10000);
                     std::vector<OHLCVBar> filtered;
                     filtered.reserve(history.size());
                     for (const auto& bar : history) {
-                        if (bar.timestamp_ms <= endMs) {
+                        if (bar.timestamp_ms >= endMs - limit * 1000LL && bar.timestamp_ms < endMs) {
                             filtered.push_back(bar);
                         }
                     }

@@ -86,3 +86,33 @@ TEST(CandleSeriesBuffer, LateLiveBarIsInsertedInOrder) {
     ASSERT_EQ(bars.size(), 3u);
     EXPECT_TRUE(sortedByStart(bars));
 }
+
+TEST(CandleSeriesBuffer, OverlappingUnsortedDuplicatePagesPreserveLiveAndOrder) {
+    CandleSeriesBuffer buffer;
+    buffer.applyUpdate(kSym, kTfSec, bar(100, 9.0, false), 1, false);
+    buffer.applyHistory(kSym, kTfSec, {bar(99, 5.0, true), bar(98, 4.0, true), bar(100, 1.0, false)});
+    buffer.applyHistory(kSym, kTfSec, {bar(98, 0.0, true), bar(96, 2.0, true),
+                                     bar(97, 3.0, true), bar(96, 0.0, true), bar(0, 0.0, true)});
+    auto bars = visible(buffer);
+    ASSERT_EQ(bars.size(), 5u);
+    EXPECT_TRUE(sortedByStart(bars));
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 96 * 60'000);
+    EXPECT_DOUBLE_EQ(bars[0].close, 2.0);
+    EXPECT_DOUBLE_EQ(bars[2].close, 4.0);
+    EXPECT_DOUBLE_EQ(bars.back().close, 9.0);
+    buffer.applyUpdate(kSym, kTfSec, bar(100, 10.0, false), 2, false);
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 10.0);
+    EXPECT_FALSE(buffer.historyCapacityReached(kSym, kTfSec));
+    EXPECT_EQ(buffer.oldestTimeMs("ETH-USD", kTfSec), 0);
+}
+
+TEST(CandleSeriesBuffer, CapacityGuardStopsBackfillThatWouldBeImmediatelyEvicted) {
+    CandleSeriesBuffer buffer;
+    std::vector<Bar> page;
+    for (int m = 1; m <= 20000; ++m) page.push_back(bar(m, 1.0, true));
+    buffer.applyHistory(kSym, kTfSec, page);
+    EXPECT_TRUE(buffer.historyCapacityReached(kSym, kTfSec));
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 60'000);
+    buffer.applyUpdate(kSym, kTfSec, bar(20001, 2.0, false), 1, false);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 120'000);
+}
