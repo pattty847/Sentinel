@@ -14,9 +14,10 @@
 
 int main(int argc, char **argv) {
     const auto launched = std::chrono::steady_clock::now();
-    bool benchmark = false;
-    for (int i = 1; i < argc; ++i) benchmark |= QByteArray(argv[i]) == "--bench";
-    if (benchmark) qputenv("QT_QPA_PLATFORM", "offscreen");
+    bool headless = false;
+    for (int i = 1; i < argc; ++i)
+        headless |= QByteArray(argv[i]) == "--bench" || QByteArray(argv[i]) == "--screenshot";
+    if (headless) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("sentinel-lab"));
     QCommandLineParser parser;
@@ -26,6 +27,8 @@ int main(int argc, char **argv) {
     parser.addOption({"hours", "Hours back from now", "hours", "24"});
     parser.addOption({"layer", "Recording layer: near or deep", "layer", "near"});
     parser.addOption({"synthetic", "Generate this many synthetic entries", "entries"});
+    parser.addOption({"tf", "Exact timeframe in minutes (1, 5, 15, 60, 240, 1440, or custom)", "minutes", "1"});
+    parser.addOption({"screenshot", "Render the first data-backed frame to this PNG", "path"});
     parser.process(app);
     bool ok = false;
     const int hours = parser.value("hours").toInt(&ok);
@@ -38,22 +41,30 @@ int main(int argc, char **argv) {
         if (!ok || value < 1 || value > 100'000'000) return 2;
         synthetic = value;
     }
-    if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic);
+    const int tf = parser.value("tf").toInt(&ok);
+    if (!ok || tf < 1 || tf > 1440) return 2;
+    if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic, tf);
+    if (parser.isSet("screenshot"))
+        return lab::runScreenshot(hours, layer, synthetic, tf, parser.value("screenshot"));
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Metal);
     qmlRegisterType<lab::LabItem>("Sentinel.Lab", 1, 0, "BinLab");
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("initialHours", hours);
     engine.rootContext()->setContextProperty("initialLayer", layer);
     engine.rootContext()->setContextProperty("initialSynthetic", synthetic);
+    engine.rootContext()->setContextProperty("initialTf", tf);
     engine.load(QUrl(QStringLiteral("qrc:/lab/Main.qml")));
     if (engine.rootObjects().isEmpty()) return 2;
-    if (parser.isSet("first-paint")) {
+    if (parser.isSet("first-paint") || parser.isSet("screenshot")) {
         auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab"));
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         if (!item || !window) return 2;
-        QObject::connect(window, &QQuickWindow::frameSwapped, &app, [item, &app, hours, layer, launched] {
+        const QString screenshot = parser.value("screenshot");
+        QObject::connect(window, &QQuickWindow::frameSwapped, &app, [item, &app, hours, layer, tf, screenshot, launched] {
             const auto metrics = item->metrics();
             if (metrics.value("firstFrameMs").toDouble() <= 0) return;
+            if (metrics.value("entries").toDouble() <= 0) return;
+            const bool saved = screenshot.isEmpty() || item->saveScreenshot(screenshot);
             const auto presentedMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - launched).count();
             const QJsonObject result{{"hours", hours}, {"layer", layer},
@@ -61,9 +72,12 @@ int main(int argc, char **argv) {
                                      {"load_ms", metrics.value("loadMs").toDouble()},
                                      {"decode_ms", metrics.value("decodeMs").toDouble()},
                                      {"first_draw_submit_ms", metrics.value("firstFrameMs").toDouble()},
-                                     {"launch_to_first_frame_ms", presentedMs}};
+                                     {"launch_to_first_frame_ms", presentedMs},
+                                     {"timeframe_minutes", tf},
+                                     {"screenshot", screenshot},
+                                     {"screenshot_saved", saved}};
             std::cout << QJsonDocument(result).toJson(QJsonDocument::Compact).constData() << std::endl;
-            app.quit();
+            app.exit(saved ? 0 : 2);
         }, Qt::QueuedConnection);
         QTimer::singleShot(30'000, &app, [&app] { app.exit(2); });
     }

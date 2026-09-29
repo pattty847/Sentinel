@@ -4,8 +4,8 @@ layout(location = 0) out vec4 fragColor;
 layout(std430, binding = 0) readonly buffer Output { vec4 cell[]; };
 layout(std140, binding = 1) uniform Params {
     uvec4 dims;
-    vec4 timeView;
-    ivec4 priceView;
+    vec4 mapping; // left-column offset/span, top-row offset/span
+    vec4 colorScale;
 };
 
 // Same recording-mode log code normalization and default cyan/orange palette
@@ -22,14 +22,19 @@ vec3 palette(float t, bool ask) {
     return mix(vec3(255,160,30), vec3(255,230,80), (t - 0.85) / 0.15) / 255.0;
 }
 void main() {
-    uint x = min(uint(clamp(uv.x, 0.0, 0.999999) * float(dims.x)), dims.x - 1u);
-    uint y = min(uint(clamp(1.0 - uv.y, 0.0, 0.999999) * float(dims.y)), dims.y - 1u);
+    // Absolute-bin data stays fixed; sub-bin panning only changes this map.
+    float fx = floor(mapping.x + uv.x * mapping.y);
+    float fy = floor(mapping.z + (1.0 - uv.y) * mapping.w);
+    if (fx < 0.0 || fy < 0.0 || fx >= float(dims.x) || fy >= float(dims.y)) {
+        fragColor = vec4(0.0); return;
+    }
+    uint x = uint(fx), y = uint(fy);
     vec4 value = cell[y * dims.x + x];
     if (value.z < 0.5) { fragColor = vec4(0.16, 0.18, 0.22, 0.30); return; }
     bool ask = value.y > value.x;
     float quantity = ask ? value.y : value.x;
     if (quantity <= 0.0) { fragColor = vec4(0.0); return; }
-    float code = 1.0 + log2(max(quantity / timeView.z, 1.0)) * timeView.w;
+    float code = 1.0 + log2(max(quantity / colorScale.x, 1.0)) * colorScale.y;
     float magnitude = clamp((code - 6000.0) / 24000.0, 0.0, 1.0);
     if (magnitude <= 0.0) { fragColor = vec4(0.0); return; }
     float adjusted = clamp((max(magnitude, 0.08) - 0.5) * 1.25 + 0.5, 0.0, 1.0);

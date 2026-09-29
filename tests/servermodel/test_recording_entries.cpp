@@ -144,6 +144,16 @@ TEST(RecordingEntries, MixedFiveAndTenDollarGridsUseCommonRows) {
     EXPECT_EQ(joined.nativeFactor, entries.nativeFactor);
     EXPECT_EQ(joined.coverage[1].bidLo, entries.coverage[1].bidLo);
     EXPECT_EQ(joined.coverage[1].bidHi, entries.coverage[1].bidHi);
+    const auto composed = loadComposedMinuteEntries(root, "BTC-USD", "deep",
+        kHmc2MinMs, kHmc2MinMs + 2 * minute, 2);
+    EXPECT_EQ(composed.sourceMinutes, 2u);
+    EXPECT_TRUE(composed.preNormalized);
+    EXPECT_EQ(composed.nativeFactor[0], 2u);
+    const auto rawCell = binRecordingCell(entries, 0, 2, 0, 1);
+    const auto composedCell = binRecordingCell(composed, 0, 1, 0, 1);
+    EXPECT_EQ(rawCell.valid, composedCell.valid);
+    EXPECT_LE(std::abs(int(encodeSize(rawCell.bid)) -
+                       int(encodeSize(composedCell.bid))), 1);
 }
 
 TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {
@@ -174,7 +184,7 @@ TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {
     EXPECT_EQ(data.code[1], r.entries[0].twapCode);
     EXPECT_DOUBLE_EQ(data.columnScale[0].floor, 1e-6);
     EXPECT_DOUBLE_EQ(data.columnScale[1].floor, 1e-8);
-    const auto cell = binRecordingCell(data, 0, 2, 0, 0, true);
+    const auto cell = binRecordingCell(data, 0, 2, 0, 0);
     EXPECT_TRUE(cell.valid);
     const double expected = (decodeSize(firstCode, data.columnScale[0]) +
                              decodeSize(r.entries[0].twapCode, data.columnScale[1])) * 0.5;
@@ -213,25 +223,72 @@ TEST(RecordingEntries, JoinPreservesEmptyOlderColumns) {
     EXPECT_EQ(joined.code[0], encodeSize(3));
 }
 
-TEST(RecordingEntries, EightMinuteLodMatchesRawWithUnalignedTimeAndPriceBins) {
-    const auto entries = syntheticRecordingEntries(1'000'000);
-    ASSERT_EQ(entries.lod.coverage.size(), 125u);
-    for (const auto [first, end] : {std::pair{0u, 1000u}, {3u, 28u}, {128u, 144u}, {797u, 999u}}) {
-        for (const auto [lo, hi] : {std::pair{0u, 999u}, {330u, 340u}, {660u, 680u}, {500u, 500u}}) {
-            const auto raw = binRecordingCell(entries, first, end, lo, hi, false);
-            const auto lod = binRecordingCell(entries, first, end, lo, hi, true);
-            EXPECT_EQ(raw.valid, lod.valid);
-            EXPECT_NEAR(raw.bid, lod.bid, std::max(0.02f, raw.bid * 1e-6f));
-            EXPECT_NEAR(raw.ask, lod.ask, std::max(0.02f, raw.ask * 1e-6f));
-            const auto spatial = binRecordingCell(entries, first, end, lo, hi, true, true);
-            EXPECT_EQ(raw.valid, spatial.valid);
-            EXPECT_NEAR(raw.bid, spatial.bid, std::max(0.02f, raw.bid * 1e-6f));
-            EXPECT_NEAR(raw.ask, spatial.ask, std::max(0.02f, raw.ask * 1e-6f));
+TEST(RecordingEntries, FiveAndSixteenMinuteColumnsEqualWeightedMinuteSum) {
+    const auto data = syntheticRecordingEntries(1'000'000);
+    for (uint32_t tf : {5u, 16u}) {
+        const uint32_t alignment = uint32_t((tf - (data.startMs / minute) % tf) % tf);
+        for (uint32_t first = alignment; first + tf <= data.columns(); first += tf) {
+            for (uint32_t row : {0u, 100u, 500u, 999u}) {
+                const auto composed = binRecordingCell(data, first, first + tf, row, row);
+                double expectedBid = 0, expectedAsk = 0, observed = 0;
+                for (uint32_t c = first; c < first + tf; ++c) {
+                    observed += data.observedMs[c];
+                    for (uint32_t i = data.offsets[c]; i < data.offsets[c + 1]; ++i) {
+                        if ((data.rowSide[i] & 0x7fffffffu) != row) continue;
+                        const double amount = decodeSize(uint16_t(data.code[i]), data.columnScale[c]) *
+                                              data.observedMs[c];
+                        (data.rowSide[i] & 0x80000000u ? expectedAsk : expectedBid) += amount;
+                    }
+                }
+                EXPECT_TRUE(composed.valid);
+                EXPECT_NEAR(composed.bid, expectedBid / observed, std::max(0.002, expectedBid / observed * 1e-6));
+                EXPECT_NEAR(composed.ask, expectedAsk / observed, std::max(0.002, expectedAsk / observed * 1e-6));
+            }
         }
     }
 }
 
-TEST(RecordingEntries, TimeLodExcludesMissingMinuteFromObservedDuration) {
+TEST(RecordingEntries, ExplicitFiveAndSixteenMinuteColumnsKeepPartialCoverage) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const std::filesystem::path root(dir.path().toStdString());
+    Hmc2Record r;
+    r.header = {"BTC-USD", "deep", minute, 100, 500, {}, 42};
+    r.observedMs = minute;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 100'050;
+    r.bidRowLo = r.askRowLo = 20'000;
+    r.askRowHi = 20'003;
+    {
+        Hmc2Store writer(root);
+        for (int c = 0; c < 80; ++c) {
+            if (c % 11 == 4) continue;
+            r.bucketStartMs = kHmc2MinMs + int64_t(c) * minute;
+            r.bidRowHi = c % 3 == 0 ? 20'001 : 20'003;
+            r.entries = {{20'001, false, encodeSize(3 + c % 4), 0},
+                         {20'002, true, encodeSize(8 + c % 5), 0}};
+            writer.append(r);
+        }
+    }
+    const auto raw = loadRecordingEntries(root, "BTC-USD", "deep",
+                                          kHmc2MinMs, kHmc2MinMs + 80 * minute);
+    for (uint32_t tf : {5u, 16u}) {
+        const auto composed = loadComposedMinuteEntries(root, "BTC-USD", "deep",
+            kHmc2MinMs, kHmc2MinMs + 80 * minute, tf);
+        ASSERT_EQ(composed.sourceMinutes, tf);
+        ASSERT_EQ(composed.columns(), 80u / tf);
+        for (uint32_t c = 0; c < composed.columns(); ++c) {
+            for (uint32_t row = 0; row < 4; ++row) {
+                const auto original = binRecordingCell(raw, c * tf, (c + 1) * tf, row, row);
+                const auto compact = binRecordingCell(composed, c, c + 1, row, row);
+                EXPECT_EQ(original.valid, compact.valid);
+                EXPECT_LE(std::abs(int(encodeSize(original.bid)) - int(encodeSize(compact.bid))), 1);
+                EXPECT_LE(std::abs(int(encodeSize(original.ask)) - int(encodeSize(compact.ask))), 1);
+            }
+        }
+    }
+}
+
+TEST(RecordingEntries, MissingMinuteDoesNotDiluteTimeframeColumn) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     const std::filesystem::path root(dir.path().toStdString());
@@ -244,40 +301,17 @@ TEST(RecordingEntries, TimeLodExcludesMissingMinuteFromObservedDuration) {
     r.entries = {{10, false, encodeSize(4), 0}, {11, true, encodeSize(5), 0}};
     {
         Hmc2Store writer(root);
-        for (int c = 0; c < 8; ++c) {
+        for (int c = 0; c < 16; ++c) {
             if (c == 3) continue;
             r.bucketStartMs = kHmc2MinMs + c * minute;
             writer.append(r);
         }
     }
-    const auto entries = loadRecordingEntries(root, "BTC-USD", "near", kHmc2MinMs, kHmc2MinMs + 8 * minute);
-    const auto raw = binRecordingCell(entries, 0, 8, 0, 1, false);
-    const auto lod = binRecordingCell(entries, 0, 8, 0, 1, true);
-    EXPECT_TRUE(raw.valid);
-    EXPECT_TRUE(lod.valid);
-    EXPECT_NEAR(raw.bid, lod.bid, 0.0001);
-    EXPECT_NEAR(raw.ask, lod.ask, 0.0001);
-}
-
-TEST(RecordingEntries, AlignedDensePriceSumsMatchRawMinutes) {
-    const auto entries = syntheticRecordingEntries(1'000'000);
-    for (uint32_t c : {0u, 123u, 999u}) {
-        for (uint32_t row : {0u, 320u, 640u, 960u}) {
-            const auto raw = binRecordingCell(entries, c, c + 1, row, row + 39, false);
-            const auto meta = entries.dense40.meta[c];
-            const auto index = meta[0] + int32_t(row / 40) - meta[1];
-            ASSERT_GE(index, meta[0]);
-            ASSERT_LT(index, entries.dense40.meta[c + 1][0]);
-            EXPECT_NEAR(raw.bid, entries.dense40.sums[index][0], std::max(0.02f, raw.bid * 1e-6f));
-            EXPECT_NEAR(raw.ask, entries.dense40.sums[index][1], std::max(0.02f, raw.ask * 1e-6f));
-        }
-    }
-    const auto rawEight = binRecordingCell(entries, 0, 8, 300, 399, false);
-    const auto coarseMeta = entries.timeDense100.meta[0];
-    const auto coarseIndex = coarseMeta[0] + 3 - coarseMeta[1];
-    ASSERT_GE(coarseIndex, coarseMeta[0]);
-    EXPECT_NEAR(rawEight.bid, entries.timeDense100.sums[coarseIndex][0] / (8 * minute),
-                std::max(0.02f, rawEight.bid * 1e-6f));
+    const auto entries = loadRecordingEntries(root, "BTC-USD", "near", kHmc2MinMs, kHmc2MinMs + 16 * minute);
+    const auto cell = binRecordingCell(entries, 0, 16, 0, 1);
+    EXPECT_TRUE(cell.valid);
+    EXPECT_NEAR(cell.bid, decodeSize(encodeSize(4)), 0.001);
+    EXPECT_NEAR(cell.ask, decodeSize(encodeSize(5)), 0.001);
 }
 
 TEST(RecordingEntries, ParallelReaderChunksKeepMinuteOffsets) {

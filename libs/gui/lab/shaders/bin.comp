@@ -1,85 +1,69 @@
 #version 440
 layout(local_size_x = 8, local_size_y = 8) in;
-
 layout(std430, binding = 0) readonly buffer Packed { uint packed[]; };
 layout(std430, binding = 1) readonly buffer Offsets { uint offset[]; };
 layout(std430, binding = 2) readonly buffer Coverage { ivec4 coverage[]; };
 layout(std430, binding = 3) readonly buffer Durations { uint observedMs[]; };
 struct ColumnMeta { uint factor; float floor; float codesPerOctave; uint reserved; };
 layout(std430, binding = 4) readonly buffer NativeFactors { ColumnMeta columnMeta[]; };
-layout(std430, binding = 5) readonly buffer LodRows { uint lodRowSide[]; };
-layout(std430, binding = 6) readonly buffer LodSizes { float lodWeighted[]; };
-layout(std430, binding = 7) readonly buffer LodOffsets { uint lodOffset[]; };
-layout(std430, binding = 8) readonly buffer LodCoverage { ivec4 lodCoverage[]; };
-layout(std430, binding = 9) readonly buffer LodDurations { uint lodObservedMs[]; };
-layout(std430, binding = 10) readonly buffer PriceRows { uint priceRowSide[]; };
-layout(std430, binding = 11) readonly buffer PriceSizes { float priceSize[]; };
-layout(std430, binding = 12) readonly buffer PriceOffsets { uint priceOffset[]; };
-layout(std430, binding = 13) readonly buffer TimePriceRows { uint timePriceRowSide[]; };
-layout(std430, binding = 14) readonly buffer TimePriceSizes { float timePriceSize[]; };
-layout(std430, binding = 15) readonly buffer TimePriceOffsets { uint timePriceOffset[]; };
-layout(std430, binding = 16) readonly buffer Dense10 { vec2 dense10[]; };
-layout(std430, binding = 17) readonly buffer Dense10Meta { ivec2 dense10Meta[]; };
-layout(std430, binding = 18) readonly buffer Dense40 { vec2 dense40[]; };
-layout(std430, binding = 19) readonly buffer Dense40Meta { ivec2 dense40Meta[]; };
-layout(std430, binding = 20) readonly buffer Dense100 { vec2 dense100[]; };
-layout(std430, binding = 21) readonly buffer Dense100Meta { ivec2 dense100Meta[]; };
-layout(std430, binding = 22) readonly buffer TimeDense10 { vec2 timeDense10[]; };
-layout(std430, binding = 23) readonly buffer TimeDense10Meta { ivec2 timeDense10Meta[]; };
-layout(std430, binding = 24) readonly buffer TimeDense40 { vec2 timeDense40[]; };
-layout(std430, binding = 25) readonly buffer TimeDense40Meta { ivec2 timeDense40Meta[]; };
-layout(std430, binding = 26) readonly buffer TimeDense100 { vec2 timeDense100[]; };
-layout(std430, binding = 27) readonly buffer TimeDense100Meta { ivec2 timeDense100Meta[]; };
-layout(std430, binding = 28) writeonly buffer Output { vec4 cell[]; };
-layout(std140, binding = 29) uniform Params {
-    uvec4 dims; // output columns, output rows, source columns, native rows per display row
-    vec4 timeView; // source-column start, end
-    ivec4 priceView; // first output row's native index relative to base row
+layout(std430, binding = 5) readonly buffer EntryCovered { uint entryCoveredMs[]; };
+layout(std430, binding = 6) readonly buffer CoverageRuns { ivec4 run[]; };
+layout(std430, binding = 7) readonly buffer RunOffsets { uint runOffset[]; };
+layout(std430, binding = 8) writeonly buffer Output { vec4 cell[]; };
+layout(std140, binding = 9) uniform Params {
+    uvec4 dims;   // output columns, rows, source minutes, native rows per display row
+    ivec4 coords; // first source column, source columns/timeframe, relative bottom row, absolute base row
+    vec4 scale;
 };
-
 float decodedSize(uint value, uint column) {
     return value == 0u ? 0.0 : columnMeta[column].floor *
         exp2((float(value & 0x7fffu) - 1.0) / columnMeta[column].codesPerOctave);
 }
-uint rawRowSide(uint i) { return packed[(i >> 1u) * 3u + (i & 1u)]; }
-uint rawCode(uint i) { return (packed[(i >> 1u) * 3u + 2u] >> ((i & 1u) * 16u)) & 0xffffu; }
-
-vec2 denseOne(uint column, int group, bool coarse) {
-    ivec2 meta;
-    int end;
-    if (dims.w == 10u || dims.w == 20u || dims.w == 50u) {
-        meta = coarse ? timeDense10Meta[column] : dense10Meta[column];
-        end = coarse ? timeDense10Meta[column + 1u].x : dense10Meta[column + 1u].x;
-    } else if (dims.w == 40u) {
-        meta = coarse ? timeDense40Meta[column] : dense40Meta[column];
-        end = coarse ? timeDense40Meta[column + 1u].x : dense40Meta[column + 1u].x;
-    } else {
-        meta = coarse ? timeDense100Meta[column] : dense100Meta[column];
-        end = coarse ? timeDense100Meta[column + 1u].x : dense100Meta[column + 1u].x;
+uint rawRowSide(uint i) {
+    if (scale.x > 0.5) {
+        uint value = packed[i];
+        return (value & 0xffffu) | ((value & 0x10000u) != 0u ? 0x80000000u : 0u);
     }
-    int index = meta.x + group - meta.y;
-    if (index < meta.x || index >= end) return vec2(0.0);
-    if (dims.w == 10u || dims.w == 20u || dims.w == 50u) return coarse ? timeDense10[index] : dense10[index];
-    if (dims.w == 40u) return coarse ? timeDense40[index] : dense40[index];
-    return coarse ? timeDense100[index] : dense100[index];
+    return packed[(i >> 1u) * 3u + (i & 1u)];
 }
-
-vec2 denseValue(uint column, int group, bool coarse) {
-    if (dims.w == 20u)
-        return denseOne(column, group * 2, coarse) + denseOne(column, group * 2 + 1, coarse);
-    if (dims.w == 50u) {
-        int first = group * 5;
-        return denseOne(column, first, coarse) + denseOne(column, first + 1, coarse) +
-               denseOne(column, first + 2, coarse) + denseOne(column, first + 3, coarse) +
-               denseOne(column, first + 4, coarse);
+uint rawCode(uint i) {
+    if (scale.x > 0.5) return (packed[i] >> 17u) & 0x7fffu;
+    return (packed[(i >> 1u) * 3u + 2u] >> ((i & 1u) * 16u)) & 0xffffu;
+}
+uint coveredAt(uint c, bool askSide, uint row) {
+    if (scale.z < 2.0) {
+        ivec4 cov = coverage[c];
+        return (askSide ? (cov.z <= int(row) && cov.w >= int(row)) :
+                          (cov.x <= int(row) && cov.y >= int(row))) ? observedMs[c] : 0u;
     }
-    if (dims.w == 200u)
-        return denseOne(column, group * 2, coarse) + denseOne(column, group * 2 + 1, coarse);
-    return denseOne(column, group, coarse);
+    uint a = runOffset[c * 2u + uint(askSide)], b = runOffset[c * 2u + uint(askSide) + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if (run[m].y < int(row)) a = m + 1u;
+        else b = m;
+    }
+    return a < runOffset[c * 2u + uint(askSide) + 1u] && run[a].x <= int(row) ?
+        uint(run[a].z) : 0u;
 }
-
+bool coversRange(uint c, bool askSide, int lo, int hi) {
+    if (scale.z < 2.0) {
+        ivec4 cov = coverage[c];
+        return askSide ? (cov.z <= lo && cov.w >= hi) : (cov.x <= lo && cov.y >= hi);
+    }
+    uint cursor = uint(lo);
+    uint a = runOffset[c * 2u + uint(askSide)], b = runOffset[c * 2u + uint(askSide) + 1u];
+    while (a < b) {
+        uint m = a + (b - a) / 2u;
+        if (run[m].y < lo) a = m + 1u;
+        else b = m;
+    }
+    for (uint i = a; i < runOffset[c * 2u + uint(askSide) + 1u] && cursor <= uint(hi); ++i) {
+        if (run[i].x > int(cursor) || uint(run[i].z) != observedMs[c]) return false;
+        cursor = uint(run[i].y + 1);
+    }
+    return cursor > uint(hi);
+}
 vec2 rawRange(uint c, uint lo, uint hi, float weight) {
-    if (lo > hi) return vec2(0.0);
     uint a = offset[c], b = offset[c + 1u];
     while (a < b) {
         uint m = a + (b - a) / 2u;
@@ -87,71 +71,17 @@ vec2 rawRange(uint c, uint lo, uint hi, float weight) {
         else b = m;
     }
     vec2 sums = vec2(0.0);
-    uint stop = offset[c + 1u];
-    for (uint i = a; i < stop && (rawRowSide(i) & 0x7fffffffu) <= hi; ++i) {
-        float quantity = decodedSize(rawCode(i), c) * weight;
+    for (uint i = a; i < offset[c + 1u] && (rawRowSide(i) & 0x7fffffffu) <= hi; ++i) {
+        float quantity = decodedSize(rawCode(i), c) *
+            (scale.z < 2.0 ? weight : float(entryCoveredMs[i]));
         if ((rawRowSide(i) & 0x80000000u) == 0u) sums.x += quantity;
         else sums.y += quantity;
     }
     return sums;
 }
-
-vec2 priceRange(uint c, uint lo, uint end, float weight) {
-    if (lo >= end) return vec2(0.0);
-    uint a = priceOffset[c], b = priceOffset[c + 1u];
-    while (a < b) {
-        uint m = a + (b - a) / 2u;
-        if ((priceRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
-        else b = m;
-    }
-    vec2 sums = vec2(0.0);
-    uint stop = priceOffset[c + 1u];
-    for (uint i = a; i < stop && (priceRowSide[i] & 0x7fffffffu) < end; ++i) {
-        float quantity = priceSize[i] * weight;
-        if ((priceRowSide[i] & 0x80000000u) == 0u) sums.x += quantity;
-        else sums.y += quantity;
-    }
-    return sums;
-}
-
-vec2 lodRange(uint g, uint lo, uint hi) {
-    if (lo > hi) return vec2(0.0);
-    uint a = lodOffset[g], b = lodOffset[g + 1u];
-    while (a < b) {
-        uint m = a + (b - a) / 2u;
-        if ((lodRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
-        else b = m;
-    }
-    vec2 sums = vec2(0.0);
-    uint stop = lodOffset[g + 1u];
-    for (uint i = a; i < stop && (lodRowSide[i] & 0x7fffffffu) <= hi; ++i) {
-        if ((lodRowSide[i] & 0x80000000u) == 0u) sums.x += lodWeighted[i];
-        else sums.y += lodWeighted[i];
-    }
-    return sums;
-}
-
-vec2 timePriceRange(uint g, uint lo, uint end) {
-    if (lo >= end) return vec2(0.0);
-    uint a = timePriceOffset[g], b = timePriceOffset[g + 1u];
-    while (a < b) {
-        uint m = a + (b - a) / 2u;
-        if ((timePriceRowSide[m] & 0x7fffffffu) < lo) a = m + 1u;
-        else b = m;
-    }
-    vec2 sums = vec2(0.0);
-    uint stop = timePriceOffset[g + 1u];
-    for (uint i = a; i < stop && (timePriceRowSide[i] & 0x7fffffffu) < end; ++i) {
-        if ((timePriceRowSide[i] & 0x80000000u) == 0u) sums.x += timePriceSize[i];
-        else sums.y += timePriceSize[i];
-    }
-    return sums;
-}
-
-// buildPage first divides each native row/side by the duration that covered
-// that row, then weights distinct native grids by their observed duration.
-// This path is needed only when a displayed row has incomplete coverage.
-vec2 partialCoverageSums(uint first, uint end, uint lo, uint hi, float totalMs, ivec4 commonCoverage) {
+// Match RecordingPage: each native row/side uses its own covered duration.
+// Distinct native grids are then weighted by their observed duration.
+vec2 partialCoverageSums(uint first, uint end, uint lo, uint hi, float totalMs) {
     vec2 result = vec2(0.0);
     for (uint c = first; c < end; ++c) {
         if (observedMs[c] == 0u) continue;
@@ -168,21 +98,14 @@ vec2 partialCoverageSums(uint first, uint end, uint lo, uint hi, float totalMs, 
         for (uint i = a; i < offset[c + 1u] && (rawRowSide(i) & 0x7fffffffu) <= hi; ++i) {
             uint row = rawRowSide(i) & 0x7fffffffu;
             bool askSide = (rawRowSide(i) & 0x80000000u) != 0u;
-            float coveredMs = gridMs;
-            bool alwaysCovered = askSide ?
-                (commonCoverage.z <= int(row) && commonCoverage.w >= int(row)) :
-                (commonCoverage.x <= int(row) && commonCoverage.y >= int(row));
-            if (!alwaysCovered) {
-                coveredMs = 0.0;
-                for (uint d = first; d < end; ++d) {
-                    if (observedMs[d] == 0u || columnMeta[d].factor != columnMeta[c].factor) continue;
-                    ivec4 cov = coverage[d];
-                    if (askSide ? (cov.z <= int(row) && cov.w >= int(row)) :
-                                  (cov.x <= int(row) && cov.y >= int(row))) coveredMs += float(observedMs[d]);
-                }
+            float coveredMs = 0.0;
+            for (uint d = first; d < end; ++d) {
+                if (observedMs[d] == 0u || columnMeta[d].factor != columnMeta[c].factor) continue;
+                coveredMs += float(coveredAt(d, askSide, row));
             }
             if (coveredMs > 0.0) {
-                float value = decodedSize(rawCode(i), c) * float(observedMs[c]) / coveredMs * gridMs / totalMs;
+                float numeratorMs = scale.z < 2.0 ? float(observedMs[c]) : float(entryCoveredMs[i]);
+                float value = decodedSize(rawCode(i), c) * numeratorMs / coveredMs * gridMs / totalMs;
                 if (askSide) result.y += value;
                 else result.x += value;
             }
@@ -190,93 +113,40 @@ vec2 partialCoverageSums(uint first, uint end, uint lo, uint hi, float totalMs, 
     }
     return result;
 }
-
 void main() {
     uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
     if (x >= dims.x || y >= dims.y) return;
-    float scale = (timeView.y - timeView.x) / float(dims.x);
-    uint first = uint(clamp(ceil(timeView.x + float(x) * scale - 0.00001), 0.0, float(dims.z)));
-    uint end = uint(clamp(ceil(timeView.x + float(x + 1u) * scale - 0.00001), 0.0, float(dims.z)));
-    int lo = priceView.x + int((dims.y - 1u - y) * dims.w);
+    int start = coords.x + int(x) * coords.y;
+    int stop = start + coords.y;
+    uint first = uint(clamp(start, 0, int(dims.z)));
+    uint end = uint(clamp(stop, 0, int(dims.z)));
+    int lo = coords.z + int((dims.y - 1u - y) * dims.w);
     int hi = lo + int(dims.w) - 1;
     float bid = 0.0, ask = 0.0, totalMs = 0.0;
     bool valid = end > first && lo >= 0;
-    ivec4 commonCoverage = ivec4(0);
-    bool haveCoverage = false;
-    for (uint c = first; c < end;) {
-        // Aligned whole K-minute groups use duration-weighted sparse sums.
-        // Raw boundary minutes keep arbitrary pan/zoom partitions identical.
-        if (c % uint(priceView.y) == 0u && c + uint(priceView.y) <= end) {
-            uint g = c / uint(priceView.y);
-            if (lodObservedMs[g] != 0u) {
-                ivec4 cov = lodCoverage[g];
-                valid = valid && cov.x <= lo && cov.y >= hi && cov.z <= lo && cov.w >= hi;
-                if (!haveCoverage) { commonCoverage = cov; haveCoverage = true; }
-                else commonCoverage = ivec4(max(commonCoverage.x, cov.x), min(commonCoverage.y, cov.y),
-                                           max(commonCoverage.z, cov.z), min(commonCoverage.w, cov.w));
-                totalMs += float(lodObservedMs[g]);
-            }
-            if (hi < 0) { c += uint(priceView.y); continue; }
-            uint safeLo = uint(max(lo, 0)), safeHi = uint(hi);
-            vec2 sums;
-            if (dims.w == 10u || dims.w == 20u || dims.w == 40u || dims.w == 50u || dims.w == 100u || dims.w == 200u) {
-                sums = denseValue(g, (lo + priceView.w) / int(dims.w), true);
-            } else if (dims.w >= uint(priceView.z)) {
-                uint blockLo = (safeLo + uint(priceView.z) - 1u) / uint(priceView.z);
-                uint blockEnd = (safeHi + 1u) / uint(priceView.z);
-                if (blockLo < blockEnd) {
-                    sums = vec2(0.0);
-                    if (blockLo * uint(priceView.z) > safeLo)
-                        sums += lodRange(g, safeLo, blockLo * uint(priceView.z) - 1u);
-                    sums += timePriceRange(g, blockLo, blockEnd);
-                    if (blockEnd * uint(priceView.z) <= safeHi)
-                        sums += lodRange(g, blockEnd * uint(priceView.z), safeHi);
-                } else sums = lodRange(g, safeLo, safeHi);
-            } else sums = lodRange(g, safeLo, safeHi);
-            bid += sums.x; ask += sums.y;
-            c += uint(priceView.y);
-            continue;
-        }
-        if (observedMs[c] == 0u) { ++c; continue; }
-        ivec4 cov = coverage[c];
-        valid = valid && cov.x <= lo && cov.y >= hi && cov.z <= lo && cov.w >= hi;
-        if (!haveCoverage) { commonCoverage = cov; haveCoverage = true; }
-        else commonCoverage = ivec4(max(commonCoverage.x, cov.x), min(commonCoverage.y, cov.y),
-                                   max(commonCoverage.z, cov.z), min(commonCoverage.w, cov.w));
+    for (uint c = first; c < end; ++c) {
+        if (observedMs[c] == 0u) continue;
+        valid = valid && lo >= 0 && coversRange(c, false, lo, hi) && coversRange(c, true, lo, hi);
         float weight = float(observedMs[c]);
         totalMs += weight;
-        if (hi < 0) { ++c; continue; }
-        vec2 sums;
-        uint safeLo = uint(max(lo, 0)), safeHi = uint(hi);
-        if (dims.w == 10u || dims.w == 20u || dims.w == 40u || dims.w == 50u || dims.w == 100u || dims.w == 200u) {
-            sums = denseValue(c, (lo + priceView.w) / int(dims.w), false) * weight;
-        } else if (dims.w >= uint(priceView.z)) {
-            uint blockLo = (safeLo + uint(priceView.z) - 1u) / uint(priceView.z);
-            uint blockEnd = (safeHi + 1u) / uint(priceView.z);
-            if (blockLo < blockEnd) {
-                sums = vec2(0.0);
-                if (blockLo * uint(priceView.z) > safeLo)
-                    sums += rawRange(c, safeLo, blockLo * uint(priceView.z) - 1u, weight);
-                sums += priceRange(c, blockLo, blockEnd, weight);
-                if (blockEnd * uint(priceView.z) <= safeHi)
-                    sums += rawRange(c, blockEnd * uint(priceView.z), safeHi, weight);
-            } else sums = rawRange(c, safeLo, safeHi, weight);
-        } else sums = rawRange(c, safeLo, safeHi, weight);
-        bid += sums.x; ask += sums.y;
-        ++c;
+        if (hi >= 0) {
+            vec2 sums = rawRange(c, uint(max(lo, 0)), uint(hi), weight);
+            bid += sums.x; ask += sums.y;
+        }
     }
     bool compatible = true;
     for (uint c = first; c < end; ++c) {
         uint factor = columnMeta[c].factor;
         if (observedMs[c] != 0u && (factor == 0u || dims.w % factor != 0u ||
-            (lo + priceView.w) % int(factor) != 0)) compatible = false;
+            (lo + coords.w) % int(factor) != 0)) compatible = false;
     }
     if (totalMs <= 0.0 || !compatible) {
         cell[y * dims.x + x] = vec4(0.0);
         return;
     }
-    if (!valid && end - first > 1u && hi >= 0 && (bid > 0.0 || ask > 0.0)) {
-        vec2 corrected = partialCoverageSums(first, end, uint(max(lo, 0)), uint(hi), totalMs, commonCoverage);
+    if (!valid && scale.w < 0.5 && (end - first > 1u || scale.z > 1.0) &&
+        hi >= 0 && (bid > 0.0 || ask > 0.0)) {
+        vec2 corrected = partialCoverageSums(first, end, uint(max(lo, 0)), uint(hi), totalMs);
         bid = corrected.x * totalMs;
         ask = corrected.y * totalMs;
     }

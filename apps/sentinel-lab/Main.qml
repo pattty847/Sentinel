@@ -14,8 +14,16 @@ ApplicationWindow {
     color: "#070b10"
     property var metrics: ({})
     property var frameHistory: []
+    property string screenshotNotice: ""
 
     Component.onCompleted: {
+        binLab.timeframeMinutes = initialTf
+        var presets = [1, 5, 15, 60, 240, 1440]
+        timeframe.currentIndex = presets.indexOf(initialTf)
+        if (timeframe.currentIndex < 0) {
+            timeframe.currentIndex = 6
+            customTf.text = String(initialTf)
+        }
         if (initialSynthetic > 0) {
             source.currentIndex = initialSynthetic >= 100000000 ? 3 : initialSynthetic >= 10000000 ? 2 : 1
             binLab.loadSynthetic(initialSynthetic)
@@ -39,32 +47,100 @@ ApplicationWindow {
         }
     }
 
+    Shortcut {
+        sequence: "S"
+        onActivated: root.screenshotNotice = binLab.saveScreenshot("") ?
+            "Screenshot saved to screenshots/" : "Screenshot failed"
+    }
+    Connections {
+        target: binLab
+        function onTimeframeChanged() {
+            var preset = [1, 5, 15, 60, 240, 1440].indexOf(binLab.timeframeMinutes)
+            timeframe.currentIndex = preset >= 0 ? preset : 6
+            if (preset < 0) customTf.text = String(binLab.timeframeMinutes)
+        }
+        function onTickChanged() {
+            priceTick.currentIndex = [0, 1, 5, 10, 20, 50, 100].indexOf(binLab.manualTick)
+        }
+    }
+
     header: Rectangle {
-        height: 64
+        height: 112
         color: "#101820"
         border.color: "#243442"
-        RowLayout {
+        ColumnLayout {
             anchors.fill: parent
             anchors.leftMargin: 18
             anchors.rightMargin: 18
-            spacing: 12
-            Label { text: "GPU BIN LAB"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 16; Layout.rightMargin: 16 }
-            ComboBox {
-                id: source
-                model: ["Real HMC2", "Synthetic 1M", "Synthetic 10M", "Synthetic 100M"]
-                Layout.preferredWidth: 170
-            }
-            Label { text: "Hours"; color: "#aab7c0"; visible: source.currentIndex === 0 }
-            SpinBox { id: hours; from: 1; to: 720; value: 24; visible: source.currentIndex === 0; Layout.preferredWidth: 95 }
-            ComboBox { id: layer; model: ["near", "deep"]; visible: source.currentIndex === 0; Layout.preferredWidth: 90 }
-            Button {
-                text: "Load"
-                onClicked: {
-                    if (source.currentIndex === 0) binLab.loadReal(hours.value, layer.currentText)
-                    else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : source.currentIndex === 2 ? 10000000 : 100000000)
+            spacing: 4
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: "GPU BIN LAB"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 16; Layout.rightMargin: 16 }
+                ComboBox {
+                    id: source
+                    model: ["Real HMC2", "Synthetic 1M", "Synthetic 10M", "Synthetic 100M"]
+                    Layout.preferredWidth: 170
                 }
+                Label { text: "Hours"; color: "#aab7c0"; visible: source.currentIndex === 0 }
+                SpinBox { id: hours; from: 1; to: 720; value: 24; visible: source.currentIndex === 0; Layout.preferredWidth: 95 }
+                ComboBox { id: layer; model: ["near", "deep"]; visible: source.currentIndex === 0; Layout.preferredWidth: 90 }
+                Button {
+                    text: "Load"
+                    onClicked: {
+                        if (source.currentIndex === 0) binLab.loadReal(hours.value, layer.currentText)
+                        else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : source.currentIndex === 2 ? 10000000 : 100000000)
+                    }
+                }
+                Label { text: binLab.status; color: "#b9c9d2"; elide: Text.ElideRight; Layout.fillWidth: true }
             }
-            Label { text: binLab.status; color: "#b9c9d2"; elide: Text.ElideRight; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: "Timeframe"; color: "#aab7c0" }
+                ComboBox {
+                    id: timeframe
+                    model: ["1m", "5m", "15m", "1h", "4h", "1D", "Custom"]
+                    Layout.preferredWidth: 100
+                    onActivated: {
+                        if (currentIndex < 6) {
+                            binLab.autoTimeframe = false
+                            binLab.timeframeMinutes = [1, 5, 15, 60, 240, 1440][currentIndex]
+                        } else customTf.forceActiveFocus()
+                    }
+                }
+                TextField {
+                    id: customTf
+                    Layout.preferredWidth: 52
+                    placeholderText: "16"
+                    validator: IntValidator { bottom: 1; top: 1440 }
+                    onEditingFinished: {
+                        if (acceptableInput) {
+                            binLab.autoTimeframe = false
+                            binLab.timeframeMinutes = Number(text)
+                            timeframe.currentIndex = 6
+                        }
+                    }
+                }
+                CheckBox {
+                    id: autoTf
+                    text: "Auto"
+                    checked: binLab.autoTimeframe
+                    onToggled: binLab.autoTimeframe = checked
+                }
+                Label { text: "Active " + binLab.timeframeMinutes + "m"; color: "#a6e7e9"; font.pixelSize: 12 }
+                Label { text: "Min col px"; color: "#aab7c0" }
+                SpinBox { from: 1; to: 8; value: 1; Layout.preferredWidth: 65
+                          onValueModified: binLab.minColumnPx = value }
+                Label { text: "Price tick"; color: "#aab7c0" }
+                ComboBox {
+                    id: priceTick
+                    model: ["Auto", "$1", "$5", "$10", "$20", "$50", "$100"]
+                    Layout.preferredWidth: 90
+                    onActivated: binLab.manualTick = [0, 1, 5, 10, 20, 50, 100][currentIndex]
+                }
+                Button { text: "Screenshot  S"; onClicked: root.screenshotNotice =
+                             binLab.saveScreenshot("") ? "Screenshot saved" : "Screenshot failed" }
+                Label { text: root.screenshotNotice; color: "#a6e7e9"; Layout.fillWidth: true; elide: Text.ElideRight }
+            }
         }
     }
 
@@ -102,7 +178,7 @@ ApplicationWindow {
                 anchors.margins: 14
                 width: hint.implicitWidth + 20; height: hint.implicitHeight + 12
                 color: "#ba101820"
-                Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price"; color: "#9fb4bf"; font.pixelSize: 12 }
+                Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price     S  screenshot"; color: "#9fb4bf"; font.pixelSize: 12 }
             }
         }
         Rectangle {
@@ -138,7 +214,7 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         ["FPS", "fps", ""], ["Frame", "frameMs", " ms"],
-                        ["Re-bin submit", "binSubmitMs", " ms"], ["GPU frame", "gpuFrameMs", " ms"],
+                        ["Re-bin submit", "binSubmitMs", " ms"], ["GPU frame", "gpuFrameMs", " ms"], ["Re-bins", "rebins", ""],
                         ["Loaded entries", "entries", ""], ["GPU buffers", "gpuBytes", " bytes"],
                         ["Ticks / bin", "group", ""], ["Display tick", "tick", " $"],
                         ["Grid", "columns", " cols"], ["Rows", "rows", ""],

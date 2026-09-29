@@ -18,61 +18,62 @@ struct RecordingEntries {
     struct Coverage {
         int32_t bidLo = 1, bidHi = 0, askLo = 1, askHi = 0;
     };
-    static constexpr uint32_t kLodMinutes = 8;
-    struct TimeLod {
-        std::vector<uint32_t> rowSide, offsets, observedMs;
-        std::vector<float> weightedSize; // decoded size * observed milliseconds
-        std::vector<Coverage> coverage;
-    } lod;
-    static constexpr uint32_t kPriceBlockRows = 10;
-    struct PriceLod {
-        std::vector<uint32_t> rowSide, offsets;
-        std::vector<float> size;
-    } priceLod;
-    PriceLod timePriceLod; // duration-weighted sizes over eight-minute groups
-    struct DensePriceLod {
-        std::vector<std::array<float, 2>> sums;
-        std::vector<std::array<int32_t, 2>> meta; // [first sum offset, global row group base]
-    } dense10, dense40, dense100, timeDense10, timeDense40, timeDense100;
     int64_t startMs = 0;
+    uint32_t sourceMinutes = 1; // one source column is this many UTC-aligned minutes
+    bool preNormalized = false; // selected sub-hour columns already use per-row covered duration
     int64_t baseRow = 0;
     double nativeTick = 0;
     double priceScale = 100;
     SizeScale sizeScale;
     std::vector<uint32_t> rowSide, code;
+    std::vector<uint32_t> entryCoveredMs; // hour rollup numerator weight; empty for minutes
     std::vector<uint32_t> offsets;
     std::vector<Coverage> coverage;
     std::vector<uint32_t> observedMs;
     std::vector<uint32_t> nativeFactor; // native tick / common fine tick, per minute
     std::vector<SizeScale> columnScale; // original HMC2 log-code scale, per minute
+    std::vector<std::array<int32_t, 4>> coverageRuns; // lo, hi, coveredMs, side
+    std::vector<uint32_t> coverageRunOffsets; // two side slices per source column
     double loadMs = 0, decodeMs = 0;
 
     uint32_t columns() const { return static_cast<uint32_t>(coverage.size()); }
     uint64_t gpuBytes() const {
-        return ((rowSide.size() + 1ull) / 2ull) * 12ull + offsets.size() * 4ull + coverage.size() * 36ull +
-            lod.rowSide.size() * 8ull + lod.offsets.size() * 4ull + lod.coverage.size() * 20ull +
-            priceLod.rowSide.size() * 8ull + priceLod.offsets.size() * 4ull +
-            timePriceLod.rowSide.size() * 8ull + timePriceLod.offsets.size() * 4ull +
-            (dense10.sums.size() + dense40.sums.size() + dense100.sums.size() +
-             timeDense10.sums.size() + timeDense40.sums.size() + timeDense100.sums.size()) * 8ull +
-            (dense10.meta.size() + dense40.meta.size() + dense100.meta.size() +
-             timeDense10.meta.size() + timeDense40.meta.size() + timeDense100.meta.size()) * 8ull;
+        uint64_t packedBytes = rowSide.size() * 4ull;
+        for (const auto value : rowSide) if ((value & 0x7fffffffu) > 0xffffu) {
+            packedBytes = ((rowSide.size() + 1ull) / 2ull) * 12ull;
+            break;
+        }
+        return packedBytes + entryCoveredMs.size() * 4ull +
+            offsets.size() * 4ull + coverage.size() * (sizeof(Coverage) + sizeof(uint32_t) +
+            sizeof(uint32_t) + 16ull) + coverageRuns.size() * 16ull + coverageRunOffsets.size() * 4ull;
     }
 };
 
 struct BinCell { float bid = 0, ask = 0; bool valid = false; };
-// CPU reference for raw/LOD equivalence tests. The GPU uses the same aligned
-// interior groups and raw boundary minutes.
+// CPU reference for exact timeframe and GPU parity tests.
 BinCell binRecordingCell(const RecordingEntries &data, uint32_t first, uint32_t end,
-                         uint32_t rowLo, uint32_t rowHi, bool useLod, bool usePriceLod = false);
+                         uint32_t rowLo, uint32_t rowHi);
 
 // A reader never acquires the writer lock and ignores a torn append tail.
 // Throws on incompatible native grids, invalid dimensions, or a read failure.
 RecordingEntries loadRecordingEntries(const std::filesystem::path &root,
                                       const std::string &symbol, const std::string &layer,
-                                      int64_t startMs, int64_t endMs);
+                                      int64_t startMs, int64_t endMs, uint32_t sourceMinutes = 1);
+// Use persisted schema-4 hours, composing an unpersisted tail from minutes.
+// A mixed-grid tail falls back to raw minutes for the complete range.
+RecordingEntries loadHourEntriesWithMinuteTail(const std::filesystem::path &root,
+                                               const std::string &symbol, const std::string &layer,
+                                               int64_t startMs, int64_t endMs);
+// Explicit selected timeframes below an hour are composed once from minute
+// records, per native row/side and covered duration. Mixed grids use raw data.
+RecordingEntries loadComposedMinuteEntries(const std::filesystem::path &root,
+                                           const std::string &symbol, const std::string &layer,
+                                           int64_t startMs, int64_t endMs, uint32_t timeframeMinutes);
+RecordingEntries loadComposedHourEntries(const std::filesystem::path &root,
+                                         const std::string &symbol, const std::string &layer,
+                                         int64_t startMs, int64_t endMs, uint32_t timeframeMinutes);
 // Concatenate adjacent independently decoded ranges without rereading the
-// already painted recent range. Rebuilds the disposable LODs on a common grid.
+// already painted recent range.
 RecordingEntries joinRecordingEntries(const RecordingEntries &older,
                                       const RecordingEntries &recent);
 RecordingEntries syntheticRecordingEntries(uint32_t count);

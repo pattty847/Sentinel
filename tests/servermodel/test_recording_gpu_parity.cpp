@@ -19,6 +19,27 @@ namespace {
 constexpr int64_t minute = 60'000;
 constexpr int64_t hour = 60 * minute;
 
+TEST(LabGridPlacement, FractionalPansStayInsideAbsoluteBinMargin) {
+    lab::Grid grid;
+    grid.firstMinute = 10; // absolute minute 30010, a multiple of five
+    grid.timeframeMinutes = 5;
+    grid.columns = 9;
+    grid.baseRow = 20'000;
+    grid.rowLo = 80'000; // absolute native row 100000, display bin 10000
+    grid.group = 10;
+    grid.rows = 10;
+    constexpr int64_t sourceStartMinute = 30'000;
+    constexpr double tick = 10;
+    EXPECT_TRUE(lab::gridContainsView(grid, sourceStartMinute, grid.baseRow,
+                                      30'020.2, 30'040.2, 100'020.2, 100'070.2, tick));
+    EXPECT_TRUE(lab::gridContainsView(grid, sourceStartMinute, grid.baseRow,
+                                      30'020.8, 30'040.8, 100'020.8, 100'070.8, tick));
+    EXPECT_FALSE(lab::gridContainsView(grid, sourceStartMinute, grid.baseRow,
+                                       30'030.2, 30'050.2, 100'020.2, 100'070.2, tick));
+    EXPECT_FALSE(lab::gridContainsView(grid, sourceStartMinute, grid.baseRow,
+                                       30'020.2, 30'040.2, 100'040.2, 100'090.2, tick));
+}
+
 void writeFixture(const std::filesystem::path &root) {
     recording::Hmc2Store writer(root);
     recording::Hmc2Record r;
@@ -43,6 +64,51 @@ void writeFixture(const std::filesystem::path &root) {
         writer.append(r);
     }
 }
+void writeHourFixture(const std::filesystem::path &root) {
+    recording::Hmc2Store writer(root);
+    recording::Hmc2Record r;
+    r.header = {"BTC-USD", "deep", hour, 100, 500, {}, 79};
+    r.observedMs = hour;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 100'050;
+    r.bidRowLo = r.askRowLo = 20'000;
+    r.bidRowHi = r.askRowHi = 20'003;
+    for (int c = 0; c < 24; ++c) {
+        r.bucketStartMs = recording::kHmc2MinMs + int64_t(c) * hour;
+        const uint32_t partial = c % 3 == 0 ? uint32_t(hour / 2) : uint32_t(hour);
+        r.coverage = {{20'000, 20'001, false, uint32_t(hour)},
+                      {20'002, 20'002, false, partial},
+                      {20'003, 20'003, false, uint32_t(hour)},
+                      {20'000, 20'003, true, uint32_t(hour)}};
+        r.entries = {{20'001, false, recording::encodeSize(5 + c % 3), 0, uint32_t(hour)},
+                     {20'002, false, recording::encodeSize(12 + c % 5), 0, partial},
+                     {20'002, true, recording::encodeSize(8 + c % 2), 0, uint32_t(hour)}};
+        writer.append(r);
+    }
+}
+void writeMinuteTailFixture(const std::filesystem::path &root) {
+    recording::Hmc2Store writer(root);
+    recording::Hmc2Record r;
+    r.header = {"BTC-USD", "deep", hour, 100, 500, {}, 91};
+    r.bucketStartMs = recording::kHmc2MinMs;
+    r.observedMs = hour;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 100'050;
+    r.bidRowLo = r.askRowLo = 20'000;
+    r.bidRowHi = r.askRowHi = 20'002;
+    r.coverage = {{20'000, 20'002, false, uint32_t(hour)},
+                  {20'000, 20'002, true, uint32_t(hour)}};
+    r.entries = {{20'001, false, recording::encodeSize(10), 0, uint32_t(hour)}};
+    writer.append(r);
+    r.header.tfMs = minute;
+    r.header.configHash = 92;
+    r.coverage.clear();
+    for (int c = 0; c < 30; ++c) {
+        r.bucketStartMs = recording::kHmc2MinMs + hour + int64_t(c) * minute;
+        r.observedMs = minute;
+        r.bidRowHi = c % 2 ? 20'001 : 20'002;
+        r.entries = {{20'001, false, recording::encodeSize(20 + c % 3), 0}};
+        writer.append(r);
+    }
+}
 
 struct Deviation { int code = 0; int side = 0; int validity = 0; int cells = 0; };
 
@@ -62,15 +128,29 @@ void compareViews(QRhi *rhi, const std::filesystem::path &root,
             ASSERT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
             ASSERT_LT(++uploadFrames, 1000);
         }
-        EXPECT_GT(uploadFrames, 1);
+        if (data.sourceMinutes == 1) EXPECT_GT(uploadFrames, 1);
     } else {
         ASSERT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
         ASSERT_TRUE(binner.upload(cb, data, &error)) << error.toStdString();
         ASSERT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
     }
 
-    for (const auto [window, tf] : {std::pair{24 * hour, 15 * minute},
-                                    {hour, 5 * minute}, {10 * minute, minute}}) {
+    const std::vector<std::pair<int64_t, int64_t>> views = data.sourceMinutes == 60 ?
+        std::vector<std::pair<int64_t, int64_t>>{{hour, hour}, {24 * hour, hour}, {8 * hour, 4 * hour},
+                                                 {24 * hour, 24 * hour}} :
+        data.sourceMinutes == 5 ?
+        std::vector<std::pair<int64_t, int64_t>>{{hour, 5 * minute}} :
+        data.sourceMinutes == 16 ?
+        std::vector<std::pair<int64_t, int64_t>>{{16 * 16 * minute, 16 * minute}} :
+        data.sourceMinutes == 240 ?
+        std::vector<std::pair<int64_t, int64_t>>{{8 * hour, 4 * hour}} :
+        data.sourceMinutes == 1440 ?
+        std::vector<std::pair<int64_t, int64_t>>{{24 * hour, 24 * hour}} :
+        std::vector<std::pair<int64_t, int64_t>>{{24 * hour, 15 * minute},
+                                                 {hour, 5 * minute},
+                                                 {16 * 16 * minute, 16 * minute},
+                                                 {10 * minute, minute}};
+    for (const auto [window, tf] : views) {
         const int64_t viewEnd = end / tf * tf;
         const int64_t viewStart = viewEnd - window;
         if (viewStart < data.startMs) continue;
@@ -95,8 +175,8 @@ void compareViews(QRhi *rhi, const std::filesystem::path &root,
             ASSERT_EQ(page.band.rows, rows);
 
             lab::Grid grid;
-            grid.timeLo = float((viewStart - data.startMs) / minute);
-            grid.timeHi = float((viewEnd - data.startMs) / minute);
+            grid.firstMinute = int32_t((viewStart - data.startMs) / minute);
+            grid.timeframeMinutes = uint32_t(tf / minute);
             grid.columns = uint32_t(window / tf);
             grid.rows = rows;
             grid.rowLo = int32_t(first - data.baseRow);
@@ -175,6 +255,113 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     EXPECT_EQ(synthetic.side, 0);
     EXPECT_EQ(synthetic.validity, 0);
 
+    for (uint32_t tf : {5u, 16u}) {
+        const auto composed = recording::loadComposedMinuteEntries(root, "BTC-USD", "deep",
+            recording::kHmc2MinMs, syntheticEnd, tf);
+        ASSERT_EQ(composed.sourceMinutes, tf);
+        Deviation selected;
+        compareViews(rhi.get(), root, composed, syntheticEnd, selected);
+        std::cout << tf << "m composed GPU parity: cells=" << selected.cells
+                  << " max_code_delta=" << selected.code
+                  << " side_mismatches=" << selected.side
+                  << " validity_mismatches=" << selected.validity << '\n';
+        EXPECT_GT(selected.cells, 0);
+        EXPECT_LE(selected.code, 1);
+        EXPECT_EQ(selected.side, 0);
+        EXPECT_EQ(selected.validity, 0);
+    }
+
+    writeHourFixture(root);
+    const auto hourData = recording::loadRecordingEntries(root, "BTC-USD", "deep",
+        recording::kHmc2MinMs, syntheticEnd, 60);
+    ASSERT_EQ(hourData.sourceMinutes, 60u);
+    ASSERT_EQ(hourData.columns(), 24u);
+    const auto hourOlder = recording::loadRecordingEntries(root, "BTC-USD", "deep",
+        recording::kHmc2MinMs, recording::kHmc2MinMs + 12 * hour, 60);
+    const auto hourRecent = recording::loadRecordingEntries(root, "BTC-USD", "deep",
+        recording::kHmc2MinMs + 12 * hour, syntheticEnd, 60);
+    const auto joinedHours = recording::joinRecordingEntries(hourOlder, hourRecent);
+    EXPECT_EQ(joinedHours.rowSide, hourData.rowSide);
+    EXPECT_EQ(joinedHours.entryCoveredMs, hourData.entryCoveredMs);
+    EXPECT_EQ(joinedHours.coverageRuns, hourData.coverageRuns);
+    EXPECT_EQ(joinedHours.coverageRunOffsets, hourData.coverageRunOffsets);
+    Deviation hourly;
+    compareViews(rhi.get(), root, joinedHours, syntheticEnd, hourly);
+    std::cout << "hour-rollup GPU parity: cells=" << hourly.cells << " max_code_delta=" << hourly.code
+              << " side_mismatches=" << hourly.side << " validity_mismatches=" << hourly.validity << '\n';
+    EXPECT_GT(hourly.cells, 0);
+    EXPECT_LE(hourly.code, 1);
+    EXPECT_EQ(hourly.side, 0);
+    EXPECT_EQ(hourly.validity, 0);
+
+    for (uint32_t tf : {240u, 1440u}) {
+        const auto composed = recording::loadComposedHourEntries(
+            root, "BTC-USD", "deep", recording::kHmc2MinMs, syntheticEnd, tf);
+        ASSERT_EQ(composed.sourceMinutes, tf);
+        Deviation selected;
+        compareViews(rhi.get(), root, composed, syntheticEnd, selected);
+        std::cout << "synthetic " << tf << "m hour-composed GPU parity: cells="
+                  << selected.cells << " max_code_delta=" << selected.code
+                  << " side_mismatches=" << selected.side
+                  << " validity_mismatches=" << selected.validity << '\n';
+        EXPECT_GT(selected.cells, 0);
+        EXPECT_LE(selected.code, 1);
+        EXPECT_EQ(selected.side, 0);
+        EXPECT_EQ(selected.validity, 0);
+    }
+
+    QTemporaryDir tailDir;
+    ASSERT_TRUE(tailDir.isValid());
+    const std::filesystem::path tailRoot(tailDir.path().toStdString());
+    writeMinuteTailFixture(tailRoot);
+    const auto withTail = recording::loadHourEntriesWithMinuteTail(
+        tailRoot, "BTC-USD", "deep", recording::kHmc2MinMs, recording::kHmc2MinMs + 2 * hour);
+    ASSERT_EQ(withTail.sourceMinutes, 60u);
+    ASSERT_EQ(withTail.columns(), 2u);
+    EXPECT_EQ(withTail.observedMs[1], 30 * minute);
+    Deviation tail;
+    compareViews(rhi.get(), tailRoot, withTail, recording::kHmc2MinMs + 2 * hour, tail);
+    std::cout << "minute-tail GPU parity: cells=" << tail.cells << " max_code_delta=" << tail.code
+              << " side_mismatches=" << tail.side << " validity_mismatches=" << tail.validity << '\n';
+    EXPECT_GT(tail.cells, 0);
+    EXPECT_LE(tail.code, 1);
+    EXPECT_EQ(tail.side, 0);
+    EXPECT_EQ(tail.validity, 0);
+
+    // Relative rows above 65535 must use the six-byte packed fallback.
+    recording::RecordingEntries wide;
+    wide.startMs = recording::kHmc2MinMs;
+    wide.baseRow = 20'000;
+    wide.nativeTick = 1;
+    wide.coverage = {{0, 70'000, 0, 70'000}};
+    wide.observedMs = {uint32_t(minute)};
+    wide.nativeFactor = {1};
+    wide.columnScale = {wide.sizeScale};
+    wide.rowSide = {70'000u};
+    wide.code = {recording::encodeSize(7)};
+    wide.offsets = {0, 1};
+    lab::GpuBinner wideBinner(rhi.get());
+    lab::Grid wideGrid;
+    wideGrid.firstMinute = 0; wideGrid.timeframeMinutes = 1;
+    wideGrid.rowLo = 70'000; wideGrid.baseRow = 20'000;
+    wideGrid.group = wideGrid.columns = wideGrid.rows = 1;
+    wideGrid.sizeFloor = float(wide.sizeScale.floor);
+    wideGrid.codesPerOctave = float(wide.sizeScale.codesPerOctave);
+    QRhiCommandBuffer *wideCb = nullptr;
+    QRhiReadbackResult wideReadback;
+    QString wideError;
+    ASSERT_EQ(rhi->beginOffscreenFrame(&wideCb), QRhi::FrameOpSuccess);
+    ASSERT_TRUE(wideBinner.upload(wideCb, wide, &wideError)) << wideError.toStdString();
+    ASSERT_TRUE(wideBinner.bin(wideCb, wideGrid, &wideError)) << wideError.toStdString();
+    ASSERT_TRUE(wideBinner.readBack(wideCb, wideGrid, &wideReadback, &wideError))
+        << wideError.toStdString();
+    ASSERT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    ASSERT_EQ(wideReadback.data.size(), 16);
+    float wideCell[4];
+    std::memcpy(wideCell, wideReadback.data.constData(), sizeof(wideCell));
+    EXPECT_EQ(recording::encodeSize(wideCell[0]), recording::encodeSize(7));
+    EXPECT_EQ(wideCell[2], 1.0f);
+
     const std::filesystem::path realRoot("/Volumes/T7/sentinel-data/recording");
     if (!std::filesystem::exists(realRoot / "BTC-USD")) {
         std::cout << "real GPU parity: skipped (recording directory absent)\n";
@@ -195,5 +382,62 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     EXPECT_LE(recorded.code, 1);
     EXPECT_EQ(recorded.side, 0);
     EXPECT_EQ(recorded.validity, 0);
+
+    for (uint32_t tf : {5u, 16u}) {
+        const int64_t selectedEnd = QDateTime::currentMSecsSinceEpoch() /
+                                    (int64_t(tf) * minute) * (int64_t(tf) * minute);
+        const auto selectedData = recording::loadComposedMinuteEntries(
+            realRoot, "BTC-USD", "deep", selectedEnd - 24 * hour, selectedEnd, tf);
+        ASSERT_EQ(selectedData.sourceMinutes, tf);
+        Deviation selected;
+        compareViews(rhi.get(), realRoot, selectedData, selectedEnd, selected);
+        std::cout << "real " << tf << "m GPU parity: cells=" << selected.cells
+                  << " max_code_delta=" << selected.code
+                  << " side_mismatches=" << selected.side
+                  << " validity_mismatches=" << selected.validity << '\n';
+        EXPECT_GT(selected.cells, 0);
+        EXPECT_LE(selected.code, 1);
+        EXPECT_EQ(selected.side, 0);
+        EXPECT_EQ(selected.validity, 0);
+    }
+
+    const int64_t hourEnd = QDateTime::currentMSecsSinceEpoch() / hour * hour;
+    const auto realHours = recording::loadRecordingEntries(realRoot, "BTC-USD", "deep",
+                                                            hourEnd - 24 * hour, hourEnd, 60);
+    auto lastHour = std::find_if(realHours.observedMs.rbegin(), realHours.observedMs.rend(),
+                                 [](uint32_t ms) { return ms != 0; });
+    if (lastHour != realHours.observedMs.rend()) {
+        const int64_t lastExclusive = realHours.startMs +
+            int64_t(realHours.observedMs.rend() - lastHour) * hour;
+        Deviation rollup;
+        compareViews(rhi.get(), realRoot, realHours, lastExclusive, rollup);
+        std::cout << "real hour-rollup GPU parity: cells=" << rollup.cells
+                  << " max_code_delta=" << rollup.code
+                  << " side_mismatches=" << rollup.side
+                  << " validity_mismatches=" << rollup.validity << '\n';
+        EXPECT_GT(rollup.cells, 0);
+        EXPECT_LE(rollup.code, 1);
+        EXPECT_EQ(rollup.side, 0);
+        EXPECT_EQ(rollup.validity, 0);
+    }
+    for (uint32_t tf : {240u, 1440u}) {
+        const int64_t tfMs = int64_t(tf) * minute;
+        const int64_t selectedEnd = ((QDateTime::currentMSecsSinceEpoch() / minute * minute +
+                                       tfMs - 1) / tfMs) * tfMs;
+        const auto selectedData = recording::loadComposedHourEntries(
+            realRoot, "BTC-USD", "deep", selectedEnd - 2 * tfMs, selectedEnd, tf);
+        if (selectedData.rowSide.empty()) continue;
+        ASSERT_EQ(selectedData.sourceMinutes, tf);
+        Deviation selected;
+        compareViews(rhi.get(), realRoot, selectedData, selectedEnd, selected);
+        std::cout << "real " << tf << "m hour-composed GPU parity: cells="
+                  << selected.cells << " max_code_delta=" << selected.code
+                  << " side_mismatches=" << selected.side
+                  << " validity_mismatches=" << selected.validity << '\n';
+        EXPECT_GT(selected.cells, 0);
+        EXPECT_LE(selected.code, 1);
+        EXPECT_EQ(selected.side, 0);
+        EXPECT_EQ(selected.validity, 0);
+    }
 }
 } // namespace
