@@ -21,14 +21,22 @@ struct HeatmapRenderStats {
     std::atomic<double> binSubmitMs{0}, gpuFrameMs{0};
     std::atomic<uint32_t> columns{0}, rows{0}, factor{0};
     std::atomic<double> tick{0};
+    std::atomic<bool> preciseKernel{true}; // false once the fast kernel passed its self-test
 };
 
 class HeatmapRenderNode final : public QSGRenderNode {
 public:
+    // The display tick is chosen per frame for the source actually drawn (the
+    // active one, which may be older than `source` while it uploads).
+    struct TickPolicy {
+        double manualTick = 0;   // used when > 0 and a multiple of commonTick(active)
+        double minRowPx = 2;     // otherwise: smallest ladder tick at least this tall
+        double heightPx = 0;     // target height in physical pixels
+    };
     struct Frame {
         std::shared_ptr<const GpuSource> source; // newest wanted source; may still be uploading
         ViewWindow view;
-        double displayTick = 0;
+        TickPolicy tick;
         QRectF rect;                             // item-space draw rect
         recording::SizeScale outputScale;
         uint64_t uploadBudgetBytes = 2ull << 20; // per frame
@@ -38,6 +46,7 @@ public:
     ~HeatmapRenderNode() override;
     // Call from QQuickItem::updatePaintNode (render thread, GUI thread blocked).
     void setFrame(Frame frame) { frame_ = std::move(frame); }
+    static double displayTickFor(const GpuSource &source, const ViewWindow &view, const TickPolicy &policy);
 
     void prepare() override;
     void render(const RenderState *state) override;

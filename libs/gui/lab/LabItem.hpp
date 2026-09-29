@@ -67,7 +67,6 @@ private:
     double frameMs_ = 0, firstFrameMs_ = 0;
     QMetaObject::Connection frameConnection_;
     int64_t tfMs() const { return int64_t(timeframeMinutes_) * 60'000; }
-    double displayTick() const;
     void accept(LabSource source, bool preserveView, bool final);
     void reload(bool preserveView);
     void clampTimeSpan();

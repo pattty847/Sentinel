@@ -177,6 +177,8 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapBinGrid.hpp
     render/heatmap/HeatmapGpuSource.hpp
     render/heatmap/HeatmapGpuSource.cpp
+    render/heatmap/HeatmapGpuSelfTest.hpp
+    render/heatmap/HeatmapGpuSelfTest.cpp
     render/heatmap/HeatmapGpuBinner.hpp
     render/heatmap/HeatmapGpuBinner.cpp
     render/heatmap/HeatmapRenderNode.hpp
@@ -192,6 +194,18 @@ qt_add_shaders(sentinel_heatmap_gpu heatmap_gpu_shaders
         render/heatmap/shaders/heatmap_bin.comp
         render/heatmap/shaders/heatmap_display.vert
         render/heatmap/shaders/heatmap_display.frag
+)
+# The same kernel with GLSL `precise` float-float: used when the fast kernel
+# fails the runtime precision self-test (HeatmapGpuSelfTest).
+qt_add_shaders(sentinel_heatmap_gpu heatmap_gpu_precise_shader
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/heatmapgpu"
+    BASE "render/heatmap/shaders"
+    DEFINES HEATMAP_PRECISE
+    FILES render/heatmap/shaders/heatmap_bin.comp
+    OUTPUTS heatmap_bin_precise.comp.qsb
 )
 find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 target_include_directories(sentinel_heatmap_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

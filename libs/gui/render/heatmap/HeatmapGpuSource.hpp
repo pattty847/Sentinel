@@ -26,6 +26,10 @@ inline constexpr uint32_t kSlotNotLoaded = 0xffffffffu; // bucket not scanned ye
 inline constexpr uint32_t kSlotGap = 0xfffffffeu;       // scanned, recorder had no column
 inline constexpr uint32_t kMaxTicks = 16;               // distinct native ticks per source
 inline constexpr uint32_t kRowIndexStride = 16;         // native rows per row-index step
+// D3D11 only guarantees 128 MB per buffer, so entries live in pages of at most
+// 64 MiB (2^23 compact or 2^22 wide entries), up to kMaxEntryPages bindings.
+inline constexpr uint32_t kMaxEntryPages = 8;
+inline constexpr uint64_t kMaxGpuBufferBytes = 128ull << 20; // any single source buffer
 
 // std430 layout shared with heatmap_bin.comp. Rows are absolute native rows on
 // the group's tick (price = row * tick).
@@ -49,6 +53,8 @@ struct GpuSourceOptions {
     // Row clip: keep native rows whose price lies in [priceLo, priceHi). Display
     // bins not fully inside draw "loading" (their rows were not uploaded).
     std::optional<double> priceLo, priceHi;
+    // Tests only: smaller entry pages (log2 entries per page) to exercise paging.
+    std::optional<uint32_t> entryPageShift;
 };
 
 struct GpuSource {
@@ -77,6 +83,10 @@ struct GpuSource {
     double coveredPriceHi = std::numeric_limits<double>::quiet_NaN();
     size_t columns() const { return columnGroups.empty() ? 0 : columnGroups.size() - 1; }
     uint32_t wordsPerEntry() const { return wide ? 3u : 2u; }
+    uint32_t entryPageShift = 23;    // log2 entries per page: 23 compact / 22 wide (64 MiB)
+    uint32_t pageShift() const { return entryPageShift; }
+    uint64_t entriesPerPage() const { return 1ull << pageShift(); }
+    uint32_t entryPages() const { return uint32_t((entryCount + entriesPerPage() - 1) / entriesPerPage()); }
     uint64_t bytes() const {
         return bucketSlots.size() * 4ull + columnGroups.size() * 4ull + groups.size() * sizeof(GroupMeta) +
                runs.size() * 8ull + rowIndex.size() * 4ull + entries.size() * 4ull;
@@ -99,6 +109,8 @@ float dequantizeLow(float hi, int32_t q);
 // split as float-float (hi, lo) pairs: index k - 2. A value v > 0 then encodes to
 // 1 + (number of thresholds <= v). Exact against the CPU encoder by construction.
 std::vector<FloatFloat> encodeThresholds(const recording::SizeScale& scale);
+// Process-wide cache of encodeThresholds (one ~256 KiB table per size scale).
+const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale& scale);
 
 // Smallest display tick every native grid of the source can build (LCM of the
 // native ticks in price units). Display-tick policy must pick multiples of it,

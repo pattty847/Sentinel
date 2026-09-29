@@ -85,6 +85,8 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
         std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Metal, &init, QRhi::EnableTimestamps));
         if (!rhi) throw std::runtime_error("headless Metal QRhi creation failed");
         heatmap::gpu::HeatmapGpuBinner binner(rhi.get());
+        // Default: the production choice (precision self-test, then fast kernel).
+        if (qgetenv("SENTINEL_HEATMAP_KERNEL") == "precise") binner.forceKernel(heatmap::gpu::KernelVariant::Precise);
         QString error;
         QRhiCommandBuffer *cb = nullptr;
         const auto uploadStart = Clock::now();
@@ -191,6 +193,8 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
                {"build_ms", source.buildMs}, {"upload_ms", uploadMs},
                {"source_gpu_bytes", double(binner.sourceBytes())}, {"gpu_bytes", double(binner.gpuBytes())},
                {"passes_per_grid", 200}, {"grid_1x", oneX}, {"grid_2x", twoX},
+               {"kernel", binner.currentKernel() == heatmap::gpu::KernelVariant::Fast ? "fast" : "precise"},
+               {"entry_pages", int(gpu.entryPages())},
                {"p95_1x_ms", oneX.value("bin_ms_p95")}, {"max_1x_ms", oneX.value("bin_ms_max")},
                {"p95_2x_ms", twoX.value("bin_ms_p95")}, {"max_2x_ms", twoX.value("bin_ms_max")}});
         return 0;

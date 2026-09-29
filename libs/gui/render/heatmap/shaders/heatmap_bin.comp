@@ -20,10 +20,19 @@ layout(std430, binding = 0) readonly buffer Slots { uint slots[]; };
 layout(std430, binding = 1) readonly buffer ColumnGroups { uint columnGroups[]; };
 layout(std430, binding = 2) readonly buffer Groups { GroupMeta groups[]; };
 layout(std430, binding = 3) readonly buffer Runs { ivec2 runs[]; };
-layout(std430, binding = 4) readonly buffer Entries { uint entries[]; };
 layout(std430, binding = 5) readonly buffer Thresholds { uvec2 thresholds[]; };
 layout(std430, binding = 6) writeonly buffer Output { uint cells[]; };
 layout(std430, binding = 8) readonly buffer RowIndex { uint rowIndex[]; };
+// Entries are split into pages of at most 64 MiB (D3D11 guarantees 128 MB per
+// buffer). Page p holds entries [p << paging.x, (p + 1) << paging.x).
+layout(std430, binding = 9) readonly buffer Page0 { uint page0[]; };
+layout(std430, binding = 10) readonly buffer Page1 { uint page1[]; };
+layout(std430, binding = 11) readonly buffer Page2 { uint page2[]; };
+layout(std430, binding = 12) readonly buffer Page3 { uint page3[]; };
+layout(std430, binding = 13) readonly buffer Page4 { uint page4[]; };
+layout(std430, binding = 14) readonly buffer Page5 { uint page5[]; };
+layout(std430, binding = 15) readonly buffer Page6 { uint page6[]; };
+layout(std430, binding = 16) readonly buffer Page7 { uint page7[]; };
 const uint kRowIndexStride = 16u; // HeatmapGpuSource.hpp
 layout(std140, binding = 7) uniform Params {
     uvec4 dims;    // columns, rows, source slots, flags (bit 0: wide entries)
@@ -31,6 +40,7 @@ layout(std140, binding = 7) uniform Params {
     ivec4 price;   // absolute display bin of the bottom row, clip bin lo, clip bin end, zero (see opaque())
     uvec4 factors[4]; // native rows per display bin, per tick index (0 = incompatible)
     vec4 codeScale;   // output size floor, codes per octave (estimate only; the table decides)
+    uvec4 paging;     // log2 entries per page (a group never straddles a page)
 };
 
 const uint kNotLoaded = 0xffffffffu;
@@ -38,14 +48,29 @@ const uint kGap = 0xfffffffeu;
 const uint kNoData = 0u, kLoading = 1u, kVeil = 2u, kValid = 3u;
 
 // Float-float arithmetic. Metal compiles with fast math (reassociation allowed),
-// which would fold the error terms of two-sum to zero. Every intermediate is
-// laundered through an integer XOR with a runtime zero (price.w), so no
-// algebraic rewrite can see through it; each add/sub rounds exactly once.
-// (GLSL `precise` also works but costs a non-inlined call per operation.)
+// which folds the error terms of two-sum to zero. Two variants, chosen at run
+// time by HeatmapGpuBinner's precision self-test:
+// - fast (default): every intermediate is laundered through an integer XOR with
+//   a runtime zero (price.w), so no algebraic rewrite can see through it. This
+//   relies on observed compiler behaviour, hence the self-test.
+// - HEATMAP_PRECISE: GLSL `precise` (SPIR-V NoContraction; SPIRV-Cross emits
+//   non-reassociable adds). Specified behaviour, about 2x slower.
+// HEATMAP_UNGUARDED is test-only: plain adds, which fast math folds (the
+// self-test must reject it).
+#if defined(HEATMAP_PRECISE)
+#define FF precise float
+float opaque(float x) { return x; }
+#elif defined(HEATMAP_UNGUARDED)
+#define FF float
+float opaque(float x) { return x; }
+#else
+#define FF float
 float opaque(float x) { return uintBitsToFloat(floatBitsToUint(x) ^ uint(price.w)); }
+#endif
 vec2 fastTwoSum(float a, float b) { // |a| >= |b|
-    float s = opaque(a + b);
-    float e = opaque(b - opaque(s - a));
+    FF s = opaque(a + b);
+    FF z = opaque(s - a);
+    FF e = opaque(b - z);
     return vec2(s, e);
 }
 // Compensated accumulation: acc.x is the running float sum, acc.y collects the
@@ -53,27 +78,46 @@ vec2 fastTwoSum(float a, float b) { // |a| >= |b|
 // (ffNormalize). Error ~ n^2 * 2^-48 relative for n entries, below the 2^-38 of
 // the compact entry encoding for any realistic bin.
 vec2 ffAccumulate(vec2 acc, vec2 x) {
-    float s = opaque(acc.x + x.x);
-    float bb = opaque(s - acc.x);
-    float e = opaque(opaque(acc.x - opaque(s - bb)) + opaque(x.x - bb));
+    FF s = opaque(acc.x + x.x);
+    FF bb = opaque(s - acc.x);
+    FF sbb = opaque(s - bb);
+    FF d1 = opaque(acc.x - sbb);
+    FF d2 = opaque(x.x - bb);
+    FF e = opaque(d1 + d2);
     return vec2(s, acc.y + (e + x.y));
 }
 vec2 ffNormalize(vec2 acc) { return fastTwoSum(acc.x, acc.y); }
 bool ffGreater(vec2 a, vec2 b) { return a.x > b.x || (a.x == b.x && a.y > b.y); }
 bool ffGreaterEqual(vec2 a, vec2 b) { return a.x > b.x || (a.x == b.x && a.y >= b.y); }
 
-uint entryWord(uint i, uint w) { return entries[i * ((dims.w & 1u) != 0u ? 3u : 2u) + w]; }
-uint entryKey(uint i) {
-    return (dims.w & 1u) != 0u ? entryWord(i, 2u) : (entryWord(i, 1u) & 0x1ffffu);
-}
-vec2 entryValue(uint i) {
-    float hi = uintBitsToFloat(entryWord(i, 0u));
-    if ((dims.w & 1u) != 0u) return vec2(hi, uintBitsToFloat(entryWord(i, 1u)));
-    int q = int(entryWord(i, 1u)) >> 17;
+// Entry access through one page buffer P. A group never straddles a page
+// (HeatmapGpuSource pads), so the page is chosen once per group and the inner
+// loops read a single buffer. Indices here are page-local entry indices.
+#define WPE (((dims.w & 1u) != 0u) ? 3u : 2u)
+#define ENTRY_KEY(P, i) (((dims.w & 1u) != 0u) ? P[(i) * 3u + 2u] : (P[(i) * 2u + 1u] & 0x1ffffu))
+vec2 decodeValue(uint w0, uint w1) {
+    float hi = uintBitsToFloat(w0);
+    if ((dims.w & 1u) != 0u) return vec2(hi, uintBitsToFloat(w1));
+    int q = int(w1) >> 17;
     uint exponent = (floatBitsToUint(hi) >> 23) & 0xffu;
     // lo = q * ulp(hi) * 2^-14 = q * 2^(exponent - 127 - 37); powers of two are exact.
     float scale = exponent > 37u ? uintBitsToFloat((exponent - 37u) << 23) : 0.0;
     return vec2(hi, float(q) * scale);
+}
+// Sum entries [a, end) of page P whose relative row <= relHi (a found by the
+// row-index-narrowed search in [a, b) for firstKey).
+#define WALK_GROUP(P) { \
+    while (a < b) { \
+        uint m = (a + b) >> 1; \
+        if (ENTRY_KEY(P, m) < firstKey) a = m + 1u; else b = m; \
+    } \
+    for (uint i = a; i < end; ++i) { \
+        uint key = ENTRY_KEY(P, i); \
+        if (int(key >> 1u) > relHi) break; \
+        vec2 value = decodeValue(P[i * WPE], P[i * WPE + 1u]); \
+        if ((key & 1u) != 0u) ask = ffAccumulate(ask, value); \
+        else bid = ffAccumulate(bid, value); \
+    } \
 }
 // Full coverage of absolute rows [lo, hi] by one merged run (runs are disjoint,
 // sorted and merged, so a covering run is unique).
@@ -129,15 +173,19 @@ void main() {
         uint a = rowIndex[meta.indexBegin + step];
         uint b = step + 1u < meta.indexCount ? rowIndex[meta.indexBegin + step + 1u] : meta.entryEnd;
         uint firstKey = firstRow << 1u;
-        while (a < b) {
-            uint m = (a + b) >> 1;
-            if (entryKey(m) < firstKey) a = m + 1u; else b = m;
-        }
-        for (uint i = a; i < meta.entryEnd; ++i) {
-            uint key = entryKey(i);
-            if (int(key >> 1u) > relHi) break;
-            if ((key & 1u) != 0u) ask = ffAccumulate(ask, entryValue(i));
-            else bid = ffAccumulate(bid, entryValue(i));
+        uint page = meta.entryBegin >> paging.x;
+        uint base = page << paging.x; // page-local indices from here on
+        a -= base; b -= base;
+        uint end = meta.entryEnd - base;
+        switch (page) {
+        case 0u: WALK_GROUP(page0) break;
+        case 1u: WALK_GROUP(page1) break;
+        case 2u: WALK_GROUP(page2) break;
+        case 3u: WALK_GROUP(page3) break;
+        case 4u: WALK_GROUP(page4) break;
+        case 5u: WALK_GROUP(page5) break;
+        case 6u: WALK_GROUP(page6) break;
+        default: WALK_GROUP(page7) break;
         }
     }
     bid = ffNormalize(bid);

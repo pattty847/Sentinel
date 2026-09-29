@@ -41,23 +41,17 @@ void LabItem::itemChange(ItemChange change, const ItemChangeData &value) {
     QQuickItem::itemChange(change, value);
 }
 
-double LabItem::displayTick() const {
-    if (manualTick_ > 0) return manualTick_;
-    if (!source_.gpu || source_.gpu->ticks.empty()) return 0;
-    const double finest = heatmap::gpu::commonTick(*source_.gpu); // every grid can build it
-    const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-    // Rows at least 2 physical pixels tall, on the price ladder.
-    return heatmap::idealTick(view_.priceLo, view_.priceHi, std::max(1.0, height() * dpr), 2.0, finest,
-                              source_.gpu->priceScale);
-}
-
 QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     auto *node = old ? static_cast<heatmap::gpu::HeatmapRenderNode *>(old)
                      : new heatmap::gpu::HeatmapRenderNode(stats_);
     heatmap::gpu::HeatmapRenderNode::Frame frame;
     frame.source = source_.gpu;
     frame.view = view_;
-    frame.displayTick = displayTick();
+    // The node picks the tick for the source it actually draws (commonTick of
+    // the active source), so a pending source with other grids cannot veil it.
+    frame.tick.manualTick = manualTick_;
+    frame.tick.minRowPx = 2.0; // rows at least 2 physical pixels tall
+    frame.tick.heightPx = height() * (window() ? window()->effectiveDevicePixelRatio() : 1.0);
     frame.rect = QRectF(0, 0, width(), height());
     frame.uploadBudgetBytes = kUploadBudgetBytes;
     node->setFrame(std::move(frame));
@@ -279,6 +273,7 @@ QVariantMap LabItem::metrics() const {
             {"rebins", qulonglong(stats_->rebins.load())}, {"timeframeMinutes", timeframeMinutes_},
             {"uploadPending", stats_->uploadPending.load()}, {"errors", qulonglong(stats_->errors.load())},
             {"loadMs", source_.loadMs}, {"composeMs", source_.composeMs}, {"buildMs", source_.buildMs},
-            {"settled", settled()}};
+            {"settled", settled()},
+            {"kernel", stats_->preciseKernel.load() ? QStringLiteral("precise") : QStringLiteral("fast")}};
 }
 } // namespace lab

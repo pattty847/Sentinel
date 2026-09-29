@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 #include <numeric>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 
 namespace heatmap::gpu {
@@ -96,6 +98,15 @@ double commonTick(const GpuSource& source) {
     return lcm ? double(lcm) / source.priceScale : 0;
 }
 
+const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale& scale) {
+    static std::mutex mutex;
+    static std::map<std::pair<double, double>, std::vector<FloatFloat>> cache;
+    std::scoped_lock lock(mutex);
+    auto& entry = cache[{scale.floor, scale.codesPerOctave}];
+    if (entry.empty()) entry = encodeThresholds(scale);
+    return entry; // map nodes are stable; entries are never modified again
+}
+
 std::array<uint32_t, kMaxTicks> tickFactors(const GpuSource& source, double displayTick) {
     std::array<uint32_t, kMaxTicks> factors{};
     for (size_t i = 0; i < source.ticks.size() && i < kMaxTicks; ++i) {
@@ -149,6 +160,9 @@ GpuSource buildGpuSource(const SparseColumns& data, const GpuSourceOptions& opti
         if (out.wide) break;
     }
 
+    out.entryPageShift = out.wide ? 22u : 23u;
+    if (options.entryPageShift) out.entryPageShift = std::min(out.entryPageShift, *options.entryPageShift);
+
     detail::DecodeTables tables;
     out.columnGroups.reserve(data.columns.size() + 1);
     out.columnGroups.push_back(0);
@@ -185,6 +199,17 @@ GpuSource buildGpuSource(const SparseColumns& data, const GpuSourceOptions& opti
             }
             const long double weight = static_cast<long double>(aggregate.observedMs) / column.observedMs;
             meta.baseRow = checkedRow(aggregate.rows.empty() ? 0 : aggregate.rows.front().row);
+            {
+                // A group never straddles an entry page: the shader picks the page
+                // once per group. Pad (never read) to the next page if needed.
+                const uint64_t perPage = out.entriesPerPage(), bound = aggregate.rows.size() * 2;
+                if (bound > perPage) throw std::invalid_argument("heatmap group exceeds one GPU entry page");
+                const uint64_t used = out.entryCount % perPage;
+                if (used && used + bound > perPage) {
+                    out.entries.resize(out.entries.size() + (perPage - used) * out.wordsPerEntry(), 0);
+                    out.entryCount += perPage - used;
+                }
+            }
             meta.entryBegin = static_cast<uint32_t>(out.entryCount);
             std::array<size_t, 2> runIndex{};
             for (const auto& row : aggregate.rows) {
@@ -232,6 +257,12 @@ GpuSource buildGpuSource(const SparseColumns& data, const GpuSourceOptions& opti
         out.columnGroups.push_back(static_cast<uint32_t>(out.groups.size()));
     }
     if (coveredLo < coveredHi) { out.coveredPriceLo = coveredLo; out.coveredPriceHi = coveredHi; }
+    if (out.entryPages() > kMaxEntryPages)
+        throw std::invalid_argument("heatmap source exceeds the GPU entry pages (clip rows or use a coarser timeframe)");
+    for (const uint64_t bytes : {out.bucketSlots.size() * 4ull, out.columnGroups.size() * 4ull,
+                                 out.groups.size() * uint64_t(sizeof(GroupMeta)), out.runs.size() * 8ull,
+                                 out.rowIndex.size() * 4ull})
+        if (bytes > kMaxGpuBufferBytes) throw std::invalid_argument("heatmap source index buffer exceeds 128 MiB");
     return out;
 }
 } // namespace heatmap::gpu

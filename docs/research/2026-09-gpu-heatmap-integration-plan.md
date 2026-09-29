@@ -215,10 +215,20 @@ Findings the later slices need:
   - Rejected, slower: one thread per strip of 8 bins with walking cursors (3.7 ms), and an interpolation or galloping search (4.7 ms).
 - **Lab:** `sentinel-lab` now hosts `HeatmapRenderNode` in a plain `QQuickItem`, which exercises the production path. This replaces `QQuickRhiItem`. `--screenshot` renders headless through `QQuickRenderControl`.
 - **Deleted:** the lab `GpuBinner` and its shaders, `servermodel/RecordingEntries`, and their tests.
+- **Review fixes (Codex gpt-6-sol review, same day):**
+  - *D3D11 buffer size:* entries now live in up to 8 pages of ≤ 64 MiB. A native-tick group never straddles a page (the builder pads), so the kernel picks the page once per group. Every other source buffer is capped at 128 MiB. The deep day uses 3 pages. The first per-read page switch doubled the kernel time; choosing the page per group removed that cost (deep 1m 1x p95 2.02 ms, near 1m 0.88 ms).
+  - *Allocation:* two grow-only buffer sets (active and spare) are reused across sources. At most one source is pending. A new capacity need creates at most one large buffer per upload step. A failed allocation or a refused source drops only the pending source; the active one keeps drawing. Re-requesting the active source cancels a pending upload (A → B → A).
+  - *Re-bin key:* now includes the output size scale and the kernel variant, as well as the source id and grid coverage.
+  - *Display tick:* the node picks it for the source it actually draws (`TickPolicy`), never for a still-pending one.
+  - *Runtime precision self-test* (`HeatmapGpuSelfTest`), once per QRhi backend and device:
+    - The fixture is 384 cells: 128 adversarial bins, whose exact sum lies 1e-9 above a code threshold while a plain float sum stays below it, plus random bins. It is compared with `binColumn`.
+    - Until the test resolves, the binner uses the `precise` kernel variant. It switches to the fast kernel only if the test passes, and logs the result either way.
+    - On this M4 the fast kernel passes. A folding kernel fails 128/384 cells and is rejected (test).
+    - The precise fallback measures p95 3.22 ms against the fast kernel's 2.02 ms on deep 1m at 1x.
 - **Unverified:**
   - The on-screen interactive lab window: the screen was locked, so no manual pan or zoom was done.
-  - D3D11: HLSL 5.0 shaders compile, but nothing has run. The entry buffer is one buffer, not paged to ≤ 128 MB.
-  - Memory at 2x with several charts.
+  - D3D11: HLSL 5.0 shaders compile (all three variants), but nothing has run.
+  - Memory at 2x with several charts. The spare buffer set keeps the capacity of the largest earlier source (up to about 2× the source bytes).
 
 - **Order:** S1 → (S2 ‖ S4 ‖ S5) → S3 (after L) → S6 → S7 → S8, then S9.
 - **Parallel by files:** L with S1/S2/S4/S5; S2, S4 and S5 with each other.

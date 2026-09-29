@@ -154,5 +154,17 @@ set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")
 add_executable(test_heatmap_gpu_binner test_heatmap_gpu_binner.cpp)
 target_include_directories(test_heatmap_gpu_binner PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_gpu_binner PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+# Test-only kernel candidate that lets fast math fold float-float error terms:
+# the runtime precision self-test must reject it.
+qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/testshaders"
+    BASE "${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/shaders"
+    DEFINES HEATMAP_UNGUARDED
+    FILES "${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/shaders/heatmap_bin.comp"
+    OUTPUTS heatmap_bin_unguarded.comp.qsb
+)
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")

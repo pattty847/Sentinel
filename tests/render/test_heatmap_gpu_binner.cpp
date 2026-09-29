@@ -8,6 +8,7 @@
 #include "heatmap/TimeComposer.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
+#include "render/heatmap/HeatmapGpuSelfTest.hpp"
 #include "render/heatmap/HeatmapRenderNode.hpp"
 #include <QDateTime>
 #include <QGuiApplication>
@@ -147,12 +148,13 @@ void uploadPaged(QRhi *rhi, HeatmapGpuBinner &binner, std::shared_ptr<const GpuS
     }
     if (frames) *frames = count;
 }
-std::vector<uint32_t> binAndRead(QRhi *rhi, HeatmapGpuBinner &binner, const BinGrid &grid) {
+std::vector<uint32_t> binAndRead(QRhi *rhi, HeatmapGpuBinner &binner, const BinGrid &grid,
+                                 const recording::SizeScale &scale = {}) {
     QString error;
     QRhiCommandBuffer *cb = nullptr;
     QRhiReadbackResult readback;
     EXPECT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
-    EXPECT_TRUE(binner.bin(cb, grid, {}, &error)) << error.toStdString();
+    EXPECT_TRUE(binner.bin(cb, grid, scale, &error)) << error.toStdString();
     EXPECT_TRUE(binner.readBack(cb, &readback, &error)) << error.toStdString();
     EXPECT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
     std::vector<uint32_t> cells(size_t(grid.columns) * grid.rows);
@@ -179,7 +181,8 @@ std::ostream &operator<<(std::ostream &os, const Tally &t) {
 
 // Compare every GPU cell with the CPU reference (bucketState + binColumn).
 Tally compareGrid(const SparseColumns &data, const GpuSource &source, const BinGrid &grid,
-                  const std::vector<uint32_t> &cells, const std::string &label) {
+                  const std::vector<uint32_t> &cells, const std::string &label,
+                  const recording::SizeScale &scale = {}) {
     Tally t;
     int reported = 0;
     const double tick = grid.displayTick;
@@ -197,7 +200,7 @@ Tally compareGrid(const SparseColumns &data, const GpuSource &source, const BinG
             if (state == BucketState::Present) {
                 const auto it = std::lower_bound(data.columns.begin(), data.columns.end(), startMs,
                     [](const SparseColumn &c, int64_t s) { return c.bucketStartMs < s; });
-                expected = binColumn(*it, double(grid.firstBin) * tick, double(grid.firstBin + grid.rows) * tick, tick);
+                expected = binColumn(*it, double(grid.firstBin) * tick, double(grid.firstBin + grid.rows) * tick, tick, scale);
                 if (expected.size() != grid.rows) { ADD_FAILURE() << "binColumn rows"; return t; }
             }
         }
@@ -474,6 +477,171 @@ TEST(HeatmapGpuParity, OutputResizeKeepsSourceAndNewSourceSwapsOnlyWhenComplete)
     EXPECT_EQ(binner.activeSource(), second);
 }
 
+TEST(HeatmapGpuParity, OutputScaleChangeRebinsWithMatchingCodes) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    const auto data = compose(minuteLevel(), 5 * minute);
+    auto source = std::make_shared<const GpuSource>(buildGpuSource(data));
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    uploadPaged(gpu.rhi.get(), binner, source, 1 << 20);
+    const auto grid = gridFor(*source, 10, 99'900, 30, 2);
+    const recording::SizeScale fine{1e-8, 819}, coarse{1e-5, 409};
+    Tally tally;
+    for (const auto &scale : {recording::SizeScale{}, fine, coarse, recording::SizeScale{}}) {
+        const auto cells = binAndRead(gpu.rhi.get(), binner, grid, scale);
+        EXPECT_TRUE(binner.binnedMatches(source->id, scale));
+        tally.add(compareGrid(data, *source, grid, cells, "scale", scale));
+    }
+    EXPECT_FALSE(binner.binnedMatches(source->id, fine));
+    std::cout << "output scale changes: " << tally << '\n';
+    EXPECT_TRUE(tally.exact());
+    EXPECT_GT(tally.valid, 0u);
+}
+
+TEST(HeatmapGpuParity, ReRequestingActiveSourceCancelsPendingUpload) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    auto a = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
+    auto b = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), 5 * minute)));
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    uploadPaged(gpu.rhi.get(), binner, a, 1 << 20);
+    QString error;
+    auto step = [&](uint64_t budget) {
+        QRhiCommandBuffer *cb = nullptr;
+        ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+        ASSERT_TRUE(binner.uploadStep(cb, budget, &error)) << error.toStdString();
+        ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    };
+    ASSERT_TRUE(binner.setSource(b, &error));      // A active, B pending
+    step(512);
+    step(512);
+    ASSERT_TRUE(binner.uploadPending());
+    EXPECT_EQ(binner.pendingSource(), b);
+    ASSERT_TRUE(binner.setSource(a, &error));      // back to A: B must never activate
+    EXPECT_FALSE(binner.uploadPending());
+    EXPECT_EQ(binner.pendingSource(), nullptr);
+    for (int i = 0; i < 4; ++i) step(1 << 20);
+    EXPECT_EQ(binner.activeSource(), a);
+    // B can still be requested afterwards and completes normally.
+    uploadPaged(gpu.rhi.get(), binner, b, 1 << 20);
+    EXPECT_EQ(binner.activeSource(), b);
+    // A source the GPU cannot take is refused without disturbing the active one.
+    auto tooManyPages = std::make_shared<GpuSource>(*a);
+    tooManyPages->entryPageShift = 2; // thousands of pages
+    EXPECT_FALSE(binner.setSource(tooManyPages, &error));
+    EXPECT_FALSE(binner.uploadPending());
+    EXPECT_EQ(binner.activeSource(), b);
+    EXPECT_FALSE(binAndRead(gpu.rhi.get(), binner, gridFor(*b, 10, 99'990, 8, 0)).empty());
+    // A newer request replaces a pending one (at most one pending source).
+    auto c = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), 15 * minute)));
+    ASSERT_TRUE(binner.setSource(a, &error));
+    step(256);
+    ASSERT_TRUE(binner.setSource(c, &error));
+    EXPECT_EQ(binner.pendingSource(), c);
+    uploadPaged(gpu.rhi.get(), binner, c, 1 << 20);
+    EXPECT_EQ(binner.activeSource(), c);
+}
+
+TEST(HeatmapGpuParity, BufferPoolIsReusedAcrossSources) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    auto big = [] { return std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute))); };
+    auto small = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), hour)));
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    uploadPaged(gpu.rhi.get(), binner, big(), 1 << 20); // set 1 grows to "big"
+    uploadPaged(gpu.rhi.get(), binner, big(), 1 << 20); // set 2 grows to "big"
+    const uint64_t settled = binner.gpuBytes();         // two sets: active + spare
+    for (int i = 0; i < 4; ++i) uploadPaged(gpu.rhi.get(), binner, i % 2 ? small : big(), 1 << 20);
+    EXPECT_EQ(binner.gpuBytes(), settled) << "grow-only pool must not reallocate for sources that fit";
+}
+
+TEST(HeatmapGpuParity, EntriesSplitAcrossPagesMatchSinglePage) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    const auto data = compose(minuteLevel(), minute);
+    const auto single = buildGpuSource(data);
+    GpuSourceOptions options;
+    uint32_t shift = 4;
+    while ((single.entryCount >> shift) > 5) ++shift; // about six pages
+    options.entryPageShift = shift;
+    auto paged = std::make_shared<const GpuSource>(buildGpuSource(data, options));
+    ASSERT_GE(paged->entryPages(), 3u);
+    ASSERT_LE(paged->entryPages(), kMaxEntryPages);
+    HeatmapGpuBinner a(gpu.rhi.get()), b(gpu.rhi.get());
+    uploadPaged(gpu.rhi.get(), a, std::make_shared<const GpuSource>(single), 1 << 20);
+    uploadPaged(gpu.rhi.get(), b, paged, 1 << 20);
+    const auto grid = gridFor(single, 5, 99'900, 60, 2);
+    const auto ca = binAndRead(gpu.rhi.get(), a, grid), cb = binAndRead(gpu.rhi.get(), b, grid);
+    EXPECT_EQ(ca, cb);
+    const auto tally = compareGrid(data, *paged, grid, cb, "paged");
+    std::cout << "paged entries (" << paged->entryPages() << " pages): " << tally << '\n';
+    EXPECT_TRUE(tally.exact());
+}
+
+// Precision self-test: the shipped fast kernel passes, the precise kernel is
+// exact, and a kernel that lets fast math fold the error terms is rejected.
+void settleSelfTest(QRhi *rhi, HeatmapGpuBinner &binner) {
+    for (int i = 0; i < 4 && !binner.resolvedKernel(); ++i) {
+        QRhiCommandBuffer *cb = nullptr;
+        ASSERT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+        binner.runPrecisionSelfTest(cb);
+        ASSERT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    }
+}
+TEST(HeatmapGpuSelfTest, FixtureOracleIsSelfConsistent) {
+    const auto test = makePrecisionSelfTest();
+    EXPECT_GE(test.expected.size(), 300u);
+    EXPECT_EQ(countSelfTestMismatches(test, test.expected), 0u);
+}
+TEST(HeatmapGpuSelfTest, ShippedFastKernelPassesOnThisDevice) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    EXPECT_EQ(binner.currentKernel(), KernelVariant::Precise) << "precise until proven";
+    settleSelfTest(gpu.rhi.get(), binner);
+    ASSERT_TRUE(binner.resolvedKernel());
+    EXPECT_EQ(*binner.resolvedKernel(), KernelVariant::Fast);
+    HeatmapGpuBinner second(gpu.rhi.get()); // cached per device: no second run
+    QRhiCommandBuffer *cb = nullptr;
+    ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+    second.runPrecisionSelfTest(cb);
+    ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    EXPECT_EQ(second.resolvedKernel(), std::optional<KernelVariant>(KernelVariant::Fast));
+}
+TEST(HeatmapGpuSelfTest, FoldingKernelIsRejectedAndPreciseKernelIsExact) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    // The unguarded candidate really is wrong on the fixture...
+    const auto fixture = makePrecisionSelfTest();
+    HeatmapGpuBinner direct(gpu.rhi.get());
+    direct.setFastKernelShaderForTest(QStringLiteral(":/testshaders/heatmap_bin_unguarded.comp.qsb"));
+    direct.forceKernel(KernelVariant::Fast);
+    uploadPaged(gpu.rhi.get(), direct, std::make_shared<const GpuSource>(fixture.source), 1 << 20);
+    const size_t folded = countSelfTestMismatches(fixture, binAndRead(gpu.rhi.get(), direct, fixture.grid));
+    std::cout << "unguarded kernel self-test mismatches: " << folded << '/' << fixture.expected.size() << '\n';
+    EXPECT_GT(folded, 50u);
+    // ...so the self-test rejects it and the binner stays on the precise kernel.
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    binner.setFastKernelShaderForTest(QStringLiteral(":/testshaders/heatmap_bin_unguarded.comp.qsb"));
+    settleSelfTest(gpu.rhi.get(), binner);
+    ASSERT_TRUE(binner.resolvedKernel());
+    EXPECT_EQ(*binner.resolvedKernel(), KernelVariant::Precise);
+    // The precise kernel is exact on the self-test fixture and the stress-style data.
+    uploadPaged(gpu.rhi.get(), binner, std::make_shared<const GpuSource>(fixture.source), 1 << 20);
+    EXPECT_EQ(countSelfTestMismatches(fixture, binAndRead(gpu.rhi.get(), binner, fixture.grid)), 0u);
+    const auto data = compose(minuteLevel(), 5 * minute);
+    auto source = std::make_shared<const GpuSource>(buildGpuSource(data));
+    uploadPaged(gpu.rhi.get(), binner, source, 1 << 20);
+    Tally tally;
+    for (const double tick : {5.0, 10.0, 50.0}) {
+        const auto grid = gridFor(*source, tick, 99'900, uint32_t(250 / tick) + 2, 3);
+        tally.add(compareGrid(data, *source, grid, binAndRead(gpu.rhi.get(), binner, grid), "precise"));
+    }
+    std::cout << "precise kernel parity: " << tally << '\n';
+    EXPECT_TRUE(tally.exact());
+}
+
 TEST(HeatmapGpuParity, RealRecordingOptIn) {
     if (qgetenv("SENTINEL_HEATMAP_REAL_PARITY") != "1")
         GTEST_SKIP() << "set SENTINEL_HEATMAP_REAL_PARITY=1 to compare against the real recording";
@@ -534,6 +702,7 @@ public:
     std::shared_ptr<const GpuSource> source;
     ViewWindow view;
     double tick = 10;
+    recording::SizeScale scale;
     HeatmapTestItem() { setFlag(ItemHasContents, true); }
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override {
@@ -541,7 +710,8 @@ protected:
         HeatmapRenderNode::Frame frame;
         frame.source = source;
         frame.view = view;
-        frame.displayTick = tick;
+        frame.tick.manualTick = tick;
+        frame.outputScale = scale;
         frame.rect = QRectF(0, 0, width(), height());
         node->setFrame(frame);
         return node;
@@ -584,8 +754,13 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     item->update();
     QImage frame = scene.renderFrame(&error);
     ASSERT_FALSE(frame.isNull()) << error.toStdString();
+    // The precision self-test resolves within a frame or two (or is cached);
+    // resolving to the fast kernel re-bins once. Count rebins after that.
+    for (int i = 0; i < 3; ++i) { item->update(); frame = scene.renderFrame(&error); }
+    ASSERT_FALSE(frame.isNull()) << error.toStdString();
     ASSERT_EQ(item->stats->errors.load(), 0u);
-    ASSERT_EQ(item->stats->rebins.load(), 1u);
+    const uint64_t baseRebins = item->stats->rebins.load();
+    ASSERT_GE(baseRebins, 1u);
     // Bin [100000, 100010) is rows y in [40, 50).
     const int y = 45;
     auto at = [&](int x, int yy = y) { return frame.pixelColor(x, yy); };
@@ -606,16 +781,39 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     item->update();
     QImage panned = scene.renderFrame(&error);
     ASSERT_FALSE(panned.isNull());
-    EXPECT_EQ(item->stats->rebins.load(), 1u);
+    EXPECT_EQ(item->stats->rebins.load(), baseRebins);
     EXPECT_EQ(panned.pixelColor(150 - 6, y), data);
     EXPECT_EQ(panned.pixelColor(99 - 6, y), frame.pixelColor(99, y));   // veil/data edge moved 6 px
     EXPECT_EQ(panned.pixelColor(100 - 6, y), frame.pixelColor(100, y));
     EXPECT_NE(panned.pixelColor(99 - 6, y), panned.pixelColor(100 - 6, y));
+    // A source the GPU refuses is reported, and the active picture keeps drawing.
+    {
+        auto refused = std::make_shared<GpuSource>(*item->source);
+        refused->id += 1'000'000;
+        refused->bucketSlots.clear(); // malformed: setSource refuses it
+        const auto good = item->source;
+        item->source = refused;
+        item->update();
+        const QImage kept = scene.renderFrame(&error);
+        ASSERT_FALSE(kept.isNull());
+        EXPECT_GE(item->stats->errors.load(), 1u);
+        EXPECT_EQ(kept.pixelColor(150 - 6, y), data);
+        item->source = good;
+    }
     // Zooming the price axis changes the display tick: a new compute pass.
     item->tick = 20;
     item->update();
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
-    EXPECT_EQ(item->stats->rebins.load(), 2u);
+    EXPECT_EQ(item->stats->rebins.load(), baseRebins + 1);
+    // A new output size scale changes every code: it must re-bin (the view did not move).
+    item->scale = {1e-8, 819};
+    item->update();
+    const QImage rescaled = scene.renderFrame(&error);
+    ASSERT_FALSE(rescaled.isNull());
+    EXPECT_EQ(item->stats->rebins.load(), baseRebins + 2);
+    item->update();
+    ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    EXPECT_EQ(item->stats->rebins.load(), baseRebins + 2) << "same scale again: no re-bin";
 }
 } // namespace
 
