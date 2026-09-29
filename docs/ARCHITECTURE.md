@@ -182,8 +182,11 @@ for capacity. No resolver thread retains server/client state.
 Overlay pagination checks shutdown and selection cancellation between pages.
 Candle-history REST and screener work also use the joined, bounded history pool;
 no detached task retains a session or server executor. The screener uses blocking
-QProcess APIs with a 30-second process deadline, cancellation checks every 50 ms,
-and an 8 MiB output cap. Shutdown joins admitted work before destroying the REST
+QProcess APIs with a 90-second process deadline (uv startup, the upstream
+30-second HTTP timeout, and serialization margin), cancellation checks every
+50 ms, and an 8 MiB output cap. On POSIX, the launched process starts its own
+process group; cancellation sends SIGTERM to the group, allows 250 ms of grace,
+then sends SIGKILL to the group and reaps the direct child. Shutdown joins admitted work before destroying the REST
 client or executor.
 The legacy heatmap streamer remains only for its heatmap path pending removal.
 

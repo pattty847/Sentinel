@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QDir>
+#include <QFile>
 #include <gtest/gtest.h>
 #include <future>
 #include <boost/asio/read.hpp>
@@ -289,21 +290,27 @@ TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
     tcp::acceptor acceptor(listener, {net::ip::make_address("127.0.0.1"), 0});
     tcp::socket peer(listener);
     std::array<char, 65536> buffer{};
-    std::promise<void> accepted, closed;
-    auto acceptedFuture = accepted.get_future(); auto closedFuture = closed.get_future();
+    std::promise<unsigned char> clientHello;
+    std::promise<void> closed;
+    auto helloFuture = clientHello.get_future(); auto closedFuture = closed.get_future();
     acceptor.async_accept(peer, [&](beast::error_code ec) {
         if (ec) return;
-        accepted.set_value();
-        // Accept ClientHello but never answer: fetch remains in TLS handshake.
-        net::async_read(peer, net::buffer(buffer), [&](beast::error_code ec, size_t) {
-            if (ec) closed.set_value();
+        peer.async_read_some(net::buffer(buffer), [&](beast::error_code ec, size_t size) {
+            clientHello.set_value(!ec && size > 0 ? static_cast<unsigned char>(buffer[0]) : 0);
+            if (ec) { closed.set_value(); return; }
+            // ClientHello arrived, but never answer it. The following read only
+            // observes closure after the stalled TLS request's deadline.
+            net::async_read(peer, net::buffer(buffer), [&](beast::error_code ec, size_t) {
+                if (ec) closed.set_value();
+            });
         });
     });
     std::thread listenerThread([&] { listener.run(); });
     struct Join { net::io_context& ioc; std::thread& thread; ~Join() { ioc.stop(); thread.join(); } } join{listener, listenerThread};
     auto server = std::make_unique<SentinelStreamServer>(model, auth, config, 0);
     auto session = RecordingServerStopTest::startCandleFetch(*server, model, auth, acceptor.local_endpoint().port());
-    ASSERT_EQ(acceptedFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_EQ(helloFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_EQ(helloFuture.get(), 0x16); // TLS handshake record, not just TCP accept
     const auto start = std::chrono::steady_clock::now();
     server->stop();
     EXPECT_TRUE(session.expired()); // no detached fetch retains a session/executor
@@ -316,15 +323,37 @@ TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
 TEST(RecordingServerStop, JoinedProcessWorkHonorsCancellationAndDeadline) {
     int argc = 1; char name[] = "process-stop"; char* argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
-    QTemporaryDir directory;
-    const auto start = std::chrono::steady_clock::now();
-    const auto result = runBoundedProcess("/bin/sh", {"-c", "exec sleep 30"}, directory.path(), [&] {
-        return std::chrono::steady_clock::now() - start > std::chrono::milliseconds(100);
-    });
-    EXPECT_EQ(result.error, "process cancelled");
-    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
-    const auto timed = runBoundedProcess("/bin/sh", {"-c", "exec sleep 30"}, directory.path(), [] { return false; },
-                                         std::chrono::milliseconds(100));
-    EXPECT_EQ(timed.error, "process deadline exceeded");
+    EXPECT_EQ(kScreenerProcessBudget, std::chrono::seconds(90));
+    for (bool cancel : {true, false}) {
+        QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+        const auto pidFile = directory.path() + "/child.pid";
+        pid_t child = 0;
+        const auto readChild = [&] {
+            QFile file(pidFile);
+            if (file.open(QIODevice::ReadOnly)) child = static_cast<pid_t>(file.readAll().trimmed().toLongLong());
+        };
+        bool cancellationRequested = false;
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = runBoundedProcess("/bin/sh",
+            {"-c", "trap 'wait; exit' TERM; sleep 60 & echo $! > child.pid; wait"}, directory.path(), [&] {
+                if (cancel && !cancellationRequested) {
+                    readChild();
+                    cancellationRequested = child > 0 && ::kill(child, 0) == 0;
+                }
+                return cancellationRequested;
+            }, cancel ? std::chrono::seconds(5) : std::chrono::milliseconds(500));
+        EXPECT_EQ(result.error, cancel ? "process cancelled" : "process deadline exceeded");
+        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(3));
+        readChild();
+        ASSERT_GT(child, 0); // real shell -> sleep grandchild of this test process
+        const auto reapedBy = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (::kill(child, 0) == 0 && std::chrono::steady_clock::now() < reapedBy)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        errno = 0;
+        const auto status = ::kill(child, 0);
+        EXPECT_EQ(status, -1) << "grandchild survived process-group termination: " << child;
+        EXPECT_EQ(errno, ESRCH);
+        if (status == 0) ::kill(child, SIGKILL); // clean up on regression without hiding failure
+    }
 }
 #endif

@@ -44,6 +44,11 @@
 #include "Cpp20Utils.hpp"
 
 #include <filesystem>
+#ifdef Q_OS_UNIX
+#include <cerrno>
+#include <csignal>
+#include <unistd.h>
+#endif
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -52,29 +57,54 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
+// Allow uv startup, tvscreener's own 30-second HTTP timeout, and serialization.
+constexpr auto kScreenerProcessBudget = std::chrono::seconds(90);
+constexpr auto kProcessTerminationGrace = std::chrono::milliseconds(250);
+
+void terminateProcessTree(QProcess& process) {
+#ifdef Q_OS_UNIX
+    // The child modifier makes the launched process its group's leader before
+    // exec. Keep the pgid even if uv exits during the grace period: Python may
+    // still be alive. Signal the whole group, then reap the direct child.
+    const auto group = static_cast<pid_t>(process.processId());
+    if (group > 0) ::kill(-group, SIGTERM);
+    std::this_thread::sleep_for(kProcessTerminationGrace);
+    if (group > 0) ::kill(-group, SIGKILL);
+#else
+    process.terminate();
+    process.waitForFinished(static_cast<int>(kProcessTerminationGrace.count()));
+#endif
+    // Also handles cancellation during startup, before setpgid has run.
+    process.kill();
+    process.waitForFinished(1000);
+}
+
 struct ProcessResult { std::string output, error; };
 ProcessResult runBoundedProcess(const QString& program, const QStringList& arguments,
                                const QString& directory, const std::function<bool()>& stopped,
-                               std::chrono::milliseconds budget = std::chrono::seconds(30)) {
+                               std::chrono::milliseconds budget = kScreenerProcessBudget) {
     ProcessResult result;
     if (stopped()) { result.error = "process cancelled"; return result; }
     QProcess process;
+#ifdef Q_OS_UNIX
+    process.setChildProcessModifier([&process] {
+        if (::setpgid(0, 0) == -1) process.failChildProcessModifier("setpgid", errno);
+    });
+#endif
     process.setWorkingDirectory(directory);
     process.setProcessChannelMode(QProcess::MergedChannels);
     const auto deadline = std::chrono::steady_clock::now() + budget;
     process.start(program, arguments);
     while (process.state() != QProcess::NotRunning) {
         if (stopped() || std::chrono::steady_clock::now() >= deadline) {
-            process.kill();
-            process.waitForFinished(1000);
+            terminateProcessTree(process);
             result.error = stopped() ? "process cancelled" : "process deadline exceeded";
             return result;
         }
         process.waitForFinished(50);
         result.output += process.readAll().toStdString();
         if (result.output.size() > 8 * 1024 * 1024) {
-            process.kill();
-            process.waitForFinished(1000);
+            terminateProcessTree(process);
             result.error = "process output budget exceeded";
             return result;
         }

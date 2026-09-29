@@ -24,6 +24,9 @@ Branch: `lt-astra/remove-legacy-heatmap`. Status: phase 1 implemented; phase 2 r
 - [x] Third review: join candle-history and screener jobs before owner teardown;
   bound/cancel screener subprocesses; cache/share DNS lookups with capacity waits;
   test stalled-fetch destruction, resolver recovery, and deadline-test stability.
+- [x] Fourth review: 90-second screener budget with upstream timeout margin;
+  POSIX process-group termination and grandchild cleanup regression; stalled
+  candle-fetch teardown gated on actual ClientHello bytes.
 - [ ] Orchestrator live continuity checks below.
 
 The original blocker was that `on_heatmap_slice` also produced all three live
