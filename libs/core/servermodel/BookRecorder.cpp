@@ -47,6 +47,8 @@ struct Layer {
     std::vector<Row *> touched;
     std::vector<Hmc2Record> hourMinutes;
     int64_t hour = -1;
+    int64_t hourThroughMs = 0;
+    bool hourWatermarkBlocked = false;
     explicit Layer(std::pmr::memory_resource *pool) : rows(pool) {
         rows.reserve(8192);
         touched.reserve(4096);
@@ -59,6 +61,8 @@ struct Symbol {
     std::vector<Layer> layers;
     bool initialized = false, valid = false;
     int64_t clock = 0, minute = 0, closedThrough = 0, offset = 0;
+    int64_t minuteThroughMs = 0;
+    bool minuteWatermarkBlocked = false;
     uint32_t observed = 0, flags = 0;
     int64_t lastPublish = 0;
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
@@ -127,6 +131,8 @@ struct BookRecorder::Impl {
     int64_t emergencyLocal = 0;
     std::thread worker;
     std::map<std::string, std::unique_ptr<Symbol>> symbols;
+    mutable std::mutex watermarksMutex;
+    std::map<std::pair<std::string, std::string>, BookRecorder::Watermarks> watermarksBySeries;
     std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, queueDrops{0}, invalidations{0},
         diskErrors{0};
 
@@ -416,6 +422,7 @@ struct BookRecorder::Impl {
                     rebuildHour(l, previous);
                     writeHour(l);
                 } catch (const std::exception &e) {
+                    l.hourWatermarkBlocked = true;
                     ++diskErrors;
                     sLog_Error("BookRecorder: previous-hour recovery failed symbol="
                                << l.header.symbol << " hour=" << previous << " error=" << e.what());
@@ -497,6 +504,8 @@ struct BookRecorder::Impl {
                 out.coverage.push_back({lo, INT64_MAX, ask, static_cast<uint32_t>(covered)});
         }
         write(out);
+        if (!l.hourWatermarkBlocked)
+            l.hourThroughMs = std::max(l.hourThroughMs, l.hour + kHour);
         l.hourMinutes.clear();
     }
     void rollup(Symbol &s, const Hmc2Record &r) {
@@ -526,6 +535,9 @@ struct BookRecorder::Impl {
             try {
                 write(r);
             } catch (const std::exception &e) {
+                s.minuteWatermarkBlocked = true;
+                for (size_t li = 0; li < s.layers.size(); ++li)
+                    if (cfg.layers[li].hourlyRollup) s.layers[li].hourWatermarkBlocked = true;
                 ++diskErrors;
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
                 continue;
@@ -534,6 +546,8 @@ struct BookRecorder::Impl {
             try {
                 rollup(s, r);
             } catch (const std::exception &e) {
+                for (size_t li = 0; li < s.layers.size(); ++li)
+                    if (cfg.layers[li].hourlyRollup) s.layers[li].hourWatermarkBlocked = true;
                 ++diskErrors;
                 sLog_Error("BookRecorder: minute committed; hourly accumulation failed bucket="
                            << r.bucketStartMs << " error=" << e.what());
@@ -548,11 +562,24 @@ struct BookRecorder::Impl {
                 try {
                     writeHour(l);
                 } catch (const std::exception &e) {
+                    l.hourWatermarkBlocked = true;
                     ++diskErrors;
                     sLog_Error("BookRecorder: hourly write failed error=" << e.what());
                     l.hourMinutes.clear();
                 }
             }
+        }
+        if (!s.minuteWatermarkBlocked)
+            s.minuteThroughMs = std::max(s.minuteThroughMs, s.closedThrough);
+        const auto hourBoundary = floorDiv(s.minuteThroughMs, kHour) * kHour;
+        std::lock_guard lock(watermarksMutex);
+        for (size_t li = 0; li < s.layers.size(); ++li) {
+            auto &l = s.layers[li];
+            if (cfg.layers[li].hourlyRollup && !l.hourWatermarkBlocked &&
+                (l.hour < 0 || l.hour >= hourBoundary || l.hourMinutes.empty()))
+                l.hourThroughMs = std::max(l.hourThroughMs, hourBoundary);
+            watermarksBySeries[{l.header.symbol, l.header.layer}] =
+                {s.minuteThroughMs, cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0};
         }
     }
     void apply(Symbol &s, const Message &m) {
@@ -714,6 +741,11 @@ BookRecorder::Stats BookRecorder::stats() const {
     const auto &i = *impl_;
     return {i.columnsWritten.load(), i.lateEvents.load(),    i.backwardSteps.load(),
             i.queueDrops.load(),     i.invalidations.load(), i.diskErrors.load()};
+}
+BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, const std::string &layer) const {
+    std::lock_guard lock(impl_->watermarksMutex);
+    const auto it = impl_->watermarksBySeries.find({symbol, layer});
+    return it == impl_->watermarksBySeries.end() ? Watermarks{} : it->second;
 }
 void BookRecorder::drainForTest() {
     std::unique_lock lock(impl_->mutex);

@@ -19,14 +19,17 @@ struct ChunkState {
 };
 struct ChunkFrame {
     ChunkKind kind = ChunkKind::Chunk;
-    uint64_t requestId = 0;
     ChunkKey key;
     ChunkState state;
     SparseColumns columns;
-    uint64_t contentHash = 0; // filled by encode/decode; FNV-1a of uncompressed payload
+    uint64_t contentHash = 0; // decoded FNV-1a of header prefix and uncompressed payload
 };
 // SHC1 v1 is little-endian. All lengths and counts are checked before allocation.
 // Throws invalid_argument for malformed input or a wire-version mismatch.
 std::vector<uint8_t> encodeChunk(const ChunkFrame& frame);
 ChunkFrame decodeChunk(std::span<const uint8_t> wire);
+// Request identity is transport metadata. Cached SHC1 bytes never contain it.
+std::vector<uint8_t> encodeChunkEnvelope(uint64_t requestId, std::span<const uint8_t> chunkWire);
+struct ChunkEnvelope { uint64_t requestId = 0; ChunkFrame chunk; };
+ChunkEnvelope decodeChunkEnvelope(std::span<const uint8_t> wire);
 } // namespace heatmap

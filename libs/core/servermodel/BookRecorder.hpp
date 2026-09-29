@@ -33,6 +33,10 @@ struct Level {
 };
 class BookRecorder {
   public:
+    struct Watermarks {
+        int64_t minuteThroughMs = 0; // exclusive, lateness already applied
+        int64_t hourThroughMs = 0;   // exclusive, after hour rollup persistence
+    };
     explicit BookRecorder(RecorderConfig cfg);
     // Deterministic clock injection for replay/tests; called on the producer only.
     BookRecorder(RecorderConfig cfg, std::function<int64_t()> localClock);
@@ -47,6 +51,8 @@ class BookRecorder {
         uint64_t columnsWritten, lateEvents, backwardSteps, queueDrops, invalidations, diskErrors;
     };
     Stats stats() const;
+    // Safe to query from chunk workers; one cutoff per persisted native level.
+    Watermarks watermarks(const std::string &symbol, const std::string &layer) const;
     // Waits for all preceding enqueues and disk writes, without advancing time.
     void drainForTest();
 

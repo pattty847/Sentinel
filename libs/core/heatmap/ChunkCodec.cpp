@@ -1,21 +1,18 @@
 #include "ChunkCodec.hpp"
 #include "../servermodel/RecordingCodec.hpp"
+#include "../servermodel/Hmc2Store.hpp"
 #include <zstd.h>
 #include <bit>
-#include <cmath>
-#include <cstring>
-#include <iomanip>
 #include <limits>
-#include <locale>
-#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
 
 namespace heatmap {
 namespace {
-constexpr size_t kMaxPayload = 256u * 1024u * 1024u;
+constexpr size_t kMaxPayload = 16u * 1024u * 1024u;
 constexpr uint32_t kMaxColumns = 1440, kMaxEntries = 8'000'000;
+constexpr size_t kColumnRecordMinBytes = 22, kNativeRecordMinBytes = 66;
 void fail() { throw std::invalid_argument("invalid SHC1 chunk"); }
 struct Writer {
     std::vector<uint8_t> data;
@@ -48,6 +45,9 @@ struct Reader {
         std::string s(reinterpret_cast<const char*>(data.data() + pos), n);
         pos += n; return s;
     }
+    void requireCount(uint64_t count, size_t minBytes) const {
+        if (count > (data.size() - pos) / minBytes) fail();
+    }
     uint64_t var() {
         uint64_t v = 0;
         if (!recording::getVarint(data.data(), data.size(), pos, v)) fail();
@@ -59,20 +59,10 @@ uint64_t hashBytes(std::span<const uint8_t> bytes) {
     for (auto b : bytes) { h ^= b; h *= 1099511628211ULL; }
     return h;
 }
-void putNumerator(Writer& w, long double n) {
-    std::ostringstream os;
-    os.imbue(std::locale::classic());
-    os << std::setprecision(std::numeric_limits<long double>::max_digits10) << n;
-    w.str(os.str());
-}
-long double getNumerator(Reader& r) {
-    const auto s = r.str();
-    std::istringstream is(s);
-    is.imbue(std::locale::classic());
-    long double n = 0;
-    is >> n;
-    if (!is || is.peek() != std::char_traits<char>::eof() || !std::isfinite(n) || n < 0) fail();
-    return n;
+uint64_t chunkHash(std::span<const uint8_t> prefix, std::span<const uint8_t> raw) {
+    uint64_t h = hashBytes(prefix);
+    for (auto b : raw) { h ^= b; h *= 1099511628211ULL; }
+    return h;
 }
 uint8_t layerCode(const std::string& layer) {
     if (layer == "near") return 1;
@@ -83,8 +73,8 @@ bool validExtent(const ChunkKey& key, int64_t end) {
     const int64_t span = key.levelMs == kMinuteMs ? kHourMs :
                          key.levelMs == kHourMs && key.layer == "deep" ? kDayMs : 0;
     return span && !key.symbol.empty() && (key.layer == "near" || key.layer == "deep") &&
-           key.startMs >= 0 && key.startMs % span == 0 &&
-           key.startMs <= std::numeric_limits<int64_t>::max() - span &&
+           key.startMs >= recording::kHmc2MinMs && key.startMs % span == 0 &&
+           key.startMs <= recording::kHmc2EndMs - span &&
            end == key.startMs + span;
 }
 std::string layerName(uint8_t code) {
@@ -131,14 +121,22 @@ Counts count(const SparseColumns& data) {
     }
     return {uint32_t(data.columns.size()), uint32_t(entries)};
 }
+bool validState(const ChunkFrame& frame) {
+    if (frame.state.sealed)
+        return frame.state.revision == 0 && frame.state.committedThroughMs >= frame.columns.endMs &&
+               frame.columns.scannedRanges.size() == 1 &&
+               frame.columns.scannedRanges.front() ==
+                   SparseColumns::TimeRange{frame.columns.startMs, frame.columns.endMs};
+    return frame.columns.scannedRanges.empty() ||
+           frame.columns.scannedRanges.back().endMs <= frame.state.committedThroughMs;
+}
 } // namespace
 
 std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
     if (frame.kind != ChunkKind::Chunk || frame.key.symbol != frame.columns.symbol ||
         frame.key.layer != frame.columns.layer || frame.key.levelMs != frame.columns.tfMs ||
         frame.key.startMs != frame.columns.startMs ||
-        !validExtent(frame.key, frame.columns.endMs) ||
-        (frame.state.sealed && frame.state.revision)) fail();
+        !validExtent(frame.key, frame.columns.endMs) || !validState(frame)) fail();
     validate(frame.columns);
     const auto counts = count(frame.columns);
     Writer raw;
@@ -151,9 +149,10 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
         raw.i(col.bucketStartMs); raw.u(col.observedMs); raw.u(col.flags);
         raw.u(uint16_t(col.native.size()));
         for (const auto& n : col.native) {
+            if (n.composed) fail(); // v1 transports native levels only.
             putGrid(raw, n.grid, n.sizeScale);
             raw.i(n.baseRow); raw.u(n.observedMs);
-            raw.u(uint8_t(n.composed)); raw.u(uint8_t(!n.entryCoveredMs.empty()));
+            raw.u(uint8_t(0)); raw.u(uint8_t(!n.entryCoveredMs.empty()));
             for (const auto& side : n.coverage) {
                 if (side.size() > 65535) fail();
                 raw.u(uint16_t(side.size()));
@@ -172,7 +171,6 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
             recording::putVarint(raw.data, packed);
             raw.u(e.code);
             if (!n.entryCoveredMs.empty()) recording::putVarint(raw.data, n.entryCoveredMs[j]);
-            if (n.composed) putNumerator(raw, n.numerators[j]);
             previousRow = e.row();
         }
     }
@@ -184,13 +182,14 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
     Writer wire;
     for (char c : "SHC1") { if (c) wire.u(uint8_t(c)); }
     wire.u(kChunkWireVersion); wire.u(uint8_t(frame.kind)); wire.u(uint8_t(frame.state.sealed));
-    wire.u(frame.requestId); wire.str(frame.key.symbol); wire.u(layerCode(frame.key.layer));
+    wire.str(frame.key.symbol); wire.u(layerCode(frame.key.layer));
     wire.i(frame.key.levelMs); wire.i(frame.key.startMs); wire.i(frame.columns.endMs);
     const auto common = commonGrid(frame.columns);
     putGrid(wire, common.grid, common.scale);
     wire.i(frame.state.committedThroughMs); wire.u(frame.state.revision);
-    wire.u(hashBytes(raw.data)); wire.u(counts.columns); wire.u(counts.entries);
+    wire.u(chunkHash(wire.data, raw.data)); wire.u(counts.columns); wire.u(counts.entries);
     wire.u(uint32_t(raw.data.size())); wire.u(uint32_t(compressed.size()));
+    if (wire.data.size() + compressed.size() + 14 > kMaxPayload) fail();
     wire.data.insert(wire.data.end(), compressed.begin(), compressed.end());
     return std::move(wire.data);
 }
@@ -204,27 +203,32 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
     if (out.kind != ChunkKind::Chunk) fail();
     const auto sealed = h.u<uint8_t>(); if (sealed > 1) fail();
     out.state.sealed = sealed;
-    out.requestId = h.u<uint64_t>(); out.key.symbol = h.str();
+    out.key.symbol = h.str();
     out.key.layer = layerName(h.u<uint8_t>());
     out.key.levelMs = h.i(); out.key.startMs = h.i(); const auto end = h.i();
     const auto headerGrid = getGrid(h);
     out.state.committedThroughMs = h.i(); out.state.revision = h.u<uint64_t>();
+    const auto hashOffset = h.pos;
     out.contentHash = h.u<uint64_t>();
     const auto nColumns = h.u<uint32_t>(), nEntries = h.u<uint32_t>();
     const auto rawLen = h.u<uint32_t>(), zLen = h.u<uint32_t>();
-    if (nColumns > kMaxColumns || nEntries > kMaxEntries || rawLen > kMaxPayload ||
+    if (wire.size() + 14 > kMaxPayload || nColumns > kMaxColumns || nEntries > kMaxEntries ||
+        rawLen < 2 || rawLen > kMaxPayload ||
         zLen > kMaxPayload || zLen != wire.size() - h.pos ||
-        (out.state.sealed && out.state.revision) ||
         !validExtent(out.key, end)) fail();
+    if (ZSTD_getFrameContentSize(wire.data() + h.pos, zLen) != rawLen) fail();
     std::vector<uint8_t> raw(rawLen);
     const auto decoded = ZSTD_decompress(raw.data(), raw.size(), wire.data() + h.pos, zLen);
-    if (ZSTD_isError(decoded) || decoded != rawLen || hashBytes(raw) != out.contentHash) fail();
+    if (ZSTD_isError(decoded) || decoded != rawLen ||
+        chunkHash(wire.first(hashOffset), raw) != out.contentHash) fail();
     Reader r{raw};
     out.columns = {out.key.symbol, out.key.layer, out.key.levelMs, out.key.startMs, end};
     const auto nRanges = r.u<uint16_t>();
     if (nRanges > kMaxColumns) fail();
+    r.requireCount(nRanges, 16);
     out.columns.scannedRanges.reserve(nRanges);
     for (unsigned j = 0; j < nRanges; ++j) out.columns.scannedRanges.push_back({r.i(), r.i()});
+    r.requireCount(nColumns, kColumnRecordMinBytes);
     out.columns.columns.reserve(nColumns);
     uint64_t totalEntries = 0;
     std::vector<std::vector<uint32_t>> entryCounts;
@@ -232,6 +236,7 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
         SparseColumn col;
         col.bucketStartMs = r.i(); col.observedMs = r.u<uint64_t>(); col.flags = r.u<uint32_t>();
         const auto nativeCount = r.u<uint16_t>(); if (nativeCount > 1024) fail();
+        r.requireCount(nativeCount, kNativeRecordMinBytes);
         col.native.reserve(nativeCount);
         std::vector<uint32_t> perNative;
         for (unsigned j = 0; j < nativeCount; ++j) {
@@ -239,18 +244,18 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
             const auto g = getGrid(r); n.grid = g.grid; n.sizeScale = g.scale;
             n.baseRow = r.i(); n.observedMs = r.u<uint64_t>();
             const auto composed = r.u<uint8_t>(), sidecar = r.u<uint8_t>();
-            if (composed > 1 || sidecar > 1) fail();
-            n.composed = composed;
+            if (composed || sidecar > 1) fail();
             for (auto& side : n.coverage) {
                 const auto count = r.u<uint16_t>();
+                r.requireCount(count, 24);
                 side.reserve(count);
                 for (unsigned k = 0; k < count; ++k) side.push_back({r.i(), r.i(), r.u<uint64_t>()});
             }
             const auto count = r.u<uint32_t>(); totalEntries += count;
             if (totalEntries > nEntries) fail();
+            r.requireCount(count, 3);
             n.entries.reserve(count);
             if (sidecar) n.entryCoveredMs.reserve(count);
-            if (n.composed) n.numerators.reserve(count);
             perNative.push_back((count << 1) | sidecar);
             col.native.push_back(std::move(n));
         }
@@ -270,17 +275,34 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
                 row += uint32_t(packed >> 1);
                 n.entries.push_back({row | (uint32_t(packed & 1) << 31), r.u<uint16_t>()});
                 if (sidecar) n.entryCoveredMs.push_back(r.var());
-                if (n.composed) n.numerators.push_back(getNumerator(r));
             }
         }
     if (r.pos != raw.size()) fail();
     validate(out.columns);
+    if (!validState(out)) fail();
     const auto common = commonGrid(out.columns);
     if (common.grid.configHash != headerGrid.grid.configHash ||
         common.grid.rowTickUnits != headerGrid.grid.rowTickUnits ||
         common.grid.priceScale != headerGrid.grid.priceScale ||
         common.scale.floor != headerGrid.scale.floor ||
         common.scale.codesPerOctave != headerGrid.scale.codesPerOctave) fail();
+    return out;
+}
+std::vector<uint8_t> encodeChunkEnvelope(uint64_t requestId, std::span<const uint8_t> chunkWire) {
+    if (chunkWire.size() > kMaxPayload - 14 || chunkWire.size() < 6) fail();
+    Writer out;
+    for (char c : "SHE1") { if (c) out.u(uint8_t(c)); }
+    out.u(uint16_t(1)); out.u(requestId);
+    out.data.insert(out.data.end(), chunkWire.begin(), chunkWire.end());
+    return std::move(out.data);
+}
+ChunkEnvelope decodeChunkEnvelope(std::span<const uint8_t> wire) {
+    Reader r{wire};
+    for (char c : "SHE1") { if (c && r.u<uint8_t>() != uint8_t(c)) fail(); }
+    if (r.u<uint16_t>() != 1) fail();
+    ChunkEnvelope out;
+    out.requestId = r.u<uint64_t>();
+    out.chunk = decodeChunk(wire.subspan(r.pos));
     return out;
 }
 } // namespace heatmap

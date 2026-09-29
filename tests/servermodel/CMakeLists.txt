@@ -121,7 +121,8 @@ add_dependencies(servermodel_tests test_heatmap_model)
 
 add_executable(test_recording_chunks test_recording_chunks.cpp)
 target_include_directories(test_recording_chunks PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
-target_link_libraries(test_recording_chunks PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_link_libraries(test_recording_chunks PRIVATE sentinel_core GTest::gtest_main Qt6::Core
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
 add_test(NAME RecordingChunkTests COMMAND test_recording_chunks)
 set_tests_properties(RecordingChunkTests PROPERTIES LABELS "servermodel;heatmap")
 add_dependencies(servermodel_tests test_recording_chunks)

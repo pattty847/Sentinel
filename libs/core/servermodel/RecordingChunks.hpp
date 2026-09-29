@@ -1,7 +1,9 @@
 #pragma once
 #include "Hmc2Store.hpp"
+#include "BookRecorder.hpp"
 #include "../heatmap/ChunkCodec.hpp"
 #include <list>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 
@@ -11,26 +13,27 @@ using ChunkState = heatmap::ChunkState;
 // Only native levels are chunks. Minute chunks span a UTC hour; deep hour
 // chunks span a UTC day. The start must be aligned to that span.
 int64_t chunkEndMs(const ChunkKey& key);
-ChunkState chunkState(const ChunkKey& key, int64_t committedThroughMs,
-                      uint64_t revision, int64_t latenessMs);
-// committedThroughMs limits the proven scan to completed native buckets for an
-// open chunk. Omit it only when the caller knows the entire chunk is committed.
+ChunkState chunkState(const ChunkKey& key, const BookRecorder::Watermarks& watermarks,
+                      uint64_t revision);
+// Omit watermarks only when the caller knows the entire chunk is committed.
+heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key);
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
-                                  std::optional<int64_t> committedThroughMs = {});
+                                  const BookRecorder::Watermarks& watermarks);
 
-// Worker-owned cache of exact encoded sealed frames. Open frames are refused.
+// Shared cache of exact encoded sealed SHC1 bytes. Open frames are refused.
 class EncodedChunkLru {
 public:
     explicit EncodedChunkLru(size_t maxBytes) : maxBytes_(maxBytes) {}
-    void put(const heatmap::ChunkFrame& frame, std::vector<uint8_t> encoded);
-    std::optional<std::vector<uint8_t>> get(const ChunkKey& key);
-    size_t bytes() const { return bytes_; }
-    size_t size() const { return entries_.size(); }
+    void put(std::vector<uint8_t> encoded);
+    std::shared_ptr<const std::vector<uint8_t>> get(const ChunkKey& key);
+    size_t bytes() const;
+    size_t size() const;
 private:
-    struct Entry { ChunkKey key; std::vector<uint8_t> wire; };
+    struct Entry { ChunkKey key; std::shared_ptr<const std::vector<uint8_t>> wire; };
     struct Hash {
         size_t operator()(const ChunkKey& key) const;
     };
+    mutable std::mutex mutex_;
     size_t maxBytes_ = 0, bytes_ = 0;
     std::list<Entry> lru_;
     std::unordered_map<ChunkKey, std::list<Entry>::iterator, Hash> entries_;
