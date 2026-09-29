@@ -9,7 +9,7 @@ Zoomed out, the chart shows the deep layer's whale lines across the whole price 
 
 ## Facts this design builds on
 
-- HMC2 records per (symbol, layer, tf): `(row, side) -> twapCode, peakCode` on a fixed log size scale; near = $1 rows within +/-5% of the mid, deep = $10 rows over [mid/4, mid*4]; 1m records, deep also 1h. Schema 3 stores deltas with 15-minute keyframes.
+- HMC2 records per (symbol, layer, tf): `(row, side) -> twapCode, peakCode` on a fixed log size scale; near = $1 rows within +/-5% of the mid, deep = $5 rows over [mid/4, mid*4]; 1m records, deep also 1h. Schema 3 stores deltas with 15-minute keyframes.
 - The client's `heatmap_window::ColumnWindow` already keeps per-column source bands and resamples each column into one display band (`resampleColumn`); a band change rewrites every slot (`Update::full`).
 - The client texture is R16 `code|sideBit` per cell; today's value is a per-column log-normalized intensity. Labels read a separate linear liquidity channel (`u16 * liquidityScale`).
 - The display tick groups rows client-side (HeatmapRowGrouping, square-ish cells).
@@ -20,7 +20,7 @@ Zoomed out, the chart shows the deep layer's whale lines across the whole price 
 
 `recording::buildColumns(root, symbol, tfMs, endMs, count, priceLo, priceHi, rows) -> std::vector<ServedColumn>`
 
-- Output row tick = smallest `layerTick * {1,2,5,10,...}` with `tick * rows >= priceHi - priceLo`. Band = `[floor(priceLo / tick) * tick, + rows * tick)`, on the absolute tick grid.
+- Output row tick = smallest shared `recording::ladderTickUnits` tick (`{1,2,2.5,5} x 10^k`, restricted to native-tick multiples) with `ceil(priceHi/tick) - floor(priceLo/tick) <= rows`. Band = `[floor(priceLo / tick) * tick, + rows * tick)`, on the absolute tick grid.
 - Layer: near when the output tick is below the deep tick, else deep. Inside a near column, rows outside that minute's recorded bounds are unknown (0), not zero liquidity; a per-column `coveredLo/coveredHi` travels with the column.
 - Aggregation per output row, per side: **sum** of decoded TWAP sizes (quantity semantics). Peak per row = max of decoded peaks.
 - Cell value: dominant side (larger summed size) encoded as `encodeSize(sum) | sideBit` with the recording's size scale: an **absolute log code**, not a normalized intensity. A second channel carries the dominant side's summed size linearly (`u16 * scale`, scale = column max / 65535) for labels, as today.
@@ -35,7 +35,7 @@ Zoomed out, the chart shows the deep layer's whale lines across the whole price 
 
 ### 3. Client
 
-- **Band follows the view.** DataProcessor keeps a display band = the visible price range with 50% margin on each side, at the output tick chosen for the texture's row count (2048). When the view leaves the margin, or the ideal tick changes by a 1-2-5 step, it requests a re-band: the window reconfigures its band (`full` rewrite) and refetches the visible pages with the new `price_min/price_max/rows`. Debounced (~150 ms) during zoom so a wheel gesture fetches once.
+- **Band follows the view.** DataProcessor keeps a display band = the visible price range with 50% margin on each side, at the output tick chosen for the texture's row count (2048). When the view leaves the margin, or the ideal tick changes by a shared-ladder step, it requests a re-band: the window reconfigures its band (`full` rewrite) and refetches the visible pages with the new `price_min/price_max/rows`. Debounced (~150 ms) during zoom so a wheel gesture fetches once.
 - **Shader logcode mode.** A uniform flag selects the value meaning. In logcode mode, magnitude = `clamp((code - lo) / (hi - lo), 0, 1)` with `lo/hi` uniforms (the sensitivity range; default from config, e.g. 0.01 BTC .. 100 BTC). The existing gamma/contrast/palette stay. Max-by-row grouping still works (codes are monotonic in size).
 - **Labels** unchanged: they read the linear channel and sum within display groups.
 - Config `heatmap.source: recording | legacy` (default legacy until verified), so the change can be A/B tested and rolled back.
@@ -69,9 +69,9 @@ Measured live (schema 3): deep ~1 KB/min deltas + ~35 KB keyframe per 15 min, ne
 3. **Coverage is explicit.** Each column carries a row-validity bitmask (1 = recorded, 0 = unknown) derived from the minute's side bounds; an aggregate row is valid only if all constituent rows were covered for the time used. Pages carry `scanned_start/scanned_end`, `next_end`, `exhausted`; a short page never marks older history missing, only the scanned interval.
 4. **Bounded, streaming reads.** `Hmc2Store` gains a streaming reader (visit reconstructed records in order without retaining them), per-request budgets (source records, entries visited, wall-clock ms), a stop token, and a cached per-series availability (oldest/latest bucket). Page size shrinks to fit the budget; the reply says so (not exhausted).
 5. **Hourly records carry coverage.** Hour (tf=3600000) records store per-entry covered-ms (new schema for hour records), so multi-hour rollups are exact: `sum(size*coveredMs)/sum(coveredMs)`. Output tf >= 1h reads hours (plus the current hour's tail from minutes, no double count); tf < 1h reads minutes. Persisted 15m/4h only if measurement demands it.
-6. **Cells are half-open on the absolute grid:** row k covers [k*tick, (k+1)*tick); price of a row is its lower edge; band rows = ceil(hi/tick) - floor(lo/tick) <= rows (grow the tick one 1-2-5 step if not). Wire order stays descending from the top row. Client grouping phase and label coordinates are corrected to the lower-edge convention together.
+6. **Cells are half-open on the absolute grid:** row k covers [k*tick, (k+1)*tick); price of a row is its lower edge; band rows = ceil(hi/tick) - floor(lo/tick) <= rows (grow the tick one shared-ladder step if not). Wire order stays descending from the top row. Client grouping phase and label coordinates are corrected to the lower-edge convention together.
 7. **Dominant side, single channel** for v1, with deterministic ties (bid on tie); bid and ask accumulators are kept until final projection. Labels state dominant-side quantity.
-8. **Unknown stays unknown** outside near coverage (no expanding $10 totals into $1 rows).
+8. **Unknown stays unknown** outside near coverage (no expanding $5 totals into $1 rows).
 9. **Client:** `ColumnWindow::setDisplayBand()` re-bands without `configure()/clear()`, keeps live cache/placement/slots (INV-045), rewrites all slots and validity; projected cache keyed by (source, tf, band_generation); obsolete replies dropped by request_id; viewport dedup includes price bounds; legacy live ingestion gated off in recording mode. Shader gets a value-mode flag and a validity-aware path.
 
 Slices: S1 (builder + streaming reader + budgets + availability + hour-record coverage, core, tests) -> S2 (protocol + server wiring + client DTO parsing) -> S3 (client re-band + shader + labels; orchestrator) -> S4 (live per-client + provisional minute; needs a recorder publication API).

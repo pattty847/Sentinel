@@ -1,5 +1,6 @@
 #include "RecordingPage.hpp"
 #include "RecordingLive.hpp"
+#include "PriceLadder.hpp"
 #include <array>
 #include <map>
 #include <unordered_map>
@@ -28,7 +29,8 @@ BuildStatus status(ReadStatus s) {
     }
 }
 struct GridError : std::runtime_error { using std::runtime_error::runtime_error; };
-struct Aggregate {
+using RowSums = std::vector<std::array<long double, 2>>;
+struct NativeAggregate {
     ServedColumn column;
     double nativeTick = 0;
     bool direct = false;
@@ -37,8 +39,6 @@ struct Aggregate {
     std::array<std::map<int64_t, int64_t>, 2> coverage;
     void add(const Hmc2Record &r, const PriceBand &band, ReadControl &control) {
         const double tick = r.header.rowTickUnits / r.header.priceScale;
-        if (!multiple(band.tick, tick) || (nativeTick && std::abs(nativeTick - tick) > tick * 1e-9))
-            throw GridError("source grid changed or display tick is not a native-tick multiple");
         nativeTick = tick;
         column.observedMs += r.observedMs;
         column.flags |= r.flags;
@@ -82,12 +82,7 @@ struct Aggregate {
                 numerator[e.row][e.isAsk] += static_cast<long double>(size) * ms;
         }
     }
-    ServedColumn finish(const PriceBand &band, const SizeScale &scale, int64_t tf, ReadControl &control) {
-        column.flags &= ~kPartial;
-        if (column.observedMs < static_cast<uint64_t>(tf))
-            column.flags |= kPartial;
-        column.cells.resize(band.rows);
-        column.quantities.resize(band.rows);
+    RowSums finish(const PriceBand &band, ReadControl &control) {
         column.validity.resize((band.rows + 7) / 8);
         auto sums = direct ? std::move(directSums) : std::vector<std::array<long double, 2>>(band.rows);
         // Turn interval differences into the per-native-row denominator. Zero
@@ -124,11 +119,64 @@ struct Aggregate {
                     return false;
             return true;
         };
-        double maximum = 0;
         for (uint32_t row = 0; row < band.rows; ++row) {
             const auto lo = nativeLo + (band.rows - 1 - row) * group;
             if (fullyCovered(false, lo, lo + group) && fullyCovered(true, lo, lo + group))
                 column.validity[row / 8] |= static_cast<uint8_t>(1u << (row % 8));
+        }
+        return sums;
+    }
+};
+// Preserve each grid's native-row denominators, then combine its display-row
+// quantities by observed duration. Never reinterpret a native row on another grid.
+struct Aggregate {
+    ServedColumn column;
+    bool direct = false;
+    bool incompatible = false;
+    std::map<double, NativeAggregate> grids;
+    void add(const Hmc2Record &r, const PriceBand &band, ReadControl &control) {
+        column.observedMs += r.observedMs;
+        column.flags |= r.flags;
+        const double tick = r.header.rowTickUnits / r.header.priceScale;
+        if (!multiple(band.tick, tick) || gridPosition(band.lo, tick) != std::round(band.lo / tick)) {
+            incompatible = true;
+            grids.clear();
+        }
+        if (incompatible) return;
+        auto &grid = grids[tick];
+        grid.direct = direct;
+        grid.add(r, band, control);
+    }
+    ServedColumn finish(const PriceBand &band, const SizeScale &scale, int64_t tf, ReadControl &control) {
+        column.flags &= ~kPartial;
+        if (column.observedMs < static_cast<uint64_t>(tf)) column.flags |= kPartial;
+        column.cells.resize(band.rows);
+        column.quantities.resize(band.rows);
+        column.validity.resize((band.rows + 7) / 8);
+        // A constituent that cannot be represented makes this output bucket
+        // unknown, including quantities; other buckets on the page still serve.
+        if (incompatible) return std::move(column);
+        RowSums sums;
+        bool first = true;
+        for (auto &[tick, grid] : grids) {
+            auto values = grid.finish(band, control);
+            if (!control.poll()) return {};
+            if (first) {
+                sums = std::move(values);
+                column.validity = grid.column.validity;
+            } else {
+                for (size_t i = 0; i < column.validity.size(); ++i)
+                    column.validity[i] &= grid.column.validity[i];
+            }
+            const auto weight = static_cast<long double>(grid.column.observedMs) / column.observedMs;
+            for (uint32_t row = 0; row < band.rows; ++row)
+                for (bool ask : {false, true})
+                    if (first) sums[row][ask] *= weight;
+                    else sums[row][ask] += values[row][ask] * weight;
+            first = false;
+        }
+        double maximum = 0;
+        for (uint32_t row = 0; row < band.rows; ++row) {
             const bool ask = sums[row][1] > sums[row][0];
             const auto quantity = static_cast<double>(sums[row][ask]);
             if (!std::isfinite(quantity))
@@ -176,36 +224,33 @@ BuildResult buildPage(Hmc2Reader &reader, const BuildRequest &q, StopToken stop)
         if (!control.poll())
             return done();
         const auto deepHeader = deep.latestHeader ? deep.latestHeader : hours.latestHeader;
-        const double deepTick = deepHeader ? deepHeader->rowTickUnits / deepHeader->priceScale : 10;
+        const double deepTick = deepHeader ? deepHeader->rowTickUnits / deepHeader->priceScale : 5;
         const double nearTick = near.latestHeader ? near.latestHeader->rowTickUnits / near.latestHeader->priceScale : 1;
         // Hourly history is the persisted deep layer. Never expand deep rows into near rows.
         if (!std::isfinite(deepTick) || !std::isfinite(nearTick) || deepTick <= 0 || nearTick <= 0)
             throw GridError("invalid source price grid");
-        const double baseTick = q.tfMs >= hour ? deepTick : std::min(nearTick, deepTick);
+        const bool baseDeep = q.tfMs >= hour || deepTick <= nearTick;
+        const double baseTick = baseDeep ? deepTick : nearTick;
         double tick = q.displayTick.value_or(baseTick);
         auto rowCount = [&] { return std::ceil(gridPosition(q.priceHi, tick)) - std::floor(gridPosition(q.priceLo, tick)); };
+        auto chooseTick = [&](const std::optional<Hmc2Header> &header, double fallback, double minimum) {
+            const double scale = header ? header->priceScale : 100;
+            const int64_t native = header ? header->rowTickUnits : static_cast<int64_t>(fallback * scale);
+            auto units = ladderTickUnits(minimum * scale, native);
+            for (;;) {
+                if (!units) throw GridError("band cannot be represented on the native price ladder");
+                tick = units / scale;
+                if (rowCount() <= q.rows) break;
+                units = ladderTickUnits(std::nextafter(static_cast<double>(units),
+                                                       std::numeric_limits<double>::infinity()), native);
+            }
+        };
         if (!q.displayTick) {
-            double decade = 1;
-            int step = 0;
-            constexpr double steps[]{1, 2, 5};
-            while (rowCount() > q.rows) {
-                if (++step == 3) { step = 0; decade *= 10; }
-                tick = baseTick * decade * steps[step];
-                if (!std::isfinite(tick))
-                    throw GridError("band cannot be represented");
-            }
-        }
-        // A custom deep tick need not divide a near-grid 1-2-5 choice.
-        // Rechoose on the selected layer's grid instead of rejecting an auto band.
-        if (!q.displayTick && tick >= deepTick && !multiple(tick, deepTick)) {
-            tick = deepTick;
-            double decade = 1;
-            int step = 0;
-            constexpr double steps[]{1, 2, 5};
-            while (rowCount() > q.rows) {
-                if (++step == 3) { step = 0; decade *= 10; }
-                tick = deepTick * decade * steps[step];
-            }
+            chooseTick(baseDeep ? deepHeader : near.latestHeader, baseTick,
+                       std::max(baseTick, (q.priceHi - q.priceLo) / q.rows));
+            // The selected deep grid may not divide the near-grid choice.
+            if (tick >= deepTick && !multiple(tick, deepTick))
+                chooseTick(deepHeader, deepTick, tick);
         }
         out.layer = tick < deepTick ? "near" : "deep";
         const auto &source = out.layer == "near" ? near : deep;

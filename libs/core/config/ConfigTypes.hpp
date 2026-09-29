@@ -92,7 +92,7 @@ struct ServerRecordingConfig {
     double codesPerOctave = 819.0;
     double nearTick = 1.0;
     double nearPct = 0.05;
-    double deepTick = 10.0;
+    double deepTick = 5.0;
     double deepLowFrac = 0.25;
     double deepHighMult = 4.0;
     int64_t latenessMs = 2000;

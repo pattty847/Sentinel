@@ -283,7 +283,7 @@ TEST_F(RecorderTest, ResnapshotReplacesSizesWithoutLosingValidNumerator) {
 }
 TEST_F(RecorderTest, DeepWindowAndIndependentSymbolValidity) {
     auto c = config();
-    c.layers.push_back({"deep", 1000, 0.25, 4, false});
+    c.layers.push_back({"deep", 500, 0.25, 4, false});
     auto r = make(c);
     snap(*r, 0, {{true, 99, 2}, {true, 30, 7}, {false, 101, 4}, {false, 390, 8}, {false, 410, 9}});
     local = 0;
@@ -295,10 +295,11 @@ TEST_F(RecorderTest, DeepWindowAndIndependentSymbolValidity) {
     auto deep = read(60000, "deep");
     ASSERT_EQ(deep.size(), 1);
     EXPECT_EQ(deep[0].observedMs, 20000);
-    value(deep[0], 3, false, 7, 7);
-    value(deep[0], 39, true, 8, 8);
+    EXPECT_EQ(deep[0].header.rowTickUnits, 500);
+    value(deep[0], 6, false, 7, 7);
+    value(deep[0], 78, true, 8, 8);
     EXPECT_TRUE(
-        std::none_of(deep[0].entries.begin(), deep[0].entries.end(), [](const auto &e) { return e.row == 41; }));
+        std::none_of(deep[0].entries.begin(), deep[0].entries.end(), [](const auto &e) { return e.row == 82; }));
     auto eth = Hmc2Store::readRange(dir.path().toStdString(), "ETH-USD", "near", 60000, kEpoch, kEpoch + 60000);
     ASSERT_EQ(eth.size(), 1);
     EXPECT_EQ(eth[0].observedMs, 60000);
