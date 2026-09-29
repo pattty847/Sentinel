@@ -3,8 +3,28 @@
 #include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include "SentinelLogging.hpp"
+#include "servermodel/PriceLadder.hpp"
 #include <algorithm>
 #include <cmath>
+
+namespace {
+
+// Use enough integer price units to represent the cell tick without rounding it.
+double priceScaleForTick(double tick) {
+    double scale = 1.0;
+    while (scale < 1e8 &&
+           std::abs(tick * scale - std::round(tick * scale)) > 1e-8) {
+        scale *= 10.0;
+    }
+    return scale;
+}
+
+bool isTickMultiple(double step, double tick) {
+    const double quotient = step / tick;
+    return std::abs(quotient - std::round(quotient)) <= 1e-8;
+}
+
+} // namespace
 
 PriceAxisModel::PriceAxisModel(QObject* parent)
     : AxisModel(parent) {
@@ -68,50 +88,26 @@ void PriceAxisModel::calculateTicks() {
     const double tickSize = (m_tickSize > 0.0)
         ? m_tickSize
         : (m_viewState ? m_viewState->calculateOptimalPriceResolution() : 1.0);
-    if (tickSize <= 0.0) {
+    if (!std::isfinite(tickSize) || tickSize <= 0.0 || !std::isfinite(rawSpacing)) {
         return;
     }
 
-    auto niceNumber = [](double value, bool roundDown) -> double {
-        if (value <= 0.0) return 1.0;
-        const double exponent = std::floor(std::log10(value));
-        const double magnitude = std::pow(10.0, exponent);
-        const double fraction = value / magnitude;
-        double niceFraction = 1.0;
-        if (roundDown) {
-            if (fraction < 1.5) {
-                niceFraction = 1.0;
-            } else if (fraction < 3.0) {
-                niceFraction = 2.0;
-            } else if (fraction < 7.0) {
-                niceFraction = 5.0;
-            } else {
-                niceFraction = 10.0;
-            }
-        } else {
-            if (fraction <= 1.0) {
-                niceFraction = 1.0;
-            } else if (fraction <= 2.0) {
-                niceFraction = 2.0;
-            } else if (fraction <= 5.0) {
-                niceFraction = 5.0;
-            } else {
-                niceFraction = 10.0;
-            }
-        }
-        return niceFraction * magnitude;
-    };
-
-    double niceSpacing = niceNumber(rawSpacing, true);
-    niceSpacing = std::max(niceSpacing, tickSize);
-    niceSpacing = std::round(niceSpacing / tickSize) * tickSize;
+    const double priceScale = priceScaleForTick(tickSize);
+    const double nativeUnit = 1.0 / priceScale;
+    const bool cellTickIsLadder =
+        recording::ladderTick(tickSize, nativeUnit, priceScale) == tickSize;
+    const double minSpacing = std::max(rawSpacing, tickSize);
+    double niceSpacing = recording::ladderTick(
+        minSpacing, cellTickIsLadder ? tickSize : nativeUnit, priceScale);
     if (niceSpacing <= 0.0) {
         return;
     }
 
     if (m_lastNiceSpacing > 0.0) {
         const double ratio = niceSpacing / m_lastNiceSpacing;
-        if (ratio <= 1.2 && ratio >= 0.83) {
+        if (ratio <= 1.2 && ratio >= 0.83 &&
+            m_lastNiceSpacing >= minSpacing &&
+            (!cellTickIsLadder || isTickMultiple(m_lastNiceSpacing, tickSize))) {
             niceSpacing = m_lastNiceSpacing;
         }
     }
