@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
+#include <QDir>
+#include <QTemporaryDir>
 #include <QtEndian>
 #include "protocol/SentinelStreamClientParseHelpers.hpp"
 #include "servermodel/TradeOverlayPublisher.hpp"
@@ -154,6 +156,12 @@ TEST_F(TradeOverlay, AdvertisedDefaultsAreIndependentOfHeatmapConfig) {
 }
 
 TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
+    QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+    struct RestoreDirectory {
+        QString path = QDir::currentPath();
+        ~RestoreDirectory() { QDir::setCurrent(path); }
+    } restore;
+    ASSERT_TRUE(QDir::setCurrent(directory.path()));
     ServerConfig config; config.heatmap.persistenceEnabled = false; config.recording.enabled = false;
     ServerDataModel model(config);
     using Trade = ServerDataModel::FootprintTradeSample;
@@ -280,4 +288,17 @@ TEST_F(TradeOverlay, RestartWithoutTradesBackfillsClosedSessionAndAnchorsGridFro
         CandleFetchResult r; r.error = "REST unavailable"; return r;
     });
     EXPECT_FALSE(failed.ok); EXPECT_EQ(failed.error, "REST unavailable"); EXPECT_TRUE(failed.candles.empty());
+}
+
+TEST_F(TradeOverlay, CancelledCandleHistoryDoesNotFetchAnotherPageOrReturnPartialHistory) {
+    auto q = request(); q.kind = Kind::TpoHistory; q.nowMs = day + 86400000; q.count = 96;
+    bool stopped = false; int calls = 0;
+    const auto fetch = [&](auto, auto, auto) {
+        ++calls; stopped = true;
+        CandleFetchResult page; page.ok = true; page.candles.push_back({}); return page;
+    };
+    auto result = fetchTpoCandles(q, 0, fetch, [&] { return stopped; });
+    EXPECT_EQ(calls, 1); EXPECT_FALSE(result.ok); EXPECT_TRUE(result.candles.empty());
+    result = fetchTpoCandles(q, 0, fetch, [&] { return stopped; });
+    EXPECT_EQ(calls, 1); EXPECT_FALSE(result.ok); EXPECT_TRUE(result.candles.empty());
 }

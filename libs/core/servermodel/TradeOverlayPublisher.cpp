@@ -44,7 +44,7 @@ TimeWindow tradeWindow(const Request& q) {
     return {std::max<int64_t>(0, start), q.nowMs + 1};
 }
 CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
-                                const CandleFetcher& fetch) {
+                                const CandleFetcher& fetch, const StopRequested& stopped) {
     CandleFetchResult result;
     result.ok = true;
     if (q.kind != Kind::TpoHistory) return result;
@@ -66,8 +66,14 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
     std::map<int64_t, OHLCVBar> minutes;
     constexpr int batch = 350;
     for (auto cursor = window.startMs; cursor < window.endMs;) {
+        if (stopped && stopped()) {
+            result.ok = false; result.error = "overlay history cancelled"; return result;
+        }
         const auto end = std::min<int64_t>(window.endMs, cursor + batch * 60000LL);
         auto page = fetch(cursor / 1000, end / 1000, static_cast<int>((end - cursor) / 60000));
+        if (stopped && stopped()) {
+            result.ok = false; result.error = "overlay history cancelled"; return result;
+        }
         if (!page.ok || page.candles.size() > batch) {
             result.ok = false;
             result.error = page.ok ? "TPO candle response exceeds page budget" : page.error;

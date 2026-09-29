@@ -39,11 +39,12 @@ struct TimeWindow {
 };
 // Exact input interval for the requested output; no blanket retained-tape copy.
 TimeWindow tradeWindow(const Request& request);
+using StopRequested = std::function<bool()>;
 using CandleFetcher = std::function<CandleFetchResult(int64_t startSec, int64_t endSec, int limit)>;
 // Worker-only REST paging for TPO history preceding the retained tape. Empty tape
 // (retainedFromMs == 0) backfills the entire requested historical window.
 CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
-                                const CandleFetcher& fetch);
+                                const CandleFetcher& fetch, const StopRequested& stopped = {});
 // Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
 Result build(const Request& request, const std::vector<ServerDataModel::FootprintTradeSample>& trades,
              const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);

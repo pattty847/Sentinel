@@ -320,7 +320,12 @@ TPO history additionally fills price rows from REST minute-candle high/low range
 before the oldest retained trade, including its partially retained minute. With
 no retained tape (for example after restart), candles cover the entire requested
 history window. Fetches run on the history worker, in pages of at most 350 minutes;
-fetch errors fail the request explicitly. Candle ranges and retained trades map
+fetch errors fail the request explicitly. Every REST call has one 10-second total
+network deadline covering DNS, connect, TLS and HTTP, including any auth fallback.
+Timeouts return a failed result and log a warning. Overlay jobs check cancellation
+before and after each page; shutdown, unsubscribe and selection changes prevent
+additional page fetches. An in-flight page may use the remaining request deadline.
+Candle ranges and retained trades map
 onto the same independent overlay grid, anchored from a candle close when no
 trade is available. This preserves session history without introducing persisted
 trade-history storage. Footprint and VP still have no observations outside the

@@ -170,8 +170,13 @@ history before the retained tape, the worker fetches bounded REST minute-candle
 pages and fills their high/low ranges on the same independent grid. TPO history
 and live publication respect session close.
 `SentinelStreamServer::Session` owns timer cadence, request selection and
-bounded admission to the history worker pool. Workers never access Session state;
+bounded admission to the history worker pool. Workers read only atomic stop flags;
 replies return by executor post, with subscription/generation checks before write.
+REST uses asynchronous socket operations behind its synchronous worker API, with
+one 10-second deadline per call. Blocking system DNS lookups are isolated in at
+most four self-owned resolver threads process-wide, so a timed-out caller does
+not join a stuck OS resolver. No resolver thread retains server/client state.
+Overlay pagination checks shutdown and selection cancellation between pages.
 The legacy heatmap streamer remains only for its heatmap path pending removal.
 
 The GUI carries `TradeOverlayGrid` with each immutable footprint/TPO upload.

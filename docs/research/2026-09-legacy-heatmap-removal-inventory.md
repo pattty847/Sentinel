@@ -18,6 +18,9 @@ Branch: `lt-astra/remove-legacy-heatmap`. Status: phase 1 implemented; phase 2 r
   restore worker-side minute-candle history before the retained tape.
 - [x] Regressions for an over-cap retained deque with a small requested window,
   closed-session history/live, partial-minute candle coverage and restart history.
+- [x] Second review: finite total REST deadline, bounded DNS isolation, and
+  overlay page cancellation on shutdown/selection/unsubscribe; local TLS stall
+  tests and temporary working directory for the trade-window model fixture.
 - [ ] Orchestrator live continuity checks below.
 
 The original blocker was that `on_heatmap_slice` also produced all three live

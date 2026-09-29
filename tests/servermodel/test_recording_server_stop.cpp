@@ -61,6 +61,16 @@ struct RecordingServerStopTest {
         auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, &server);
         session->subscriptions_.insert("BTC-USD");
         session->overlayState("BTC-USD").request.grid.maxPrice = 120000;
+        const auto oldSelectionStopped = session->overlayStopRequested("BTC-USD");
+        EXPECT_FALSE(oldSelectionStopped());
+        session->requestOverlayHistory({{"symbol", "BTC-USD"}, {"timeframe_ms", 300000}, {"count", 2}}, false);
+        EXPECT_TRUE(oldSelectionStopped());
+        const auto currentSelectionStopped = session->overlayStopRequested("BTC-USD");
+        EXPECT_FALSE(currentSelectionStopped());
+        server.m_running = false;
+        EXPECT_TRUE(currentSelectionStopped()); // shutdown is visible before executor drain
+        server.m_running = true;
+        session->overlayHistory_.clear();
         session->write_queue_.push_back({"in-flight", false});
         session->pendingWriteBytes_ = 9;
         session->pumpOverlays();
@@ -76,6 +86,7 @@ struct RecordingServerStopTest {
         EXPECT_FALSE(server.submitHistoryTask([] {})); // global admission cap is eight
         session->armOverlayTimer();
         session->beginClose("overlay cancellation test");
+        EXPECT_TRUE(currentSelectionStopped());
         EXPECT_TRUE(session->overlayHistory_.empty());
         release.set_value();
         server.m_historyWorkers->join(); // force the queued completion to race with the closed session

@@ -293,6 +293,7 @@ class Session : public std::enable_shared_from_this<Session> {
     struct OverlayState {
         trade_overlay::Request request;
         uint64_t generation = 0;
+        std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
     };
     std::map<std::string, OverlayState> overlays_;
     std::deque<trade_overlay::Request> overlayHistory_;
@@ -312,6 +313,13 @@ class Session : public std::enable_shared_from_this<Session> {
             it->second.request.footprintMs = cfg.footprintTimeframeMs;
         }
         return it->second;
+    }
+    trade_overlay::StopRequested overlayStopRequested(const std::string& symbol) {
+        return [weak = weak_from_this(), cancelled = overlays_.at(symbol).cancelled] {
+            const auto self = weak.lock();
+            return cancelled->load() || !self || self->closing_.load() || self->closePosted_.load() ||
+                !self->owner_->m_running.load();
+        };
     }
     void armOverlayTimer() {
         if (closing_.load()) return;
@@ -355,6 +363,8 @@ class Session : public std::enable_shared_from_this<Session> {
             q.session != state.request.session || q.grid.tick != state.request.grid.tick ||
             q.grid.rows != state.request.grid.rows || q.grid.maxPrice != state.request.grid.maxPrice;
         if (changed) {
+            state.cancelled->store(true);
+            state.cancelled = std::make_shared<std::atomic_bool>(false);
             state.generation = nextOverlayGeneration_++; q.previousMs = 0;
         }
         state.request = q;
@@ -389,21 +399,26 @@ class Session : public std::enable_shared_from_this<Session> {
         const auto executor = ws_.get_executor();
         auto* model = &model_;
         auto* rest = &owner_->restClient();
-        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation] {
+        auto stopped = overlayStopRequested(q.symbol);
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation, stopped] {
             trade_overlay::Result result;
             try {
                 std::vector<ServerDataModel::FootprintTradeSample> trades;
                 const auto window = trade_overlay::tradeWindow(q);
                 int64_t retainedFromMs = 0;
-                if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
+                if (stopped()) {
+                    result.error = "overlay history cancelled";
+                } else if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
                                                  trade_overlay::kMaxTrades, trades, &retainedFromMs)) {
                     result.error = "overlay trade budget exceeded";
                 } else {
                     const auto candles = trade_overlay::fetchTpoCandles(q, retainedFromMs,
                         [rest, &q](int64_t startSec, int64_t endSec, int limit) {
                             return rest->fetchProductCandles(q.symbol, startSec, endSec, "ONE_MINUTE", limit);
-                        });
-                    if (!candles.ok) {
+                        }, stopped);
+                    if (stopped()) {
+                        result.error = "overlay history cancelled";
+                    } else if (!candles.ok) {
                         result.error = "TPO candle history fetch failed: " + candles.error;
                         sLog_Warning("Trade overlay candle fetch failed: symbol=" << q.symbol << " error=" << candles.error);
                     } else result = trade_overlay::build(q, trades, candles.candles, retainedFromMs);
@@ -899,9 +914,11 @@ public:
                     std::vector<OHLCVBar> minutes;
                     const int64_t firstMinuteSec = (startTimeSec / 60) * 60;
                     for (int64_t pageStart = firstMinuteSec; pageStart < endTimeSec;) {
+                        if (self->closing_.load() || self->closePosted_.load()) return;
                         const int64_t pageEnd = std::min(pageStart + 350 * 60, endTimeSec);
                         auto page = self->owner_->restClient().fetchProductCandles(
                             symbol, pageStart, pageEnd, "ONE_MINUTE", 350);
+                        if (self->closing_.load() || self->closePosted_.load()) return;
                         if (!page.ok) {
                             self->send_error("candle_history_request", symbol,
                                              std::string("fetch failed: ") + page.error);
@@ -1016,6 +1033,8 @@ public:
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 if (const auto it = overlays_.find(symbol); it != overlays_.end())
+                     it->second.cancelled->store(true);
                  overlays_.erase(symbol);
                  std::erase_if(overlayHistory_, [&](const auto& q) { return q.symbol == symbol; });
                  if (removed && owner_) {
