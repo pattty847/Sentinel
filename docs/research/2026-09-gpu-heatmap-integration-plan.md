@@ -86,12 +86,12 @@
   - `heatmap_live_subscribe {symbol, layers[]}`
   - Server response `heatmap_availability {layers: {oldest, latest, native grids/generations, levels}}`, sent on subscribe and whenever it changes.
 - **Binary frames (new):**
-  - Header: magic `SHC1`, wire version, kind (`chunk | live_column | not_modified | error`), req id, chunk key, grid id, `SizeScale`, state (`sealed`, or `open{committedThroughMs, revision}`), content hash, columns, entries, payload length.
+  - Cached chunk body: magic `SHC1`, wire version, kind (`chunk | live_column | not_modified | error`), chunk key, grid id, `SizeScale`, state (`sealed`, or `open{committedThroughMs, revision}`), content hash, columns, entries, payload length. Request id belongs to a separate `SHE1` envelope so cached bytes can serve any request.
   - Payload: zstd over column records `{bucket, observedMs, flags, coverage runs, n}` followed by entries stored column by column (row-delta varints, side bits, u16 codes, and `coveredMs` for hours).
   - Server changes: add `bool binary` to `Session::PendingWrite` and call `ws_.binary(...)` in `internal_async_write`. Client change: branch on `m_ws.got_binary()` in `onRead`.
 - **Identity:**
   - Key: `(symbol, layer, levelMs, startMs)` with a fixed span per level: 1m level → 1 UTC hour; 1h level → 1 UTC day.
-  - A chunk is sealed only once `committedThroughMs` ≥ end + lateness. A sealed chunk never changes.
+  - A chunk is sealed only once its native-level recorder watermark reaches end. The minute watermark already includes lateness; the hour watermark advances after hour-rollup persistence. A sealed chunk never changes.
   - A config change produces new `configHash` values per column, never an edited chunk.
 - **Versioning:** `recording.chunk_wire_version` in `server_config`. On a mismatch the client refuses and wipes its cache. No compatibility shims.
 - **Disk cache:** `<CacheLocation>/Sentinel/heatmap-chunks/<server-id>/…`, storing the exact wire payload, sealed chunks only. LRU default 2 GiB.
@@ -160,6 +160,8 @@ Each slice gets a short tag: S1 (model), S2 (server chunks), S3 (wire), S4 (GPU)
 | S7 | Labels/walls from `binCell`; 1 px/column zoom clamp; auto-timeframe | UGR*, GuiApiServer, TopToolbar | Walls API parity with the old path; label glyph tests. |
 | S8 | Deletion (section 3) | DataProcessor.cpp and the rest | Parity tests now run against goldens; full ctest; docs updated. |
 | S9 | Server-composed tf chunks for extreme zoom | RecordingChunks, SentinelStreamServer | Budget-triggered; parity with client compose. |
+
+S2 opt-in real-recording benchmark (`SENTINEL_CHUNK_BENCH=1`, latest complete 24 hours, 2026-09-29, arm64 Mac, revised v1): deep 82,294 encoded bytes/hour, 7.40 ms encode, 5.59 ms decode, 24.19 ms cold reader; near 177,320 bytes/hour, 3.12 ms encode, 1.97 ms decode, 26.74 ms cold reader. Bytes are the cacheable SHC1 body; a request envelope adds 14 bytes per response.
 
 - **Order:** S1 → (S2 ‖ S4 ‖ S5) → S3 (after L) → S6 → S7 → S8, then S9.
 - **Parallel by files:** L with S1/S2/S4/S5; S2, S4 and S5 with each other.
