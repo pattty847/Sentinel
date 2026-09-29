@@ -237,6 +237,37 @@ void UnifiedGridRenderer::renderOverlays(
                   heatmap_rows::targetRowPx(columnPx, m_heatmapTargetRowPx, m_heatmapCellAspect))
             : 1;
         texNode->setRowGrouping(rowGroup, heatmap_rows::rowPhase(snapshot.maxPrice, snapshot.tickSize, rowGroup));
+
+        // Zoom diagnostics (SENTINEL_PROBES=zoom): what the chart actually draws at this zoom.
+        // Logged only when the view span, cell tick or grouping changes, never every frame.
+        if (drawHeatmap && srcRect.height() > 0.0 && srcRect.width() > 0.0) {
+            const double viewPrice = frame.mapping.viewMaxPrice - frame.mapping.viewMinPrice;
+            const double viewTime = frame.mapping.viewEndMs - frame.mapping.viewStartMs;
+            const uint64_t key = std::hash<double>{}(std::round(viewPrice * 100.0)) ^
+                                 (std::hash<double>{}(std::round(viewTime)) << 1) ^
+                                 (std::hash<double>{}(snapshot.tickSize) << 2) ^
+                                 (static_cast<uint64_t>(rowGroup) << 40);
+            if (key != m_lastZoomProbeKey) {
+                m_lastZoomProbeKey = key;
+                const double pxPerBaseRow = drawRect.height() / srcRect.height();
+                sLog_Probe("zoom.frame",
+                           "mode=" << (recordingMode ? "recording" : "legacy")
+                           << " viewPrice=" << viewPrice
+                           << " viewTimeMin=" << viewTime / 60000.0
+                           << " plotPx=" << drawRect.width() << "x" << drawRect.height()
+                           << " cellTick=" << snapshot.tickSize
+                           << " pxPerRow=" << pxPerBaseRow
+                           << " pxPerRowFromView=" << (viewPrice > 0.0 ? drawRect.height() * snapshot.tickSize / viewPrice : 0.0)
+                           << " srcRect=" << srcRect.x() << "," << srcRect.y() << " " << srcRect.width() << "x" << srcRect.height()
+                           << " forceFull=" << frame.forceFull
+                           << " columnPx=" << columnPx
+                           << " rowGroup=" << rowGroup
+                           << " displayTick=" << snapshot.tickSize * rowGroup
+                           << " displayRowPx=" << pxPerBaseRow * rowGroup
+                           << " bandRows=" << snapshot.gridHeight
+                           << " band=[" << snapshot.minPrice << ".." << snapshot.maxPrice << "]");
+            }
+        }
     }
     m_footprintOverlay.render(window(),
                               texNode,

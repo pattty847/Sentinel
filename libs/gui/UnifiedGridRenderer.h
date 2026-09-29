@@ -136,6 +136,7 @@ private:
     double m_heatmapShaderFloor = 0.01;
     int m_heatmapTargetRowPx = 2;       // minimum display row height (heatmap.target_row_px)
     double m_heatmapCellAspect = 0.75;  // row height / column width (heatmap.cell_aspect)
+    uint64_t m_lastZoomProbeKey = 0;    // render thread: zoom.frame logs only when the picture changes
     double m_heatmapSensitivityMin = 0.05;  // recording colour range, base units (heatmap.sensitivity_*)
     double m_heatmapSensitivityMax = 50.0;
     int m_heatmapLabelPx = 14;

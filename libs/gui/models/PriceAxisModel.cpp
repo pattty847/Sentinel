@@ -2,6 +2,7 @@
 #include "../render/GridViewState.hpp"
 #include "../UnifiedGridRenderer.h"
 #include <QDebug>
+#include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -115,6 +116,9 @@ void PriceAxisModel::calculateTicks() {
         }
     }
     m_lastNiceSpacing = niceSpacing;
+    sLog_Probe("zoom.axis", "priceRange=" << priceRange << " viewportPx=" << viewportPx
+               << " labelStep=" << niceSpacing << " minTick=" << tickSize
+               << " labels<=" << maxLabelCount);
 
     const double firstTick = std::floor(priceMin / niceSpacing) * niceSpacing;
     const double lastTick = std::ceil(priceMax / niceSpacing) * niceSpacing;
