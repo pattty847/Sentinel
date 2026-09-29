@@ -87,3 +87,25 @@ TEST(SessionManagerTests, AlignAndDurationMatchResolvedBoundary) {
     EXPECT_EQ(SessionManager::sessionDurationMs(SessionManager::SessionType::Australia),
               9LL * 60LL * 60LL * 1000LL);
 }
+
+TEST(SessionManagerTests, MonthlySessionIsTheCalendarMonthInUtc) {
+    using SessionManager::SessionType;
+    expectBoundary(SessionType::M1, utcMs(2026, 9, 29, 23, 59),
+                   utcMs(2026, 9, 1, 0), utcMs(2026, 10, 1, 0));
+    expectBoundary(SessionType::M1, utcMs(2026, 9, 1, 0),
+                   utcMs(2026, 9, 1, 0), utcMs(2026, 10, 1, 0));
+    // December rolls into the next year; February follows leap years.
+    expectBoundary(SessionType::M1, utcMs(2026, 12, 31, 23, 59),
+                   utcMs(2026, 12, 1, 0), utcMs(2027, 1, 1, 0));
+    expectBoundary(SessionType::M1, utcMs(2028, 2, 15, 12),
+                   utcMs(2028, 2, 1, 0), utcMs(2028, 3, 1, 0));
+    expectBoundary(SessionType::M1, utcMs(2027, 2, 28, 23, 59),
+                   utcMs(2027, 2, 1, 0), utcMs(2027, 3, 1, 0));
+    // The nominal duration is the longest month, so period budgets stay conservative.
+    EXPECT_EQ(SessionManager::sessionDurationMs(SessionType::M1), 31LL * 86400000LL);
+    for (int m = 1; m <= 12; ++m) {
+        const auto b = SessionManager::sessionContaining(utcMs(2026, m, 10, 0), SessionType::M1);
+        EXPECT_EQ((b.endMs - b.startMs) % 86400000LL, 0) << "month " << m;
+        EXPECT_LE(b.endMs - b.startMs, SessionManager::sessionDurationMs(SessionType::M1));
+    }
+}

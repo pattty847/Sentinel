@@ -59,7 +59,7 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
     // requires whole minute pages. Apply each candle to the periods it overlaps.
     window.startMs = window.startMs / 60000 * 60000;
     window.endMs = (window.endMs + 59999) / 60000 * 60000;
-    // SessionManager's longest session is five days. Keep a hard input bound.
+    // Clients page long sessions (W1, M1) in windows of at most seven days.
     if (window.endMs - window.startMs > 7LL * 86400000) {
         result.ok = false; result.error = "TPO candle history exceeds input budget"; return result;
     }

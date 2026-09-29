@@ -12,6 +12,7 @@
  *   Australia  22:00–07:00 UTC  (Sydney core; AEDT ≈ UTC+11, opens 09:00 local)
  *   H24        00:00–23:59 UTC  rolling daily
  *   W1         Sunday 21:00 – Friday 21:00 UTC  (FX/crypto week boundary)
+ *   M1         calendar month, 1st 00:00 UTC – 1st of next month 00:00 UTC
  */
 #pragma once
 #include <cstdint>
@@ -26,6 +27,7 @@ enum class SessionType : int {
     Australia = 3,
     H24       = 4,
     W1        = 5,
+    M1        = 6,
 };
 
 // ─── Session boundary ──────────────────────────────────────────────────────
@@ -41,6 +43,7 @@ namespace detail {
 // Offset from UTC midnight to session open, expressed in milliseconds.
 static constexpr int64_t kMsPerDay  = 86'400'000LL;
 static constexpr int64_t kMsPerWeek = 7LL * kMsPerDay;
+static constexpr int64_t kMaxMonthMs = 31LL * kMsPerDay;
 
 // [SessionType index] → {openOffsetMs, durationMs}
 // Australia: open at 22:00 UTC previous day → openOffset = 22 * 3600000
@@ -77,6 +80,29 @@ inline int utcWeekday(int64_t epochMs) {
     return static_cast<int>((days + 4) % 7);
 }
 
+// Proleptic Gregorian calendar conversions (H. Hinnant's civil algorithms).
+// daysFromCivil(1970, 1, 1) == 0.
+inline int64_t daysFromCivil(int64_t y, int m, int d) {
+    y -= m <= 2 ? 1 : 0;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+inline void civilFromDays(int64_t z, int64_t& y, int& m, int& d) {
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const int64_t doe = z - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp = (5 * doy + 2) / 153;
+    d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
+    m = static_cast<int>(mp < 10 ? mp + 3 : mp - 9);
+    y = yoe + era * 400 + (m <= 2 ? 1 : 0);
+}
+
 } // namespace detail
 
 // ─── Primary API ───────────────────────────────────────────────────────────
@@ -92,6 +118,15 @@ inline int utcWeekday(int64_t epochMs) {
  */
 inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
     using namespace detail;
+
+    if (type == SessionType::M1) {
+        if (epochMs < 0) epochMs = 0;
+        int64_t y = 0; int m = 0; int d = 0;
+        civilFromDays(epochMs / kMsPerDay, y, m, d);
+        const int64_t open = daysFromCivil(y, m, 1) * kMsPerDay;
+        const int64_t close = (m == 12 ? daysFromCivil(y + 1, 1, 1) : daysFromCivil(y, m + 1, 1)) * kMsPerDay;
+        return { open, close, true };
+    }
 
     if (type == SessionType::W1) {
         // Find most recent Sunday 21:00 UTC before epochMs.
@@ -122,11 +157,15 @@ inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
 
 /*
  * Convenience: return the nominal duration of a session type in ms.
- * W1 = 5 days.
+ * W1 = 5 days. M1 = 31 days (the longest month; actual months use
+ * sessionContaining). Every M1 session is a whole number of UTC days, so any
+ * period that divides a day partitions every month.
  */
 inline int64_t sessionDurationMs(SessionType type) {
     using namespace detail;
     if (type == SessionType::W1) return 5LL * kMsPerDay;
+    if (type == SessionType::M1) return kMaxMonthMs;
+    if (static_cast<int>(type) < 0 || static_cast<int>(type) > static_cast<int>(SessionType::H24)) return 0;
     return kSpecs[static_cast<int>(type)].durationMs;
 }
 

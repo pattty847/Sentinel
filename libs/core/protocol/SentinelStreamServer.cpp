@@ -409,7 +409,7 @@ class Session : public std::enable_shared_from_this<Session> {
         if (tpo) {
             q.tpoMs = tf;
             const int type = j.value("session_type", static_cast<int>(q.session));
-            if (type < 0 || type > static_cast<int>(SessionManager::SessionType::W1)) {
+            if (type < 0 || type > static_cast<int>(SessionManager::SessionType::M1)) {
                 send_error("trade_overlay", symbol, "invalid session"); return;
             }
             q.session = static_cast<SessionManager::SessionType>(type);
