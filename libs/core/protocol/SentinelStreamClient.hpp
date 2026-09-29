@@ -92,11 +92,13 @@ public:
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
                                  int count);
+    // requestId (optional, <= 64 chars) is echoed on the reply chunk and on errors.
     void requestTpoHistory(const std::string& symbol,
                            int64_t timeframeMs,
                            int sessionType,
                            int64_t endTimeMs,
-                           int count);
+                           int count,
+                           const std::string& requestId = {});
     void requestCandleHistory(const std::string& symbol,
                               int64_t timeframeSec,
                               int64_t endTimeSec,
@@ -127,6 +129,11 @@ signals:
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    // After a tpo_history_chunk's slices were emitted. requestId is empty from older servers.
+    void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
+                                 int sessionType, qint64 lastEndMs, int columns);
+    // A trade_overlay error that carries a TPO history request_id.
+    void tpoHistoryFailed(const QString& symbol, const QString& requestId, const QString& message);
     void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,

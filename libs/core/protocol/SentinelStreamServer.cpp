@@ -397,12 +397,25 @@ class Session : public std::enable_shared_from_this<Session> {
             }
         });
     }
+    // Overlay errors echo the client's request_id (TPO history) so it can pace pages.
+    void send_overlay_error(const std::string& symbol, const std::string& requestId, const std::string& message) {
+        if (requestId.empty()) { send_error("trade_overlay", symbol, message); return; }
+        sLog_Warning("Sending error to client: peer=" << peer_ << " context=trade_overlay symbol=" << symbol
+                     << " request_id=" << requestId << " message=" << message);
+        do_write(nlohmann::json{{"type", "error"}, {"context", "trade_overlay"}, {"symbol", symbol},
+                                {"request_id", requestId}, {"message", message}}.dump());
+    }
     void requestOverlayHistory(const nlohmann::json& j, bool tpo) {
         const auto symbol = j.value("symbol", std::string{});
         const auto tf = j.value("timeframe_ms", int64_t{0});
+        std::string requestId;
+        if (tpo && j.contains("request_id") && j["request_id"].is_string()) {
+            requestId = j["request_id"].get<std::string>();
+            if (requestId.size() > trade_overlay::kMaxRequestIdLength) requestId.clear();
+        }
         if (!subscriptions_.contains(symbol) || (overlays_.size() >= 16 && !overlays_.contains(symbol)) ||
             tf < (tpo ? 60000 : 1000) || tf > 86400000 || j.value("count", 0) <= 0 || overlayHistory_.size() >= 8) {
-            send_error("trade_overlay", symbol, "invalid request or overlay queue full"); return;
+            send_overlay_error(symbol, requestId, "invalid request or overlay queue full"); return;
         }
         auto& state = overlayState(symbol);
         auto q = state.request;
@@ -410,20 +423,20 @@ class Session : public std::enable_shared_from_this<Session> {
             q.tpoMs = tf;
             const int type = j.value("session_type", static_cast<int>(q.session));
             if (type < 0 || type > static_cast<int>(SessionManager::SessionType::M1)) {
-                send_error("trade_overlay", symbol, "invalid session"); return;
+                send_overlay_error(symbol, requestId, "invalid session"); return;
             }
             q.session = static_cast<SessionManager::SessionType>(type);
         } else q.footprintMs = tf;
         const auto duration = SessionManager::sessionDurationMs(q.session);
         if (duration % q.tpoMs != 0 || duration / q.tpoMs > trade_overlay::kMaxGridWidth) {
-            send_error("trade_overlay", symbol, "TPO timeframe must partition the session within the grid budget"); return;
+            send_overlay_error(symbol, requestId, "TPO timeframe must partition the session within the grid budget"); return;
         }
         if (j.contains("tick_size")) q.grid.tick = j.at("tick_size").get<double>();
         if (j.contains("rows")) q.grid.rows = j.at("rows").get<int>();
         if (j.contains("price_min")) q.grid.maxPrice = j.at("price_min").get<double>() + q.grid.rows * q.grid.tick;
         auto check = q.grid;
         if (check.maxPrice == 0) check.maxPrice = check.rows * check.tick;
-        if (!check.valid()) { send_error("trade_overlay", symbol, "invalid overlay grid"); return; }
+        if (!check.valid()) { send_overlay_error(symbol, requestId, "invalid overlay grid"); return; }
         // A selection change invalidates worker replies and queued requests for that symbol.
         const bool changed = q.footprintMs != state.request.footprintMs || q.tpoMs != state.request.tpoMs ||
             q.session != state.request.session || q.grid.tick != state.request.grid.tick ||
@@ -437,6 +450,7 @@ class Session : public std::enable_shared_from_this<Session> {
         q.kind = tpo ? trade_overlay::Kind::TpoHistory : trade_overlay::Kind::FootprintHistory;
         q.endMs = j.value("end_time", int64_t{0});
         q.count = std::clamp(j.value("count", 128), 1, trade_overlay::kMaxColumns);
+        q.requestId = requestId;
         overlayHistory_.push_back(std::move(q));
     }
     void pumpOverlays() {
@@ -453,7 +467,7 @@ class Session : public std::enable_shared_from_this<Session> {
             const auto pending = overlayHistory_.front(); overlayHistory_.pop_front();
             if (!overlays_.contains(pending.symbol)) return;
             q = overlays_.at(pending.symbol).request;
-            q.kind = pending.kind; q.endMs = pending.endMs; q.count = pending.count;
+            q.kind = pending.kind; q.endMs = pending.endMs; q.count = pending.count; q.requestId = pending.requestId;
             overlayHistoryTurn_ = false;
         } else {
             auto it = overlays_.begin(); std::advance(it, overlayCursor_++ % overlays_.size());
@@ -503,7 +517,7 @@ class Session : public std::enable_shared_from_this<Session> {
                 }
                 if (!result.error.empty()) {
                     sLog_DataN(5000, "Trade overlay not published: symbol=" << q.symbol << " error=" << result.error);
-                    if (q.kind != trade_overlay::Kind::Live) self->send_error("trade_overlay", q.symbol, result.error);
+                    if (q.kind != trade_overlay::Kind::Live) self->send_overlay_error(q.symbol, q.requestId, result.error);
                     return;
                 }
                 it->second.request.grid = result.grid;
@@ -515,7 +529,7 @@ class Session : public std::enable_shared_from_this<Session> {
         });
         overlayBusy_ = queued;
         if (!queued && q.kind != trade_overlay::Kind::Live)
-            send_error("trade_overlay", q.symbol, "overlay worker queue full");
+            send_overlay_error(q.symbol, q.requestId, "overlay worker queue full");
     }
 
 public:

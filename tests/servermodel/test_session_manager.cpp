@@ -26,22 +26,20 @@ void expectBoundary(SessionManager::SessionType type, int64_t queryMs,
 
 } // namespace
 
-TEST(SessionManagerTests, WeeklySessionBeforeSundayOpenUsesPreviousWeek) {
-    const auto previousOpen = utcMs(2026, 8, 30, 21);
-    const auto previousClose = utcMs(2026, 9, 4, 21);
-
-    expectBoundary(SessionManager::SessionType::W1,
-                   utcMs(2026, 9, 6, 20, 59), previousOpen, previousClose);
+TEST(SessionManagerTests, WeeklySessionIsSevenDaysFromMondayMidnightUtc) {
+    // 2026-09-07 is a Monday.
+    const auto open = utcMs(2026, 9, 7, 0);
+    const auto close = utcMs(2026, 9, 14, 0);
+    expectBoundary(SessionManager::SessionType::W1, utcMs(2026, 9, 7, 0), open, close);
+    expectBoundary(SessionManager::SessionType::W1, utcMs(2026, 9, 11, 21), open, close);
+    // Weekend trades belong to the same week.
+    expectBoundary(SessionManager::SessionType::W1, utcMs(2026, 9, 12, 12), open, close);
+    expectBoundary(SessionManager::SessionType::W1, utcMs(2026, 9, 13, 23, 59), open, close);
 }
 
-TEST(SessionManagerTests, WeeklySessionRollsAtSundayOpen) {
-    const auto currentOpen = utcMs(2026, 9, 6, 21);
-    const auto currentClose = utcMs(2026, 9, 11, 21);
-
-    expectBoundary(SessionManager::SessionType::W1,
-                   utcMs(2026, 9, 6, 21), currentOpen, currentClose);
-    expectBoundary(SessionManager::SessionType::W1,
-                   utcMs(2026, 9, 12, 12), currentOpen, currentClose);
+TEST(SessionManagerTests, WeeklySessionBeforeMondayUsesPreviousWeek) {
+    expectBoundary(SessionManager::SessionType::W1, utcMs(2026, 9, 6, 23, 59),
+                   utcMs(2026, 8, 31, 0), utcMs(2026, 9, 7, 0));
 }
 
 TEST(SessionManagerTests, AustraliaSessionRollsAtTwentyTwoUtc) {

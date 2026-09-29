@@ -12,6 +12,11 @@ constexpr int kMaxColumns = 512;
 constexpr int kMaxGridWidth = 2048;
 constexpr int kMaxRows = 2048;
 constexpr size_t kMaxBytes = 8 * 1024 * 1024;
+constexpr size_t kMaxRequestIdLength = 64;
+// Volume profile always covers the UTC day, independent of the TPO session:
+// the live trade tape is retained for at most 24 h, so a longer TPO session
+// (W1, M1) must never make the profile claim more than it has.
+constexpr SessionManager::SessionType kVolumeProfileSession = SessionManager::SessionType::H24;
 struct Grid {
     int width = 512, rows = 2048;
     double tick = 5, maxPrice = 0;
@@ -27,6 +32,7 @@ struct Request {
     SessionManager::SessionType session = SessionManager::SessionType::H24;
     int64_t nowMs = 0, endMs = 0, previousMs = 0;
     int count = 128;
+    std::string requestId;  // optional client tag, echoed on TPO history chunks and errors
 };
 struct Result {
     Grid grid;

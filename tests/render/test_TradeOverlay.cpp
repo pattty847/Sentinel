@@ -316,7 +316,7 @@ TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase)
     EXPECT_GE(month.minPrice(), 0);  // never below zero
     EXPECT_TRUE(month.valid());
 
-    // Monday 2026-09-28 00:00 UTC lies inside the W1 session opened Sunday 21:00.
+    // Monday 2026-09-28 00:00 UTC is a W1 session open.
     constexpr int64_t monday = 1790553600000;
     auto q = request(); q.kind = Kind::Live; q.session = SessionManager::SessionType::W1;
     q.tpoMs = 3600000; q.nowMs = monday + 120001; q.previousMs = monday + 119001;
@@ -342,4 +342,55 @@ TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase)
     }
     EXPECT_TRUE(sawTpo);
     EXPECT_TRUE(sawFootprint);
+}
+
+TEST_F(TradeOverlay, WeekendTradeLandsInWeeklyProfileAndVolumeProfileStaysOnTheUtcDay) {
+    constexpr int64_t hour = 3600000;
+    constexpr int64_t monday = 1790553600000;          // 2026-09-28 00:00 UTC, W1 open
+    constexpr int64_t saturday = monday + 5 * 86400000; // 2026-10-03 00:00 UTC
+    auto q = request(); q.kind = Kind::TpoHistory; q.session = SessionManager::SessionType::W1;
+    q.tpoMs = 4 * hour; q.nowMs = saturday + 13 * hour; q.count = 512;
+    const auto history = build(q, {{saturday + 10 * hour, 115, 1, AggressorSide::Buy}});
+    ASSERT_TRUE(history.error.empty()) << history.error;
+    const auto j = nlohmann::json::parse(history.messages.at(0));
+    EXPECT_EQ(j["grid_width"], 42);  // 7 days of 4 h periods
+    bool found = false;
+    for (const auto& column : j["columns"]) {
+        if (column["time_start"] != saturday + 8 * hour) continue;
+        const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(column["letters"].get<std::string>()));
+        for (char c : letters) found = found || c != '\0';
+        // Saturday 08:00 is period 32 of the week; the server's letter cycles A..Z.
+        for (char c : letters) if (c != '\0') EXPECT_EQ(c, 'A' + 32 % 26);
+    }
+    EXPECT_TRUE(found) << "Saturday trade missing from the weekly profile";
+
+    // The client letters by period index (A-Z, a-z); weekend days are inside W1:
+    const auto w = SessionManager::sessionContaining(saturday + 10 * hour, SessionManager::SessionType::W1);
+    EXPECT_EQ(w.startMs, monday);
+    EXPECT_EQ(w.endMs, monday + 7 * 86400000);
+
+    // A monthly TPO selection never widens the live volume profile beyond its UTC day.
+    auto live = request(); live.kind = Kind::Live; live.session = SessionManager::SessionType::M1;
+    live.tpoMs = 30 * 60000; live.nowMs = saturday + 13 * hour; live.previousMs = live.nowMs - 1000;
+    EXPECT_EQ(tradeWindow(live).startMs, saturday);
+    const auto result = build(live, {{saturday + 12 * hour, 115, 2, AggressorSide::Buy}});
+    ASSERT_TRUE(result.error.empty()) << result.error;
+    bool sawVp = false;
+    for (const auto& message : result.messages) {
+        const auto m = nlohmann::json::parse(message);
+        if (m["type"] != "volume_profile_slice") continue;
+        sawVp = true;
+        EXPECT_EQ(m["session_type"], static_cast<int>(SessionManager::SessionType::H24));
+        EXPECT_EQ(m["session_start_ms"], saturday);
+        EXPECT_EQ(m["session_end_ms"], saturday + 86400000);
+    }
+    EXPECT_TRUE(sawVp);
+}
+
+TEST_F(TradeOverlay, TpoHistoryChunkEchoesRequestId) {
+    auto q = request(); q.kind = Kind::TpoHistory; q.nowMs = day + 1800001; q.requestId = "tpo-7-2";
+    const auto tpo = build(q, tape()); ASSERT_TRUE(tpo.error.empty());
+    EXPECT_EQ(nlohmann::json::parse(tpo.messages.at(0))["request_id"], "tpo-7-2");
+    q.requestId.clear();
+    EXPECT_FALSE(nlohmann::json::parse(build(q, tape()).messages.at(0)).contains("request_id"));
 }

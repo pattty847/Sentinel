@@ -48,7 +48,8 @@ public:
                                    int64_t timeframeMs,
                                    int sessionType,
                                    int64_t endTimeMs,
-                                   int count) = 0;
+                                   int count,
+                                   const QString& requestId = {}) = 0;
     virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
                                          qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
@@ -65,6 +66,9 @@ signals:
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
+    void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
+                                 int sessionType, qint64 lastEndMs, int columns);
+    void tpoHistoryFailed(const QString& symbol, const QString& requestId, const QString& message);
     void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void heatmapHistoryReceived(const QString& symbol,
                                 int64_t timeframeMs,

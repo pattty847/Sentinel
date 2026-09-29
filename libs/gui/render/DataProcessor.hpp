@@ -32,6 +32,10 @@ public slots:
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
+    // Selected TPO bracket and session. Slices for any other selection (stale
+    // history replies, live slices from before the server saw the selection)
+    // are dropped instead of resetting the store.
+    void setTpoSelection(qint64 timeframeMs, int sessionType);
     void onVolumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void onHeatmapHistoryReceived(const QString& symbol,
                                   int64_t timeframeMs,
@@ -160,6 +164,8 @@ private:
     double m_tpoMaxPrice = 0.0;
     double m_tpoTickSize = 0.0;
     std::unique_ptr<TpoStreamState> m_tpoStream;
+    qint64 m_tpoSelectedTimeframeMs = 0;  // 0 = accept the slice's own selection
+    int m_tpoSelectedSessionType = -1;
     std::unique_ptr<VolumeProfileState> m_vpStream;
 
 };

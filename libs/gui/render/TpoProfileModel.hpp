@@ -46,11 +46,15 @@ struct HistoryPage {
 };
 // History requests, newest first: the current session (only completed periods;
 // the forming one arrives live) and then whole earlier sessions, until `sessions`
-// sessions or `maxPages` pages. A page spans at most 7 days and 512 periods (the
-// server's candle and column budgets). An earlier session is included only when
-// all of its pages fit.
+// sessions or `maxPages` pages (see historyPageBudget). A page spans at most 7
+// days and 512 periods (the server's candle and column budgets). An earlier
+// session is included only when all of its pages fit.
 std::vector<HistoryPage> historyPages(int sessionType, int64_t periodMs, int64_t nowMs,
                                       int sessions, int maxPages);
+// Hard cap on pages per history run (pages are paced one at a time).
+constexpr int kMaxHistoryPages = 64;
+// Pages needed for `sessions` whole sessions, capped at kMaxHistoryPages.
+int historyPageBudget(int sessionType, int64_t periodMs, int sessions);
 
 // Session-relative letter: A..Z for periods 0..25, a..z for 26..51, then repeats.
 char letterForPeriod(int period);

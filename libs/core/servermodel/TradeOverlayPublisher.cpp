@@ -49,10 +49,14 @@ TimeWindow historyWindow(const Request& q, bool tpo) {
 }
 TimeWindow tradeWindow(const Request& q) {
     if (q.kind != Kind::Live) return historyWindow(q, q.kind == Kind::TpoHistory);
-    const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
-    auto start = session.startMs; // VP needs the session; footprint may precede its open.
+    // VP needs its UTC day; live footprint and TPO need only their last buckets.
+    auto start = SessionManager::sessionContaining(q.nowMs, kVolumeProfileSession).startMs;
     for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.footprintMs))
         start = std::min(start, bucket);
+    const auto tpoSession = SessionManager::sessionContaining(q.nowMs, q.session);
+    if (tpoSession.valid)
+        for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.tpoMs, tpoSession.startMs))
+            start = std::min(start, bucket);
     return {std::max<int64_t>(0, start), q.nowMs + 1};
 }
 CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
@@ -200,6 +204,7 @@ struct Builder {
             {"symbol", q.symbol}, {"timeframe_ms", tf}, {"session_type", static_cast<int>(q.session)},
             {"grid_width", width}, {"grid_height", out.grid.rows},
             {"format", tpo ? "tpo_ascii" : "q16_delta"}, {"encoding", "base64"}, {"columns", std::move(columns)}};
+        if (tpo && !live && !q.requestId.empty()) j["request_id"] = q.requestId;
         // Live uses the existing per-column messages, preserving consumer routing.
         if (live) {
             for (auto& col : j["columns"]) {
@@ -210,7 +215,7 @@ struct Builder {
         } else send(std::move(j));
     }
     void profile() {
-        const auto session = SessionManager::sessionContaining(q.nowMs, q.session);
+        const auto session = SessionManager::sessionContaining(q.nowMs, kVolumeProfileSession);
         if (!session.valid) return;
         std::vector<double> bins(out.grid.rows, 0);
         scan(out.grid, session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
@@ -230,7 +235,7 @@ struct Builder {
         }
         send({{"type", "volume_profile_slice"}, {"schema_version", protocol::SentinelProtocol::kVolumeProfileSchemaVersion},
             {"symbol", q.symbol}, {"session_start_ms", session.startMs}, {"session_end_ms", session.endMs},
-            {"session_type", static_cast<int>(q.session)}, {"grid_height", out.grid.rows},
+            {"session_type", static_cast<int>(kVolumeProfileSession)}, {"grid_height", out.grid.rows},
             {"min_price", out.grid.minPrice()}, {"max_price", out.grid.maxPrice}, {"tick_size", out.grid.tick},
             {"total_volume", total}, {"poc_price", out.grid.maxPrice - (poc + .5) * out.grid.tick},
             {"vah_price", out.grid.maxPrice - lo * out.grid.tick},

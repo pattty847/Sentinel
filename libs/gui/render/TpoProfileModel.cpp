@@ -112,6 +112,17 @@ std::vector<HistoryPage> historyPages(int sessionType, int64_t periodMs, int64_t
     return pages;
 }
 
+int historyPageBudget(int sessionType, int64_t periodMs, int sessions) {
+    if (periodMs <= 0 || sessions <= 0) return 0;
+    const auto type = static_cast<SessionManager::SessionType>(sessionType);
+    const int64_t duration = SessionManager::sessionDurationMs(type);
+    const int64_t pagePeriods = std::min<int64_t>(kMaxPagePeriods, kMaxPageMs / periodMs);
+    if (duration <= 0 || pagePeriods <= 0) return 0;
+    const int64_t periods = (duration + periodMs - 1) / periodMs;
+    const int64_t perSession = (periods + pagePeriods - 1) / pagePeriods;
+    return static_cast<int>(std::min<int64_t>(kMaxHistoryPages, perSession * sessions));
+}
+
 char letterForPeriod(int period) {
     if (period < 0) return '?';
     const int idx = period % 52;

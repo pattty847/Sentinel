@@ -404,6 +404,16 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
     }
 }
 
+void DataProcessor::setTpoSelection(qint64 timeframeMs, int sessionType) {
+    if (timeframeMs == m_tpoSelectedTimeframeMs && sessionType == m_tpoSelectedSessionType) {
+        return;
+    }
+    sLog_Data("TPO selection: tf=" << m_tpoSelectedTimeframeMs << "->" << timeframeMs
+              << " session=" << m_tpoSelectedSessionType << "->" << sessionType);
+    m_tpoSelectedTimeframeMs = timeframeMs;
+    m_tpoSelectedSessionType = sessionType;
+}
+
 void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
     if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
     if (m_shuttingDown.load()) {
@@ -436,6 +446,12 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                << " grid=" << resolvedWidth << "x" << resolvedHeight
                << " letters=" << slice.letters.size());
 
+    if (m_tpoSelectedTimeframeMs > 0 &&
+        (slice.timeframeMs != m_tpoSelectedTimeframeMs || slice.sessionType != m_tpoSelectedSessionType)) {
+        sLog_Probe("tpo.slice", "dropped: selection tf=" << slice.timeframeMs << " session=" << slice.sessionType
+                   << " selected tf=" << m_tpoSelectedTimeframeMs << " session=" << m_tpoSelectedSessionType);
+        return;
+    }
     const auto previous = m_tpoStream->snapshot();
     if (m_tpoMaxPrice != slice.maxPrice || m_tpoTickSize != slice.tickSize ||
         (previous.timeframeMs && previous.timeframeMs != slice.timeframeMs)) {

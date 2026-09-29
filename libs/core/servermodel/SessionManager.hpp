@@ -11,7 +11,7 @@
  *   Asia       00:00–09:00 UTC  (Tokyo/Singapore core; SGT = UTC+8, opens 08:00 local)
  *   Australia  22:00–07:00 UTC  (Sydney core; AEDT ≈ UTC+11, opens 09:00 local)
  *   H24        00:00–23:59 UTC  rolling daily
- *   W1         Sunday 21:00 – Friday 21:00 UTC  (FX/crypto week boundary)
+ *   W1         Monday 00:00 UTC, 7 days (crypto trades through the weekend)
  *   M1         calendar month, 1st 00:00 UTC – 1st of next month 00:00 UTC
  */
 #pragma once
@@ -113,7 +113,8 @@ inline void civilFromDays(int64_t z, int64_t& y, int& m, int& d) {
  * Returns the session window [startMs, endMs) that either contains epochMs
  * or is the most-recent completed session before epochMs.
  *
- * For W1: returns the latest Sunday–Friday week whose open is at or before epochMs.
+ * For W1: returns the Monday 00:00 UTC week containing epochMs.
+ * For M1: returns the UTC calendar month containing epochMs.
  * For all others: returns the daily session whose open is latest at or before epochMs.
  */
 inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
@@ -129,18 +130,12 @@ inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
     }
 
     if (type == SessionType::W1) {
-        // Find most recent Sunday 21:00 UTC before epochMs.
+        // Crypto trades 24/7: the week is Monday 00:00 UTC to the next Monday.
         const int64_t midnight = utcMidnightBefore(epochMs);
         const int dow = utcWeekday(midnight);  // 0=Sun…6=Sat
-        // How many days back to Sunday?
-        const int daysBack = (dow + 7) % 7; // 0 if today is Sunday
-        const int64_t sundayMidnight = midnight - static_cast<int64_t>(daysBack) * kMsPerDay;
-        int64_t weekOpen = sundayMidnight + 21LL * 3600'000LL;
-        if (epochMs < weekOpen) {
-            weekOpen -= kMsPerWeek;
-        }
-        const int64_t weekClose = weekOpen + 5LL * kMsPerDay; // Fri 21:00 UTC
-        return { weekOpen, weekClose, true };
+        const int daysBack = (dow + 6) % 7;    // 0 on Monday
+        const int64_t weekOpen = midnight - static_cast<int64_t>(daysBack) * kMsPerDay;
+        return { weekOpen, weekOpen + kMsPerWeek, true };
     }
 
     const SessionSpec& spec = kSpecs[static_cast<int>(type)];
@@ -157,13 +152,13 @@ inline SessionBoundary sessionContaining(int64_t epochMs, SessionType type) {
 
 /*
  * Convenience: return the nominal duration of a session type in ms.
- * W1 = 5 days. M1 = 31 days (the longest month; actual months use
+ * W1 = 7 days. M1 = 31 days (the longest month; actual months use
  * sessionContaining). Every M1 session is a whole number of UTC days, so any
  * period that divides a day partitions every month.
  */
 inline int64_t sessionDurationMs(SessionType type) {
     using namespace detail;
-    if (type == SessionType::W1) return 5LL * kMsPerDay;
+    if (type == SessionType::W1) return kMsPerWeek;
     if (type == SessionType::M1) return kMaxMonthMs;
     if (static_cast<int>(type) < 0 || static_cast<int>(type) > static_cast<int>(SessionType::H24)) return 0;
     return kSpecs[static_cast<int>(type)].durationMs;

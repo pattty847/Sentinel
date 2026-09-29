@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "render/TpoProfileModel.hpp"
+#include "render/TpoHistoryPager.hpp"
 #include "render/TpoStreamState.hpp"
 #include "servermodel/SessionManager.hpp"
 
@@ -141,19 +142,73 @@ TEST(TpoProfileModel, HistoryPagesCoverCurrentAndWholePreviousSessionsNewestFirs
     EXPECT_EQ(pages[1].count, 48);
     EXPECT_EQ(pages[2].endMs, kDayStart - kDay);
 
-    // A month at 30m is paged in <= 7-day windows; the previous month does not fit.
+    // A month at 30m is paged in <= 7-day windows (336 periods each).
     const int m1 = static_cast<int>(SessionManager::SessionType::M1);
     const auto month = SessionManager::sessionContaining(now, SessionManager::SessionType::M1);
-    pages = historyPages(m1, 30 * kMin, now, 2, 6);
+    EXPECT_EQ(historyPageBudget(m1, 30 * kMin, 1), 5);  // 31 days / 7 days
+    EXPECT_EQ(historyPageBudget(m1, 30 * kMin, 3), 15);
+    EXPECT_EQ(historyPageBudget(m1, 15 * kMin, 8), 48);
+    EXPECT_EQ(historyPageBudget(m1, kMin, 2), kMaxHistoryPages);
+    EXPECT_EQ(historyPageBudget(h24, 30 * kMin, 5), 5);
+    pages = historyPages(m1, 30 * kMin, now, 3, historyPageBudget(m1, 30 * kMin, 3));
     ASSERT_FALSE(pages.empty());
     int64_t covered = 0;
+    int64_t oldestStart = pages.front().endMs;
     for (const auto& page : pages) {
         EXPECT_LE(page.count * 30 * kMin, 7 * kDay);
         EXPECT_LE(page.count, 512);
         covered += page.count * 30 * kMin;
-        EXPECT_GT(page.endMs, month.startMs);
+        oldestStart = std::min(oldestStart, page.endMs - page.count * 30 * kMin);
     }
-    EXPECT_EQ(covered, pages.front().endMs - month.startMs);
+    // All three months are covered end to end: the current one up to now, then two whole months.
+    const auto previous = SessionManager::sessionContaining(month.startMs - 1, SessionManager::SessionType::M1);
+    const auto third = SessionManager::sessionContaining(previous.startMs - 1, SessionManager::SessionType::M1);
+    EXPECT_EQ(oldestStart, third.startMs);
+    EXPECT_EQ(covered, pages.front().endMs - third.startMs);
+}
+
+TEST(TpoHistoryPager, PacesOnePageAtATimeAndDedupesTheSameSelection) {
+    HistoryPager pager;
+    const HistoryPager::Selection sel{"BTC-USD", 30 * kMin, 4, 3};
+    const std::vector<HistoryPage> pages{{3000, 10}, {2000, 48}, {1000, 48}};
+    auto first = pager.start(sel, pages, 0);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->endMs, 3000);
+    EXPECT_EQ(first->requestId, "tpo-1-0");
+    EXPECT_EQ(pager.pending(), 2);
+    // Re-enabling the layer with the same selection does not restart or add requests.
+    EXPECT_FALSE(pager.start(sel, pages, 10));
+    EXPECT_EQ(pager.generation(), 1u);
+    // A reply for another id (stale) does not advance; the matching one does.
+    EXPECT_FALSE(pager.onChunk("BTC-USD", "tpo-0-3", 30 * kMin, 4, 20));
+    auto second = pager.onChunk("BTC-USD", "tpo-1-0", 30 * kMin, 4, 20);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->endMs, 2000);
+    // An error skips the page; a timeout abandons a silent one.
+    auto third = pager.onError(second->requestId, 30);
+    ASSERT_TRUE(third);
+    EXPECT_EQ(third->endMs, 1000);
+    EXPECT_FALSE(pager.onTick(30 + HistoryPager::kTimeoutMs - 1));
+    EXPECT_FALSE(pager.onTick(30 + HistoryPager::kTimeoutMs));  // queue empty: nothing next
+    EXPECT_FALSE(pager.busy());
+    EXPECT_EQ(pager.failures(), 2);
+}
+
+TEST(TpoHistoryPager, NewSelectionStartsNewGenerationAndIgnoresOldReplies) {
+    HistoryPager pager;
+    auto a = pager.start({"BTC-USD", 30 * kMin, 4, 3}, {{3000, 10}, {2000, 48}}, 0);
+    ASSERT_TRUE(a);
+    auto b = pager.start({"BTC-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 5);
+    ASSERT_TRUE(b);
+    EXPECT_EQ(b->requestId, "tpo-2-0");
+    EXPECT_FALSE(pager.onChunk("BTC-USD", a->requestId, 30 * kMin, 4, 6));
+    // Older servers send no id: only a reply for the current selection completes the page.
+    EXPECT_FALSE(pager.onChunk("BTC-USD", "", 30 * kMin, 4, 7));
+    EXPECT_FALSE(pager.onChunk("BTC-USD", "", 30 * kMin, 5, 8));
+    EXPECT_FALSE(pager.busy());
+    pager.start({"BTC-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 9);
+    pager.cancel();
+    EXPECT_FALSE(pager.busy());
 }
 
 TEST(TpoStreamStateSessions, KeepsRecentSessionsAndTagsUploads) {
