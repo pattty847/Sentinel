@@ -39,10 +39,14 @@ add_library(sentinel_core
     servermodel/RecordingLive.hpp
     servermodel/RecordingPage.cpp
     servermodel/RecordingPage.hpp
+    servermodel/RecordingChunks.cpp
+    servermodel/RecordingChunks.hpp
     servermodel/RecordingEntries.cpp
     servermodel/RecordingEntries.hpp
     heatmap/SparseColumns.cpp
     heatmap/SparseColumns.hpp
+    heatmap/ChunkCodec.cpp
+    heatmap/ChunkCodec.hpp
     heatmap/TimeComposer.cpp
     heatmap/TimeComposer.hpp
     heatmap/NativeRows.hpp
