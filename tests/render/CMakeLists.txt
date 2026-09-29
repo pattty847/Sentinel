@@ -147,3 +147,12 @@ qt_add_shaders(test_qsg_compute_spike spike_shaders
 )
 add_test(NAME QsgComputeSpikeTests COMMAND test_qsg_compute_spike)
 set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")
+
+# S4: GPU price binning parity vs heatmap::binColumn, grid/threshold unit tests
+# and the HeatmapRenderNode scene test. GPU cases skip without a Metal device;
+# SENTINEL_HEATMAP_REAL_PARITY=1 adds the real-recording comparison.
+add_executable(test_heatmap_gpu_binner test_heatmap_gpu_binner.cpp)
+target_include_directories(test_heatmap_gpu_binner PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_gpu_binner PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
+set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")

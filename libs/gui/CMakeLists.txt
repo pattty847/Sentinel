@@ -171,6 +171,35 @@ set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})
 
+# GPU heatmap price binning (integration slice S4). Its own target so the lab,
+# tests and (from S6) sentinel_gui_lib link the same code without the whole GUI.
+add_library(sentinel_heatmap_gpu STATIC
+    render/heatmap/HeatmapBinGrid.hpp
+    render/heatmap/HeatmapGpuSource.hpp
+    render/heatmap/HeatmapGpuSource.cpp
+    render/heatmap/HeatmapGpuBinner.hpp
+    render/heatmap/HeatmapGpuBinner.cpp
+    render/heatmap/HeatmapRenderNode.hpp
+    render/heatmap/HeatmapRenderNode.cpp
+)
+qt_add_shaders(sentinel_heatmap_gpu heatmap_gpu_shaders
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/heatmapgpu"
+    BASE "render/heatmap/shaders"
+    FILES
+        render/heatmap/shaders/heatmap_bin.comp
+        render/heatmap/shaders/heatmap_display.vert
+        render/heatmap/shaders/heatmap_display.frag
+)
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+target_include_directories(sentinel_heatmap_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sentinel_heatmap_gpu
+    PUBLIC sentinel_core Qt6::Core Qt6::Gui Qt6::Quick
+    PRIVATE Qt6::GuiPrivate
+)
+
 # The recording GPU experiment is isolated from the production GUI target.
 add_library(sentinel_lab_lib
     lab/GpuBinner.hpp
@@ -350,7 +379,7 @@ find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 target_link_libraries(sentinel_gui_lib PRIVATE Qt6::GuiPrivate)
 target_include_directories(sentinel_lab_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sentinel_lab_lib
-    PUBLIC sentinel_core Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
+    PUBLIC sentinel_core sentinel_heatmap_gpu Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
     PRIVATE Qt6::GuiPrivate
 )
 
@@ -382,4 +411,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-shadow           # Qt macros cause shadow warnings
     )
     target_compile_options(sentinel_lab_lib PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_compile_options(sentinel_heatmap_gpu PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
