@@ -94,6 +94,12 @@ target_compile_definitions(test_AxisLayout PRIVATE
 add_test(NAME AxisLayoutTests COMMAND test_AxisLayout)
 set_tests_properties(AxisLayoutTests PROPERTIES LABELS "render")
 
+add_executable(test_PriceAxisModel test_PriceAxisModel.cpp)
+target_include_directories(test_PriceAxisModel PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_PriceAxisModel PRIVATE GTest::gtest_main sentinel_gui_lib Qt6::Core)
+add_test(NAME PriceAxisModelTests COMMAND test_PriceAxisModel)
+set_tests_properties(PriceAxisModelTests PROPERTIES LABELS "render")
+
 add_executable(test_RecordingBandPolicy test_RecordingBandPolicy.cpp)
 target_include_directories(test_RecordingBandPolicy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_RecordingBandPolicy PRIVATE GTest::gtest_main)
