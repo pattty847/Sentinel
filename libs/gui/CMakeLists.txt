@@ -132,12 +132,6 @@ set(GRID_CORE_SOURCES
     render/PaperTradeOverlayModel.cpp
     render/PnlCurveItem.hpp
     render/PnlCurveItem.cpp
-    lab/GpuBinner.hpp
-    lab/GpuBinner.cpp
-    lab/LabItem.hpp
-    lab/LabItem.cpp
-    lab/Bench.hpp
-    lab/Bench.cpp
 )
 
 set(WIDGET_SOURCES
@@ -176,6 +170,17 @@ set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
 
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})
+
+# The recording GPU experiment is isolated from the production GUI target.
+add_library(sentinel_lab_lib
+    lab/GpuBinner.hpp
+    lab/GpuBinner.cpp
+    lab/LabItem.hpp
+    lab/LabItem.cpp
+    lab/Bench.hpp
+    lab/Bench.cpp
+)
+set_target_properties(sentinel_lab_lib PROPERTIES AUTOMOC ON)
 
 # Create the QML module
 qt6_add_qml_module(sentinel_gui_lib
@@ -305,7 +310,7 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/footprint_intensity.frag
 )
 
-qt_add_shaders(sentinel_gui_lib lab_shaders
+qt_add_shaders(sentinel_lab_lib lab_shaders
     GLSL "440"
     PREFIX "/labshaders"
     BASE "lab/shaders"
@@ -341,6 +346,11 @@ target_link_libraries(sentinel_gui_lib
 # QRhi (semi-public) for incremental heatmap texture uploads on Metal/D3D/Vulkan.
 find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 target_link_libraries(sentinel_gui_lib PRIVATE Qt6::GuiPrivate)
+target_include_directories(sentinel_lab_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sentinel_lab_lib
+    PUBLIC sentinel_core Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
+    PRIVATE Qt6::GuiPrivate
+)
 
 target_compile_definitions(sentinel_gui_lib
     PRIVATE
@@ -369,4 +379,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-sign-conversion   # Qt/Boost has many sign conversions
         -Wno-shadow           # Qt macros cause shadow warnings
     )
+    target_compile_options(sentinel_lab_lib PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()

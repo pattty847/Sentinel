@@ -174,6 +174,19 @@ ApplicationWindow {
                 }
             }
             Rectangle {
+                anchors.fill: parent
+                visible: binLab.status.startsWith("Timeframe unavailable:")
+                color: "#080d12"
+                Label {
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 40, 520)
+                    text: binLab.status
+                    color: "#e2b5a6"
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+            }
+            Rectangle {
                 anchors.left: parent.left; anchors.bottom: parent.bottom
                 anchors.margins: 14
                 width: hint.implicitWidth + 20; height: hint.implicitHeight + 12

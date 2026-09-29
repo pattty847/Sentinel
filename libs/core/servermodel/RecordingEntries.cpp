@@ -11,6 +11,7 @@
 #include <numeric>
 #include <queue>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace recording {
@@ -424,7 +425,10 @@ RecordingEntries composeRange(const RecordingEntries &source, int64_t startMs, i
     for (uint32_t c = 0; c < columns; ++c) {
         const auto bucket = composeBucketFromSource(source, startMs + int64_t(c) * timeframeMs,
                                                      timeframeMinutes, true);
-        if (!bucket) return source;
+        if (!bucket)
+            throw std::runtime_error("timeframe unavailable: cannot compose " +
+                std::to_string(timeframeMinutes) + "m bucket at " +
+                std::to_string(startMs + int64_t(c) * timeframeMs));
         out.offsets[c] = uint32_t(out.rowSide.size());
         out.rowSide.insert(out.rowSide.end(), bucket->rowSide.begin(), bucket->rowSide.end());
         out.code.insert(out.code.end(), bucket->code.begin(), bucket->code.end());
@@ -466,7 +470,8 @@ RecordingEntries loadComposedMinuteEntries(const std::filesystem::path &root,
 RecordingEntries loadHourEntriesWithMinuteTail(const std::filesystem::path &root,
                                                const std::string &symbol, const std::string &layer,
                                                int64_t startMs, int64_t endMs) {
-    if (layer != "deep") return loadRecordingEntries(root, symbol, layer, startMs, endMs);
+    if (layer != "deep")
+        throw std::invalid_argument("timeframe unavailable: hour rollups require the deep layer");
     auto hours = loadRecordingEntries(root, symbol, layer, startMs, endMs, 60);
     uint32_t tail = hours.columns();
     while (tail > 0 && hours.observedMs[tail - 1] == 0) --tail;
@@ -482,7 +487,9 @@ RecordingEntries loadHourEntriesWithMinuteTail(const std::filesystem::path &root
     }
     for (uint32_t c = tail; c < hours.columns(); ++c) {
         const auto composed = composeBucketFromSource(minutes, startMs + int64_t(c) * 3'600'000, 60, false);
-        if (!composed) return loadRecordingEntries(root, symbol, layer, startMs, endMs);
+        if (!composed)
+            throw std::runtime_error("timeframe unavailable: cannot compose unpersisted hour at " +
+                                     std::to_string(startMs + int64_t(c) * 3'600'000));
         if (!haveResult) { result = *composed; haveResult = true; }
         else result = joinRecordingEntries(result, *composed);
     }

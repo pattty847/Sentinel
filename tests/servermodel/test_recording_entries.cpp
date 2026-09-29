@@ -3,6 +3,8 @@
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <fstream>
+#include <stdexcept>
+#include <string>
 
 using namespace recording;
 namespace {
@@ -154,6 +156,38 @@ TEST(RecordingEntries, MixedFiveAndTenDollarGridsUseCommonRows) {
     EXPECT_EQ(rawCell.valid, composedCell.valid);
     EXPECT_LE(std::abs(int(encodeSize(rawCell.bid)) -
                        int(encodeSize(composedCell.bid))), 1);
+}
+
+TEST(RecordingEntries, UncomposableHourTailReportsUnavailableInsteadOfReturningMinutes) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const std::filesystem::path root(dir.path().toStdString());
+    Hmc2Record r;
+    r.header = {"BTC-USD", "deep", minute, 100, 1000, {}, 42};
+    r.bucketStartMs = kHmc2MinMs;
+    r.observedMs = minute;
+    r.bidRowLo = r.askRowLo = r.bidRowHi = r.askRowHi = 2;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 25;
+    r.entries = {{2, false, encodeSize(1), 0}};
+    {
+        Hmc2Store writer(root);
+        writer.append(r);
+        r.header.rowTickUnits = 500;
+        r.header.configHash = 43;
+        r.bucketStartMs += minute;
+        r.bidRowLo = r.askRowLo = r.bidRowHi = r.askRowHi = 4;
+        r.entries = {{4, false, encodeSize(2), 0}};
+        writer.append(r);
+    }
+    try {
+        (void)loadHourEntriesWithMinuteTail(root, "BTC-USD", "deep",
+                                            kHmc2MinMs, kHmc2MinMs + 60 * minute);
+        FAIL() << "mixed native grids must not fall back to raw minute columns";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("timeframe unavailable"), std::string::npos);
+    }
+    EXPECT_THROW((void)loadComposedHourEntries(root, "BTC-USD", "deep",
+                  kHmc2MinMs, kHmc2MinMs + 60 * minute, 60), std::runtime_error);
 }
 
 TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {

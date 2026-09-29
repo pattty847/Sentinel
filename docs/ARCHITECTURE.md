@@ -110,22 +110,24 @@ live GPU measurement; it is not implemented here.
 
 ### GPU bin lab (isolated experiment)
 
-`RecordingEntries` reads one HMC2 minute layer without a writer lock. Four
-independent readers decode separate time chunks on worker threads; loading also
-builds eight-minute duration-weighted, 16-native-row sparse, and aligned 50/100-row
-dense price sums. Each raw
-GPU entry occupies six bytes: a row with the side bit and a 15-bit HMC2 size
-code, packed two entries per three words. Minute offsets supply the column.
-The compute shader assigns one invocation to each visible output cell and
-gathers raw entries at arbitrary time/price boundaries, using coarse sums only
-for aligned interiors. The common 50/100-row ladder ticks read one precomputed
-bid/ask pair per source column. It preserves separate side sums, duration-weighted
-time averages, and conservative validity. Mixed $5/$10 deep history uses a
-compatible common row tick. The screen-sized result is disposable; pan and
-zoom rebuild it without a server request. Gather is deterministic and avoids
-float atomics, which are not portable to Metal.
-The existing server-side recording re-band path remains the production path until
-Metal timing and visual checks justify a change.
+`RecordingEntries` reads HMC2 without a writer lock and decodes independent
+time chunks on worker threads. The lab explicitly composes columns at the
+selected UTC-epoch-aligned timeframe: 1m from minute records, 5m/15m and custom
+sub-hour frames from minutes, and deep 1h/4h/1D from hour rollups when present.
+It preserves per-row/side covered duration, mixed $5/$10 native grids, and
+unknown coverage. Raw minute GPU entries use four bytes when the relative row
+fits 16 bits and six bytes otherwise; composed entries also carry covered
+duration. There is no hidden time LOD or pre-summed price grid.
+
+One compute invocation gathers sparse entries for each visible price/time cell
+at the selected display tick. Separate bid and ask sums use deterministic float
+arithmetic without float atomics. Time and price bin edges stay anchored to
+absolute UTC and ladder coordinates. Guard cells let a fractional pan translate
+the fragment mapping without re-binning; a changed bin width or a view leaving
+the guard triggers a new disposable screen-sized grid. The lab remains isolated
+from `UnifiedGridRenderer` and the production server re-band path. The
+[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md)
+specifies the production design, including worker-side timeframe composition.
 
 ### Coordinate system: TimeAxisMapping
 

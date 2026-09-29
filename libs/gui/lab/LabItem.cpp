@@ -14,6 +14,7 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 
 namespace lab {
@@ -25,6 +26,11 @@ double msSince(Clock::time_point start) {
 }
 uint32_t sourceMinutesFor(int timeframe, const QString &) {
     return uint32_t(std::max(1, timeframe));
+}
+QString unavailableStatus(QString detail) {
+    const QString prefix = QStringLiteral("timeframe unavailable:");
+    if (detail.startsWith(prefix, Qt::CaseInsensitive)) detail = detail.mid(prefix.size());
+    return QStringLiteral("Timeframe unavailable: %1").arg(detail.trimmed());
 }
 } // namespace
 
@@ -44,6 +50,7 @@ public:
         auto *lab = static_cast<LabItem *>(item);
         data_ = lab->data_; view_ = lab->view_; version_ = lab->version_;
         timeframeMinutes_ = lab->timeframeMinutes_; manualTick_ = lab->manualTick_;
+        realMode_ = lab->realMode_;
         telemetry_ = lab->telemetry_;
     }
     void render(QRhiCommandBuffer *cb) override {
@@ -72,6 +79,10 @@ public:
         }
         if (!uploaded_) { update(); return; }
         const auto &active = *uploaded_;
+        const int tf = std::max(1, timeframeMinutes_);
+        // A real timeframe switch must wait for its composed source. Never
+        // reinterpret the resident minute buffer as a coarse timeframe.
+        if (realMode_ && active.sourceMinutes != uint32_t(tf)) { update(); return; }
         const auto size = renderTarget()->pixelSize();
         const double native = active.nativeTick;
         const double height = std::max(1, size.height());
@@ -81,7 +92,6 @@ public:
         if (!(tick > 0) || !std::isfinite(tick)) return;
         const auto group = static_cast<uint32_t>(std::llround(tick / native));
         if (!group || std::abs(tick / native - group) > 1e-8) return;
-        const int tf = std::max(1, timeframeMinutes_);
         const double absoluteMinuteLo = double(data_->startMs) / 60'000.0 + view_.timeLo;
         const double absoluteMinuteHi = double(data_->startMs) / 60'000.0 + view_.timeHi;
         const int64_t visibleTimeFirst = int64_t(std::floor(absoluteMinuteLo / tf));
@@ -151,6 +161,7 @@ private:
     LabItem::View view_;
     uint64_t version_ = 0;
     int timeframeMinutes_ = 1;
+    bool realMode_ = false;
     double manualTick_ = 0;
     std::optional<Grid> lastGrid_;
     Clock::time_point previous_;
@@ -254,7 +265,10 @@ void LabItem::loadRealInternal(int hours, const QString &layer, bool preserveVie
         } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
         QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error, firstPaintVersion, preserveView] {
             if (!self || guard->load() != generation) return;
-            if (!error.isEmpty()) { self->status_ = error; emit self->statusChanged(); }
+            if (!error.isEmpty()) {
+                self->status_ = unavailableStatus(error);
+                emit self->statusChanged();
+            }
             else {
                 self->accept(result, preserveView);
                 firstPaintVersion->store(self->version_);
@@ -281,17 +295,17 @@ void LabItem::loadRealInternal(int hours, const QString &layer, bool preserveVie
                     "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
                     fullStart, visibleStart, result->sourceMinutes);
             if (guard->load() != generation) return;
-            result = older.sourceMinutes == initial->sourceMinutes ?
-                std::make_shared<recording::RecordingEntries>(
-                    recording::joinRecordingEntries(older, *initial)) :
-                std::make_shared<recording::RecordingEntries>(
-                    recording::loadRecordingEntries(
-                        "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
-                        fullStart, end));
+            if (older.sourceMinutes != initial->sourceMinutes)
+                throw std::runtime_error("timeframe unavailable: background range has a different source resolution");
+            result = std::make_shared<recording::RecordingEntries>(
+                recording::joinRecordingEntries(older, *initial));
         } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
         QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error] {
             if (!self || guard->load() != generation) return;
-            if (!error.isEmpty()) { self->status_ = error; emit self->statusChanged(); }
+            if (!error.isEmpty()) {
+                self->status_ = unavailableStatus(error);
+                emit self->statusChanged();
+            }
             else self->accept(result, true);
         }, Qt::QueuedConnection);
     });

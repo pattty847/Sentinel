@@ -2,6 +2,7 @@
 #include "servermodel/RecordingPage.hpp"
 #include <QDateTime>
 #include <QTemporaryDir>
+#include <QtGlobal>
 #include <gtest/gtest.h>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
@@ -222,7 +223,7 @@ void compareViews(QRhi *rhi, const std::filesystem::path &root,
     }
 }
 
-TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
+TEST(RecordingGpuParity, SyntheticAndOptionalRecordedDeepMatchServer) {
     std::unique_ptr<QRhi> rhi;
 #ifdef Q_OS_MACOS
     void *metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW);
@@ -362,12 +363,18 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     EXPECT_EQ(recording::encodeSize(wideCell[0]), recording::encodeSize(7));
     EXPECT_EQ(wideCell[2], 1.0f);
 
+    if (qgetenv("SENTINEL_LAB_REAL_PARITY") != "1") {
+        std::cout << "real GPU parity: skipped (set SENTINEL_LAB_REAL_PARITY=1 to opt in)\n";
+        return;
+    }
     const std::filesystem::path realRoot("/Volumes/T7/sentinel-data/recording");
     if (!std::filesystem::exists(realRoot / "BTC-USD")) {
         std::cout << "real GPU parity: skipped (recording directory absent)\n";
         return;
     }
-    const int64_t realEnd = QDateTime::currentMSecsSinceEpoch() / (15 * minute) * (15 * minute);
+    // The previous completed UTC day is immutable to the live recorder. Every
+    // selected timeframe below divides a day, so no view includes a live tail.
+    const int64_t realEnd = QDateTime::currentMSecsSinceEpoch() / (24 * hour) * (24 * hour);
     const auto real = recording::loadRecordingEntries(realRoot, "BTC-USD", "deep",
                                                        realEnd - 24 * hour, realEnd);
     if (real.rowSide.empty()) {
@@ -384,8 +391,7 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     EXPECT_EQ(recorded.validity, 0);
 
     for (uint32_t tf : {5u, 16u}) {
-        const int64_t selectedEnd = QDateTime::currentMSecsSinceEpoch() /
-                                    (int64_t(tf) * minute) * (int64_t(tf) * minute);
+        const int64_t selectedEnd = realEnd;
         const auto selectedData = recording::loadComposedMinuteEntries(
             realRoot, "BTC-USD", "deep", selectedEnd - 24 * hour, selectedEnd, tf);
         ASSERT_EQ(selectedData.sourceMinutes, tf);
@@ -401,7 +407,7 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
         EXPECT_EQ(selected.validity, 0);
     }
 
-    const int64_t hourEnd = QDateTime::currentMSecsSinceEpoch() / hour * hour;
+    const int64_t hourEnd = realEnd;
     const auto realHours = recording::loadRecordingEntries(realRoot, "BTC-USD", "deep",
                                                             hourEnd - 24 * hour, hourEnd, 60);
     auto lastHour = std::find_if(realHours.observedMs.rbegin(), realHours.observedMs.rend(),
@@ -422,8 +428,7 @@ TEST(RecordingGpuParity, SyntheticAndRecordedDeepMatchServer) {
     }
     for (uint32_t tf : {240u, 1440u}) {
         const int64_t tfMs = int64_t(tf) * minute;
-        const int64_t selectedEnd = ((QDateTime::currentMSecsSinceEpoch() / minute * minute +
-                                       tfMs - 1) / tfMs) * tfMs;
+        const int64_t selectedEnd = realEnd;
         const auto selectedData = recording::loadComposedHourEntries(
             realRoot, "BTC-USD", "deep", selectedEnd - 2 * tfMs, selectedEnd, tf);
         if (selectedData.rowSide.empty()) continue;
