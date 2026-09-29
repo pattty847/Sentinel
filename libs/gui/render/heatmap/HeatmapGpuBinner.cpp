@@ -7,6 +7,7 @@
 #include <rhi/qshader.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -64,6 +65,7 @@ bool sameScale(const recording::SizeScale &a, const recording::SizeScale &b) {
 // Self-test verdict per backend/device, shared by every binner in the process.
 std::mutex selfTestMutex;
 std::map<QString, KernelVariant> selfTestCache;
+std::atomic<uint64_t> drainedSelfTestReadbacks{0}; // tests: see drainedSelfTestReadbacksForTest
 } // namespace
 
 struct HeatmapGpuBinner::SourceBuffers {
@@ -95,7 +97,20 @@ struct HeatmapGpuBinner::SelfTestRun {
 HeatmapGpuBinner::HeatmapGpuBinner(QRhi *rhi, uint64_t memoryCapBytes) : rhi_(rhi), memoryCapBytes_(memoryCapBytes) {
     prewarmPrecisionSelfTest(); // no-op after the first call; the build runs on a worker
 }
-HeatmapGpuBinner::~HeatmapGpuBinner() = default;
+HeatmapGpuBinner::~HeatmapGpuBinner() {
+    // QRhi keeps a raw pointer to the self-test's QRhiReadbackResult until the
+    // frame that recorded it completes, and writes into it then (or in ~QRhi).
+    // Destroying the binner first (window teardown right after the first frame)
+    // freed that result and crashed in QRhiMetal::finishActiveReadbacks (FM-099).
+    // Complete the readback while the result is alive. finish() is valid inside
+    // and outside a frame (never inside a pass; nodes are never destroyed there).
+    if (selfTest_ && rhi_ && selfTest_->readback.data.size() != qsizetype(selfTest_->fixture->expected.size() * 4)) {
+        rhi_->finish();
+        drainedSelfTestReadbacks.fetch_add(1);
+    }
+}
+uint64_t HeatmapGpuBinner::drainedSelfTestReadbacksForTest() { return drainedSelfTestReadbacks.load(); }
+bool HeatmapGpuBinner::selfTestInFlightForTest() const { return selfTest_ != nullptr; }
 
 void HeatmapGpuBinner::clearSelfTestCacheForTest() {
     std::scoped_lock lock(selfTestMutex);

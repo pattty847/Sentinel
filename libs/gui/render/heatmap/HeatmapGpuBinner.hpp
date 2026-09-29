@@ -123,6 +123,10 @@ public:
     // the per-device self-test cache so the candidate is actually tested.
     void setFastKernelShaderForTest(const QString &qsbPath) { fastShaderPath_ = qsbPath; testShader_ = true; }
     static void clearSelfTestCacheForTest();
+    // Tests: a self-test readback is recorded and not yet consumed; and how many
+    // in-flight self-test readbacks a destructor completed before freeing them.
+    bool selfTestInFlightForTest() const;
+    static uint64_t drainedSelfTestReadbacksForTest();
     // Starts (first call) or polls the precision self-test. bin() also calls it;
     // call it every frame so a static view still resolves to the fast kernel.
     void runPrecisionSelfTest(QRhiCommandBuffer *cb) { driveSelfTest(cb); }

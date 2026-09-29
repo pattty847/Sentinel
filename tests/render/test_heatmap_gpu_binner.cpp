@@ -676,6 +676,35 @@ TEST(HeatmapGpuSelfTest, WaitsForAnActiveSourceAndAWorkerBuiltFixture) {
     EXPECT_EQ(binner.resolvedKernel(), std::optional<KernelVariant>(KernelVariant::Fast));
 }
 
+// FM-099: closing the lab right after its first frame destroyed the render node
+// (binner, self-test and its QRhiReadbackResult) before the frame that recorded
+// the readback completed; ~QRhi then wrote into the freed result
+// (QRhiMetal::finishActiveReadbacks, EXC_BAD_ACCESS). The binner must complete
+// an in-flight self-test readback before freeing it. The destruction here happens
+// inside the recording frame, the same order as window teardown.
+TEST(HeatmapGpuSelfTest, DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    auto binner = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
+    for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(precisionSelfTestIfReady());
+    uploadPaged(gpu.rhi.get(), *binner, smallSource(), 1 << 20);
+    const uint64_t drained = HeatmapGpuBinner::drainedSelfTestReadbacksForTest();
+    QRhiCommandBuffer *cb = nullptr;
+    ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+    binner->runPrecisionSelfTest(cb);
+    ASSERT_TRUE(binner->selfTestInFlightForTest()) << "the readback is recorded, not yet completed";
+    binner.reset();
+    EXPECT_EQ(HeatmapGpuBinner::drainedSelfTestReadbacksForTest(), drained + 1);
+    ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    gpu.rhi.reset(); // ~QRhi finishes no stale readback
+    // A binner destroyed with nothing in flight does not stall the GPU.
+    Headless again;
+    { HeatmapGpuBinner idle(again.rhi.get()); }
+    EXPECT_EQ(HeatmapGpuBinner::drainedSelfTestReadbacksForTest(), drained + 1);
+}
+
 TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
     Headless gpu;
     if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
