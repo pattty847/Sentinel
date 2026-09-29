@@ -112,6 +112,13 @@ add_executable(hmc2_dump hmc2_dump.cpp)
 target_include_directories(hmc2_dump PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(hmc2_dump PRIVATE sentinel_core)
 
+add_executable(test_heatmap_model test_heatmap_model.cpp)
+target_include_directories(test_heatmap_model PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_model PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME HeatmapModelTests COMMAND test_heatmap_model)
+set_tests_properties(HeatmapModelTests PROPERTIES LABELS "servermodel;heatmap")
+add_dependencies(servermodel_tests test_heatmap_model)
+
 add_executable(test_recording_page test_recording_page.cpp)
 add_executable(test_recording_entries test_recording_entries.cpp)
 target_include_directories(test_recording_entries PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)

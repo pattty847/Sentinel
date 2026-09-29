@@ -41,6 +41,15 @@ add_library(sentinel_core
     servermodel/RecordingPage.hpp
     servermodel/RecordingEntries.cpp
     servermodel/RecordingEntries.hpp
+    heatmap/SparseColumns.cpp
+    heatmap/SparseColumns.hpp
+    heatmap/TimeComposer.cpp
+    heatmap/TimeComposer.hpp
+    heatmap/BinCell.cpp
+    heatmap/BinCell.hpp
+    heatmap/HeatmapResolution.hpp
+    heatmap/RecordingLoader.cpp
+    heatmap/RecordingLoader.hpp
     servermodel/Hmc2Store.cpp
     servermodel/Hmc2Store.hpp
     servermodel/HeatmapColumnStore.hpp

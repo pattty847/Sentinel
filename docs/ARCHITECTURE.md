@@ -108,6 +108,32 @@ GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
 during the fade. That option needs separate mapping/label lifecycle handling and
 live GPU measurement; it is not implemented here.
 
+### Sparse heatmap core model (integration slice S1)
+
+`libs/core/heatmap` owns the GUI-independent `SparseColumns`, `TimeComposer`,
+CPU `binCell`/`binColumn` reference, and `HeatmapResolution` policy. Each time
+column retains native constituents with config/tick identity, original size
+scale, packed row/side codes, observation duration, and per-side coverage runs.
+Composition creates exactly the selected UTC-epoch timeframe (including 16m
+and 90m); only levels that divide it participate. Sealed hour scan ranges take
+precedence over minutes, including gaps. `RecordingLoader` is an HMC2 adapter
+for tests/lab use; hour multiples load deep hours plus the newest open hour's
+minute tail, while odd timeframes use minutes.
+
+Coverage is merged by endpoint sweeps. The CPU reference normalizes each native
+row/side by its own covered duration, then weights physical grids by observed
+duration; config/size-scale changes on the same tick share the denominator.
+Composed entries retain decoded duration-weighted numerators in memory alongside
+their rounded 15-bit codes, avoiding a second log quantization before final
+price binning. Future GPU/wire work must preserve this precision contract to
+keep zero-code-step page parity. Missing columns remain sparse, covered zero
+cells stay valid, incomplete coverage stays invalid, and incompatible grids
+make only their output column unknown. Auto timeframe selection returns no
+choice when even 1D exceeds the one-pixel-per-column limit, requiring a span clamp.
+
+The lab remains on `RecordingEntries` until its GPU upload contract is migrated
+in S4; S1 does not alter rendering, live transport, or the existing page path.
+
 ### GPU bin lab (isolated experiment)
 
 `RecordingEntries` reads HMC2 without a writer lock and decodes independent
