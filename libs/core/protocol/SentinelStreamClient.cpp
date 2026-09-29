@@ -210,8 +210,10 @@ SentinelStreamClient::~SentinelStreamClient() {
 
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
+    m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
     m_ioc.restart();
     m_isConnected = false;
+    Q_ASSERT(!m_writeInFlight); // disconnect drains completions before queue reuse
     m_writeQueue.clear();
 
     m_running = true;
@@ -224,7 +226,7 @@ void SentinelStreamClient::connectToServer() {
             tcp::resolver resolver(m_ioc);
             auto const results = resolver.resolve(m_host, m_port);
             
-            boost::beast::get_lowest_layer(m_ws).async_connect(
+            boost::beast::get_lowest_layer(*m_ws).async_connect(
                 results,
                 [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
             );
@@ -244,16 +246,23 @@ void SentinelStreamClient::disconnectFromServer() {
                   << " connected=" << m_isConnected.load());
     }
     m_running = false;
-    if (m_work) m_work->reset();
-    
-    if (m_isConnected) {
-        // Close websocket gracefully... or just stop ioc
-    }
     m_isConnected = false;
-    m_ioc.stop();
     if (m_thread.joinable()) {
+        // stop() alone strands callbacks that still borrow queue.front(). Close
+        // on the strand and drain them before clearing buffers or restarting.
+        net::post(m_strand, [this] {
+            boost::beast::error_code ignored;
+            boost::beast::get_lowest_layer(*m_ws).socket().close(ignored);
+            if (m_work) m_work->reset();
+        });
         m_thread.join();
+        // Also drain if the worker exited via its exception handler before run().
+        m_ioc.restart();
+        m_ioc.run();
     }
+    m_writeQueue.clear();
+    m_buffer.consume(m_buffer.size());
+    Q_ASSERT(!m_writeInFlight);
 }
 
 void SentinelStreamClient::subscribe(const std::string& symbol) {
@@ -481,6 +490,7 @@ void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command
 }
 
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
+    if (!m_running) return;
     if (ec) {
         sLog_Error("Connect failed: host=" << m_host << " port=" << m_port
                    << " error=" << ec.message());
@@ -488,12 +498,13 @@ void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint)
         return;
     }
     
-    m_ws.next_layer().async_handshake(
+    m_ws->next_layer().async_handshake(
         ssl::stream_base::client,
         [this](auto ec) { onSslHandshake(ec); });
 }
 
 void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
+    if (!m_running) return;
     if (ec) {
         sLog_Error("SSL handshake failed: host=" << m_host << " port=" << m_port
                    << " error=" << ec.message());
@@ -501,10 +512,11 @@ void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
         return;
     }
 
-    m_ws.async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
+    m_ws->async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 
 void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
+    if (!m_running) return;
     if (ec) {
         sLog_Error("WebSocket handshake failed: host=" << m_host << " port=" << m_port
                    << " error=" << ec.message());
@@ -514,22 +526,22 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
 
     sLog_Data("SentinelStreamClient connected: host=" << m_host << " port=" << m_port);
     m_isConnected = true;
+    // Drain pre-handshake messages here, before notifying subscribers. Posting
+    // another drain after connected() races a subscription's own write kick.
+    doWrite();
     emit connected();
     
     doRead();
 
-    net::post(m_strand, [this]() {
-        if (!m_writeQueue.empty()) {
-            doWrite();
-        }
-    });
 }
 
 void SentinelStreamClient::doRead() {
-    m_ws.async_read(m_buffer, [this](auto ec, auto bytes) { onRead(ec, bytes); });
+    if (!m_running) return;
+    m_ws->async_read(m_buffer, [this](auto ec, auto bytes) { onRead(ec, bytes); });
 }
 
 void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes_transferred) {
+    if (!m_running) return;
     if (ec) {
         if (ec == boost::beast::websocket::error::closed || ec == net::error::operation_aborted) {
             sLog_Data("SentinelStreamClient disconnected: host=" << m_host << " port=" << m_port
@@ -552,26 +564,34 @@ void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes
 }
 
 void SentinelStreamClient::doWrite() {
-    if (m_writeQueue.empty()) {
+    if (!m_isConnected || m_writeInFlight || m_writeQueue.empty()) {
         return;
     }
-    m_ws.async_write(net::buffer(m_writeQueue.front()),
-                     [this](auto ec, auto bytes) { onWrite(ec, bytes); });
+    m_writeInFlight = true;
+    m_ws->async_write(net::buffer(m_writeQueue.front()),
+                     net::bind_executor(m_strand, [this](auto ec, auto bytes) { onWrite(ec, bytes); }));
 }
 
 void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t bytes_transferred) {
-    if (ec) {
-        // The failed payload stays at the queue head; later writes wait behind it.
-        sLog_Error("Write failed: host=" << m_host << " port=" << m_port
-                   << " queued=" << m_writeQueue.size() << " error=" << ec.message());
+    if (!m_writeInFlight) {
+        sLog_Warning("Client write completion without an outstanding write: host=" << m_host);
         return;
     }
-    
-    m_writeQueue.pop_front();
-    
-    if (!m_writeQueue.empty()) {
-        doWrite();
+    m_writeInFlight = false;
+    if (ec) {
+        m_isConnected = false; // Do not retry an ambiguous partial message.
+        if (!m_running) return;
+        sLog_Error("Write failed: host=" << m_host << " port=" << m_port
+                   << " queued=" << m_writeQueue.size() << " error=" << ec.message());
+        emit errorOccurred(QString::fromStdString("Write: " + ec.message()));
+        return;
     }
+    if (m_writeQueue.empty()) {
+        sLog_Warning("Client write completion with empty queue: host=" << m_host);
+        return;
+    }
+    m_writeQueue.pop_front();
+    doWrite();
 }
 
 void SentinelStreamClient::handleMessage(const std::string& msgStr) {

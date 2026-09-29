@@ -84,10 +84,63 @@ int main(int argc, char** argv) {
     int64_t start = 0, end = 0;
     std::string error;
     uint64_t maxTimerDelay = 0;
+    bool finalized = false;
+    auto makeReport = [&](const char* status) {
+        const double seconds = std::max<int64_t>(0, end - start) / 1000.0;
+        return Json{{"schema", 1}, {"checkpoint_utc_ms", QDateTime::currentMSecsSinceEpoch()},
+            {"checkpoint_interval_ms", 60000}, {"finalized", finalized},
+            {"pending_raw_bytes", measurement.raw.pendingBytes()}, {"status", status}, {"error", error},
+            {"source", synthetic ? "synthetic_fixture" : "sentinel_local_stream"}, {"symbol", "BTC-USD"},
+            {"clock", synthetic ? "deterministic_fixture_ms" : "monotonic_elapsed_anchored_to_first_snapshot_dequeue_utc_ms"},
+            {"upstream_sequence_and_validity_available", false}, {"peak", peak},
+            {"simulation", "same events interleaved on one thread; each TWAP encoder maintains its own book"},
+            {"byte_accounting", "compressed frames + modeled stream/file headers; no disk writes/fsync/index"},
+            {"cpu_accounting", "thread CPU; book maintenance + integration + serialization + zstd; excludes network/JSON"},
+            {"zstd_level", 3}, {"raw_block_target_ms", 1000}, {"raw_block_soft_cap_bytes", 1048576},
+            {"column_keyframe_interval_ms", 900000}, {"requested_minutes", minutes},
+            {"start_ms", start}, {"end_ms", end}, {"measured_seconds", seconds},
+            {"max_timer_delay_ms", maxTimerDelay}, {"messages", measurement.messages},
+            {"snapshots", measurement.snapshots}, {"levels", measurement.levels},
+            {"encoders", measurement.report(seconds)},
+            {"limitations", {"Local stream uses server indexed book and float quantities; not full-depth exchange L2.",
+                "Upstream gaps/resync and malformed messages may be invisible to this client.",
+                "Short-run extrapolation includes startup snapshot/keyframe and final partial bucket.",
+                "HMC2-style log means are lossy; this does not measure an exact-sums format.",
+                "Synthetic results are fixture measurements, not BTC storage forecasts."}}};
+    };
+    auto writeResult = [&](const char* status, bool progress) {
+        auto result = makeReport(status);
+        QSaveFile output(parser.value("out"));
+        const auto json = result.dump(2) + "\n";
+        if (!output.open(QIODevice::WriteOnly) ||
+            output.write(json.data(), qint64(json.size())) != qint64(json.size()) || !output.commit())
+            throw std::runtime_error("cannot atomically save result: " + parser.value("out").toStdString());
+        if (progress) {
+            std::string line = "storage_probe progress: elapsed_ms=" + std::to_string(end - start) +
+                " events=" + std::to_string(measurement.messages) + " status=" + status;
+            for (const auto& encoder : result["encoders"]) {
+                const auto name = encoder["name"].get<std::string>() +
+                    (encoder.contains("base_ms") ? "_" + std::to_string(encoder["base_ms"].get<int>()) : "");
+                line += " " + name + "_bytes=" + std::to_string(encoder["encoded_bytes"].get<uint64_t>());
+            }
+            sLog_App(line); // Qt's default handler writes stderr; one line per minute.
+        }
+        return result;
+    };
+    int64_t nextCheckpoint = 60000;
+    auto checkpoint = [&] {
+        if (start && end - start >= nextCheckpoint) {
+            // Do not flush/finalize encoders here: checkpoints must not change
+            // block boundaries or double-count the open column on continuation.
+            writeResult("partial", true);
+            nextCheckpoint = ((end - start) / 60000 + 1) * 60000;
+        }
+    };
     auto guard = [&](auto&& operation) {
         try { operation(); } catch (const std::exception& e) { error = e.what(); app.exit(1); }
     };
     try {
+        writeResult("starting", false); // Check the output path before opening a socket.
         if (synthetic) {
             start = recording::kHmc2MinMs;
             std::vector<Level> snapshot;
@@ -97,10 +150,14 @@ int main(int argc, char** argv) {
                 snapshot.push_back({false, 60'002.0 + i * 50, .01 * (1 + i % 31)});
             }
             measurement.event({start, Kind::Snapshot, snapshot});
+            end = start;
+            writeResult("partial", false);
             for (int64_t t = 20; t < duration; t += 20) {
                 const int k = int((t / 20) % 2000);
-                measurement.event({start + t, Kind::Delta,
+                end = start + t;
+                measurement.event({end, Kind::Delta,
                     {{true, 60'000.0 - k * 10, .01 * (1 + (t / 20) % 43)}}});
+                checkpoint();
             }
             end = start + duration;
         } else {
@@ -118,6 +175,7 @@ int main(int argc, char** argv) {
             auto accept = [&](Kind kind, std::vector<Level> levels) {
                 if (!error.empty()) return;
                 guard([&] {
+                    const bool firstSnapshot = !start;
                     if (!start) {
                         if (kind != Kind::Snapshot) return;
                         start = QDateTime::currentMSecsSinceEpoch(); elapsed.start(); startup.stop(); timer.start();
@@ -125,6 +183,8 @@ int main(int argc, char** argv) {
                     end = now();
                     if (end < start + duration) measurement.event({end, kind, std::move(levels)});
                     else app.quit();
+                    if (firstSnapshot) writeResult("partial", false);
+                    checkpoint();
                 });
             };
             QObject::connect(&client, &SentinelStreamClient::connected, &app,
@@ -166,37 +226,21 @@ int main(int argc, char** argv) {
                 maxTimerDelay = std::max(maxTimerDelay, uint64_t(std::max<int64_t>(0, t - lastTick - 25)));
                 lastTick = t;
                 measurement.tick(end);
+                checkpoint();
                 if (end >= start + duration) app.quit();
             }); });
             sLog_App("storage_probe: sampling local parsed stream; sequence/upstream validity unavailable");
             startup.start(); client.connectToServer(); app.exec(); client.disconnectFromServer();
         }
         measurement.finish(end);
+        finalized = true;
     } catch (const std::exception& e) { error = e.what(); }
-    const double seconds = std::max<int64_t>(0, end - start) / 1000.0;
-    Json result{{"schema", 1}, {"status", error.empty() ? "complete" : "failed"}, {"error", error},
-        {"source", synthetic ? "synthetic_fixture" : "sentinel_local_stream"}, {"symbol", "BTC-USD"},
-        {"clock", synthetic ? "deterministic_fixture_ms" : "monotonic_elapsed_anchored_to_first_snapshot_dequeue_utc_ms"},
-        {"upstream_sequence_and_validity_available", false}, {"peak", peak},
-        {"simulation", "same events interleaved on one thread; each TWAP encoder maintains its own book"},
-        {"byte_accounting", "compressed frames + modeled stream/file headers; no disk writes/fsync/index"},
-        {"cpu_accounting", "thread CPU; book maintenance + integration + serialization + zstd; excludes network/JSON"},
-        {"zstd_level", 3}, {"raw_block_target_ms", 1000}, {"raw_block_soft_cap_bytes", 1048576},
-        {"column_keyframe_interval_ms", 900000}, {"requested_minutes", minutes},
-        {"start_ms", start}, {"end_ms", end}, {"measured_seconds", seconds},
-        {"max_timer_delay_ms", maxTimerDelay}, {"messages", measurement.messages},
-        {"snapshots", measurement.snapshots}, {"levels", measurement.levels},
-        {"encoders", measurement.report(seconds)},
-        {"limitations", {"Local stream uses server indexed book and float quantities; not full-depth exchange L2.",
-            "Upstream gaps/resync and malformed messages may be invisible to this client.",
-            "Short-run extrapolation includes startup snapshot/keyframe and final partial bucket.",
-            "HMC2-style log means are lossy; this does not measure an exact-sums format.",
-            "Synthetic results are fixture measurements, not BTC storage forecasts."}}};
-    QSaveFile output(parser.value("out"));
-    const auto json = result.dump(2) + "\n";
-    if (!output.open(QIODevice::WriteOnly) || output.write(json.data(), qint64(json.size())) != qint64(json.size()) || !output.commit()) {
-        sLog_Error("storage_probe: cannot save result path=" << parser.value("out")); return 1;
+    try {
+        auto result = writeResult(error.empty() ? "complete" : "failed", true);
+        std::cout << result.dump(2) << '\n';
+    } catch (const std::exception& e) {
+        sLog_Error("storage_probe: " << e.what());
+        return 1;
     }
-    std::cout << result.dump(2) << '\n';
     return error.empty() ? 0 : 1;
 }

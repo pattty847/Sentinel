@@ -172,3 +172,11 @@ target_link_libraries(test_storage_probe PRIVATE storage_probe_encoders GTest::g
 add_test(NAME StorageProbeTests COMMAND test_storage_probe)
 set_tests_properties(StorageProbeTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_storage_probe)
+
+add_executable(test_storage_probe_cli storage_probe/test_cli.cpp)
+target_link_libraries(test_storage_probe_cli PRIVATE GTest::gtest_main Qt6::Core nlohmann_json::nlohmann_json)
+target_compile_definitions(test_storage_probe_cli PRIVATE STORAGE_PROBE_EXECUTABLE="$<TARGET_FILE:storage_probe>")
+add_dependencies(test_storage_probe_cli storage_probe)
+add_test(NAME StorageProbeCliTests COMMAND test_storage_probe_cli)
+set_tests_properties(StorageProbeCliTests PROPERTIES LABELS "servermodel" TIMEOUT 45)
+add_dependencies(servermodel_tests test_storage_probe_cli)

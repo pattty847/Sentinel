@@ -28,6 +28,7 @@ class RawEncoder {
     void add(const Event& event);
     void flush();
     const Stats& stats() const { return stats_; }
+    size_t pendingBytes() const { return raw_.size(); }
     static std::vector<Event> decode(const Bytes& frame);
   private:
     Stats stats_;

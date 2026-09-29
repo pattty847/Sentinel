@@ -1,7 +1,9 @@
 # Order-book storage pyramid: design and measurement
 
 Research date: 2026-09-29. Branch: `lt-astra/storage-research`.
-Scope: isolated probe and offline tests; no recorder, server, GUI, or wire behavior changes.
+Initial scope: isolated probe and offline tests; no recorder, server, GUI, or wire behavior changes.
+The owner-authorized crash follow-up also fixes the shared stream client's write
+serialization and transport teardown; recorder and server behavior remain unchanged.
 
 The useful storage object is **linear liquidity plus its observation semantics**, from
 which the client derives paint intensity. Keep bids and asks separate until presentation.
@@ -406,7 +408,7 @@ run on shared hardware, not a throughput or latency guarantee. The peak-enabled
 run overlapped the full test suite. Rates include initial/final overhead and do
 not predict real traffic or the larger exact-sums representation.
 
-Validation: full `cmake --build --preset mac-clang -j 4` passed;
+Initial research validation: full `cmake --build --preset mac-clang -j 4` passed;
 `ctest --test-dir build/mac-clang --output-on-failure` reported
 `100% tests passed, 0 tests failed out of 38`. `StorageProbeTests` comprises ten
 offline cases. Both synthetic CLI modes completed; missing-certificate failure
@@ -415,6 +417,77 @@ The existing dependency installation was reused with the local CMake cache setti
 `VCPKG_MANIFEST_INSTALL=OFF`; the compiler cache and full tests required sandbox
 access outside this worktree. No project dependency settings were changed.
 Live BTC capture and serving/GPU performance remain unverified by this task.
+
+## Live crash follow-up: write ownership and recoverable results
+
+The owner's `f2a0b28` run crashed about 150 seconds after launch (02:42:54 to
+02:45:24 EDT, 2026-09-29). The supplied `storage_probe-crash.ips` identifies the
+`stream-client` thread in `onWrite -> doWrite -> buffer(queue.front()) -> string::size`,
+with a near-null address, while the probe's main thread was waiting in Qt's event loop.
+
+The write-start race exists even with one subscription and a single I/O thread:
+
+1. `onHandshake` marks connected and emits the queued Qt `connected` signal.
+2. The receiving thread posts `subscribe` onto the client strand.
+3. The handshake callback posts its own deferred queue drain onto that strand.
+4. The subscribe handler starts `async_write(queue.front())`.
+5. The deferred drain sees a nonempty queue and starts a second write on the same
+   head before the first completion has popped it.
+
+A strand orders callbacks; it does not make overlapping asynchronous writes legal.
+The first completion can release a payload still borrowed by the second operation;
+duplicate completions can also consume an empty queue. This violates both the
+one-write-at-a-time and buffer-lifetime contracts in the [Beast async_write
+documentation](https://www.boost.org/doc/libs/latest/libs/beast/doc/html/beast/ref/boost__beast__websocket__stream/async_write.html).
+The probe does not reconnect during capture, so its reported crash does not require
+the reconnect queue-clear candidate. The encoder-only ASan tests pass; that is
+evidence about those fixtures, not a proof about every possible stream. An isolated
+copy of the original write methods, with a diagnostic assertion added, aborts in
+the deterministic duplicate-drain test at the second write start with queue size
+one. Without the diagnostic assertion the original methods hang during teardown
+in this fixture; the exact delayed live SIGSEGV was not reproduced.
+
+The client now drains pre-handshake messages synchronously before notifying
+subscribers, has a strand-owned `m_writeInFlight` guard, binds write completions
+explicitly to the strand, and checks ownership and queue emptiness before popping.
+A failed write clears the in-flight flag, disables further writes and reports the
+error rather than retrying an ambiguous partial message. Teardown closes the socket
+and drains cancellation completions before clearing borrowed buffers. Reconnection
+creates a fresh TLS/WebSocket transport: reusing the canceled transport failed the
+new reconnect regression even after callbacks were drained.
+
+The probe writes the same JSON path atomically with `QSaveFile` before connecting,
+after the initial snapshot, every 60 seconds, and on normal/error exit. Status is
+`starting`, `partial`, `complete`, or `failed`; `checkpoint_utc_ms` identifies the
+saved checkpoint and `finalized` records whether the final flush succeeded. Each
+minute also logs elapsed milliseconds, event count and all five encoder byte counts
+through Qt's stderr handler. An unwritable output path fails before network startup.
+
+Periodic reports include completed compressed blocks/columns only. They expose
+`pending_raw_bytes` and leave forming TWAP columns open; they do not flush encoders
+or change compression boundaries. Thus partial rates omit the current tail. A
+process crash preserves the preceding checkpoint, not necessarily the last minute
+of input. Final reports include the normal final partial-column/raw-block flush.
+The synthetic mode checkpoints on simulated time, making kill/recovery tests fast.
+
+New regressions use a local TLS/WebSocket peer for duplicate drains, cancellation
+with an 8 MiB borrowed buffer, reconnect, failed writes and defensive completions.
+The CLI tests kill a subprocess after its first minute checkpoint and read its
+valid partial JSON, then verify that a completed ten-minute synthetic run preserves
+the original byte totals despite checkpointing. The ASan configuration instruments
+the probe, encoder tests, client and these regression tests using
+`-fsanitize=address -fno-omit-frame-pointer` with `-O1 -g`; prebuilt Qt/OpenSSL/zstd
+dependencies are not instrumented. Targeted ASan tests are run with
+`ASAN_OPTIONS=halt_on_error=1:abort_on_error=1`.
+
+Follow-up validation: `cmake --build --preset mac-clang -j 6` passed; full
+`ctest --test-dir build/mac-clang --output-on-failure` passed **42/42** suites
+after rebasing onto `main` (including the two new candle suites).
+The three targeted ASan suites (offline encoders, TLS client regressions and
+probe checkpoint CLI tests) passed **3/3**, comprising 15 individual cases.
+Only those targets and their dependencies were built under ASan. The owner
+should rerun the 30-minute live capture; this follow-up does not claim a new
+live BTC measurement or reproduction of the exact delayed fault.
 
 ## Prior art that changes a decision
 
