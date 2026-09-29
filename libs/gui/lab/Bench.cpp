@@ -107,6 +107,7 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
             if (c.askLo <= c.askHi) { low = std::min(low, data.baseRow + c.askLo); high = std::max(high, data.baseRow + c.askHi); }
         }
         if (low >= high) return fail(QStringLiteral("source has no valid price coverage"));
+        auto sweep = [&](uint32_t widthPx, uint32_t heightPx, int dpr) -> QJsonObject {
         struct ZoomRow {
             double zoom = 0;
             uint64_t visible = 0;
@@ -126,21 +127,24 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
             const double priceSpan = std::max(data.nativeTick * 64.0,
                                               (high - low + 1) * data.nativeTick / zoom);
             const double priceLo = priceMid - priceSpan * 0.5;
-            const double tick = recording::ladderTick(priceSpan / 720.0 * 2.0,
+            const double tick = recording::ladderTick(priceSpan / double(heightPx) * 2.0,
                                                      data.nativeTick, data.priceScale);
             Grid grid;
             grid.timeLo = float(data.columns() * (1.0 - 1.0 / zoom) * 0.5);
             grid.timeHi = float(data.columns() - grid.timeLo);
-            grid.columns = std::clamp<uint32_t>(uint32_t(grid.timeHi - grid.timeLo), 1, 1280);
-            if (levelIndex >= 20) grid.columns = std::min<uint32_t>(grid.columns, 1280u >> (levelIndex - 19));
+            grid.columns = std::clamp<uint32_t>(uint32_t(grid.timeHi - grid.timeLo), 1, widthPx);
+            if (levelIndex >= 20) grid.columns = std::min<uint32_t>(grid.columns, widthPx >> (levelIndex - 19));
             grid.group = static_cast<uint32_t>(std::llround(tick / data.nativeTick));
             const int64_t first = int64_t(std::floor(priceLo / tick)) * grid.group;
             if (first - data.baseRow < std::numeric_limits<int32_t>::min() ||
                 first - data.baseRow > std::numeric_limits<int32_t>::max())
-                return fail(QStringLiteral("bench row offset out of range"));
+                throw std::runtime_error("bench row offset out of range");
             grid.rowLo = int32_t(first - data.baseRow);
-            grid.rowAlignment = int32_t((data.baseRow % grid.group + grid.group) % grid.group);
-            grid.rows = std::clamp<uint32_t>(uint32_t(std::ceil((priceMid + priceSpan * 0.5 - first * data.nativeTick) / tick)), 1, 360);
+            if (data.baseRow < std::numeric_limits<int32_t>::min() ||
+                data.baseRow > std::numeric_limits<int32_t>::max())
+                throw std::runtime_error("bench base row out of range");
+            grid.baseRow = int32_t(data.baseRow);
+            grid.rows = std::clamp<uint32_t>(uint32_t(std::ceil((priceMid + priceSpan * 0.5 - first * data.nativeTick) / tick)), 1, heightPx / 2);
             grid.sizeFloor = float(data.sizeScale.floor);
             grid.codesPerOctave = float(data.sizeScale.codesPerOctave);
             auto &level = levels[levelIndex];
@@ -165,12 +169,12 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
             }
             const auto started = Clock::now();
             if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess)
-                return fail(QStringLiteral("begin bin frame failed"));
+                throw std::runtime_error("begin bin frame failed");
             const bool binned = binner.bin(cb, grid, &error);
             const bool drawn = !binned || i != 0 || binner.draw(cb, smokeTarget.get(), &error);
             const bool frameFinished = rhi->endOffscreenFrame() == QRhi::FrameOpSuccess;
             if (!binned || !drawn || !frameFinished)
-                return fail(QStringLiteral("GPU bin failed: %1").arg(error));
+                throw std::runtime_error(QStringLiteral("GPU bin failed: %1").arg(error).toStdString());
             const double wall = elapsed(started);
             if (i >= 25 && i < 225) {
                 cpu.push_back(wall); level.cpu.push_back(wall);
@@ -182,10 +186,9 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
         }
         std::sort(cpu.begin(), cpu.end()); std::sort(gpu.begin(), gpu.end());
         const auto &times = gpu.size() == cpu.size() ? gpu : cpu;
-        const auto validColumns = std::count_if(data.observedMs.begin(), data.observedMs.end(),
-                                                [](uint32_t ms) { return ms > 0; });
         QJsonArray perZoom;
-        std::cerr << "zoom visible_entries grid rows_per_bin source_cols_per_output gpu_ms_p50 gpu_ms_p95 gpu_ms_max\n";
+        std::cerr << "grid=" << widthPx << 'x' << heightPx << " dpr=" << dpr
+                  << " zoom visible_entries grid rows_per_bin source_cols_per_output gpu_ms_p50 gpu_ms_p95 gpu_ms_max\n";
         for (auto &z : levels) {
             std::sort(z.cpu.begin(), z.cpu.end()); std::sort(z.gpu.begin(), z.gpu.end());
             const auto &t = z.gpu.size() == z.cpu.size() ? z.gpu : z.cpu;
@@ -199,6 +202,15 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
                                        {"source_columns_per_output_column", z.sourcePerOutput},
                                        {"bin_ms_p50", p50}, {"bin_ms_p95", p95}, {"bin_ms_max", max}});
         }
+        return {{"width_px", int(widthPx)}, {"height_px", int(heightPx)}, {"dpr", dpr},
+                {"timing", gpu.size() == cpu.size() ? QStringLiteral("GPU frame timestamp") : QStringLiteral("CPU finished offscreen frame")},
+                {"bin_ms_p50", percentile(times, 0.50)}, {"bin_ms_p95", percentile(times, 0.95)},
+                {"bin_ms_max", times.empty() ? 0 : times.back()}, {"zoom_levels", perZoom}};
+        };
+        const QJsonObject oneX = sweep(1920, 1080, 1);
+        const QJsonObject twoX = sweep(3840, 2160, 2);
+        const auto validColumns = std::count_if(data.observedMs.begin(), data.observedMs.end(),
+                                                [](uint32_t ms) { return ms > 0; });
         print({{"source", synthetic ? QStringLiteral("synthetic") : QStringLiteral("real")},
                {"layer", synthetic ? QStringLiteral("synthetic") : layer},
                {"hours", hours}, {"entries", double(data.rowSide.size())},
@@ -206,10 +218,10 @@ int runBench(int hours, const QString &layer, uint32_t synthetic) {
                {"load_ms", data.loadMs}, {"decode_ms", data.decodeMs}, {"upload_ms", uploadMs},
                {"gpu_bytes", double(binner.gpuBytes())}, {"source_gpu_bytes", double(binner.sourceBytes())},
                {"source_bytes_per_million_entries", double(binner.sourceBytes()) * 1'000'000.0 / data.rowSide.size()},
-               {"passes", 200}, {"fragment_smoke", true},
-               {"timing", gpu.size() == cpu.size() ? QStringLiteral("GPU frame timestamp") : QStringLiteral("CPU finished offscreen frame")},
-               {"bin_ms_p50", percentile(times, 0.50)}, {"bin_ms_p95", percentile(times, 0.95)},
-               {"bin_ms_max", times.empty() ? 0 : times.back()}, {"zoom_levels", perZoom}});
+               {"passes_per_grid", 200}, {"fragment_smoke", true},
+               {"grid_1x", oneX}, {"grid_2x", twoX},
+               {"bin_ms_p50", twoX.value("bin_ms_p50")}, {"bin_ms_p95", twoX.value("bin_ms_p95")},
+               {"bin_ms_max", twoX.value("bin_ms_max")}});
         return 0;
     } catch (const std::exception &e) {
         print({{"error", QString::fromUtf8(e.what())}, {"source", synthetic ? "synthetic" : "real"},

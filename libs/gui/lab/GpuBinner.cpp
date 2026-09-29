@@ -43,17 +43,26 @@ uint64_t GpuBinner::gpuBytes() const {
 }
 
 bool GpuBinner::upload(QRhiCommandBuffer *cb, const recording::RecordingEntries &data, QString *error) {
+    if (!beginUpload(data, error)) return false;
+    while (!uploadComplete())
+        if (!uploadStep(cb, 8 * 1024 * 1024, error)) return false;
+    return true;
+}
+
+bool GpuBinner::beginUpload(const recording::RecordingEntries &data, QString *error) {
     compute_.reset(); graphics_.reset(); computeBindings_.reset(); drawBindings_.reset();
-    packed_.reset(); offsets_.reset(); coverage_.reset(); observed_.reset();
+    packed_.reset(); offsets_.reset(); coverage_.reset(); observed_.reset(); nativeFactor_.reset();
     lodRowSide_.reset(); lodWeighted_.reset(); lodOffsets_.reset(); lodCoverage_.reset(); lodObserved_.reset();
     priceRowSide_.reset(); priceSize_.reset(); priceOffsets_.reset();
     timePriceRowSide_.reset(); timePriceSize_.reset(); timePriceOffsets_.reset();
     for (auto &buffer : dense_) buffer.reset();
     output_.reset(); params_.reset();
     sourceColumns_ = data.columns(); bytes_ = 0;
+    uploadParts_.clear(); uploadPart_ = 0; uploadOffset_ = 0; uploadData_ = nullptr;
     if (!sourceColumns_ || data.rowSide.size() != data.code.size() ||
         data.offsets.size() != size_t(sourceColumns_) + 1 || data.coverage.size() != sourceColumns_ ||
-        data.observedMs.size() != sourceColumns_ ||
+        data.observedMs.size() != sourceColumns_ || data.nativeFactor.size() != sourceColumns_ ||
+        data.columnScale.size() != sourceColumns_ ||
         data.lod.rowSide.size() != data.lod.weightedSize.size() ||
         data.lod.offsets.size() != data.lod.coverage.size() + 1 ||
         data.lod.coverage.size() != data.lod.observedMs.size() ||
@@ -65,10 +74,11 @@ bool GpuBinner::upload(QRhiCommandBuffer *cb, const recording::RecordingEntries 
         return false;
     }
     const auto storage = QRhiBuffer::StorageBuffer;
-    const std::array<const recording::RecordingEntries::DensePriceLod *, 4> dense{
-        &data.dense50, &data.dense100, &data.timeDense50, &data.timeDense100};
+    const std::array<const recording::RecordingEntries::DensePriceLod *, 6> dense{
+        &data.dense10, &data.dense40, &data.dense100,
+        &data.timeDense10, &data.timeDense40, &data.timeDense100};
     for (size_t i = 0; i < dense.size(); ++i) {
-        const size_t expected = i < 2 ? size_t(sourceColumns_) + 1 : data.lod.coverage.size() + 1;
+        const size_t expected = i < 3 ? size_t(sourceColumns_) + 1 : data.lod.coverage.size() + 1;
         if (dense[i]->meta.size() != expected) {
             if (error) *error = QStringLiteral("invalid dense price LOD metadata"); return false;
         }
@@ -78,6 +88,7 @@ bool GpuBinner::upload(QRhiCommandBuffer *cb, const recording::RecordingEntries 
         !make<uint32_t>(rhi_, offsets_, QRhiBuffer::Static, storage, data.offsets.size(), error) ||
         !make<recording::RecordingEntries::Coverage>(rhi_, coverage_, QRhiBuffer::Static, storage, data.coverage.size(), error) ||
         !make<uint32_t>(rhi_, observed_, QRhiBuffer::Static, storage, data.observedMs.size(), error) ||
+        !make<ColumnGpuMeta>(rhi_, nativeFactor_, QRhiBuffer::Static, storage, data.nativeFactor.size(), error) ||
         !make<uint32_t>(rhi_, lodRowSide_, QRhiBuffer::Static, storage, data.lod.rowSide.size(), error) ||
         !make<float>(rhi_, lodWeighted_, QRhiBuffer::Static, storage, data.lod.weightedSize.size(), error) ||
         !make<uint32_t>(rhi_, lodOffsets_, QRhiBuffer::Static, storage, data.lod.offsets.size(), error) ||
@@ -96,42 +107,75 @@ bool GpuBinner::upload(QRhiCommandBuffer *cb, const recording::RecordingEntries 
             !make<std::array<int32_t, 2>>(rhi_, dense_[i * 2 + 1], QRhiBuffer::Static, storage,
                                            dense[i]->meta.size(), error)) return false;
     }
-    auto *updates = rhi_->nextResourceUpdateBatch();
-    if (!data.rowSide.empty()) {
-        std::vector<uint32_t> packed(std::max<size_t>(packedWords, 4), 0);
-        for (size_t i = 0; i < data.rowSide.size(); ++i) {
-            const size_t word = (i / 2) * 3;
-            packed[word + i % 2] = data.rowSide[i];
-            packed[word + 2] |= (data.code[i] & 0xffffu) << ((i % 2) * 16);
-        }
-        updates->uploadStaticBuffer(packed_.get(), packed.data());
-    }
-    updates->uploadStaticBuffer(offsets_.get(), data.offsets.data());
-    updates->uploadStaticBuffer(coverage_.get(), data.coverage.data());
-    updates->uploadStaticBuffer(observed_.get(), data.observedMs.data());
-    if (!data.lod.rowSide.empty()) {
-        updates->uploadStaticBuffer(lodRowSide_.get(), data.lod.rowSide.data());
-        updates->uploadStaticBuffer(lodWeighted_.get(), data.lod.weightedSize.data());
-    }
-    updates->uploadStaticBuffer(lodOffsets_.get(), data.lod.offsets.data());
-    updates->uploadStaticBuffer(lodCoverage_.get(), data.lod.coverage.data());
-    updates->uploadStaticBuffer(lodObserved_.get(), data.lod.observedMs.data());
-    if (!data.priceLod.rowSide.empty()) {
-        updates->uploadStaticBuffer(priceRowSide_.get(), data.priceLod.rowSide.data());
-        updates->uploadStaticBuffer(priceSize_.get(), data.priceLod.size.data());
-    }
-    updates->uploadStaticBuffer(priceOffsets_.get(), data.priceLod.offsets.data());
-    if (!data.timePriceLod.rowSide.empty()) {
-        updates->uploadStaticBuffer(timePriceRowSide_.get(), data.timePriceLod.rowSide.data());
-        updates->uploadStaticBuffer(timePriceSize_.get(), data.timePriceLod.size.data());
-    }
-    updates->uploadStaticBuffer(timePriceOffsets_.get(), data.timePriceLod.offsets.data());
+    auto add = [&](QRhiBuffer *buffer, const auto &values) {
+        if (!values.empty())
+            uploadParts_.push_back({buffer, values.data(), uint32_t(values.size() * sizeof(values[0])), false});
+    };
+    if (!data.rowSide.empty()) uploadParts_.push_back({packed_.get(), nullptr, uint32_t(packedWords * 4), true});
+    add(offsets_.get(), data.offsets);
+    add(coverage_.get(), data.coverage);
+    add(observed_.get(), data.observedMs);
+    columnMetaStaging_.resize(sourceColumns_);
+    for (uint32_t c = 0; c < sourceColumns_; ++c)
+        columnMetaStaging_[c] = {data.nativeFactor[c], float(data.columnScale[c].floor),
+                                 float(data.columnScale[c].codesPerOctave), 0};
+    add(nativeFactor_.get(), columnMetaStaging_);
+    add(lodRowSide_.get(), data.lod.rowSide);
+    add(lodWeighted_.get(), data.lod.weightedSize);
+    add(lodOffsets_.get(), data.lod.offsets);
+    add(lodCoverage_.get(), data.lod.coverage);
+    add(lodObserved_.get(), data.lod.observedMs);
+    add(priceRowSide_.get(), data.priceLod.rowSide);
+    add(priceSize_.get(), data.priceLod.size);
+    add(priceOffsets_.get(), data.priceLod.offsets);
+    add(timePriceRowSide_.get(), data.timePriceLod.rowSide);
+    add(timePriceSize_.get(), data.timePriceLod.size);
+    add(timePriceOffsets_.get(), data.timePriceLod.offsets);
     for (size_t i = 0; i < dense.size(); ++i) {
-        if (!dense[i]->sums.empty()) updates->uploadStaticBuffer(dense_[i * 2].get(), dense[i]->sums.data());
-        updates->uploadStaticBuffer(dense_[i * 2 + 1].get(), dense[i]->meta.data());
+        add(dense_[i * 2].get(), dense[i]->sums);
+        add(dense_[i * 2 + 1].get(), dense[i]->meta);
+    }
+    bytes_ = data.gpuBytes();
+    uploadData_ = &data;
+    return true;
+}
+
+bool GpuBinner::uploadStep(QRhiCommandBuffer *cb, uint32_t budgetBytes, QString *error) {
+    if (!uploadData_ || !cb || !budgetBytes) {
+        if (error) *error = QStringLiteral("upload was not initialized");
+        return false;
+    }
+    if (uploadComplete()) return true;
+    auto *updates = rhi_->nextResourceUpdateBatch();
+    uint32_t remaining = std::max<uint32_t>(budgetBytes, 12);
+    while (uploadPart_ < uploadParts_.size() && remaining >= 12) {
+        const auto &part = uploadParts_[uploadPart_];
+        uint32_t chunk = std::min(part.bytes - uploadOffset_, remaining);
+        if (part.packed) chunk = (chunk / 12) * 12;
+        else chunk = (chunk / 4) * 4;
+        if (!chunk) break;
+        if (part.packed) {
+            std::vector<uint32_t> words(chunk / 4, 0);
+            const size_t firstPair = uploadOffset_ / 12;
+            for (size_t p = 0; p < words.size() / 3; ++p) {
+                const size_t i = (firstPair + p) * 2;
+                words[p * 3] = uploadData_->rowSide[i];
+                words[p * 3 + 2] = uploadData_->code[i] & 0xffffu;
+                if (i + 1 < uploadData_->rowSide.size()) {
+                    words[p * 3 + 1] = uploadData_->rowSide[i + 1];
+                    words[p * 3 + 2] |= (uploadData_->code[i + 1] & 0xffffu) << 16;
+                }
+            }
+            updates->uploadStaticBuffer(part.buffer, uploadOffset_, chunk, words.data());
+        } else {
+            updates->uploadStaticBuffer(part.buffer, uploadOffset_, chunk,
+                                        static_cast<const char *>(part.source) + uploadOffset_);
+        }
+        uploadOffset_ += chunk;
+        remaining -= chunk;
+        if (uploadOffset_ == part.bytes) { ++uploadPart_; uploadOffset_ = 0; }
     }
     cb->resourceUpdate(updates);
-    bytes_ = data.gpuBytes();
     return true;
 }
 
@@ -143,27 +187,32 @@ bool GpuBinner::makeBindings(QString *error) {
         QRhiShaderResourceBinding::bufferLoad(1, cs, offsets_.get()),
         QRhiShaderResourceBinding::bufferLoad(2, cs, coverage_.get()),
         QRhiShaderResourceBinding::bufferLoad(3, cs, observed_.get()),
-        QRhiShaderResourceBinding::bufferLoad(4, cs, lodRowSide_.get()),
-        QRhiShaderResourceBinding::bufferLoad(5, cs, lodWeighted_.get()),
-        QRhiShaderResourceBinding::bufferLoad(6, cs, lodOffsets_.get()),
-        QRhiShaderResourceBinding::bufferLoad(7, cs, lodCoverage_.get()),
-        QRhiShaderResourceBinding::bufferLoad(8, cs, lodObserved_.get()),
-        QRhiShaderResourceBinding::bufferLoad(9, cs, priceRowSide_.get()),
-        QRhiShaderResourceBinding::bufferLoad(10, cs, priceSize_.get()),
-        QRhiShaderResourceBinding::bufferLoad(11, cs, priceOffsets_.get()),
-        QRhiShaderResourceBinding::bufferLoad(12, cs, timePriceRowSide_.get()),
-        QRhiShaderResourceBinding::bufferLoad(13, cs, timePriceSize_.get()),
-        QRhiShaderResourceBinding::bufferLoad(14, cs, timePriceOffsets_.get()),
-        QRhiShaderResourceBinding::bufferLoad(15, cs, dense_[0].get()),
-        QRhiShaderResourceBinding::bufferLoad(16, cs, dense_[1].get()),
-        QRhiShaderResourceBinding::bufferLoad(17, cs, dense_[2].get()),
-        QRhiShaderResourceBinding::bufferLoad(18, cs, dense_[3].get()),
-        QRhiShaderResourceBinding::bufferLoad(19, cs, dense_[4].get()),
-        QRhiShaderResourceBinding::bufferLoad(20, cs, dense_[5].get()),
-        QRhiShaderResourceBinding::bufferLoad(21, cs, dense_[6].get()),
-        QRhiShaderResourceBinding::bufferLoad(22, cs, dense_[7].get()),
-        QRhiShaderResourceBinding::bufferStore(23, cs, output_.get()),
-        QRhiShaderResourceBinding::uniformBuffer(24, cs, params_.get())});
+        QRhiShaderResourceBinding::bufferLoad(4, cs, nativeFactor_.get()),
+        QRhiShaderResourceBinding::bufferLoad(5, cs, lodRowSide_.get()),
+        QRhiShaderResourceBinding::bufferLoad(6, cs, lodWeighted_.get()),
+        QRhiShaderResourceBinding::bufferLoad(7, cs, lodOffsets_.get()),
+        QRhiShaderResourceBinding::bufferLoad(8, cs, lodCoverage_.get()),
+        QRhiShaderResourceBinding::bufferLoad(9, cs, lodObserved_.get()),
+        QRhiShaderResourceBinding::bufferLoad(10, cs, priceRowSide_.get()),
+        QRhiShaderResourceBinding::bufferLoad(11, cs, priceSize_.get()),
+        QRhiShaderResourceBinding::bufferLoad(12, cs, priceOffsets_.get()),
+        QRhiShaderResourceBinding::bufferLoad(13, cs, timePriceRowSide_.get()),
+        QRhiShaderResourceBinding::bufferLoad(14, cs, timePriceSize_.get()),
+        QRhiShaderResourceBinding::bufferLoad(15, cs, timePriceOffsets_.get()),
+        QRhiShaderResourceBinding::bufferLoad(16, cs, dense_[0].get()),
+        QRhiShaderResourceBinding::bufferLoad(17, cs, dense_[1].get()),
+        QRhiShaderResourceBinding::bufferLoad(18, cs, dense_[2].get()),
+        QRhiShaderResourceBinding::bufferLoad(19, cs, dense_[3].get()),
+        QRhiShaderResourceBinding::bufferLoad(20, cs, dense_[4].get()),
+        QRhiShaderResourceBinding::bufferLoad(21, cs, dense_[5].get()),
+        QRhiShaderResourceBinding::bufferLoad(22, cs, dense_[6].get()),
+        QRhiShaderResourceBinding::bufferLoad(23, cs, dense_[7].get()),
+        QRhiShaderResourceBinding::bufferLoad(24, cs, dense_[8].get()),
+        QRhiShaderResourceBinding::bufferLoad(25, cs, dense_[9].get()),
+        QRhiShaderResourceBinding::bufferLoad(26, cs, dense_[10].get()),
+        QRhiShaderResourceBinding::bufferLoad(27, cs, dense_[11].get()),
+        QRhiShaderResourceBinding::bufferStore(28, cs, output_.get()),
+        QRhiShaderResourceBinding::uniformBuffer(29, cs, params_.get())});
     if (!computeBindings_->create()) {
         if (error) *error = QStringLiteral("compute bindings failed");
         return false;
@@ -198,7 +247,7 @@ bool GpuBinner::bin(QRhiCommandBuffer *cb, const Grid &grid, QString *error) {
     Params params{{grid.columns, grid.rows, sourceColumns_, grid.group},
                   {grid.timeLo, grid.timeHi, grid.sizeFloor, grid.codesPerOctave},
                   {grid.rowLo, int32_t(recording::RecordingEntries::kLodMinutes),
-                   int32_t(recording::RecordingEntries::kPriceBlockRows), grid.rowAlignment}};
+                   int32_t(recording::RecordingEntries::kPriceBlockRows), grid.baseRow}};
     auto *updates = rhi_->nextResourceUpdateBatch();
     updates->updateDynamicBuffer(params_.get(), 0, sizeof(params), &params);
     cb->beginComputePass(updates);
@@ -206,6 +255,18 @@ bool GpuBinner::bin(QRhiCommandBuffer *cb, const Grid &grid, QString *error) {
     cb->setShaderResources(computeBindings_.get());
     cb->dispatch(int((grid.columns + 7) / 8), int((grid.rows + 7) / 8), 1);
     cb->endComputePass();
+    return true;
+}
+
+bool GpuBinner::readBack(QRhiCommandBuffer *cb, const Grid &grid, QRhiReadbackResult *result, QString *error) {
+    const uint64_t bytes = uint64_t(grid.columns) * grid.rows * 16;
+    if (!output_ || !result || bytes > output_->size() || bytes > std::numeric_limits<quint32>::max()) {
+        if (error) *error = QStringLiteral("invalid readback grid");
+        return false;
+    }
+    auto *updates = rhi_->nextResourceUpdateBatch();
+    updates->readBackBuffer(output_.get(), 0, quint32(bytes), result);
+    cb->resourceUpdate(updates);
     return true;
 }
 

@@ -11,6 +11,7 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <thread>
 
 namespace lab {
 namespace {
@@ -23,7 +24,16 @@ double msSince(Clock::time_point start) {
 
 class LabRenderer final : public QQuickRhiItemRenderer {
 public:
-    void initialize(QRhiCommandBuffer *) override { binner_ = std::make_unique<GpuBinner>(rhi()); uploaded_.reset(); }
+    void initialize(QRhiCommandBuffer *) override {
+        if (!binner_ || resourceRhi_ != rhi()) {
+            binner_ = std::make_unique<GpuBinner>(rhi());
+            resourceRhi_ = rhi();
+            uploaded_.reset();
+            pending_.reset();
+            pendingData_.reset();
+            lastGrid_.reset();
+        }
+    }
     void synchronize(QQuickRhiItem *item) override {
         auto *lab = static_cast<LabItem *>(item);
         data_ = lab->data_; view_ = lab->view_; version_ = lab->version_;
@@ -37,16 +47,28 @@ public:
         if (!data_ || !binner_) { update(); return; }
         QString error;
         bool uploadedNow = false;
-        if (uploaded_ != data_) {
-            if (!binner_->upload(cb, *data_, &error)) { qWarning("sentinel-lab upload: %s", qPrintable(error)); return; }
-            uploaded_ = data_;
-            uploadedNow = true;
+        if (uploaded_ != data_ && pendingData_ != data_) {
+            pending_ = std::make_unique<GpuBinner>(rhi());
+            if (!pending_->beginUpload(*data_, &error)) { qWarning("sentinel-lab upload: %s", qPrintable(error)); return; }
+            pendingData_ = data_;
         }
+        if (pending_) {
+            if (!pending_->uploadStep(cb, 2 * 1024 * 1024, &error)) {
+                qWarning("sentinel-lab upload: %s", qPrintable(error)); return;
+            }
+            if (pending_->uploadComplete()) {
+                binner_ = std::move(pending_);
+                uploaded_ = std::move(pendingData_);
+                uploadedNow = true;
+            }
+        }
+        if (!uploaded_) { update(); return; }
+        const auto &active = *uploaded_;
         const auto size = renderTarget()->pixelSize();
-        const double native = data_->nativeTick;
+        const double native = active.nativeTick;
         const double height = std::max(1, size.height());
         const double pricePerPx = (view_.priceHi - view_.priceLo) / height;
-        const double tick = recording::ladderTick(pricePerPx * 2.0, native, data_->priceScale);
+        const double tick = recording::ladderTick(pricePerPx * 2.0, native, active.priceScale);
         if (!(tick > 0)) return;
         const auto group = static_cast<uint32_t>(std::llround(tick / native));
         const int64_t firstRow = static_cast<int64_t>(std::floor(view_.priceLo / tick)) * group;
@@ -54,15 +76,18 @@ public:
             (view_.priceHi - double(firstRow) * native) / tick)), 1, uint32_t(std::max(1, size.height() / 2)));
         const auto cols = std::clamp<uint32_t>(static_cast<uint32_t>(std::floor(view_.timeHi - view_.timeLo)),
                                                 1, uint32_t(std::max(1, size.width())));
-        if (firstRow - data_->baseRow < std::numeric_limits<int32_t>::min() ||
-            firstRow - data_->baseRow > std::numeric_limits<int32_t>::max()) return;
+        if (firstRow - active.baseRow < std::numeric_limits<int32_t>::min() ||
+            firstRow - active.baseRow > std::numeric_limits<int32_t>::max()) return;
         Grid grid;
-        grid.timeLo = float(view_.timeLo); grid.timeHi = float(view_.timeHi);
-        grid.rowLo = int32_t(firstRow - data_->baseRow);
-        grid.rowAlignment = int32_t((data_->baseRow % group + group) % group);
+        const double timeShift = double(data_->startMs - active.startMs) / 60'000.0;
+        grid.timeLo = float(view_.timeLo + timeShift); grid.timeHi = float(view_.timeHi + timeShift);
+        grid.rowLo = int32_t(firstRow - active.baseRow);
+        if (active.baseRow < std::numeric_limits<int32_t>::min() ||
+            active.baseRow > std::numeric_limits<int32_t>::max()) return;
+        grid.baseRow = int32_t(active.baseRow);
         grid.group = group; grid.columns = cols; grid.rows = rows;
-        grid.sizeFloor = float(data_->sizeScale.floor);
-        grid.codesPerOctave = float(data_->sizeScale.codesPerOctave);
+        grid.sizeFloor = float(active.sizeScale.floor);
+        grid.codesPerOctave = float(active.sizeScale.codesPerOctave);
         const bool gridChanged = !lastGrid_ || lastGrid_->columns != grid.columns ||
             lastGrid_->rows != grid.rows || lastGrid_->group != grid.group ||
             lastGrid_->rowLo != grid.rowLo || lastGrid_->timeLo != grid.timeLo ||
@@ -80,11 +105,15 @@ public:
         telemetry_->group.store(group); telemetry_->tick.store(tick);
         if (!binner_->draw(cb, renderTarget(), &error)) { qWarning("sentinel-lab draw: %s", qPrintable(error)); return; }
         if (telemetry_->firstFrameMs.load() == 0) telemetry_->firstFrameMs.store(msSince(launched));
+        if (uploaded_ == data_) telemetry_->paintedVersion.store(version_);
         update();
     }
 private:
     std::unique_ptr<GpuBinner> binner_;
+    std::unique_ptr<GpuBinner> pending_;
+    QRhi *resourceRhi_ = nullptr;
     std::shared_ptr<const recording::RecordingEntries> data_, uploaded_;
+    std::shared_ptr<const recording::RecordingEntries> pendingData_;
     std::shared_ptr<Telemetry> telemetry_;
     LabItem::View view_;
     uint64_t version_ = 0;
@@ -99,9 +128,18 @@ LabItem::LabItem(QQuickItem *parent) : QQuickRhiItem(parent) {
 LabItem::~LabItem() { loadGeneration_->fetch_add(1); }
 QQuickRhiItemRenderer *LabItem::createRenderer() { return new LabRenderer; }
 
-void LabItem::accept(std::shared_ptr<const recording::RecordingEntries> data) {
+void LabItem::accept(std::shared_ptr<const recording::RecordingEntries> data, bool preserveView) {
+    const auto previous = data_;
     data_ = std::move(data);
     if (!data_ || data_->nativeTick <= 0) { status_ = QStringLiteral("No source columns"); emit statusChanged(); return; }
+    if (preserveView && previous && !previous->rowSide.empty()) {
+        const double shift = double(previous->startMs - data_->startMs) / 60'000.0;
+        view_.timeLo += shift;
+        view_.timeHi += shift;
+        status_ = QStringLiteral("Ready: %1 entries").arg(data_->rowSide.size());
+        ++version_; emit statusChanged(); update();
+        return;
+    }
     view_.timeLo = 0; view_.timeHi = data_->columns();
     int64_t low = std::numeric_limits<int64_t>::max(), high = std::numeric_limits<int64_t>::min();
     for (const auto &c : data_->coverage) {
@@ -123,12 +161,39 @@ void LabItem::loadReal(int hours, const QString &layer) {
     const QPointer<LabItem> self(this);
     const auto guard = loadGeneration_;
     const auto mutex = loadMutex_;
+    const auto telemetry = telemetry_;
+    const auto firstPaintVersion = std::make_shared<std::atomic<uint64_t>>(std::numeric_limits<uint64_t>::max());
     const int64_t end = QDateTime::currentMSecsSinceEpoch() / 60'000 * 60'000;
-    QThreadPool::globalInstance()->start([self, guard, mutex, generation, hours, layer, end] {
+    QThreadPool::globalInstance()->start([self, guard, mutex, telemetry, firstPaintVersion,
+                                          generation, hours, layer, end] {
         std::scoped_lock lock(*mutex);
         if (guard->load() != generation) return;
         std::shared_ptr<recording::RecordingEntries> result;
         QString error;
+        try {
+            result = std::make_shared<recording::RecordingEntries>(recording::loadRecordingEntries(
+                "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
+                end - int64_t(std::min(hours, 2)) * 3'600'000, end));
+        } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error, firstPaintVersion] {
+            if (!self || guard->load() != generation) return;
+            if (!error.isEmpty()) { self->status_ = error; emit self->statusChanged(); }
+            else {
+                self->accept(result);
+                firstPaintVersion->store(self->version_);
+            }
+        }, Qt::QueuedConnection);
+        if (!error.isEmpty() || hours <= 2 || guard->load() != generation) return;
+        const bool initialHasEntries = result && !result->rowSide.empty();
+        const auto paintDeadline = Clock::now() + std::chrono::seconds(30);
+        while (initialHasEntries && guard->load() == generation && Clock::now() < paintDeadline &&
+               (firstPaintVersion->load() == std::numeric_limits<uint64_t>::max() ||
+                telemetry->paintedVersion.load() < firstPaintVersion->load()))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (guard->load() != generation) return;
+        if (initialHasEntries && telemetry->paintedVersion.load() < firstPaintVersion->load())
+            qWarning("sentinel-lab: initial visible range did not paint within 30 s");
+        result.reset();
         try {
             result = std::make_shared<recording::RecordingEntries>(recording::loadRecordingEntries(
                 "/Volumes/T7/sentinel-data/recording", "BTC-USD", layer.toStdString(),
@@ -137,7 +202,7 @@ void LabItem::loadReal(int hours, const QString &layer) {
         QMetaObject::invokeMethod(QCoreApplication::instance(), [self, guard, generation, result, error] {
             if (!self || guard->load() != generation) return;
             if (!error.isEmpty()) { self->status_ = error; emit self->statusChanged(); }
-            else self->accept(result);
+            else self->accept(result, true);
         }, Qt::QueuedConnection);
     });
 }

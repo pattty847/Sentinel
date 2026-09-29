@@ -12,8 +12,8 @@ namespace recording {
 // Native-row sparse columns for the isolated GPU binning experiment. rowSide
 // carries the ask bit in bit 31; code carries the 15-bit HMC2 log size code.
 // The first/last index of each minute is in offsets, so no entry stores a col.
-// Row indices are relative to baseRow on the least common compatible price
-// tick across the range, preserving exact integer grid alignment.
+// Row indices are relative to baseRow on the finest common price tick
+// (GCD of source tick units), preserving exact integer grid alignment.
 struct RecordingEntries {
     struct Coverage {
         int32_t bidLo = 1, bidHi = 0, askLo = 1, askHi = 0;
@@ -24,7 +24,7 @@ struct RecordingEntries {
         std::vector<float> weightedSize; // decoded size * observed milliseconds
         std::vector<Coverage> coverage;
     } lod;
-    static constexpr uint32_t kPriceBlockRows = 16;
+    static constexpr uint32_t kPriceBlockRows = 10;
     struct PriceLod {
         std::vector<uint32_t> rowSide, offsets;
         std::vector<float> size;
@@ -33,7 +33,7 @@ struct RecordingEntries {
     struct DensePriceLod {
         std::vector<std::array<float, 2>> sums;
         std::vector<std::array<int32_t, 2>> meta; // [first sum offset, global row group base]
-    } dense50, dense100, timeDense50, timeDense100;
+    } dense10, dense40, dense100, timeDense10, timeDense40, timeDense100;
     int64_t startMs = 0;
     int64_t baseRow = 0;
     double nativeTick = 0;
@@ -43,16 +43,20 @@ struct RecordingEntries {
     std::vector<uint32_t> offsets;
     std::vector<Coverage> coverage;
     std::vector<uint32_t> observedMs;
+    std::vector<uint32_t> nativeFactor; // native tick / common fine tick, per minute
+    std::vector<SizeScale> columnScale; // original HMC2 log-code scale, per minute
     double loadMs = 0, decodeMs = 0;
 
     uint32_t columns() const { return static_cast<uint32_t>(coverage.size()); }
     uint64_t gpuBytes() const {
-        return ((rowSide.size() + 1ull) / 2ull) * 12ull + offsets.size() * 4ull + coverage.size() * 20ull +
+        return ((rowSide.size() + 1ull) / 2ull) * 12ull + offsets.size() * 4ull + coverage.size() * 36ull +
             lod.rowSide.size() * 8ull + lod.offsets.size() * 4ull + lod.coverage.size() * 20ull +
             priceLod.rowSide.size() * 8ull + priceLod.offsets.size() * 4ull +
             timePriceLod.rowSide.size() * 8ull + timePriceLod.offsets.size() * 4ull +
-            (dense50.sums.size() + dense100.sums.size() + timeDense50.sums.size() + timeDense100.sums.size()) * 8ull +
-            (dense50.meta.size() + dense100.meta.size() + timeDense50.meta.size() + timeDense100.meta.size()) * 8ull;
+            (dense10.sums.size() + dense40.sums.size() + dense100.sums.size() +
+             timeDense10.sums.size() + timeDense40.sums.size() + timeDense100.sums.size()) * 8ull +
+            (dense10.meta.size() + dense40.meta.size() + dense100.meta.size() +
+             timeDense10.meta.size() + timeDense40.meta.size() + timeDense100.meta.size()) * 8ull;
     }
 };
 

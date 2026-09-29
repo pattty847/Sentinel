@@ -124,13 +124,49 @@ TEST(RecordingEntries, MixedFiveAndTenDollarGridsUseCommonRows) {
         writer.append(r);
     }
     const auto entries = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs, kHmc2MinMs + 2 * minute);
-    ASSERT_EQ(entries.nativeTick, 10);
-    ASSERT_EQ(entries.rowSide.size(), 2u);
+    ASSERT_EQ(entries.nativeTick, 5);
+    ASSERT_EQ(entries.rowSide.size(), 3u);
     EXPECT_EQ(entries.rowSide[0], 0u);
     EXPECT_EQ(entries.rowSide[1], 0u);
-    EXPECT_NEAR(decodeSize(uint16_t(entries.code[1])), decodeSize(encodeSize(2)) + decodeSize(encodeSize(3)), 0.01);
+    EXPECT_EQ(entries.rowSide[2], 1u);
+    EXPECT_EQ(entries.nativeFactor, (std::vector<uint32_t>{2, 1}));
     EXPECT_EQ(entries.coverage[1].bidLo, 0);
-    EXPECT_EQ(entries.coverage[1].bidHi, 0);
+    EXPECT_EQ(entries.coverage[1].bidHi, 1);
+}
+
+TEST(RecordingEntries, KeepsOriginalCodesAndPerMinuteScales) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const std::filesystem::path root(dir.path().toStdString());
+    Hmc2Record r;
+    r.header = {"BTC-USD", "deep", minute, 100, 500, {}, 42};
+    r.bucketStartMs = kHmc2MinMs;
+    r.observedMs = minute;
+    r.bidRowLo = r.bidRowHi = r.askRowLo = r.askRowHi = 20'000;
+    r.midOpen = r.midClose = r.midMin = r.midMax = 100'000;
+    r.entries = {{20'000, false, encodeSize(0.00041, r.header.sizeScale), 0}};
+    const uint16_t firstCode = r.entries[0].twapCode;
+    {
+        Hmc2Store writer(root);
+        writer.append(r);
+        r.bucketStartMs += minute;
+        r.header.sizeScale.floor = 1e-8;
+        r.header.configHash = 43;
+        r.entries[0].twapCode = encodeSize(0.00041, r.header.sizeScale);
+        writer.append(r);
+    }
+    const auto data = loadRecordingEntries(root, "BTC-USD", "deep", kHmc2MinMs, kHmc2MinMs + 2 * minute);
+    ASSERT_EQ(data.baseRow, 20'000);
+    ASSERT_EQ(data.code.size(), 2u);
+    EXPECT_EQ(data.code[0], firstCode);
+    EXPECT_EQ(data.code[1], r.entries[0].twapCode);
+    EXPECT_DOUBLE_EQ(data.columnScale[0].floor, 1e-6);
+    EXPECT_DOUBLE_EQ(data.columnScale[1].floor, 1e-8);
+    const auto cell = binRecordingCell(data, 0, 2, 0, 0, true);
+    EXPECT_TRUE(cell.valid);
+    const double expected = (decodeSize(firstCode, data.columnScale[0]) +
+                             decodeSize(r.entries[0].twapCode, data.columnScale[1])) * 0.5;
+    EXPECT_NEAR(cell.bid, expected, expected * 1e-6);
 }
 
 TEST(RecordingEntries, EightMinuteLodMatchesRawWithUnalignedTimeAndPriceBins) {
@@ -151,7 +187,7 @@ TEST(RecordingEntries, EightMinuteLodMatchesRawWithUnalignedTimeAndPriceBins) {
     }
 }
 
-TEST(RecordingEntries, TimeLodKeepsMissingMinuteInvalid) {
+TEST(RecordingEntries, TimeLodExcludesMissingMinuteFromObservedDuration) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     const std::filesystem::path root(dir.path().toStdString());
@@ -173,8 +209,8 @@ TEST(RecordingEntries, TimeLodKeepsMissingMinuteInvalid) {
     const auto entries = loadRecordingEntries(root, "BTC-USD", "near", kHmc2MinMs, kHmc2MinMs + 8 * minute);
     const auto raw = binRecordingCell(entries, 0, 8, 0, 1, false);
     const auto lod = binRecordingCell(entries, 0, 8, 0, 1, true);
-    EXPECT_FALSE(raw.valid);
-    EXPECT_FALSE(lod.valid);
+    EXPECT_TRUE(raw.valid);
+    EXPECT_TRUE(lod.valid);
     EXPECT_NEAR(raw.bid, lod.bid, 0.0001);
     EXPECT_NEAR(raw.ask, lod.ask, 0.0001);
 }
@@ -182,14 +218,14 @@ TEST(RecordingEntries, TimeLodKeepsMissingMinuteInvalid) {
 TEST(RecordingEntries, AlignedDensePriceSumsMatchRawMinutes) {
     const auto entries = syntheticRecordingEntries(1'000'000);
     for (uint32_t c : {0u, 123u, 999u}) {
-        for (uint32_t row : {0u, 300u, 650u, 950u}) {
-            const auto raw = binRecordingCell(entries, c, c + 1, row, row + 49, false);
-            const auto meta = entries.dense50.meta[c];
-            const auto index = meta[0] + int32_t(row / 50) - meta[1];
+        for (uint32_t row : {0u, 320u, 640u, 960u}) {
+            const auto raw = binRecordingCell(entries, c, c + 1, row, row + 39, false);
+            const auto meta = entries.dense40.meta[c];
+            const auto index = meta[0] + int32_t(row / 40) - meta[1];
             ASSERT_GE(index, meta[0]);
-            ASSERT_LT(index, entries.dense50.meta[c + 1][0]);
-            EXPECT_NEAR(raw.bid, entries.dense50.sums[index][0], std::max(0.02f, raw.bid * 1e-6f));
-            EXPECT_NEAR(raw.ask, entries.dense50.sums[index][1], std::max(0.02f, raw.ask * 1e-6f));
+            ASSERT_LT(index, entries.dense40.meta[c + 1][0]);
+            EXPECT_NEAR(raw.bid, entries.dense40.sums[index][0], std::max(0.02f, raw.bid * 1e-6f));
+            EXPECT_NEAR(raw.ask, entries.dense40.sums[index][1], std::max(0.02f, raw.ask * 1e-6f));
         }
     }
     const auto rawEight = binRecordingCell(entries, 0, 8, 300, 399, false);

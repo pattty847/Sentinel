@@ -10,6 +10,7 @@ namespace lab {
 struct Telemetry {
     std::atomic<double> frameMs{0}, binSubmitMs{0}, gpuFrameMs{0}, firstFrameMs{0};
     std::atomic<uint64_t> gpuBytes{0}, frames{0};
+    std::atomic<uint64_t> paintedVersion{0};
     std::atomic<uint32_t> columns{0}, rows{0}, group{0};
     std::atomic<double> tick{0};
 };
@@ -39,6 +40,6 @@ private:
     std::shared_ptr<std::mutex> loadMutex_ = std::make_shared<std::mutex>();
     QString status_ = QStringLiteral("Select a source");
     uint64_t version_ = 0;
-    void accept(std::shared_ptr<const recording::RecordingEntries> data);
+    void accept(std::shared_ptr<const recording::RecordingEntries> data, bool preserveView = false);
 };
 } // namespace lab
