@@ -1,5 +1,6 @@
 // Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
+#include "PerformanceMonitor.hpp"
 #include "CoordinateSystem.h"
 #include "SentinelLogging.hpp"
 #include "config/GuiConfigStore.hpp"
@@ -1276,12 +1277,8 @@ QString UnifiedGridRenderer::getDataPipelineDebug() const {
   return lines.join('\n');
 }
 QString UnifiedGridRenderer::getPerformanceStats() const {
-  return "N/A (SentinelMonitor removed)";
+  return PerformanceMonitor::instance().frameStatsText();
 }
-double UnifiedGridRenderer::getCurrentFPS() const {
-  return m_currentFps.load();
-}
-double UnifiedGridRenderer::getAverageRenderTime() const { return 0.0; }
 double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 
 void UnifiedGridRenderer::addTrade(const Trade &trade) {

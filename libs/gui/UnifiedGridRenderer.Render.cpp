@@ -488,21 +488,6 @@ void UnifiedGridRenderer::clearLabelGeometry() {
     m_heatmapLabelGlyphs.clear();
 }
 
-void UnifiedGridRenderer::updateFpsEstimate() {
-    if (!m_fpsTimer.isValid()) {
-        m_fpsTimer.start();
-        m_fpsFrameCount = 0;
-    }
-
-    ++m_fpsFrameCount;
-    const qint64 elapsedMs = m_fpsTimer.elapsed();
-    if (elapsedMs >= 1000) {
-        m_currentFps.store((static_cast<double>(m_fpsFrameCount) * 1000.0) / elapsedMs);
-        m_fpsFrameCount = 0;
-        m_fpsTimer.restart();
-    }
-}
-
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
     if (width() <= 0 || height() <= 0 || !m_useGpuHeatmap) {
@@ -587,7 +572,6 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
                    << " high=" << m_chartTextRenderer.droppedHighGlyphs()
                    << " low=" << m_chartTextRenderer.droppedLowGlyphs());
     }
-    updateFpsEstimate();
 
     // ── TPO POC/VAH/VAL horizontal lines ────────────────────────────────────
     renderTpoPocVahValLines(texNode, frame, m_tpoLayerEnabled);

@@ -159,6 +159,16 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_EQ(heatmap.value("servedTimeframesMs").toArray().size(), 1);
     EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value("trades").isNull());
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
+    EXPECT_TRUE(data.value("render").toObject().value("frameP50Ms").isNull());
+    s.frameP50Ms = 4.5;
+    s.frameP95Ms = 7.25;
+    s.renderRateHz = 20.0;
+    s.frameIdle = true;
+    const auto render = stateJson(s).value("data").toObject().value("render").toObject();
+    EXPECT_DOUBLE_EQ(render.value("frameP50Ms").toDouble(), 4.5);
+    EXPECT_DOUBLE_EQ(render.value("frameP95Ms").toDouble(), 7.25);
+    EXPECT_DOUBLE_EQ(render.value("rateHz").toDouble(), 20.0);
+    EXPECT_TRUE(render.value("idle").toBool());
     const auto err = error("invalid_range", "startMs must precede endMs");
     EXPECT_FALSE(err.value("ok").toBool());
     EXPECT_EQ(err.value("error").toObject().value("code").toString(), "invalid_range");

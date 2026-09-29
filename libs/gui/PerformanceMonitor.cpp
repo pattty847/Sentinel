@@ -7,7 +7,8 @@ Sentinel — PerformanceMonitor
 #include <QFile>
 #include <QTextStream>
 #include <QThread>
-#include <numeric>
+#include <QMouseEvent>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -30,6 +31,11 @@ PerformanceMonitor::PerformanceMonitor()
     m_cpuUpdateTimer = new QTimer(this);
     connect(m_cpuUpdateTimer, &QTimer::timeout, this, &PerformanceMonitor::updateCpuMetrics);
     m_cpuUpdateTimer->start(2000);
+
+    m_frameUpdateTimer = new QTimer(this);
+    connect(m_frameUpdateTimer, &QTimer::timeout, this, &PerformanceMonitor::refreshFrameStats);
+    m_frameUpdateTimer->start(250);
+    m_lastBandwidthMs = monotonicNs() / 1000000;
 }
 
 PerformanceMonitor::~PerformanceMonitor() {
@@ -39,46 +45,84 @@ PerformanceMonitor::~PerformanceMonitor() {
 }
 
 void PerformanceMonitor::attachToWindow(QQuickWindow* window) {
-    if (!window) return;
-
-    connect(window, &QQuickWindow::frameSwapped, this, &PerformanceMonitor::onFrameSwapped, Qt::UniqueConnection);
-
-    m_fpsTimer.start();
-    m_frameCount = 0;
+    if (!window || window == m_window) return;
+    if (m_window) {
+        m_window->removeEventFilter(this);
+        disconnect(m_window, nullptr, this, nullptr);
+    }
+    m_window = window;
+    {
+        std::lock_guard lock(m_frameMutex);
+        m_frameWindow.clear();
+    }
+    m_latestFrameStats = {};
+    m_window->installEventFilter(this);
+    connect(window, &QQuickWindow::beforeSynchronizing, this,
+            &PerformanceMonitor::onRenderStart, Qt::DirectConnection);
+    connect(window, &QQuickWindow::afterRendering, this,
+            &PerformanceMonitor::onRenderEnd, Qt::DirectConnection);
 }
 
-void PerformanceMonitor::onFrameSwapped() {
-    const qint64 currentMs = m_fpsTimer.elapsed();
-    static qint64 lastFrameMs = 0;
+int64_t PerformanceMonitor::monotonicNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
-    if (lastFrameMs > 0) {
-        const qint64 frameTimeMs = currentMs - lastFrameMs;
-        m_frameTimesMs.push_back(frameTimeMs);
-        if (m_frameTimesMs.size() > MAX_FRAME_SAMPLES) {
-            m_frameTimesMs.pop_front();
-        }
+void PerformanceMonitor::onRenderStart() {
+    m_renderStartNs.store(monotonicNs(), std::memory_order_relaxed);
+}
 
-        if (!m_frameTimesMs.empty()) {
-            const double avgMs = std::accumulate(m_frameTimesMs.begin(), m_frameTimesMs.end(), 0.0) / m_frameTimesMs.size();
-            m_avgFrameTimeMs.store(avgMs);
+void PerformanceMonitor::onRenderEnd() {
+    const int64_t endNs = monotonicNs();
+    const int64_t startNs = m_renderStartNs.exchange(0, std::memory_order_relaxed);
+    if (startNs <= 0 || endNs < startNs) return;
+    const double durationMs = static_cast<double>(endNs - startNs) / 1000000.0;
+    std::lock_guard lock(m_frameMutex);
+    m_frameWindow.add(endNs / 1000000, durationMs);
+}
+
+bool PerformanceMonitor::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_window) {
+        const auto type = event->type();
+        if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease ||
+            type == QEvent::Wheel || type == QEvent::KeyPress ||
+            type == QEvent::TouchBegin || type == QEvent::TouchUpdate ||
+            (type == QEvent::MouseMove &&
+             static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton)) {
+            m_lastInputMs = monotonicNs() / 1000000;
         }
     }
-    lastFrameMs = currentMs;
+    return QObject::eventFilter(watched, event);
+}
 
-    ++m_frameCount;
-    if (currentMs >= 1000) {
-        const double fps = (static_cast<double>(m_frameCount) * 1000.0) / currentMs;
-        m_currentFps.store(fps);
-        emit fpsChanged(fps);
+QString PerformanceMonitor::frameStatsText() const {
+    const auto& stats = m_latestFrameStats;
+    if (!stats.window.samples) return QStringLiteral("Frame: -- | idle");
+    return QStringLiteral("Frame p50/p95: %1/%2 ms | %3 renders/s%4")
+        .arg(stats.window.p50Ms, 0, 'f', 1)
+        .arg(stats.window.p95Ms, 0, 'f', 1)
+        .arg(stats.window.samples)
+        .arg(stats.idle ? QStringLiteral(" idle") : QString());
+}
 
+void PerformanceMonitor::refreshFrameStats() {
+    const int64_t nowMs = monotonicNs() / 1000000;
+    FrameStatsWindow snapshot;
+    {
+        std::lock_guard lock(m_frameMutex);
+        snapshot = m_frameWindow;
+    }
+    m_latestFrameStats.window = snapshot.summarize(nowMs);
+    m_latestFrameStats.idle = m_lastInputMs == 0 || nowMs - m_lastInputMs >= 1000;
+    emit frameStatsChanged(frameStatsText());
+
+    if (nowMs - m_lastBandwidthMs >= 1000) {
+        const double elapsedSeconds = static_cast<double>(nowMs - m_lastBandwidthMs) / 1000.0;
         const qint64 uploadBytes = m_uploadBytesAccum.exchange(0, std::memory_order_relaxed);
-        const double mbps = (static_cast<double>(uploadBytes) / (1024.0 * 1024.0)) / (currentMs / 1000.0);
+        const double mbps = (static_cast<double>(uploadBytes) / (1024.0 * 1024.0)) / elapsedSeconds;
         m_uploadBandwidthMBps.store(mbps);
         emit uploadBandwidthChanged(mbps);
-
-        m_frameCount = 0;
-        m_fpsTimer.restart();
-        lastFrameMs = 0;
+        m_lastBandwidthMs = nowMs;
     }
 }
 

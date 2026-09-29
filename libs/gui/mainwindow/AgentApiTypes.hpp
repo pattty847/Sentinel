@@ -63,6 +63,10 @@ struct Metadata {
 
 struct StateSnapshot {
     Metadata meta;
+    std::optional<double> frameP50Ms;
+    std::optional<double> frameP95Ms;
+    std::optional<double> renderRateHz;
+    std::optional<bool> frameIdle;
     bool connected = false;
     bool serverConfigReady = false;
     QString serverHost;

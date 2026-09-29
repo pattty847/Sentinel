@@ -765,7 +765,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             color: "#9ef6ff"
             font.pixelSize: 12
-            text: "FPS: 0.0"
+            text: "Frame: -- | idle"
         }
 
         Text {
@@ -783,7 +783,7 @@ Rectangle {
             repeat: true
             running: fpsOverlay.visible
             onTriggered: {
-                fpsText.text = "FPS: " + unifiedGridRenderer.getCurrentFPS().toFixed(1);
+                fpsText.text = unifiedGridRenderer.getPerformanceStats();
                 var zoom = unifiedGridRenderer.getZoomFactor();
                 var t0 = unifiedGridRenderer.getVisibleTimeStart();
                 var t1 = unifiedGridRenderer.getVisibleTimeEnd();

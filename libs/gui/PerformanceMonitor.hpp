@@ -1,11 +1,12 @@
-// Main thread performance metrics tracker; connect to QQuickWindow::frameSwapped for FPS.
+// Chart render-thread timing, summarized on the GUI thread for display/API reads.
 #pragma once
 
+#include "FrameStatsWindow.hpp"
 #include <QObject>
-#include <QElapsedTimer>
+#include <QPointer>
 #include <QQuickWindow>
 #include <atomic>
-#include <deque>
+#include <mutex>
 
 class PerformanceMonitor : public QObject {
     Q_OBJECT
@@ -15,8 +16,12 @@ public:
 
     void attachToWindow(QQuickWindow* window);
 
-    double getCurrentFPS() const { return m_currentFps.load(); }
-    double getAverageFrameTime() const { return m_avgFrameTimeMs.load(); }
+    struct FrameStats {
+        FrameStatsWindow::Summary window;
+        bool idle = true; // no chart input in the past second
+    };
+    FrameStats frameStats() const { return m_latestFrameStats; } // GUI thread only
+    QString frameStatsText() const;
     int getCpuUsage() const { return m_cpuPercent.load(); }
     int getGpuUsage() const { return m_gpuPercent.load(); }
     int getLatency() const { return m_latencyMs.load(); }
@@ -31,14 +36,16 @@ public:
     void addUploadBytes(qint64 n) { m_uploadBytesAccum.fetch_add(n, std::memory_order_relaxed); }
 
 signals:
-    void fpsChanged(double fps);
+    void frameStatsChanged(const QString& text);
     void cpuUsageChanged(int percent);
     void gpuUsageChanged(int percent);
     void latencyChanged(int milliseconds);
     void uploadBandwidthChanged(double mbPerSec);
 
 private slots:
-    void onFrameSwapped();
+    void onRenderStart();
+    void onRenderEnd();
+    void refreshFrameStats();
     void updateCpuMetrics();
 
 private:
@@ -50,14 +57,16 @@ private:
     void initWindowsCounters();
     void cleanupWindowsCounters();
 
-    QElapsedTimer m_fpsTimer;
-    int m_frameCount = 0;
-    std::atomic<double> m_currentFps{0.0};
-    std::atomic<double> m_avgFrameTimeMs{0.0};
-
-    // Frame time history for smoothing
-    std::deque<qint64> m_frameTimesMs;
-    static constexpr int MAX_FRAME_SAMPLES = 60;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    static int64_t monotonicNs();
+    std::mutex m_frameMutex;
+    FrameStatsWindow m_frameWindow;
+    std::atomic<int64_t> m_renderStartNs{0};
+    int64_t m_lastInputMs = 0; // GUI thread only
+    int64_t m_lastBandwidthMs = 0;
+    FrameStats m_latestFrameStats; // GUI thread only
+    QPointer<QQuickWindow> m_window;
+    QTimer* m_frameUpdateTimer = nullptr;
 
     std::atomic<int> m_cpuPercent{0};
     std::atomic<int> m_gpuPercent{0};
