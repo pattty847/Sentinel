@@ -108,6 +108,44 @@ GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
 during the fade. That option needs separate mapping/label lifecycle handling and
 live GPU measurement; it is not implemented here.
 
+### Sparse heatmap core model (integration slice S1)
+
+`libs/core/heatmap` owns the GUI-independent `SparseColumns`, `TimeComposer`,
+CPU `binCell`/`binColumn` reference, and `HeatmapResolution` policy. Each time
+column retains native constituents with config/tick identity, original size
+scale, packed row/side codes, observation duration, and per-side coverage runs.
+Raw minute entries occupy eight bytes; entry-duration sidecars are omitted when
+every entry uses the constituent's observed duration. Composed constituents are
+explicitly marked and validation requires their exact numerator sidecar.
+Composition creates exactly the selected UTC-epoch timeframe (including 16m
+and 90m); only levels that divide it participate. Sealed hour scan ranges take
+precedence over minutes, including gaps. `RecordingLoader` is an HMC2 adapter
+for tests/lab use; hour multiples load deep hours plus the newest open hour's
+minute tail, while odd timeframes use minutes. `startMs/endMs` is only a bounding
+extent: explicit `scannedRanges` proves complete output buckets. `bucketState()`
+distinguishes `NotLoaded`, recorder `Gap`, and `Present`; unscanned chunks and
+incomplete edge buckets never become known gaps. Partial output aggregates are
+omitted, so controllers retain raw input chunks until a full bucket is loaded.
+
+Composition accumulates native rows in bounded dense scratch vectors, with a
+sorted sparse merge for wide row spans, and groups time buckets in a sorted
+vector. Coverage is merged by endpoint sweeps. The CPU reference normalizes each native
+row/side by its own covered duration, then weights physical grids by observed
+duration; config/size-scale changes on the same tick share the denominator.
+Composed entries retain decoded duration-weighted numerators in memory alongside
+their rounded 15-bit codes, avoiding a second log quantization before final
+price binning. Future GPU/wire work must preserve this precision contract to
+keep zero-code-step page parity. Missing columns remain sparse, covered zero
+cells stay valid, incomplete coverage stays invalid, and incompatible grids
+make only their output column unknown. `binCell` remains the independent oracle;
+`binColumn` sweeps each native constituent once and bins the whole price range
+for labels/walls. Auto timeframe selection counts epoch buckets touched by the
+half-open viewport, including partial edge buckets, and returns no choice when
+even 1D exceeds the one-pixel-per-column limit, requiring a span clamp.
+
+The lab remains on `RecordingEntries` until its GPU upload contract is migrated
+in S4; S1 does not alter rendering, live transport, or the existing page path.
+
 ### GPU bin lab (isolated experiment)
 
 `RecordingEntries` reads HMC2 without a writer lock and decodes independent

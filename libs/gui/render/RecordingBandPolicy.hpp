@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/servermodel/PriceLadder.hpp"
+#include "../../core/heatmap/HeatmapResolution.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -34,8 +34,8 @@ constexpr double kFinestNativeTick = 1.0;  // near layer, quote currency
 constexpr double kPriceScale = 100.0;      // price units per 1.0 (BTC-USD cents)
 inline double idealTick(const View& view, double minRowPx) {
     if (!view.valid() || !(minRowPx > 0)) return 0;
-    const double pricePerPx = (view.maxPrice - view.minPrice) / view.heightPx;
-    return recording::ladderTick(pricePerPx * minRowPx, kFinestNativeTick, kPriceScale);
+    return heatmap::idealTick(view.minPrice, view.maxPrice, view.heightPx, minRowPx,
+                             kFinestNativeTick, kPriceScale);
 }
 inline BandRequest requestBand(const View& view, double minRowPx) {
     if (!view.valid()) return {};

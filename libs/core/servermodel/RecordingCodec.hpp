@@ -18,6 +18,15 @@ Threading: pure functions, any thread.
 
 namespace recording {
 
+inline constexpr uint32_t kPartial = 1u << 0;
+inline constexpr uint32_t kResynced = 1u << 1;
+inline constexpr uint32_t kLateEvents = 1u << 2;
+inline constexpr uint32_t kUnderflow = 1u << 3;
+inline constexpr uint32_t kApproximateCoverage = 1u << 4;
+
+// Publication/wire only; never persisted.
+inline constexpr uint32_t kProvisional = 1u << 5;
+
 struct SizeScale {
     double floor = 1e-6;           // smallest size that gets a nonzero code (base units)
     double codesPerOctave = 819.0; // 40 octaves fit in 15 bits at ~0.085% precision
