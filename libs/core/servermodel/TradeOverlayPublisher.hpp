@@ -13,10 +13,9 @@ constexpr int kMaxGridWidth = 2048;
 constexpr int kMaxRows = 2048;
 constexpr size_t kMaxBytes = 8 * 1024 * 1024;
 constexpr size_t kMaxRequestIdLength = 64;
-// Volume profile always covers the UTC day, independent of the TPO session:
-// the live trade tape is retained for at most 24 h, so a longer TPO session
-// (W1, M1) must never make the profile claim more than it has.
-constexpr SessionManager::SessionType kVolumeProfileSession = SessionManager::SessionType::H24;
+// Volume profile follows the TPO session when that session is 24 h or shorter
+// (it fits the retained trade tape, at most 24 h); for W1/M1 it covers the UTC day.
+SessionManager::SessionType volumeProfileSession(SessionManager::SessionType tpoSession);
 struct Grid {
     int width = 512, rows = 2048;
     double tick = 5, maxPrice = 0;
@@ -46,9 +45,18 @@ struct TimeWindow {
 // Exact input interval for the requested output; no blanket retained-tape copy.
 TimeWindow tradeWindow(const Request& request);
 using StopRequested = std::function<bool()>;
-using CandleFetcher = std::function<CandleFetchResult(int64_t startSec, int64_t endSec, int limit)>;
-// Worker-only REST paging for TPO history preceding the retained tape. Empty tape
-// (retainedFromMs == 0) backfills the entire requested historical window.
+using CandleFetcher = std::function<CandleFetchResult(int64_t startSec, int64_t endSec,
+                                                      int64_t granularitySec, int limit)>;
+// Coinbase candle granularities, finest first (seconds), and their REST names.
+constexpr int64_t kCandleGranularitiesSec[] = {60, 300, 900, 1800, 3600, 7200, 21600, 86400};
+const char* candleGranularityName(int64_t granularitySec);  // nullptr when unsupported
+// Coarsest granularity that divides the TPO period and is aligned with the
+// session open, so every candle lies inside one period and a period's letter
+// range is exactly the high/low of its candles. Falls back to one minute.
+int64_t tpoCandleGranularityMs(int64_t periodMs, int64_t sessionStartMs);
+// Worker-only REST paging for TPO history preceding the retained tape, at
+// tpoCandleGranularityMs (a 7-day page at 30-minute periods is one call). Empty
+// tape (retainedFromMs == 0) backfills the entire requested historical window.
 CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
                                 const CandleFetcher& fetch, const StopRequested& stopped = {});
 // Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.

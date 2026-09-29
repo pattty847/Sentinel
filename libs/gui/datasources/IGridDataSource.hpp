@@ -49,7 +49,8 @@ public:
                                    int sessionType,
                                    int64_t endTimeMs,
                                    int count,
-                                   const QString& requestId = {}) = 0;
+                                   const QString& requestId) = 0;
+    virtual void cancelTpoHistory(const QString& symbol, const QString& requestId) = 0;
     virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
                                          qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;

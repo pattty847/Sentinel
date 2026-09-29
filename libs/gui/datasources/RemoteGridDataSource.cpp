@@ -253,6 +253,10 @@ void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
                                requestId.toStdString());
 }
 
+void RemoteGridDataSource::cancelTpoHistory(const QString& symbol, const QString& requestId) {
+    m_client.cancelTpoHistory(symbol.toStdString(), requestId.toStdString());
+}
+
 
 void RemoteGridDataSource::sendTradeCommand(const trading::TradeCommand& command) {
     m_client.sendTradeCommand(command);

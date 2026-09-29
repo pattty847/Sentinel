@@ -318,7 +318,8 @@ refresh sends the forming bucket and, when a boundary was crossed, the preceding
 closed bucket. Long stalls do not enqueue a bucket backlog; older ranges use
 history requests. Footprint uses UTC epoch-aligned half-open buckets; TPO letters
 and brackets align to its own session open. TPO history ends at session close,
-and live TPO never publishes periods outside the session. VP aggregates the current UTC day.
+and live TPO never publishes periods outside the session. VP aggregates the current
+TPO session, or the UTC day for W1/M1.
 
 The existing `footprint_slice`, `tpo_slice`, `volume_profile_slice`, and history
 chunk wire families retain self-describing grid metadata. Overlay history requests
@@ -330,12 +331,21 @@ centred on that grid and aligned to their own tick (`tpoGridFor`), so a whole
 week or month fits; footprint and VP keep the base grid. The GUI maps footprint
 time slots, TPO session columns and VP prices through their own metadata and the
 common viewport. Clients page W1/M1 TPO history in windows of at most 7 days.
-W1 is the crypto week: 7 days from Monday 00:00 UTC. `tpo_history_request` may
-carry a `request_id` string (at most 64 characters); the server echoes it on the
-`tpo_history_chunk` and on `trade_overlay` errors for that request, so the GUI
-sends one page at a time. The live volume profile always covers the current UTC
-day (`session_type` 4), whatever TPO session is selected, because the live trade
-tape is retained for at most 24 hours.
+W1 is the crypto week: 7 days from Monday 00:00 UTC. `tpo_history_request`
+requires a unique `request_id` string (1-64 characters; a request without one is
+rejected). The server echoes it on the `tpo_history_chunk` and on `trade_overlay`
+errors for that request. The GUI keeps one page in flight and accepts only the
+chunk carrying that page's id; any other chunk is dropped before a slice is
+emitted. `tpo_history_cancel` (`symbol`, `request_id`) drops a queued page or
+stops a running one between REST calls; a cancelled page gets no reply. The GUI
+sends it for pages it abandons (45 s timeout) or supersedes (new selection).
+TPO candle fallback uses the coarsest Coinbase granularity that divides the TPO
+period and is aligned with the session open (for example `THIRTY_MINUTE` for
+30-minute periods, so a 7-day page is one REST call); every candle lies inside
+one period, so each period's range is exactly the high/low of its candles.
+The live volume profile follows the TPO session when that session is 24 hours or
+shorter (NY, London, Asia, Australia, H24); for W1 and M1 it covers the current
+UTC day, because the live trade tape is retained for at most 24 hours.
 
 Live overlays and footprint history derive from the retained server trade tape.
 TPO history additionally fills price rows from REST minute-candle high/low ranges

@@ -30,7 +30,8 @@ public:
                            int sessionType,
                            int64_t endTimeMs,
                            int count,
-                           const QString& requestId = {}) override;
+                           const QString& requestId) override;
+    void cancelTpoHistory(const QString& symbol, const QString& requestId) override;
     void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
                                  qint64 startMs, qint64 endMs) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;

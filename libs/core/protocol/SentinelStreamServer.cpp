@@ -363,6 +363,9 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::map<std::string, OverlayState> overlays_;
     std::deque<trade_overlay::Request> overlayHistory_;
+    // Cancel flags of queued/running TPO history requests, by request_id. Bounded
+    // by the history queue (8) plus the running job; erased on completion/cancel.
+    std::map<std::string, std::shared_ptr<std::atomic_bool>> tpoRequestCancel_;
     net::steady_timer overlayTimer_{ws_.get_executor()};
     bool overlayBusy_ = false;
     size_t overlayCursor_ = 0;
@@ -380,12 +383,28 @@ class Session : public std::enable_shared_from_this<Session> {
         }
         return it->second;
     }
-    trade_overlay::StopRequested overlayStopRequested(const std::string& symbol) {
-        return [weak = weak_from_this(), cancelled = overlays_.at(symbol).cancelled] {
+    trade_overlay::StopRequested overlayStopRequested(const std::string& symbol,
+                                                      std::shared_ptr<std::atomic_bool> request = {}) {
+        return [weak = weak_from_this(), cancelled = overlays_.at(symbol).cancelled, request] {
             const auto self = weak.lock();
-            return cancelled->load() || !self || self->closing_.load() || self->closePosted_.load() ||
-                !self->owner_->m_running.load();
+            return cancelled->load() || (request && request->load()) || !self || self->closing_.load() ||
+                self->closePosted_.load() || !self->owner_->m_running.load();
         };
+    }
+    std::shared_ptr<std::atomic_bool> tpoRequestFlag(const std::string& requestId) const {
+        const auto it = tpoRequestCancel_.find(requestId);
+        return it == tpoRequestCancel_.end() ? nullptr : it->second;
+    }
+    // The client abandoned or superseded a TPO history page: drop it if queued,
+    // stop its REST paging if running. No reply is sent for a cancelled page.
+    void cancelOverlayHistory(const nlohmann::json& j) {
+        const auto requestId = j.value("request_id", std::string{});
+        const auto it = tpoRequestCancel_.find(requestId);
+        if (requestId.empty() || it == tpoRequestCancel_.end()) return;
+        it->second->store(true);
+        tpoRequestCancel_.erase(it);
+        std::erase_if(overlayHistory_, [&](const auto& q) { return q.requestId == requestId; });
+        sLog_Data("TPO history cancelled: peer=" << peer_ << " request_id=" << requestId);
     }
     void armOverlayTimer() {
         if (closing_.load()) return;
@@ -409,9 +428,14 @@ class Session : public std::enable_shared_from_this<Session> {
         const auto symbol = j.value("symbol", std::string{});
         const auto tf = j.value("timeframe_ms", int64_t{0});
         std::string requestId;
-        if (tpo && j.contains("request_id") && j["request_id"].is_string()) {
-            requestId = j["request_id"].get<std::string>();
-            if (requestId.size() > trade_overlay::kMaxRequestIdLength) requestId.clear();
+        if (tpo) {
+            if (j.contains("request_id") && j["request_id"].is_string())
+                requestId = j["request_id"].get<std::string>();
+            if (requestId.empty() || requestId.size() > trade_overlay::kMaxRequestIdLength ||
+                tpoRequestCancel_.contains(requestId) || tpoRequestCancel_.size() >= 16) {
+                send_error("trade_overlay", symbol, "TPO history requires a unique request_id of at most 64 characters");
+                return;
+            }
         }
         if (!subscriptions_.contains(symbol) || (overlays_.size() >= 16 && !overlays_.contains(symbol)) ||
             tf < (tpo ? 60000 : 1000) || tf > 86400000 || j.value("count", 0) <= 0 || overlayHistory_.size() >= 8) {
@@ -451,6 +475,7 @@ class Session : public std::enable_shared_from_this<Session> {
         q.endMs = j.value("end_time", int64_t{0});
         q.count = std::clamp(j.value("count", 128), 1, trade_overlay::kMaxColumns);
         q.requestId = requestId;
+        if (tpo) tpoRequestCancel_.emplace(requestId, std::make_shared<std::atomic_bool>(false));
         overlayHistory_.push_back(std::move(q));
     }
     void pumpOverlays() {
@@ -465,7 +490,7 @@ class Session : public std::enable_shared_from_this<Session> {
         trade_overlay::Request q;
         if (!overlayHistory_.empty() && overlayHistoryTurn_) {
             const auto pending = overlayHistory_.front(); overlayHistory_.pop_front();
-            if (!overlays_.contains(pending.symbol)) return;
+            if (!overlays_.contains(pending.symbol)) { tpoRequestCancel_.erase(pending.requestId); return; }
             q = overlays_.at(pending.symbol).request;
             q.kind = pending.kind; q.endMs = pending.endMs; q.count = pending.count; q.requestId = pending.requestId;
             overlayHistoryTurn_ = false;
@@ -479,8 +504,9 @@ class Session : public std::enable_shared_from_this<Session> {
         const auto executor = ws_.get_executor();
         auto* model = &model_;
         auto* rest = &owner_->restClient();
-        auto stopped = overlayStopRequested(q.symbol);
-        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation, stopped] {
+        const auto requestFlag = q.requestId.empty() ? nullptr : tpoRequestFlag(q.requestId);
+        auto stopped = overlayStopRequested(q.symbol, requestFlag);
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation, stopped, requestFlag] {
             trade_overlay::Result result;
             try {
                 std::vector<ServerDataModel::FootprintTradeSample> trades;
@@ -493,8 +519,10 @@ class Session : public std::enable_shared_from_this<Session> {
                     result.error = "overlay trade budget exceeded";
                 } else {
                     const auto candles = trade_overlay::fetchTpoCandles(q, retainedFromMs,
-                        [rest, &q](int64_t startSec, int64_t endSec, int limit) {
-                            return rest->fetchProductCandles(q.symbol, startSec, endSec, "ONE_MINUTE", limit);
+                        [rest, &q](int64_t startSec, int64_t endSec, int64_t granularitySec, int limit) {
+                            const char* name = trade_overlay::candleGranularityName(granularitySec);
+                            if (!name) { CandleFetchResult bad; bad.error = "unsupported candle granularity"; return bad; }
+                            return rest->fetchProductCandles(q.symbol, startSec, endSec, name, limit);
                         }, stopped);
                     if (stopped()) {
                         result.error = "overlay history cancelled";
@@ -504,17 +532,23 @@ class Session : public std::enable_shared_from_this<Session> {
                     } else result = trade_overlay::build(q, trades, candles.candles, retainedFromMs);
                 }
             } catch (const std::exception& e) { result.error = e.what(); }
-            net::post(executor, [weak, q, generation, result = std::move(result)]() mutable {
+            net::post(executor, [weak, q, generation, requestFlag, result = std::move(result)]() mutable {
                 const auto self = weak.lock();
                 if (!self || self->closing_.load()) return;
                 self->overlayBusy_ = false;
+                if (requestFlag && requestFlag->load()) return;  // cancelled by the client: no reply
                 const auto it = self->overlays_.find(q.symbol);
-                if (it == self->overlays_.end() || !self->subscriptions_.contains(q.symbol)) return;
+                if (it == self->overlays_.end() || !self->subscriptions_.contains(q.symbol)) {
+                    self->tpoRequestCancel_.erase(q.requestId);
+                    return;
+                }
                 if (it->second.generation != generation) {
                     if (q.kind != trade_overlay::Kind::Live && self->overlayHistory_.size() < 8)
                         self->overlayHistory_.push_front(q); // rebuilt against the latest selection
+                    else self->tpoRequestCancel_.erase(q.requestId);
                     return;
                 }
+                if (!q.requestId.empty()) self->tpoRequestCancel_.erase(q.requestId);
                 if (!result.error.empty()) {
                     sLog_DataN(5000, "Trade overlay not published: symbol=" << q.symbol << " error=" << result.error);
                     if (q.kind != trade_overlay::Kind::Live) self->send_overlay_error(q.symbol, q.requestId, result.error);
@@ -528,8 +562,10 @@ class Session : public std::enable_shared_from_this<Session> {
             });
         });
         overlayBusy_ = queued;
-        if (!queued && q.kind != trade_overlay::Kind::Live)
+        if (!queued && q.kind != trade_overlay::Kind::Live) {
+            tpoRequestCancel_.erase(q.requestId);
             send_overlay_error(q.symbol, q.requestId, "overlay worker queue full");
+        }
     }
 
 public:
@@ -894,6 +930,8 @@ public:
                 requestOverlayHistory(j, false);
             } else if (type == "tpo_history_request") {
                 requestOverlayHistory(j, true);
+            } else if (type == "tpo_history_cancel") {
+                cancelOverlayHistory(j);
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const int64_t timeframeSec = j.value("timeframe_sec", static_cast<int64_t>(0));

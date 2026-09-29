@@ -819,6 +819,13 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Request>& request) {
+    if (m_dataSource) {
+        for (const auto& abandoned : m_tpoPager.takeAbandoned()) {
+            sLog_Probe("tpo.history", "cancel id=" << abandoned.requestId);
+            m_dataSource->cancelTpoHistory(QString::fromStdString(abandoned.symbol),
+                                           QString::fromStdString(abandoned.requestId));
+        }
+    }
     if (!request || !m_dataSource) {
         if (m_tpoPagerTimer && !m_tpoPager.busy()) m_tpoPagerTimer->stop();
         return;

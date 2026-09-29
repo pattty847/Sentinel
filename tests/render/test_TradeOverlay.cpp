@@ -20,6 +20,7 @@ struct TradeOverlayWireTest {
         else if (type == "tpo_history_chunk") client.handleTpoHistoryChunkMessage(msg);
         else if (type == "volume_profile_slice") client.handleVolumeProfileSliceMessage(msg);
     }
+    static void expectTpo(SentinelStreamClient& client, const std::string& id) { client.m_expectedTpoRequestId = id; }
 };
 struct TradeOverlayModelTest {
     static void seed(ServerDataModel& model, const std::string& symbol,
@@ -228,24 +229,27 @@ TEST_F(TradeOverlay, CandleHistoryFillsOlderPeriodsAndPartialRetentionMinuteOnOw
     q.tpoMs = hour; q.nowMs = day + 23 * hour; q.count = 9;
     const auto retainedFrom = day + 20 * hour + 30000;
     std::vector<std::pair<int64_t, int64_t>> pages;
-    const auto candles = fetchTpoCandles(q, retainedFrom, [&](int64_t startSec, int64_t endSec, int limit) {
+    const auto candles = fetchTpoCandles(q, retainedFrom, [&](int64_t startSec, int64_t endSec, int64_t granSec, int limit) {
         pages.emplace_back(startSec * 1000, endSec * 1000);
-        EXPECT_LE(limit, 350); EXPECT_EQ(endSec - startSec, limit * 60);
+        EXPECT_EQ(granSec, 3600);  // hourly periods from 13:00: ONE_HOUR candles
+        EXPECT_LE(limit, 350); EXPECT_EQ(endSec - startSec, limit * granSec);
         CandleFetchResult r; r.ok = true;
-        for (auto t = startSec * 1000; t < endSec * 1000; t += 60000) {
+        for (auto t = startSec * 1000; t < endSec * 1000; t += granSec * 1000) {
             OHLCVBar bar; bar.timestamp_ms = t; bar.high = 117; bar.low = 113; bar.close = 115;
             r.candles.push_back(bar);
         }
         return r;
     });
-    ASSERT_TRUE(candles.ok); ASSERT_EQ(pages.size(), 2);
+    // One call covers the session up to the candle holding the first retained trade.
+    ASSERT_TRUE(candles.ok); ASSERT_EQ(pages.size(), 1);
     EXPECT_EQ(pages.front().first, day + 13 * hour);
-    EXPECT_EQ(pages.front().second, pages.back().first);
-    EXPECT_EQ(pages.back().second, day + 20 * hour + 60000);
+    EXPECT_EQ(pages.front().second, day + 21 * hour);
+    q.requestId = "tpo-1-0";
     const auto history = build(q, {{retainedFrom, 109, 1, AggressorSide::Buy},
                                   {day + 21 * hour, 111, 2, AggressorSide::Sell}}, candles.candles, retainedFrom);
     ASSERT_TRUE(history.error.empty()) << history.error;
     SentinelStreamClient client("127.0.0.1", "0");
+    TradeOverlayWireTest::expectTpo(client, "tpo-1-0");
     std::vector<TpoSlice> columns;
     QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { columns.push_back(s); });
     TradeOverlayWireTest::receive(client, nlohmann::json::parse(history.messages.at(0)));
@@ -256,7 +260,7 @@ TEST_F(TradeOverlay, CandleHistoryFillsOlderPeriodsAndPartialRetentionMinuteOnOw
     EXPECT_EQ(columns[8].letters[1], '\0'); EXPECT_EQ(columns[8].letters[4], 'I');
     EXPECT_DOUBLE_EQ(columns[0].maxPrice, 120); EXPECT_DOUBLE_EQ(columns[0].tickSize, 2);
     // Tape covering the whole requested window needs no REST work.
-    EXPECT_TRUE(fetchTpoCandles(q, day + 13 * hour, [](auto, auto, auto) {
+    EXPECT_TRUE(fetchTpoCandles(q, day + 13 * hour, [](auto, auto, auto, auto) {
         ADD_FAILURE() << "unnecessary candle fetch"; return CandleFetchResult{};
     }).candles.empty());
 }
@@ -266,10 +270,10 @@ TEST_F(TradeOverlay, RestartWithoutTradesBackfillsClosedSessionAndAnchorsGridFro
     auto q = request(); q.kind = Kind::TpoHistory; q.session = SessionManager::SessionType::NY;
     q.tpoMs = hour; q.nowMs = day + 23 * hour; q.count = 9; q.grid.maxPrice = 0;
     int64_t lastEnd = 0;
-    const auto candles = fetchTpoCandles(q, 0, [&](int64_t startSec, int64_t endSec, int) {
+    const auto candles = fetchTpoCandles(q, 0, [&](int64_t startSec, int64_t endSec, int64_t granSec, int) {
         lastEnd = endSec * 1000;
         CandleFetchResult r; r.ok = true;
-        for (auto t = startSec * 1000; t < endSec * 1000; t += 60000) {
+        for (auto t = startSec * 1000; t < endSec * 1000; t += granSec * 1000) {
             OHLCVBar b; b.timestamp_ms = t; b.high = 117; b.low = 113; b.close = 115;
             r.candles.push_back(b);
         }
@@ -284,7 +288,7 @@ TEST_F(TradeOverlay, RestartWithoutTradesBackfillsClosedSessionAndAnchorsGridFro
         const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(j["columns"][i]["letters"].get<std::string>()));
         EXPECT_TRUE(letters.contains(char('A' + i)));
     }
-    const auto failed = fetchTpoCandles(q, 0, [](auto, auto, auto) {
+    const auto failed = fetchTpoCandles(q, 0, [](auto, auto, auto, auto) {
         CandleFetchResult r; r.error = "REST unavailable"; return r;
     });
     EXPECT_FALSE(failed.ok); EXPECT_EQ(failed.error, "REST unavailable"); EXPECT_TRUE(failed.candles.empty());
@@ -293,7 +297,7 @@ TEST_F(TradeOverlay, RestartWithoutTradesBackfillsClosedSessionAndAnchorsGridFro
 TEST_F(TradeOverlay, CancelledCandleHistoryDoesNotFetchAnotherPageOrReturnPartialHistory) {
     auto q = request(); q.kind = Kind::TpoHistory; q.nowMs = day + 86400000; q.count = 96;
     bool stopped = false; int calls = 0;
-    const auto fetch = [&](auto, auto, auto) {
+    const auto fetch = [&](auto, auto, auto, auto) {
         ++calls; stopped = true;
         CandleFetchResult page; page.ok = true; page.candles.push_back({}); return page;
     };
@@ -393,4 +397,96 @@ TEST_F(TradeOverlay, TpoHistoryChunkEchoesRequestId) {
     EXPECT_EQ(nlohmann::json::parse(tpo.messages.at(0))["request_id"], "tpo-7-2");
     q.requestId.clear();
     EXPECT_FALSE(nlohmann::json::parse(build(q, tape()).messages.at(0)).contains("request_id"));
+}
+
+TEST_F(TradeOverlay, CandleFallbackUsesCoarsestAlignedGranularityAndOneCallPerWeek) {
+    constexpr int64_t minute = 60000, hour = 3600000;
+    EXPECT_EQ(tpoCandleGranularityMs(30 * minute, 0), 30 * minute);
+    EXPECT_EQ(tpoCandleGranularityMs(15 * minute, 0), 15 * minute);
+    EXPECT_EQ(tpoCandleGranularityMs(4 * hour, 0), 2 * hour);       // 6h does not divide 4h
+    EXPECT_EQ(tpoCandleGranularityMs(24 * hour, 0), 24 * hour);
+    EXPECT_EQ(tpoCandleGranularityMs(2 * hour, 13 * hour), hour);   // NY opens at 13:00
+    EXPECT_EQ(tpoCandleGranularityMs(24 * hour, 22 * hour), 2 * hour);  // Australia 22:00
+    EXPECT_EQ(tpoCandleGranularityMs(7 * minute, 0), minute);
+    EXPECT_STREQ(candleGranularityName(1800), "THIRTY_MINUTE");
+    EXPECT_EQ(candleGranularityName(123), nullptr);
+
+    // A whole 7-day W1 page at 30-minute periods is one THIRTY_MINUTE call.
+    constexpr int64_t monday = 1790553600000;
+    auto q = request(); q.kind = Kind::TpoHistory; q.session = SessionManager::SessionType::W1;
+    q.tpoMs = 30 * minute; q.nowMs = monday + 7 * 86400000 + hour; q.endMs = monday + 7 * 86400000; q.count = 336;
+    int calls = 0;
+    const auto candles = fetchTpoCandles(q, 0, [&](int64_t startSec, int64_t endSec, int64_t granSec, int limit) {
+        ++calls;
+        EXPECT_EQ(granSec, 1800); EXPECT_EQ(limit, 336);
+        EXPECT_EQ(startSec * 1000, monday); EXPECT_EQ(endSec * 1000, monday + 7 * 86400000);
+        CandleFetchResult r; r.ok = true;
+        for (auto t = startSec * 1000; t < endSec * 1000; t += granSec * 1000) {
+            OHLCVBar b; b.timestamp_ms = t; b.high = 117; b.low = 113; b.close = 115;
+            r.candles.push_back(b);
+        }
+        return r;
+    });
+    ASSERT_TRUE(candles.ok); EXPECT_EQ(calls, 1); EXPECT_EQ(candles.candles.size(), 336u);
+    // Each period's letters are exactly its own candle's high/low range.
+    const auto history = build(q, {}, candles.candles);
+    ASSERT_TRUE(history.error.empty()) << history.error;
+    const auto j = nlohmann::json::parse(history.messages.at(0));
+    ASSERT_EQ(j["columns"].size(), 336);
+    const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(j["columns"][5]["letters"].get<std::string>()));
+    const double tick = j["columns"][5]["tick_size"].get<double>();
+    const double top = j["columns"][5]["max_price"].get<double>();
+    for (int row = 0; row < letters.size(); ++row) {
+        const double high = top - row * tick, low = high - tick;
+        const bool inside = high > 113 && low <= 117;
+        EXPECT_EQ(letters[row] != '\0', inside) << "row " << row;
+    }
+}
+
+TEST_F(TradeOverlay, VolumeProfileFollowsIntradayTpoSessionsAndFallsBackToUtcDay) {
+    using SessionManager::SessionType;
+    EXPECT_EQ(volumeProfileSession(SessionType::NY), SessionType::NY);
+    EXPECT_EQ(volumeProfileSession(SessionType::London), SessionType::London);
+    EXPECT_EQ(volumeProfileSession(SessionType::Australia), SessionType::Australia);
+    EXPECT_EQ(volumeProfileSession(SessionType::H24), SessionType::H24);
+    EXPECT_EQ(volumeProfileSession(SessionType::W1), SessionType::H24);
+    EXPECT_EQ(volumeProfileSession(SessionType::M1), SessionType::H24);
+
+    constexpr int64_t hour = 3600000;
+    auto q = request(); q.kind = Kind::Live; q.session = SessionType::NY; q.tpoMs = hour;
+    q.nowMs = day + 15 * hour; q.previousMs = q.nowMs - 1000;
+    EXPECT_EQ(tradeWindow(q).startMs, day + 13 * hour);
+    const auto result = build(q, {{day + 14 * hour, 115, 2, AggressorSide::Buy}});
+    ASSERT_TRUE(result.error.empty()) << result.error;
+    bool sawVp = false;
+    for (const auto& message : result.messages) {
+        const auto m = nlohmann::json::parse(message);
+        if (m["type"] != "volume_profile_slice") continue;
+        sawVp = true;
+        EXPECT_EQ(m["session_type"], static_cast<int>(SessionType::NY));
+        EXPECT_EQ(m["session_start_ms"], day + 13 * hour);
+        EXPECT_EQ(m["session_end_ms"], day + 22 * hour);
+    }
+    EXPECT_TRUE(sawVp);
+}
+
+TEST_F(TradeOverlay, TpoHistoryChunkWithoutTheInFlightRequestIdIsDroppedBeforeAnySlice) {
+    auto q = request(); q.kind = Kind::TpoHistory; q.nowMs = day + 1800001; q.requestId = "tpo-3-0";
+    const auto history = build(q, tape()); ASSERT_TRUE(history.error.empty());
+    auto chunk = nlohmann::json::parse(history.messages.at(0));
+    SentinelStreamClient client("127.0.0.1", "0");
+    int slices = 0; QStringList replies;
+    QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto) { ++slices; });
+    QObject::connect(&client, &SentinelStreamClient::tpoHistoryChunkReceived, &client,
+                     [&](const QString&, const QString& id, qint64, int, qint64, int) { replies << id; });
+    TradeOverlayWireTest::expectTpo(client, "tpo-3-1");
+    TradeOverlayWireTest::receive(client, chunk);           // stale id
+    chunk.erase("request_id");
+    TradeOverlayWireTest::receive(client, chunk);           // untagged
+    EXPECT_EQ(slices, 0); EXPECT_TRUE(replies.isEmpty());
+    chunk["request_id"] = "tpo-3-1";
+    TradeOverlayWireTest::receive(client, chunk);
+    EXPECT_EQ(slices, 2); EXPECT_EQ(replies, QStringList{"tpo-3-1"});
+    TradeOverlayWireTest::receive(client, chunk);           // a duplicate is no longer expected
+    EXPECT_EQ(slices, 2);
 }

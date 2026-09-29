@@ -10,9 +10,10 @@
  *     toggling the layer or reapplying the same config does not restart).
  *   - A new selection (symbol, period, session type, session count) starts a new
  *     generation; replies for older generations no longer match and are ignored.
- *   - Request ids are "tpo-<generation>-<page>". A reply without an id (older
- *     server) completes the in-flight page when its symbol, period and session
- *     type match the current selection.
+ *   - Request ids are "tpo-<generation>-<page>" and required: only a reply with
+ *     the in-flight id completes a page (no backward compatibility).
+ *   - A page abandoned by a timeout or superseded by a new selection is reported
+ *     by takeAbandoned() so the caller cancels its server job.
  *
  * Pure and single-threaded (GUI thread). Times are UTC epoch ms.
  */
@@ -55,6 +56,7 @@ public:
         if (busy() && selection == m_selection) {
             return std::nullopt;
         }
+        abandonInFlight();
         ++m_generation;
         m_selection = selection;
         m_queue.assign(pages.begin(), pages.end());
@@ -66,14 +68,9 @@ public:
     // A tpo_history_chunk arrived. Returns the next request when it completed the in-flight page.
     std::optional<Request> onChunk(const std::string& symbol, const std::string& requestId,
                                    int64_t periodMs, int sessionType, int64_t nowMs) {
-        if (!m_inFlight) {
-            return std::nullopt;
-        }
-        const bool matches = requestId.empty()
-            ? (symbol == m_selection.symbol && periodMs == m_selection.periodMs &&
-               sessionType == m_selection.sessionType)
-            : requestId == m_inFlight->requestId;
-        if (!matches) {
+        if (!m_inFlight || requestId.empty() || requestId != m_inFlight->requestId ||
+            symbol != m_selection.symbol || periodMs != m_selection.periodMs ||
+            sessionType != m_selection.sessionType) {
             return std::nullopt;
         }
         m_inFlight.reset();
@@ -96,16 +93,25 @@ public:
             return std::nullopt;
         }
         ++m_failures;
-        m_inFlight.reset();
+        abandonInFlight();
         return sendNext(nowMs);
     }
 
+    // Pages the server should stop working on (timed out or superseded).
+    std::vector<Request> takeAbandoned() {
+        std::vector<Request> out;
+        out.swap(m_abandoned);
+        return out;
+    }
+
+    // Connection lost: nothing to cancel on the server (its session is gone).
     void cancel() {
         ++m_generation;
         m_queue.clear();
         m_inFlight.reset();
     }
 
+    const Selection& selection() const { return m_selection; }
     bool busy() const { return m_inFlight.has_value() || !m_queue.empty(); }
     uint64_t generation() const { return m_generation; }
     int failures() const { return m_failures; }
@@ -113,6 +119,13 @@ public:
     const std::optional<Request>& inFlight() const { return m_inFlight; }
 
 private:
+    void abandonInFlight() {
+        if (m_inFlight) {
+            m_abandoned.push_back(*m_inFlight);
+        }
+        m_inFlight.reset();
+    }
+
     std::optional<Request> sendNext(int64_t nowMs) {
         if (m_queue.empty()) {
             return std::nullopt;
@@ -130,6 +143,7 @@ private:
     Selection m_selection;
     std::deque<HistoryPage> m_queue;
     std::optional<Request> m_inFlight;
+    std::vector<Request> m_abandoned;
     int64_t m_sentAtMs = 0;
     uint64_t m_generation = 0;
     int m_nextPage = 0;

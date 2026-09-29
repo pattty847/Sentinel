@@ -194,19 +194,30 @@ TEST(TpoHistoryPager, PacesOnePageAtATimeAndDedupesTheSameSelection) {
     EXPECT_EQ(pager.failures(), 2);
 }
 
-TEST(TpoHistoryPager, NewSelectionStartsNewGenerationAndIgnoresOldReplies) {
+TEST(TpoHistoryPager, NewSelectionStartsNewGenerationCancelsTheOldPageAndRequiresIds) {
     HistoryPager pager;
     auto a = pager.start({"BTC-USD", 30 * kMin, 4, 3}, {{3000, 10}, {2000, 48}}, 0);
     ASSERT_TRUE(a);
-    auto b = pager.start({"BTC-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 5);
+    EXPECT_TRUE(pager.takeAbandoned().empty());
+    auto b = pager.start({"ETH-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 5);
     ASSERT_TRUE(b);
     EXPECT_EQ(b->requestId, "tpo-2-0");
+    // The superseded page is reported (with its own symbol) so the server job is cancelled.
+    const auto abandoned = pager.takeAbandoned();
+    ASSERT_EQ(abandoned.size(), 1u);
+    EXPECT_EQ(abandoned[0].requestId, a->requestId);
+    EXPECT_EQ(abandoned[0].symbol, "BTC-USD");
     EXPECT_FALSE(pager.onChunk("BTC-USD", a->requestId, 30 * kMin, 4, 6));
-    // Older servers send no id: only a reply for the current selection completes the page.
-    EXPECT_FALSE(pager.onChunk("BTC-USD", "", 30 * kMin, 4, 7));
-    EXPECT_FALSE(pager.onChunk("BTC-USD", "", 30 * kMin, 5, 8));
+    // No id, or the right id for the wrong selection, never completes a page.
+    EXPECT_FALSE(pager.onChunk("ETH-USD", "", 30 * kMin, 5, 7));
+    EXPECT_FALSE(pager.onChunk("ETH-USD", b->requestId, 30 * kMin, 4, 7));
+    EXPECT_TRUE(pager.busy());
+    EXPECT_FALSE(pager.onChunk("ETH-USD", b->requestId, 30 * kMin, 5, 8));  // last page: nothing next
     EXPECT_FALSE(pager.busy());
-    pager.start({"BTC-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 9);
+    // A timed-out page is also reported for cancellation.
+    pager.start({"ETH-USD", 30 * kMin, 5, 3}, {{9000, 336}}, 9);
+    EXPECT_FALSE(pager.onTick(9 + HistoryPager::kTimeoutMs));
+    ASSERT_EQ(pager.takeAbandoned().size(), 1u);
     pager.cancel();
     EXPECT_FALSE(pager.busy());
 }
