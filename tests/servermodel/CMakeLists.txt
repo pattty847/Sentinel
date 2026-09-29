@@ -140,3 +140,8 @@ target_link_libraries(test_recording_server_stop PRIVATE sentinel_core GTest::gt
 add_test(NAME RecordingServerStopTests COMMAND test_recording_server_stop)
 set_tests_properties(RecordingServerStopTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_recording_server_stop)
+
+add_executable(test_price_ladder test_price_ladder.cpp)
+target_include_directories(test_price_ladder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_price_ladder PRIVATE GTest::gtest_main)
+add_test(NAME PriceLadderTests COMMAND test_price_ladder)
