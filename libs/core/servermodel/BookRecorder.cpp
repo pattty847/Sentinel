@@ -49,6 +49,7 @@ struct Layer {
     int64_t hour = -1;
     int64_t hourThroughMs = 0;
     bool hourWatermarkBlocked = false;
+    int64_t publishedMinuteMs = -1, publishedHourMs = -1; // last values handed to readers
     explicit Layer(std::pmr::memory_resource *pool) : rows(pool) {
         rows.reserve(8192);
         touched.reserve(4096);
@@ -572,14 +573,28 @@ struct BookRecorder::Impl {
         if (!s.minuteWatermarkBlocked)
             s.minuteThroughMs = std::max(s.minuteThroughMs, s.closedThrough);
         const auto hourBoundary = floorDiv(s.minuteThroughMs, kHour) * kHour;
-        std::lock_guard lock(watermarksMutex);
+        // commit() runs per message; the watermarks move at most once a minute.
+        // Take the reader lock only when a published value actually changes.
+        bool changed = false;
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &l = s.layers[li];
             if (cfg.layers[li].hourlyRollup && !l.hourWatermarkBlocked &&
                 (l.hour < 0 || l.hour >= hourBoundary || l.hourMinutes.empty()))
                 l.hourThroughMs = std::max(l.hourThroughMs, hourBoundary);
-            watermarksBySeries[{l.header.symbol, l.header.layer}] =
-                {s.minuteThroughMs, cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0};
+            const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
+            changed = changed || l.publishedMinuteMs != s.minuteThroughMs || l.publishedHourMs != hourMs;
+        }
+        if (!changed)
+            return;
+        std::lock_guard lock(watermarksMutex);
+        for (size_t li = 0; li < s.layers.size(); ++li) {
+            auto &l = s.layers[li];
+            const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
+            if (l.publishedMinuteMs == s.minuteThroughMs && l.publishedHourMs == hourMs)
+                continue;
+            watermarksBySeries[{l.header.symbol, l.header.layer}] = {s.minuteThroughMs, hourMs};
+            l.publishedMinuteMs = s.minuteThroughMs;
+            l.publishedHourMs = hourMs;
         }
     }
     void apply(Symbol &s, const Message &m) {

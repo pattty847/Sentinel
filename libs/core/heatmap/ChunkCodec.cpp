@@ -253,7 +253,7 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
             }
             const auto count = r.u<uint32_t>(); totalEntries += count;
             if (totalEntries > nEntries) fail();
-            r.requireCount(count, 3);
+            r.requireCount(totalEntries, 3); // running total: entries are read after all headers
             n.entries.reserve(count);
             if (sidecar) n.entryCoveredMs.reserve(count);
             perNative.push_back((count << 1) | sidecar);
