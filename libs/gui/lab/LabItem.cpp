@@ -1,5 +1,6 @@
 #include "LabItem.hpp"
 #include "heatmap/HeatmapResolution.hpp"
+#include "render/heatmap/HeatmapGpuSelfTest.hpp"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -20,6 +21,7 @@ QString unavailableStatus(QString detail) { return QStringLiteral("Timeframe una
 
 LabItem::LabItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    heatmap::gpu::prewarmPrecisionSelfTest(); // fixture builds on a worker, not in prepare()
     launched_.start();
 }
 LabItem::~LabItem() { loadGeneration_->fetch_add(1); }

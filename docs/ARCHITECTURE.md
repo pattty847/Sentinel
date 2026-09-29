@@ -155,15 +155,17 @@ them, merged full-coverage runs, a 16-row entry index, and per-row values
 entries. `HeatmapGpuBinner` pages a source into fresh buffers within a per-frame
 byte budget, into two grow-only buffer sets (active + spare, at most one
 pending source), while the previous source keeps drawing; entries are split into
-≤ 64 MiB pages for D3D11 and a failed or refused pending source never disturbs
-the active one. One compute invocation per
+≤ 64 MiB pages for D3D11, both sets together are capped (512 MiB default), and a
+failed or refused pending source never disturbs the active one; it is reported
+once and not retried every frame (allocation failures back off 2 s doubling to
+60 s). One compute invocation per
 output cell sums its bin's rows per side in float-float and encodes the 15-bit
 code through a threshold table that is exact against `recording::encodeSize`.
 Codes, side and validity therefore equal `binColumn`. Metal compiles with fast
 math, so the fast kernel launders float-float intermediates through an XOR with a
 runtime zero; without it, two-sum error terms fold away (FM-094). Because that
 relies on observed compiler behaviour, a runtime precision self-test runs once
-per backend/device; until it passes (and forever if it fails) the binner uses a
+per backend/device once a source is active (its CPU fixture is built on a worker); until it passes (and forever if it fails) the binner uses a
 GLSL `precise` kernel variant. The re-bin key is source, grid, output size scale
 and kernel variant.
 Each cell carries one of four states: data, veil (scanned but unproven, or an

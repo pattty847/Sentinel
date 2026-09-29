@@ -6,6 +6,7 @@
 // and the comparison. HeatmapGpuBinner runs it once per QRhi backend/device.
 #include "HeatmapBinGrid.hpp"
 #include "HeatmapGpuSource.hpp"
+#include <memory>
 #include <vector>
 
 namespace heatmap::gpu {
@@ -19,6 +20,12 @@ struct PrecisionSelfTest {
 // plain float sum of the same entries stays below it (every addition's
 // rounding error must survive), plus a block of ordinary random bins.
 PrecisionSelfTest makePrecisionSelfTest();
+// The shared fixture, built once per process on a worker thread (it needs the
+// ~18 ms threshold table). prewarm starts the build and never blocks; call it
+// from item construction. IfReady returns nullptr until the build finished
+// (starting it if needed), so the render thread never builds the fixture.
+void prewarmPrecisionSelfTest();
+std::shared_ptr<const PrecisionSelfTest> precisionSelfTestIfReady();
 // Cells whose code, side or state differ from the oracle.
 size_t countSelfTestMismatches(const PrecisionSelfTest &test, const std::vector<uint32_t> &cells);
 } // namespace heatmap::gpu

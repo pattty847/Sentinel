@@ -13,9 +13,11 @@
 // - Re-requesting the active source cancels a pending upload (A -> B -> A).
 // - The output grid buffer only grows; a resize never touches source buffers.
 // - Entries are split into <= 64 MiB pages (D3D11 guarantees 128 MB per buffer).
-// Precision: the first bin() per QRhi backend/device runs a precision self-test
-// (HeatmapGpuSelfTest) with the fast kernel. Until it resolves, bins use the
-// `precise` kernel; if it fails, the precise kernel stays (and is logged).
+// Precision: once an active source exists, the first frame per QRhi
+// backend/device runs a precision self-test (HeatmapGpuSelfTest; its CPU fixture
+// is built on a worker, so the render thread only records the dispatch and the
+// readback). Until it resolves, bins use the `precise` kernel; if it fails, the
+// precise kernel stays (and is logged).
 #include "HeatmapBinGrid.hpp"
 #include "HeatmapGpuSource.hpp"
 #include <QMatrix4x4>
@@ -23,6 +25,7 @@
 #include <QString>
 #include <QVector>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -58,7 +61,9 @@ enum class KernelVariant { Fast, Precise };
 
 class HeatmapGpuBinner {
 public:
-    explicit HeatmapGpuBinner(QRhi *rhi);
+    static constexpr uint64_t kDefaultMemoryCapBytes = 512ull << 20;
+    // memoryCapBytes bounds both source buffer sets together (active + spare).
+    explicit HeatmapGpuBinner(QRhi *rhi, uint64_t memoryCapBytes = kDefaultMemoryCapBytes);
     ~HeatmapGpuBinner();
     HeatmapGpuBinner(const HeatmapGpuBinner &) = delete;
     HeatmapGpuBinner &operator=(const HeatmapGpuBinner &) = delete;
@@ -66,7 +71,10 @@ public:
     QRhi *rhi() const { return rhi_; }
     // No-op if `source` is already pending; cancels the pending upload if it is
     // the active source; otherwise replaces any pending source. nullptr is a no-op.
-    // Never disturbs the active source; returns false (pending dropped) on error.
+    // Never disturbs the active source; returns false (pending dropped) when it
+    // refuses a source (limits, memory cap). A refused source is reported once:
+    // requesting it again is a silent no-op, forever for limits/cap and until
+    // the retry backoff elapses after an allocation failure (2 s doubling to 60 s).
     bool setSource(std::shared_ptr<const GpuSource> source, QString *error);
     // Creates at most one missing buffer, then records up to budgetBytes of data.
     // Swaps the pending source in when complete. Errors drop only the pending source.
@@ -109,6 +117,14 @@ public:
     // call it every frame so a static view still resolves to the fast kernel.
     void runPrecisionSelfTest(QRhiCommandBuffer *cb) { driveSelfTest(cb); }
 
+    void setMemoryCap(uint64_t bytes) { if (bytes != memoryCapBytes_) { memoryCapBytes_ = bytes; refused_.reset(); } }
+    uint64_t memoryCap() const { return memoryCapBytes_; }
+    // Id of the source currently refused or backing off (0 if none).
+    uint64_t refusedSourceId() const { return refused_ ? refused_->sourceId : 0; }
+    std::chrono::milliseconds retryBackoff() const { return refused_ ? refused_->backoff : std::chrono::milliseconds(0); }
+    void setAllocationFailureForTest(bool fail) { failAllocationsForTest_ = fail; }
+    void setInitialRetryBackoffForTest(std::chrono::milliseconds backoff) { initialRetryBackoff_ = backoff; }
+
     uint64_t gpuBytes() const;
     uint64_t sourceBytes() const;
 
@@ -134,6 +150,17 @@ private:
     bool forced_ = false, testShader_ = false;
     QString fastShaderPath_ = QStringLiteral(":/heatmapgpu/heatmap_bin.comp.qsb");
     std::unique_ptr<SelfTestRun> selfTest_;
+    uint64_t memoryCapBytes_ = kDefaultMemoryCapBytes;
+    struct Refusal {
+        uint64_t sourceId = 0;
+        bool retryable = false; // allocation failure: retry after backoff
+        std::chrono::steady_clock::time_point retryAt;
+        std::chrono::milliseconds backoff{0};
+    };
+    std::optional<Refusal> refused_;
+    static constexpr std::chrono::milliseconds kMaxRetryBackoff{60'000};
+    std::chrono::milliseconds initialRetryBackoff_{2'000};
+    bool failAllocationsForTest_ = false;
     bool rebuildComputeBindings(QString *error);
     bool rebuildDrawBindings(QString *error);
     bool ensurePipeline(KernelVariant variant, QString *error);

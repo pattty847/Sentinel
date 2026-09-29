@@ -1,12 +1,15 @@
 #include "HeatmapRenderNode.hpp"
 #include "SentinelLogging.hpp"
+#include "HeatmapGpuSelfTest.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include <rhi/qrhi.h>
 #include <chrono>
 
 namespace heatmap::gpu {
 HeatmapRenderNode::HeatmapRenderNode(std::shared_ptr<HeatmapRenderStats> stats)
-    : stats_(stats ? std::move(stats) : std::make_shared<HeatmapRenderStats>()) {}
+    : stats_(stats ? std::move(stats) : std::make_shared<HeatmapRenderStats>()) {
+    prewarmPrecisionSelfTest(); // worker-built fixture, ready before the first source uploads
+}
 HeatmapRenderNode::~HeatmapRenderNode() { releaseResources(); }
 
 void HeatmapRenderNode::releaseResources() {
@@ -42,11 +45,13 @@ void HeatmapRenderNode::prepare() {
         rhi_ = rhi;
     }
     stats_->frames.fetch_add(1);
+    binner_->setMemoryCap(frame_.gpuMemoryCapBytes);
     QString error;
     // A failed pending source (allocation, limits) never stops the active one drawing.
     if (!binner_->setSource(frame_.source, &error)) noteError(error);
     else if (!binner_->uploadStep(cb, frame_.uploadBudgetBytes, &error)) noteError(error);
     stats_->uploadPending.store(binner_->uploadPending());
+    stats_->refusedSourceId.store(binner_->refusedSourceId());
     binner_->runPrecisionSelfTest(cb); // once per device; resolves within a frame or two
     const auto active = binner_->activeSource();
     if (!active || frame_.rect.isEmpty()) return;

@@ -16,6 +16,7 @@ namespace heatmap::gpu {
 // Written on the render thread, read anywhere (telemetry and upload pacing).
 struct HeatmapRenderStats {
     std::atomic<uint64_t> frames{0}, rebins{0}, errors{0};
+    std::atomic<uint64_t> refusedSourceId{0}; // source the binner refused or is backing off
     std::atomic<bool> uploadPending{false};
     std::atomic<uint64_t> drawnSourceId{0}, gpuBytes{0};
     std::atomic<double> binSubmitMs{0}, gpuFrameMs{0};
@@ -40,6 +41,7 @@ public:
         QRectF rect;                             // item-space draw rect
         recording::SizeScale outputScale;
         uint64_t uploadBudgetBytes = 2ull << 20; // per frame
+        uint64_t gpuMemoryCapBytes = HeatmapGpuBinner::kDefaultMemoryCapBytes; // both source buffer sets
         DrawStyle style;
     };
     explicit HeatmapRenderNode(std::shared_ptr<HeatmapRenderStats> stats = {});

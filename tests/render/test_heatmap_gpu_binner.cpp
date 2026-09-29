@@ -23,6 +23,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <thread>
 
 namespace {
 using namespace heatmap;
@@ -580,13 +581,18 @@ TEST(HeatmapGpuParity, EntriesSplitAcrossPagesMatchSinglePage) {
 
 // Precision self-test: the shipped fast kernel passes, the precise kernel is
 // exact, and a kernel that lets fast math fold the error terms is rejected.
+// The fixture builds on a worker, so resolution can take a few frames.
 void settleSelfTest(QRhi *rhi, HeatmapGpuBinner &binner) {
-    for (int i = 0; i < 4 && !binner.resolvedKernel(); ++i) {
+    for (int i = 0; i < 500 && !binner.resolvedKernel(); ++i) {
         QRhiCommandBuffer *cb = nullptr;
         ASSERT_EQ(rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
         binner.runPrecisionSelfTest(cb);
         ASSERT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+        if (!binner.resolvedKernel()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+std::shared_ptr<const GpuSource> smallSource() {
+    return std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), hour)));
 }
 TEST(HeatmapGpuSelfTest, FixtureOracleIsSelfConsistent) {
     const auto test = makePrecisionSelfTest();
@@ -599,6 +605,7 @@ TEST(HeatmapGpuSelfTest, ShippedFastKernelPassesOnThisDevice) {
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     HeatmapGpuBinner binner(gpu.rhi.get());
     EXPECT_EQ(binner.currentKernel(), KernelVariant::Precise) << "precise until proven";
+    uploadPaged(gpu.rhi.get(), binner, smallSource(), 1 << 20); // the self-test waits for an active source
     settleSelfTest(gpu.rhi.get(), binner);
     ASSERT_TRUE(binner.resolvedKernel());
     EXPECT_EQ(*binner.resolvedKernel(), KernelVariant::Fast);
@@ -624,6 +631,7 @@ TEST(HeatmapGpuSelfTest, FoldingKernelIsRejectedAndPreciseKernelIsExact) {
     // ...so the self-test rejects it and the binner stays on the precise kernel.
     HeatmapGpuBinner binner(gpu.rhi.get());
     binner.setFastKernelShaderForTest(QStringLiteral(":/testshaders/heatmap_bin_unguarded.comp.qsb"));
+    uploadPaged(gpu.rhi.get(), binner, smallSource(), 1 << 20);
     settleSelfTest(gpu.rhi.get(), binner);
     ASSERT_TRUE(binner.resolvedKernel());
     EXPECT_EQ(*binner.resolvedKernel(), KernelVariant::Precise);
@@ -640,6 +648,99 @@ TEST(HeatmapGpuSelfTest, FoldingKernelIsRejectedAndPreciseKernelIsExact) {
     }
     std::cout << "precise kernel parity: " << tally << '\n';
     EXPECT_TRUE(tally.exact());
+}
+
+TEST(HeatmapGpuSelfTest, WaitsForAnActiveSourceAndAWorkerBuiltFixture) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner::clearSelfTestCacheForTest();
+    HeatmapGpuBinner binner(gpu.rhi.get()); // constructing it starts the worker build
+    for (int i = 0; i < 5; ++i) {
+        QRhiCommandBuffer *cb = nullptr;
+        ASSERT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+        binner.runPrecisionSelfTest(cb);
+        ASSERT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+    }
+    EXPECT_FALSE(binner.resolvedKernel()) << "no active source: nothing to prove yet";
+    // The fixture is produced by the worker without any render-thread call.
+    std::shared_ptr<const PrecisionSelfTest> fixture;
+    for (int i = 0; i < 500 && !fixture; ++i) {
+        fixture = precisionSelfTestIfReady();
+        if (!fixture) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(fixture);
+    EXPECT_EQ(fixture, precisionSelfTestIfReady()) << "built once per process";
+    uploadPaged(gpu.rhi.get(), binner, smallSource(), 1 << 20);
+    settleSelfTest(gpu.rhi.get(), binner);
+    EXPECT_EQ(binner.resolvedKernel(), std::optional<KernelVariant>(KernelVariant::Fast));
+}
+
+TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    HeatmapGpuBinner binner(gpu.rhi.get());
+    auto a = smallSource();
+    uploadPaged(gpu.rhi.get(), binner, a, 1 << 20);
+    auto b = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
+    binner.setInitialRetryBackoffForTest(std::chrono::milliseconds(150));
+    binner.setAllocationFailureForTest(true);
+    QString error;
+    auto step = [&]() {
+        QRhiCommandBuffer *cb = nullptr;
+        EXPECT_EQ(gpu.rhi->beginOffscreenFrame(&cb), QRhi::FrameOpSuccess);
+        const bool ok = binner.uploadStep(cb, 1 << 20, &error);
+        EXPECT_EQ(gpu.rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
+        return ok;
+    };
+    ASSERT_TRUE(binner.setSource(b, &error));
+    EXPECT_FALSE(step()) << "allocation fails";
+    EXPECT_EQ(binner.refusedSourceId(), b->id);
+    EXPECT_EQ(binner.retryBackoff(), std::chrono::milliseconds(150));
+    EXPECT_EQ(binner.activeSource(), a) << "the active source is untouched";
+    // Requested again every frame: no retry until the backoff elapses.
+    binner.setAllocationFailureForTest(false);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_TRUE(binner.setSource(b, &error));
+        EXPECT_FALSE(binner.uploadPending());
+        EXPECT_TRUE(step());
+    }
+    EXPECT_EQ(binner.activeSource(), a);
+    // After the backoff it retries; a second failure doubles the backoff.
+    binner.setAllocationFailureForTest(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(170));
+    ASSERT_TRUE(binner.setSource(b, &error));
+    EXPECT_TRUE(binner.uploadPending());
+    EXPECT_FALSE(step());
+    EXPECT_EQ(binner.retryBackoff(), std::chrono::milliseconds(300));
+    // Once allocation works again and the backoff elapsed, the source lands.
+    binner.setAllocationFailureForTest(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(320));
+    uploadPaged(gpu.rhi.get(), binner, b, 1 << 20);
+    EXPECT_EQ(binner.activeSource(), b);
+    EXPECT_EQ(binner.refusedSourceId(), 0u);
+}
+
+TEST(HeatmapGpuParity, MemoryCapRefusesSourceCleanly) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    auto a = smallSource();
+    auto big = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
+    HeatmapGpuBinner binner(gpu.rhi.get(), a->bytes() * 3); // room for the small one only
+    uploadPaged(gpu.rhi.get(), binner, a, 1 << 20);
+    QString error;
+    EXPECT_FALSE(binner.setSource(big, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("cap"))) << error.toStdString();
+    EXPECT_FALSE(binner.uploadPending());
+    EXPECT_EQ(binner.refusedSourceId(), big->id);
+    error.clear();
+    EXPECT_TRUE(binner.setSource(big, &error)) << "reported once; a repeat request is a silent no-op";
+    EXPECT_TRUE(error.isEmpty());
+    EXPECT_EQ(binner.activeSource(), a);
+    EXPECT_FALSE(binAndRead(gpu.rhi.get(), binner, gridFor(*a, 10, 99'990, 8, 0)).empty());
+    // Raising the cap lifts the refusal.
+    binner.setMemoryCap(HeatmapGpuBinner::kDefaultMemoryCapBytes);
+    uploadPaged(gpu.rhi.get(), binner, big, 1 << 20);
+    EXPECT_EQ(binner.activeSource(), big);
 }
 
 TEST(HeatmapGpuParity, RealRecordingOptIn) {
@@ -703,6 +804,7 @@ public:
     ViewWindow view;
     double tick = 10;
     recording::SizeScale scale;
+    uint64_t cap = HeatmapGpuBinner::kDefaultMemoryCapBytes;
     HeatmapTestItem() { setFlag(ItemHasContents, true); }
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override {
@@ -712,6 +814,7 @@ protected:
         frame.view = view;
         frame.tick.manualTick = tick;
         frame.outputScale = scale;
+        frame.gpuMemoryCapBytes = cap;
         frame.rect = QRectF(0, 0, width(), height());
         node->setFrame(frame);
         return node;
@@ -786,19 +889,22 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     EXPECT_EQ(panned.pixelColor(99 - 6, y), frame.pixelColor(99, y));   // veil/data edge moved 6 px
     EXPECT_EQ(panned.pixelColor(100 - 6, y), frame.pixelColor(100, y));
     EXPECT_NE(panned.pixelColor(99 - 6, y), panned.pixelColor(100 - 6, y));
-    // A source the GPU refuses is reported, and the active picture keeps drawing.
+    // A source over the GPU memory cap is refused once (not every frame), and
+    // the active picture keeps drawing.
     {
-        auto refused = std::make_shared<GpuSource>(*item->source);
-        refused->id += 1'000'000;
-        refused->bucketSlots.clear(); // malformed: setSource refuses it
+        const uint64_t errorsBefore = item->stats->errors.load();
         const auto good = item->source;
-        item->source = refused;
-        item->update();
-        const QImage kept = scene.renderFrame(&error);
+        auto big = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
+        item->source = big;
+        item->cap = good->bytes() * 4;
+        QImage kept;
+        for (int i = 0; i < 5; ++i) { item->update(); kept = scene.renderFrame(&error); }
         ASSERT_FALSE(kept.isNull());
-        EXPECT_GE(item->stats->errors.load(), 1u);
+        EXPECT_EQ(item->stats->errors.load(), errorsBefore + 1) << "reported once, not per frame";
+        EXPECT_EQ(item->stats->refusedSourceId.load(), big->id);
         EXPECT_EQ(kept.pixelColor(150 - 6, y), data);
         item->source = good;
+        item->cap = HeatmapGpuBinner::kDefaultMemoryCapBytes;
     }
     // Zooming the price axis changes the display tick: a new compute pass.
     item->tick = 20;

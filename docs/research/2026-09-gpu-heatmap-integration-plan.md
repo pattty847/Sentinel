@@ -225,6 +225,12 @@ Findings the later slices need:
     - Until the test resolves, the binner uses the `precise` kernel variant. It switches to the fast kernel only if the test passes, and logs the result either way.
     - On this M4 the fast kernel passes. A folding kernel fails 128/384 cells and is rejected (test).
     - The precise fallback measures p95 3.22 ms against the fast kernel's 2.02 ms on deep 1m at 1x.
+- **Second review round:**
+  - *Refused sources are not retried every frame.* The binner remembers the refused source id and reports it once.
+    - A source refused for limits or for the memory cap is never retried until a different source (or cap) arrives.
+    - After an allocation failure it retries after a backoff of 2 s, doubling to 60 s.
+  - *GPU memory cap.* Both source buffer sets together (active + spare) are capped at 512 MiB by default (`Frame::gpuMemoryCapBytes`, a constructor value). Before refusing, the binner releases unused spare pages. A refused source never disturbs the active one.
+  - *Self-test fixture off the render thread.* The fixture (including the ~18 ms threshold table) is built once per process on a worker, started when the item or node is constructed. `prepare()` only records the self-test dispatch and readback, and only once an active source exists.
 - **Unverified:**
   - The on-screen interactive lab window: the screen was locked, so no manual pan or zoom was done.
   - D3D11: HLSL 5.0 shaders compile (all three variants), but nothing has run.

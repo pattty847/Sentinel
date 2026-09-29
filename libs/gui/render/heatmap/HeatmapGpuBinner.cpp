@@ -87,12 +87,14 @@ struct HeatmapGpuBinner::SourceBuffers {
 };
 
 struct HeatmapGpuBinner::SelfTestRun {
-    PrecisionSelfTest fixture = makePrecisionSelfTest();
+    std::shared_ptr<const PrecisionSelfTest> fixture; // built off the render thread
     std::unique_ptr<HeatmapGpuBinner> binner;
     QRhiReadbackResult readback;
 };
 
-HeatmapGpuBinner::HeatmapGpuBinner(QRhi *rhi) : rhi_(rhi) {}
+HeatmapGpuBinner::HeatmapGpuBinner(QRhi *rhi, uint64_t memoryCapBytes) : rhi_(rhi), memoryCapBytes_(memoryCapBytes) {
+    prewarmPrecisionSelfTest(); // no-op after the first call; the build runs on a worker
+}
 HeatmapGpuBinner::~HeatmapGpuBinner() = default;
 
 void HeatmapGpuBinner::clearSelfTestCacheForTest() {
@@ -131,39 +133,67 @@ bool HeatmapGpuBinner::setSource(std::shared_ptr<const GpuSource> source, QStrin
         return true;
     }
     if (pending_ && spare_->source == source) return true;
-    if (source->columnGroups.empty() || source->bucketSlots.empty()) {
-        dropPending();
-        return fail(error, QStringLiteral("empty heatmap GPU source"));
+    // A refused source is not retried every frame: never (limits, cap) or only
+    // after its backoff (allocation failure). It was reported once already.
+    if (refused_ && refused_->sourceId == source->id &&
+        (!refused_->retryable || std::chrono::steady_clock::now() < refused_->retryAt)) {
+        if (pending_) dropPending();
+        return true;
     }
-    if (source->entryPages() > kMaxEntryPages) {
+    if (refused_ && refused_->sourceId != source->id) refused_.reset();
+    auto refuse = [&](const QString &message) {
         dropPending();
-        return fail(error, QStringLiteral("heatmap source needs more than %1 entry pages").arg(kMaxEntryPages));
-    }
+        refused_ = Refusal{source->id, false, {}, {}};
+        return fail(error, message);
+    };
+    if (source->columnGroups.empty() || source->bucketSlots.empty())
+        return refuse(QStringLiteral("empty heatmap GPU source"));
+    if (source->entryPages() > kMaxEntryPages)
+        return refuse(QStringLiteral("heatmap source needs more than %1 entry pages").arg(kMaxEntryPages));
     if (!spare_) spare_ = std::make_unique<SourceBuffers>();
     dropPending();
     auto &s = *spare_;
+    const auto &src = *source;
+    struct Spec { std::unique_ptr<QRhiBuffer> *slot; const void *data; uint64_t bytes, limit; };
+    std::vector<Spec> specs{
+        {&s.bucketSlots, src.bucketSlots.data(), src.bucketSlots.size() * 4ull, kMaxGpuBufferBytes},
+        {&s.columnGroups, src.columnGroups.data(), src.columnGroups.size() * 4ull, kMaxGpuBufferBytes},
+        {&s.groups, src.groups.data(), src.groups.size() * sizeof(GroupMeta), kMaxGpuBufferBytes},
+        {&s.runs, src.runs.data(), src.runs.size() * 8ull, kMaxGpuBufferBytes},
+        {&s.rowIndex, src.rowIndex.data(), src.rowIndex.size() * 4ull, kMaxGpuBufferBytes}};
+    const uint64_t pageWords = src.entriesPerPage() * src.wordsPerEntry();
+    const uint32_t pageCount = std::max<uint32_t>(src.entryPages(), 1);
+    for (uint32_t p = 0; p < pageCount; ++p) {
+        const uint64_t first = uint64_t(p) * pageWords;
+        const uint64_t words = first < src.entries.size() ? std::min<uint64_t>(pageWords, src.entries.size() - first) : 0;
+        specs.push_back({&s.pages[p], src.entries.data() + first, words * 4, pageWords * 4});
+    }
+    auto neededOf = [](const Spec &spec) { return std::max<uint64_t>((spec.bytes + 15) / 16 * 16, 16); };
+    auto grownOf = [&](const Spec &spec) { return std::min(spec.limit, neededOf(spec) + neededOf(spec) / 8); };
+    // GPU memory cap over both buffer sets (active + spare after this upload).
+    auto projected = [&] {
+        uint64_t total = active_ ? active_->bytes() : 0;
+        for (const auto &spec : specs) {
+            const uint64_t have = *spec.slot ? (*spec.slot)->size() : 0;
+            total += have >= neededOf(spec) ? have : grownOf(spec);
+        }
+        for (uint32_t p = pageCount; p < kMaxEntryPages; ++p) if (s.pages[p]) total += s.pages[p]->size();
+        return total;
+    };
+    if (projected() > memoryCapBytes_) {
+        for (uint32_t p = pageCount; p < kMaxEntryPages; ++p) s.pages[p].reset(); // spare capacity we can give back
+        if (const uint64_t total = projected(); total > memoryCapBytes_)
+            return refuse(QStringLiteral("heatmap source needs %1 MiB of GPU buffers with the active one; cap is %2 MiB")
+                              .arg(total >> 20).arg(memoryCapBytes_ >> 20));
+    }
     s.source = source;
     s.part = 0;
     s.offset = 0;
+    s.pageCount = pageCount;
     // Grow-only: reuse any buffer that is already large enough; plan the rest.
-    auto plan = [&](std::unique_ptr<QRhiBuffer> &slot, const void *data, uint64_t bytes, uint64_t limit) {
-        const uint64_t needed = std::max<uint64_t>((bytes + 15) / 16 * 16, 16);
-        if (!slot || slot->size() < needed)
-            s.needs.push_back({&slot, std::min(limit, needed + needed / 8)}); // 1/8 headroom
-        if (bytes) s.parts.push_back({&slot, static_cast<const char *>(data), bytes});
-    };
-    const auto &src = *source;
-    plan(s.bucketSlots, src.bucketSlots.data(), src.bucketSlots.size() * 4ull, kMaxGpuBufferBytes);
-    plan(s.columnGroups, src.columnGroups.data(), src.columnGroups.size() * 4ull, kMaxGpuBufferBytes);
-    plan(s.groups, src.groups.data(), src.groups.size() * sizeof(GroupMeta), kMaxGpuBufferBytes);
-    plan(s.runs, src.runs.data(), src.runs.size() * 8ull, kMaxGpuBufferBytes);
-    plan(s.rowIndex, src.rowIndex.data(), src.rowIndex.size() * 4ull, kMaxGpuBufferBytes);
-    const uint64_t pageWords = src.entriesPerPage() * src.wordsPerEntry();
-    s.pageCount = std::max<uint32_t>(src.entryPages(), 1);
-    for (uint32_t p = 0; p < s.pageCount; ++p) {
-        const uint64_t first = uint64_t(p) * pageWords;
-        const uint64_t words = first < src.entries.size() ? std::min<uint64_t>(pageWords, src.entries.size() - first) : 0;
-        plan(s.pages[p], src.entries.data() + first, words * 4, pageWords * 4);
+    for (const auto &spec : specs) {
+        if (!*spec.slot || (*spec.slot)->size() < neededOf(spec)) s.needs.push_back({spec.slot, grownOf(spec)});
+        if (spec.bytes) s.parts.push_back({spec.slot, static_cast<const char *>(spec.data), spec.bytes});
     }
     pending_ = true;
     return true;
@@ -178,10 +208,17 @@ bool HeatmapGpuBinner::uploadStep(QRhiCommandBuffer *cb, uint64_t budgetBytes, Q
     while (!s.needs.empty()) {
         const auto need = s.needs.front();
         if (created && created + need.bytes > kSmallAllocationBytes) break;
-        auto buffer = makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, need.bytes, error);
+        auto buffer = failAllocationsForTest_ ? nullptr
+            : makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, need.bytes, error);
+        if (!buffer && failAllocationsForTest_ && error) *error = QStringLiteral("GPU buffer allocation failed (test)");
         if (!buffer) { // keep the active source; only the pending one is lost
+            const uint64_t id = s.source->id;
+            const auto backoff = refused_ && refused_->sourceId == id && refused_->retryable
+                ? std::min(refused_->backoff * 2, kMaxRetryBackoff) : initialRetryBackoff_;
+            refused_ = Refusal{id, true, std::chrono::steady_clock::now() + backoff, backoff};
             pending_ = false;
             s.source.reset(); s.needs.clear(); s.parts.clear();
+            if (error) *error += QStringLiteral("; retrying this source in %1 ms").arg(backoff.count());
             return false;
         }
         *need.slot = std::move(buffer); // a replaced buffer is released by QRhi after in-flight frames
@@ -203,6 +240,7 @@ bool HeatmapGpuBinner::uploadStep(QRhiCommandBuffer *cb, uint64_t budgetBytes, Q
     if (s.part >= s.parts.size()) {
         std::swap(active_, spare_);
         pending_ = false;
+        if (refused_ && refused_->sourceId == active_->source->id) refused_.reset(); // a retry succeeded
         if (spare_) { // the retired set (none after the first upload) keeps its GPU capacity
             spare_->source.reset(); // but frees the retired source's CPU memory
             spare_->parts.clear();
@@ -283,17 +321,23 @@ void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
         }
     }
     if (!selfTest_) {
+        // Only once there is something to draw, and only with the fixture that
+        // a worker built: prepare() records the dispatch and readback, nothing more.
+        if (!active_) return;
+        auto fixture = precisionSelfTestIfReady();
+        if (!fixture) return;
         // Run the fast kernel on the fixture in its own binner; the readback
         // lands when this frame completes. Meanwhile bins use the precise kernel.
         selfTest_ = std::make_unique<SelfTestRun>();
         auto &run = *selfTest_;
+        run.fixture = std::move(fixture);
         run.binner = std::make_unique<HeatmapGpuBinner>(rhi_);
         run.binner->fastShaderPath_ = fastShaderPath_;
         run.binner->forceKernel(KernelVariant::Fast);
         QString error;
-        auto source = std::make_shared<const GpuSource>(run.fixture.source);
+        auto source = std::make_shared<const GpuSource>(run.fixture->source);
         if (!run.binner->setSource(source, &error) || !run.binner->uploadAll(cb, &error) ||
-            !run.binner->bin(cb, run.fixture.grid, {}, &error) || !run.binner->readBack(cb, &run.readback, &error)) {
+            !run.binner->bin(cb, run.fixture->grid, {}, &error) || !run.binner->readBack(cb, &run.readback, &error)) {
             sLog_Warning("heatmap gpu: precision self-test could not run (" << error
                          << "); using the precise kernel");
             resolved_ = KernelVariant::Precise;
@@ -302,10 +346,10 @@ void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
         return;
     }
     auto &run = *selfTest_;
-    if (run.readback.data.size() != qsizetype(run.fixture.expected.size() * 4)) return; // still in flight
-    std::vector<uint32_t> cells(run.fixture.expected.size());
+    if (run.readback.data.size() != qsizetype(run.fixture->expected.size() * 4)) return; // still in flight
+    std::vector<uint32_t> cells(run.fixture->expected.size());
     std::memcpy(cells.data(), run.readback.data.constData(), cells.size() * 4);
-    const size_t mismatches = countSelfTestMismatches(run.fixture, cells);
+    const size_t mismatches = countSelfTestMismatches(*run.fixture, cells);
     resolved_ = mismatches ? KernelVariant::Precise : KernelVariant::Fast;
     if (mismatches)
         sLog_Warning("heatmap gpu: fast kernel failed the precision self-test on " << deviceKey() << " ("

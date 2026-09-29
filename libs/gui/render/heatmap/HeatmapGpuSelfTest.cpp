@@ -1,6 +1,8 @@
 #include "HeatmapGpuSelfTest.hpp"
 #include "heatmap/BinCell.hpp"
 #include <cmath>
+#include <future>
+#include <mutex>
 #include <random>
 
 namespace heatmap::gpu {
@@ -78,6 +80,23 @@ PrecisionSelfTest makePrecisionSelfTest() {
                 ((cells[y].valid ? 3u : 2u) << 16);
     }
     return test;
+}
+
+namespace {
+std::once_flag fixtureOnce;
+std::shared_future<std::shared_ptr<const PrecisionSelfTest>> fixtureFuture;
+} // namespace
+void prewarmPrecisionSelfTest() {
+    std::call_once(fixtureOnce, [] {
+        fixtureFuture = std::async(std::launch::async, [] {
+            return std::shared_ptr<const PrecisionSelfTest>(std::make_shared<PrecisionSelfTest>(makePrecisionSelfTest()));
+        }).share();
+    });
+}
+std::shared_ptr<const PrecisionSelfTest> precisionSelfTestIfReady() {
+    prewarmPrecisionSelfTest();
+    if (fixtureFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+    return fixtureFuture.get();
 }
 
 size_t countSelfTestMismatches(const PrecisionSelfTest &test, const std::vector<uint32_t> &cells) {
