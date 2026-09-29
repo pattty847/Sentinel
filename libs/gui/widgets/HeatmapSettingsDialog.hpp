@@ -34,5 +34,7 @@ private:
     QLabel* m_floorLabel = nullptr;
     QComboBox* m_tpoTimeframeCombo = nullptr;
     QComboBox* m_tpoSessionCombo = nullptr;
+    QComboBox* m_tpoLayoutCombo = nullptr;
+    QComboBox* m_tpoThemeCombo = nullptr;
     QPushButton* m_logButton = nullptr;
 };
