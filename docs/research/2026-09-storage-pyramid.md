@@ -79,6 +79,14 @@ Capture contract:
 4. Report frames per second (mean and p99), bytes per day as received, gaps, reconnects and
    snapshot sizes.
 
+**Decided (owner, 2026-09-29 PM): raw deltas + periodic keyframes (option A) is the storage
+method.** Per-second snapshots lose everything inside a second, so they cannot meet "full
+fine-detail history recoverable". Option B is still measured below, only as a reference point
+for the owner's learning and for keyframe spacing. The pristine capture is approved; the owner
+has about 800 GB on the T7 for it and will add drives as needed, and wants to learn the
+compression side hands-on (a compression lab: a bench tool that replays captured raw data
+through candidate encodings and prints bytes and speed).
+
 **Benchmark: raw deltas + periodic keyframes vs full-book snapshots every second.** Replay the
 capture offline through both encoders:
 - **A.** Canonical events (integer ticks, integer quantity atoms, varint timestamp and sequence

@@ -2,7 +2,7 @@
 
 Status 2026-09-29: S1, S2 and S4 landed; TPO profiles landed. Next: legacy phase 2 (L), then S3. See section 4.
 
-## Owner decisions (2026-09-29)
+## Owner decisions (2026-09-29, tick contract revised the same afternoon)
 
 These decisions override every other statement in this plan and in older research notes.
 Where a choice is still open, benchmark it. Do not invent a product rule.
@@ -28,7 +28,8 @@ The server never builds viewport-specific pages.
 - Windows D3D11 testing by the owner (`docs/WINDOWS_GPU_TESTS.md`).
 
 **REJECTED**
-- Automatic tick changes driven by zoom.
+- Aggregating a block of rows by anything other than its defined statistic (for example drawing
+  only the strongest constituent row): it changes what a cell means.
 - Silent 1m -> 5m switches for GPU budget (and any automatic timeframe change on zoom).
 - Near/deep as permanent product or renderer semantics. They may exist only during migration.
 - Permanent parallel architectures (page path, re-band path, near/deep path and GPU path side
@@ -42,35 +43,39 @@ The server never builds viewport-specific pages.
 - True pristine L2 rate; raw deltas + keyframes vs full snapshots every second; 100 ms
   retention; the long-term aggregate schema (storage doc).
 
-**Heatmap product contract**
+**Heatmap product contract** (full detail: `2026-09-heatmap-interaction-spec.md`)
 - Three separate concepts: source resolution (stored L2 and serving level), heatmap
   timeframe, and heatmap price tick.
-- **Zoom and pan are camera operations.** They change pixels per column and per row only.
-  They never change timeframe or tick.
-- Zoom-out clamp: at most one selected time column per screen pixel and one selected price
-  row per screen pixel. Never reduce resolution silently.
-- A timeframe change may select that asset's default tick for the timeframe (for example BTC:
-  1m fine, 5m coarser, 1h coarser; the exact ladder is open). Zoom may not.
-- Ticks are discrete, per-asset presets (native exchange tick, price magnitude, product
-  presets). No arbitrary floats. The finest user-facing BTC tick is about $10.
-- A preset must be a multiple of the source's `commonTick()` (S4 finding). The recorded BTC
-  deep grid mixes $10 and $5, so BTC presets are multiples of $10. A $25 preset veils every
-  $10 column.
-- Re-binning is expected for: an explicit tick change, a timeframe change, new or revised
-  source data, new chunks, a source generation or config change. Never for zoom.
+- **Timeframe:** a column is exactly the selected timeframe. Zoom and pan never change the
+  timeframe (no auto-timeframe). Time zoom-out clamps at one column per screen pixel.
+- **Tick modes.** *Auto* (default): the tick follows zoom, the smallest preset at least
+  `minRowPx` (2 px) tall, with hysteresis so thresholds do not twitch; zooming in reaches the
+  finest preset the data supports (BTC $1). *Manual*: the user locks a preset; zoom only
+  scales, and price zoom-out clamps at one row per pixel.
+- **Presets:** `{1, 2, 2.5, 5} x 10^k` in price units, restricted to multiples of the
+  `commonTick()` of the data in view (S4). BTC offers $1 upward where $1 data exists; older
+  deep history recorded on a $10 grid only offers multiples of $10. Presets the visible data
+  cannot build are not offered.
+- **Cell meaning:** the summed time-weighted liquidity of its constituent rows (the defined
+  aggregate). Coarser ticks never substitute a single row.
+- **Re-bin triggers:** a tick change (Auto threshold crossing or Manual choice), a timeframe
+  change, new or revised source data, new chunks, a source generation or config change, or the
+  view leaving the prepared region at the same tick. Pan inside the prepared region never
+  re-bins. A re-bin is a GPU pass in the same frame: no freeze.
+- **Transitions:** the active source keeps drawing until its replacement is ready. Whether a
+  crossfade between ticks is needed is decided in the lab (spec experiment E2), not assumed.
 - Detail comes from source availability, timeframe, tick and serving level, not from a
   near/deep choice.
 
-**Code that still implements rejected policy** (reshape in slice T; no code changes in this revision):
-- `libs/core/heatmap/HeatmapResolution.hpp`: `idealTick` (smallest ladder tick at least
-  `minRowPx` tall, from viewport height), `layerFor` (near/deep by tick and tf), and
-  `autoTimeframe` / `kAutoTimeframes` (timeframe from viewport width).
-- `libs/gui/render/RecordingBandPolicy.hpp`: the legacy page path's 2 px ladder rule
-  (`idealTick`, `requestBand`, `needsReband` on tick change). This file is deleted in S8.
-- `libs/gui/render/heatmap/HeatmapRenderNode` `TickPolicy::minRowPx` fallback (calls
-  `heatmap::idealTick`). The `manualTick` path stays.
-- Lab only: `LabItem` auto-timeframe on zoom and `minRowPx = 2`; `Bench.cpp` picks the tick per
-  zoom level with `idealTick`.
+**Code to reshape in slice T** (no code changes in this revision):
+- `libs/core/heatmap/HeatmapResolution.hpp`: keep `idealTick` as the Auto rule but add
+  hysteresis and the `commonTick()` restriction; `layerFor` (near/deep) is migration-only;
+  delete `autoTimeframe` / `kAutoTimeframes`.
+- `libs/gui/render/RecordingBandPolicy.hpp`: the legacy page path's 2 px rule (with its
+  round-trip freeze). Deleted in S8.
+- `libs/gui/render/heatmap/HeatmapRenderNode` `TickPolicy`: Auto (`minRowPx` + hysteresis)
+  and Manual (`manualTick`) modes.
+- Lab: add the Auto/Manual toggle and hysteresis; remove auto-timeframe on zoom.
 
 **Resolved. Do not solve these again.**
 - Compute inside `QSGRenderNode::prepare()` works on Metal (S4 spike, `QsgComputeSpikeTests`).
@@ -283,7 +288,7 @@ possible one-frame misalignment).
 | S3 | Wire: binary framing and new messages | SentinelStreamServer/Client, SentinelStreamProtocol.hpp | Loopback TLS test: chunk, not_modified, live revision ordering, backlog bounds, stop/teardown. | **Next**, after L |
 | S4 | GPU: binner, render node, shaders; lab repointed | libs/gui/render/heatmap, sentinel-lab | Readback vs `binCell` exact. About 2 ms full-day deep 1m re-bin accepted by the owner. D3D11 run by the owner. | Landed (`4c5a991`); D3D11 run open |
 | B1 | **Benchmark: whole-chunk render-ready price aggregation vs viewport clipping** | libs/gui/lab (Bench, LabSources) | See below. Decides the render-ready source shape and the budget policy. | Before S5 finalizes |
-| T | Tick and zoom contract | HeatmapResolution.hpp, HeatmapRenderNode, lab | Per-asset discrete presets (multiples of `commonTick()`; BTC finest $10), per-tf default tick, zoom clamp at 1 column and 1 row per pixel. No function picks tick or tf from viewport geometry. Unit tests. | Before S5 |
+| T | Tick and zoom contract | HeatmapResolution.hpp, HeatmapRenderNode, lab | Auto (default, 2 px + hysteresis) and Manual tick modes; presets multiples of `commonTick()` (BTC from $1); column = timeframe, time clamp 1 column/px; Manual price clamp 1 row/px; no auto-timeframe. Lab experiments E1-E3 of the interaction spec. Unit tests. | Before S5 |
 | S5 | Controller: `HeatmapSourceController` + process-wide `ChunkDiskCache` | new files, fake-transport tests | Chunk set and prefetch per viewport; global RAM budget shared by two charts with no duplicate decode; active/spare swap never blanks; switch to a recently used tf < 50 ms from cache; reconnect resume. | After B1, T |
 | S6 | Integration behind toggle | UGR*, MainWindowGpu.cpp, FrameContextBuilder, UgrFrameMath, TimeAxisMapping | Cold start <= 1 s to first data frame. Zero full-texture rebuilds. Zoom repaints in the next frame with no tick or tf change. No stretched columns on tf switch. A/B screenshots via Agent API. | |
 | S7 | Labels/walls from `binCell`; tick selector UI | UGR*, GuiApiServer, TopToolbar | Walls API parity with the old path; label glyph tests. | |
