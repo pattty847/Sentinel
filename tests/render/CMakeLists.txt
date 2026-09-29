@@ -2,6 +2,12 @@
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
+add_executable(test_FrameStatsWindow test_FrameStatsWindow.cpp)
+target_include_directories(test_FrameStatsWindow PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_FrameStatsWindow PRIVATE GTest::gtest_main)
+add_test(NAME FrameStatsWindowTests COMMAND test_FrameStatsWindow)
+set_tests_properties(FrameStatsWindowTests PROPERTIES LABELS "render")
+
 add_executable(test_PriceCenteringPolicy test_PriceCenteringPolicy.cpp)
 target_include_directories(test_PriceCenteringPolicy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_PriceCenteringPolicy PRIVATE GTest::gtest_main)

@@ -148,13 +148,13 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         }
     });
 
-    // Attach PerformanceMonitor to QML window for FPS tracking
+    // Track render-thread frame work and chart interaction for the status readout.
     if (m_qquickView) {
         PerformanceMonitor::instance().attachToWindow(m_qquickView);
     }
     if (m_statusBar) {
         auto& perfMon = PerformanceMonitor::instance();
-        connect(&perfMon, &PerformanceMonitor::fpsChanged, m_statusBar, &StatusBar::setFps);
+        connect(&perfMon, &PerformanceMonitor::frameStatsChanged, m_statusBar, &StatusBar::setFrameStats);
         connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
         connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
         connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
@@ -1261,6 +1261,13 @@ AgentApi::Metadata MainWindowGPU::agentApiMetadata() const {
 AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
     AgentApi::StateSnapshot s;
     s.meta = agentApiMetadata();
+    const auto frameStats = PerformanceMonitor::instance().frameStats();
+    s.frameIdle = frameStats.idle;
+    s.renderRateHz = frameStats.window.renderRateHz;
+    if (frameStats.window.samples > 0) {
+        s.frameP50Ms = frameStats.window.p50Ms;
+        s.frameP95Ms = frameStats.window.p95Ms;
+    }
     s.connected = m_connected;
     s.serverConfigReady = m_serverConfigReady;
     const auto& client = GuiConfigStore::instance().clientConfig();

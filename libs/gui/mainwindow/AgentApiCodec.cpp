@@ -409,6 +409,9 @@ QJsonObject stateJson(const StateSnapshot& s) {
     if (s.defaultSymbols) for (const QString& symbol : *s.defaultSymbols) symbols.append(symbol);
     QJsonObject data{
         {"connected", s.connected}, {"serverConfigReady", s.serverConfigReady},
+        {"render", QJsonObject{{"frameP50Ms", number(s.frameP50Ms)},
+            {"frameP95Ms", number(s.frameP95Ms)}, {"rateHz", number(s.renderRateHz)},
+            {"idle", boolean(s.frameIdle)}}},
         {"server", QJsonObject{{"host", s.serverHost.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s.serverHost)},
                                 {"port", integer(s.serverPort)}}},
         {"serverConfig", QJsonObject{

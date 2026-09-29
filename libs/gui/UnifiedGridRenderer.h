@@ -179,10 +179,6 @@ private:
     int m_tpoTimeframeMs = 900000;            // standard 15m
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
-    QElapsedTimer m_fpsTimer;
-    int m_fpsFrameCount = 0;
-    std::atomic<double> m_currentFps{0.0};
-
     QElapsedTimer m_uploadTimer;
     std::atomic<qint64> m_totalBytesUploaded{0};
     std::atomic<double> m_uploadBandwidthMBps{0.0};
@@ -296,8 +292,6 @@ public:
     
     Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
-    Q_INVOKABLE double getCurrentFPS() const;
-    Q_INVOKABLE double getAverageRenderTime() const;
     Q_INVOKABLE double getCacheHitRate() const;
 
     Q_INVOKABLE QString getTextureSize() const;
@@ -441,7 +435,6 @@ private:
                            int gridWidth,
                            int gridHeight);
     void clearLabelGeometry();
-    void updateFpsEstimate();
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);
     void setHistoryRequestInFlight(bool inFlight);

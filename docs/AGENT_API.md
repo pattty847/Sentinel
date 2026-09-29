@@ -4,7 +4,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 
 | Method | Route | Result |
 |---|---|---|
-| GET | `/api/v1/state` | Connection, advertised server configuration, active layers and per-source last receive times. |
+| GET | `/api/v1/state` | Connection, advertised server configuration, active layers, receive times and chart render statistics. |
 | GET | `/api/v1/viewport` | Active chart bounds, linked heatmap/candle timeframe, follow mode, dimensions, zoom and viewport version. |
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
@@ -19,6 +19,8 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |
 
 State, viewport, candles, book, trades and walls accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
+
+State `data.render` contains `frameP50Ms`, `frameP95Ms`, `rateHz`, and `idle`. Durations cover CPU work on the chart render thread from scene synchronization through render command submission; they do not measure GPU completion. Percentiles use rendered frames from the preceding one second and are `null` if that window has no frames. `rateHz` counts renders in that same one-second window, including data-driven renders, so it is not an FPS capacity estimate. `idle` means no mouse, touch, wheel, or keyboard input reached the chart in the past second. The GUI refreshes these values four times a second.
 
 Successful state and viewport responses have `{"ok":true,"meta":{"sessionId":"...","symbol":"BTC-USD","selectionEpoch":"1","observedAtMs":1790596800000,"source":"gui-cache","stale":false,"coverage":"unknown","truncated":false},"data":{...}}`. Errors have `{"ok":false,"error":{"code":"not_found","message":"Unknown route"}}`. Screenshot success retains `{"ok":true,"path":"./screenshots/review.png","target":"main"}`. The v1 route also accepts `afterOperation=<id>&waitMs=0..5000`; it captures only after that operation renders, returning `408 render_timeout` if no frame arrives, `409 operation_not_rendered` if superseded or failed, and `404 unknown_operation` for an unknown ID. A guarded screenshot includes decimal-string `frameId`, `viewportVersion` and `selectionEpoch`. Screenshots are limited to one request per second (`429`).
 

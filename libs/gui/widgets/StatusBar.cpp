@@ -29,9 +29,9 @@ StatusBar::StatusBar(QWidget* parent)
     m_connectionLabel->setStyleSheet("QLabel { color: #ffaa00; font-size: 10px; }");
     layout->addWidget(m_connectionLabel);
 
-    m_fpsLabel = new QLabel("FPS: --", this);
-    m_fpsLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_fpsLabel);
+    m_frameLabel = new QLabel("Frame: -- | idle", this);
+    m_frameLabel->setStyleSheet("QLabel { color: #9ac6d3; font-size: 10px; }");
+    layout->addWidget(m_frameLabel);
 
     m_cpuLabel = new QLabel("CPU: --%", this);
     m_cpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
@@ -95,12 +95,8 @@ void StatusBar::setGpuUsage(int percent) {
     m_gpuLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
 }
 
-void StatusBar::setFps(double fps) {
-    m_fps = fps;
-    m_fpsLabel->setText(QString("FPS: %1").arg(static_cast<int>(fps)));
-
-    QString color = fps >= 55 ? "#44ff44" : (fps >= 30 ? "#ffaa00" : "#ff4444");
-    m_fpsLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
+void StatusBar::setFrameStats(const QString& text) {
+    m_frameLabel->setText(text);
 }
 
 void StatusBar::setLatency(int milliseconds) {
@@ -135,4 +131,3 @@ void StatusBar::updateMetrics() {
 void StatusBar::showVersion() {
     m_versionLabel->setVisible(!m_versionLabel->isVisible());
 }
-
