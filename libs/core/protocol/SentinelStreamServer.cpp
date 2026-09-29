@@ -909,7 +909,9 @@ public:
                     if (limit > 10000) {
                         limit = 10000;
                     }
-                    const auto history = model_.getHistory(symbol, 1000, static_cast<size_t>(limit));
+                    // Page the retained 1s series, not just its newest `limit`
+                    // bars; otherwise the second backward page appears empty.
+                    const auto history = model_.getHistory(symbol, 1000, 10000);
                     std::vector<OHLCVBar> filtered;
                     filtered.reserve(history.size());
                     for (const auto& bar : history) {
@@ -917,6 +919,10 @@ public:
                             filtered.push_back(bar);
                         }
                     }
+                    // Existing contract: inclusive end and limit counts retained
+                    // bars, not seconds. Sparse series may span a wider interval.
+                    if (filtered.size() > static_cast<size_t>(limit))
+                        filtered.erase(filtered.begin(), filtered.end() - limit);
 
                     const int64_t tfMs = 1000;
                     const int64_t nowMs = static_cast<int64_t>(

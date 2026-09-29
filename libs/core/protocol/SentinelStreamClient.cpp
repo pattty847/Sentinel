@@ -660,7 +660,10 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                         msg.value("band_generation", uint64_t{0}),
                         QString::fromStdString(msg.value("message", "")));
                 }
-                // Not surfaced to the GUI; log it so server-side refusals are visible.
+                if (msg.value("context", "") == "candle_history_request") {
+                    emit candleHistoryFailed(QString::fromStdString(msg.value("symbol", "")));
+                }
+                // Log server-side refusals as well as surfacing correlated failures.
                 sLog_Warning("Server error: context=" << msg.value("context", "")
                              << " symbol=" << msg.value("symbol", "")
                              << " message=" << msg.value("message", ""));
@@ -998,6 +1001,7 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
 }
 
 void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg) {
+    const auto generation = m_candleDeliveryGeneration.load(std::memory_order_acquire);
     if (!validateFamilySchema(msg,
                               "candle",
                               protocol::SentinelProtocol::kCandleSchemaVersion,
@@ -1016,9 +1020,9 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
 
     const auto symbolQ = QString::fromStdString(symbol);
     if (type == protocol::MessageType::CandleBarClosed) {
-        emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+        emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
     } else {
-        emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+        emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
     }
 }
 

@@ -49,10 +49,8 @@ public:
                                    int sessionType,
                                    int64_t endTimeMs,
                                    int count) = 0;
-    virtual void requestCandleHistory(const QString& symbol,
-                                      int64_t timeframeSec,
-                                      int64_t endTimeSec,
-                                      int limit) = 0;
+    virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
+                                         qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
     virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;
 

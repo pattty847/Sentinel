@@ -24,6 +24,7 @@ public:
         double volume = 0.0;
         bool isClosed = false;
         int64_t seq = 0;
+        bool historyRefreshable = false; // cached across a session/selection boundary
     };
 
     explicit CandleSeriesBuffer(QObject* parent = nullptr);
@@ -34,14 +35,19 @@ public:
                      int64_t seq,
                      bool isClosed);
 
-    // Merges history bars by bar start time. A still-forming live bar wins over a
-    // history copy of the same bucket; the live seq stream is not touched.
+    // Merges history by start time. Live-owned buckets always win, including
+    // against "closed" REST snapshots; the live seq stream is not touched.
     void applyHistory(const QString& symbol,
                       int64_t timeframeSec,
                       const std::vector<CandleBar>& bars);
 
-    // Live seq numbers restart with each server session; call on (re)connect.
+    // New sessions/selections revoke all cached live ownership. Fresh history
+    // can correct closed cached bars; the new live stream re-establishes ownership.
     void resetSequences();
+    void resetSeriesForSelection(const QString& symbol, int64_t timeframeSec);
+
+    qint64 oldestTimeMs(const QString& symbol, int64_t timeframeSec) const;
+    bool historyCapacityReached(const QString& symbol, int64_t timeframeSec) const;
 
     bool getVisibleSlice(const QString& symbol,
                          int64_t timeframeSec,
@@ -86,6 +92,7 @@ private:
     };
 
     static size_t capacityFor(int64_t timeframeSec);
+    static void resetOwnership(Series& series);
     static const CandleBar& getAt(const Series& series, size_t index);
     static CandleBar& getAt(Series& series, size_t index);
     static size_t lowerBound(const Series& series, qint64 timeStartMs);

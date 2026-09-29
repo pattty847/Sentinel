@@ -1,6 +1,8 @@
 #pragma once
 #include "IGridDataSource.hpp"
 #include "CandleSeriesBuffer.hpp"
+#include "CandleBackfillState.hpp"
+#include <QTimer>
 #include "../../core/protocol/SentinelStreamClient.hpp"
 #include "../config/GuiConfigStore.hpp"
 
@@ -28,10 +30,8 @@ public:
                            int sessionType,
                            int64_t endTimeMs,
                            int count) override;
-    void requestCandleHistory(const QString& symbol,
-                              int64_t timeframeSec,
-                              int64_t endTimeSec,
-                              int limit) override;
+    void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
+                                 qint64 startMs, qint64 endMs) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;
     void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) override;
 
@@ -58,12 +58,12 @@ private slots:
                                    int64_t timeframeSec,
                                    int64_t bucketStartMs,
                                    int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar);
+                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
     void onCandleBarClosedReceived(const QString& symbol,
                                    int64_t timeframeSec,
                                    int64_t bucketStartMs,
                                    int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar);
+                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
     void onCandleHistoryReceived(const QString& symbol,
                                  int64_t timeframeSec,
                                  int64_t startTimeSec,
@@ -74,8 +74,16 @@ private slots:
     void onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 
 private:
+    void requestNextCandlePage();
+    void advanceCandleDeliveryGeneration();
     SentinelStreamClient m_client;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
+    CandleBackfillState m_candleBackfill;
+    QTimer m_candleBackfillTimer;
+    QString m_candleSymbol;
+    int64_t m_candleTimeframeSec = 0;
+    bool m_candleHistoryReady = false;
+    quint64 m_candleDeliveryGeneration = 0;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
     // Or we might change the interface to not return references?
     // IGridDataSource::getDirectLiveOrderBook returns const ref.

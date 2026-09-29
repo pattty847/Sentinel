@@ -75,13 +75,16 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
     CandleBar updated = bar;
     updated.isClosed = isClosed || bar.isClosed;
     updated.seq = seq;
+    updated.historyRefreshable = false;
 
     bool updatedExisting = false;
     if (series.count > 0) {
         size_t idx = lowerBound(series, updated.timeStartMs);
         if (idx < series.count && getAt(series, idx).timeStartMs == updated.timeStartMs) {
             CandleBar& existing = getAt(series, idx);
-            if (!existing.isClosed) {
+            // A REST snapshot can be labelled closed after crossing a boundary
+            // in flight. The first live update still takes ownership of it.
+            if (!existing.isClosed || existing.seq == 0) {
                 existing = updated;
             }
             updatedExisting = true;
@@ -150,22 +153,36 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
         return;
     }
     auto& series = seriesFor(symbol, timeframeSec);
-    std::vector<CandleBar> merged = linearize(series);
-    const auto byStart = [](const CandleBar& a, qint64 t) { return a.timeStartMs < t; };
-    for (const auto& bar : history) {
-        if (bar.timeStartMs <= 0) {
-            continue;
-        }
-        auto it = std::lower_bound(merged.begin(), merged.end(), bar.timeStartMs, byStart);
-        if (it != merged.end() && it->timeStartMs == bar.timeStartMs) {
-            // Keep the live bar unless history says the bucket is final and live does not.
-            if (bar.isClosed && !it->isClosed) {
-                *it = bar;
-            }
+    std::vector<CandleBar> page = history;
+    for (auto& bar : page) {
+        bar.seq = 0; // Only applyUpdate grants live ownership.
+        bar.historyRefreshable = false;
+    }
+    page.erase(std::remove_if(page.begin(), page.end(), [](const CandleBar& bar) {
+        return bar.timeStartMs <= 0;
+    }), page.end());
+    std::stable_sort(page.begin(), page.end(), [](const CandleBar& a, const CandleBar& b) {
+        return a.timeStartMs < b.timeStartMs;
+    });
+    // Merge once rather than shifting the entire retained series per older bar.
+    std::vector<CandleBar> merged;
+    merged.reserve(series.count + page.size());
+    size_t existing = 0;
+    for (const auto& bar : page) {
+        while (existing < series.count && getAt(series, existing).timeStartMs <= bar.timeStartMs)
+            merged.push_back(getAt(series, existing++));
+        if (!merged.empty() && merged.back().timeStartMs == bar.timeStartMs) {
+            // History must never close or replace a live-owned bucket. A REST
+            // response fetched before the boundary may be older than live even
+            // when the server labels it final after the fetch completes.
+            if (merged.back().seq == 0 &&
+                (merged.back().historyRefreshable || (bar.isClosed && !merged.back().isClosed)))
+                merged.back() = bar;
         } else {
-            merged.insert(it, bar);
+            merged.push_back(bar);
         }
     }
+    while (existing < series.count) merged.push_back(getAt(series, existing++));
     rebuild(series, std::move(merged));
     if (series.count == 0) {
         return;
@@ -182,8 +199,32 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
 
 void CandleSeriesBuffer::resetSequences() {
     for (auto& [key, series] : m_series) {
-        series.lastSeq = 0;
+        resetOwnership(series);
     }
+}
+
+void CandleSeriesBuffer::resetSeriesForSelection(const QString& symbol, int64_t timeframeSec) {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeSec});
+    if (it != m_series.end()) resetOwnership(it->second);
+}
+
+void CandleSeriesBuffer::resetOwnership(Series& series) {
+    series.lastSeq = 0;
+    for (size_t i = 0; i < series.count; ++i) {
+        auto& bar = getAt(series, i);
+        bar.seq = 0;
+        bar.historyRefreshable = true;
+    }
+}
+
+qint64 CandleSeriesBuffer::oldestTimeMs(const QString& symbol, int64_t timeframeSec) const {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeSec});
+    return it == m_series.end() || it->second.count == 0 ? 0 : getAt(it->second, 0).timeStartMs;
+}
+
+bool CandleSeriesBuffer::historyCapacityReached(const QString& symbol, int64_t timeframeSec) const {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeSec});
+    return it != m_series.end() && it->second.count == it->second.capacity;
 }
 
 bool CandleSeriesBuffer::getVisibleSlice(const QString& symbol,

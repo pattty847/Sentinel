@@ -148,7 +148,6 @@ private:
     std::unique_ptr<GuiApiServer> m_guiApiServer;
     QPointer<class FontSettingsDialog> m_fontDialog;
     QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
-    QMetaObject::Connection m_candleViewportConn;
     std::unique_ptr<TradeInputManager> m_tradeInputManager;
     TradeBlotterDock* m_tradeBlotterDock = nullptr;
     QLabel* m_positionOverlayLabel = nullptr;

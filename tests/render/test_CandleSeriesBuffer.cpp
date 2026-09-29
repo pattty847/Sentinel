@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "datasources/CandleSeriesBuffer.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
+#include <QCoreApplication>
+#include <QEvent>
 
 #include <vector>
 
@@ -55,15 +58,50 @@ TEST(CandleSeriesBuffer, HistoryAfterLiveStaysSortedAndLiveKeepsFlowing) {
     EXPECT_DOUBLE_EQ(bars.back().close, 2.0);
 }
 
-TEST(CandleSeriesBuffer, FormingLiveBarBeatsOpenHistoryCopyButFinalHistoryWins) {
+TEST(CandleSeriesBuffer, RestFetchedBeforeBoundaryCannotCloseOrRegressNewerLiveBar) {
     CandleSeriesBuffer buffer;
-    buffer.applyUpdate(kSym, kTfSec, bar(5, 9.0, false), 1, false);
-    buffer.applyHistory(kSym, kTfSec, {bar(5, 1.0, false)});
-    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
+    auto snapshot = bar(5, 11.0, true); // fetched while open, labelled closed after fetch
+    snapshot.high = 12.0;
+    snapshot.low = 9.0;
+    snapshot.volume = 10.0;
+    auto live = bar(5, 13.0, false);
+    live.high = 15.0;
+    live.low = 8.0;
+    live.volume = 20.0;
+    buffer.applyUpdate(kSym, kTfSec, bar(5, 10.0, false), 1, false);
+    buffer.applyUpdate(kSym, kTfSec, live, 2, false); // arrives while REST is in flight
+    buffer.applyHistory(kSym, kTfSec, {snapshot});
+    auto actual = visible(buffer).back();
+    EXPECT_FALSE(actual.isClosed);
+    EXPECT_DOUBLE_EQ(actual.close, 13.0);
+    EXPECT_DOUBLE_EQ(actual.high, 15.0);
+    EXPECT_DOUBLE_EQ(actual.low, 8.0);
+    EXPECT_DOUBLE_EQ(actual.volume, 20.0);
+    EXPECT_EQ(actual.seq, 2);
 
+    live.close = 14.0;
+    live.high = 16.0;
+    live.low = 7.0;
+    live.volume = 25.0;
+    buffer.applyUpdate(kSym, kTfSec, live, 3, true); // real live final still takes effect
+    actual = visible(buffer).back();
+    EXPECT_TRUE(actual.isClosed);
+    EXPECT_DOUBLE_EQ(actual.close, 14.0);
+    EXPECT_DOUBLE_EQ(actual.high, 16.0);
+    EXPECT_DOUBLE_EQ(actual.low, 7.0);
+    EXPECT_DOUBLE_EQ(actual.volume, 25.0);
+    buffer.applyHistory(kSym, kTfSec, {snapshot});
+    EXPECT_DOUBLE_EQ(visible(buffer).back().volume, 25.0);
+}
+
+TEST(CandleSeriesBuffer, LiveTakesOwnershipOfPreviouslyClosedHistorySnapshot) {
+    CandleSeriesBuffer buffer;
     buffer.applyHistory(kSym, kTfSec, {bar(5, 3.0, true)});
-    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 3.0);
-    EXPECT_TRUE(visible(buffer).back().isClosed);
+    buffer.applyUpdate(kSym, kTfSec, bar(5, 9.0, false), 1, false);
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
+    EXPECT_FALSE(visible(buffer).back().isClosed);
+    buffer.applyHistory(kSym, kTfSec, {bar(5, 4.0, true)});
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 9.0);
 }
 
 TEST(CandleSeriesBuffer, NewServerSessionSeqIsAcceptedAfterReset) {
@@ -85,4 +123,86 @@ TEST(CandleSeriesBuffer, LateLiveBarIsInsertedInOrder) {
     const auto bars = visible(buffer);
     ASSERT_EQ(bars.size(), 3u);
     EXPECT_TRUE(sortedByStart(bars));
+}
+
+TEST(CandleSeriesBuffer, OverlappingUnsortedDuplicatePagesPreserveLiveAndOrder) {
+    CandleSeriesBuffer buffer;
+    buffer.applyUpdate(kSym, kTfSec, bar(100, 9.0, false), 1, false);
+    buffer.applyHistory(kSym, kTfSec, {bar(99, 5.0, true), bar(98, 4.0, true), bar(100, 1.0, false)});
+    buffer.applyHistory(kSym, kTfSec, {bar(98, 0.0, true), bar(96, 2.0, true),
+                                     bar(97, 3.0, true), bar(96, 0.0, true), bar(0, 0.0, true)});
+    auto bars = visible(buffer);
+    ASSERT_EQ(bars.size(), 5u);
+    EXPECT_TRUE(sortedByStart(bars));
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 96 * 60'000);
+    EXPECT_DOUBLE_EQ(bars[0].close, 2.0);
+    EXPECT_DOUBLE_EQ(bars[2].close, 4.0);
+    EXPECT_DOUBLE_EQ(bars.back().close, 9.0);
+    buffer.applyUpdate(kSym, kTfSec, bar(100, 10.0, false), 2, false);
+    EXPECT_DOUBLE_EQ(visible(buffer).back().close, 10.0);
+    EXPECT_FALSE(buffer.historyCapacityReached(kSym, kTfSec));
+    EXPECT_EQ(buffer.oldestTimeMs("ETH-USD", kTfSec), 0);
+}
+
+TEST(CandleSeriesBuffer, CapacityGuardStopsBackfillThatWouldBeImmediatelyEvicted) {
+    CandleSeriesBuffer buffer;
+    std::vector<Bar> page;
+    for (int m = 1; m <= 20000; ++m) page.push_back(bar(m, 1.0, true));
+    buffer.applyHistory(kSym, kTfSec, page);
+    EXPECT_TRUE(buffer.historyCapacityReached(kSym, kTfSec));
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 60'000);
+    buffer.applyUpdate(kSym, kTfSec, bar(20001, 2.0, false), 1, false);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfSec), 120'000);
+}
+
+
+TEST(CandleSeriesBuffer, ReconnectRevokesAllCachedOwnershipAndAllowsHistoryCorrection) {
+    int argc = 1;
+    char name[] = "candle-reconnect";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    ASSERT_NE(buffer, nullptr);
+    buffer->applyUpdate(kSym, kTfSec, bar(4, 1.0, true), 49, true);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 2.0, true), 50, true);
+    // Exercise the actual queued reconnect hook without opening a connection.
+    source.streamClient()->connected();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    for (const auto& cached : visible(*buffer)) EXPECT_EQ(cached.seq, 0);
+    buffer->applyHistory(kSym, kTfSec, {bar(4, 3.0, true), bar(5, 4.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).front().close, 3.0);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 4.0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 5.0, false), 1, false);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 5.0);
+    EXPECT_EQ(visible(*buffer).back().seq, 1);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 1.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 5.0); // current-session ownership restored
+}
+
+TEST(CandleSeriesBuffer, SelectionReentryRevokesCachedOwnershipButOrdinaryViewportChangesDoNot) {
+    int argc = 1;
+    char name[] = "candle-selection";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    ASSERT_NE(buffer, nullptr);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 2.0, true), 50, true);
+    source.setCandleHistoryViewport("ETH-USD", kTfSec, 0, 0);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    EXPECT_EQ(visible(*buffer).back().seq, 0);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 3.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 3.0);
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 4.0, false), 1, false);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 1); // same selection, no valid history request
+    EXPECT_EQ(visible(*buffer).back().seq, 1);
+    buffer->applyHistory(kSym, kTfSec, {bar(5, 1.0, true)});
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 4.0);
+    source.setCandleHistoryViewport(kSym, 300, 0, 0);
+    source.setCandleHistoryViewport(kSym, kTfSec, 0, 0);
+    EXPECT_EQ(visible(*buffer).back().seq, 0); // timeframe reentry also revokes ownership
+    buffer->applyUpdate(kSym, kTfSec, bar(5, 6.0, true), 1, true);
+    EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 6.0);
 }

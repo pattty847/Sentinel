@@ -188,6 +188,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 ++m_agentApiSelectionEpoch;
                 m_heatmapReceivedAtMs.reset();
                 m_candlesReceivedAtMs.reset();
+                requestCandleHistoryForSymbol(m_currentSymbol);
+            });
+            connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
+                requestCandleHistoryForSymbol(m_currentSymbol);
             });
         }
     }
@@ -695,6 +699,7 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
             renderer->setActiveSymbol(symbol);
         }
     }
+    requestCandleHistoryForSymbol(symbol);
     emit symbolChanged(symbol);
 }
 
@@ -800,66 +805,15 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
-    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
-        return;
-    }
-    int64_t timeframeSec = 1;
-    int limit = 2000;
-    int64_t endTimeSec = 0;
-    qint64 viewStart = 0;
-    qint64 viewEnd = 0;
-    int64_t rendererTfMs = 0;
-    if (m_qmlController) {
-        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            rendererTfMs = renderer->getCurrentTimeframe();
-            const int64_t timeframeMs = rendererTfMs;
-            timeframeSec = std::max<int64_t>(1, (timeframeMs + 999) / 1000);
-            viewStart = renderer->getVisibleTimeStart();
-            viewEnd = renderer->getVisibleTimeEnd();
-            if (viewEnd > viewStart) {
-                const int64_t spanSec = std::max<int64_t>(1, (viewEnd - viewStart) / 1000);
-                const int64_t spanBars = std::max<int64_t>(1, spanSec / timeframeSec);
-                const int64_t cap = (timeframeSec <= 1) ? 10000 : 350;
-                limit = static_cast<int>(std::min<int64_t>(cap, spanBars));
-                endTimeSec = viewEnd / 1000;
-            }
-        }
-    }
-    if (viewEnd <= viewStart) {
-        if (!m_qmlController) {
-            return;
-        }
-        auto* renderer = m_qmlController->getUnifiedGridRenderer();
-        if (!renderer) {
-            return;
-        }
-        if (!m_candleViewportConn) {
-            sLog_Data("Candle history request deferred until viewport is valid: symbol=" << symbol
-                      << " view=[" << viewStart << ".." << viewEnd << "]");
-            m_candleViewportConn = connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
-                if (!m_qmlController) {
-                    return;
-                }
-                auto* liveRenderer = m_qmlController->getUnifiedGridRenderer();
-                if (!liveRenderer) {
-                    return;
-                }
-                if (liveRenderer->getVisibleTimeEnd() <= liveRenderer->getVisibleTimeStart()) {
-                    return;
-                }
-                if (m_candleViewportConn) {
-                    disconnect(m_candleViewportConn);
-                    m_candleViewportConn = QMetaObject::Connection();
-                }
-                requestCandleHistoryForSymbol(m_currentSymbol);
-            });
-        }
-        return;
-    }
-    sLog_Data("Candle history request: symbol=" << symbol << " tfMs=" << rendererTfMs
-              << " tfSec=" << timeframeSec << " limit=" << limit << " endSec=" << endTimeSec
-              << " view=[" << viewStart << ".." << viewEnd << "]");
-    m_dataSource->requestCandleHistory(symbol, timeframeSec, endTimeSec, limit);
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    if (!renderer || !m_dataSource) return;
+    const int64_t tfSec = std::max<int64_t>(1, (renderer->getCurrentTimeframe() + 999LL) / 1000);
+    const bool ready = canRequestConfiguredHistoryForSymbol(symbol);
+    // Selection is updated even before readiness/viewport initialization, so a
+    // queued reply from the previous selection can never enter the new series.
+    m_dataSource->setCandleHistoryViewport(symbol, tfSec,
+        ready ? renderer->getVisibleTimeStart() : 0,
+        ready ? renderer->getVisibleTimeEnd() : 0);
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
