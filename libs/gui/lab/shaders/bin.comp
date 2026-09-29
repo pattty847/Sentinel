@@ -1,0 +1,51 @@
+#version 440
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Columns { uint col[]; };
+layout(std430, binding = 1) readonly buffer Rows { uint row[]; };
+layout(std430, binding = 2) readonly buffer Sides { uint side[]; };
+layout(std430, binding = 3) readonly buffer Sizes { float size[]; };
+layout(std430, binding = 4) readonly buffer Offsets { uint offset[]; };
+layout(std430, binding = 5) readonly buffer Coverage { ivec4 coverage[]; };
+layout(std430, binding = 6) readonly buffer Durations { uint observedMs[]; };
+layout(std430, binding = 7) writeonly buffer Output { vec4 cell[]; };
+layout(std140, binding = 8) uniform Params {
+    uvec4 dims; // output columns, output rows, source columns, native rows per display row
+    vec4 timeView; // source-column start, end
+    ivec4 priceView; // first output row's native index relative to base row
+};
+
+void main() {
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x >= dims.x || y >= dims.y) return;
+    float scale = (timeView.y - timeView.x) / float(dims.x);
+    uint first = uint(clamp(ceil(timeView.x + float(x) * scale - 0.00001), 0.0, float(dims.z)));
+    uint end = uint(clamp(ceil(timeView.x + float(x + 1u) * scale - 0.00001), 0.0, float(dims.z)));
+    int lo = priceView.x + int((dims.y - 1u - y) * dims.w);
+    int hi = lo + int(dims.w) - 1;
+    float bid = 0.0, ask = 0.0, totalMs = 0.0;
+    bool valid = end > first && lo >= 0;
+    for (uint c = first; c < end; ++c) {
+        ivec4 cov = coverage[c];
+        valid = valid && cov.x <= lo && cov.y >= hi && cov.z <= lo && cov.w >= hi;
+        float weight = float(observedMs[c]);
+        totalMs += weight;
+        if (hi < 0) continue;
+        uint a = offset[c], b = offset[c + 1u];
+        // Entries are sorted by (column,row,side). Binary search skips all
+        // rows below this display bin; each entry in the bin is visited once.
+        while (a < b) {
+            uint m = a + (b - a) / 2u;
+            if (row[m] < uint(max(lo, 0))) a = m + 1u;
+            else b = m;
+        }
+        uint stop = offset[c + 1u];
+        for (uint i = a; i < stop && row[i] <= uint(max(hi, -1)); ++i) {
+            if (col[i] != c) continue;
+            if (side[i] == 0u) bid += size[i] * weight;
+            else ask += size[i] * weight;
+        }
+    }
+    float divisor = max(totalMs, 1.0);
+    cell[y * dims.x + x] = vec4(bid / divisor, ask / divisor, valid ? 1.0 : 0.0, 0.0);
+}

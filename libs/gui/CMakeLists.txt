@@ -132,6 +132,12 @@ set(GRID_CORE_SOURCES
     render/PaperTradeOverlayModel.cpp
     render/PnlCurveItem.hpp
     render/PnlCurveItem.cpp
+    lab/GpuBinner.hpp
+    lab/GpuBinner.cpp
+    lab/LabItem.hpp
+    lab/LabItem.cpp
+    lab/Bench.hpp
+    lab/Bench.cpp
 )
 
 set(WIDGET_SOURCES
@@ -297,6 +303,16 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_msdf.frag
         render/shaders/footprint_intensity.vert
         render/shaders/footprint_intensity.frag
+)
+
+qt_add_shaders(sentinel_gui_lib lab_shaders
+    GLSL "440"
+    PREFIX "/labshaders"
+    BASE "lab/shaders"
+    FILES
+        lab/shaders/bin.comp
+        lab/shaders/display.vert
+        lab/shaders/display.frag
 )
 
 target_include_directories(sentinel_gui_lib

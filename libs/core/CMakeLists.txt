@@ -39,6 +39,8 @@ add_library(sentinel_core
     servermodel/RecordingLive.hpp
     servermodel/RecordingPage.cpp
     servermodel/RecordingPage.hpp
+    servermodel/RecordingEntries.cpp
+    servermodel/RecordingEntries.hpp
     servermodel/Hmc2Store.cpp
     servermodel/Hmc2Store.hpp
     servermodel/HeatmapColumnStore.hpp

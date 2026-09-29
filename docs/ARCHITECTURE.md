@@ -21,6 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
+- **`servermodel/RecordingEntries`:** Read-only HMC2 range projection for the GPU bin lab. It decodes sparse sizes, keeps minute coverage and durations, and normalizes mixed native grids to a common compatible row tick without any Qt GUI dependency.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
 
@@ -30,6 +31,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
 - **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives heatmap slices and buffers them before dispatching to the renderer.
 - **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapIntensityNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
+- **`lab`:** Isolated QRhi compute/render path for measuring client-side binning over recording entries. It is not wired into `UnifiedGridRenderer` or the server stream.
 - **`qml` & `widgets`:** Owns the declarative scenes (e.g., `CandleChartView`) and the dockable window management (e.g., `ChartDock`, `OrderBookDock`).
 
 ### 3. Application Bootstraps (`apps/`)
@@ -38,6 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
+- **`sentinel-lab`:** Standalone QQuickRhiItem experiment and headless Metal benchmark for the sparse recording GPU path.
 
 ## Data pipeline
 
@@ -104,6 +107,20 @@ GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
 32 MiB at 8192 x 2048), its mapping and coverage, and draw a second blended quad
 during the fade. That option needs separate mapping/label lifecycle handling and
 live GPU measurement; it is not implemented here.
+
+### GPU bin lab (isolated experiment)
+
+`RecordingEntries` reads one HMC2 minute layer without a writer lock and uploads
+sorted sparse `(column,row,side,size)` arrays, per-column offsets, coverage, and
+observed durations to storage buffers. The lab compute shader assigns one invocation
+to each visible output cell, binary-searches row ranges within each source column,
+sums sizes by side, weights multiple columns by observed duration, and marks any
+cell without complete source coverage unknown. It normalizes mixed $5/$10 deep
+history onto a compatible common tick before upload. The screen-sized result is
+discardable; pan and zoom rebuild it without a server request. The gather design
+is deterministic and avoids float atomics, which are not portable to Metal.
+The existing server-side recording re-band path remains the production path until
+Metal timing and visual checks justify a change.
 
 ### Coordinate system: TimeAxisMapping
 
