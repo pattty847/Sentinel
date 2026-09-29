@@ -7,8 +7,8 @@
 /*
  * Sentinel – VolumeProfileSlice
  *
- * Wire payload for Mode A (Session Volume Profile).  Sent once per heatmap
- * bucket update with the accumulated per-level volumes for the current session.
+ * Wire payload for Mode A (Session Volume Profile).  Sent on the independent trade-overlay
+ * refresh cadence with the accumulated per-level volumes for the current session.
  *
  * volumeBinsF32: float32 little-endian, one value per price bin, size == gridHeight.
  *   bin[0]             → price = maxPrice - 0.5*tickSize  (top of grid)

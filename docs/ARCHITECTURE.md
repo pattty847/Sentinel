@@ -160,3 +160,20 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
 | `docs/FEATURES.md` | Feature overview and notable changes |
 | `docs/TRADING_SIMULATION_BLUEPRINT.md` | Long-term plan for shared live paper trading, replay, and future book-aware execution |
+
+## Trade overlays and recording heatmaps
+
+`servermodel/TradeOverlayPublisher` builds footprint deltas, session-relative TPO
+letters and volume profiles from a bounded immutable snapshot of the shared trade
+tape. `SentinelStreamServer::Session` owns timer cadence, request selection and
+bounded admission to the history worker pool. Workers never access Session state;
+replies return by executor post, with subscription/generation checks before write.
+The legacy heatmap streamer remains only for its heatmap path pending removal.
+
+The GUI carries `TradeOverlayGrid` with each immutable footprint/TPO upload.
+`TradeOverlayMapping` projects that grid against the frame's common world
+viewport and full surface. Texture dimensions do not imply shared price/time
+coordinates. Footprint inserts neutral missing time slots and resets on changes
+to its own grid; TPO clears its old band when its own price metadata changes.
+Volume profile also uses the full surface and its own price metadata. Recording
+re-bands do not reset these overlays or stretch them to the heatmap overlap rect.

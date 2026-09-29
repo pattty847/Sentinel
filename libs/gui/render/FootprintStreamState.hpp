@@ -32,6 +32,7 @@ public:
         int writeColumn = 0;
         int filledColumns = 0;
         int64_t lastSliceStartMs = 0;
+        int64_t timeframeMs = 0;
         double minPrice = 0.0;
         double maxPrice = 0.0;
         double tickSize = 0.0;
@@ -73,6 +74,7 @@ private:
     int m_writeColumn = 0;
     int m_filledColumns = 0;
     int64_t m_lastSliceStartMs = 0;
+    int64_t m_timeframeMs = 0;
     double m_minPrice = 0.0;
     double m_maxPrice = 0.0;
     double m_tickSize = 0.0;

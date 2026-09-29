@@ -271,6 +271,24 @@ int64_t ServerDataModel::oldestHeatmapPersistedMs(const std::string& symbol,
     return m_heatmapStreamer->oldestPersistedMs(symbol, timeframeMs);
 }
 
+// Worker-only bounded snapshot. False means over budget, never a partial tape.
+bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t startMs,
+                                          int64_t endMs, size_t limit,
+                                          std::vector<FootprintTradeSample>& out) const {
+    out.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
+        const auto it = m_recentFootprintTrades.find(symbol);
+        if (it == m_recentFootprintTrades.end()) return true;
+        // Upstream timestamps can arrive out of order. Do not binary-search this deque.
+        if (it->second.size() > limit) return false;
+        out.assign(it->second.begin(), it->second.end());
+    }
+    std::erase_if(out, [=](const auto& t) { return t.timestampMs < startMs || t.timestampMs >= endMs; });
+    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.timestampMs < b.timestampMs; });
+    return true;
+}
+
 bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
                                              int64_t startTimeMs,
                                              int64_t endTimeMs,

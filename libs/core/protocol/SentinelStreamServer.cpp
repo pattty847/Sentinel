@@ -1,5 +1,7 @@
 #include "SentinelStreamServer.hpp"
 #include "HeatmapSlice.hpp"
+#include "../servermodel/TradeOverlayPublisher.hpp"
+#include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
 #include "RecordingHistoryWire.hpp"
 #include <list>
@@ -70,6 +72,9 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
             if (tf > 60'000 && tf % 60'000 == 0) servedHeatmap.push_back(tf);
         }
     }
+    payload["trade_overlays"] = {
+        {"grid_width", cfg.tradeOverlays.gridWidth}, {"grid_height", cfg.tradeOverlays.gridHeight},
+        {"tick_size", cfg.tradeOverlays.tickSize}, {"footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs}};
     payload["heatmap"] = {
         {"served_timeframes_ms", servedHeatmap},
         {"grid_width", cfg.heatmap.gridWidth},
@@ -136,26 +141,7 @@ double resolveMidPrice(const LiveOrderBook& book) {
     return (bestBid > 0.0) ? bestBid : bestAsk;
 }
 
-struct TpoLetterStats {
-    int occupiedRows = 0;
-    int firstRow = -1;
-    int lastRow = -1;
-};
 
-TpoLetterStats summarizeTpoLetters(const QByteArray& letters) {
-    TpoLetterStats stats;
-    for (int i = 0; i < letters.size(); ++i) {
-        if (letters.at(i) == '\0') {
-            continue;
-        }
-        ++stats.occupiedRows;
-        if (stats.firstRow < 0) {
-            stats.firstRow = i;
-        }
-        stats.lastRow = i;
-    }
-    return stats;
-}
 }
 
 class Session : public std::enable_shared_from_this<Session> {
@@ -175,8 +161,6 @@ class Session : public std::enable_shared_from_this<Session> {
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
     std::atomic_bool closePosted_{false};
-    QByteArray footprintDeltaScratch_;
-    std::vector<double> footprintRowDeltaScratch_;
     
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
@@ -192,9 +176,6 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
-    int64_t tpoBucketMs_ = 900'000;
-    SessionManager::SessionType tpoSessionType_ = SessionManager::SessionType::H24;
-    int64_t tpoSessionMs_ = SessionManager::sessionDurationMs(SessionManager::SessionType::H24);
     uint64_t m_latencySenderId = 0;
     uint64_t m_tradingBroadcasterId = 0;
     bool m_tradingBroadcasterRegistered = false;
@@ -269,6 +250,8 @@ class Session : public std::enable_shared_from_this<Session> {
         }
 
         disconnectModelSignals();
+        overlayTimer_.cancel();
+        overlayHistory_.clear();
         if (recordingView_) recordingView_->active.store(false);
         recordingView_.reset();
         if (owner_ && m_latencySenderId != 0) {
@@ -307,686 +290,140 @@ class Session : public std::enable_shared_from_this<Session> {
                  << " subscriptions=" << subscriptionCount);
     }
 
-    bool buildFootprintDeltaColumn(const HeatmapSlice& slice, QByteArray& out, double& outQuantScale) {
-        if (slice.gridHeight <= 0 || slice.tickSize <= 0.0 || slice.maxPrice <= slice.minPrice) {
-            return false;
-        }
+    struct OverlayState {
+        trade_overlay::Request request;
+        uint64_t generation = 0;
+    };
+    std::map<std::string, OverlayState> overlays_;
+    std::deque<trade_overlay::Request> overlayHistory_;
+    net::steady_timer overlayTimer_{ws_.get_executor()};
+    bool overlayBusy_ = false;
+    size_t overlayCursor_ = 0;
+    uint64_t nextOverlayGeneration_ = 1;
+    bool overlayHistoryTurn_ = true;
 
-        const int gridHeight = slice.gridHeight;
-        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) {
-            return false;
+    OverlayState& overlayState(const std::string& symbol) {
+        auto [it, inserted] = overlays_.try_emplace(symbol);
+        if (inserted) {
+            it->second.generation = nextOverlayGeneration_++;
+            const auto& cfg = owner_->serverConfig().tradeOverlays;
+            it->second.request.symbol = symbol;
+            it->second.request.grid = {cfg.gridWidth, cfg.gridHeight, cfg.tickSize, 0};
+            it->second.request.footprintMs = cfg.footprintTimeframeMs;
         }
-
-        if (footprintRowDeltaScratch_.size() != static_cast<size_t>(gridHeight)) {
-            footprintRowDeltaScratch_.assign(static_cast<size_t>(gridHeight), 0.0);
+        return it->second;
+    }
+    void armOverlayTimer() {
+        if (closing_.load()) return;
+        overlayTimer_.expires_after(std::chrono::milliseconds(trade_overlay::kRefreshMs));
+        overlayTimer_.async_wait([weak = weak_from_this()](beast::error_code ec) {
+            if (auto self = weak.lock(); self && !ec && !self->closing_.load()) {
+                self->pumpOverlays();
+                self->armOverlayTimer();
+            }
+        });
+    }
+    void requestOverlayHistory(const nlohmann::json& j, bool tpo) {
+        const auto symbol = j.value("symbol", std::string{});
+        const auto tf = j.value("timeframe_ms", int64_t{0});
+        if (!subscriptions_.contains(symbol) || (overlays_.size() >= 16 && !overlays_.contains(symbol)) ||
+            tf < (tpo ? 60000 : 1000) || tf > 86400000 || j.value("count", 0) <= 0 || overlayHistory_.size() >= 8) {
+            send_error("trade_overlay", symbol, "invalid request or overlay queue full"); return;
+        }
+        auto& state = overlayState(symbol);
+        auto q = state.request;
+        if (tpo) {
+            q.tpoMs = tf;
+            const int type = j.value("session_type", static_cast<int>(q.session));
+            if (type < 0 || type > static_cast<int>(SessionManager::SessionType::W1)) {
+                send_error("trade_overlay", symbol, "invalid session"); return;
+            }
+            q.session = static_cast<SessionManager::SessionType>(type);
+        } else q.footprintMs = tf;
+        const auto duration = SessionManager::sessionDurationMs(q.session);
+        if (duration % q.tpoMs != 0 || duration / q.tpoMs > trade_overlay::kMaxGridWidth) {
+            send_error("trade_overlay", symbol, "TPO timeframe must partition the session within the grid budget"); return;
+        }
+        if (j.contains("tick_size")) q.grid.tick = j.at("tick_size").get<double>();
+        if (j.contains("rows")) q.grid.rows = j.at("rows").get<int>();
+        if (j.contains("price_min")) q.grid.maxPrice = j.at("price_min").get<double>() + q.grid.rows * q.grid.tick;
+        auto check = q.grid;
+        if (check.maxPrice == 0) check.maxPrice = check.rows * check.tick;
+        if (!check.valid()) { send_error("trade_overlay", symbol, "invalid overlay grid"); return; }
+        // A selection change invalidates worker replies and queued requests for that symbol.
+        const bool changed = q.footprintMs != state.request.footprintMs || q.tpoMs != state.request.tpoMs ||
+            q.session != state.request.session || q.grid.tick != state.request.grid.tick ||
+            q.grid.rows != state.request.grid.rows || q.grid.maxPrice != state.request.grid.maxPrice;
+        if (changed) {
+            state.generation = nextOverlayGeneration_++; q.previousMs = 0;
+        }
+        state.request = q;
+        q.kind = tpo ? trade_overlay::Kind::TpoHistory : trade_overlay::Kind::FootprintHistory;
+        q.endMs = j.value("end_time", int64_t{0});
+        q.count = std::clamp(j.value("count", 128), 1, trade_overlay::kMaxColumns);
+        overlayHistory_.push_back(std::move(q));
+    }
+    void pumpOverlays() {
+        if (overlayBusy_ || !owner_ || closing_.load()) return;
+        // Bound per-session state, and round-robin live symbols. Never enqueue refresh backlog.
+        for (const auto& symbol : subscriptions_) {
+            if (overlays_.size() >= 16) break;
+            overlayState(symbol);
+        }
+        std::erase_if(overlays_, [&](const auto& entry) { return !subscriptions_.contains(entry.first); });
+        if (overlays_.empty()) return;
+        trade_overlay::Request q;
+        if (!overlayHistory_.empty() && overlayHistoryTurn_) {
+            const auto pending = overlayHistory_.front(); overlayHistory_.pop_front();
+            if (!overlays_.contains(pending.symbol)) return;
+            q = overlays_.at(pending.symbol).request;
+            q.kind = pending.kind; q.endMs = pending.endMs; q.count = pending.count;
+            overlayHistoryTurn_ = false;
         } else {
-            std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
+            auto it = overlays_.begin(); std::advance(it, overlayCursor_++ % overlays_.size());
+            q = it->second.request; q.kind = trade_overlay::Kind::Live;
+            overlayHistoryTurn_ = true;
         }
-
-        std::vector<ServerDataModel::FootprintTradeSample> trades;
-        model_.collectFootprintTrades(slice.symbol.toStdString(),
-                                      slice.bucketStartMs,
-                                      slice.bucketEndMs,
-                                      trades);
-        for (const auto& sample : trades) {
-            const int row = static_cast<int>(std::floor((slice.maxPrice - sample.price) / slice.tickSize));
-            if (row < 0 || row >= gridHeight) {
-                continue;
-            }
-            if (sample.side == AggressorSide::Buy) {
-                footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
-            } else if (sample.side == AggressorSide::Sell) {
-                footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
-            }
-        }
-
-        double maxAbs = 0.0;
-        for (double v : footprintRowDeltaScratch_) {
-            const double av = std::abs(v);
-            if (av > maxAbs) {
-                maxAbs = av;
-            }
-        }
-        outQuantScale = (maxAbs > 0.0) ? std::max(1e-9, maxAbs / 32767.0) : 1.0;
-
-        out.resize(gridHeight * static_cast<int>(sizeof(uint16_t)));
-        auto* dst = reinterpret_cast<uchar*>(out.data());
-        for (int y = 0; y < gridHeight; ++y) {
-            const double delta = footprintRowDeltaScratch_[static_cast<size_t>(y)];
-            const double q = std::round(delta / outQuantScale);
-            const int32_t q16 = static_cast<int32_t>(std::clamp(q, -32768.0, 32767.0));
-            const uint16_t biased = static_cast<uint16_t>(q16 + 32768);
-            qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
-        }
-        return true;
-    }
-
-    bool resolveFootprintGridAndRange(const std::string& symbol,
-                                      int& outGridWidth,
-                                      int& outGridHeight,
-                                      double& outTickSize,
-                                      double& outMinPrice,
-                                      double& outMaxPrice) {
-        if (!owner_) {
-            return false;
-        }
-        const auto& cfg = owner_->serverConfig();
-        outGridWidth = std::max(1, cfg.heatmap.gridWidth);
-        outGridHeight = std::max(1, cfg.heatmap.gridHeight);
-        outTickSize = (cfg.heatmap.tickSize > 0.0) ? cfg.heatmap.tickSize : cfg.orderbook.tickSize;
-        if (outTickSize <= 0.0) {
-            outTickSize = 0.01;
-        }
-
-        const auto& hotData = model_.ensureSymbol(symbol);
-        const auto& book = hotData.liveBook;
-        if (book.getTickSize() > 0.0) {
-            outTickSize = book.getTickSize();
-        }
-
-        outMinPrice = book.getMinPrice();
-        outMaxPrice = book.getMaxPrice();
-        if (!(outMaxPrice > outMinPrice)) {
-            double anchorPrice = 0.0;
-            std::vector<ServerDataModel::FootprintTradeSample> recentTrades;
-            const int64_t nowMs = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-            if (model_.collectFootprintTrades(symbol, nowMs - 60'000, nowMs + 1, recentTrades) &&
-                !recentTrades.empty()) {
-                anchorPrice = recentTrades.back().price;
-            }
-            if (anchorPrice <= 0.0) {
-                anchorPrice = outTickSize * static_cast<double>(outGridHeight);
-            }
-            const double span = outTickSize * static_cast<double>(outGridHeight);
-            outMinPrice = std::max(0.0, anchorPrice - (span * 0.5));
-            outMaxPrice = outMinPrice + span;
-        }
-        return outMaxPrice > outMinPrice && outTickSize > 0.0;
-    }
-
-    bool resolveTpoGridAndRange(const std::string& symbol,
-                                int& outGridWidth,
-                                int& outGridHeight,
-                                double& outTickSize,
-                                double& outMinPrice,
-                                double& outMaxPrice) {
-        if (!owner_) {
-            return false;
-        }
-        const auto& cfg = owner_->serverConfig();
-        int64_t heatmapTfMs = 0;
-        if (cfg.heatmap.activeTimeframeMs > 0) {
-            heatmapTfMs = cfg.heatmap.activeTimeframeMs;
-        } else if (!cfg.heatmap.timeframesMs.empty()) {
-            heatmapTfMs = cfg.heatmap.timeframesMs.front();
-        } else {
-            heatmapTfMs = 1000;
-        }
-
-        std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
-        int histGridWidth = 0;
-        int histGridHeight = 0;
-        if (model_.getHeatmapHistory(symbol, heatmapTfMs, 0, 1, histGridWidth, histGridHeight, columns) &&
-            !columns.empty()) {
-            const auto& latest = columns.back();
-            outGridWidth = std::max(1, histGridWidth);
-            outGridHeight = std::max(1, histGridHeight);
-            outTickSize = (latest.tickSize > 0.0) ? latest.tickSize : cfg.heatmap.tickSize;
-            outMinPrice = latest.minPrice;
-            outMaxPrice = latest.maxPrice;
-            if (outTickSize > 0.0 && outMaxPrice > outMinPrice) {
-                sLog_Probe("tpo.bootstrap",
-                           "range source=heatmap_history symbol=" << symbol
-                           << " tfMs=" << heatmapTfMs
-                           << " grid=" << outGridWidth << "x" << outGridHeight
-                           << " range=[" << QString::number(outMinPrice, 'f', 4)
-                           << ".." << QString::number(outMaxPrice, 'f', 4) << "]"
-                           << " tick=" << QString::number(outTickSize, 'g', 10));
-                return true;
-            }
-        }
-
-        const bool ok = resolveFootprintGridAndRange(symbol,
-                                                     outGridWidth,
-                                                     outGridHeight,
-                                                     outTickSize,
-                                                     outMinPrice,
-                                                     outMaxPrice);
-        if (ok) {
-            sLog_Probe("tpo.bootstrap",
-                       "range source=live_book symbol=" << symbol
-                       << " grid=" << outGridWidth << "x" << outGridHeight
-                       << " range=[" << QString::number(outMinPrice, 'f', 4)
-                       << ".." << QString::number(outMaxPrice, 'f', 4) << "]"
-                       << " tick=" << QString::number(outTickSize, 'g', 10));
-        }
-        return ok;
-    }
-
-    bool buildFootprintDeltaWindow(const std::string& symbol,
-                                   int64_t bucketStartMs,
-                                   int64_t bucketEndMs,
-                                   int64_t timeframeMs,
-                                   int gridHeight,
-                                   double minPrice,
-                                   double maxPrice,
-                                   double tickSize,
-                                   QByteArray& out,
-                                   double& outQuantScale) {
-        if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
-            gridHeight <= 0 || tickSize <= 0.0 || maxPrice <= minPrice) {
-            return false;
-        }
-        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)))) {
-            return false;
-        }
-        if (footprintRowDeltaScratch_.size() != static_cast<size_t>(gridHeight)) {
-            footprintRowDeltaScratch_.assign(static_cast<size_t>(gridHeight), 0.0);
-        } else {
-            std::fill(footprintRowDeltaScratch_.begin(), footprintRowDeltaScratch_.end(), 0.0);
-        }
-
-        std::vector<ServerDataModel::FootprintTradeSample> trades;
-        model_.collectFootprintTrades(symbol, bucketStartMs, bucketEndMs, trades);
-        for (const auto& sample : trades) {
-            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
-            if (row < 0 || row >= gridHeight) {
-                continue;
-            }
-            if (sample.side == AggressorSide::Buy) {
-                footprintRowDeltaScratch_[static_cast<size_t>(row)] += sample.size;
-            } else if (sample.side == AggressorSide::Sell) {
-                footprintRowDeltaScratch_[static_cast<size_t>(row)] -= sample.size;
-            }
-        }
-
-        double maxAbs = 0.0;
-        for (double v : footprintRowDeltaScratch_) {
-            const double av = std::abs(v);
-            if (av > maxAbs) {
-                maxAbs = av;
-            }
-        }
-        outQuantScale = (maxAbs > 0.0) ? std::max(1e-9, maxAbs / 32767.0) : 1.0;
-        out.resize(gridHeight * static_cast<int>(sizeof(uint16_t)));
-        auto* dst = reinterpret_cast<uchar*>(out.data());
-        for (int y = 0; y < gridHeight; ++y) {
-            const double delta = footprintRowDeltaScratch_[static_cast<size_t>(y)];
-            const double q = std::round(delta / outQuantScale);
-            const int32_t q16 = static_cast<int32_t>(std::clamp(q, -32768.0, 32767.0));
-            const uint16_t biased = static_cast<uint16_t>(q16 + 32768);
-            qToLittleEndian<uint16_t>(biased, dst + (y * sizeof(uint16_t)));
-        }
-        return true;
-    }
-
-    // Returns the Market Profile letter for a TPO time bucket.
-    // Letter is always relative to sessionStartMs so it resets to 'A' at each
-    // session open (standard Market Profile convention).
-    // Falls back to epoch-relative assignment when sessionStartMs == 0.
-    static char tpoLetterForBucket(int64_t bucketStartMs,
-                                   int64_t timeframeMs,
-                                   int64_t sessionStartMs = 0) {
-        if (timeframeMs <= 0) {
-            return 'A';
-        }
-        const int64_t base = (sessionStartMs > 0) ? sessionStartMs : 0;
-        const int64_t relativeMs = bucketStartMs - base;
-        const int64_t sequence = (relativeMs >= 0) ? (relativeMs / timeframeMs) : (bucketStartMs / timeframeMs);
-        const int letterIndex = static_cast<int>(sequence % 26);
-        return static_cast<char>('A' + letterIndex);
-    }
-
-    static int64_t alignDownMs(int64_t valueMs, int64_t stepMs) {
-        if (valueMs <= 0 || stepMs <= 0) {
-            return 0;
-        }
-        return (valueMs / stepMs) * stepMs;
-    }
-
-    static void fillTpoRowsFromBar(const OHLCVBar& bar,
-                                   int gridHeight,
-                                   double maxPrice,
-                                   double tickSize,
-                                   char letter,
-                                   QByteArray& out) {
-        if (gridHeight <= 0 || tickSize <= 0.0 || out.size() != gridHeight) {
-            return;
-        }
-        const double hiPrice = std::max(bar.high, bar.low);
-        const double loPrice = std::min(bar.high, bar.low);
-        const int rowHigh = static_cast<int>(std::floor((maxPrice - hiPrice) / tickSize));
-        const int rowLow = static_cast<int>(std::floor((maxPrice - loPrice) / tickSize));
-        const int rStart = std::max(0, rowHigh);
-        const int rEnd = std::min(gridHeight - 1, rowLow);
-        for (int row = rStart; row <= rEnd; ++row) {
-            out[row] = letter;
-        }
-    }
-
-    bool buildTpoColumnWindow(const std::string& symbol,
-                              int64_t bucketStartMs,
-                              int64_t bucketEndMs,
-                              int64_t timeframeMs,
-                              int gridHeight,
-                              double maxPrice,
-                              double tickSize,
-                              QByteArray& out) {
-        if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
-            gridHeight <= 0 || tickSize <= 0.0) {
-            return false;
-        }
-        out = QByteArray(gridHeight, '\0');
-        // Compute session-relative letter so 'A' always aligns to session open.
-        const auto sessionBoundary = SessionManager::sessionContaining(bucketStartMs, tpoSessionType_);
-        const int64_t sessionStartForLetter = sessionBoundary.valid ? sessionBoundary.startMs : 0;
-        const char letter = tpoLetterForBucket(bucketStartMs, timeframeMs, sessionStartForLetter);
-        std::vector<ServerDataModel::FootprintTradeSample> trades;
-        model_.collectFootprintTrades(symbol, bucketStartMs, bucketEndMs, trades);
-        for (const auto& sample : trades) {
-            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
-            if (row < 0 || row >= gridHeight) {
-                continue;
-            }
-            out[row] = letter;
-        }
-        return true;
-    }
-
-    bool fetchBatchedCandles(const std::string& symbol,
-                             int64_t startMs,
-                             int64_t endMs,
-                             int64_t timeframeSec,
-                             std::vector<OHLCVBar>& out) {
-        out.clear();
-        if (!owner_ || symbol.empty() || startMs <= 0 || endMs <= startMs || timeframeSec <= 0) {
-            return false;
-        }
-
-        const auto granularity = CoinbaseRestClient::granularityFromSeconds(timeframeSec);
-        if (!granularity) {
-            return false;
-        }
-
-        constexpr int kBatchLimit = 350;
-        const int64_t batchSpanSec = timeframeSec * static_cast<int64_t>(kBatchLimit);
-        const int64_t startSec = startMs / 1000;
-        const int64_t endSec = endMs / 1000;
-        std::unordered_map<int64_t, OHLCVBar> byStartMs;
-
-        for (int64_t cursorSec = startSec; cursorSec < endSec; cursorSec += batchSpanSec) {
-            const int64_t chunkEndSec = std::min(endSec, cursorSec + batchSpanSec);
-            if (chunkEndSec <= cursorSec) {
-                break;
-            }
-            const int limit = static_cast<int>(std::max<int64_t>(
-                1,
-                std::min<int64_t>(kBatchLimit,
-                                  (chunkEndSec - cursorSec + timeframeSec - 1) / timeframeSec)));
-            CandleFetchResult res = owner_->restClient().fetchProductCandles(
-                symbol, cursorSec, chunkEndSec, *granularity, limit);
-            if (!res.ok) {
-                sLog_Warning("TPO history candle bootstrap failed for "
-                             << QString::fromStdString(symbol)
-                             << " [" << cursorSec << ".." << chunkEndSec
-                             << "] tfSec=" << timeframeSec
-                             << " error=" << QString::fromStdString(res.error));
-                continue;
-            }
-            sLog_Probe("tpo.bootstrap",
-                       "candle chunk symbol=" << symbol
-                       << " tfSec=" << timeframeSec
-                       << " chunk=[" << cursorSec << ".." << chunkEndSec << "]"
-                       << " limit=" << limit
-                       << " returned=" << res.candles.size());
-            for (const auto& bar : res.candles) {
-                if (bar.timestamp_ms < startMs || bar.timestamp_ms >= endMs) {
-                    continue;
+        q.nowMs = model_.exchangeNowMs();
+        const auto generation = overlays_.at(q.symbol).generation;
+        const auto executor = ws_.get_executor();
+        auto* model = &model_;
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, q, generation] {
+            trade_overlay::Result result;
+            try {
+                std::vector<ServerDataModel::FootprintTradeSample> trades;
+                const auto anchor = q.endMs > 0 ? q.endMs : q.nowMs;
+                const auto start = std::max<int64_t>(0, anchor - 7 * 86400000LL);
+                if (!model->collectOverlayTrades(q.symbol, start, q.nowMs + 1, trade_overlay::kMaxTrades, trades))
+                    result.error = "overlay trade budget exceeded";
+                else result = trade_overlay::build(q, trades);
+            } catch (const std::exception& e) { result.error = e.what(); }
+            net::post(executor, [weak, q, generation, result = std::move(result)]() mutable {
+                const auto self = weak.lock();
+                if (!self || self->closing_.load()) return;
+                self->overlayBusy_ = false;
+                const auto it = self->overlays_.find(q.symbol);
+                if (it == self->overlays_.end() || !self->subscriptions_.contains(q.symbol)) return;
+                if (it->second.generation != generation) {
+                    if (q.kind != trade_overlay::Kind::Live && self->overlayHistory_.size() < 8)
+                        self->overlayHistory_.push_front(q); // rebuilt against the latest selection
+                    return;
                 }
-                byStartMs[bar.timestamp_ms] = bar;
-            }
-        }
-
-        if (byStartMs.empty()) {
-            return false;
-        }
-
-        out.reserve(byStartMs.size());
-        for (const auto& [ts, bar] : byStartMs) {
-            Q_UNUSED(ts);
-            out.push_back(bar);
-        }
-        std::sort(out.begin(), out.end(),
-                  [](const OHLCVBar& a, const OHLCVBar& b) {
-                      return a.timestamp_ms < b.timestamp_ms;
-                  });
-        sLog_Probe("tpo.bootstrap",
-                   "candle summary symbol=" << symbol
-                   << " tfSec=" << timeframeSec
-                   << " window=[" << startSec << ".." << endSec << "]"
-                   << " kept=" << out.size());
-        return true;
-    }
-
-    // ── Volume Profile builder ──────────────────────────────────────────────
-    // Aggregates total trade volume (buy + sell) per price bin for
-    // [sessionStartMs, sessionEndMs).  Computes POC and 70 % value area
-    // (Steidlmayer methodology) in-place before emitting to the client.
-    //
-    // Output: volumeBinsF32 – float32 LE, one value per grid row (top→bottom),
-    //         same row convention as HeatmapSlice / FootprintSlice.
-    bool buildVolumeProfileWindow(const std::string& symbol,
-                                  int64_t sessionStartMs,
-                                  int64_t sessionEndMs,
-                                  int gridHeight,
-                                  double maxPrice,
-                                  double tickSize,
-                                  QByteArray& outBinsF32,
-                                  double& outTotalVolume,
-                                  int& outPocRow,
-                                  double& outPocPrice,
-                                  double& outVahPrice,
-                                  double& outValPrice) {
-        if (sessionStartMs <= 0 || sessionEndMs <= sessionStartMs ||
-            gridHeight <= 0 || gridHeight > protocol::SentinelProtocol::kMaxGridHeight ||
-            tickSize <= 0.0) {
-            return false;
-        }
-        if (gridHeight > (std::numeric_limits<int>::max() / static_cast<int>(sizeof(float)))) {
-            return false;
-        }
-
-        // Reuse scratch vector: one float per price bin.
-        std::vector<float> bins(static_cast<size_t>(gridHeight), 0.0f);
-
-        std::vector<ServerDataModel::FootprintTradeSample> trades;
-        model_.collectFootprintTrades(symbol, sessionStartMs, sessionEndMs, trades);
-
-        for (const auto& sample : trades) {
-            const int row = static_cast<int>(std::floor((maxPrice - sample.price) / tickSize));
-            if (row < 0 || row >= gridHeight) {
-                continue;
-            }
-            // Volume Profile aggregates absolute volume regardless of direction.
-            bins[static_cast<size_t>(row)] += static_cast<float>(sample.size);
-        }
-
-        // ── Steidlmayer 70 % Value-Area ─────────────────────────────────────
-        double total = 0.0;
-        outPocRow    = 0;
-        float  pocVol = bins[0];
-        for (int i = 0; i < gridHeight; ++i) {
-            total += static_cast<double>(bins[static_cast<size_t>(i)]);
-            if (bins[static_cast<size_t>(i)] > pocVol) {
-                pocVol    = bins[static_cast<size_t>(i)];
-                outPocRow = i;
-            }
-        }
-        outTotalVolume = total;
-        outPocPrice    = maxPrice - (static_cast<double>(outPocRow) + 0.5) * tickSize;
-
-        // Expand VA from POC.
-        const double vaTarget = 0.70 * total;
-        double cumVol = static_cast<double>(bins[static_cast<size_t>(outPocRow)]);
-        int hi = outPocRow;
-        int lo = outPocRow;
-        while (cumVol < vaTarget) {
-            const int nextLo = lo - 1;
-            const int nextHi = hi + 1;
-            const float volAbove = (nextLo >= 0)       ? bins[static_cast<size_t>(nextLo)] : -1.0f;
-            const float volBelow = (nextHi < gridHeight) ? bins[static_cast<size_t>(nextHi)] : -1.0f;
-            if (volAbove < 0.0f && volBelow < 0.0f) break;
-            if (volAbove >= volBelow) {
-                lo = nextLo;
-                cumVol += static_cast<double>(volAbove);
-            } else {
-                hi = nextHi;
-                cumVol += static_cast<double>(volBelow);
-            }
-        }
-        outVahPrice = maxPrice - static_cast<double>(lo) * tickSize;       // top of lowest row index
-        outValPrice = maxPrice - static_cast<double>(hi + 1) * tickSize;   // bottom of highest row index
-
-        // Pack bins as little-endian float32.
-        outBinsF32.resize(gridHeight * static_cast<int>(sizeof(float)));
-        auto* dst = reinterpret_cast<uchar*>(outBinsF32.data());
-        for (int i = 0; i < gridHeight; ++i) {
-            const float v = bins[static_cast<size_t>(i)];
-            std::memcpy(dst + (static_cast<size_t>(i) * sizeof(float)), &v, sizeof(float));
-        }
-        return true;
-    }
-
-    void streamFootprintHistory(const std::string& symbol,
-                                int64_t timeframeMs,
-                                int64_t endTimeMs,
-                                int count) {
-        if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
-            return;
-        }
-        int gridWidth = 0;
-        int gridHeight = 0;
-        double tickSize = 0.0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        if (!resolveTpoGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
-            sLog_Warning("Footprint history not sent: no grid/price range for symbol=" << symbol
-                         << " tfMs=" << timeframeMs << " end=" << endTimeMs);
-            return;
-        }
-
-        const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, tpoSessionMs_ / timeframeMs));
-        gridWidth = std::max(1, std::min(gridWidth, sessionPeriods));
-        int effectiveCount = std::max(1, std::min(count, std::max(1, gridWidth)));
-        effectiveCount = std::min(effectiveCount, 512);
-        int64_t effectiveEnd = endTimeMs;
-        if (effectiveEnd <= 0) {
-            effectiveEnd = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-        }
-        effectiveEnd = (effectiveEnd / timeframeMs) * timeframeMs;
-        if (effectiveEnd <= 0) {
-            return;
-        }
-        const int64_t firstStart = effectiveEnd - (timeframeMs * effectiveCount);
-
-        nlohmann::json payload;
-        payload["type"] = "footprint_history_chunk";
-        payload["schema_version"] = protocol::SentinelProtocol::kFootprintSchemaVersion;
-        payload["symbol"] = symbol;
-        payload["timeframe_ms"] = timeframeMs;
-        payload["session_type"] = static_cast<int>(tpoSessionType_);
-        payload["grid_width"] = gridWidth;
-        payload["grid_height"] = gridHeight;
-        payload["format"] = "q16_delta";
-        payload["encoding"] = "base64";
-        auto columns = nlohmann::json::array();
-        for (int i = 0; i < effectiveCount; ++i) {
-            const int64_t bucketStart = firstStart + static_cast<int64_t>(i) * timeframeMs;
-            const int64_t bucketEnd = bucketStart + timeframeMs;
-            QByteArray deltaLevelsQ16;
-            double quantScale = 1.0;
-            if (!buildFootprintDeltaWindow(symbol,
-                                           bucketStart,
-                                           bucketEnd,
-                                           timeframeMs,
-                                           gridHeight,
-                                           minPrice,
-                                           maxPrice,
-                                           tickSize,
-                                           deltaLevelsQ16,
-                                           quantScale)) {
-                continue;
-            }
-            nlohmann::json item;
-            item["time_start"] = bucketStart;
-            item["time_end"] = bucketEnd;
-            item["min_price"] = minPrice;
-            item["max_price"] = maxPrice;
-            item["tick_size"] = tickSize;
-            item["quant_scale"] = quantScale;
-            item["format"] = "q16_delta";
-            item["delta_levels_q16"] = deltaLevelsQ16.toBase64().toStdString();
-            columns.push_back(std::move(item));
-        }
-        sLog_Data("Footprint history sent: symbol=" << symbol << " tfMs=" << timeframeMs
-                  << " window=[" << firstStart << ".." << effectiveEnd << "]"
-                  << " requested=" << count << " columns=" << columns.size()
-                  << " grid=" << gridWidth << "x" << gridHeight);
-        payload["columns"] = std::move(columns);
-        do_write(payload.dump());
-    }
-
-    void streamTpoHistory(const std::string& symbol,
-                          int64_t timeframeMs,
-                          int64_t endTimeMs,
-                          int count) {
-        if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
-            return;
-        }
-        int gridWidth = 0;
-        int gridHeight = 0;
-        double tickSize = 0.0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        if (!resolveFootprintGridAndRange(symbol, gridWidth, gridHeight, tickSize, minPrice, maxPrice)) {
-            sLog_Warning("TPO history not sent: no grid/price range for symbol=" << symbol
-                         << " tfMs=" << timeframeMs << " end=" << endTimeMs);
-            return;
-        }
-
-        const auto sessionType = static_cast<SessionManager::SessionType>(tpoSessionType_);
-        const int64_t sessionMs = SessionManager::sessionDurationMs(sessionType);
-        const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
-        const int payloadGridWidth = std::max(1, sessionPeriods);
-        const int effectiveCount = std::min(std::max(1, std::min(count, payloadGridWidth)), 512);
-
-        int64_t anchorMs = endTimeMs;
-        if (anchorMs <= 0) {
-            anchorMs = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-        }
-        if (anchorMs <= 0) {
-            return;
-        }
-
-        const auto sessionBoundary = SessionManager::sessionContaining(
-            std::max<int64_t>(0, anchorMs - 1), sessionType);
-        if (!sessionBoundary.valid || sessionBoundary.endMs <= sessionBoundary.startMs) {
-            sLog_Warning("TPO history not sent: no valid session for symbol=" << symbol
-                         << " anchor=" << anchorMs << " sessionType=" << static_cast<int>(sessionType));
-            return;
-        }
-
-        const int64_t sessionStart = sessionBoundary.startMs;
-        const int64_t sessionEnd = sessionBoundary.endMs;
-        const int64_t nowMs = static_cast<int64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-        const int64_t availableEnd = std::clamp(
-            alignDownMs(std::min(anchorMs, nowMs), timeframeMs),
-            sessionStart + timeframeMs,
-            sessionEnd);
-        const int availablePeriods = static_cast<int>(std::clamp<int64_t>(
-            (availableEnd - sessionStart) / timeframeMs,
-            1,
-            payloadGridWidth));
-        const int startPeriod = std::max(0, availablePeriods - effectiveCount);
-        const int64_t firstStart = sessionStart + static_cast<int64_t>(startPeriod) * timeframeMs;
-
-        std::vector<OHLCVBar> minuteCandles;
-        std::unordered_map<int64_t, std::vector<OHLCVBar>> candlesByBucket;
-        if (fetchBatchedCandles(symbol, sessionStart, availableEnd, 60, minuteCandles)) {
-            candlesByBucket.reserve(static_cast<size_t>(std::min(payloadGridWidth, 512)));
-            for (const auto& bar : minuteCandles) {
-                if (bar.timestamp_ms < sessionStart || bar.timestamp_ms >= sessionEnd) {
-                    continue;
+                if (!result.error.empty()) {
+                    sLog_DataN(5000, "Trade overlay not published: symbol=" << q.symbol << " error=" << result.error);
+                    if (q.kind != trade_overlay::Kind::Live) self->send_error("trade_overlay", q.symbol, result.error);
+                    return;
                 }
-                const int64_t relative = bar.timestamp_ms - sessionStart;
-                if (relative < 0) {
-                    continue;
-                }
-                const int64_t bucketStart = sessionStart + ((relative / timeframeMs) * timeframeMs);
-                candlesByBucket[bucketStart].push_back(bar);
-            }
-        }
-        sLog_Probe("tpo.bootstrap",
-                   "history symbol=" << symbol
-                   << " session=[" << sessionStart << ".." << sessionEnd << "]"
-                   << " tfMs=" << timeframeMs
-                   << " periods=" << payloadGridWidth
-                   << " requested=" << effectiveCount
-                   << " firstStart=" << firstStart
-                   << " availableEnd=" << availableEnd
-                   << " minuteCandles=" << minuteCandles.size()
-                   << " bucketsWithCandles=" << candlesByBucket.size());
-
-        nlohmann::json payload;
-        payload["type"] = "tpo_history_chunk";
-        payload["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
-        payload["symbol"] = symbol;
-        payload["timeframe_ms"] = timeframeMs;
-        payload["session_type"] = static_cast<int>(tpoSessionType_);
-        payload["grid_width"] = payloadGridWidth;
-        payload["grid_height"] = gridHeight;
-        payload["format"] = "tpo_ascii";
-        payload["encoding"] = "base64";
-        auto columns = nlohmann::json::array();
-        for (int i = 0; i < effectiveCount; ++i) {
-            const int64_t bucketStart = firstStart + static_cast<int64_t>(i) * timeframeMs;
-            const int64_t bucketEnd = bucketStart + timeframeMs;
-            QByteArray letters;
-            if (!buildTpoColumnWindow(symbol,
-                                      bucketStart,
-                                      bucketEnd,
-                                      timeframeMs,
-                                      gridHeight,
-                                      maxPrice,
-                                      tickSize,
-                                      letters)) {
-                continue;
-            }
-            const auto it = candlesByBucket.find(bucketStart);
-            if (it != candlesByBucket.end()) {
-                // sessionStart is the boundary already computed for this history batch.
-                const char letter = tpoLetterForBucket(bucketStart, timeframeMs, sessionStart);
-                for (const auto& bar : it->second) {
-                    fillTpoRowsFromBar(bar, gridHeight, maxPrice, tickSize, letter, letters);
-                }
-            }
-            static const bool kProbeBucket = sentinel::logging::probeEnabled("tpo.bootstrap.bucket");
-            if (kProbeBucket) {
-                const auto stats = summarizeTpoLetters(letters);
-                const int minuteCount = (it != candlesByBucket.end()) ? static_cast<int>(it->second.size()) : 0;
-                sLog_Probe("tpo.bootstrap.bucket",
-                           "symbol=" << symbol
-                           << " start=" << bucketStart << " end=" << bucketEnd
-                           << " tfMs=" << timeframeMs
-                           << " minuteCandles=" << minuteCount
-                           << " occupiedRows=" << stats.occupiedRows
-                           << " rowSpan=[" << stats.firstRow << ".." << stats.lastRow << "]");
-            }
-            nlohmann::json item;
-            item["time_start"] = bucketStart;
-            item["time_end"] = bucketEnd;
-            item["min_price"] = minPrice;
-            item["max_price"] = maxPrice;
-            item["tick_size"] = tickSize;
-            item["format"] = "tpo_ascii";
-            item["letters"] = letters.toBase64().toStdString();
-            columns.push_back(std::move(item));
-        }
-        sLog_Data("TPO history sent: symbol=" << symbol << " tfMs=" << timeframeMs
-                  << " session=[" << sessionStart << ".." << sessionEnd << "]"
-                  << " requested=" << count << " columns=" << columns.size()
-                  << " minuteCandles=" << minuteCandles.size()
-                  << " grid=" << payloadGridWidth << "x" << gridHeight);
-        payload["columns"] = std::move(columns);
-        do_write(payload.dump());
+                it->second.request.grid = result.grid;
+                if (q.kind == trade_overlay::Kind::Live) it->second.request.previousMs = q.nowMs;
+                for (const auto& message : result.messages) self->do_write(message);
+                sLog_Probe("overlay.publish", "symbol=" << q.symbol << " messages=" << result.messages.size()
+                           << " tf=" << q.footprintMs << " tick=" << result.grid.tick);
+            });
+        });
+        overlayBusy_ = queued;
+        if (!queued && q.kind != trade_overlay::Kind::Live)
+            send_error("trade_overlay", q.symbol, "overlay worker queue full");
     }
 
 public:
@@ -1129,6 +566,7 @@ public:
                 });
             m_tradingBroadcasterRegistered = true;
         }
+        armOverlayTimer();
         do_read();
     }
 
@@ -1347,55 +785,9 @@ public:
                                  << " count=" << requestedCount);
                 }
             } else if (type == "footprint_history_request") {
-                std::string symbol = j.value("symbol", "");
-                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
-                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
-                const int count = j.value("count", 0);
-                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
-                    streamFootprintHistory(symbol, timeframeMs, endTimeMs, count);
-                } else {
-                    sLog_Warning("Ignoring invalid footprint_history_request: peer=" << peer_
-                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
-                                 << " count=" << count);
-                }
+                requestOverlayHistory(j, false);
             } else if (type == "tpo_history_request") {
-                std::string symbol = j.value("symbol", "");
-                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
-                const int sessionType = j.value("session_type", static_cast<int>(SessionManager::SessionType::H24));
-                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
-                const int count = j.value("count", 0);
-                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
-                    switch (sessionType) {
-                        case static_cast<int>(SessionManager::SessionType::NY):
-                            tpoSessionType_ = SessionManager::SessionType::NY;
-                            break;
-                        case static_cast<int>(SessionManager::SessionType::London):
-                            tpoSessionType_ = SessionManager::SessionType::London;
-                            break;
-                        case static_cast<int>(SessionManager::SessionType::Asia):
-                            tpoSessionType_ = SessionManager::SessionType::Asia;
-                            break;
-                        case static_cast<int>(SessionManager::SessionType::Australia):
-                            tpoSessionType_ = SessionManager::SessionType::Australia;
-                            break;
-                        case static_cast<int>(SessionManager::SessionType::H24):
-                            tpoSessionType_ = SessionManager::SessionType::H24;
-                            break;
-                        case static_cast<int>(SessionManager::SessionType::W1):
-                            tpoSessionType_ = SessionManager::SessionType::W1;
-                            break;
-                        default:
-                            tpoSessionType_ = SessionManager::SessionType::H24;
-                            break;
-                    }
-                    tpoBucketMs_ = timeframeMs;
-                    tpoSessionMs_ = SessionManager::sessionDurationMs(tpoSessionType_);
-                    streamTpoHistory(symbol, timeframeMs, endTimeMs, count);
-                } else {
-                    sLog_Warning("Ignoring invalid tpo_history_request: peer=" << peer_
-                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
-                                 << " count=" << count);
-                }
+                requestOverlayHistory(j, true);
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const int64_t timeframeSec = j.value("timeframe_sec", static_cast<int64_t>(0));
@@ -1613,6 +1005,8 @@ public:
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 overlays_.erase(symbol);
+                 std::erase_if(overlayHistory_, [&](const auto& q) { return q.symbol == symbol; });
                  if (removed && owner_) {
                      owner_->notifyClientUnsubscribed(symbol);
                  }
@@ -1802,130 +1196,6 @@ public:
 
         do_write(j.dump());
 
-        double quantScale = 1.0;
-        if (!buildFootprintDeltaColumn(slice, footprintDeltaScratch_, quantScale)) {
-            return;
-        }
-
-        nlohmann::json footprint;
-        footprint["type"] = "footprint_slice";
-        footprint["schema_version"] = protocol::SentinelProtocol::kFootprintSchemaVersion;
-        footprint["symbol"] = sym;
-        footprint["time_start"] = slice.bucketStartMs;
-        footprint["time_end"] = slice.bucketEndMs;
-        footprint["timeframe_ms"] = slice.timeframeMs;
-        footprint["grid_width"] = slice.gridWidth;
-        footprint["grid_height"] = slice.gridHeight;
-        footprint["min_price"] = slice.minPrice;
-        footprint["max_price"] = slice.maxPrice;
-        footprint["tick_size"] = slice.tickSize;
-        footprint["quant_scale"] = quantScale;
-        footprint["format"] = "q16_delta";
-        footprint["encoding"] = "base64";
-        footprint["delta_levels_q16"] = footprintDeltaScratch_.toBase64().toStdString();
-
-        sLog_Probe("footprint.emit",
-                   "symbol=" << sym
-                   << " t=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]"
-                   << " tfMs=" << slice.timeframeMs
-                   << " grid=" << slice.gridWidth << "x" << slice.gridHeight
-                   << " bytes=" << footprintDeltaScratch_.size()
-                   << " q=" << QString::number(quantScale, 'g', 8));
-
-        do_write(footprint.dump());
-
-        const int64_t tpoTimeframeMs = (tpoBucketMs_ > 0) ? tpoBucketMs_ : 60000;
-        const int64_t tpoBucketStart = (slice.bucketStartMs / tpoTimeframeMs) * tpoTimeframeMs;
-        const int64_t tpoBucketEnd = tpoBucketStart + tpoTimeframeMs;
-        const int tpoSessionPeriods =
-            static_cast<int>(std::max<int64_t>(1, tpoSessionMs_ / tpoTimeframeMs));
-        const int tpoGridWidth = std::max(1, std::min(slice.gridWidth, tpoSessionPeriods));
-
-        QByteArray tpoLetters;
-        if (!buildTpoColumnWindow(sym,
-                                  tpoBucketStart,
-                                  tpoBucketEnd,
-                                  tpoTimeframeMs,
-                                  slice.gridHeight,
-                                  slice.maxPrice,
-                                  slice.tickSize,
-                                  tpoLetters)) {
-            return;
-        }
-        static const bool kProbeTpoLive = sentinel::logging::probeEnabled("tpo.live");
-        if (kProbeTpoLive) {
-            const auto liveTpoStats = summarizeTpoLetters(tpoLetters);
-            sLog_Probe("tpo.live",
-                       "symbol=" << sym
-                       << " start=" << tpoBucketStart << " end=" << tpoBucketEnd
-                       << " tfMs=" << tpoTimeframeMs
-                       << " occupiedRows=" << liveTpoStats.occupiedRows
-                       << " rowSpan=[" << liveTpoStats.firstRow << ".." << liveTpoStats.lastRow << "]"
-                       << " heatmapSlice=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]");
-        }
-
-        nlohmann::json tpo;
-        tpo["type"] = "tpo_slice";
-        tpo["schema_version"] = protocol::SentinelProtocol::kTpoSchemaVersion;
-        tpo["symbol"] = sym;
-        tpo["time_start"] = tpoBucketStart;
-        tpo["time_end"] = tpoBucketEnd;
-        tpo["timeframe_ms"] = tpoTimeframeMs;
-        tpo["session_type"] = static_cast<int>(tpoSessionType_);
-        tpo["grid_width"] = tpoGridWidth;
-        tpo["grid_height"] = slice.gridHeight;
-        tpo["min_price"] = slice.minPrice;
-        tpo["max_price"] = slice.maxPrice;
-        tpo["tick_size"] = slice.tickSize;
-        tpo["format"] = "tpo_ascii";
-        tpo["encoding"] = "base64";
-        tpo["letters"] = tpoLetters.toBase64().toStdString();
-        do_write(tpo.dump());
-
-        // ── Mode A: Volume Profile slice (session-scoped) ───────────────────
-        // Use SessionManager to determine the current session boundary so that
-        // the profile always covers exactly one full session window.
-        const auto sessionBoundary =
-            SessionManager::sessionContaining(slice.bucketStartMs, tpoSessionType_);
-        QByteArray vpBinsF32;
-        double vpTotalVolume = 0.0;
-        int    vpPocRow      = 0;
-        double vpPocPrice    = 0.0;
-        double vpVahPrice    = 0.0;
-        double vpValPrice    = 0.0;
-        if (sessionBoundary.valid &&
-            buildVolumeProfileWindow(sym,
-                                     sessionBoundary.startMs,
-                                     sessionBoundary.endMs,
-                                     slice.gridHeight,
-                                     slice.maxPrice,
-                                     slice.tickSize,
-                                     vpBinsF32,
-                                     vpTotalVolume,
-                                     vpPocRow,
-                                     vpPocPrice,
-                                     vpVahPrice,
-                                     vpValPrice)) {
-            nlohmann::json vp;
-            vp["type"]           = "volume_profile_slice";
-            vp["schema_version"] = protocol::SentinelProtocol::kVolumeProfileSchemaVersion;
-            vp["symbol"]         = sym;
-            vp["session_start_ms"] = sessionBoundary.startMs;
-            vp["session_end_ms"]   = sessionBoundary.endMs;
-            vp["session_type"]   = static_cast<int>(tpoSessionType_);
-            vp["grid_height"]    = slice.gridHeight;
-            vp["min_price"]      = slice.minPrice;
-            vp["max_price"]      = slice.maxPrice;
-            vp["tick_size"]      = slice.tickSize;
-            vp["total_volume"]   = vpTotalVolume;
-            vp["poc_price"]      = vpPocPrice;
-            vp["vah_price"]      = vpVahPrice;
-            vp["val_price"]      = vpValPrice;
-            vp["format"]         = "vp_f32";
-            vp["encoding"]       = "base64";
-            vp["volume_bins"]    = vpBinsF32.toBase64().toStdString();
-            do_write(vp.dump());
-        }
     }
 
     static bool should_emit_update(const OHLCVBar& bar,

@@ -1,5 +1,6 @@
 // Dedicated QThread processor for remote heatmap slices; server is authoritative for columns.
 #pragma once
+#include "TradeOverlayMapping.hpp"
 #include <QObject>
 #include <QElapsedTimer>
 #include <QVector>
@@ -82,14 +83,14 @@ signals:
     void heatmapHistoryFetchNeeded(qint64 timeframeMs, qint64 endTimeMs, int count);
     void heatmapHistoryStatus(bool loading, qint64 oldestAvailableMs);
     void heatmapRangeReset(double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight);
-    void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16);
+    void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16, TradeOverlayGrid grid);
     void tpoColumnReady(int x,
                         int gridWidth,
                         int gridHeight,
                         QByteArray letters,
                         int64_t sessionStartMs,
                         int64_t sessionEndMs,
-                        int64_t timeframeMs);
+                        int64_t timeframeMs, TradeOverlayGrid grid);
     // Emitted after session data changes; row indices in grid space (0 = highest price).
     // maxPrice and tickSize let the receiver convert row → price without heatmap coupling.
     void tpoPocVahValReady(int pocRow, int vahRow, int valRow,
@@ -160,6 +161,7 @@ private:
     std::unique_ptr<FootprintStreamState> m_footprintStream;
     int m_tpoGridWidth = 5120;
     int m_tpoGridHeight = 2048;
+    uint64_t m_tpoGridGeneration = 0;
     double m_tpoMaxPrice = 0.0;
     double m_tpoTickSize = 0.0;
     std::unique_ptr<TpoStreamState> m_tpoStream;

@@ -111,3 +111,9 @@ target_include_directories(test_RecordingDataProcessor PRIVATE ${CMAKE_SOURCE_DI
 target_link_libraries(test_RecordingDataProcessor PRIVATE GTest::gtest_main sentinel_gui_lib Qt6::Core)
 add_test(NAME RecordingDataProcessorTests COMMAND test_RecordingDataProcessor)
 set_tests_properties(RecordingDataProcessorTests PROPERTIES LABELS "render")
+
+add_executable(test_TradeOverlay test_TradeOverlay.cpp)
+target_include_directories(test_TradeOverlay PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_TradeOverlay PRIVATE sentinel_gui_lib GTest::gtest_main)
+add_test(NAME TradeOverlayTests COMMAND test_TradeOverlay)
+set_tests_properties(TradeOverlayTests PROPERTIES LABELS "render;servermodel")

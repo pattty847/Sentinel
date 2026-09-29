@@ -283,3 +283,37 @@ to the next old provisional. Delayed provisionals cannot reopen a settled repair
 actual live final can still correct it. Attempt state is bounded by the column cache and
 reset with the projection generation. This repairs finals missed through prolonged transport
 congestion without an unbounded server replay queue or a permanent oldest-bucket retry loop.
+
+## Independent trade-overlay publication
+
+Footprint, TPO and volume profile no longer run from `heatmap_slice` callbacks.
+A session timer dispatches at most one overlay job per second, with one job in
+flight per session, up to eight pending history requests and sixteen overlay
+symbols. Live symbols rotate; pending history alternates with live work so neither
+can monopolize a session. Jobs use the bounded history pool (two workers, eight
+jobs globally). Trade snapshotting, sorting, aggregation and wire encoding run
+there, never on the network executor or recording live callback. Only immutable
+bounded replies return to the session executor. Closing/unsubscribing discards
+late replies, and selection generations prevent obsolete grids from publishing.
+
+Each job reads at most 250,000 retained trades and produces at most 8 MiB. An
+oversized tape fails explicitly instead of producing a partial profile. History
+pages contain at most 512 columns. Saturation rejects history requests with a
+`trade_overlay` error; live refreshes coalesce until the next timer turn. A live
+refresh sends the forming bucket and, when a boundary was crossed, the preceding
+closed bucket. Long stalls do not enqueue a bucket backlog; older ranges use
+history requests. Footprint uses UTC epoch-aligned half-open buckets; TPO letters
+and brackets align to its own session open. VP aggregates the current session.
+
+The existing `footprint_slice`, `tpo_slice`, `volume_profile_slice`, and history
+chunk wire families retain self-describing grid metadata. Overlay history requests
+may additionally specify `price_min`, `tick_size`, and `rows`; defaults come from
+`trade_overlays`, independently of heatmap settings. History and live publications
+share the selected overlay grid. The GUI maps footprint time slots, TPO session
+columns and VP prices through their own metadata and the common viewport.
+
+All three quantities derive from the retained server trade tape. TPO history no
+longer fills price rows from REST candle high/low ranges; that approximation has
+been removed. This is not a new persisted trade-history reader: periods outside
+the retained tape have no trade observations, and an empty profile must not be
+interpreted as proof of complete historical coverage.

@@ -134,6 +134,13 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
                 cfg.defaultSymbols = symbols;
             }
         }
+        if (serverRoot["trade_overlays"]) {
+            const auto node = serverRoot["trade_overlays"];
+            readScalar(node, "grid_width", cfg.tradeOverlays.gridWidth);
+            readScalar(node, "grid_height", cfg.tradeOverlays.gridHeight);
+            readScalar(node, "tick_size", cfg.tradeOverlays.tickSize);
+            readScalar(node, "footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs);
+        }
         if (serverRoot["orderbook"]) {
             auto ob = serverRoot["orderbook"];
             readScalar(ob, "tick_size", cfg.orderbook.tickSize);

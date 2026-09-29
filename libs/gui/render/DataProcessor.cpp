@@ -31,6 +31,7 @@ DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
     qRegisterMetaType<IGridDataSource::HeatmapHistoryColumn>("IGridDataSource::HeatmapHistoryColumn");
     qRegisterMetaType<QVector<IGridDataSource::HeatmapHistoryColumn>>("QVector<IGridDataSource::HeatmapHistoryColumn>");
+    qRegisterMetaType<TradeOverlayGrid>();
     qRegisterMetaType<heatmap_window::UpdatePtr>("heatmap_window::UpdatePtr");
     qRegisterMetaType<protocol::recordingwire::Request>();
     qRegisterMetaType<recording::LiveView>();
@@ -95,6 +96,9 @@ void DataProcessor::stopProcessing() {
 }
 
 void DataProcessor::clearData() {
+    ++m_tpoGridGeneration;
+    m_tpoMaxPrice = 0;
+    m_tpoTickSize = 0;
     resetHeatmapWindow();
     if (m_footprintStream) {
         m_footprintStream->clear();
@@ -320,6 +324,7 @@ void DataProcessor::requestHeatmapFetch() {
 }
 
 void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
+    if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
     if (m_shuttingDown.load()) {
         return;
     }
@@ -393,11 +398,14 @@ void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
         }
         sLog_Probe("footprint.upload", "x=" << upload.x << " start=" << upload.bucketStartMs
                    << " bytes=" << columnQ16.size());
-        emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16));
+        const auto end = snap.lastSliceStartMs + snap.timeframeMs;
+        emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16),
+            {end - snap.gridWidth * snap.timeframeMs, end, snap.maxPrice, snap.tickSize, snap.resetGeneration});
     }
 }
 
 void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
+    if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
     if (m_shuttingDown.load()) {
         return;
     }
@@ -428,6 +436,12 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                << " grid=" << resolvedWidth << "x" << resolvedHeight
                << " letters=" << slice.letters.size());
 
+    const auto previous = m_tpoStream->snapshot();
+    if (m_tpoMaxPrice != slice.maxPrice || m_tpoTickSize != slice.tickSize ||
+        (previous.timeframeMs && previous.timeframeMs != slice.timeframeMs)) {
+        m_tpoStream->reset(resolvedWidth, resolvedHeight);
+        ++m_tpoGridGeneration;
+    }
     m_tpoStream->setSessionType(slice.sessionType);
 
     if (resolvedWidth != m_tpoGridWidth || resolvedHeight != m_tpoGridHeight) {
@@ -482,7 +496,8 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                             std::move(upload.data),
                             snap.sessionStartMs,
                             snap.sessionEndMs,
-                            snap.timeframeMs);
+                            snap.timeframeMs,
+                            {snap.sessionStartMs, snap.sessionEndMs, m_tpoMaxPrice, m_tpoTickSize, m_tpoGridGeneration});
     }
 }
 
@@ -557,6 +572,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
 }
 
 void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
+    if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
     if (m_shuttingDown.load()) {
         return;
     }

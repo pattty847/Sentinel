@@ -47,6 +47,42 @@ struct RecordingServerStopTest {
         EXPECT_TRUE(session->write_queue_.empty());
         EXPECT_EQ(session->pendingWriteBytes_.load(), 0);
     }
+    static void checkOverlayBounds(SentinelStreamServer& server, ServerDataModel& model) {
+        server.m_running = true;
+        server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
+        std::promise<void> release, entered1, entered2;
+        auto gate = release.get_future().share();
+        EXPECT_TRUE(server.submitHistoryTask([&] { entered1.set_value(); gate.wait(); }));
+        EXPECT_TRUE(server.submitHistoryTask([&] { entered2.set_value(); gate.wait(); }));
+        EXPECT_EQ(entered1.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(entered2.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        net::io_context ioc;
+        ssl::context ctx(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, &server);
+        session->subscriptions_.insert("BTC-USD");
+        session->overlayState("BTC-USD").request.grid.maxPrice = 120000;
+        session->write_queue_.push_back({"in-flight", false});
+        session->pendingWriteBytes_ = 9;
+        session->pumpOverlays();
+        EXPECT_TRUE(session->overlayBusy_);
+        EXPECT_EQ(server.m_pendingHistoryTasks.load(), 3);
+        // A stalled worker never accumulates forming refreshes.
+        for (int i = 0; i < 100; ++i) session->pumpOverlays();
+        EXPECT_EQ(server.m_pendingHistoryTasks.load(), 3);
+        nlohmann::json request = {{"symbol", "BTC-USD"}, {"timeframe_ms", 60000}, {"count", 2}};
+        for (int i = 0; i < 9; ++i) session->requestOverlayHistory(request, false);
+        EXPECT_EQ(session->overlayHistory_.size(), 8);
+        for (int i = 0; i < 5; ++i) EXPECT_TRUE(server.submitHistoryTask([] {}));
+        EXPECT_FALSE(server.submitHistoryTask([] {})); // global admission cap is eight
+        session->armOverlayTimer();
+        session->beginClose("overlay cancellation test");
+        EXPECT_TRUE(session->overlayHistory_.empty());
+        release.set_value();
+        server.m_historyWorkers->join(); // force the queued completion to race with the closed session
+        server.stop(); // joins scans/builds before owner/model destruction
+        ioc.run(); // late completion and cancelled timer must not publish
+        EXPECT_EQ(session->write_queue_.size(), 1);
+    }
     static boost::asio::io_context& startExecutor(SentinelStreamServer& server) {
         server.m_running = true;
         server.m_thread = std::thread([&server, guard = boost::asio::make_work_guard(server.m_ioc)] {
@@ -197,4 +233,15 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
         server.stop();
         EXPECT_FALSE(sub->active.load());
     }
+}
+
+TEST(TradeOverlayServer, BoundedWorkersHistoryAndCloseDiscardLatePublication) {
+    int argc = 1; char name[] = "overlay-queue"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerConfig config; config.heatmap.persistenceEnabled = false; config.recording.enabled = false;
+    ServerDataModel model(config);
+    QTemporaryDir dir;
+    Authenticator auth(dir.path().toStdString() + "/no-credentials");
+    SentinelStreamServer server(model, auth, config, 0);
+    RecordingServerStopTest::checkOverlayBounds(server, model);
 }

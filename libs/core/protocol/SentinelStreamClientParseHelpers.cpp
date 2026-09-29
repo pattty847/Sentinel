@@ -19,6 +19,13 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
             }
         }
     }
+    if (msg.contains("trade_overlays") && msg["trade_overlays"].is_object()) {
+        const auto& overlay = msg["trade_overlays"];
+        cfg.tradeOverlays.gridWidth = overlay.value("grid_width", cfg.tradeOverlays.gridWidth);
+        cfg.tradeOverlays.gridHeight = overlay.value("grid_height", cfg.tradeOverlays.gridHeight);
+        cfg.tradeOverlays.tickSize = overlay.value("tick_size", cfg.tradeOverlays.tickSize);
+        cfg.tradeOverlays.footprintTimeframeMs = overlay.value("footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs);
+    }
     if (msg.contains("heatmap") && msg["heatmap"].is_object()) {
         const auto& hm = msg["heatmap"];
         for (const auto& [wire, field] : {std::pair{"grid_width", "heatmap.gridWidth"},

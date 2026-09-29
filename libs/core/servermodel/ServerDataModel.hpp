@@ -56,6 +56,8 @@ public:
     // persistence / no records. Surfaced to clients as oldest_available_ms.
     int64_t oldestHeatmapPersistedMs(const std::string& symbol,
                                      int64_t timeframeMs) const;
+    bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
+                              size_t limit, std::vector<FootprintTradeSample>& out) const;
     bool collectFootprintTrades(const std::string& symbol,
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,

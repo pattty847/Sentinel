@@ -146,7 +146,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 
     connect(m_dataProcessor.get(), &DataProcessor::footprintColumnReady,
             this,
-            [this](int x, int gridWidth, int gridHeight, QByteArray columnQ16) {
+            [this](int x, int gridWidth, int gridHeight, QByteArray columnQ16, TradeOverlayGrid grid) {
                 if (!m_useGpuHeatmap) {
                     m_useGpuHeatmap = true;
                     m_heatmapStreamService->ensureClockStarted();
@@ -162,7 +162,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                 }
 
                 m_footprintOverlay.enqueue(
-                    FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16)});
+                    FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16), grid});
                 m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
                 sLog_Probe("footprint.queue",
                            "x=" << x << " grid=" << gridWidth << "x" << gridHeight);
@@ -173,7 +173,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
     connect(m_dataProcessor.get(), &DataProcessor::tpoColumnReady,
             this,
             [this](int x, int gridWidth, int gridHeight, QByteArray letters,
-                   int64_t sessionStartMs, int64_t sessionEndMs, int64_t timeframeMs) {
+                   int64_t sessionStartMs, int64_t sessionEndMs, int64_t timeframeMs, TradeOverlayGrid grid) {
                 if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth ||
                     letters.size() != gridHeight) {
                     sLog_RenderN(1000, "tpo column dropped: x=" << x
@@ -182,7 +182,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
                     return;
                 }
                 m_tpoOverlay.enqueue(
-                    TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters)},
+                    TpoOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(letters), grid},
                     sessionStartMs, sessionEndMs, timeframeMs, gridWidth);
                 update();
             },

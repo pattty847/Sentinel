@@ -1,4 +1,5 @@
 #pragma once
+#include "TradeOverlayMapping.hpp"
 
 #include "IOverlayRenderer.hpp"
 #include "TpoStreamState.hpp"   // for TpoStreamState::DisplayMode
@@ -32,7 +33,8 @@ class FootprintIntensityNode;
  *     aligning letters with the underlying candle/heatmap series.
  *     Requires valid sessionStartMs / sessionEndMs in the snapshot plus
  *     a valid TimeAxisMapping (passed as extra parameters).
- */
+ */
+
 class HeatmapColumnTexture;
 class TpoOverlayRenderer : public IOverlayRenderer {
 public:
@@ -41,6 +43,7 @@ public:
         int gridWidth = 0;
         int gridHeight = 0;
         QByteArray letters;
+        TradeOverlayGrid grid;
     };
 
     /// Thread-safe enqueue with session metadata (called from GUI thread).
@@ -63,18 +66,11 @@ public:
     void setDisplayMode(TpoStreamState::DisplayMode mode);
     TpoStreamState::DisplayMode displayMode() const { return m_displayMode; }
 
-    // drawRect      – heatmap overlap rect; used for HorizontalProfile draw area.
-    // surfaceBounds – full item area (0,0,w,h); VerticalTimeline uses this for world→screen
-    //                 projection so session columns align with candles regardless of ring state.
+    // Map the immutable overlay grid against the full common viewport.
     void render(QQuickWindow* window,
                 QSGNode* parentNode,
                 bool drawTpo,
-                bool forceFull,
-                float timeOffset,
-                const QRectF& drawRect,
-                const QRectF& sourceRect,
-                int sharedGridWidth,
-                int sharedGridHeight,
+                double viewMin, double viewMax,
                 std::vector<PendingUpload>& pendingUploads,
                 // VerticalTimeline extras (ignored in HorizontalProfile mode):
                 int64_t sessionStartMs    = 0,
@@ -85,18 +81,12 @@ public:
 
 private:
     void ensureImage();
-    // Compute the clipped drawRect for VerticalTimeline mode.
-    QRectF computeTimelinedDrawRect(const QRectF& fullDrawRect,
-                                    int64_t sessionStartMs,
-                                    int64_t sessionEndMs,
-                                    int64_t viewStartMs,
-                                    int64_t viewEndMs) const;
-
     FootprintIntensityNode* m_node = nullptr;
     int m_gridWidth = 5120;
     int m_gridHeight = 2048;
     int m_lastWriteColumn = -1;
     bool m_textureDirty = true;
+    TradeOverlayGrid m_grid;
     QImage m_image;                                   // CPU mirror for full uploads
     HeatmapColumnTexture* m_columnTexture = nullptr;  // RHI path; owned by the node
     TpoStreamState::DisplayMode m_displayMode =
