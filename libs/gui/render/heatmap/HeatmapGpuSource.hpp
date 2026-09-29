@@ -117,6 +117,25 @@ const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale
 // or columns on the other grid veil as incompatible. 0 if there are no ticks.
 double commonTick(const GpuSource& source);
 
+// Bit i set when some column in absolute buckets [firstBucket, endBucket) has a
+// group on ticks[i]. Gap and unloaded buckets contribute nothing.
+uint32_t tickMaskInBuckets(const GpuSource& source, int64_t firstBucket, int64_t endBucket);
+// LCM of the native ticks in `mask` (price units); 0 for an empty mask.
+double commonTickOfMask(const GpuSource& source, uint32_t mask);
+// commonTick() of the data in view: the columns the view's time range touches.
+// Falls back to commonTick(source) when no column is in view.
+double commonTickInView(const GpuSource& source, double timeLoMs, double timeHiMs);
+// Distinct per-column common ticks, ascending (price units): the grids a Manual
+// preset can be built on somewhere in the loaded data.
+std::vector<double> columnCommonTicks(const GpuSource& source);
+// How much of a bucket range a display tick can be built on (resolution indicator).
+struct TickCoverage {
+    uint32_t columns = 0, incompatible = 0;      // columns with data; those the tick cannot build
+    int64_t firstIncompatibleBucket = 0, endIncompatibleBucket = 0; // absolute, half-open
+    double incompatibleCommon = 0;               // LCM of the incompatible columns' ticks
+};
+TickCoverage tickCoverage(const GpuSource& source, int64_t firstBucket, int64_t endBucket, double displayTick);
+
 // Display tick -> per-tick native rows per display bin (0 = incompatible grid),
 // the same integrality rule binColumn applies.
 std::array<uint32_t, kMaxTicks> tickFactors(const GpuSource& source, double displayTick);

@@ -55,6 +55,7 @@ inline Cell decodeCell(uint32_t word) {
 
 struct DrawStyle {
     float codeFloor = 6000, codeRange = 24000; // recording-mode palette normalization
+    float opacity = 1;                         // premultiplied: scales colour and alpha
 };
 
 enum class KernelVariant { Fast, Precise };
@@ -86,8 +87,10 @@ public:
     std::shared_ptr<const GpuSource> pendingSource() const;
 
     // One compute pass over the active source. Records outside a render pass.
+    // keepPrevious: the grid binned so far stays drawable as the "previous" grid
+    // (its own output buffer) for a crossfade; a failed bin keeps both unchanged.
     bool bin(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
-             QString *error);
+             QString *error, bool keepPrevious = false);
     const std::optional<BinGrid> &binnedGrid() const { return binnedGrid_; }
     uint64_t binnedSourceId() const { return binnedSourceId_; }
     // True if the last bin() used this source and output scale and the kernel
@@ -99,7 +102,14 @@ public:
     bool prepareDraw(QRhiRenderPassDescriptor *pass, int sampleCount, QString *error);
     void updateDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp, const QRectF &itemRect,
                     const DisplayMapping &mapping, const DrawStyle &style = {});
-    // Inside a render pass; the caller sets viewport/scissor.
+    // Crossfade support: the previous grid (see bin(keepPrevious)) draws after the
+    // current one, so a partly transparent previous grid fades out over it.
+    const std::optional<BinGrid> &previousGrid() const { return previousGrid_; }
+    void updatePreviousDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp, const QRectF &itemRect,
+                            const DisplayMapping &mapping, const DrawStyle &style);
+    void dropPrevious() { previousGrid_.reset(); } // keeps the buffer for reuse
+    // Inside a render pass; the caller sets viewport/scissor. Draws the current
+    // grid, then the previous grid if one is kept.
     void recordDraw(QRhiCommandBuffer *cb);
     bool canDraw() const { return binnedGrid_.has_value() && graphics_ && drawBindings_; }
 
@@ -142,6 +152,10 @@ private:
     QVector<quint32> graphicsFormat_;
     int graphicsSamples_ = 0;
     std::optional<BinGrid> binnedGrid_;
+    // Crossfade: the grid binned before the latest tick change and its draw resources.
+    std::unique_ptr<QRhiBuffer> previousOutput_, previousDrawParams_;
+    std::unique_ptr<QRhiShaderResourceBindings> previousDrawBindings_;
+    std::optional<BinGrid> previousGrid_;
     uint64_t binnedSourceId_ = 0;
     recording::SizeScale binnedScale_{0, 0};
     KernelVariant binnedKernel_ = KernelVariant::Precise;

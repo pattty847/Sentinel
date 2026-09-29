@@ -117,7 +117,8 @@ std::shared_ptr<const GpuSource> HeatmapGpuBinner::pendingSource() const {
 uint64_t HeatmapGpuBinner::sourceBytes() const { return active_ ? active_->bytes() : 0; }
 uint64_t HeatmapGpuBinner::gpuBytes() const {
     uint64_t total = (active_ ? active_->bytes() : 0) + (spare_ ? spare_->bytes() : 0);
-    for (auto *b : {thresholds_.get(), output_.get(), computeParams_.get(), drawParams_.get(), dummy_.get()})
+    for (auto *b : {thresholds_.get(), output_.get(), computeParams_.get(), drawParams_.get(), dummy_.get(),
+                    previousOutput_.get(), previousDrawParams_.get()})
         if (b) total += b->size();
     return total;
 }
@@ -370,7 +371,7 @@ bool HeatmapGpuBinner::binnedMatches(uint64_t sourceId, const recording::SizeSca
 }
 
 bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
-                           const recording::SizeScale &outputScale, QString *error) {
+                           const recording::SizeScale &outputScale, QString *error, bool keepPrevious) {
     if (!active_) return fail(error, QStringLiteral("no uploaded heatmap source"));
     const auto &source = *active_->source;
     if (!cb || grid.tfMs != source.tfMs || !grid.columns || !grid.rows ||
@@ -383,7 +384,32 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
         if (!computeParams_ || !drawParams_) return false;
     }
     auto *updates = rhi_->nextResourceUpdateBatch();
-    auto bail = [&] { updates->release(); return false; };
+    // keepPrevious: swap the current output (with its draw uniforms and bindings)
+    // into the previous slot, bin into the other buffer, and swap back on failure.
+    const bool swapped = keepPrevious && binnedGrid_.has_value();
+    auto swapSlots = [&] {
+        std::swap(output_, previousOutput_);
+        std::swap(drawParams_, previousDrawParams_);
+        std::swap(drawBindings_, previousDrawBindings_);
+        computeBoundTo_ = nullptr; // compute bindings name the output buffer
+    };
+    if (swapped) {
+        swapSlots();
+        previousGrid_ = binnedGrid_;
+        if (!drawParams_) {
+            drawParams_ = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams), error);
+            drawBindings_.reset();
+        }
+    }
+    auto bail = [&] {
+        updates->release();
+        if (swapped) {
+            swapSlots(); // the current grid's buffer was not touched
+            previousGrid_.reset(); // the previous slot may hold a fresh, unbinned buffer
+        }
+        return false;
+    };
+    if (swapped && !drawParams_) return bail();
     if (!thresholds_ || !sameScale(thresholdScale_, outputScale)) {
         const auto &table = cachedEncodeThresholds(outputScale);
         if (!thresholds_) {
@@ -415,6 +441,7 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
         bail();
         return fail(error, QStringLiteral("heatmap grid native rows exceed int32"));
     }
+    if (!keepPrevious) previousGrid_.reset();
     constexpr double big = double(1 << 30);
     ComputeParams params{};
     params.dims = {grid.columns, grid.rows, uint32_t(source.bucketSlots.size()), source.wide ? 1u : 0u};
@@ -491,8 +518,32 @@ void HeatmapGpuBinner::updateDraw(QRhiResourceUpdateBatch *updates, const QMatri
     params.mapping[0] = mapping.timeOffset; params.mapping[1] = mapping.timeSpan;
     params.mapping[2] = mapping.priceOffset; params.mapping[3] = mapping.priceSpan;
     params.dims[0] = binnedGrid_->columns; params.dims[1] = binnedGrid_->rows;
-    params.style[0] = style.codeFloor; params.style[1] = style.codeRange;
+    params.style[0] = style.codeFloor; params.style[1] = style.codeRange; params.style[2] = style.opacity;
     updates->updateDynamicBuffer(drawParams_.get(), 0, sizeof(params), &params);
+}
+
+void HeatmapGpuBinner::updatePreviousDraw(QRhiResourceUpdateBatch *updates, const QMatrix4x4 &mvp,
+                                          const QRectF &itemRect, const DisplayMapping &mapping,
+                                          const DrawStyle &style) {
+    if (!previousGrid_ || !previousDrawParams_ || !previousOutput_) return;
+    if (!previousDrawBindings_) {
+        const auto fs = QRhiShaderResourceBinding::FragmentStage;
+        const auto vs = QRhiShaderResourceBinding::VertexStage;
+        auto bindings = std::unique_ptr<QRhiShaderResourceBindings>(rhi_->newShaderResourceBindings());
+        bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, previousOutput_.get()),
+                               QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, previousDrawParams_.get())});
+        if (!bindings->create()) { previousGrid_.reset(); return; }
+        previousDrawBindings_ = std::move(bindings);
+    }
+    DrawParams params{};
+    std::memcpy(params.mvp, mvp.constData(), sizeof(params.mvp));
+    params.rect[0] = float(itemRect.x()); params.rect[1] = float(itemRect.y());
+    params.rect[2] = float(itemRect.width()); params.rect[3] = float(itemRect.height());
+    params.mapping[0] = mapping.timeOffset; params.mapping[1] = mapping.timeSpan;
+    params.mapping[2] = mapping.priceOffset; params.mapping[3] = mapping.priceSpan;
+    params.dims[0] = previousGrid_->columns; params.dims[1] = previousGrid_->rows;
+    params.style[0] = style.codeFloor; params.style[1] = style.codeRange; params.style[2] = style.opacity;
+    updates->updateDynamicBuffer(previousDrawParams_.get(), 0, sizeof(params), &params);
 }
 
 void HeatmapGpuBinner::recordDraw(QRhiCommandBuffer *cb) {
@@ -500,5 +551,9 @@ void HeatmapGpuBinner::recordDraw(QRhiCommandBuffer *cb) {
     cb->setGraphicsPipeline(graphics_.get());
     cb->setShaderResources(drawBindings_.get());
     cb->draw(4);
+    if (previousGrid_ && previousDrawBindings_) {
+        cb->setShaderResources(previousDrawBindings_.get());
+        cb->draw(4);
+    }
 }
 } // namespace heatmap::gpu
