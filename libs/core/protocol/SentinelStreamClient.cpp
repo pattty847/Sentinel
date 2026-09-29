@@ -1001,6 +1001,7 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
 }
 
 void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg) {
+    const auto generation = m_candleDeliveryGeneration.load(std::memory_order_acquire);
     if (!validateFamilySchema(msg,
                               "candle",
                               protocol::SentinelProtocol::kCandleSchemaVersion,
@@ -1019,9 +1020,9 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
 
     const auto symbolQ = QString::fromStdString(symbol);
     if (type == protocol::MessageType::CandleBarClosed) {
-        emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+        emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
     } else {
-        emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar);
+        emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
     }
 }
 

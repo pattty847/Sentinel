@@ -33,6 +33,7 @@ using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
     friend struct TradeOverlayWireTest;
+    friend struct CandleDataSourceTest;
     Q_OBJECT
 public:
     struct HeatmapHistoryColumn {
@@ -99,6 +100,10 @@ public:
                               int64_t timeframeSec,
                               int64_t endTimeSec,
                               int limit);
+    // Local delivery tag, captured on the network thread before queuing a bar.
+    void setCandleDeliveryGeneration(quint64 generation) {
+        m_candleDeliveryGeneration.store(generation, std::memory_order_release);
+    }
     void requestScreenerData(const std::string& asset,
                              int limit = 50,
                              double minVolume = 0.0);
@@ -145,12 +150,12 @@ signals:
                                  int64_t timeframeSec,
                                  int64_t bucketStartMs,
                                  int64_t seq,
-                                 const CandleBar& candle);
+                                 const CandleBar& candle, quint64 deliveryGeneration);
     void candleBarClosedReceived(const QString& symbol,
                                  int64_t timeframeSec,
                                  int64_t bucketStartMs,
                                  int64_t seq,
-                                 const CandleBar& candle);
+                                 const CandleBar& candle, quint64 deliveryGeneration);
     // Emitted when the server returns a screener_update in response to screener_request.
     // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
@@ -212,6 +217,7 @@ private:
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
+    std::atomic<quint64> m_candleDeliveryGeneration{0};
 };
 
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)

@@ -120,13 +120,17 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this,
             [this]{
                 // Candle seq numbers restart with every server session.
+                advanceCandleDeliveryGeneration();
                 if (m_candleBuffer) m_candleBuffer->resetSequences();
+                m_candleBackfill.requestRefresh();
                 emit connectionStatusChanged(true);
+                requestNextCandlePage();
             },
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::disconnected,
             this,
             [this]{
+                advanceCandleDeliveryGeneration();
                 m_candleHistoryReady = false;
                 m_candleBackfillTimer.stop();
                 m_candleBackfill.disconnect();
@@ -191,15 +195,25 @@ void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
 
 void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
                                                     qint64 startMs, qint64 endMs) {
-    if (!m_candleSymbol.isEmpty() && (symbol != m_candleSymbol || timeframeSec != m_candleTimeframeSec))
+    const bool selectionChanged = symbol != m_candleSymbol || timeframeSec != m_candleTimeframeSec;
+    if (selectionChanged) advanceCandleDeliveryGeneration();
+    const bool refresh = selectionChanged && !m_candleSymbol.isEmpty() &&
+        m_candleBuffer->oldestTimeMs(symbol, timeframeSec) > 0;
+    if (refresh)
         m_candleBuffer->resetSeriesForSelection(symbol, timeframeSec);
     m_candleSymbol = symbol;
     m_candleTimeframeSec = timeframeSec;
     m_candleHistoryReady = endMs > startMs && startMs > 0;
-    if (m_candleBackfill.setViewport(symbol, timeframeSec, startMs, endMs)) {
+    const bool viewportChanged = m_candleBackfill.setViewport(symbol, timeframeSec, startMs, endMs);
+    if (refresh) m_candleBackfill.requestRefresh();
+    if (viewportChanged || refresh) {
         if (m_candleHistoryReady) requestNextCandlePage();
         else m_candleBackfillTimer.stop();
     }
+}
+
+void RemoteGridDataSource::advanceCandleDeliveryGeneration() {
+    m_client.setCandleDeliveryGeneration(++m_candleDeliveryGeneration);
 }
 
 void RemoteGridDataSource::requestNextCandlePage() {
@@ -356,8 +370,10 @@ void RemoteGridDataSource::onCandleBarUpdateReceived(const QString& symbol,
                                                      int64_t timeframeSec,
                                                      int64_t,
                                                      int64_t seq,
-                                                     const SentinelStreamClient::CandleBar& bar) {
-    if (!m_candleBuffer) {
+                                                     const SentinelStreamClient::CandleBar& bar,
+                                                     quint64 deliveryGeneration) {
+    if (!m_candleBuffer || deliveryGeneration != m_candleDeliveryGeneration ||
+        symbol != m_candleSymbol || timeframeSec != m_candleTimeframeSec) {
         return;
     }
     CandleSeriesBuffer::CandleBar out;
@@ -377,8 +393,10 @@ void RemoteGridDataSource::onCandleBarClosedReceived(const QString& symbol,
                                                      int64_t timeframeSec,
                                                      int64_t,
                                                      int64_t seq,
-                                                     const SentinelStreamClient::CandleBar& bar) {
-    if (!m_candleBuffer) {
+                                                     const SentinelStreamClient::CandleBar& bar,
+                                                     quint64 deliveryGeneration) {
+    if (!m_candleBuffer || deliveryGeneration != m_candleDeliveryGeneration ||
+        symbol != m_candleSymbol || timeframeSec != m_candleTimeframeSec) {
         return;
     }
     CandleSeriesBuffer::CandleBar out;

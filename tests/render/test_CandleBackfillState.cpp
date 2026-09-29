@@ -265,3 +265,19 @@ TEST(CandleBackfillState, PausedScanDoesNotNeedTimerWhenViewportReturnsToLoadedC
     EXPECT_FALSE(state.needsOlderData(4050 * minute, false, now + 200));
     EXPECT_FALSE(state.next(4050 * minute, false, now + 200 + CandleBackfillState::kFloorRetryMs));
 }
+
+
+TEST(CandleBackfillState, ExplicitRefreshBypassesCoveredFullCacheThenStops) {
+    CandleBackfillState state;
+    view(state);
+    EXPECT_FALSE(state.next(800 * minute, true, now));
+    state.requestRefresh();
+    auto refresh = state.next(800 * minute, true, now);
+    ASSERT_TRUE(refresh);
+    EXPECT_TRUE(refresh->refresh);
+    EXPECT_EQ(refresh->endSec, 1100 * 60);
+    EXPECT_EQ(refresh->startSec, 900 * 60);
+    EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
+    ASSERT_TRUE(accept(state, *refresh, 900 * minute, now + 1000));
+    EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
+}

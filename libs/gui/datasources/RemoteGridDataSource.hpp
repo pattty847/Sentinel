@@ -58,12 +58,12 @@ private slots:
                                    int64_t timeframeSec,
                                    int64_t bucketStartMs,
                                    int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar);
+                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
     void onCandleBarClosedReceived(const QString& symbol,
                                    int64_t timeframeSec,
                                    int64_t bucketStartMs,
                                    int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar);
+                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
     void onCandleHistoryReceived(const QString& symbol,
                                  int64_t timeframeSec,
                                  int64_t startTimeSec,
@@ -75,6 +75,7 @@ private slots:
 
 private:
     void requestNextCandlePage();
+    void advanceCandleDeliveryGeneration();
     SentinelStreamClient m_client;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     CandleBackfillState m_candleBackfill;
@@ -82,6 +83,7 @@ private:
     QString m_candleSymbol;
     int64_t m_candleTimeframeSec = 0;
     bool m_candleHistoryReady = false;
+    quint64 m_candleDeliveryGeneration = 0;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
     // Or we might change the interface to not return references?
     // IGridDataSource::getDirectLiveOrderBook returns const ref.

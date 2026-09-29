@@ -62,6 +62,12 @@ target_link_libraries(test_CandleBackfillState PRIVATE GTest::gtest_main Qt6::Co
 add_test(NAME CandleBackfillStateTests COMMAND test_CandleBackfillState)
 set_tests_properties(CandleBackfillStateTests PROPERTIES LABELS "render")
 
+add_executable(test_CandleDataSource test_CandleDataSource.cpp)
+target_include_directories(test_CandleDataSource PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_CandleDataSource PRIVATE GTest::gtest_main sentinel_gui_lib Qt6::Core)
+add_test(NAME CandleDataSourceTests COMMAND test_CandleDataSource)
+set_tests_properties(CandleDataSourceTests PROPERTIES LABELS "render")
+
 add_executable(test_CandleSeriesBuffer test_CandleSeriesBuffer.cpp)
 target_include_directories(test_CandleSeriesBuffer PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui

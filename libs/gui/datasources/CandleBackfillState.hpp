@@ -24,11 +24,16 @@ public:
         int limit = 0;
         quint64 generation = 0;
         qint64 boundarySec = 0; // exclusive progress boundary, independent of wire end
+        bool refresh = false;
     };
 
     bool setViewport(const QString& symbol, qint64 tfSec, qint64 startMs, qint64 endMs) {
         bool changed = symbol != m_symbol || tfSec != m_tfSec;
-        if (changed) ++m_generation;
+        if (changed) {
+            ++m_generation;
+            m_refreshPending = false;
+            m_refreshCursorSec = 0;
+        }
         m_symbol = symbol;
         m_tfSec = tfSec;
         qint64 start = 0, end = 0;
@@ -44,9 +49,32 @@ public:
         return changed;
     }
 
+    // One refresh pass, newest first, through the same page cap/flight/throttle.
+    // Capture the visible range plus prefetch when its first valid page is sent.
+    void requestRefresh() {
+        m_refreshPending = true;
+        m_refreshCursorSec = 0;
+    }
+
     std::optional<Request> next(qint64 oldestMs, bool cacheFull, qint64 nowMs) {
         if (m_pending || !needsOlderData(oldestMs, cacheFull, nowMs) ||
             retryDelayMs(nowMs) > 0) return std::nullopt;
+        if (m_refreshPending) {
+            if (m_refreshCursorSec == 0) {
+                const qint64 nowEnd = ((nowMs / 1000) / m_tfSec + 1) * m_tfSec;
+                m_refreshCursorSec = std::min(m_endSec, nowEnd);
+                m_refreshStartSec = m_startSec;
+            }
+            const qint64 pageCap = std::clamp<qint64>(350 * 60 / m_tfSec, 1, 350);
+            const qint64 bars = (m_refreshCursorSec - m_refreshStartSec + m_tfSec - 1) / m_tfSec;
+            const int limit = static_cast<int>(std::min(pageCap, bars));
+            const qint64 end = m_refreshCursorSec - (m_tfSec == 1 ? 1 : 0);
+            const qint64 start = std::max<qint64>(0, end - limit * m_tfSec);
+            if (limit <= 0 || end <= 0 || (m_tfSec != 1 && start <= 0)) return std::nullopt;
+            m_pending = Request{m_symbol, m_tfSec, start, end, limit, m_generation, m_refreshCursorSec, true};
+            m_nextSendMs = nowMs + kThrottleMs;
+            return m_pending;
+        }
         auto& history = m_history[{m_symbol, m_tfSec}];
         if (history.emptyPages >= kMaxEmptyPages) {
             // Resume the same scan after the pause, never revisit its empty prefix.
@@ -83,9 +111,18 @@ public:
         if (!m_pending || m_pending->symbol != symbol || m_pending->timeframeSec != tfSec ||
             m_pending->startSec != startSec || m_pending->endSec != endSec) return false;
         const bool current = m_pending->generation == m_generation;
-        const auto boundary = m_pending->boundarySec;
+        const auto completed = *m_pending;
+        const auto boundary = completed.boundarySec;
         m_pending.reset();
         if (!current) return false;
+        if (completed.refresh) {
+            // Empty refresh windows still advance; they are not older-history floors.
+            m_refreshCursorSec = tfSec == 1 && oldestReplyMs > 0
+                ? std::min(boundary - 1, oldestReplyMs / 1000)
+                : startSec + (tfSec == 1 ? 1 : 0);
+            if (m_refreshCursorSec <= m_refreshStartSec) m_refreshPending = false;
+            return true;
+        }
         auto& history = m_history[{symbol, tfSec}];
         if (oldestReplyMs > 0 && oldestReplyMs / 1000 < boundary) {
             history = {oldestReplyMs / 1000, 0, 0, 0};
@@ -113,14 +150,16 @@ public:
     qint64 retryDelayMs(qint64 nowMs) const {
         qint64 deadline = std::max(m_retryAfterMs, m_nextSendMs);
         const auto it = m_history.find({m_symbol, m_tfSec});
-        if (it != m_history.end() && !emptyLookbackExhausted(it->second))
+        if (!m_refreshPending && it != m_history.end() && !emptyLookbackExhausted(it->second))
             deadline = std::max(deadline, it->second.retryAfterMs);
         return std::max<qint64>(0, deadline - nowMs);
     }
 
     bool needsOlderData(qint64 oldestMs, bool cacheFull, qint64 nowMs) const {
-        if (m_symbol.isEmpty() || m_tfSec <= 0 || m_endSec <= m_startSec || cacheFull) return false;
+        if (m_symbol.isEmpty() || m_tfSec <= 0 || m_endSec <= m_startSec) return false;
         const qint64 nowEnd = ((nowMs / 1000) / m_tfSec + 1) * m_tfSec;
+        if (m_refreshPending) return m_refreshCursorSec > 0 || std::min(m_endSec, nowEnd) > m_startSec;
+        if (cacheFull) return false;
         const qint64 loadedEdge = oldestMs > 0 ? oldestMs / 1000 : std::min(m_endSec, nowEnd);
         if (loadedEdge <= m_startSec) return false;
         const auto it = m_history.find({m_symbol, m_tfSec});
@@ -134,6 +173,8 @@ public:
         m_nextSendMs = 0;
         m_history.clear();
         m_startSec = m_endSec = 0;
+        m_refreshPending = false;
+        m_refreshCursorSec = 0;
     }
 
 private:
@@ -142,6 +183,8 @@ private:
     qint64 m_nextSendMs = 0;
     qint64 m_emptyLookbackSec;
     quint64 m_generation = 0;
+    bool m_refreshPending = false;
+    qint64 m_refreshCursorSec = 0, m_refreshStartSec = 0;
     std::optional<Request> m_pending;
     struct History {
         qint64 cursorSec = 0;
