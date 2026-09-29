@@ -15,9 +15,9 @@ Status: design, 2026-09-28. Author: orchestrator. Review: Lt. Astra (read-only),
 | Layer | Price range | Row tick (BTC) | Columns | Purpose |
 |---|---|---|---|---|
 | Near | +/-5% around the mid (follows the mid) | $1 | 1m | order-flow detail, in-cell text zoom |
-| Deep | whole book clipped to [mid/4, mid*4] | $10 | 1m, plus persisted 1h rollup | whales over weeks and months |
+| Deep | whole book clipped to [mid/4, mid*4] | $5 | 1m, plus persisted 1h rollup | whales over weeks and months |
 
-- Per-asset ticks: near tick is about 1 bp rounded down to 1-2-5 (owner chose $1 for BTC); deep tick = 10 x near tick.
+- Per-asset ticks: near tick is about 1 bp rounded down to 1-2-5 (owner chose $1 for BTC); deep tick is $5 for BTC (owner decision 2026-09-28), allowing $25 display rows.
 - Store absolute resting size per price row with one fixed scale forever. Colour normalization moves to display time (a two-handle sensitivity range).
 - Store only occupied rows. Compress.
 - The existing HMCL `.hmcol` store and today's heatmap path keep running unchanged until the display side moves to v2.
@@ -71,7 +71,7 @@ Estimated size (BTC, compressed): deep 1m about 15-25 MB/day, near 1m about 10-2
 
 ## Build order
 
-1. `BookRecorder` + HMC2 writer + reader + tests (synthetic book event streams with known TWAPs, gaps, resync, side flips, CRC tail recovery, round-trip of codes). Wire into `ServerDataModel`, config keys under `recording:` (enabled, dir, near_pct, near_tick, deep_tick_mult, deep_min_frac, deep_max_mult, size_floor). Ship: it records to disk, nothing reads it yet.
+1. `BookRecorder` + HMC2 writer + reader + tests (synthetic book event streams with known TWAPs, gaps, resync, side flips, CRC tail recovery, round-trip of codes). Wire into `ServerDataModel`, config keys under `recording:` (enabled, dir, near_pct, near_tick, deep_tick, deep_low_frac, deep_high_mult, size_floor). Ship: it records to disk, nothing reads it yet.
 2. Serve path + client LOD requests + display (separate steps).
 
 ## Open questions for review

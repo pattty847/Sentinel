@@ -53,7 +53,7 @@ recording:                # recording v2: near and deep order-book layers (docs/
   fallback_dir: data/recording   # used when dir's volume is not mounted; empty = do not record
   near_tick: 1              # $ rows within near_pct of the mid
   near_pct: 0.05
-  deep_tick: 10             # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
+  deep_tick: 5              # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
   deep_low_frac: 0.25
   deep_high_mult: 4
   # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
@@ -66,6 +66,8 @@ server:
     use_jwt: false   # true only when key.json exists and user/futures channels are needed
     ssl_ca_bundle: resources/certs/ca-bundle.crt
 ```
+
+Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.
 
 Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 

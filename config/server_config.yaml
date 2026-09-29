@@ -20,7 +20,7 @@ recording:
   fallback_dir: data/recording
   near_tick: 1        # $ rows within near_pct of the mid (follows the mid)
   near_pct: 0.05
-  deep_tick: 10       # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
+  deep_tick: 5       # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
   deep_low_frac: 0.25
   deep_high_mult: 4
   size_floor: 1.0e-8   # BTC base increment; codes span 1e-8 .. ~11k BTC per row at 0.085%

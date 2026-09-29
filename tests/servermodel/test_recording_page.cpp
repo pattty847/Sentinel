@@ -13,7 +13,7 @@ class PageTest : public testing::Test {
     std::filesystem::path root() { return dir.path().toStdString(); }
     Hmc2Record record(int64_t offset = 0, std::string layer = "near", int64_t tf = minute) {
         Hmc2Record r;
-        r.header = {"BTC-USD", layer, tf, 100, layer == "near" ? 100 : 1000, {}, 42};
+        r.header = {"BTC-USD", layer, tf, 100, layer == "near" ? 100 : 500, {}, 42};
         r.bucketStartMs = epoch + offset;
         r.observedMs = static_cast<uint32_t>(tf);
         r.bidRowLo = r.askRowLo = 0;
@@ -66,7 +66,7 @@ TEST_F(PageTest, LayerSelectionAndAbsoluteGrid) {
     EXPECT_EQ(r.layer, "deep");
     EXPECT_EQ(r.band.tick, 20);
     EXPECT_EQ(r.band.lo, 80);
-    q = request(10, 20, 2);
+    q = request(10, 14, 2);
     EXPECT_EQ(buildPage(root(), q).layer, "near");
     q.displayTick = 10;
     EXPECT_EQ(buildPage(root(), q).layer, "deep");
@@ -75,13 +75,110 @@ TEST_F(PageTest, LayerSelectionAndAbsoluteGrid) {
 }
 TEST_F(PageTest, AutomaticBandUsesCustomDeepGrid) {
     auto deep = record(0, "deep");
-    deep.header.rowTickUnits = 300;
+    deep.header.rowTickUnits = 400;
     write({record(), deep});
     auto p = buildPage(root(), request(0, 10, 2));
     EXPECT_EQ(p.status, BuildStatus::Complete);
     EXPECT_EQ(p.layer, "deep");
-    EXPECT_EQ(p.band.tick, 6);
-    EXPECT_EQ(p.band.rows, 2);
+    EXPECT_EQ(p.band.tick, 20); // $5 and $10 are not multiples of the custom $4 native tick
+    EXPECT_EQ(p.band.rows, 1);
+}
+TEST_F(PageTest, AutomaticTicksFollowSharedLadderAndSelectDeepAtFive) {
+    write({record(), record(0, "deep"), record(0, "deep", hour)});
+    for (const auto tf : {minute, hour}) {
+        for (const auto tick : {5., 10., 20., 25., 50., 100., 200., 250.}) {
+            auto q = request(0, tick * 2, 2, tf);
+            auto p = buildPage(root(), q);
+            EXPECT_EQ(p.status, BuildStatus::Complete);
+            EXPECT_EQ(p.band.tick, tick);
+            EXPECT_EQ(p.layer, "deep");
+        }
+    }
+    auto q = request(19, 51, 2); // $20 and $25 need three aligned rows; $50 fits
+    EXPECT_EQ(buildPage(root(), q).band.tick, 50);
+    q = request(0, 21, 1);
+    EXPECT_EQ(buildPage(root(), q).band.tick, 25);
+}
+TEST_F(PageTest, CustomNativeWithoutLargerLadderTickFailsBoundedly) {
+    auto deep = record(0, "deep");
+    deep.header.rowTickUnits = 300;
+    write({record(), deep});
+    EXPECT_EQ(buildPage(root(), request(0, 10, 2)).status, BuildStatus::IncompatibleGrid);
+}
+TEST_F(PageTest, MixedGenerationsKeepOwnGridAndOnlyIncompatibleColumnsAreUnknown) {
+    auto old = record(0, "deep"), next = record(minute, "deep");
+    old.header.rowTickUnits = 1000;
+    old.header.configHash = Hmc2Store::configHash(old.header, .25, 4);
+    next.header.configHash = Hmc2Store::configHash(next.header, .25, 4);
+    old.entries = {{10, false, encodeSize(2), 0}};
+    next.entries = {{20, false, encodeSize(6), 0}, {21, false, encodeSize(4), 0}};
+    ASSERT_NE(old.header.configHash, next.header.configHash);
+    write({old, next});
+    EXPECT_TRUE(std::filesystem::exists(Hmc2Store::filePath(root(), next.header, next.bucketStartMs, 1)));
+    auto q = request(100, 150, 1);
+    auto p = buildPage(root(), q);
+    ASSERT_EQ(p.status, BuildStatus::Complete);
+    ASSERT_EQ(p.columns.size(), 2);
+    EXPECT_EQ(p.band.tick, 50);
+    EXPECT_TRUE(valid(p.columns[0], 0));
+    EXPECT_TRUE(valid(p.columns[1], 0));
+    EXPECT_NEAR(quantity(p.columns[0], 0), decodeSize(encodeSize(2)), 1e-5);
+    EXPECT_NEAR(quantity(p.columns[1], 0), decodeSize(encodeSize(6)) + decodeSize(encodeSize(4)), 1e-5);
+    q = request(100, 125, 1);
+    p = buildPage(root(), q);
+    ASSERT_EQ(p.status, BuildStatus::Complete);
+    ASSERT_EQ(p.columns.size(), 2);
+    EXPECT_EQ(p.band.tick, 25);
+    EXPECT_FALSE(valid(p.columns[0], 0));
+    EXPECT_EQ(p.columns[0].cells[0], 0);
+    EXPECT_EQ(p.columns[0].quantities[0], 0);
+    EXPECT_EQ(p.columns[0].observedMs, minute);
+    EXPECT_TRUE(valid(p.columns[1], 0));
+    EXPECT_TRUE(p.exhausted);
+    EXPECT_EQ(p.scannedStartMs, epoch);
+    EXPECT_EQ(p.scannedEndMs, epoch + 2 * minute);
+    q.tfMs = 5 * minute;
+    p = buildPage(root(), q);
+    ASSERT_EQ(p.status, BuildStatus::Complete);
+    ASSERT_EQ(p.columns.size(), 1);
+    EXPECT_FALSE(valid(p.columns[0], 0));
+    EXPECT_EQ(p.columns[0].observedMs, 2 * minute);
+}
+TEST_F(PageTest, MixedNativeRollupsWeightSidesBeforeChoosingDominantSide) {
+    for (const auto tf : {minute, hour}) {
+        QTemporaryDir mixed;
+        auto old = record(0, "deep", tf), next = record(tf, "deep", tf);
+        old.header.rowTickUnits = 1000;
+        old.observedMs = static_cast<uint32_t>(tf / 2);
+        old.entries = {{10, false, encodeSize(12), 0, old.observedMs}};
+        next.entries = {{20, true, encodeSize(4), 0, next.observedMs},
+                        {21, true, encodeSize(6), 0, next.observedMs}};
+        if (tf == hour) old.coverage = {{0, 100, false, old.observedMs}, {0, 100, true, old.observedMs}};
+        { Hmc2Store store(mixed.path().toStdString()); store.append(old); store.append(next); }
+        auto q = request(100, 150, 1, tf == minute ? 5 * minute : 4 * hour);
+        auto p = buildPage(mixed.path().toStdString(), q);
+        ASSERT_EQ(p.status, BuildStatus::Complete);
+        ASSERT_EQ(p.columns.size(), 1);
+        EXPECT_EQ(p.columns[0].observedMs, tf * 3 / 2);
+        EXPECT_TRUE(valid(p.columns[0], 0));
+        EXPECT_TRUE(isAsk(p.columns[0].cells[0]));
+        EXPECT_NEAR(quantity(p.columns[0], 0), (decodeSize(encodeSize(4)) + decodeSize(encodeSize(6))) * 2 / 3, 1e-5);
+    }
+}
+TEST_F(PageTest, MixedRollupValidityRequiresCoverageFromBothNativeGrids) {
+    auto old = record(0, "deep"), next = record(minute, "deep");
+    old.header.rowTickUnits = 1000;
+    old.bidRowHi = 14; // [100,150) covered, [150,200) unknown on old bids
+    old.entries = {{10, false, encodeSize(2), 0}};
+    next.entries = {{20, false, encodeSize(6), 0}};
+    write({old, next});
+    auto q = request(100, 200, 2, 5 * minute);
+    auto p = buildPage(root(), q);
+    ASSERT_EQ(p.status, BuildStatus::Complete);
+    ASSERT_EQ(p.columns.size(), 1);
+    EXPECT_FALSE(valid(p.columns[0], 0));
+    EXPECT_TRUE(valid(p.columns[0], 1));
+    EXPECT_NEAR(quantity(p.columns[0], 1), (decodeSize(encodeSize(2)) + decodeSize(encodeSize(6))) / 2, 1e-5);
 }
 TEST_F(PageTest, SumsDecodedSizesDominantSideTieAndDescendingRows) {
     auto r = record();
@@ -163,7 +260,7 @@ TEST_F(PageTest, MultiHourCoverageExactIncludingAbsentZeroRows) {
     b.entries = {{10, false, encodeSize(2), 0, 120000}};
     b.coverage = {{10, 10, false, 120000}, {10, 10, true, 120000}};
     write({a, b});
-    auto p = buildPage(root(), request(100, 110, 1, 4 * hour));
+    auto p = buildPage(root(), request(50, 55, 1, 4 * hour));
     ASSERT_EQ(p.columns.size(), 1);
     EXPECT_NEAR(quantity(p.columns[0], 0), (decodeSize(encodeSize(8)) * 30000 +
                 decodeSize(encodeSize(2)) * 120000) / 150000, 1e-5);
@@ -171,7 +268,7 @@ TEST_F(PageTest, MultiHourCoverageExactIncludingAbsentZeroRows) {
     // No entry in the second hour still supplies a zero denominator contribution.
     b.entries.clear();
     write({b});
-    p = buildPage(root(), request(100, 110, 1, 4 * hour));
+    p = buildPage(root(), request(50, 55, 1, 4 * hour));
     EXPECT_NEAR(quantity(p.columns[0], 0), decodeSize(encodeSize(8)) * 30000 / 150000, 1e-5);
 }
 TEST_F(PageTest, CurrentHourTailAndPersistedHourNeverDoubleCount) {
@@ -181,7 +278,7 @@ TEST_F(PageTest, CurrentHourTailAndPersistedHourNeverDoubleCount) {
     stale.entries = {{10, false, encodeSize(1000), 0}};
     tail.entries = {{10, false, encodeSize(8), 0}};
     write({h, stale, tail});
-    auto q = request(100, 110, 1, 4 * hour);
+    auto q = request(50, 55, 1, 4 * hour);
     auto p = buildPage(root(), q);
     ASSERT_EQ(p.columns.size(), 1);
     EXPECT_EQ(p.columns[0].observedMs, hour + minute);

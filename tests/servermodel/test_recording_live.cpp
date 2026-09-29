@@ -482,3 +482,67 @@ TEST(RecordingLive, TransientReadFailurePreservesPreviouslyWarmedPrefix) {
     EXPECT_EQ(recovered.columns.back().observedMs, 241000);
     EXPECT_NEAR(quantity(recovered.columns.back()), 2, .01);
 }
+
+TEST(RecordingLive, DeepFiveLadderBandMatchesHistoryAcrossGridChangeAndProvisionalCommit) {
+    QTemporaryDir dir;
+    const auto root = std::filesystem::path(dir.path().toStdString());
+    auto deep = [](int offset, int64_t native, double size) {
+        auto r = std::make_shared<Hmc2Record>(*record(offset, size));
+        r->header.layer = "deep";
+        r->header.rowTickUnits = native;
+        r->header.configHash = Hmc2Store::configHash(r->header, .25, 4);
+        r->bidRowLo = r->askRowLo = 0;
+        r->bidRowHi = r->askRowHi = 100;
+        r->entries = {{10000 / native, false, encodeSize(size), 0}};
+        return r;
+    };
+    auto old = deep(0, 1000, 2), next = deep(1, 500, 6);
+    { Hmc2Store store(root); store.append(*old); store.append(*next); }
+    for (const auto tf : {60000, 300000}) {
+        for (const auto tick : {25., 50.}) {
+            BuildRequest q;
+            q.symbol = "BTC-USD"; q.tfMs = tf;
+            q.priceLo = 100; q.priceHi = 100 + tick; q.rows = 1;
+            q.budgets = {};
+            Hmc2Reader reader(root);
+            auto history = buildPage(reader, q);
+            ASSERT_EQ(history.status, BuildStatus::Complete);
+            ASSERT_EQ(history.band.tick, tick);
+            ASSERT_EQ(history.layer, "deep");
+            LiveBuilder live({q.symbol, history.layer, tf, history.band, 42});
+            LiveCache cache;
+            cache.publish(old);
+            auto forming = std::make_shared<Hmc2Record>(*next);
+            forming->flags |= kProvisional;
+            forming->committedThroughMs = next->bucketStartMs;
+            cache.publish(forming);
+            auto page = live.build(reader, cache.snapshot(q.symbol, "deep"));
+            ASSERT_EQ(page.status, BuildStatus::Complete);
+            ASSERT_EQ(page.columns.size(), history.columns.size());
+            EXPECT_TRUE(page.columns.back().flags & kProvisional);
+            auto compare = [&] {
+                for (size_t i = 0; i < page.columns.size(); ++i) {
+                    EXPECT_EQ(page.columns[i].cells, history.columns[i].cells);
+                    EXPECT_EQ(page.columns[i].quantities, history.columns[i].quantities);
+                    EXPECT_EQ(page.columns[i].quantityScale, history.columns[i].quantityScale);
+                    EXPECT_EQ(page.columns[i].validity, history.columns[i].validity);
+                    EXPECT_EQ(page.columns[i].observedMs, history.columns[i].observedMs);
+                }
+            };
+            compare();
+            cache.publish(next);
+            page = live.build(reader, cache.snapshot(q.symbol, "deep"));
+            ASSERT_EQ(page.status, BuildStatus::Complete);
+            ASSERT_EQ(page.columns.size(), history.columns.size());
+            compare();
+            // Cold live warmup reads the old generation from disk before the new commit.
+            LiveCache cold;
+            cold.publish(next);
+            LiveBuilder warmed({q.symbol, history.layer, tf, history.band, 43});
+            page = warmed.build(reader, cold.snapshot(q.symbol, "deep"));
+            ASSERT_EQ(page.status, BuildStatus::Complete);
+            ASSERT_EQ(page.columns.size(), history.columns.size());
+            compare();
+        }
+    }
+}
