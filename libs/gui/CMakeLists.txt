@@ -71,6 +71,8 @@ set(GRID_CORE_SOURCES
     render/FootprintOverlayRenderer.cpp
     render/TpoOverlayRenderer.hpp
     render/TpoOverlayRenderer.cpp
+    render/TpoProfileModel.hpp
+    render/TpoProfileModel.cpp
     render/VolumeProfileState.hpp
     render/VolumeProfileState.cpp
     render/VolumeProfileRenderer.hpp

@@ -27,6 +27,9 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/layers", R"({"heatmap":true,"candles":false,"tpo":true})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":1})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"unknown":true})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpo":true,"tpoLayout":"split","tpoTheme":"calm"})").body.layers.size(), 3);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpoLayout":"sideways"})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpoTheme":true})").status, 422);
 }
 
 TEST(AgentApiControls, PostParserAndWaitValidation) {

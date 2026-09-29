@@ -1,14 +1,8 @@
 /*
  * Sentinel – TpoStreamState
  *
- * CPU-side ring storage for TPO profile columns before GPU upload.
- *
- * Key fixes vs. original stub:
- *  1. Stores the actual letter byte from the server instead of a 0x7F sentinel.
- *  2. Supports both HorizontalProfile (rank-indexed) and VerticalTimeline modes.
- *  3. Proper session boundary alignment using SessionManager.
- *
- * Threading: Ingest on data thread; snapshot / reads must take the internal lock.
+ * GUI-side store of TPO letter columns per session period, for the most recent
+ * sessions. See the header for the contract.
  */
 #include "TpoStreamState.hpp"
 #include "SentinelLogging.hpp"
@@ -16,8 +10,6 @@
 #include "../../core/servermodel/SessionManager.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <unordered_set>
 
 namespace {
 struct RowStats {
@@ -40,378 +32,153 @@ RowStats summarizeRows(const QByteArray& data) {
     }
     return stats;
 }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Session configuration
-// ─────────────────────────────────────────────────────────────────────────────
-
-void TpoStreamState::setSessionMs(int64_t sessionMs) {
-    if (sessionMs > 0) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_sessionMs = sessionMs;
-    }
-}
+} // namespace
 
 void TpoStreamState::setSessionType(int sessionType) {
-    const auto type = static_cast<SessionManager::SessionType>(sessionType);
-    const int64_t dur = SessionManager::sessionDurationMs(type);
-    if (dur > 0) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_sessionMs = dur;
+    if (sessionType < 0 || sessionType > static_cast<int>(SessionManager::SessionType::M1)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_sessionType != sessionType) {
         m_sessionType = sessionType;
+        clearLocked();
     }
 }
 
-void TpoStreamState::setDisplayMode(DisplayMode mode) {
+void TpoStreamState::setMaxSessions(int sessions) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_displayMode != mode) {
-        m_displayMode = mode;
-        // Reset so the new mode's column layout is built from scratch.
-        if (m_gridWidth > 0 && m_gridHeight > 0) {
-            resetLocked(m_gridWidth, m_gridHeight);
-        }
+    m_maxSessions = std::clamp(sessions, 1, kMaxSessionsLimit);
+    while (static_cast<int>(m_sessions.size()) > m_maxSessions) {
+        m_sessions.erase(m_sessions.begin());
     }
 }
 
-TpoStreamState::DisplayMode TpoStreamState::displayMode() const {
+int TpoStreamState::maxSessions() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_displayMode;
+    return m_maxSessions;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Public interface
-// ─────────────────────────────────────────────────────────────────────────────
 
 void TpoStreamState::clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_gridWidth <= 0 || m_gridHeight <= 0) {
-        std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-        m_pending.clear();
-        return;
-    }
-    resetLocked(m_gridWidth, m_gridHeight);
+    clearLocked();
 }
 
-void TpoStreamState::reset(int gridWidth, int gridHeight) {
-    if (gridWidth <= 0 || gridHeight <= 0) {
+void TpoStreamState::reset(int /*gridWidth*/, int gridHeight) {
+    if (gridHeight <= 0) {
         return;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
-    resetLocked(gridWidth, gridHeight);
+    clearLocked();
+    m_gridHeight = gridHeight;
 }
 
 bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
                                  int64_t bucketEndMs,
                                  int64_t timeframeMs,
-                                 int gridWidth,
+                                 int /*gridWidth*/,
                                  int gridHeight,
                                  const QByteArray& data) {
     if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
-        gridWidth <= 0 || gridHeight <= 0 || data.size() != gridHeight) {
+        gridHeight <= 0 || data.size() != gridHeight) {
         return false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    const int64_t sessionMs = std::max<int64_t>(m_sessionMs, timeframeMs);
-    // Number of time periods per session = session duration / bucket duration.
-    const int sessionPeriods = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
-    if (sessionPeriods <= 0) {
-        return false;
-    }
-
-    // ── Session boundary alignment ──────────────────────────────────────────
     // Match server boundary semantics (SessionManager::sessionContaining).
     const auto boundary = SessionManager::sessionContaining(
-        bucketStartMs,
-        static_cast<SessionManager::SessionType>(m_sessionType));
-    const int64_t sessionStartMs = boundary.valid
-        ? boundary.startMs
-        : ((bucketStartMs / sessionMs) * sessionMs);
-    const int64_t sessionEndMs = boundary.valid
-        ? boundary.endMs
-        : (sessionStartMs + sessionMs);
-
+        bucketStartMs, static_cast<SessionManager::SessionType>(m_sessionType));
+    if (!boundary.valid || boundary.endMs <= boundary.startMs) {
+        return false;
+    }
     // A completed session must never fold later buckets into its last column.
-    if (bucketStartMs < sessionStartMs || bucketStartMs >= sessionEndMs || bucketEndMs > sessionEndMs)
-        return false;
-
-    // ── Grid resize if session period count changed ──────────────────────────
-    const int targetWidth = (m_displayMode == DisplayMode::VerticalTimeline)
-        ? sessionPeriods
-        : gridWidth;
-
-    if (m_gridWidth != targetWidth || m_gridHeight != gridHeight) {
-        resetLocked(targetWidth, gridHeight);
-    }
-
-    if (m_sessionStartMs <= 0) {
-        m_sessionStartMs = sessionStartMs;
-        m_sessionEndMs   = sessionEndMs;
-    }
-    if (sessionStartMs != m_sessionStartMs) {
-        // New session → reset all accumulated data.
-        sLog_Data("TPO session changed: start=" << m_sessionStartMs << "->" << sessionStartMs
-                  << " end=" << sessionEndMs << " sessionType=" << m_sessionType
-                  << " bucket=" << bucketStartMs);
-        resetLocked(m_gridWidth, gridHeight);
-        m_sessionStartMs = sessionStartMs;
-        m_sessionEndMs   = sessionEndMs;
-    }
-
-    const int periodIdx = static_cast<int>((bucketStartMs - m_sessionStartMs) / timeframeMs);
-    if (periodIdx < 0) {
-        sLog_DataN(5000, "TPO bucket dropped: before session start bucket=" << bucketStartMs
-                   << " sessionStart=" << m_sessionStartMs << " tf=" << timeframeMs);
+    if (bucketStartMs < boundary.startMs || bucketStartMs >= boundary.endMs ||
+        bucketEndMs > boundary.endMs) {
         return false;
     }
-    const int boundedPeriod = std::min(periodIdx, m_gridWidth - 1);
+    const int64_t periods64 = (boundary.endMs - boundary.startMs + timeframeMs - 1) / timeframeMs;
+    if (periods64 <= 0 || periods64 > 4096) {
+        sLog_DataN(5000, "TPO bucket dropped: session has " << periods64 << " periods tf=" << timeframeMs);
+        return false;
+    }
+    const int periods = static_cast<int>(periods64);
+    const int period = static_cast<int>((bucketStartMs - boundary.startMs) / timeframeMs);
 
-    std::unordered_set<int> touchedColumns;
-    touchedColumns.reserve(static_cast<size_t>(std::min(gridHeight, 256)));
+    if (m_gridHeight != gridHeight || (m_timeframeMs != 0 && m_timeframeMs != timeframeMs)) {
+        clearLocked();
+        m_gridHeight = gridHeight;
+    }
 
-    if (m_displayMode == DisplayMode::VerticalTimeline) {
-        // ── Mode B: time-period-indexed columns ─────────────────────────────
-        // Column X in the texture = session period X; row Y = price level Y.
-        // Each ingest simply overwrites the column for this period.
-        QByteArray& col = m_columns[static_cast<size_t>(boundedPeriod)];
-        if (col.size() != gridHeight) {
-            col = QByteArray(gridHeight, '\0');
-        }
-        const RowStats beforeStats = summarizeRows(col);
-        const RowStats incomingStats = summarizeRows(data);
-        if (incomingStats.occupied == 0 && beforeStats.occupied > 0) {
-            sLog_Probe("tpo.ingest", "preserved existing rows: start=" << bucketStartMs
-                       << " end=" << bucketEndMs << " tf=" << timeframeMs
-                       << " period=" << boundedPeriod << " incomingRows=0"
-                       << " prevRows=" << beforeStats.occupied
-                       << " prevSpan=[" << beforeStats.firstRow << ".." << beforeStats.lastRow << "]");
-            m_writeColumn = boundedPeriod;
-            if (m_filledColumns < m_gridWidth) {
-                m_filledColumns = std::max(m_filledColumns, boundedPeriod + 1);
-            }
-            m_timeframeMs = timeframeMs;
-            m_lastSliceStartMs = bucketStartMs;
+    auto it = m_sessions.find(boundary.startMs);
+    if (it == m_sessions.end()) {
+        if (static_cast<int>(m_sessions.size()) >= m_maxSessions &&
+            boundary.startMs < m_sessions.begin()->first) {
+            sLog_DataN(5000, "TPO bucket dropped: session older than retained window start="
+                       << boundary.startMs << " oldest=" << m_sessions.begin()->first);
             return false;
         }
-        bool changed = false;
-        for (int row = 0; row < gridHeight; ++row) {
-            const char letter = data.at(row);
-            if (col.at(row) != letter) {
-                col[row]  = letter;
-                changed   = true;
-            }
-        }
-        if (changed) {
-            touchedColumns.insert(boundedPeriod);
-        }
-        static const bool kIngestProbe = sentinel::logging::probeEnabled("tpo.ingest");
-        if (kIngestProbe) {
-            const RowStats afterStats = summarizeRows(col);
-            sLog_Probe("tpo.ingest", "bucket: start=" << bucketStartMs
-                       << " end=" << bucketEndMs << " tf=" << timeframeMs
-                       << " period=" << boundedPeriod
-                       << " incomingRows=" << incomingStats.occupied
-                       << " incomingSpan=[" << incomingStats.firstRow << ".." << incomingStats.lastRow << "]"
-                       << " prevRows=" << beforeStats.occupied
-                       << " prevSpan=[" << beforeStats.firstRow << ".." << beforeStats.lastRow << "]"
-                       << " resultRows=" << afterStats.occupied
-                       << " resultSpan=[" << afterStats.firstRow << ".." << afterStats.lastRow << "]"
-                       << " shrank=" << (beforeStats.occupied > afterStats.occupied));
-        }
-    } else {
-        // ── Mode A: rank-indexed horizontal profile ──────────────────────────
-        // Column[rank] holds all price levels that have been visited at least
-        // (rank+1) unique time-periods within the session.
-        // The actual letter byte is preserved so the renderer can colour-code
-        // by letter bracket.
-        for (int row = 0; row < gridHeight; ++row) {
-            const char letter = data.at(row);
-            if (letter == '\0') {
-                continue;
-            }
-
-            const int64_t tickKey = static_cast<int64_t>(row);
-            auto& level = m_levelsByTick[tickKey];
-            level.row = row;
-
-            // Skip if this period already contributed to this level.
-            if (!level.periodIndices.empty() && level.periodIndices.back() == periodIdx) {
-                continue;
-            }
-
-            level.periodIndices.push_back(periodIdx);
-            level.letters.push_back(letter);  // ← store actual letter (was 0x7F)
-
-            const int rank = static_cast<int>(level.periodIndices.size()) - 1;
-            if (rank < 0 || rank >= m_gridWidth) {
-                continue;
-            }
-
-            QByteArray& column = m_columns[static_cast<size_t>(rank)];
-            if (column.size() != m_gridHeight) {
-                column = QByteArray(m_gridHeight, '\0');
-            }
-            if (row >= 0 && row < column.size()) {
-                column[row] = letter;          // ← was hardcoded 0x7F
-                touchedColumns.insert(rank);
-            }
+        Session session;
+        session.endMs = boundary.endMs;
+        session.columns.assign(static_cast<size_t>(periods), QByteArray());
+        it = m_sessions.emplace(boundary.startMs, std::move(session)).first;
+        sLog_Data("TPO session added: start=" << boundary.startMs << " end=" << boundary.endMs
+                  << " sessionType=" << m_sessionType << " periods=" << periods
+                  << " retained=" << m_sessions.size());
+        while (static_cast<int>(m_sessions.size()) > m_maxSessions) {
+            m_sessions.erase(m_sessions.begin());
         }
     }
 
-    m_writeColumn = boundedPeriod;
-    if (m_filledColumns < m_gridWidth) {
-        m_filledColumns = std::max(m_filledColumns, boundedPeriod + 1);
+    QByteArray& col = it->second.columns[static_cast<size_t>(period)];
+    if (col.size() != gridHeight) {
+        col = QByteArray(gridHeight, '\0');
     }
-    m_timeframeMs      = timeframeMs;
-    m_lastSliceStartMs = bucketStartMs;
-
-    sLog_Probe("tpo.period", "start=" << bucketStartMs << " end=" << bucketEndMs
-               << " tf=" << timeframeMs << " sessionType=" << m_sessionType
-               << " session=[" << m_sessionStartMs << ".." << m_sessionEndMs << "]"
-               << " periodIdx=" << periodIdx << " boundedPeriod=" << boundedPeriod
-               << " grid=" << m_gridWidth << "x" << m_gridHeight
-               << " filled=" << m_filledColumns);
-
-    {
-        std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-        for (const int col : touchedColumns) {
-            if (col < 0 || col >= m_gridWidth) {
-                continue;
-            }
-            m_pending.push_back(PendingUpload{
-                col, bucketStartMs, bucketEndMs,
-                m_columns[static_cast<size_t>(col)]});
-        }
+    const RowStats incomingStats = summarizeRows(data);
+    m_timeframeMs = timeframeMs;
+    m_lastSliceStartMs = std::max(m_lastSliceStartMs, bucketStartMs);
+    if (incomingStats.occupied == 0) {
+        // An empty refresh never erases rows a previous publication established.
+        sLog_Probe("tpo.ingest", "empty slice ignored: start=" << bucketStartMs
+                   << " period=" << period);
+        return false;
     }
+    if (col == data) {
+        return true;
+    }
+    col = data;
+    sLog_Probe("tpo.ingest", "bucket: start=" << bucketStartMs << " end=" << bucketEndMs
+               << " tf=" << timeframeMs << " session=" << boundary.startMs
+               << " period=" << period << "/" << periods
+               << " rows=" << incomingStats.occupied
+               << " span=[" << incomingStats.firstRow << ".." << incomingStats.lastRow << "]");
+    m_pending.push_back(PendingUpload{period, periods, boundary.startMs, boundary.endMs,
+                                      bucketStartMs, bucketEndMs, col});
     return true;
 }
 
 void TpoStreamState::takePendingUploads(std::vector<PendingUpload>& out) {
-    std::lock_guard<std::mutex> lock(m_uploadMutex);
-    if (!m_pending.empty()) {
-        out.swap(m_pending);
-    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    out.clear();
+    out.swap(m_pending);
 }
 
 TpoStreamState::Snapshot TpoStreamState::snapshot() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     Snapshot snap;
-    snap.gridWidth        = m_gridWidth;
-    snap.gridHeight       = m_gridHeight;
-    snap.filledColumns    = m_filledColumns;
-    snap.writeColumn      = m_writeColumn;
-    snap.lastSliceStartMs = m_lastSliceStartMs;
-    snap.sessionStartMs   = m_sessionStartMs;
-    snap.sessionEndMs     = m_sessionEndMs;
-    snap.timeframeMs      = m_timeframeMs;
-    snap.displayMode      = m_displayMode;
-    {
-        std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-        snap.pendingUploads = static_cast<int>(m_pending.size());
+    snap.gridHeight = m_gridHeight;
+    snap.sessions = static_cast<int>(m_sessions.size());
+    if (!m_sessions.empty()) {
+        snap.latestSessionStartMs = m_sessions.rbegin()->first;
+        snap.latestSessionEndMs = m_sessions.rbegin()->second.endMs;
     }
+    snap.lastSliceStartMs = m_lastSliceStartMs;
+    snap.timeframeMs = m_timeframeMs;
+    snap.pendingUploads = static_cast<int>(m_pending.size());
     return snap;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Private reset helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-TpoStreamState::PocVahVal TpoStreamState::computePocVahVal() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_gridWidth <= 0 || m_gridHeight <= 0 || m_columns.empty()) {
-        return {};
-    }
-
-    // Build per-row histogram: count how many columns have a non-null letter at each row.
-    std::vector<int> hist(static_cast<size_t>(m_gridHeight), 0);
-    int total = 0;
-    for (const auto& col : m_columns) {
-        if (col.size() != m_gridHeight) {
-            continue;
-        }
-        for (int row = 0; row < m_gridHeight; ++row) {
-            if (col.at(row) != '\0') {
-                ++hist[static_cast<size_t>(row)];
-                ++total;
-            }
-        }
-    }
-    if (total == 0) {
-        return {};
-    }
-
-    // POC: row with the highest count.
-    int pocRow = 0;
-    int pocCount = 0;
-    for (int row = 0; row < m_gridHeight; ++row) {
-        if (hist[static_cast<size_t>(row)] > pocCount) {
-            pocCount = hist[static_cast<size_t>(row)];
-            pocRow = row;
-        }
-    }
-    if (pocCount == 0) {
-        return {};
-    }
-
-    // Value Area: expand from POC until accumulated count >= 70% of total.
-    // Standard Market Profile rule: at each step, choose the direction (up or down)
-    // whose next two rows sum to the larger value.
-    const int target = static_cast<int>(std::ceil(total * 0.70));
-    int accumulated = pocCount;
-    int vahRow = pocRow;
-    int valRow = pocRow;
-
-    while (accumulated < target) {
-        const int upRow   = vahRow - 1;
-        const int downRow = valRow + 1;
-        const bool canUp   = upRow >= 0;
-        const bool canDown = downRow < m_gridHeight;
-
-        if (!canUp && !canDown) {
-            break;
-        }
-
-        // Sum next two rows in each direction (standard TPO value area convention).
-        auto rowCount = [&](int r) -> int {
-            if (r < 0 || r >= m_gridHeight) return 0;
-            return hist[static_cast<size_t>(r)];
-        };
-        const int upSum   = canUp   ? (rowCount(upRow)   + rowCount(upRow - 1))   : -1;
-        const int downSum = canDown ? (rowCount(downRow) + rowCount(downRow + 1)) : -1;
-
-        if (!canDown || (canUp && upSum >= downSum)) {
-            // Expand upward (decreasing row index = higher price).
-            accumulated += rowCount(upRow);
-            --vahRow;
-        } else {
-            // Expand downward.
-            accumulated += rowCount(downRow);
-            ++valRow;
-        }
-    }
-
-    PocVahVal result;
-    result.pocRow = pocRow;
-    result.vahRow = vahRow;
-    result.valRow = valRow;
-    result.valid  = true;
-    return result;
-}
-
-void TpoStreamState::resetLocked(int gridWidth, int gridHeight) {
-    m_gridWidth        = gridWidth;
-    m_gridHeight       = gridHeight;
-    m_filledColumns    = 0;
-    m_writeColumn      = -1;
-    m_sessionStartMs   = 0;
-    m_sessionEndMs     = 0;
+void TpoStreamState::clearLocked() {
+    m_sessions.clear();
+    m_pending.clear();
+    m_timeframeMs = 0;
     m_lastSliceStartMs = 0;
-    m_timeframeMs      = 0;
-    m_columns.assign(static_cast<size_t>(gridWidth), QByteArray(gridHeight, '\0'));
-    m_levelsByTick.clear();
-    {
-        std::lock_guard<std::mutex> uploadLock(m_uploadMutex);
-        m_pending.clear();
-    }
 }

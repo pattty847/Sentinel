@@ -243,6 +243,16 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(guiNode, "default_order_qty", cfg.gui.defaultOrderQty);
     }
 
+    YAML::Node tpoNode = (clientNode && clientNode["tpo"]) ? clientNode["tpo"] : root["tpo"];
+    if (tpoNode) {
+        readScalar(tpoNode, "layout", cfg.tpo.layout);
+        readScalar(tpoNode, "theme", cfg.tpo.theme);
+        readScalar(tpoNode, "session", cfg.tpo.session);
+        readScalar(tpoNode, "period_minutes", cfg.tpo.periodMinutes);
+        readScalar(tpoNode, "sessions", cfg.tpo.sessions);
+        readScalar(tpoNode, "row_px", cfg.tpo.rowPx);
+    }
+
     if (clientNode && clientNode["server"]) {
         auto server = clientNode["server"];
         readScalar(server, "host",    cfg.server.host);

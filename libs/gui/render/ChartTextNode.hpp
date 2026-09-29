@@ -49,6 +49,9 @@ public:
     ~ChartTextNode() override;
 
     void setAtlas(const QImage& image, QQuickWindow* window);
+    // Use a texture owned elsewhere (several nodes sharing one atlas upload).
+    // The node never deletes a shared texture.
+    void setSharedAtlasTexture(QSGTexture* texture);
     void setColor(const QColor& color);
     void setPxRange(float pxRange);
     void setSdfBias(float sdfBias);
@@ -62,6 +65,7 @@ private:
     QSGGeometry m_geometry;
     ChartTextMaterial m_material;
     QSGTexture* m_texture = nullptr;
+    bool m_ownsTexture = true;
     int m_capacityGlyphs = 0;
     QSize m_atlasSize;
     QRectF m_texSubRect{0.0, 0.0, 1.0, 1.0};

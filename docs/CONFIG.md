@@ -126,6 +126,23 @@ trading:
 
 See the default files `config/server_config.yaml` and `config/client_config.yaml` for every key and comment. Override only what you need in the `.server_config.yaml` / `.client_config.yaml` copies.
 
+## TPO (market profile)
+
+Client-only look and session selection for the TPO layer (`tpo:` in `client_config.yaml`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `layout` | `collapsed` | `collapsed`: each price row's letters pack left-to-right from the session start (one profile per session; it sticks to the plot's left edge while its session is on screen). `split`: every period keeps its own time column, aligned with candles. |
+| `theme` | `rainbow` | `rainbow`: cell colour walks red to violet across the session's periods. `calm`: single blue hue. `sage`: single green hue. In every theme the POC row is light and cells outside the 70% value area are dimmed. |
+| `session` | `h24` | `ny`, `london`, `asia`, `australia`, `h24`, `w1` (Sunday 21:00 to Friday 21:00 UTC) or `m1` (calendar month, UTC). |
+| `period_minutes` | `30` | Letter bracket. It must divide the session (for `w1`/`m1`, a UTC day) into at most 2048 periods; otherwise the largest valid standard bracket (15, 30, 60, 120, 240, 480, 1440 minutes) below it is used. |
+| `sessions` | `5` | Sessions shown: the current one plus earlier ones (1-8). History is requested per session in pages of at most 7 days and 512 periods, at most 6 pages; an earlier session is shown only when all of its pages fit. |
+| `row_px` | `14` | Price rows (trade grid ticks) merge in 1-2-5 steps until a row is at least this tall. POC and value area are computed on the merged rows. |
+
+Letters are session-relative: `A`-`Z`, then `a`-`z`, then repeat. They fade out
+when a cell is too small to read; the coloured cells remain. `m1` needs a server
+that accepts session type 6.
+
 ## Related documentation
 
 - **`docs/ARCHITECTURE.md`** — How server and client use config (e.g. `server_config` on connect).

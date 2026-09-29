@@ -95,16 +95,35 @@ ChartTextNode::ChartTextNode()
 }
 
 ChartTextNode::~ChartTextNode() {
-    delete m_texture;
+    if (m_ownsTexture) {
+        delete m_texture;
+    }
     m_texture = nullptr;
+}
+
+void ChartTextNode::setSharedAtlasTexture(QSGTexture* texture) {
+    if (m_texture == texture && !m_ownsTexture) {
+        return;
+    }
+    if (m_ownsTexture) {
+        delete m_texture;
+    }
+    m_texture = texture;
+    m_ownsTexture = false;
+    m_atlasSize = texture ? texture->textureSize() : QSize();
+    m_texSubRect = texture ? texture->normalizedTextureSubRect() : QRectF(0.0, 0.0, 1.0, 1.0);
+    updateMaterial();
 }
 
 void ChartTextNode::setAtlas(const QImage& image, QQuickWindow* window) {
     if (!window || image.isNull()) {
         return;
     }
-    if (!m_texture || m_atlasSize != image.size()) {
-        delete m_texture;
+    if (!m_ownsTexture || !m_texture || m_atlasSize != image.size()) {
+        if (m_ownsTexture) {
+            delete m_texture;
+        }
+        m_ownsTexture = true;
         m_texture = window->createTextureFromImage(image);
         if (m_texture) {
             m_texture->setFiltering(QSGTexture::Linear);

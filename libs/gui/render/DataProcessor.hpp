@@ -91,11 +91,6 @@ signals:
                         int64_t sessionStartMs,
                         int64_t sessionEndMs,
                         int64_t timeframeMs, TradeOverlayGrid grid);
-    // Emitted after session data changes; row indices in grid space (0 = highest price).
-    // maxPrice and tickSize let the receiver convert row → price without heatmap coupling.
-    void tpoPocVahValReady(int pocRow, int vahRow, int valRow,
-                           int gridHeight,
-                           double maxPrice, double tickSize);
     void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:

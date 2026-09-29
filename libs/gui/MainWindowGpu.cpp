@@ -18,6 +18,7 @@
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "../core/servermodel/SessionManager.hpp"
+#include "render/TpoProfileModel.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "render/GridViewState.hpp"
@@ -781,27 +782,29 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     if (!m_dataSource || symbol.isEmpty()) {
         return;
     }
-    int64_t timeframeMs = 900000;
+    int64_t timeframeMs = 1800000;
     int sessionType = 4;
+    int sessions = 5;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             timeframeMs = renderer->tpoTimeframeMs();
             sessionType = renderer->tpoSessionType();
+            sessions = renderer->tpoSessions();
         }
     }
-    if (timeframeMs != 900000 && timeframeMs != 1800000) {
-        timeframeMs = 900000;
-    }
-    if (sessionType < static_cast<int>(SessionManager::SessionType::NY) ||
-        sessionType > static_cast<int>(SessionManager::SessionType::W1)) {
-        sessionType = 4;
-    }
-    const int64_t sessionMs = SessionManager::sessionDurationMs(
-        static_cast<SessionManager::SessionType>(sessionType));
-    const int count = static_cast<int>(std::max<int64_t>(1, sessionMs / timeframeMs));
+    timeframeMs = tpo::resolvePeriodMs(sessionType, timeframeMs);
+    // The server queues at most 8 overlay history requests per client; leave room
+    // for footprint history. Long sessions (W1, M1) arrive in pages of <= 7 days.
+    constexpr int kMaxTpoPages = 6;
+    const auto pages = tpo::historyPages(sessionType, timeframeMs,
+                                         QDateTime::currentMSecsSinceEpoch(), sessions, kMaxTpoPages);
     sLog_Data("TPO history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " sessionType=" << sessionType << " count=" << count);
-    m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, 0, count);
+              << " session=" << tpo::sessionTypeName(sessionType) << " sessions=" << sessions
+              << " pages=" << pages.size());
+    for (const auto& page : pages) {
+        sLog_Probe("tpo.history", "page end=" << page.endMs << " count=" << page.count);
+        m_dataSource->requestTpoHistory(symbol, timeframeMs, sessionType, page.endMs, page.count);
+    }
 }
 
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
@@ -1230,6 +1233,8 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
             s.heatmapLayer = renderer->heatmapLayerEnabled();
             s.footprintLayer = renderer->footprintLayerEnabled();
             s.tpoLayer = renderer->tpoLayerEnabled();
+            s.tpoLayout = renderer->tpoLayout();
+            s.tpoTheme = renderer->tpoTheme();
             s.volumeProfileLayer = renderer->volumeProfileLayerEnabled();
         }
     }
@@ -1301,6 +1306,8 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
             const bool enabled = it.value().toBool();
+            if (it.key() == "tpoLayout") { renderer->setTpoLayout(it.value().toString()); continue; }
+            if (it.key() == "tpoTheme") { renderer->setTpoTheme(it.value().toString()); continue; }
             if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->setHeatmapLayerEnabled(enabled); }
             else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->setFootprintLayerEnabled(enabled); }
             else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->setTpoLayerEnabled(enabled); }
@@ -1314,7 +1321,9 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"candles", state.candlesLayer.value_or(false)},
                                           {"footprint", state.footprintLayer.value_or(false)},
                                           {"tpo", state.tpoLayer.value_or(false)},
-                                          {"volumeProfile", state.volumeProfileLayer.value_or(false)}};
+                                          {"volumeProfile", state.volumeProfileLayer.value_or(false)},
+                                          {"tpoLayout", state.tpoLayout.value_or(QString())},
+                                          {"tpoTheme", state.tpoTheme.value_or(QString())}};
     }
     if (!out.viewportVersion) out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
     return out;

@@ -150,6 +150,16 @@ struct ClientGuiConfig {
     double defaultOrderQty = 1.0;
 };
 
+/// TPO (market profile) overlay. Parsed values are validated by the GUI.
+struct ClientTpoConfig {
+    std::string layout = "collapsed";  // collapsed | split
+    std::string theme = "rainbow";     // rainbow | calm | sage
+    std::string session = "h24";       // ny | london | asia | australia | h24 | w1 | m1
+    int periodMinutes = 30;            // letter bracket; must divide a UTC day or the session
+    int sessions = 5;                  // retained sessions (current + previous), 1..8
+    int rowPx = 14;                    // rows merge (1-2-5 ticks) until at least this tall
+};
+
 struct ClientServerConfig {
     std::string host = "127.0.0.1";
     std::string port = "8080";
@@ -161,6 +171,7 @@ struct ClientServerConfig {
 struct ClientConfig {
     ClientHeatmapConfig heatmap;
     ClientGuiConfig gui;
+    ClientTpoConfig tpo;
     ClientServerConfig server;
 };
 
