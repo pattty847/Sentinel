@@ -129,3 +129,21 @@ target_include_directories(test_TradeOverlay PRIVATE ${CMAKE_SOURCE_DIR}/libs/gu
 target_link_libraries(test_TradeOverlay PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TradeOverlayTests COMMAND test_TradeOverlay)
 set_tests_properties(TradeOverlayTests PROPERTIES LABELS "render;servermodel")
+
+# S4 spike guard: compute recorded in QSGRenderNode::prepare() inside a real
+# scene graph (headless via QQuickRenderControl). Skips without a Metal device.
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate Quick)
+add_executable(test_qsg_compute_spike test_qsg_compute_spike.cpp)
+target_include_directories(test_qsg_compute_spike PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_qsg_compute_spike PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+qt_add_shaders(test_qsg_compute_spike spike_shaders
+    GLSL "440"
+    PREFIX "/spikeshaders"
+    BASE "shaders"
+    FILES
+        shaders/spike_fill.comp
+        shaders/spike_draw.vert
+        shaders/spike_draw.frag
+)
+add_test(NAME QsgComputeSpikeTests COMMAND test_qsg_compute_spike)
+set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")

@@ -179,6 +179,8 @@ add_library(sentinel_lab_lib
     lab/LabItem.cpp
     lab/Bench.hpp
     lab/Bench.cpp
+    lab/OffscreenQuick.hpp
+    lab/OffscreenQuick.cpp
 )
 set_target_properties(sentinel_lab_lib PROPERTIES AUTOMOC ON)
 

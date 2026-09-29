@@ -163,6 +163,12 @@ Each slice gets a short tag: S1 (model), S2 (server chunks), S3 (wire), S4 (GPU)
 
 S2 opt-in real-recording benchmark (`SENTINEL_CHUNK_BENCH=1`, latest complete 24 hours, 2026-09-29, arm64 Mac, revised v1): deep 82,294 encoded bytes/hour, 7.40 ms encode, 5.59 ms decode, 24.19 ms cold reader; near 177,320 bytes/hour, 3.12 ms encode, 1.97 ms decode, 26.74 ms cold reader. Bytes are the cacheable SHC1 body; a request envelope adds 14 bytes per response.
 
+**S4 spike answer (2026-09-29, Qt 6.11.2, Metal, arm64 Mac): yes, a compute pass can be recorded in `QSGRenderNode::prepare()`.**
+- Evidence: `tests/render/test_qsg_compute_spike.cpp` (ctest `QsgComputeSpikeTests`). A `QSGRenderNode` inside an ordinary `QQuickItem` tree calls `commandBuffer()->beginComputePass()`/`dispatch()`/`endComputePass()` in `prepare()`, writing a storage buffer, then reads that buffer in its fragment shader in `render()`, in the same frame. The rendered pixels equal the compute output, the rest of the scene is intact, and a second frame dispatches again. 20/20 repeats pass with the Metal API validation layer on (`METAL_DEVICE_WRAPPER_TYPE=1 MTL_DEBUG_LAYER=1`) with no validation messages.
+- Why it works: the batch renderer calls every render node's `prepare()` before it begins the main render pass, so the command buffer is outside a pass, which is what `beginComputePass()` requires. The compute encoder ends before the render encoder starts, so Metal orders the buffer write before the fragment read.
+- The test renders through `QQuickRenderControl` into a Metal texture (`libs/gui/lab/OffscreenQuick`), so it runs headless and with the screen locked. The same batch renderer drives an on-screen `QQuickWindow`. Under the offscreen QPA, the harness must call `QQuickWindow::setSceneGraphBackend("rhi")`, or Qt Quick selects the software adaptation.
+- Result: `HeatmapRenderNode` uses this mechanism. The `beforeRendering` fallback is not needed. D3D11 is unverified: the owner runs the same test on Windows.
+
 - **Order:** S1 → (S2 ‖ S4 ‖ S5) → S3 (after L) → S6 → S7 → S8, then S9.
 - **Parallel by files:** L with S1/S2/S4/S5; S2, S4 and S5 with each other.
 - **Serial:** S3/L (SentinelStreamServer.cpp) and S6/S7/S8 (hot GUI files).

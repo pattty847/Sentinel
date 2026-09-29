@@ -1,0 +1,10 @@
+#version 440
+// Spike: one texel-sized colour per column, written by compute in QSGRenderNode::prepare().
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) writeonly buffer Out { vec4 color[]; };
+layout(std140, binding = 1) uniform Params { uvec4 dims; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= dims.x) return;
+    color[i] = vec4(float(i % 4u == 0u), float(i % 4u == 1u), float(dims.y) / 255.0, 1.0);
+}
