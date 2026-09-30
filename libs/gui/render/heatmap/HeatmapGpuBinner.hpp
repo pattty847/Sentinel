@@ -121,8 +121,9 @@ public:
     bool binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb, const BinGrid &grid,
                          const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error,
                          bool fill = false);
+    // Its buffers go through QRhiResource::deleteLater(): a frame being recorded
+    // may still reference them (uploads, bins), so they die at its end.
     void releaseResident(uint64_t sourceId);
-    void releaseResidentExcept(const std::vector<uint64_t> &keepSourceIds);
     uint64_t residentBytes() const;
     uint64_t residentBytes(uint64_t sourceId) const; // one source's buffers (0 if absent)
     const std::optional<BinGrid> &binnedGrid() const { return binnedGrid_; }
@@ -148,6 +149,15 @@ public:
     // the per-device self-test cache so the candidate is actually tested.
     void setFastKernelShaderForTest(const QString &qsbPath) { fastShaderPath_ = qsbPath; testShader_ = true; }
     static void clearSelfTestCacheForTest();
+    // Marks the current thread as inside a QRhi cleanup-callback traversal (the
+    // QRhi is being destroyed). Code that runs there must not destroy objects
+    // that own a cleanup callback: their destructor would remove a callback from
+    // the hash the QRhi is iterating. Tests count such removals.
+    struct RhiCleanupScope {
+        RhiCleanupScope();
+        ~RhiCleanupScope();
+    };
+    static uint64_t callbackRemovalsDuringCleanupForTest();
     // Tests: a self-test run is recorded and not yet consumed; and how many
     // in-flight readbacks a destructor or QRhi cleanup completed before freeing them.
     bool selfTestInFlightForTest() const;

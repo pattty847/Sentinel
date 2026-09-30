@@ -61,7 +61,13 @@ bool sameScale(const recording::SizeScale &a, const recording::SizeScale &b) {
 std::mutex selfTestMutex;
 std::map<QString, KernelVariant> selfTestCache;
 std::atomic<uint64_t> drainedReadbacks{0}; // tests: see drainedReadbacksForTest
+thread_local int rhiCleanupDepth = 0;       // inside a QRhi cleanup-callback traversal
+std::atomic<uint64_t> removalsDuringCleanup{0};
 } // namespace
+
+HeatmapGpuBinner::RhiCleanupScope::RhiCleanupScope() { ++rhiCleanupDepth; }
+HeatmapGpuBinner::RhiCleanupScope::~RhiCleanupScope() { --rhiCleanupDepth; }
+uint64_t HeatmapGpuBinner::callbackRemovalsDuringCleanupForTest() { return removalsDuringCleanup.load(); }
 
 // What a bin needs of a source: resident sources keep only this once their
 // upload completed, so the CPU image can be released (S5 capacity contract).
@@ -106,10 +112,14 @@ struct HeatmapGpuBinner::SelfTestRun {
 
 HeatmapGpuBinner::HeatmapGpuBinner(QRhi *rhi, uint64_t memoryCapBytes) : rhi_(rhi), memoryCapBytes_(memoryCapBytes) {
     prewarmPrecisionSelfTest(); // no-op after the first call; the build runs on a worker
-    if (rhi_) rhi_->addCleanupCallback(this, [this](QRhi *) { releaseForDeadRhi(); });
+    if (rhi_) rhi_->addCleanupCallback(this, [this](QRhi *) {
+        RhiCleanupScope scope;
+        releaseForDeadRhi();
+    });
 }
 HeatmapGpuBinner::~HeatmapGpuBinner() {
     if (!rhi_) return; // the QRhi is gone and released everything through the callback
+    if (rhiCleanupDepth > 0) removalsDuringCleanup.fetch_add(1); // a bug: see RhiCleanupScope
     rhi_->removeCleanupCallback(this);
     // QRhi keeps a raw pointer to the readback result until the frame that
     // recorded it completes and writes into it then (or in ~QRhi). Destroying
@@ -669,15 +679,19 @@ bool HeatmapGpuBinner::binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb,
     return binSourceInto(*resident_.at(sourceId), cb, grid, outputScale, target, fill, error);
 }
 
-void HeatmapGpuBinner::releaseResident(uint64_t sourceId) { resident_.erase(sourceId); }
+void HeatmapGpuBinner::releaseResident(uint64_t sourceId) {
+    const auto it = resident_.find(sourceId);
+    if (it == resident_.end()) return;
+    auto &s = *it->second;
+    for (auto *slot : {&s.bucketSlots, &s.columnGroups, &s.groups, &s.runs, &s.rowIndex})
+        if (*slot) slot->release()->deleteLater();
+    for (auto &page : s.pages)
+        if (page) page.release()->deleteLater();
+    resident_.erase(it);
+}
 uint64_t HeatmapGpuBinner::residentBytes(uint64_t sourceId) const {
     const auto it = resident_.find(sourceId);
     return it == resident_.end() ? 0 : it->second->bytes();
-}
-
-void HeatmapGpuBinner::releaseResidentExcept(const std::vector<uint64_t> &keep) {
-    for (auto it = resident_.begin(); it != resident_.end();)
-        it = std::find(keep.begin(), keep.end(), it->first) == keep.end() ? resident_.erase(it) : std::next(it);
 }
 
 uint64_t HeatmapGpuBinner::residentBytes() const {

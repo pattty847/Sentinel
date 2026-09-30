@@ -473,6 +473,110 @@ TEST(HeatmapTileNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
     }
 }
 
+// Review fix 1: the QRhi dies first (scene graph invalidation). Its cleanup
+// traversal runs the nodes' callbacks and the binners' callbacks in hash order;
+// no callback may destroy an object that owns a callback (the binner), or its
+// destructor removes a callback from the hash the QRhi is iterating. Several
+// nodes make some node callback run before its binner's.
+TEST(HeatmapTileNodeScene, QRhiDestroyedFirstLeavesTheCleanupTraversalIntact) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    auto device = std::make_unique<lab::HeadlessRhi>();
+    ASSERT_TRUE(device->create()) << device->error.toStdString();
+    std::vector<std::unique_ptr<HeatmapTileNode>> nodes;
+    for (int i = 0; i < 16; ++i) {
+        nodes.push_back(std::make_unique<HeatmapTileNode>());
+        nodes.back()->attachRhiForTest(device->rhi.get());
+    }
+    const auto before = HeatmapGpuBinner::callbackRemovalsDuringCleanupForTest();
+    device->rhi.reset(); // the QRhi goes first
+    EXPECT_EQ(HeatmapGpuBinner::callbackRemovalsDuringCleanupForTest(), before)
+        << "a cleanup callback destroyed an object that owns a callback";
+    nodes.clear(); // after the QRhi: must not call into it
+}
+
+// Review fix 2: the cap is enforced before a frame records uploads, and never
+// releases a source the same frame uploaded into (its commands still reference
+// the buffers). Here one frame uploads a prefetch span, then the visible bin
+// pushes residency over the cap.
+TEST(HeatmapTileNodeScene, CapEvictionNeverReleasesWhatTheFrameUploaded) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    Scene scene;
+    ASSERT_TRUE(scene.create(QSize(400, 400))) << scene.error.toStdString();
+    FakeSpans spans;
+    const int64_t tile = firstTile();
+    const auto v = spans.both(minute, tile, visible()), p = spans.both(minute, tile + 1, prefetch(1));
+    size_t sources = 0;
+    for (const auto *span : {&v, &p})
+        for (const auto &b : span->sources) sources += b->uploadBytes + 256;
+    auto &frame = scene.host->frame;
+    frame.spans = spans.set(minute, {v, p});
+    frame.tfMs = minute;
+    frame.tickUnits = 100; // $1 over $3000: a tall bin
+    frame.view = {double(tiles::tileStartMs(tile, minute)), double(tiles::tileEndMs(tile, minute)), 98'500, 101'500};
+    frame.uploadBudgetBytes = 1ull << 30; // everything uploads in the first frame
+    frame.gpuCapBytes = sources + 64 * 1024; // the sources fit, the visible bin does not
+    for (int i = 0; i < 4; ++i) ASSERT_TRUE(scene.frame());
+    const auto &st = *scene.host->stats;
+    EXPECT_GT(st.binBytes.load(), 64u * 1024) << "the bin pushes residency over the cap";
+    EXPECT_GT(st.evictions.load(), 0u) << "the prefetch source was evicted";
+    EXPECT_EQ(st.sameFrameReleases.load(), 0u) << "never in the frame that uploaded it";
+    EXPECT_EQ(st.missingDraws.load(), 0u);
+    EXPECT_TRUE(st.complete.load());
+}
+
+// Review fix 3: a visible span whose sources all failed terminally is resolved,
+// not pending: a timeframe change finishes (that span draws loading) instead of
+// holding the old picture forever.
+TEST(HeatmapTileNodeScene, ASpanWhoseSourcesAllFailedDoesNotHoldATransition) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    Scene scene;
+    ASSERT_TRUE(scene.create(QSize(300, 150))) << scene.error.toStdString();
+    FakeSpans spans;
+    const int64_t tile = firstTile();
+    auto &frame = scene.host->frame;
+    frame.spans = spans.set(minute, {spans.both(minute, tile, visible()), spans.both(minute, tile + 1, visible(1))});
+    frame.tfMs = minute;
+    frame.tickUnits = 500;
+    frame.view = {double(tiles::tileStartMs(tile, minute)), double(tiles::tileEndMs(tile + 1, minute)), 99'800, 100'200};
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(scene.frame());
+    ASSERT_TRUE(scene.host->stats->complete.load());
+    // 5m: the one visible span has only failed sources.
+    FakeSpans::Span failed{firstTile(5 * minute), visible(), {}, 5 * minute, {kCoarse, kFine}};
+    frame.spans = spans.set(5 * minute, {failed});
+    frame.tfMs = 5 * minute;
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(scene.frame());
+    EXPECT_FALSE(scene.host->stats->holding.load()) << "the transition finished";
+    EXPECT_EQ(scene.host->stats->drawnTfMs.load(), 5 * minute);
+    EXPECT_GE(scene.host->stats->loadingSlots.load(), 1u) << "the failed span draws loading";
+    EXPECT_FALSE(scene.host->stats->complete.load()) << "but the view is not complete";
+}
+
+// Review fix 4: a raised GPU cap is new free bytes even when nothing moves: the
+// node reports it, so suppressed prefetch can come back.
+TEST(HeatmapTileNodeScene, ARaisedCapIsReportedWithNothingMoving) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    Scene scene;
+    ASSERT_TRUE(scene.create(QSize(300, 150))) << scene.error.toStdString();
+    FakeSpans spans;
+    auto capacity = std::make_shared<HeatmapCapacity>();
+    auto &frame = scene.host->frame;
+    frame.spans = spans.set(minute, {spans.both(minute, firstTile(), visible())});
+    frame.capacity = capacity;
+    frame.tfMs = minute;
+    frame.tickUnits = 500;
+    frame.gpuCapBytes = 32ull << 20;
+    frame.view = {double(tiles::tileStartMs(firstTile(), minute)), double(tiles::tileEndMs(firstTile(), minute)), 99'800, 100'200};
+    for (int i = 0; i < 4; ++i) ASSERT_TRUE(scene.frame());
+    capacity->take();
+    const uint64_t epoch = capacity->capacityEpoch.load();
+    ASSERT_TRUE(scene.frame());
+    ASSERT_EQ(capacity->capacityEpoch.load(), epoch) << "a static view reports nothing";
+    frame.gpuCapBytes = 64ull << 20;
+    ASSERT_TRUE(scene.frame());
+    ASSERT_NE(capacity->capacityEpoch.load(), epoch) << "the new cap is reported";
+    EXPECT_EQ(capacity->take().freeBytes, (64ull << 20) - scene.host->stats->residentBytes.load());
+}
+
 // ---------------------------------------------------------------- with the controller
 // The production pair: HeatmapSourceController on FakeChunkTransport (manual
 // build executor) and the node, frame by frame on one thread.
@@ -590,8 +694,6 @@ TEST_F(NodeWithController, QRhiRecreationReportsLossAndTheControllerRebuilds) {
     ASSERT_TRUE(settle());
     for (int i = 0; i < 5 && !released(); ++i) ASSERT_TRUE(frame());
     ASSERT_TRUE(released());
-    cache->setMaxBytes(0); // no unclaimed image stays cached: the rebuild is a real build
-    cache->setMaxBytes(256ull << 20);
     const auto builds = cache->stats().builds;
     const auto requests = transport.requests.size();
     // Move the chart to a new scene (new QRhi): the old node goes with its GPU content.
@@ -669,6 +771,70 @@ TEST_F(NodeWithController, NeverBlanksAcrossTimeframeTickAndRevision) {
     EXPECT_GT(fallbackFrames, 0u) << "the revised span drew its previous content while the new one uploaded";
     EXPECT_EQ(partialFrames, 0u) << "never a span drawn without one of its sources";
     EXPECT_EQ(scene->host->stats->missingDraws.load(), 0u);
+}
+// Ported B1 check: repeated revisions of the visible spans return to the
+// residency budget: every old version is freed once its successor draws.
+TEST_F(NodeWithController, RepeatedVisibleRevisionsReturnToTheBudget) {
+    view(minute, double(kEpoch + 2 * kTileMs), double(kEpoch + 3 * kTileMs));
+    scene->host->frame.view.priceLo = 99'800;
+    scene->host->frame.view.priceHi = 100'200;
+    ASSERT_TRUE(settle());
+    for (int i = 0; i < 5; ++i) ASSERT_TRUE(frame());
+    const auto &st = *scene->host->stats;
+    const uint64_t sources = st.residentSources.load(), bytes = st.residentBytes.load();
+    // A tight cap: exactly what is resident now.
+    scene->host->frame.gpuCapBytes = bytes;
+    controller->setGpuBudget(bytes);
+    const int64_t hourInView = recording::floorDiv(kEpoch + 2 * kTileMs, kHourMs) * kHourMs;
+    for (int r = 0; r < 4; ++r) {
+        ++revision;
+        for (const auto *source : {&kCoarse, &kFine}) {
+            const ChunkKey key{"BTC-USD", *source, kMinuteMs, hourInView};
+            const auto body = chunkFrame(key, revision);
+            ASSERT_TRUE(store.put(key, std::shared_ptr<const SparseColumns>(body, &body->columns), body->state,
+                                  body->contentHash));
+        }
+        ASSERT_TRUE(settle()) << "revision " << r;
+        for (int i = 0; i < 5; ++i) ASSERT_TRUE(frame());
+        EXPECT_LE(st.residentSources.load(), sources) << "revision " << r << ": old versions freed";
+        EXPECT_LE(st.residentBytes.load(), bytes) << "revision " << r << ": back within the budget";
+    }
+    EXPECT_EQ(st.missingDraws.load(), 0u);
+}
+
+// Ported B1 check: with the cap full of the view, the evicted prefetch settles
+// (no rebuild or upload churn while the view stands) and comes back once the
+// budget grows.
+TEST_F(NodeWithController, BudgetEvictedPrefetchSettlesAndReturnsWhenTheBudgetGrows) {
+    view(minute, double(kEpoch + 2 * kTileMs), double(kEpoch + 3 * kTileMs));
+    scene->host->frame.view.priceLo = 99'800;
+    scene->host->frame.view.priceHi = 100'200;
+    ASSERT_TRUE(settle());
+    const auto &st = *scene->host->stats;
+    const uint64_t all = st.residentSources.load();
+    // Room for the visible span (its two sources and its bin), not for prefetch.
+    uint64_t visibleBytes = st.binBytes.load() + 64 * 1024;
+    for (const auto &span : controller->latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible)
+            for (const auto &source : span.sources) visibleBytes += source.build->uploadBytes + 256;
+    scene->host->frame.gpuCapBytes = visibleBytes;
+    controller->setGpuBudget(visibleBytes);
+    for (int i = 0; i < 20; ++i) ASSERT_TRUE(frame());
+    ASSERT_LT(st.residentSources.load(), all) << "prefetch evicted";
+    EXPECT_TRUE(st.complete.load());
+    const auto builds = cache->stats().builds;
+    const uint64_t uploads = st.sourcesUploaded.load(), evictions = st.evictions.load();
+    const auto requests = transport.requests.size();
+    for (int i = 0; i < 60; ++i) ASSERT_TRUE(frame()); // the view stands
+    EXPECT_EQ(cache->stats().builds, builds) << "no rebuild churn";
+    EXPECT_EQ(st.sourcesUploaded.load(), uploads) << "no upload churn";
+    EXPECT_EQ(st.evictions.load(), evictions) << "no eviction churn";
+    EXPECT_EQ(transport.requests.size(), requests);
+    // The budget grows: prefetch returns.
+    scene->host->frame.gpuCapBytes = 320ull << 20;
+    controller->setGpuBudget(320ull << 20);
+    for (int i = 0; i < 40 && st.residentSources.load() < all; ++i) ASSERT_TRUE(frame());
+    EXPECT_EQ(st.residentSources.load(), all) << "prefetch is back";
 }
 } // namespace
 

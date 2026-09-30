@@ -135,6 +135,7 @@ struct FakeSpans {
         SpanRank rank;
         std::vector<SpanSourceBuildPtr> sources; // any order; sorted coarsest first
         int64_t tfMs = kMinuteMs;
+        std::vector<std::string> failed; // sources whose build failed terminally (no build)
     };
     std::shared_ptr<const SpanSet> set(int64_t tfMs, std::vector<Span> spans, std::vector<SpanId> refused = {}) {
         auto out = std::make_shared<SpanSet>();
@@ -153,8 +154,11 @@ struct FakeSpans {
                 span.sources.push_back({b->key.source, b, false, false});
                 if (s.tfMs == tfMs) mergeResolution(out->resolution, b->resolution);
             }
+            for (const auto &name : s.failed) span.sources.push_back({name, nullptr, false, true});
+            span.complete = s.failed.empty();
             std::stable_sort(span.sources.begin(), span.sources.end(), [](const auto &a, const auto &b) {
-                return a.build->commonUnits > b.build->commonUnits;
+                const int64_t x = a.build ? a.build->commonUnits : 0, y = b.build ? b.build->commonUnits : 0;
+                return x > y;
             });
             out->spans.push_back(std::move(span));
         }

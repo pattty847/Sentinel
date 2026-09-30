@@ -60,6 +60,9 @@ struct HeatmapTileStats {
     // Draws of content that is not resident, and drawn bins whose sources are not
     // resident: both must stay 0 (retention).
     std::atomic<uint64_t> missingDraws{0}, unpinnedDraws{0};
+    // Sources released in the frame that uploaded them (their buffers may be
+    // referenced by that frame's commands): must stay 0.
+    std::atomic<uint64_t> sameFrameReleases{0};
     std::atomic<uint32_t> slotCount{0}, readySlots{0}, fallbackSlots{0}, partialSlots{0}, loadingSlots{0};
     std::atomic<uint32_t> refusedSlots{0}, fadingLayers{0};
     std::atomic<bool> complete{false}, holding{false}, crossfading{false};
@@ -111,6 +114,9 @@ public:
     // everything the current target does not use, like the B1 node), so the
     // retention tests can prove they fail without them.
     static void setRetentionDisabledForTest(bool disabled);
+    // Tests: attach to a QRhi outside a scene graph (as prepare() does on a new
+    // QRhi), so a test can destroy the QRhi first.
+    void attachRhiForTest(QRhi *rhi) { attachRhi(rhi); }
 
 private:
     struct Source;
@@ -139,6 +145,10 @@ private:
     Frame frame_;
     QRhi *rhi_ = nullptr;
     std::unique_ptr<HeatmapGpuBinner> binner_;
+    // A binner released inside the QRhi's cleanup traversal: kept alive until the
+    // traversal is over (its destructor would remove its own callback from the
+    // hash being iterated), destroyed on the next prepare() or with the node.
+    std::unique_ptr<HeatmapGpuBinner> retiredBinner_;
     std::unordered_map<SpanSourceKey, std::unique_ptr<Source>, SpanSourceKeyHash> sources_;
     std::vector<std::unique_ptr<Bin>> bins_;
     std::vector<std::unique_ptr<QRhiBuffer>> spareBuffers_; // retired bin cell buffers, reused
@@ -167,7 +177,7 @@ private:
     size_t loadingUsed_ = 0;
     // Capacity reporting.
     std::shared_ptr<HeatmapCapacity> reportedTo_;
-    uint64_t reportedBytes_ = UINT64_MAX;
+    uint64_t reportedBytes_ = UINT64_MAX, reportedCap_ = 0;
     std::vector<SpanSourceKey> uploaded_, missing_;
     std::vector<SpanSourceKey> reportedMissing_; // not reported again while the snapshot still lists them
     bool lost_ = false;
@@ -177,7 +187,8 @@ private:
     QString lastError_;
 
     void noteError(const QString &error);
-    void releaseAll(bool reportLoss);
+    void releaseAll(bool reportLoss, bool inRhiCleanup = false);
+    void attachRhi(QRhi *rhi);
     void reindex();
     const SpanRef *spanAt(int64_t tfMs, int64_t tile) const;
     bool wanted(const SpanRef &ref, size_t index) const;

@@ -640,9 +640,7 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
     }
     EXPECT_EQ(cache->stats().claimedBytes, 0u);
     EXPECT_EQ(a.stats().releasedImages, 10u);
-    cache->setMaxBytes(0); // nothing unclaimed stays cached
-    EXPECT_EQ(cache->stats().liveBytes, 0);
-    cache->setMaxBytes(256ull << 20);
+    EXPECT_EQ(cache->stats().liveBytes, 0) << "no image stays after the upload (the LRU is not shrunk)";
     const auto requests = requestedKeys().size();
     const auto built = cache->stats().builds;
     a.capacity()->report(1ull << 30, {}, true); // QRhi lost
@@ -693,8 +691,6 @@ TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
     const SpanSourceKey key = *missing;
     const auto requests = requestedKeys().size();
     const auto built = cache->stats().builds;
-    cache->setMaxBytes(0); // nothing unclaimed stays cached: the rebuild is a real build
-    cache->setMaxBytes(256ull << 20);
     a.capacity()->report(1ull << 30, {}, false, {key});
     a.pollCapacity();
     settle();
@@ -1005,8 +1001,6 @@ TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAga
     EXPECT_EQ(upload(a, 1ull << 30), 10u);
     store.setMaxBytes(1); // unwanted chunks are evictable now
     EXPECT_EQ(store.stats().entries, 0u);
-    cache->setMaxBytes(0); // no cached copies of the released images either
-    cache->setMaxBytes(256ull << 20);
     const auto requests = requestedKeys().size();
     a.capacity()->report(1ull << 30, {}, true); // GPU loss
     a.pollCapacity();
@@ -1350,8 +1344,6 @@ TEST_F(SourceController, SharedPendingChunksWithDifferentHintsSettle) {
     view(a);
     settle(); // A measured its chunks: its hints are their real (small) sizes
     upload(a, 1ull << 30);
-    cache->setMaxBytes(0); // no cached builds to fall back on
-    cache->setMaxBytes(256ull << 20);
     store.setMaxBytes(1); // the (unwanted, sealed) chunks leave the store
     ASSERT_EQ(store.stats().entries, 0u);
     a.capacity()->report(1ull << 30, {}, true); // GPU loss: A wants its chunks again

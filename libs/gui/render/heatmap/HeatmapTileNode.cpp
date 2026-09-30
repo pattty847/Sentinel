@@ -54,6 +54,7 @@ struct HeatmapTileNode::Source {
     uint64_t listedVersion = 0;  // snapshot version that last listed it
     SpanRank rank;
     uint64_t pinnedFrame = 0;    // a drawn bin used it this frame
+    uint64_t uploadFrame = 0;    // last frame that recorded an upload into it
 };
 
 // Cells of one span at one tick: the rows around the view, binned from `passes`
@@ -91,7 +92,7 @@ HeatmapTileNode::HeatmapTileNode(std::shared_ptr<HeatmapTileStats> stats)
     : stats_(stats ? std::move(stats) : std::make_shared<HeatmapTileStats>()) {}
 HeatmapTileNode::~HeatmapTileNode() { releaseResources(); }
 
-void HeatmapTileNode::releaseAll(bool reportLoss) {
+void HeatmapTileNode::releaseAll(bool reportLoss, bool inRhiCleanup) {
     bool held = !bins_.empty();
     for (const auto &[key, s] : sources_) held = held || s->created;
     bins_.clear();
@@ -100,7 +101,15 @@ void HeatmapTileNode::releaseAll(bool reportLoss) {
     byId_.clear();
     indexedSet_.reset();
     indexed_ = nullptr;
-    binner_.reset(); // completes its own in-flight readbacks first
+    if (inRhiCleanup) {
+        // The binner owns a cleanup callback of its own and releases its GPU
+        // resources there; destroying it here would remove that callback while
+        // the QRhi iterates them. It goes after the traversal.
+        if (binner_) retiredBinner_ = std::move(binner_);
+    } else {
+        binner_.reset(); // completes its own in-flight readbacks first
+        retiredBinner_.reset();
+    }
     pipeline_.reset(); // before the loading draws: it was created with the first one's bindings
     loadingDraws_.clear();
     loadingCell_.reset();
@@ -137,6 +146,21 @@ void HeatmapTileNode::releaseResources() {
     if (rhi_) rhi_->removeCleanupCallback(this);
     releaseAll(true);
     rhi_ = nullptr;
+}
+
+void HeatmapTileNode::attachRhi(QRhi *rhi) {
+    if (rhi_) rhi_->removeCleanupCallback(this);
+    releaseAll(true);
+    rhi_ = rhi;
+    // Scene graph invalidation can destroy the QRhi before this node: free every
+    // resource while it still works, and tell the controller. Only GPU resources
+    // go here; objects that own cleanup callbacks outlive the traversal.
+    rhi_->addCleanupCallback(this, [this](QRhi *) {
+        HeatmapGpuBinner::RhiCleanupScope scope;
+        releaseAll(true, true);
+        rhi_ = nullptr;
+    });
+    binner_ = std::make_unique<HeatmapGpuBinner>(rhi_);
 }
 
 void HeatmapTileNode::noteError(const QString &error) {
@@ -222,6 +246,7 @@ bool HeatmapTileNode::wanted(const SpanRef &ref, size_t index) const {
 
 // ------------------------------------------------------------------ residency
 void HeatmapTileNode::freeSource(Source &source, bool report) {
+    if (source.created && source.uploadFrame == frameNo_) stats_->sameFrameReleases.fetch_add(1);
     if (source.created) {
         binner_->releaseResident(source.sourceId);
         byId_.erase(source.sourceId);
@@ -252,7 +277,8 @@ void HeatmapTileNode::evictDown(uint64_t target, const SpanRank *incoming) {
         std::pair<int, int64_t> worst{0, 0};
         for (auto &[key, entry] : sources_) {
             auto &s = *entry;
-            if (!s.created || s.pinnedFrame == frameNo_) continue;
+            // Never what this frame drew or uploaded into: its commands reference it.
+            if (!s.created || s.pinnedFrame == frameNo_ || s.uploadFrame == frameNo_) continue;
             const bool listed = indexed_ && s.listedVersion == indexedVersion_;
             if (listed && guarded(s.rank.tier)) continue;
             if (incoming && listed && !(*incoming < s.rank)) continue;
@@ -300,6 +326,7 @@ void HeatmapTileNode::upload(QRhiCommandBuffer *cb) {
             freeSource(*s, false);
             continue;
         }
+        s->uploadFrame = frameNo_;
         if (!s->created) {
             s->created = true;
             s->sourceId = image->id;
@@ -516,7 +543,7 @@ void HeatmapTileNode::retire(bool keepDrawn) {
     for (auto it = sources_.begin(); it != sources_.end();) {
         auto &s = *it->second;
         const bool listed = indexed_ && s.listedVersion == indexedVersion_;
-        if (listed || s.pinnedFrame == frameNo_) { ++it; continue; }
+        if (listed || s.pinnedFrame == frameNo_ || s.uploadFrame == frameNo_) { ++it; continue; }
         freeSource(s, false);
         it = sources_.erase(it);
     }
@@ -551,9 +578,9 @@ void HeatmapTileNode::report() {
         reportedTo_ = capacity;
         reportedBytes_ = UINT64_MAX;
     }
-    const uint64_t resident = residentBytes();
-    if (resident == reportedBytes_ && uploaded_.empty() && missing_.empty() && !lost_) return;
-    const uint64_t cap = frame_.gpuCapBytes;
+    const uint64_t resident = residentBytes(), cap = frame_.gpuCapBytes;
+    // A new cap is new free bytes, even when nothing moved (suppressed prefetch).
+    if (resident == reportedBytes_ && cap == reportedCap_ && uploaded_.empty() && missing_.empty() && !lost_) return;
     stats_->missingReports.fetch_add(missing_.size());
     capacity->report(size_t(cap > resident ? cap - resident : 0), std::move(uploaded_), lost_, std::move(missing_));
     stats_->reports.fetch_add(1);
@@ -561,6 +588,7 @@ void HeatmapTileNode::report() {
     missing_.clear();
     lost_ = false;
     reportedBytes_ = resident;
+    reportedCap_ = cap;
 }
 
 // ------------------------------------------------------------------ drawing
@@ -687,14 +715,8 @@ void HeatmapTileNode::prepare() {
     QRhiRenderTarget *rt = renderTarget();
     if (!cb || !rt) return;
     QRhi *rhi = rt->rhi();
-    if (rhi != rhi_) {
-        if (rhi_) rhi_->removeCleanupCallback(this);
-        releaseAll(true);
-        rhi_ = rhi;
-        // Scene graph invalidation can destroy the QRhi before this node: free
-        // every resource while it still works, and tell the controller.
-        rhi_->addCleanupCallback(this, [this](QRhi *) { releaseAll(true); rhi_ = nullptr; });
-    }
+    retiredBinner_.reset(); // its QRhi's cleanup traversal is long over
+    if (rhi != rhi_) attachRhi(rhi);
     ++frameNo_;
     stats_->frames.fetch_add(1);
     if (!binner_) binner_ = std::make_unique<HeatmapGpuBinner>(rhi_);
@@ -723,6 +745,10 @@ void HeatmapTileNode::prepare() {
         for (const auto &layer : fading_)
             for (const auto &d : layer.draws) pinDraw(d);
     }
+    // The cap first, before this frame records anything into the pool: what the
+    // last frame's bins and uploads pushed over it goes now (nothing of this
+    // frame references it yet).
+    if (residentBytes() > frame_.gpuCapBytes) evictDown(frame_.gpuCapBytes, nullptr);
     upload(cb);
 
     // 2. The target's visible spans: bin them at the tick (same frame).
@@ -742,8 +768,11 @@ void HeatmapTileNode::prepare() {
             if (const SpanRef *ref = spanAt(tf, t); ref && tick > 0) {
                 bool complete = false;
                 s.bin = binFor(*ref, tick, cb, &complete);
-                s.ready = s.bin && complete;
-                s.complete = s.ready && ref->span->complete;
+                // Complete without a bin: every source failed terminally. That is
+                // resolved (it draws loading), not pending: it must not hold a
+                // transition forever.
+                s.ready = complete;
+                s.complete = s.bin && complete && ref->span->complete;
             }
             // Refused spans draw loading until capacity frees; time outside the
             // data draws nothing: neither waits for anything.

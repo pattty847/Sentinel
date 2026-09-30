@@ -198,7 +198,7 @@ if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
     set_tests_properties(HeatmapGpuReadbackTeardownGuardMalloc PROPERTIES LABELS "render;heatmap"
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
     add_test(NAME HeatmapTileNodeTeardownGuardMalloc COMMAND test_heatmap_tile_node
-             "--gtest_filter=HeatmapTileNodeScene.SceneGraphInvalidation*")
+             "--gtest_filter=HeatmapTileNodeScene.SceneGraphInvalidation*:HeatmapTileNodeScene.QRhiDestroyedFirst*")
     set_tests_properties(HeatmapTileNodeTeardownGuardMalloc PROPERTIES LABELS "render;heatmap"
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
 endif()
