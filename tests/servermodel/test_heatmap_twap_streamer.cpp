@@ -185,25 +185,27 @@ TEST(HeatmapTwapStreamerRollup, MissingBucketsAndSignedMean) {
                       HeatmapColumnStore::AppendResult::Written);
         }
     }
-    FakeSource source([](int) { return 0; });
-    auto cfg = baseConfig();
-    cfg.timeframesMs = {kMs1m, 300'000};
-    cfg.persistenceEnabled = true;
-    cfg.persistenceDir = dir.string();
-    HeatmapTwapStreamer streamer(source, cfg);
-    std::vector<HeatmapTwapStreamer::HistoryColumn> out;
-    int width = 0, height = 0;
-    ASSERT_TRUE(streamer.fetchHistory(kSymbol, 300'000, 0, 10, width, height, out));
-    ASSERT_EQ(out.size(), 2u); // Entire middle 5m bucket is absent.
-    EXPECT_EQ(out[0].bucketStartMs, base);
-    EXPECT_EQ(out[1].bucketStartMs, base + 600'000);
-    EXPECT_EQ(out[0].bucketEndMs, base + 300'000);
-    const auto* first = reinterpret_cast<const uint16_t*>(out[0].intensity.constData());
-    const auto* second = reinterpret_cast<const uint16_t*>(out[1].intensity.constData());
-    EXPECT_EQ(first[0], static_cast<uint16_t>(0x8000u + 1000));
-    EXPECT_EQ(second[0], 2000);
-    const auto* quantity = reinterpret_cast<const uint16_t*>(out[0].liquidity.constData());
-    EXPECT_NEAR(quantity[0] * out[0].liquidityScale, 200.0, 0.01);
+    { // the streamer holds the store open: close it before removing the directory (Windows)
+        FakeSource source([](int) { return 0; });
+        auto cfg = baseConfig();
+        cfg.timeframesMs = {kMs1m, 300'000};
+        cfg.persistenceEnabled = true;
+        cfg.persistenceDir = dir.string();
+        HeatmapTwapStreamer streamer(source, cfg);
+        std::vector<HeatmapTwapStreamer::HistoryColumn> out;
+        int width = 0, height = 0;
+        ASSERT_TRUE(streamer.fetchHistory(kSymbol, 300'000, 0, 10, width, height, out));
+        ASSERT_EQ(out.size(), 2u); // Entire middle 5m bucket is absent.
+        EXPECT_EQ(out[0].bucketStartMs, base);
+        EXPECT_EQ(out[1].bucketStartMs, base + 600'000);
+        EXPECT_EQ(out[0].bucketEndMs, base + 300'000);
+        const auto* first = reinterpret_cast<const uint16_t*>(out[0].intensity.constData());
+        const auto* second = reinterpret_cast<const uint16_t*>(out[1].intensity.constData());
+        EXPECT_EQ(first[0], static_cast<uint16_t>(0x8000u + 1000));
+        EXPECT_EQ(second[0], 2000);
+        const auto* quantity = reinterpret_cast<const uint16_t*>(out[0].liquidity.constData());
+        EXPECT_NEAR(quantity[0] * out[0].liquidityScale, 200.0, 0.01);
+    }
     fs::remove_all(dir);
 }
 

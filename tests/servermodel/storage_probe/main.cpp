@@ -123,7 +123,9 @@ int main(int argc, char** argv) {
                     (encoder.contains("base_ms") ? "_" + std::to_string(encoder["base_ms"].get<int>()) : "");
                 line += " " + name + "_bytes=" + std::to_string(encoder["encoded_bytes"].get<uint64_t>());
             }
-            sLog_App(line); // Qt's default handler writes stderr; one line per minute.
+            // A protocol line for the parent (test_cli), one per minute. Written to
+            // stderr directly: without a console, Qt on Windows logs to OutputDebugString.
+            std::cerr << line << std::endl;
         }
         return result;
     };
