@@ -1242,4 +1242,28 @@ TEST_F(SourceController, ClearedFailuresKeepThePlanAndTheBuild) {
             retried = retried || transport.requests[r].key(k) == failing;
     EXPECT_TRUE(retried);
 }
+
+// Two CPU-suppressed charts share pending chunks with different size hints:
+// the ledger must settle, not bounce between the hints forever.
+TEST_F(SourceController, SharedPendingChunksWithDifferentHintsSettle) {
+    auto &a = chart();
+    view(a);
+    settle(); // A measured its chunks: its hints are their real (small) sizes
+    upload(a, 1ull << 30);
+    cache->setMaxBytes(0); // no cached builds to fall back on
+    cache->setMaxBytes(256ull << 20);
+    store.setMaxBytes(1); // the (unwanted, sealed) chunks leave the store
+    ASSERT_EQ(store.stats().entries, 0u);
+    a.capacity()->report(1ull << 30, {}, true); // GPU loss: A wants its chunks again
+    a.pollCapacity();
+    auto &b = chart(); // the same view without hints: 4 MiB estimates
+    view(b);
+    cache->setCpuCeiling(1); // both shed down to their keepers (CPU-suppressed)
+    for (int i = 0; i < 5; ++i) drain(); // the chunk requests stay unanswered
+    ASSERT_GT(transport.requests.size(), answered);
+    const auto ra = a.stats().reconciles, rb = b.stats().reconciles;
+    for (int i = 0; i < 5; ++i) drain();
+    EXPECT_EQ(a.stats().reconciles, ra);
+    EXPECT_EQ(b.stats().reconciles, rb);
+}
 } // namespace

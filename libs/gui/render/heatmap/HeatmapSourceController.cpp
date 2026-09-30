@@ -119,7 +119,18 @@ struct SpanSourceCache::State {
     struct ChunkRef {
         size_t bytes = 0;
         unsigned refs = 0;
+        bool measured = false;
     };
+    // The size a key counts at after `in` registers: measured replaces a hint
+    // (and a measured revision); a hint only raises another hint.
+    static void combine(ChunkRef &ref, const ChunkBytes &in) {
+        if (in.measured) {
+            ref.bytes = in.bytes;
+            ref.measured = true;
+        } else if (!ref.measured) {
+            ref.bytes = std::max(ref.bytes, in.bytes);
+        }
+    }
     std::unordered_map<ChunkKey, ChunkRef, ChunkKeyHash> chunkRefs;
     size_t chunkTotal = 0;
     struct Commitment {
@@ -129,16 +140,18 @@ struct SpanSourceCache::State {
     std::unordered_map<const HeatmapSourceController *, Commitment> commitments;
     size_t chartReservations = 0;
     void addRefs(const std::vector<ChunkBytes> &keys) {
-        for (const auto &[key, bytes] : keys) {
-            auto &ref = chunkRefs[key];
-            chunkTotal = chunkTotal - (ref.refs ? ref.bytes : 0) + bytes; // latest size wins
-            ref.bytes = bytes;
+        for (const auto &in : keys) {
+            auto &ref = chunkRefs[in.key];
+            const size_t old = ref.bytes;
+            if (!ref.refs) ref = {};
+            combine(ref, in);
+            chunkTotal = chunkTotal - (ref.refs ? old : 0) + ref.bytes;
             ++ref.refs;
         }
     }
     void dropRefs(const std::vector<ChunkBytes> &keys) {
-        for (const auto &[key, bytes] : keys) {
-            const auto it = chunkRefs.find(key);
+        for (const auto &in : keys) {
+            const auto it = chunkRefs.find(in.key);
             if (it == chunkRefs.end() || --it->second.refs) continue;
             chunkTotal -= it->second.bytes;
             chunkRefs.erase(it);
@@ -172,35 +185,44 @@ size_t SpanSourceCache::projectedCpuBytes(const HeatmapSourceController *self, c
     const auto &s = *state_;
     const auto it = s.commitments.find(self);
     const State::Commitment *old = it == s.commitments.end() ? nullptr : &it->second;
-    std::unordered_set<ChunkKey, ChunkKeyHash> mine;
-    size_t bytes = s.total() - (old ? old->reservation : 0) + reservation;
+    std::unordered_set<ChunkKey, ChunkKeyHash> next;
+    for (const auto &in : keys) next.insert(in.key);
+    int64_t bytes = int64_t(s.total() - (old ? old->reservation : 0) + reservation);
     if (old)
-        for (const auto &[key, size] : old->keys) {
-            mine.insert(key);
-            const auto ref = s.chunkRefs.find(key);
-            if (ref != s.chunkRefs.end() && ref->second.refs == 1) bytes -= ref->second.bytes; // only mine
+        for (const auto &in : old->keys) {
+            const auto ref = s.chunkRefs.find(in.key);
+            if (!next.contains(in.key) && ref != s.chunkRefs.end() && ref->second.refs == 1)
+                bytes -= int64_t(ref->second.bytes); // only mine, and dropped
         }
-    for (const auto &[key, size] : keys) {
-        const auto ref = s.chunkRefs.find(key);
-        const unsigned others = ref == s.chunkRefs.end() ? 0 : ref->second.refs - (mine.contains(key) ? 1 : 0);
-        if (!others) bytes += size;
+    for (const auto &in : keys) {
+        const auto ref = s.chunkRefs.find(in.key);
+        if (ref == s.chunkRefs.end()) {
+            bytes += int64_t(in.bytes);
+            continue;
+        }
+        auto after = ref->second;
+        State::combine(after, in);
+        bytes += int64_t(after.bytes) - int64_t(ref->second.bytes);
     }
-    return bytes;
+    return size_t(std::max<int64_t>(bytes, 0));
 }
 void SpanSourceCache::commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
                                 bool atKeeper) {
     auto &s = *state_;
-    const size_t before = s.total();
     auto &commitment = s.commitments[self];
+    // Released keys or reservation free capacity; a size change alone does not.
+    std::unordered_set<ChunkKey, ChunkKeyHash> next;
+    for (const auto &in : keys) next.insert(in.key);
+    bool released = reservation < commitment.reservation;
+    for (const auto &in : commitment.keys) released = released || !next.contains(in.key);
     s.addRefs(keys); // add first, so a key kept by this owner never drops to zero
     s.dropRefs(commitment.keys);
     commitment.keys = std::move(keys);
     s.chartReservations = s.chartReservations - commitment.reservation + reservation;
     commitment.reservation = reservation;
-    const size_t after = s.total();
-    if (after < before) freed();
+    if (released) freed();
     // Still over with nothing left to shed here: ask every chart to shed.
-    if (after > s.options.cpuCeiling && atKeeper && !overing_) {
+    if (s.total() > s.options.cpuCeiling && atKeeper && !overing_) {
         overing_ = true;
         QMetaObject::invokeMethod(this, [this] {
             overing_ = false;
@@ -336,7 +358,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
     auto &job = s.pending[input.key];
     job.reserved = reserveBytes;
     for (const auto &chunk : input.chunks)
-        if (chunk) job.keys.emplace_back(chunk->key, chunk->bytes);
+        if (chunk) job.keys.push_back({chunk->key, chunk->bytes, true});
     s.addRefs(job.keys); // the job owns its inputs until it finishes
     job.waiters.push_back({context, std::move(completion)});
     s.reservedBytes += reserveBytes;
@@ -734,6 +756,7 @@ HeatmapSourceController::SourceNeed HeatmapSourceController::need(const Slot &sl
 
 void HeatmapSourceController::reconcile() {
     Q_ASSERT(QThread::currentThread() == thread() && fetcher_.thread() == thread() && cache_.thread() == thread());
+    ++stats_.reconciles;
     if (symbol_.empty() || tfMs_ <= 0) {
         cache_.commitCpu(this, {}, 0, false);
         stats_.committedBytes = 0;
@@ -874,7 +897,10 @@ void HeatmapSourceController::reconcile() {
                                        *it->second.pending == list[i].desired;
                 if (list[i].build && !requested) reservation += estimate(id, planned.source, false);
                 for (const auto &key : list[i].want)
-                    if (seen.insert(key).second) keys.emplace_back(key, chunkCost(key));
+                    if (seen.insert(key).second) {
+                        const auto stored = store_.cached(key);
+                        keys.push_back({key, stored ? stored->bytes : chunkCost(key), bool(stored)});
+                    }
             }
         }
         return cache_.projectedCpuBytes(this, keys, reservation);
@@ -1010,7 +1036,7 @@ void HeatmapSourceController::reconcile() {
     // Commit after the builds: requests made above are owned by their jobs now.
     commitment();
     stats_.committedBytes = reservation;
-    for (const auto &[key, bytes] : keys) stats_.committedBytes += bytes;
+    for (const auto &in : keys) stats_.committedBytes += in.bytes;
     const bool atKeeper = slots_.size() <= 1;
     cache_.commitCpu(this, std::move(keys), reservation, atKeeper);
     if (cache_.committedCpuBytes() > ceiling && !atKeeper) schedule(); // shed what this pass added

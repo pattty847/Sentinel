@@ -81,7 +81,13 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input,
                                    std::shared_ptr<std::atomic<int64_t>> liveBytes = {});
 
 class HeatmapSourceController;
-using ChunkBytes = std::pair<ChunkKey, size_t>;
+// A chunk an owner references in the CPU ledger. `measured`: the store holds
+// the body and `bytes` is its size; otherwise `bytes` is a hint.
+struct ChunkBytes {
+    ChunkKey key;
+    size_t bytes = 0;
+    bool measured = false;
+};
 
 // One per process, on the heatmap-data thread, shared by every controller. It
 // must outlive them.
@@ -104,11 +110,15 @@ using ChunkBytes = std::pair<ChunkKey, size_t>;
 //   commitment, or a running job, which owns its input chunks until it
 //   finishes) + build reservations (running jobs, and builds a chart still has
 //   to request) + claimed image bytes. A chunk counts once however many owners
-//   hold it, so a dropped slot's running job keeps its keys without growing the
-//   union, and removing an owner only shrinks it: shedding is monotonic. After
-//   a commit over the ceiling from a chart at its keeper, overCeiling() asks
-//   the other charts to shed by their own loss order (never below their
-//   keeper); charts already at their keeper ignore it, so it terminates.
+//   hold it: at its measured size once the store has it, else at the largest
+//   hint any owner registered (never lowered while referenced, so owners with
+//   different hints cannot move it back and forth). A dropped slot's running
+//   job keeps its keys without growing the union, and removing an owner only
+//   shrinks it: shedding is monotonic. Only a released key, owner, reservation
+//   or claim fires capacityFreed(), never a size change. After a commit over
+//   the ceiling from a chart at its keeper, overCeiling() asks the other charts
+//   to shed by their own loss order (never below their keeper); charts already
+//   at their keeper ignore it, so it terminates.
 // - capacityFreed() is emitted at most once per event-loop turn after pinned
 //   bytes or ledger commitments shrink, so controllers suppressed for CPU room
 //   re-admit without another event.
@@ -299,7 +309,7 @@ public:
     void pollCapacity();
     struct Stats {
         uint64_t publications = 0, staleResults = 0, evictions = 0, admissions = 0;
-        uint64_t pressureDrops = 0, releasedImages = 0;
+        uint64_t pressureDrops = 0, releasedImages = 0, reconciles = 0;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
         size_t suppressed = 0;    // spans suppressed by the last reconcile
         size_t refused = 0;       // visible spans refused by the last reconcile
