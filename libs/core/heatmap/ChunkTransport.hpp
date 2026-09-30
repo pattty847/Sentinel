@@ -5,8 +5,8 @@
 #include <optional>
 
 // The existing client owns Q_DECLARE_METATYPE for the shared frame type.
-// Its declaration must precede moc-generated type registration (S5a keeps
-// SentinelStreamClient untouched). No client implementation is used here.
+// Its declaration must precede moc-generated type registration.
+// No client implementation is used here.
 Q_MOC_INCLUDE("protocol/SentinelStreamClient.hpp")
 
 namespace heatmap {
@@ -28,8 +28,15 @@ public:
     // Retire local request bookkeeping (e.g. after a deadline). This does not
     // cancel server work; any later reply must be ignored by the fetcher.
     virtual void forget(quint64 requestId) { Q_UNUSED(requestId); }
+    // Live subscriptions use the same id namespace as requests. The local
+    // recording-only transport has no live source and returns 0 (unsupported).
+    virtual quint64 subscribeLive(const std::string& symbol, std::vector<std::string> sources, int64_t sinceMs) {
+        Q_UNUSED(symbol); Q_UNUSED(sources); Q_UNUSED(sinceMs); return 0;
+    }
+    virtual void unsubscribeLive(const std::string& symbol) { Q_UNUSED(symbol); }
 signals:
     void received(quint64 requestId, heatmap::ChunkFramePtr frame);
+    void liveReceived(quint64 subscriptionId, heatmap::ChunkFramePtr frame);
     void failed(quint64 requestId, heatmap::OptionalChunkKey key, QString code, QString message);
     void availability(heatmap::ChunkAvailability value);
     void connected();

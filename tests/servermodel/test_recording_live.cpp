@@ -546,3 +546,172 @@ TEST(RecordingLive, DeepFiveLadderBandMatchesHistoryAcrossGridChangeAndProvision
         }
     }
 }
+
+struct RecordingLiveTest {
+    static void clock(LiveService& service, std::function<int64_t()> clock) {
+        service.shutdown(); service.setClockForTest(std::move(clock)); service.start();
+    }
+    static void poll(LiveService& service) { service.pollForTest(); }
+};
+
+TEST(RecordingRawTail, SortedEntriesSharedEncodingAndConservativeRanges) {
+    LiveCache cache;
+    auto unsorted = std::make_shared<Hmc2Record>(*record(60, 2, 1000, true, epoch+59*60000));
+    unsorted->entries = {{104, true, encodeSize(3), 0}, {99, true, encodeSize(4), 0},
+                        {99, false, encodeSize(2), 0}, {102, false, encodeSize(1), 0}};
+    cache.publish(record(57, 2));
+    cache.publish(record(59, 3, 60000, true, epoch+59*60000));
+    cache.publish(unsorted);
+    const auto snapshot = cache.snapshot("BTC-USD", "near");
+    RawTailBuilder builder;
+    const auto withFinal = builder.build("BTC-USD", "hmc2.near", snapshot, epoch);
+    const auto again = builder.build("BTC-USD", "hmc2.near", snapshot, epoch+56*60000);
+    EXPECT_EQ(withFinal.bytes, again.bytes);
+    const auto withoutFinal = builder.build("BTC-USD", "hmc2.near", snapshot, epoch+58*60000);
+    EXPECT_EQ(withoutFinal.bytes, builder.build("BTC-USD", "hmc2.near", snapshot, epoch+59*60000).bytes);
+    EXPECT_EQ(builder.encodings(), 2);
+    const auto decoded = heatmap::decodeChunk(*withFinal.bytes);
+    ASSERT_EQ(decoded.columns.columns.size(), 3);
+    const auto& entries = decoded.columns.columns.back().native.front().entries;
+    ASSERT_EQ(entries.size(), 4);
+    EXPECT_EQ(entries[0].row(), entries[1].row());
+    EXPECT_FALSE(entries[0].isAsk()); EXPECT_TRUE(entries[1].isAsk());
+    EXPECT_LT(entries[1].row(), entries[2].row()); EXPECT_LT(entries[2].row(), entries[3].row());
+    EXPECT_EQ(heatmap::bucketState(decoded.columns, epoch+58*60000), heatmap::BucketState::NotLoaded);
+    EXPECT_EQ(withFinal.finalThroughMs, epoch+58*60000);
+    EXPECT_EQ(withoutFinal.finalThroughMs, 0);
+}
+
+TEST(RecordingRawTail, FinalsOncePerSubscriberAndSinceResubscribeResends) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    std::atomic<int64_t> now{0};
+    RecordingLiveTest::clock(service, [&] { return now.load(); });
+    service.publish(record(0, 2));
+    service.publish(record(1, 3, 1000, true));
+    std::vector<heatmap::ChunkFrame> a, b, reconnect;
+    auto sink = [](auto& frames) {
+        return [&frames](const auto&, const auto&, const RawTailFrame& frame) {
+            frames.push_back(heatmap::decodeChunk(*frame.bytes)); return true;
+        };
+    };
+    auto first = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 1, epoch}, sink(a));
+    auto second = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 2, epoch+60000}, sink(b));
+    ASSERT_TRUE(first); ASSERT_TRUE(second);
+    RecordingLiveTest::poll(service);
+    ASSERT_EQ(a.size(), 1); ASSERT_EQ(b.size(), 1);
+    EXPECT_EQ(a[0].columns.columns.size(), 2); EXPECT_EQ(b[0].columns.columns.size(), 1);
+    service.publish(record(1, 4, 2000, true));
+    now = 999; RecordingLiveTest::poll(service);
+    EXPECT_EQ(a.size(), 1); EXPECT_EQ(b.size(), 1);
+    now = 1000; RecordingLiveTest::poll(service);
+    ASSERT_EQ(a.size(), 2); ASSERT_EQ(b.size(), 2);
+    ASSERT_EQ(a[1].columns.columns.size(), 1); ASSERT_EQ(b[1].columns.columns.size(), 1);
+    EXPECT_TRUE(a[1].columns.columns.front().flags & kProvisional);
+    EXPECT_EQ(service.diagnostics().rawEncodings, 3); // two initial variants, one shared update
+    first->active = false;
+    auto resub = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 3, epoch}, sink(reconnect));
+    RecordingLiveTest::poll(service);
+    ASSERT_EQ(reconnect.size(), 1);
+    ASSERT_EQ(reconnect[0].columns.columns.size(), 2);
+    EXPECT_EQ(reconnect[0].columns.columns.front().bucketStartMs, epoch);
+    EXPECT_FALSE(reconnect[0].columns.columns.front().flags & kProvisional);
+    service.shutdown();
+}
+
+TEST(RecordingRawTail, BusyCoalescesLatestAndBacksOffWithoutLosingFinals) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    std::atomic<int64_t> now{0};
+    RecordingLiveTest::clock(service, [&] { return now.load(); });
+    bool busy = false;
+    std::vector<heatmap::ChunkFrame> delivered;
+    std::vector<int64_t> attempts;
+    auto subscription = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 1, epoch},
+        [&](const auto&, const auto&, const RawTailFrame& frame) {
+            attempts.push_back(now.load());
+            if (busy) return false;
+            delivered.push_back(heatmap::decodeChunk(*frame.bytes)); return true;
+        });
+    service.publish(record(0, 2)); service.publish(record(1, 3, 1000, true));
+    RecordingLiveTest::poll(service);
+    ASSERT_EQ(delivered.size(), 1);
+    busy = true;
+    service.publish(record(1, 3)); service.publish(record(2, 4, 1000, true));
+    now = 1000; RecordingLiveTest::poll(service); // refused -> 2 s
+    now = 2999; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 2);
+    now = 3000; RecordingLiveTest::poll(service); // refused -> 4 s
+    service.publish(record(2, 4)); service.publish(record(3, 5, 1000, true));
+    now = 6999; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 3);
+    now = 7000; RecordingLiveTest::poll(service); // refused -> 5 s cap
+    service.publish(record(3, 5)); service.publish(record(4, 6, 2345, true));
+    busy = false;
+    now = 11999; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 1);
+    now = 12000; RecordingLiveTest::poll(service);
+    EXPECT_EQ(attempts, (std::vector<int64_t>{0, 1000, 3000, 7000, 12000}));
+    ASSERT_EQ(delivered.size(), 2);
+    const auto& latest = delivered.back();
+    ASSERT_EQ(latest.columns.columns.size(), 4);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(latest.columns.columns[i].bucketStartMs, epoch+(i+1)*60000);
+        EXPECT_FALSE(latest.columns.columns[i].flags & kProvisional);
+    }
+    EXPECT_EQ(latest.columns.columns.back().bucketStartMs, epoch+4*60000);
+    EXPECT_EQ(latest.columns.columns.back().observedMs, 2345);
+    EXPECT_EQ(latest.state.revision, 8);
+    service.publish(record(4, 7, 3456, true));
+    now = 12999; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 2);
+    now = 13000; RecordingLiveTest::poll(service);
+    ASSERT_EQ(delivered.size(), 3);
+    EXPECT_EQ(delivered.back().columns.columns.size(), 1); // all refused finals were accepted exactly once
+    service.shutdown();
+}
+
+TEST(RecordingRawTail, RetentionAndOnePreviousChunkBoundLeaveOlderFinalsForChunks) {
+    LiveCache cache;
+    for (int i = 0; i < 30; ++i) cache.publish(record(i, 2));
+    cache.publish(record(30, 3, 1000, true));
+    RawTailBuilder builder;
+    const auto replay = heatmap::decodeChunk(*builder.build("BTC-USD", "hmc2.near", cache.snapshot("BTC-USD", "near"), epoch).bytes);
+    ASSERT_EQ(replay.columns.columns.size(), 17);
+    EXPECT_EQ(replay.columns.startMs, epoch+14*60000);
+    EXPECT_EQ(heatmap::bucketState(replay.columns, epoch+13*60000), heatmap::BucketState::NotLoaded);
+    cache.publish(record(180, 4, 1000, true)); // old held finals are now outside the bounded extent
+    const auto jumped = heatmap::decodeChunk(*builder.build("BTC-USD", "hmc2.near", cache.snapshot("BTC-USD", "near"), epoch).bytes);
+    EXPECT_EQ(jumped.columns.columns.size(), 1);
+    EXPECT_EQ(jumped.key.startMs, epoch+180*60000);
+}
+
+TEST(RecordingRawTail, SeparateSubscriptionCapAndShutdownWithDeliveryInFlight) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    auto released = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 0, epoch}, [](auto&, auto&, auto&) { return true; });
+    std::weak_ptr<LiveService::RawSubscription> weak = released;
+    RecordingLiveTest::poll(service);
+    released.reset();
+    RecordingLiveTest::poll(service);
+    EXPECT_TRUE(weak.expired()); // scratch job storage must not become a subscription owner
+    std::vector<std::shared_ptr<LiveService::Subscription>> legacy;
+    for (int i = 0; i < 64; ++i) legacy.push_back(service.subscribe(view(), [](auto&, auto&) { return true; }));
+    std::vector<std::shared_ptr<LiveService::RawSubscription>> raw;
+    for (size_t i = 0; i < LiveService::kMaxRawSubscriptions; ++i) {
+        auto sub = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, i, epoch}, [](auto&, auto&, auto&) { return true; });
+        ASSERT_TRUE(sub); raw.push_back(sub);
+    }
+    EXPECT_FALSE(service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 129, epoch}, [](auto&, auto&, auto&) { return true; }));
+    for (const auto& sub : raw) sub->active = false;
+    for (const auto& sub : legacy) sub->active = false;
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    auto sub = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 130, epoch}, [&](auto&, auto&, auto&) {
+        entered.set_value(); gate.wait(); return true;
+    });
+    service.publish(record(0, 3, 1000, true));
+    entered.get_future().get();
+    auto stopped = std::async(std::launch::async, [&] { service.shutdown(); });
+    while (sub->active.load()) std::this_thread::yield();
+    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    release.set_value(); stopped.get();
+    EXPECT_FALSE(service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 131, epoch}, [](auto&, auto&, auto&) { return true; }));
+    service.start(); EXPECT_FALSE(sub->active.load()); service.shutdown();
+}

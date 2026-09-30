@@ -41,7 +41,8 @@ void write64(std::vector<uint8_t>& wire, size_t offset, uint64_t n) {
 struct WireOffsets { size_t hash, columns, entries, rawLen, zLen, payload; };
 WireOffsets offsets(const std::vector<uint8_t>& wire) {
     const size_t source = 9 + wire.at(8);
-    const size_t hash = source + 1 + wire.at(source) + 24 + 40 + 8 + 8;
+    const size_t hash = source + 1 + wire.at(source) + 24 + 40 + 8 + 8 +
+        (wire.at(6) == uint8_t(ChunkKind::LiveColumn) ? 8 : 0);
     return {hash, hash+8, hash+12, hash+16, hash+20, hash+24};
 }
 uint64_t chunkHash(const std::vector<uint8_t>& wire, size_t prefixLen, const std::vector<uint8_t>& raw) {
@@ -512,3 +513,125 @@ TEST(ChunkBench, LastComplete24Hours) {
     }
 }
 } // namespace
+
+TEST(ChunkCodecLive, RoundTripFinalPendingOpenAcrossHourBoundary) {
+    LiveCache cache;
+    cache.publish(std::make_shared<Hmc2Record>(minuteRecord(58)));
+    for (int i : {59, 60}) {
+        auto r = minuteRecord(i);
+        r.flags |= kProvisional;
+        r.committedThroughMs = epoch + 59 * kMinuteMs;
+        r.observedMs = i == 60 ? 12345 : 60000;
+        std::reverse(r.entries.begin(), r.entries.end());
+        cache.publish(std::make_shared<Hmc2Record>(r));
+    }
+    RawTailBuilder builder;
+    const auto result = builder.build("BTC-USD", "hmc2.deep", cache.snapshot("BTC-USD", "deep"), epoch);
+    ASSERT_TRUE(result.bytes);
+    const auto decoded = decodeChunkEnvelope(encodeChunkEnvelope(123, *result.bytes));
+    EXPECT_EQ(decoded.requestId, 123);
+    const auto& f = decoded.chunk;
+    EXPECT_EQ(f.kind, ChunkKind::LiveColumn);
+    EXPECT_EQ(f.key.startMs, epoch + kHourMs);
+    EXPECT_EQ(f.columns.startMs, epoch + 58 * kMinuteMs);
+    EXPECT_EQ(f.columns.endMs, epoch + 61 * kMinuteMs);
+    EXPECT_EQ(f.state.committedThroughMs, epoch + 59 * kMinuteMs);
+    EXPECT_EQ(f.state.revision, 3);
+    EXPECT_FALSE(f.state.sealed);
+    ASSERT_EQ(f.columns.columns.size(), 3);
+    EXPECT_FALSE(f.columns.columns.front().flags & kProvisional);
+    EXPECT_TRUE(f.columns.columns[1].flags & kProvisional);
+    EXPECT_EQ(f.columns.columns.back().observedMs, 12345);
+    EXPECT_TRUE(f.columns.columns.back().flags & kPartial);
+    EXPECT_TRUE(f.columns.columns.back().flags & kProvisional);
+    EXPECT_EQ(f.columns.scannedRanges, (std::vector<SparseColumns::TimeRange>{{epoch + 58*kMinuteMs, epoch + 61*kMinuteMs}}));
+    EXPECT_EQ(encodeChunk(f), *result.bytes);
+    same(decodeChunk(*result.bytes).columns, f.columns);
+}
+
+TEST(ChunkCodecLive, MalformedAndOverflowingFramesRejectedWithValidHashes) {
+    LiveCache cache;
+    auto record = minuteRecord(60);
+    record.flags |= kProvisional;
+    record.observedMs = 12345;
+    record.committedThroughMs = record.bucketStartMs;
+    cache.publish(std::make_shared<Hmc2Record>(record));
+    RawTailBuilder builder;
+    const auto frame = builder.build("BTC-USD", "hmc2.deep", cache.snapshot("BTC-USD", "deep"), epoch);
+    ASSERT_TRUE(frame.bytes);
+    const auto wire = *frame.bytes;
+    const auto o = offsets(wire);
+    const size_t levelAt = 10 + record.header.symbol.size() + std::string("hmc2.deep").size();
+    const auto max = std::numeric_limits<int64_t>::max(), min = std::numeric_limits<int64_t>::min();
+    for (size_t length = 0; length < wire.size(); ++length)
+        EXPECT_THROW(decodeChunk(std::span(wire.data(), length)), std::invalid_argument) << length;
+    auto rejectHeader = [&](size_t at, int64_t value) {
+        auto broken = wire;
+        write64(broken, at, uint64_t(value));
+        broken = rewritePayload(std::move(broken), [](auto&) {}); // authentic hash; semantic check must fail
+        EXPECT_THROW(decodeChunk(broken), std::invalid_argument) << "offset=" << at << " value=" << value;
+    };
+    for (int64_t value : {min, max, kHourMs, int64_t{0}}) rejectHeader(levelAt, value);
+    for (int64_t value : {min, max, epoch-1, epoch+1, kHmc2EndMs}) rejectHeader(levelAt+8, value);
+    for (int64_t value : {min, max, epoch+kHourMs, epoch+2*kHourMs+1, epoch+2*kHourMs+kMinuteMs})
+        rejectHeader(levelAt+16, value);
+    for (int64_t value : {min, max, epoch-kMinuteMs, epoch+1, epoch+61*kMinuteMs})
+        rejectHeader(levelAt+24, value);
+    for (int64_t value : {min, max, epoch-1, epoch+1, epoch+61*kMinuteMs}) rejectHeader(o.hash-16, value);
+    rejectHeader(o.hash-8, 0); // series revision is never zero
+    auto sealed = wire; sealed[7] = 1;
+    sealed = rewritePayload(std::move(sealed), [](auto&) {});
+    EXPECT_THROW(decodeChunk(sealed), std::invalid_argument);
+    // One range (18 bytes), then bucket(8), observed(8), flags(4).
+    for (uint32_t flags : {uint32_t(kPartial), uint32_t(kProvisional), uint32_t(kPartial|kProvisional|0x80000000u)}) {
+        const auto broken = rewritePayload(wire, [flags](auto& raw) { write32(raw, 34, flags); });
+        EXPECT_THROW(decodeChunk(broken), std::invalid_argument) << flags;
+    }
+    const auto duration = rewritePayload(wire, [](auto& raw) { write64(raw, 26, UINT64_MAX); });
+    EXPECT_THROW(decodeChunk(duration), std::invalid_argument);
+    const auto overflow = rewritePayload(wire, [](auto& raw) { write64(raw, 18, uint64_t(INT64_MAX)); });
+    EXPECT_THROW(decodeChunk(overflow), std::invalid_argument);
+    // A present column must be scanned; cache holes cannot be asserted as empty minutes.
+    auto holes = wire;
+    write64(holes, levelAt+24, uint64_t(epoch+59*kMinuteMs));
+    holes = rewritePayload(std::move(holes), [](auto& raw) { write64(raw, 2, uint64_t(epoch+59*kMinuteMs)); });
+    EXPECT_THROW(decodeChunk(holes), std::invalid_argument);
+    auto enormous = wire; write32(enormous, o.rawLen, 16u*1024u*1024u+1);
+    EXPECT_THROW(decodeChunk(enormous), std::invalid_argument);
+    enormous = wire; write32(enormous, o.columns, UINT32_MAX);
+    EXPECT_THROW(decodeChunk(enormous), std::invalid_argument);
+    auto badEntries = rewritePayload(wire, [](auto& raw) { raw.back() = 0xff; });
+    EXPECT_THROW(decodeChunk(badEntries), std::invalid_argument);
+}
+
+TEST(ChunkCodecLive, FullLatenessWindowAndFinalOnlyRolloverStayBounded) {
+    LiveCache cache;
+    for (int i = 60; i <= 120; ++i) {
+        auto r = minuteRecord(i);
+        r.flags |= kProvisional;
+        r.committedThroughMs = epoch+60*kMinuteMs;
+        cache.publish(std::make_shared<Hmc2Record>(r));
+    }
+    RawTailBuilder builder;
+    const auto result = builder.build("BTC-USD", "hmc2.deep", cache.snapshot("BTC-USD", "deep"), epoch);
+    ASSERT_TRUE(result.bytes);
+    const auto frame = decodeChunk(*result.bytes);
+    EXPECT_EQ(frame.columns.columns.size(), 61);
+    EXPECT_EQ(frame.key.startMs, epoch+2*kHourMs);
+    EXPECT_EQ(frame.columns.startMs, epoch+kHourMs);
+    EXPECT_EQ(frame.columns.endMs, epoch+2*kHourMs+kMinuteMs);
+    auto tooFar = *result.bytes;
+    const size_t tailAt = 10 + frame.key.symbol.size() + frame.key.source.size() + 24;
+    write64(tooFar, tailAt, uint64_t(epoch)); // aligned and supported, but two chunks back
+    tooFar = rewritePayload(std::move(tooFar), [](auto&) {});
+    EXPECT_THROW(decodeChunk(tooFar), std::invalid_argument);
+    LiveCache finalOnly;
+    finalOnly.publish(std::make_shared<Hmc2Record>(minuteRecord(59)));
+    const auto final = decodeChunk(*builder.build("BTC-USD", "hmc2.deep", finalOnly.snapshot("BTC-USD", "deep"), epoch).bytes);
+    EXPECT_EQ(final.key.startMs, epoch+kHourMs);
+    EXPECT_EQ(final.columns.endMs, epoch+61*kMinuteMs);
+    ASSERT_EQ(final.columns.columns.size(), 1);
+    EXPECT_EQ(final.columns.columns.front().bucketStartMs, epoch+59*kMinuteMs);
+    EXPECT_FALSE(final.columns.columns.front().flags & kProvisional);
+    EXPECT_EQ(bucketState(final.columns, epoch+60*kMinuteMs), BucketState::NotLoaded);
+}

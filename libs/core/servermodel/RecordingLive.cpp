@@ -50,6 +50,114 @@ std::optional<std::pair<std::string, std::string>> LiveCache::takeCapacityWarnin
     std::lock_guard lock(mutex_);
     return std::exchange(capacityWarning_, std::nullopt);
 }
+namespace {
+void fillRawColumn(heatmap::SparseColumn& column, const Hmc2Record& record, bool open) {
+    column.bucketStartMs = record.bucketStartMs;
+    column.observedMs = record.observedMs;
+    column.flags = record.flags | ((open || record.observedMs < 60'000) ? kPartial : 0);
+    column.native.resize(1);
+    auto& native = column.native.front();
+    native.grid = {record.header.configHash, record.header.rowTickUnits, record.header.priceScale};
+    native.sizeScale = record.header.sizeScale;
+    native.observedMs = record.observedMs;
+    native.entries.clear();
+    native.baseRow = std::numeric_limits<int64_t>::max();
+    for (int side = 0; side < 2; ++side) {
+        auto& runs = native.coverage[side];
+        runs.clear();
+        const auto lo = side ? record.askRowLo : record.bidRowLo;
+        const auto hi = side ? record.askRowHi : record.bidRowHi;
+        if (lo <= hi) {
+            runs.push_back({lo, hi, record.observedMs});
+            native.baseRow = std::min(native.baseRow, lo);
+        }
+    }
+    if (native.baseRow == std::numeric_limits<int64_t>::max()) native.baseRow = 0;
+    for (const auto& entry : record.entries) {
+        if (entry.row < (entry.isAsk ? record.askRowLo : record.bidRowLo) ||
+            entry.row > (entry.isAsk ? record.askRowHi : record.bidRowHi)) continue;
+        native.entries.push_back({heatmap::packRowSide(entry.row, native.baseRow, entry.isAsk),
+                                  uint16_t(entry.twapCode & kMaxCode)});
+    }
+    // Open publications originate in a pmr::unordered_map. Packed rowSide itself
+    // orders by side first, whereas SHC1 requires (row, side).
+    std::sort(native.entries.begin(), native.entries.end(), [](const auto& a, const auto& b) {
+        return std::pair(a.row(), a.isAsk()) < std::pair(b.row(), b.isAsk());
+    });
+}
+}
+RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string& source,
+                                  const LiveCache::Snapshot& snapshot, int64_t sinceMs) {
+    using namespace heatmap;
+    const auto* definition = findChunkSource(source);
+    if (!definition || sinceMs < 0) throw std::invalid_argument("invalid raw-tail source/cutoff");
+    if (snapshot.revision != revision_ || symbol != symbol_ || source != source_) {
+        variants_.clear();
+        revision_ = snapshot.revision;
+        symbol_ = symbol; source_ = source;
+    }
+    if (!snapshot.revision || (snapshot.provisional.empty() && snapshot.committed.empty())) return {};
+    // A commit can arrive just before publishOpen. In that interval the next
+    // minute is the open minute, even though it has no observed record yet.
+    int64_t open = snapshot.committedThroughMs;
+    if (!snapshot.provisional.empty()) open = std::max(open, snapshot.provisional.rbegin()->first);
+    if (open < kHmc2MinMs || open > kHmc2EndMs - kMinuteMs || open % kMinuteMs)
+        throw std::invalid_argument("invalid raw-tail open minute");
+    const auto chunkStart = open / kHourMs * kHourMs;
+    const auto earliest = std::max(kHmc2MinMs, chunkStart - kHourMs);
+    const auto first = std::find_if(snapshot.committed.begin(), snapshot.committed.end(), [&](const auto& r) {
+        return r->bucketStartMs >= std::max(sinceMs, earliest);
+    });
+    const auto variant = first == snapshot.committed.end() ? int64_t{0} : (*first)->bucketStartMs;
+    if (const auto it = variants_.find(variant); it != variants_.end()) return it->second;
+    records_.clear();
+    int64_t finalThrough = 0;
+    for (auto it = first; it != snapshot.committed.end(); ++it) {
+        const auto& r = *it;
+        if (r->bucketStartMs < kHmc2MinMs || r->bucketStartMs > open - kMinuteMs)
+            throw std::invalid_argument("invalid raw-tail final minute");
+        records_.push_back(r);
+        finalThrough = r->bucketStartMs + kMinuteMs;
+    }
+    for (const auto& [start, r] : snapshot.provisional) {
+        if (start < earliest || start != r->bucketStartMs || start > open)
+            throw std::invalid_argument("invalid raw-tail provisional extent");
+        records_.push_back(r);
+    }
+    if (records_.empty()) return {};
+    frame_.kind = ChunkKind::LiveColumn;
+    frame_.key = {symbol, source, kMinuteMs, chunkStart};
+    frame_.state = {false, snapshot.committedThroughMs, snapshot.revision};
+    auto& columns = frame_.columns;
+    columns.symbol = symbol; columns.layer = definition->hmc2Layer;
+    columns.tfMs = kMinuteMs; columns.startMs = records_.front()->bucketStartMs;
+    columns.endMs = open + kMinuteMs;
+    columns.columns.resize(records_.size());
+    filledRecords_.resize(records_.size());
+    columns.scannedRanges.clear();
+    for (size_t i = 0; i < records_.size(); ++i) {
+        const auto& r = *records_[i];
+        if (r.header.symbol != symbol || r.header.layer != definition->hmc2Layer || r.header.tfMs != kMinuteMs ||
+            r.bucketStartMs < kHmc2MinMs || r.bucketStartMs > open)
+            throw std::invalid_argument("invalid raw-tail record identity");
+        // Frozen pending minutes are immutable. Preserve their sorted storage
+        // across open updates; only a changed record or open/closed role refills it.
+        if (filledRecords_[i] != records_[i] || (r.bucketStartMs == filledOpenMs_) != (r.bucketStartMs == open)) {
+            fillRawColumn(columns.columns[i], r, r.bucketStartMs == open);
+            filledRecords_[i] = records_[i];
+        }
+        const auto end = r.bucketStartMs + kMinuteMs;
+        if (!columns.scannedRanges.empty() && columns.scannedRanges.back().endMs == r.bucketStartMs)
+            columns.scannedRanges.back().endMs = end;
+        else columns.scannedRanges.push_back({r.bucketStartMs, end});
+    }
+    filledOpenMs_ = open;
+    RawTailFrame result{std::make_shared<const std::vector<uint8_t>>(encodeChunk(frame_, scratch_)),
+                        snapshot.revision, finalThrough};
+    ++encodings_;
+    variants_.emplace(variant, result);
+    return result;
+}
 struct LiveService::Impl {
     std::filesystem::path root;
     LiveCache cache;
@@ -57,8 +165,14 @@ struct LiveService::Impl {
     std::condition_variable wake;
     bool stopping = false;
     std::vector<std::weak_ptr<Subscription>> subscriptions;
+    std::vector<std::weak_ptr<RawSubscription>> rawSubscriptions;
+    std::function<int64_t()> clock = [] { return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    uint64_t requestedTurn = 0, completedTurn = 0;
+    std::condition_variable completed;
     std::mutex shutdownMutex;
     std::atomic<uint64_t> builds{0}, buildMicros{0}, deliveries{0}, deliveryMicros{0};
+    std::atomic<uint64_t> rawEncodings{0}, rawBuildMicros{0}, rawDeliveries{0};
     std::thread worker;
     explicit Impl(std::filesystem::path p) : root(std::move(p)), worker([this] { run(); }) {}
     ~Impl() { shutdown(); }
@@ -68,8 +182,10 @@ struct LiveService::Impl {
             std::lock_guard lock(mutex);
             stopping = true;
             for (const auto &w : subscriptions) if (auto s = w.lock()) s->active.store(false);
+            for (const auto &w : rawSubscriptions) if (auto s = w.lock()) s->active.store(false);
         }
         wake.notify_one();
+        completed.notify_all();
         if (worker.joinable()) worker.join();
     }
     void start() {
@@ -77,6 +193,7 @@ struct LiveService::Impl {
         std::lock_guard lock(mutex);
         if (!stopping) return;
         subscriptions.clear();
+        rawSubscriptions.clear();
         worker = std::thread([this] { run(); });
         stopping = false;
     }
@@ -100,20 +217,35 @@ struct LiveService::Impl {
         };
         std::map<const Subscription *, State> states;
         std::map<Key, Group> groups;
-        auto nowMs = [] { return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count(); };
+        auto nowMs = [this] { return clock(); };
+        struct RawState {
+            std::weak_ptr<RawSubscription> subscription;
+            LiveCadence cadence;
+            uint64_t deliveredRevision = 0;
+            int64_t finalThroughMs = 0;
+        };
+        using Series = std::pair<std::string, std::string>;
+        std::map<std::pair<const RawSubscription*, std::string>, RawState> rawStates;
+        std::map<Series, RawTailBuilder> rawBuilders;
+        size_t nextRaw = 0;
+        std::vector<std::pair<std::shared_ptr<RawSubscription>, std::string>> rawJobs;
         auto micros = [](auto start) { return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count(); };
         for (;;) {
             std::vector<std::shared_ptr<Subscription>> views;
+            std::vector<std::shared_ptr<RawSubscription>> rawViews;
+            uint64_t turn = 0;
             {
                 std::unique_lock lock(mutex);
-                wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return stopping; });
+                wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return stopping || requestedTurn > completedTurn; });
                 if (stopping) break;
                 std::erase_if(subscriptions, [](const auto &w) {
                     auto s = w.lock(); return !s || !s->active.load();
                 });
                 for (const auto &w : subscriptions) if (auto s = w.lock()) views.push_back(std::move(s));
+                std::erase_if(rawSubscriptions, [](const auto& w) { auto s = w.lock(); return !s || !s->active.load(); });
+                for (const auto& w : rawSubscriptions) if (auto s = w.lock()) rawViews.push_back(std::move(s));
+                turn = requestedTurn;
             }
             if (const auto warning = cache.takeCapacityWarning())
                 sLog_Warning("Recording live series capacity reached: limit=" << LiveCache::kMaxSeries
@@ -199,6 +331,64 @@ struct LiveService::Impl {
                 }
                 state.cadence.completed(nowMs(), accepted);
             }
+            std::erase_if(rawStates, [](const auto& item) {
+                auto s = item.second.subscription.lock(); return !s || !s->active.load();
+            });
+            std::set<Series> activeSeries;
+            for (const auto& s : rawViews) for (const auto& source : s->view.sources)
+                activeSeries.emplace(s->view.symbol, source);
+            std::erase_if(rawBuilders, [&](const auto& item) { return !activeSeries.contains(item.first); });
+            // One snapshot per series per worker turn; no disk reads in this path.
+            std::map<Series, LiveCache::Snapshot> snapshots;
+            rawJobs.clear();
+            for (const auto& s : rawViews) for (const auto& source : s->view.sources) rawJobs.emplace_back(s, source);
+            const auto firstRaw = rawJobs.empty() ? 0 : nextRaw % rawJobs.size();
+            for (size_t job = 0; job < rawJobs.size(); ++job) {
+                const auto index = (firstRaw + job) % rawJobs.size();
+                const auto& [s, sourceId] = rawJobs[index];
+                if (!s->active.load()) continue;
+                auto [it, added] = rawStates.try_emplace({s.get(), sourceId});
+                auto& state = it->second;
+                if (added) { state.subscription = s; state.finalThroughMs = s->view.sinceMs; }
+                if (!state.cadence.due(nowMs())) continue;
+                const Series series{s->view.symbol, sourceId};
+                auto [sourceIt, fresh] = snapshots.try_emplace(series);
+                if (fresh) sourceIt->second = cache.snapshot(series.first, std::string(heatmap::findChunkSource(sourceId)->hmc2Layer));
+                const auto& snapshot = sourceIt->second;
+                if (!snapshot.revision || snapshot.revision == state.deliveredRevision) continue;
+                bool accepted = false;
+                try {
+                    auto& builder = rawBuilders[series];
+                    const auto before = builder.encodings();
+                    const auto start = std::chrono::steady_clock::now();
+                    const auto frame = builder.build(series.first, sourceId, snapshot, state.finalThroughMs);
+                    rawEncodings += builder.encodings() - before;
+                    rawBuildMicros += micros(start);
+                    if (frame.bytes && s->active.load()) {
+                        accepted = s->deliver(s->view, sourceId, frame);
+                        ++rawDeliveries;
+                    }
+                    if (accepted) {
+                        state.deliveredRevision = frame.revision;
+                        state.finalThroughMs = std::max(state.finalThroughMs, frame.finalThroughMs);
+                        // A session has one raw slot. Start after its last
+                        // accepted source next turn so a hot symbol cannot starve peers.
+                        nextRaw = index + 1;
+                    }
+                    sLog_Probe("chunks.live.send", "symbol=" << series.first << " source=" << sourceId
+                        << " sub=" << s->view.sub << " revision=" << snapshot.revision << " accepted=" << accepted
+                        << " finalThrough=" << state.finalThroughMs << " delayMs=" << state.cadence.delayMs);
+                } catch (const std::exception& e) {
+                    sLog_Error("Raw heatmap live failed: symbol=" << series.first << " source=" << sourceId << " error=" << e.what());
+                }
+                state.cadence.completed(nowMs(), accepted);
+            }
+            rawJobs.clear(); // reuse capacity, but never keep weak subscriptions alive between turns
+            {
+                std::lock_guard lock(mutex);
+                completedTurn = turn;
+            }
+            completed.notify_all();
         }
     }
 };
@@ -207,7 +397,8 @@ LiveService::~LiveService() = default;
 void LiveService::shutdown() { impl_->shutdown(); }
 void LiveService::start() { impl_->start(); }
 LiveService::Diagnostics LiveService::diagnostics() const {
-    return {impl_->builds.load(), impl_->buildMicros.load(), impl_->deliveries.load(), impl_->deliveryMicros.load()};
+    return {impl_->builds.load(), impl_->buildMicros.load(), impl_->deliveries.load(), impl_->deliveryMicros.load(),
+            impl_->rawEncodings.load(), impl_->rawBuildMicros.load(), impl_->rawDeliveries.load()};
 }
 bool LiveService::publish(RecordPtr record) { return impl_->cache.publish(std::move(record)); }
 std::shared_ptr<LiveService::Subscription> LiveService::subscribe(LiveView view, Deliver deliver) {
@@ -217,5 +408,31 @@ std::shared_ptr<LiveService::Subscription> LiveService::subscribe(LiveView view,
     auto subscription = std::make_shared<Subscription>(std::move(view), std::move(deliver));
     impl_->subscriptions.push_back(subscription);
     return subscription;
+}
+std::shared_ptr<LiveService::RawSubscription> LiveService::subscribeRaw(RawTailView view, RawDeliver deliver) {
+    if (view.symbol.empty() || view.symbol.size() > 64 || view.sources.empty() ||
+        view.sources.size() > heatmap::kChunkSources.size() || view.sinceMs < 0 ||
+        (view.sinceMs && (view.sinceMs < kHmc2MinMs || view.sinceMs >= kHmc2EndMs || view.sinceMs % 60'000))) return {};
+    std::set<std::string> unique;
+    for (const auto& source : view.sources)
+        if (!heatmap::findChunkSource(source) || !unique.insert(source).second) return {};
+    std::lock_guard lock(impl_->mutex);
+    std::erase_if(impl_->rawSubscriptions, [](const auto& w) { auto s = w.lock(); return !s || !s->active.load(); });
+    if (impl_->stopping || impl_->rawSubscriptions.size() >= kMaxRawSubscriptions) return {};
+    auto subscription = std::make_shared<RawSubscription>(std::move(view), std::move(deliver));
+    impl_->rawSubscriptions.push_back(subscription);
+    return subscription;
+}
+void LiveService::setClockForTest(std::function<int64_t()> clock) {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->stopping) throw std::logic_error("live clock requires stopped service");
+    impl_->clock = std::move(clock);
+}
+void LiveService::pollForTest() {
+    std::unique_lock lock(impl_->mutex);
+    if (impl_->stopping) return;
+    const auto turn = ++impl_->requestedTurn;
+    impl_->wake.notify_one();
+    impl_->completed.wait(lock, [&] { return impl_->stopping || impl_->completedTurn >= turn; });
 }
 } // namespace recording

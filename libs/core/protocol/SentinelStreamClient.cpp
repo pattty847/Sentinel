@@ -393,6 +393,24 @@ quint64 SentinelStreamClient::requestHeatmapChunks(const std::string& symbol, co
     return q.req;
 }
 
+quint64 SentinelStreamClient::subscribeHeatmapLive(const std::string& symbol,
+    const std::vector<std::string>& sources, int64_t sinceMs) {
+    const auto id = ++m_nextChunkRequestId;
+    recording::RawTailView view{symbol, sources, id, sinceMs};
+    net::post(m_strand, [this, payload = protocol::chunkwire::buildLiveSubscribe(view).dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+    return id;
+}
+void SentinelStreamClient::unsubscribeHeatmapLive(const std::string& symbol) {
+    const nlohmann::json request = {{"type", "heatmap_live_unsubscribe"}, {"symbol", symbol}};
+    net::post(m_strand, [this, payload = request.dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+}
+
 namespace {
 quint64 peekEnvelopeRequestId(const std::vector<uint8_t>& frame) {
     static constexpr uint8_t kMagic[4] = {'S', 'H', 'E', '1'};
@@ -460,6 +478,12 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
         emit heatmapChunkFailed({envelope.requestId, chunk.key,
                                  QString::fromLatin1(heatmap::chunkErrorName(chunk.error)),
                                  QString::fromUtf8(chunk.message.data(), qsizetype(chunk.message.size()))});
+        return;
+    }
+    if (chunk.kind == heatmap::ChunkKind::LiveColumn) {
+        sLog_Probe("chunks.live.receive", "sub=" << envelope.requestId << " symbol=" << chunk.key.symbol
+            << " source=" << chunk.key.source << " revision=" << chunk.state.revision << " bytes=" << frame.size());
+        emit heatmapLiveReceived(envelope.requestId, std::make_shared<const heatmap::ChunkFrame>(std::move(chunk)));
         return;
     }
     if (!acceptChunkOrder(chunk)) {

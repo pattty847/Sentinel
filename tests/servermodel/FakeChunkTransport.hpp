@@ -16,6 +16,23 @@ public:
         heatmap::ChunkKey key(size_t i) const { return {symbol, source, levelMs, starts.at(i)}; }
     };
     std::vector<Request> requests;
+    struct LiveRequest { quint64 id; std::string symbol; std::vector<std::string> sources; int64_t sinceMs; };
+    std::vector<LiveRequest> liveRequests;
+    std::vector<std::string> liveUnsubscribes;
+    std::vector<std::pair<quint64, heatmap::ChunkFramePtr>> heldLive;
+    quint64 subscribeLive(const std::string& symbol, std::vector<std::string> sources, int64_t sinceMs) override {
+        const auto id = ++next_;
+        liveRequests.push_back({id, symbol, std::move(sources), sinceMs});
+        return id;
+    }
+    void unsubscribeLive(const std::string& symbol) override { liveUnsubscribes.push_back(symbol); }
+    void replyLive(quint64 id, heatmap::ChunkFramePtr frame) { emit liveReceived(id, std::move(frame)); }
+    void holdLive(quint64 id, heatmap::ChunkFramePtr frame) { heldLive.emplace_back(id, std::move(frame)); }
+    void releaseLive(size_t index = 0) {
+        auto reply = std::move(heldLive.at(index));
+        heldLive.erase(heldLive.begin() + index);
+        replyLive(reply.first, std::move(reply.second));
+    }
     std::vector<quint64> forgotten;
     void forget(quint64 id) override { forgotten.push_back(id); }
     std::vector<std::pair<quint64, heatmap::ChunkFramePtr>> held;

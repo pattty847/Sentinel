@@ -12,6 +12,7 @@ void SentinelStreamClientTransport::setClient(SentinelStreamClient &client) {
     if (client_ == &client) return;
     if (client_) QObject::disconnect(client_, nullptr, this, nullptr);
     requests_.clear();
+    liveRequests_.clear();
     connected_ = false;
     emit disconnected();
     emit hostChanged();
@@ -26,8 +27,9 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
         if (epoch != epoch_) return;
         // Explicit disconnectFromServer() drops writes without emitting down.
         // A second up must invalidate that connection's requests and freshness.
-        if (connected_ || !requests_.empty()) {
+        if (connected_ || !requests_.empty() || !liveRequests_.empty()) {
             requests_.clear();
+            liveRequests_.clear();
             emit disconnected();
         }
         connected_ = true;
@@ -36,6 +38,7 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
     connect(&client, &SentinelStreamClient::disconnected, this, [this, epoch] {
         if (epoch != epoch_) return;
         requests_.clear();
+        liveRequests_.clear();
         connected_ = false;
         emit disconnected();
     }, Qt::QueuedConnection);
@@ -48,11 +51,26 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
             emit received(it->second.id, std::move(frame));
             retire(id, key);
         }, Qt::QueuedConnection);
+    connect(&client, &SentinelStreamClient::heatmapLiveReceived, this,
+        [this, epoch](quint64 id, heatmap::ChunkFramePtr frame) {
+            if (epoch != epoch_ || !frame || frame->kind != heatmap::ChunkKind::LiveColumn) return;
+            const auto it = liveRequests_.find(frame->key.symbol);
+            if (it == liveRequests_.end() || it->second.wireId != id ||
+                std::find(it->second.sources.begin(), it->second.sources.end(), frame->key.source) == it->second.sources.end()) return;
+            emit liveReceived(it->second.id, std::move(frame));
+        }, Qt::QueuedConnection);
     connect(&client, &SentinelStreamClient::heatmapChunkFailed, this,
         [this, epoch](const SentinelStreamClient::HeatmapChunkError &error) {
             if (epoch != epoch_) return;
             const auto it = requests_.find(error.requestId);
-            if (it == requests_.end() && error.requestId) return;
+            if (it == requests_.end() && error.requestId) {
+                for (const auto& [symbol, live] : liveRequests_) if (live.wireId == error.requestId) {
+                    emit failed(live.id, error.key.symbol.empty() ? heatmap::OptionalChunkKey{} : error.key,
+                                error.code, error.message);
+                    return;
+                }
+                return;
+            }
             emit failed(it == requests_.end() ? 0 : it->second.id,
                         error.key.symbol.empty() ? heatmap::OptionalChunkKey{} : error.key,
                         error.code, error.message);
@@ -67,6 +85,7 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
         // availability is deliberately not emitted by that client.
         if (epoch == epoch_ && error == QStringLiteral("heatmap chunk wire version mismatch")) {
             requests_.clear();
+            liveRequests_.clear();
             emit wireVersionMismatch();
         }
     }, Qt::QueuedConnection);
@@ -106,4 +125,24 @@ quint64 SentinelStreamClientTransport::request(const std::string &symbol, const 
     requests_[wireId] = std::move(pending);
     return id;
 }
+quint64 SentinelStreamClientTransport::subscribeLive(const std::string& symbol,
+    std::vector<std::string> sources, int64_t sinceMs) {
+    Q_ASSERT(thread() == QThread::currentThread());
+    const auto id = ++nextRequest_;
+    if (!client_) {
+        QMetaObject::invokeMethod(this, [this, id] {
+            emit failed(id, {}, QStringLiteral("unavailable"), QStringLiteral("stream client destroyed"));
+        }, Qt::QueuedConnection);
+        return id;
+    }
+    const auto wireId = client_->subscribeHeatmapLive(symbol, sources, sinceMs);
+    liveRequests_[symbol] = {id, wireId, std::move(sources)};
+    return id;
+}
+void SentinelStreamClientTransport::unsubscribeLive(const std::string& symbol) {
+    Q_ASSERT(thread() == QThread::currentThread());
+    liveRequests_.erase(symbol);
+    if (client_) client_->unsubscribeHeatmapLive(symbol);
+}
+
 } // namespace protocol

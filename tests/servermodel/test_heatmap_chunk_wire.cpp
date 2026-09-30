@@ -23,6 +23,14 @@ using heatmap::ChunkKind;
 using recording::Hmc2Record;
 
 struct HeatmapChunkWireTest {
+    static void liveClock(recording::LiveService& service, std::function<int64_t()> clock) {
+        service.shutdown(); service.setClockForTest(std::move(clock));
+    }
+    static void livePoll(recording::LiveService& service) { service.pollForTest(); }
+    static bool holdRawSlot(Session& session) { return session.rawWriteSlot_->tryAcquire(); }
+    static void releaseRawSlot(Session& session) { session.rawWriteSlot_->release(); }
+    static bool holdLegacySlot(Session& session) { return session.recordingWriteSlot_->tryAcquire(); }
+    static void releaseLegacySlot(Session& session) { session.recordingWriteSlot_->release(); }
     static void setChunks(SentinelStreamServer& server, std::shared_ptr<recording::ChunkService> chunks) {
         server.m_chunks = std::move(chunks);
     }
@@ -47,6 +55,13 @@ struct HeatmapChunkWireTest {
         });
         return result.get_future().get();
     }
+    static auto rawView(Session& session, const std::string& symbol) {
+        return onExecutor(session, [&](Session& s) {
+            const auto it = s.rawViews_.find(symbol);
+            return it == s.rawViews_.end() ? std::shared_ptr<recording::LiveService::RawSubscription>{} : it->second;
+        });
+    }
+    static size_t rawCount(Session& session) { return onExecutor(session, [](Session& s) { return s.rawViews_.size(); }); }
     static void setChunkBytes(Session& session, size_t bytes) {
         onExecutor(session, [bytes](Session& s) { s.chunkBytes_ = bytes; });
     }
@@ -105,6 +120,17 @@ Hmc2Record minuteRecord(int i, const std::string& layer) {
                  {104 / tick, true, recording::encodeSize(3. + i / 100.), 0, r.observedMs}};
     return r;
 }
+std::vector<uint8_t> liveWire(uint64_t sub, uint64_t revision = 1) {
+    recording::LiveCache cache;
+    auto r = minuteRecord(1, "near");
+    r.flags |= recording::kProvisional;
+    r.committedThroughMs = kEpoch+kMin;
+    cache.publish(std::make_shared<Hmc2Record>(r));
+    recording::RawTailBuilder builder;
+    auto snapshot = cache.snapshot("BTC-USD", "near"); snapshot.revision = revision;
+    return heatmap::encodeChunkEnvelope(sub, *builder.build("BTC-USD", "hmc2.near", snapshot, kEpoch).bytes);
+}
+
 Hmc2Record hourRecord() {
     auto r = minuteRecord(0, "deep");
     r.header.tfMs = kHour;
@@ -149,6 +175,7 @@ struct Inbox {
     std::condition_variable changed;
     bool connected = false;
     std::vector<std::pair<quint64, SentinelStreamClient::HeatmapChunkPtr>> chunks;
+    std::vector<std::pair<quint64, SentinelStreamClient::HeatmapChunkPtr>> live;
     std::vector<SentinelStreamClient::HeatmapChunkError> errors;
     std::vector<protocol::chunkwire::Availability> availability;
 
@@ -159,6 +186,10 @@ struct Inbox {
         QObject::connect(&client, &SentinelStreamClient::heatmapChunkReceived, &client,
                          [this, notify](quint64 req, SentinelStreamClient::HeatmapChunkPtr chunk) {
                              notify([&] { chunks.emplace_back(req, std::move(chunk)); });
+                         }, Qt::DirectConnection);
+        QObject::connect(&client, &SentinelStreamClient::heatmapLiveReceived, &client,
+                         [this, notify](quint64 sub, SentinelStreamClient::HeatmapChunkPtr frame) {
+                             notify([&] { live.emplace_back(sub, std::move(frame)); });
                          }, Qt::DirectConnection);
         QObject::connect(&client, &SentinelStreamClient::heatmapChunkFailed, &client,
                          [this, notify](const SentinelStreamClient::HeatmapChunkError& error) {
@@ -192,6 +223,12 @@ struct Inbox {
         std::lock_guard lock(mutex);
         std::vector<SentinelStreamClient::HeatmapChunkError> out;
         for (const auto& e : errors) if (e.requestId == req) out.push_back(e);
+        return out;
+    }
+    std::vector<SentinelStreamClient::HeatmapChunkPtr> liveFor(quint64 sub) {
+        std::lock_guard lock(mutex);
+        std::vector<SentinelStreamClient::HeatmapChunkPtr> out;
+        for (const auto& [id, frame] : live) if (id == sub) out.push_back(frame);
         return out;
     }
 };
@@ -228,6 +265,8 @@ protected:
     std::unique_ptr<SentinelStreamClient> client;
     Inbox inbox;
     Watermarks marks;
+    std::shared_ptr<std::atomic<int64_t>> liveNow = std::make_shared<std::atomic<int64_t>>(0);
+    uint64_t fenceId = 50000;
 
     std::filesystem::path root() const { return dir.path().toStdString() + "/recording"; }
 
@@ -283,6 +322,33 @@ protected:
         recording::Hmc2Reader reader(root());
         auto state = recording::chunkState(key, w, revision);
         return heatmap::encodeChunk({ChunkKind::Chunk, key, state, recording::buildChunk(reader, key, w)});
+    }
+    void useLiveClock() {
+        HeatmapChunkWireTest::liveClock(*model->recordingLive(), [now = liveNow] { return now->load(); });
+    }
+    void liveTurn(int64_t now) {
+        *liveNow = now;
+        HeatmapChunkWireTest::livePoll(*model->recordingLive());
+        // An actual socket control reply fences the earlier posted live writes
+        // and the client's FIFO decode queue, including negative assertions.
+        auto session = HeatmapChunkWireTest::onlySession(*server);
+        ASSERT_TRUE(session);
+        heatmap::ChunkFrame fence;
+        fence.kind = ChunkKind::NotModified;
+        fence.key = {"FENCE", "hmc2.deep", kMin, kEpoch};
+        const auto id = ++fenceId;
+        HeatmapChunkWireTest::serverBinary(*session, heatmap::encodeChunkEnvelope(id, heatmap::encodeChunk(fence)));
+        ASSERT_TRUE(inbox.waitReplies(id, 1));
+    }
+    void publishLive(int minute, bool provisional, uint64_t observed = 60000,
+                     const std::string& symbol = "BTC-USD", const std::string& layer = "near") {
+        auto r = minuteRecord(minute, layer);
+        r.header.symbol = symbol;
+        r.observedMs = observed;
+        r.flags = provisional ? recording::kProvisional : 0;
+        r.committedThroughMs = r.bucketStartMs + (provisional ? 0 : kMin);
+        std::reverse(r.entries.begin(), r.entries.end());
+        ASSERT_TRUE(model->recordingLive()->publish(std::make_shared<Hmc2Record>(r)));
     }
 };
 
@@ -634,7 +700,7 @@ TEST_F(ChunkWire, InProgressDecodeCannotCrossDisconnectOrReconnect) {
     malformed.back() = 0;
     malformed.push_back(0); // exact-length control frame violation
     for (bool reconnect : {false, true}) {
-        for (const auto& bytes : {good, serverError, malformed}) {
+        for (const auto& bytes : {good, serverError, malformed, liveWire(9001)}) {
             client->connectToServer();
             std::promise<void> entered, release;
             auto gate = release.get_future().share();
@@ -651,6 +717,7 @@ TEST_F(ChunkWire, InProgressDecodeCannotCrossDisconnectOrReconnect) {
             HeatmapChunkWireTest::drainDecoder(*client);
             EXPECT_EQ(HeatmapChunkWireTest::orderSize(*client), 0u);
             EXPECT_EQ(inbox.repliesFor(9001), 0u);
+            EXPECT_TRUE(inbox.liveFor(9001).empty());
         }
     }
     HeatmapChunkWireTest::decoder(*client, heatmap::decodeChunkEnvelope);
@@ -723,4 +790,163 @@ TEST(ChunkServiceWatermarks, RecorderCutoffsWinAndColdSeriesKeepAMargin) {
     EXPECT_EQ(live.minuteThroughMs, kEpoch + 42);
     EXPECT_EQ(live.hourThroughMs, 7);
     EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, 7, kEpoch + 42, 7}));
+}
+
+TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
+    EXPECT_TRUE(buildServerConfigPayload(config, true).at("recording").at("chunk_live").get<bool>());
+    useLiveClock(); startAndConnect();
+    auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
+    ASSERT_TRUE(HeatmapChunkWireTest::holdLegacySlot(*session));
+    const auto sub = client->subscribeHeatmapLive("BTC-USD", {"hmc2.near"}, kEpoch);
+    ASSERT_TRUE(poll([&] { return bool(HeatmapChunkWireTest::rawView(*session, "BTC-USD")); }));
+    publishLive(0, false); publishLive(1, true, 1000);
+    liveTurn(0);
+    ASSERT_EQ(inbox.liveFor(sub).size(), 1);
+    EXPECT_EQ(inbox.liveFor(sub)[0]->columns.columns.size(), 2);
+    HeatmapChunkWireTest::releaseLegacySlot(*session);
+    const auto registered = HeatmapChunkWireTest::rawView(*session, "BTC-USD");
+    recording::RawTailFrame oversized{std::make_shared<const std::vector<uint8_t>>(1024*1024-13), 1, 0};
+    EXPECT_FALSE(registered->deliver(registered->view, "hmc2.near", oversized)); // envelope would exceed 1 MiB
+    EXPECT_TRUE(HeatmapChunkWireTest::holdRawSlot(*session)); // refusal must not leak admission
+    HeatmapChunkWireTest::releaseRawSlot(*session);
+    publishLive(1, true, 2000);
+    liveTurn(999); EXPECT_EQ(inbox.liveFor(sub).size(), 1);
+    liveTurn(1000); ASSERT_EQ(inbox.liveFor(sub).size(), 2);
+    EXPECT_EQ(inbox.liveFor(sub)[1]->columns.columns.size(), 1); // final 0 once
+    EXPECT_EQ(inbox.liveFor(sub)[1]->columns.columns.back().observedMs, 2000);
+
+    ASSERT_TRUE(HeatmapChunkWireTest::holdRawSlot(*session));
+    const auto attempts = model->recordingLive()->diagnostics().rawDeliveries;
+    publishLive(1, false); publishLive(2, true, 3000);
+    liveTurn(2000); // busy -> due at 4000
+    liveTurn(3999); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+1);
+    liveTurn(4000); // busy -> due at 8000
+    publishLive(2, false); publishLive(3, true, 4000);
+    liveTurn(7999); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+2);
+    liveTurn(8000); // busy -> due at 13000 (5 s cap)
+    publishLive(3, false); publishLive(4, true, 5678);
+    HeatmapChunkWireTest::releaseRawSlot(*session);
+    liveTurn(12999); EXPECT_EQ(inbox.liveFor(sub).size(), 2);
+    liveTurn(13000);
+    auto frames = inbox.liveFor(sub); ASSERT_EQ(frames.size(), 3);
+    const auto& latest = *frames.back();
+    EXPECT_EQ(latest.kind, ChunkKind::LiveColumn);
+    EXPECT_EQ(latest.state.revision, 9);
+    EXPECT_EQ(latest.state.committedThroughMs, kEpoch+4*kMin);
+    ASSERT_EQ(latest.columns.columns.size(), 4);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(latest.columns.columns[i].bucketStartMs, kEpoch+(i+1)*kMin);
+        EXPECT_FALSE(latest.columns.columns[i].flags & recording::kProvisional);
+    }
+    EXPECT_EQ(latest.columns.columns.back().observedMs, 5678);
+    publishLive(4, true, 6789);
+    liveTurn(13999); EXPECT_EQ(inbox.liveFor(sub).size(), 3);
+    liveTurn(14000); ASSERT_EQ(inbox.liveFor(sub).size(), 4);
+    EXPECT_EQ(inbox.liveFor(sub).back()->columns.columns.size(), 1);
+    EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+5);
+}
+
+TEST_F(ChunkWire, LiveMultiSymbolReplaceUnsubscribeCapAndTeardown) {
+    useLiveClock(); startAndConnect();
+    auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
+    std::vector<quint64> ids;
+    for (int i = 0; i < 8; ++i)
+        ids.push_back(client->subscribeHeatmapLive("SYM"+std::to_string(i), {"hmc2.near", "hmc2.deep"}, kEpoch));
+    ASSERT_TRUE(poll([&] { return HeatmapChunkWireTest::rawCount(*session) == 8; }));
+    const auto ninth = client->subscribeHeatmapLive("SYM8", {"hmc2.near"}, kEpoch);
+    ASSERT_TRUE(inbox.waitReplies(ninth, 1)); EXPECT_EQ(inbox.errorsFor(ninth).at(0).code, "busy");
+    for (int i = 0; i < 8; ++i) {
+        publishLive(0, false, 60000, "SYM"+std::to_string(i));
+        publishLive(1, true, 1000, "SYM"+std::to_string(i));
+        liveTurn(i*1000);
+        ASSERT_EQ(inbox.liveFor(ids[i]).size(), 1);
+        EXPECT_EQ(inbox.liveFor(ids[i]).back()->key.symbol, "SYM"+std::to_string(i));
+    }
+    publishLive(1, true, 1234, "SYM0", "deep");
+    liveTurn(8000);
+    ASSERT_EQ(inbox.liveFor(ids[0]).size(), 2);
+    EXPECT_EQ(inbox.liveFor(ids[0]).back()->key.source, "hmc2.deep");
+    const auto old = HeatmapChunkWireTest::rawView(*session, "SYM0");
+    const auto replacement = client->subscribeHeatmapLive("SYM0", {"hmc2.near"}, kEpoch);
+    ASSERT_TRUE(poll([&] { const auto v = HeatmapChunkWireTest::rawView(*session, "SYM0"); return v && v->view.sub == replacement; }));
+    EXPECT_FALSE(old->active.load());
+    liveTurn(9000);
+    ASSERT_EQ(inbox.liveFor(replacement).size(), 1);
+    ASSERT_EQ(inbox.liveFor(replacement)[0]->columns.columns.size(), 2);
+    EXPECT_FALSE(inbox.liveFor(replacement)[0]->columns.columns.front().flags & recording::kProvisional);
+    const auto current = HeatmapChunkWireTest::rawView(*session, "SYM0");
+    client->unsubscribeHeatmapLive("SYM0");
+    ASSERT_TRUE(poll([&] { return !HeatmapChunkWireTest::rawView(*session, "SYM0"); }));
+    EXPECT_FALSE(current->active.load());
+    publishLive(1, true, 2345, "SYM0"); liveTurn(10000);
+    EXPECT_EQ(inbox.liveFor(replacement).size(), 1);
+    EXPECT_EQ(inbox.liveFor(ids[0]).size(), 2);
+    EXPECT_EQ(HeatmapChunkWireTest::rawCount(*session), 7);
+    auto alive = HeatmapChunkWireTest::rawView(*session, "SYM1");
+    server->stop(); // subscriptions are live; worker joins before executor destruction
+    EXPECT_FALSE(alive->active.load());
+    client->disconnectFromServer();
+    EXPECT_EQ(HeatmapChunkWireTest::sessionCount(*server), 0);
+    session.reset();
+    server->start();
+    EXPECT_FALSE(alive->active.load());
+    server->stop();
+}
+
+TEST_F(ChunkWire, InvalidLiveRequestsAreExplicitAndDoNotReplaceSubscription) {
+    useLiveClock(); startAndConnect();
+    auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
+    auto good = protocol::chunkwire::buildLiveSubscribe({"BTC-USD", {"hmc2.near"}, 1000, kEpoch});
+    HeatmapChunkWireTest::sendText(*client, good.dump());
+    ASSERT_TRUE(poll([&] { return bool(HeatmapChunkWireTest::rawView(*session, "BTC-USD")); }));
+    uint64_t id = 1001;
+    for (auto bad : {nlohmann::json{{"sources", nlohmann::json::array()}},
+                     nlohmann::json{{"sources", {"hmc2.near", "hmc2.near"}}},
+                     nlohmann::json{{"sources", {"near"}}},
+                     nlohmann::json{{"since_ms", UINT64_MAX}},
+                     nlohmann::json{{"since_ms", INT64_MIN}},
+                     nlohmann::json{{"since_ms", kEpoch+1}}}) {
+        auto request = good; request.update(bad); request["sub"] = id;
+        HeatmapChunkWireTest::sendText(*client, request.dump());
+        ASSERT_TRUE(inbox.waitReplies(id, 1));
+        EXPECT_EQ(inbox.errorsFor(id).at(0).code, "invalid_request");
+        EXPECT_EQ(HeatmapChunkWireTest::rawView(*session, "BTC-USD")->view.sub, 1000);
+        ++id;
+    }
+}
+
+TEST(ChunkClientAdmission, LiveFramesShareDecodeBoundsAndBypassChunkOrdering) {
+    SentinelStreamClient client("127.0.0.1", "0");
+    Inbox inbox; inbox.attach(client);
+    const auto good = liveWire(123, 9);
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    std::atomic<size_t> calls{0};
+    HeatmapChunkWireTest::decoder(client, [&](auto wire) {
+        if (++calls == 1) entered.set_value();
+        gate.wait(); return heatmap::decodeChunkEnvelope(wire);
+    });
+    HeatmapChunkWireTest::clientBinary(client, good); entered.get_future().get();
+    for (size_t i = 0; i < SentinelStreamClient::kMaxDecodeBacklogFrames; ++i)
+        HeatmapChunkWireTest::clientBinary(client, good);
+    EXPECT_EQ(HeatmapChunkWireTest::decodeBacklogFrames(client), SentinelStreamClient::kMaxDecodeBacklogFrames);
+    EXPECT_EQ(inbox.errorsFor(123).size(), 1);
+    EXPECT_EQ(inbox.errorsFor(123).at(0).code, "client_overloaded");
+    release.set_value(); HeatmapChunkWireTest::drainDecoder(client);
+    EXPECT_EQ(inbox.liveFor(123).size(), SentinelStreamClient::kMaxDecodeBacklogFrames);
+    EXPECT_TRUE(inbox.chunksFor(123).empty());
+    EXPECT_EQ(HeatmapChunkWireTest::orderSize(client), 0);
+    HeatmapChunkWireTest::decoder(client, heatmap::decodeChunkEnvelope);
+    HeatmapChunkWireTest::clientBinary(client, liveWire(124, 1)); // a restarted server can reset revision
+    HeatmapChunkWireTest::drainDecoder(client);
+    ASSERT_EQ(inbox.liveFor(124).size(), 1);
+    EXPECT_EQ(inbox.liveFor(124).front()->state.revision, 1);
+    EXPECT_TRUE(inbox.errorsFor(124).empty());
+    EXPECT_EQ(HeatmapChunkWireTest::orderSize(client), 0);
+    HeatmapChunkWireTest::setDecodeBacklog(client, SentinelStreamClient::kMaxDecodeBacklogBytes);
+    HeatmapChunkWireTest::clientBinary(client, liveWire(125));
+    EXPECT_EQ(inbox.errorsFor(125).size(), 1);
+    EXPECT_EQ(inbox.errorsFor(125).at(0).code, "client_overloaded");
+    EXPECT_TRUE(inbox.liveFor(125).empty());
+    HeatmapChunkWireTest::setDecodeBacklog(client, 0);
 }
