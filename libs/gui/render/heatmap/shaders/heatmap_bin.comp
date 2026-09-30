@@ -93,8 +93,12 @@ bool ffGreaterEqual(vec2 a, vec2 b) { return a.x > b.x || (a.x == b.x && a.y >= 
 // Entry access through one page buffer P. A group never straddles a page
 // (HeatmapGpuSource pads), so the page is chosen once per group and the inner
 // loops read a single buffer. Indices here are page-local entry indices.
+// Loads never sit in a ternary arm: compilers may evaluate both arms of a
+// side-effect-free select, which read the wide key word (3i+2) of compact data,
+// past the page end (D3D12 GPU-based validation). Select the index, load once.
 #define WPE (((dims.w & 1u) != 0u) ? 3u : 2u)
-#define ENTRY_KEY(P, i) (((dims.w & 1u) != 0u) ? P[(i) * 3u + 2u] : (P[(i) * 2u + 1u] & 0x1ffffu))
+#define ENTRY_KEY(P, i) (P[((dims.w & 1u) != 0u) ? (i) * 3u + 2u : (i) * 2u + 1u] & \
+                         (((dims.w & 1u) != 0u) ? 0xffffffffu : 0x1ffffu))
 vec2 decodeValue(uint w0, uint w1) {
     float hi = uintBitsToFloat(w0);
     if ((dims.w & 1u) != 0u) return vec2(hi, uintBitsToFloat(w1));
@@ -127,7 +131,7 @@ bool covered(uint begin, uint end, int lo, int hi) {
         uint m = (a + b) >> 1;
         if (runs[m].x <= lo) a = m + 1u; else b = m;
     }
-    return a > begin && runs[a - 1u].y >= hi;
+    return a > begin && runs[max(a, 1u) - 1u].y >= hi; // in range even if && is flattened
 }
 uint encodeCode(vec2 v) {
     if (!(v.x > 0.0)) return 0u;
@@ -136,8 +140,10 @@ uint encodeCode(vec2 v) {
     uint count = uint(time.w);
     float estimate = floor(log2(v.x / codeScale.x) * codeScale.y + 0.5);
     uint a = uint(clamp(estimate, 0.0, float(count)));
-    while (a < count && ffGreaterEqual(v, uintBitsToFloat(thresholds[a]))) ++a;
-    while (a > 0u && !ffGreaterEqual(v, uintBitsToFloat(thresholds[a - 1u]))) --a;
+    // Clamped indices: the loads stay in range even if && is flattened.
+    uint last = max(count, 1u) - 1u;
+    while (a < count && ffGreaterEqual(v, uintBitsToFloat(thresholds[min(a, last)]))) ++a;
+    while (a > 0u && !ffGreaterEqual(v, uintBitsToFloat(thresholds[max(a, 1u) - 1u]))) --a;
     return 1u + a;
 }
 void main() {
@@ -147,7 +153,9 @@ void main() {
     int column = int(x);
     if (column < time.y || column >= time.z) { cells[outIndex] = kNoData << 16; return; }
     int slot = time.x + column;
-    uint source = (slot < 0 || slot >= int(dims.z)) ? kNotLoaded : slots[slot];
+    // Clamped load, then select (see ENTRY_KEY): never read slots[] out of range.
+    uint slotValue = slots[min(uint(max(slot, 0)), max(dims.z, 1u) - 1u)];
+    uint source = (slot < 0 || slot >= int(dims.z)) ? kNotLoaded : slotValue;
     int bin = price.x + int(dims.y - 1u - y);
     if (source == kNotLoaded || bin < price.y || bin >= price.z) { cells[outIndex] = kLoading << 16; return; }
     if (source == kGap) { cells[outIndex] = kVeil << 16; return; }
@@ -171,7 +179,8 @@ void main() {
         uint step = firstRow / kRowIndexStride;
         if (step >= meta.indexCount) continue;
         uint a = rowIndex[meta.indexBegin + step];
-        uint b = step + 1u < meta.indexCount ? rowIndex[meta.indexBegin + step + 1u] : meta.entryEnd;
+        uint nextIndex = rowIndex[meta.indexBegin + min(step + 1u, meta.indexCount - 1u)]; // in range
+        uint b = step + 1u < meta.indexCount ? nextIndex : meta.entryEnd;
         uint firstKey = firstRow << 1u;
         uint page = meta.entryBegin >> paging.x;
         uint base = page << paging.x; // page-local indices from here on
