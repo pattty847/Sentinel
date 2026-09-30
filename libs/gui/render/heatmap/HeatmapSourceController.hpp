@@ -150,9 +150,10 @@ public:
     // Pins an image in the CPU tier until the returned token is destroyed (on
     // this thread). A key claimed by several holders counts once.
     std::shared_ptr<void> claim(const SpanSourceBuildPtr &build);
-    // A chart's node uploaded this build and the chart released its claim: once
-    // no chart claims it, the LRU drops it too, so the image dies (plan section
-    // 4: span images are not kept after upload; a GPU loss rebuilds from chunks).
+    // A chart's node uploaded this build: the LRU drops it at once and never
+    // caches it again, so the image dies with the last chart still holding it
+    // (plan section 4: span images are not kept after upload; a GPU loss
+    // rebuilds from chunks).
     void released(const SpanSourceKey &key);
     // Sizes of the last build of (span, source) at any generation; 0 unknown.
     struct Hint { size_t bytes = 0, uploadBytes = 0; };

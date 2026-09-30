@@ -746,6 +746,37 @@ TEST_F(SourceController, UploadedImagesLeaveTheCacheAndTheLedgerCoversWhatStaysP
     covered();
 }
 
+// Re-review: a key two charts claim. Once one chart's node uploaded it, the LRU
+// never keeps it, whether the other chart uploads later or closes first; its
+// own reference keeps the image only while it needs it. No cache shrinking.
+TEST_F(SourceController, ASharedImageUploadedByOneChartDiesWhenTheOtherLetsGo) {
+    for (const bool otherUploads : {false, true}) {
+        SCOPED_TRACE(otherUploads ? "the other chart uploads later" : "the other chart closes first");
+        auto &a = chart();
+        auto &b = chart();
+        view(a);
+        view(b);
+        settle();
+        ASSERT_GT(cache->stats().liveBytes, 0);
+        EXPECT_EQ(cache->stats().builds % 10, 0u) << "one shared build per source";
+        upload(a, 1ull << 30);
+        settle();
+        EXPECT_GT(cache->stats().liveBytes, 0) << "B still needs the image for its own upload";
+        if (otherUploads) {
+            upload(b, 1ull << 30);
+            settle();
+        } else {
+            charts.pop_back(); // B closes before its upload
+            drain();
+            settle();
+        }
+        EXPECT_EQ(cache->stats().liveBytes, 0) << "the uploaded image is gone";
+        EXPECT_EQ(cache->stats().bytes, 0u) << "and not in the LRU";
+        charts.clear();
+        drain();
+    }
+}
+
 // Review fix 4: surviving slots take their new ranks before admission.
 TEST_F(SourceController, NewlyVisibleSlotsAreNotEvictedWhenTheViewExpands) {
     constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;
