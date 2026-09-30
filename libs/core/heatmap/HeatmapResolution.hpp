@@ -103,19 +103,28 @@ struct AutoTickParams {
 // With h = 0 this is the plain target (idealTick). For h > 0 the result is a fixed
 // point: re-evaluating at the same zoom never changes it, and a zoom that stays
 // inside the hysteresis band around a threshold never flips it.
+// The predicate overload shares the slice-T hysteresis with multi-source policy.
+// Eligibility need not be one LCM: a fine source may cover just the rows in view.
+template <class Builds>
+inline int64_t autoTickUnitsIf(int64_t currentUnits, double unitsPerPx, Builds builds,
+                               const AutoTickParams &params = {}) {
+    if (!std::isfinite(unitsPerPx) || !(unitsPerPx > 0) || !std::isfinite(params.minRowPx) ||
+        !(params.minRowPx > 0)) return 0;
+    auto atLeast = [&](double minimum) {
+        for (const auto p : presetLadderUnits()) if (double(p) >= minimum && builds(p)) return p;
+        return int64_t{0};
+    };
+    const double h = std::isfinite(params.hysteresis) ? std::clamp(params.hysteresis, 0.0, 0.9) : 0.0;
+    const int64_t target = atLeast(params.minRowPx * unitsPerPx);
+    if (!isPresetUnits(currentUnits) || !builds(currentUnits)) return target;
+    if (double(currentUnits) / unitsPerPx < params.minRowPx * (1 - h)) return target;
+    const int64_t finer = atLeast(params.minRowPx * (1 + h) * unitsPerPx);
+    return finer > 0 && finer < currentUnits ? finer : currentUnits;
+}
 inline int64_t autoTickUnits(int64_t currentUnits, int64_t commonUnits, double unitsPerPx,
                              const AutoTickParams &params = {}) {
-    if (commonUnits <= 0 || !std::isfinite(unitsPerPx) || !(unitsPerPx > 0) || !std::isfinite(params.minRowPx) ||
-        !(params.minRowPx > 0))
-        return 0;
-    const double h = std::isfinite(params.hysteresis) ? std::clamp(params.hysteresis, 0.0, 0.9) : 0.0;
-    const int64_t target = presetAtLeast(params.minRowPx * unitsPerPx, commonUnits);
-    if (!buildsOn(currentUnits, commonUnits) || !isPresetUnits(currentUnits)) return target;
-    const double rowPx = double(currentUnits) / unitsPerPx;
-    if (rowPx < params.minRowPx * (1 - h)) return target; // coarser
-    const int64_t finer = presetAtLeast(params.minRowPx * (1 + h) * unitsPerPx, commonUnits);
-    if (finer > 0 && finer < currentUnits) return finer;
-    return currentUnits;
+    return autoTickUnitsIf(currentUnits, unitsPerPx,
+                          [=](int64_t p) { return buildsOn(p, commonUnits); }, params);
 }
 
 // ------------------------------------------------------------------ Manual

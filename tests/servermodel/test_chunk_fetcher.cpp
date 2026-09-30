@@ -397,9 +397,10 @@ TEST_F(Fetcher, NotModifiedRetainsItsBodyAcrossStoreEviction) {
     const auto frame = body(key()); transport.reply(transport.requests.back().id, frame); drain();
     const auto generation = store.generationOf(key());
     reconnect();
-    put(store, body(key(1), 60)); store.setMaxBytes(1);
+    // Wanted keys are never evicted; simulate an eviction by another store user.
+    put(store, body(key(1), 60)); store.setWanted(key(), false); store.setMaxBytes(1);
     ASSERT_FALSE(store.contains(key()));
-    store.setMaxBytes(512ull << 20);
+    store.setMaxBytes(512ull << 20); store.setWanted(key(), true);
     transport.reply(transport.requests.back().id, unchanged(frame)); drain();
     ASSERT_TRUE(store.contains(key()));
     EXPECT_EQ(store.peek(key())->columns.get(), &frame->columns);
@@ -589,9 +590,11 @@ TEST_F(Fetcher, RejectedStoreInsertionRetriesInsteadOfLosingTheWantedKey) {
     // Another producer installs a later revision, then it is evicted before
     // this request returns. The older reply cannot be returned as current.
     put(store, body(key(), 45));
+    store.setWanted(key(), false); // wanted keys are never evicted; simulate it
     store.setMaxBytes(1);
     ASSERT_FALSE(store.contains(key()));
     transport.reply(request.id, body(key(), 30)); drain();
+    store.setWanted(key(), true);
     EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
     EXPECT_TRUE(failures.empty());
     store.setMaxBytes(512ull << 20);
@@ -656,6 +659,7 @@ TEST_F(Fetcher, LocalAvailabilityFailureDoesNotFailAnOutstandingRequest) {
     WorkerGate gate;
     int scans = 0;
     LocalChunkTransport::TestHooks hooks;
+    hooks.pollIntervalMs = 0;
     hooks.beforeAvailability = [&](recording::Hmc2Reader &, std::stop_token stop) {
         if (++scans == 2) { gate.wait(stop); throw std::runtime_error("scripted availability failure"); }
     };
@@ -693,6 +697,7 @@ TEST_F(Fetcher, LocalRequestsReuseAvailabilityAndUnchangedRefreshDoesNotPublish)
     recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
     std::atomic<int> scans{0};
     LocalChunkTransport::TestHooks hooks;
+    hooks.pollIntervalMs = 0;
     hooks.beforeAvailability = [&](recording::Hmc2Reader &, std::stop_token) { ++scans; };
     LocalChunkTransport local(dir.path().toStdString(), hooks);
     ChunkFetcher reader(store, local);
@@ -722,6 +727,7 @@ TEST_F(Fetcher, LocalDestructorCancelsAnActiveReaderScan) {
     WorkerGate gate;
     std::atomic<bool> cancelled{false};
     LocalChunkTransport::TestHooks hooks;
+    hooks.pollIntervalMs = 0;
     hooks.beforeBuild = [&](recording::Hmc2Reader &reader, std::stop_token stop) {
         reader.beforeCandidateForTest([&, stop] { gate.wait(stop); cancelled = stop.stop_requested(); });
     };
@@ -741,7 +747,9 @@ TEST_F(Fetcher, LocalRequestsUseTheAdvertisedCutoffUntilAvailabilityRefreshes) {
     fetcher.reset();
     QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
     recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
-    LocalChunkTransport local(dir.path().toStdString());
+    LocalChunkTransport::TestHooks hooks;
+    hooks.pollIntervalMs = 0;
+    LocalChunkTransport local(dir.path().toStdString(), hooks);
     ChunkFetcher reader(store, local);
     QEventLoop loop;
     bool ready = false, received = false;
@@ -758,6 +766,38 @@ TEST_F(Fetcher, LocalRequestsUseTheAdvertisedCutoffUntilAvailabilityRefreshes) {
     const auto cached = store.peek(key()); ASSERT_TRUE(cached);
     EXPECT_EQ(cached->committedThroughMs, epoch + kMinuteMs);
     EXPECT_EQ(cached->columns->columns.size(), 1u);
+}
+TEST_F(Fetcher, WantedBodyLargerThanTheBudgetStaysUntilReleased) {
+    online();
+    store.setMaxBytes(1); // smaller than one valid chunk
+    fetcher->want(1, {key(), key(1)}); drain();
+    ASSERT_EQ(transport.requests.size(), 1u);
+    answer(transport.requests.back());
+    ASSERT_TRUE(store.peek(key()) && store.peek(key(1)));
+    EXPECT_GT(store.stats().wantedBytes, store.stats().maxBytes);
+    fetcher->want(1, {key(), key(1)}); drain();
+    EXPECT_EQ(transport.requests.size(), 1u) << "a delivered wanted body is not refetched";
+    fetcher->release(1, {key()}); drain();
+    EXPECT_FALSE(store.contains(key()));
+    EXPECT_TRUE(store.contains(key(1)));
+    fetcher->release(1); drain();
+    EXPECT_EQ(store.stats().entries, 0u);
+}
+TEST_F(Fetcher, StoreRejectionFailsAfterFiveAttempts) {
+    online();
+    fetcher->want(1, {key()}); drain();
+    put(store, body(key(), 45));
+    store.setWanted(key(), false); // wanted keys are never evicted; simulate it
+    store.setMaxBytes(1);
+    for (unsigned i = 0; i < ChunkFetcher::kMaxStoreAttempts; ++i) {
+        ASSERT_EQ(transport.requests.size(), i + 1);
+        answer(transport.requests.back());
+        EXPECT_EQ(failures.size(), i + 1 == ChunkFetcher::kMaxStoreAttempts ? 1u : 0u);
+        now += 10'000; fetcher->pump(); drain();
+    }
+    EXPECT_EQ(transport.requests.size(), ChunkFetcher::kMaxStoreAttempts);
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+    EXPECT_EQ(fetcher->stats().retries, ChunkFetcher::kMaxStoreAttempts - 1);
 }
 TEST_F(Fetcher, RecordingChunkBuildHonorsCancellationDuringScan) {
     QTemporaryDir dir; ASSERT_TRUE(dir.isValid());

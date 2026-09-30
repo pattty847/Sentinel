@@ -30,14 +30,33 @@ std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &so
     std::vector<ChunkKey> out;
     const int64_t lo = std::max(startMs, availability.oldestMs), hi = std::min(endMs, availability.endMs);
     if (hi <= lo || tfMs <= 0) return out;
+    const int64_t minuteOldest = std::max(availability.oldestMs, availability.minuteOldestMs);
+    auto minutes = [&](int64_t from, int64_t to) {
+        from = std::max(from, minuteOldest);
+        if (to <= from) return;
+        for (int64_t s = floorDiv(from, kHourMs) * kHourMs; s < to; s += kHourMs)
+            out.push_back({symbol, source, kMinuteMs, s});
+    };
     const auto *src = findChunkSource(source);
     const bool hours = src && src->hourLevel && tfMs % kHourMs == 0 && availability.hourThroughMs > 0;
-    const int64_t split = hours ? std::clamp(availability.hourThroughMs, lo, hi) : lo;
-    if (split > lo)
-        for (int64_t s = floorDiv(lo, kDayMs) * kDayMs; s < split; s += kDayMs)
+    if (!hours) {
+        minutes(lo, hi);
+        return out;
+    }
+    int64_t hourFrom = lo; // legacy: hours from the start of the range
+    if (availability.hourOldestMs > 0) {
+        const int64_t day = floorDiv(availability.hourOldestMs, kDayMs) * kDayMs;
+        // Minutes reach the first hour: they compose that partial day. Otherwise
+        // the hour chunk does (minutes cannot supply its hours).
+        hourFrom = minuteOldest <= availability.hourOldestMs && day != availability.hourOldestMs ? day + kDayMs : day;
+    }
+    const int64_t hourLo = std::clamp(hourFrom, lo, hi);
+    const int64_t hourHi = std::clamp(availability.hourThroughMs, hourLo, hi);
+    minutes(lo, hourLo);
+    if (hourHi > hourLo)
+        for (int64_t s = floorDiv(hourLo, kDayMs) * kDayMs; s < hourHi; s += kDayMs)
             out.push_back({symbol, source, kHourMs, s});
-    for (int64_t s = floorDiv(split, kHourMs) * kHourMs; s < hi; s += kHourMs)
-        out.push_back({symbol, source, kMinuteMs, s});
+    minutes(std::max(hourHi, hourLo), hi);
     return out;
 }
 
@@ -178,7 +197,7 @@ std::vector<uint32_t> buildCells(const SparseColumns &composed, const TileGrid &
 size_t TileKeyHash::operator()(const TileKey &key) const {
     size_t h = std::hash<std::string>{}(key.symbol);
     auto mix = [&](size_t v) { h ^= v + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2); };
-    mix(std::hash<std::string>{}(key.layer));
+    mix(std::hash<std::string>{}(key.source));
     mix(std::hash<int64_t>{}(key.tfMs));
     mix(std::hash<int64_t>{}(key.tickUnits));
     mix(std::hash<int64_t>{}(key.tile));

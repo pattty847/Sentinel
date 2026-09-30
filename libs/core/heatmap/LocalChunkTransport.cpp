@@ -89,7 +89,7 @@ LocalChunkTransport::LocalChunkTransport(std::filesystem::path root, TestHooks h
     connect(&workerThread_, &QThread::finished, worker_, &QObject::deleteLater);
     workerThread_.setObjectName(QStringLiteral("local-chunks"));
     workerThread_.start();
-    poll_->setInterval(1000);
+    poll_->setInterval(std::max(0, worker_->hooks.pollIntervalMs));
     connect(poll_, &QTimer::timeout, this, [this] {
         for (const auto &symbol : symbols_) refreshAvailability(symbol);
     });
@@ -104,7 +104,7 @@ void LocalChunkTransport::start(std::vector<std::string> symbols) {
     symbols_ = std::move(symbols);
     emit connected();
     for (const auto &symbol : symbols_) refreshAvailability(symbol, true);
-    poll_->start();
+    if (poll_->interval() > 0) poll_->start();
     sLog_Data("Local chunk transport started symbols=" << symbols_.size());
 }
 void LocalChunkTransport::refreshAvailability(const std::string &symbol) {
