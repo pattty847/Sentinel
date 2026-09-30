@@ -98,7 +98,8 @@ struct ChunkBytes {
 //   holds is shared even after the LRU dropped it.
 // - CPU tier (maxBytes, HeatmapBudgets::spanSources): controllers claim the
 //   images they hold; claimed images plus reservations of running builds are
-//   pinned. The LRU keeps unclaimed images only within what is left. When the
+//   pinned. The LRU keeps unclaimed images only within what is left, and never
+//   one that a node has uploaded (released()): after upload no CPU image stays. When the
 //   claimed bytes alone exceed the tier, the cache drops the lowest-rank slots
 //   of all controllers (prefetch, recent-tf; never visible or fallback) until
 //   they fit. Controllers admit prefetch only with CPU room (size hints of past
@@ -149,6 +150,10 @@ public:
     // Pins an image in the CPU tier until the returned token is destroyed (on
     // this thread). A key claimed by several holders counts once.
     std::shared_ptr<void> claim(const SpanSourceBuildPtr &build);
+    // A chart's node uploaded this build and the chart released its claim: once
+    // no chart claims it, the LRU drops it too, so the image dies (plan section
+    // 4: span images are not kept after upload; a GPU loss rebuilds from chunks).
+    void released(const SpanSourceKey &key);
     // Sizes of the last build of (span, source) at any generation; 0 unknown.
     struct Hint { size_t bytes = 0, uploadBytes = 0; };
     Hint hint(const SpanId &span, const std::string &source) const;

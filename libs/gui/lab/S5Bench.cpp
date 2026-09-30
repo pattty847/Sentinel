@@ -162,6 +162,9 @@ QJsonObject memoryOf(const LabItem *item) {
             {"resident_sources", m.value("residentSources").toDouble()},
             {"chunk_store_bytes", m.value("chunkBytes").toDouble()},
             {"span_live_bytes", m.value("spanLiveBytes").toDouble()},
+            {"span_lru_bytes", m.value("spanCacheBytes").toDouble()},
+            {"span_claimed_bytes", m.value("spanClaimedBytes").toDouble()},
+            {"chunk_wanted_bytes", m.value("chunkWantedBytes").toDouble()},
             {"cpu_committed_bytes", m.value("cpuCommittedBytes").toDouble()},
             {"footprint_bytes", m.value("footprintBytes").toDouble()}};
 }
@@ -194,8 +197,8 @@ QJsonObject runSession(const Case &c, double price) {
         out["ttfv_cold"] = w.json();
         out["cold_chunk_loads"] = metric(item, "chunkLoads");
     }
-    // 2. Warm: another chart decoded the chunks and built the spans (the span
-    // cache keeps unclaimed builds within its tier).
+    // 2. Warm: another chart decoded the chunks (the store keeps them within its
+    // tier); span images are not kept after upload, so the spans build again.
     Scene scene;
     if (!makeScene(scene, view)) { out["error"] = scene.error; return out; }
     auto *item = scene.items[0];

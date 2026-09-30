@@ -602,6 +602,10 @@ QVariantMap LabItem::metrics() const {
                   {"fetchedChunks", qulonglong(data.fetcher.requestedChunks)},
                   {"spanBuilds", qulonglong(data.cache.builds)}, {"spanCacheHits", qulonglong(data.cache.hits)},
                   {"spanLiveBytes", qlonglong(data.cache.liveBytes)},
+                  {"spanCacheBytes", qulonglong(data.cache.bytes)}, // LRU (claimed or not)
+                  {"spanClaimedBytes", qulonglong(data.cache.claimedBytes)},
+                  {"spanReservedBytes", qulonglong(data.cache.reservedBytes)},
+                  {"chunkWantedBytes", qulonglong(data.store.wantedBytes)},
                   {"cpuCommittedBytes", qulonglong(data.committedCpuBytes)},
                   {"footprintBytes", qulonglong(processFootprintBytes())}};
     // E4: the finest source's band in the newest column in view (price).

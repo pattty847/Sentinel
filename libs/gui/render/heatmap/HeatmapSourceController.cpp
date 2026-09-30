@@ -329,6 +329,13 @@ std::shared_ptr<void> SpanSourceCache::claim(const SpanSourceBuildPtr &build) {
     return token;
 }
 
+void SpanSourceCache::released(const SpanSourceKey &key) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto &s = *state_;
+    if (s.claims.contains(key)) return; // another chart still needs the image
+    if (s.lru.erase(key)) freed();
+}
+
 SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (const auto *hit = state_->lru.find(key)) {
@@ -558,6 +565,7 @@ void HeatmapSourceController::pollCapacity() {
             light->gpu.reset();
             source.ready = std::move(light);
             source.claim.reset();
+            cache_.released(key); // and out of the LRU, unless another chart still claims it
             ++stats_.releasedImages;
             dirty_ = true;
         }

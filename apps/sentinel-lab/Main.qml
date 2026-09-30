@@ -363,7 +363,9 @@ ApplicationWindow {
                     StatRow { name: "Decoded chunks"; value: root.mb(root.metrics.chunkBytes) + " · " + (root.metrics.chunkEntries || 0) }
                     StatRow { name: "Chunk decodes / fetched"; value: (root.metrics.chunkLoads || 0) + " / " + (root.metrics.fetchedChunks || 0) }
                     StatRow { name: "Span builds / cache hits"; value: (root.metrics.spanBuilds || 0) + " / " + (root.metrics.spanCacheHits || 0) }
-                    StatRow { name: "Span images alive"; value: root.mb(root.metrics.spanLiveBytes) }
+                    StatRow { name: "Span images alive / claimed"; value: root.mb(root.metrics.spanLiveBytes) + " / " + root.mb(root.metrics.spanClaimedBytes) }
+                    StatRow { name: "Span LRU / building"; value: root.mb(root.metrics.spanCacheBytes) + " / " + root.mb(root.metrics.spanReservedBytes) }
+                    StatRow { name: "Chunks wanted (pinned)"; value: root.mb(root.metrics.chunkWantedBytes) }
                     StatRow { name: "CPU committed (1 GiB)"; value: root.mb(root.metrics.cpuCommittedBytes) }
                     StatRow { name: "Snapshots published"; value: String(root.metrics.publications || 0) }
                     StatRow { name: "Process footprint"; value: root.mb(root.metrics.footprintBytes) }
