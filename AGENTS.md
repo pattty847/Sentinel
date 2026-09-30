@@ -205,6 +205,7 @@ Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
 - Sandbox (verified 2026-09-29): `workspace-write` has network (the config sets `network_access = true`; localhost, HTTPS and Coinbase WebSockets all worked) and can read the whole home directory; it only limits writes. It cannot use the window server or Metal, so no GUI or GPU runs.
 - Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with `codex exec resume <uuid> -m <same model> -c model_reasoning_effort='"high"' -c sandbox_mode='"workspace-write"' -c approval_policy='"never"' "<follow-up>"` (or `--last`). Resume does not keep the original model or sandbox: without `-m` it falls back to the config default model, and it has no `-s` flag.
 - Reviews: `codex exec review` runs a code review of the current repo.
+- Worktree write tasks: pass `--add-dir "$(git -C <worktree> rev-parse --git-common-dir)"` and close stdin (`< /dev/null`). A linked worktree keeps its index and refs in the main `.git`, which is outside the sandbox's writable root, so without it Codex cannot commit or rebase (seen 2026-09-30); a backgrounded `codex exec` with stdin open can wait forever for input.
 - Isolation: write tasks run in their own git worktree (`--worktree`, or `-C` into a `git worktree add` path) so two agents never edit the same checkout. Audits and reviews use `-s read-only`.
 - Never pass `--dangerously-bypass-approvals-and-sandbox`.
 - Prompts must stand alone: point the agent at `AGENTS.md`, the files, the acceptance checks, and the build/test commands.
