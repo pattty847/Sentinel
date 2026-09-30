@@ -20,14 +20,14 @@ int64_t throughFor(const ChunkKey& key, const BookRecorder::Watermarks& watermar
     (void)chunkEndMs(key);
     return key.levelMs == heatmap::kMinuteMs ? watermarks.minuteThroughMs : watermarks.hourThroughMs;
 }
-heatmap::SparseColumns buildUntil(Hmc2Reader& reader, const ChunkKey& key, int64_t committedThroughMs) {
+heatmap::SparseColumns buildUntil(Hmc2Reader& reader, const ChunkKey& key, int64_t committedThroughMs, ReadControl& control) {
+    if (!control.poll()) throw std::runtime_error("recording chunk scan cancelled");
     const auto end = chunkEndMs(key);
     const auto scanEnd = committedThroughMs <= key.startMs ? key.startMs :
                          committedThroughMs >= end ? end :
                          floorDiv(committedThroughMs, key.levelMs) * key.levelMs;
     const auto layer = hmc2Layer(key);
     heatmap::SparseColumns out{key.symbol, layer, key.levelMs, key.startMs, end};
-    ReadControl control;
     const auto scan = reader.visit(key.symbol, layer, key.levelMs, key.startMs, scanEnd,
         [&](const Hmc2Record& record) {
             if (record.observedMs) out.columns.push_back(heatmap::fromRecording(record));
@@ -53,11 +53,17 @@ ChunkState chunkState(const ChunkKey& key, const BookRecorder::Watermarks& water
     return {sealed, sealed ? end : through, sealed ? 0 : revision};
 }
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key) {
-    return buildUntil(reader, key, chunkEndMs(key));
+    ReadControl control;
+    return buildUntil(reader, key, chunkEndMs(key), control);
 }
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
                                   const BookRecorder::Watermarks& watermarks) {
-    return buildUntil(reader, key, throughFor(key, watermarks));
+    ReadControl control;
+    return buildChunk(reader, key, watermarks, control);
+}
+heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
+                                  const BookRecorder::Watermarks& watermarks, ReadControl& control) {
+    return buildUntil(reader, key, throughFor(key, watermarks), control);
 }
 size_t EncodedChunkLru::Hash::operator()(const ChunkKey& key) const {
     size_t h = std::hash<std::string>{}(key.symbol);

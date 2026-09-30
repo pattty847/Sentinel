@@ -49,6 +49,8 @@ struct StoredChunk {
     ChunkKey key;
     std::shared_ptr<const SparseColumns> columns;
     bool sealed = false;
+    int64_t committedThroughMs = 0;
+    uint64_t contentHash = 0; // wire identity; legacy loads do not supply a hash
     uint64_t revision = 0;   // caller-defined (wire revision of an open chunk)
     uint64_t generation = 0; // process-unique per stored version
     uint64_t ticket = 0;     // acquisition order (see Ordering above)
@@ -64,7 +66,14 @@ public:
     };
     // Called outside the store lock, on the requesting thread. Throws on failure.
     using Loader = std::function<Loaded(const ChunkKey &)>;
-    ChunkStore(size_t maxBytes, Loader loader);
+    explicit ChunkStore(size_t maxBytes = 512ull << 20, Loader loader = {});
+
+    // Already decoded, immutable columns (may alias a ChunkFrame). No copy.
+    // Equal hashes keep the generation, including after eviction; sealing is
+    // one revision even if the caller supplies the same hash. Older states lose.
+    // Unlike legacy get(), put never retains more bytes than the store budget.
+    std::shared_ptr<const StoredChunk> put(const ChunkKey &key, std::shared_ptr<const SparseColumns> columns,
+                                            ChunkState state, uint64_t contentHash);
 
     // Cached chunk, or loads it (blocking). Validates loaded columns once.
     // Throws what the loader throws (waiters of a shared load rethrow it).
@@ -89,7 +98,7 @@ public:
 
     struct Stats {
         uint64_t hits = 0, misses = 0;   // get/peek found / did not find it cached
-        uint64_t loads = 0;              // loader calls (decodes)
+        uint64_t loads = 0;              // loader calls + accepted put bodies
         uint64_t sharedLoads = 0;        // get() calls that waited on another caller's load
         uint64_t evictions = 0, revisions = 0;
         size_t bytes = 0, entries = 0, maxBytes = 0;
@@ -117,7 +126,13 @@ private:
     std::list<ChunkKey> lru_; // front = most recent
     std::unordered_map<ChunkKey, Entry, ChunkKeyHash> entries_;
     std::unordered_map<ChunkKey, std::shared_ptr<InFlight>, ChunkKeyHash> inFlight_;
-    struct Latest { uint64_t generation = 0, ticket = 0; bool sealed = false; };
+    struct Latest {
+        uint64_t generation = 0, ticket = 0;
+        bool sealed = false;
+        std::optional<uint64_t> contentHash;
+        uint64_t revision = 0;
+        int64_t committedThroughMs = 0;
+    };
     std::unordered_map<ChunkKey, Latest, ChunkKeyHash> latest_; // survives eviction
     uint64_t nextTicket_ = 0;
     std::function<void(const ChunkKey &)> listener_;
@@ -128,6 +143,9 @@ private:
     // *stored tells which happened.
     std::shared_ptr<const StoredChunk> insertLocked(const ChunkKey &key, Loaded loaded, uint64_t ticket,
                                                     bool revision, bool *stored = nullptr);
+    std::shared_ptr<const StoredChunk> insertSharedLocked(const ChunkKey &key,
+        std::shared_ptr<const SparseColumns> columns, ChunkState state, std::optional<uint64_t> hash,
+        uint64_t ticket, bool revision, bool *stored);
     std::shared_ptr<const StoredChunk> cachedLocked(const ChunkKey &key) const;
     void evictLocked();
 };

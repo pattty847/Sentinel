@@ -23,6 +23,10 @@ heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key);
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
                                   const BookRecorder::Watermarks& watermarks);
 
+// Cancellable worker read. A cancelled/partial scan throws; no partial chunk is published.
+heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
+                                  const BookRecorder::Watermarks& watermarks, ReadControl& control);
+
 // Shared cache of exact encoded sealed SHC1 bytes. Open frames are refused.
 class EncodedChunkLru {
 public:

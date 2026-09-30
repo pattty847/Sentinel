@@ -40,13 +40,20 @@ std::shared_ptr<const StoredChunk> ChunkStore::cachedLocked(const ChunkKey &key)
 
 std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key, Loaded loaded, uint64_t ticket,
                                                             bool revision, bool *stored) {
+    return insertSharedLocked(key, std::make_shared<const SparseColumns>(std::move(loaded.columns)),
+                              {loaded.sealed, 0, loaded.revision}, std::nullopt, ticket, revision, stored);
+}
+
+std::shared_ptr<const StoredChunk> ChunkStore::insertSharedLocked(const ChunkKey &key,
+    std::shared_ptr<const SparseColumns> columns, ChunkState state, std::optional<uint64_t> hash,
+    uint64_t ticket, bool revision, bool *stored) {
     if (stored) *stored = false;
     auto &latest = latest_[key];
     if (latest.ticket > ticket) {
         // A newer acquisition already stored its version: keep it. If it was
         // evicted meanwhile, this older data must not come back as current.
         if (auto current = cachedLocked(key); current) return current;
-        if (!revision && latest.sealed && loaded.sealed) {
+        if (!revision && latest.sealed && state.sealed && (!hash || latest.contentHash == hash)) {
             // Same immutable content: fall through and re-cache it under the
             // newer ticket and the same generation.
             ticket = latest.ticket;
@@ -54,18 +61,27 @@ std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key,
             return nullptr;
         }
     }
+    // Wire states must not regress, including when the last body was evicted.
+    if (hash && latest.contentHash && latest.generation &&
+        ((latest.sealed && !state.sealed) || (!latest.sealed && !state.sealed &&
+         (state.revision < latest.revision || state.committedThroughMs < latest.committedThroughMs))))
+        return cachedLocked(key);
     auto chunk = std::make_shared<StoredChunk>();
     chunk->key = key;
-    chunk->sealed = loaded.sealed;
-    chunk->revision = loaded.revision;
+    chunk->sealed = state.sealed;
+    chunk->revision = state.revision;
+    chunk->committedThroughMs = state.committedThroughMs;
+    chunk->contentHash = hash.value_or(0);
     // A sealed chunk never changes: re-loading it after eviction keeps its
     // generation, so nothing derived from it goes stale for no reason.
-    const bool sameContent = !revision && loaded.sealed && latest.sealed && latest.generation;
+    const bool sameContent = latest.generation && (hash
+        ? latest.contentHash == hash && state.sealed == latest.sealed
+        : !revision && state.sealed && latest.sealed);
     chunk->generation = sameContent ? latest.generation : nextGeneration.fetch_add(1);
     chunk->ticket = ticket;
-    chunk->bytes = sparseBytes(loaded.columns);
-    chunk->columns = std::make_shared<const SparseColumns>(std::move(loaded.columns));
-    latest = {chunk->generation, ticket, chunk->sealed};
+    chunk->bytes = sparseBytes(*columns);
+    chunk->columns = std::move(columns);
+    latest = {chunk->generation, ticket, chunk->sealed, hash, state.revision, state.committedThroughMs};
     if (auto it = entries_.find(key); it != entries_.end()) {
         bytes_ -= it->second.chunk->bytes;
         lru_.erase(it->second.lru);
@@ -79,10 +95,37 @@ std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key,
     return chunk;
 }
 
+std::shared_ptr<const StoredChunk> ChunkStore::put(const ChunkKey &key,
+    std::shared_ptr<const SparseColumns> columns, ChunkState state, uint64_t contentHash) {
+    uint64_t ticket;
+    {
+        std::scoped_lock lock(mutex_);
+        ticket = ++nextTicket_;
+    }
+    if (!columns) throw std::invalid_argument("null heatmap chunk columns");
+    validate(*columns);
+    std::shared_ptr<const StoredChunk> result;
+    bool changed = false;
+    {
+        std::scoped_lock lock(mutex_);
+        const auto known = latest_.find(key);
+        const uint64_t before = known == latest_.end() ? 0 : known->second.generation;
+        bool stored = false;
+        result = insertSharedLocked(key, std::move(columns), state, contentHash, ticket, false, &stored);
+        changed = stored && before && result->generation != before;
+        if (stored) ++stats_.loads;
+        if (changed) ++stats_.revisions;
+    }
+    if (changed) notify(key);
+    return result;
+}
+
 void ChunkStore::evictLocked() {
-    // Keep at least the newest entry even when it alone exceeds the budget: the
-    // caller holds it anyway, and dropping it would only force a reload.
-    while (bytes_ > maxBytes_ && lru_.size() > 1) {
+    // Preserve the blocking lab API's keep-newest exception. The async put
+    // path obeys the byte cap even for a single oversized body; its returned
+    // pointer and generation still remain valid after immediate eviction.
+    while (bytes_ > maxBytes_ && !lru_.empty()) {
+        if (lru_.size() == 1 && !latest_.at(lru_.front()).contentHash) break;
         const auto it = entries_.find(lru_.back());
         bytes_ -= it->second.chunk->bytes;
         entries_.erase(it);
