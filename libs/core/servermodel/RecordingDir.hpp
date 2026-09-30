@@ -12,8 +12,13 @@ namespace recording {
 inline bool volumeMounted(const std::filesystem::path &dir) {
     auto it = dir.begin();
     if (dir.has_root_directory() && !dir.has_root_name() && it != dir.end() && ++it != dir.end() &&
-        *it == "Volumes" && ++it != dir.end())
+        *it == "Volumes" && ++it != dir.end()) {
+#ifdef _WIN32
+        return false; // a macOS mount point; C:\Volumes\<name> may exist and is the boot disk
+#else
         return std::filesystem::is_directory(std::filesystem::path("/Volumes") / *it);
+#endif
+    }
     return true;
 }
 
