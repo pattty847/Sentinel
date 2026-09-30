@@ -652,3 +652,7 @@ architecture for these interactions, **an inference, not a finding about TapeSur
 implementation**. Neither screenshots nor its marketing establish its backend or
 prove its values are composable. Sentinel's independent heatmap timeframe remains
 its own contract. [TapeSurf heatmap guide](https://tapesurf.com/learn/orderbook-heatmap).
+
+## Owner decision: price precision (2026-09-30)
+
+Raw L2 is always stored at the exchange's exact precision (BTC-USD: $0.01 prices, exact sizes); that was never open. The rollup levels (1s / 1m / 1h) also keep the exchange's native price precision, stored sparse (only prices that held orders). Coarsening a rollup level is not planned; if a measurement (compression lab) shows a level is too large, that comes back to the owner as a decision. Rollups are rebuildable from raw L2, so any later change is reversible.
