@@ -57,6 +57,23 @@ struct HeatmapChunkWireTest {
     static recording::EncodedChunkLru& cache(SentinelStreamServer& server) { return server.m_chunks->cache(); }
     static size_t maxChunkBytes() { return Session::kMaxChunkBytes; }
     static void setDecodeBacklog(SentinelStreamClient& client, size_t bytes) { client.m_decodeBacklogBytes = bytes; }
+    static size_t decodeBacklogFrames(SentinelStreamClient& client) {
+        std::lock_guard lock(client.m_chunkOrderMutex);
+        return client.m_decodeBacklogFrames;
+    }
+    static void decoder(SentinelStreamClient& client,
+                        std::function<heatmap::ChunkEnvelope(std::span<const uint8_t>)> decode) {
+        client.m_chunkDecoder = std::move(decode);
+    }
+    static void drainDecoder(SentinelStreamClient& client) {
+        std::promise<void> drained;
+        net::post(*client.m_decodePool, [&] { drained.set_value(); });
+        drained.get_future().get();
+    }
+    static size_t orderSize(SentinelStreamClient& client) {
+        std::lock_guard lock(client.m_chunkOrderMutex);
+        return client.m_chunkOrder.size();
+    }
     static void serverBinary(Session& session, const std::vector<uint8_t>& bytes) {
         session.do_write(std::string(bytes.begin(), bytes.end()), true);
     }
@@ -391,7 +408,7 @@ TEST_F(ChunkWire, OpenChunksCarryCommittedThroughAndOrderedRevisions) {
         copy->columns = {};
         copy->columns.symbol = "BTC-USD"; copy->columns.layer = "near";
         copy->columns.startMs = other.startMs; copy->columns.endMs = other.startMs + kHour;
-        copy->state = {false, other.startMs + (c->state.revision - 1) * kMin, c->state.revision};
+        copy->state = {false, other.startMs + int64_t(c->state.revision - 1) * kMin, c->state.revision};
         if (c->state.revision > 1) copy->columns.scannedRanges = {{other.startMs, copy->state.committedThroughMs}};
         return std::shared_ptr<const heatmap::ChunkFrame>(copy);
     };
@@ -518,8 +535,7 @@ TEST_F(ChunkWire, HostileBinaryFramesAreRejectedWithoutCrashing) {
     const ChunkKey key{"BTC-USD", "hmc2.deep", kMin, kEpoch};
     const auto good = heatmap::encodeChunkEnvelope(4242, expectedWire(key, {kEpoch + kDay, kEpoch + kDay}));
     std::vector<std::vector<uint8_t>> hostile;
-    hostile.push_back({0x00});                                       // one byte
-    hostile.push_back({'S', 'H', 'E', '1'});                         // truncated envelope
+    hostile.push_back({0x00});                                       // short envelope (rejected inline)
     hostile.push_back(std::vector<uint8_t>(good.begin(), good.begin() + good.size() / 2)); // truncated chunk
     auto flipped = good; flipped[good.size() - 3] ^= 0x40;           // payload corruption (hash)
     hostile.push_back(flipped);
@@ -544,7 +560,7 @@ TEST_F(ChunkWire, HostileBinaryFramesAreRejectedWithoutCrashing) {
         for (const auto& e : inbox.errors) EXPECT_EQ(e.code, "malformed") << e.message.toStdString();
         EXPECT_TRUE(inbox.chunks.empty());
         // A readable envelope id is still reported for correlation.
-        EXPECT_EQ(inbox.errors[3].requestId, 4242u);
+        EXPECT_EQ(inbox.errors[2].requestId, 4242u);
         EXPECT_EQ(inbox.errors[0].requestId, 0u);
     }
     // The connection survives and a valid frame still decodes exactly.
@@ -559,6 +575,90 @@ TEST_F(ChunkWire, HostileBinaryFramesAreRejectedWithoutCrashing) {
                            [](const auto& e) { return e.code == "client_overloaded" && e.requestId == 4242; });
     }));
     HeatmapChunkWireTest::setDecodeBacklog(*client, 0);
+}
+
+TEST(ChunkClientAdmission, EmptyTinyAndSmallFramesHaveAFixedOutstandingBound) {
+    SentinelStreamClient client("127.0.0.1", "0");
+    Inbox inbox;
+    inbox.attach(client);
+    heatmap::ChunkFrame frame;
+    frame.kind = ChunkKind::NotModified;
+    frame.key = {"BTC-USD", "hmc2.deep", kMin, kEpoch};
+    const auto good = heatmap::encodeChunkEnvelope(77, heatmap::encodeChunk(frame));
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    std::atomic<size_t> calls{0};
+    HeatmapChunkWireTest::decoder(client, [&](auto wire) {
+        if (++calls == 1) entered.set_value();
+        gate.wait();
+        return heatmap::decodeChunkEnvelope(wire);
+    });
+    HeatmapChunkWireTest::clientBinary(client, good);
+    entered.get_future().get();
+    for (size_t i = 0; i < 1024; ++i) {
+        HeatmapChunkWireTest::clientBinary(client, {});
+        HeatmapChunkWireTest::clientBinary(client, {0});
+        HeatmapChunkWireTest::clientBinary(client, std::vector<uint8_t>(13));
+    }
+    EXPECT_EQ(HeatmapChunkWireTest::decodeBacklogFrames(client), 1u);
+    EXPECT_EQ(inbox.errors.size(), 1u); // malformed flood is coalesced, not queued
+    for (size_t i = 0; i < 1024; ++i) HeatmapChunkWireTest::clientBinary(client, good);
+    EXPECT_EQ(HeatmapChunkWireTest::decodeBacklogFrames(client), SentinelStreamClient::kMaxDecodeBacklogFrames);
+    EXPECT_EQ(inbox.errors.size(), 2u); // only one additional overload notification
+    release.set_value();
+    HeatmapChunkWireTest::drainDecoder(client);
+    EXPECT_EQ(calls.load(), SentinelStreamClient::kMaxDecodeBacklogFrames);
+    EXPECT_EQ(inbox.chunks.size(), SentinelStreamClient::kMaxDecodeBacklogFrames);
+    EXPECT_EQ(HeatmapChunkWireTest::decodeBacklogFrames(client), 0u);
+    HeatmapChunkWireTest::clientBinary(client, good);
+    HeatmapChunkWireTest::drainDecoder(client);
+    EXPECT_EQ(calls.load(), SentinelStreamClient::kMaxDecodeBacklogFrames + 1);
+}
+
+TEST_F(ChunkWire, InProgressDecodeCannotCrossDisconnectOrReconnect) {
+    server->start();
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)));
+    inbox.attach(*client);
+    client->connectToServer();
+    ASSERT_TRUE(inbox.waitFor([&] { return inbox.connected; }));
+    heatmap::ChunkFrame sealed;
+    sealed.kind = ChunkKind::NotModified;
+    sealed.key = {"BTC-USD", "hmc2.deep", kMin, kEpoch};
+    sealed.state = {true, kEpoch + kHour, 0};
+    const auto good = heatmap::encodeChunkEnvelope(9001, heatmap::encodeChunk(sealed));
+    auto error = sealed;
+    error.kind = ChunkKind::Error;
+    error.error = heatmap::ChunkError::Busy;
+    const auto serverError = heatmap::encodeChunkEnvelope(9001, heatmap::encodeChunk(error));
+    auto malformed = good;
+    malformed.back() = 0;
+    malformed.push_back(0); // exact-length control frame violation
+    for (bool reconnect : {false, true}) {
+        for (const auto& bytes : {good, serverError, malformed}) {
+            client->connectToServer();
+            std::promise<void> entered, release;
+            auto gate = release.get_future().share();
+            HeatmapChunkWireTest::decoder(*client, [&](auto wire) {
+                entered.set_value();
+                gate.wait(); // already inside decode, beyond the worker's first epoch check
+                return heatmap::decodeChunkEnvelope(wire);
+            });
+            HeatmapChunkWireTest::clientBinary(*client, bytes);
+            entered.get_future().get();
+            client->disconnectFromServer();
+            if (reconnect) client->connectToServer();
+            release.set_value();
+            HeatmapChunkWireTest::drainDecoder(*client);
+            EXPECT_EQ(HeatmapChunkWireTest::orderSize(*client), 0u);
+            EXPECT_EQ(inbox.repliesFor(9001), 0u);
+        }
+    }
+    HeatmapChunkWireTest::decoder(*client, heatmap::decodeChunkEnvelope);
+    sealed.state = {false, kEpoch, 1}; // old sealed reply must not supersede this open reply
+    HeatmapChunkWireTest::clientBinary(*client, heatmap::encodeChunkEnvelope(9002, heatmap::encodeChunk(sealed)));
+    HeatmapChunkWireTest::drainDecoder(*client);
+    EXPECT_EQ(inbox.chunksFor(9002).size(), 1u);
+    EXPECT_TRUE(inbox.errorsFor(9002).empty());
 }
 
 TEST_F(ChunkWire, SessionTeardownWithRequestsInFlight) {

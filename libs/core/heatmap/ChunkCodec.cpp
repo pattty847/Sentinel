@@ -64,12 +64,14 @@ uint64_t chunkHash(std::span<const uint8_t> prefix, std::span<const uint8_t> raw
     for (auto b : raw) { h ^= b; h *= 1099511628211ULL; }
     return h;
 }
-bool validExtent(const ChunkKey& key, int64_t end) {
+bool validKey(const ChunkKey& key) {
     const int64_t span = chunkSpanMs(key.source, key.levelMs);
     return span && !key.symbol.empty() &&
            key.startMs >= recording::kHmc2MinMs && key.startMs % span == 0 &&
-           key.startMs <= recording::kHmc2EndMs - span &&
-           end == key.startMs + span;
+           key.startMs <= recording::kHmc2EndMs - span;
+}
+bool validExtent(const ChunkKey& key, int64_t end) {
+    return validKey(key) && end == key.startMs + chunkSpanMs(key.source, key.levelMs);
 }
 std::string_view hmc2Layer(const std::string& source) {
     const auto* s = findChunkSource(source);
@@ -135,8 +137,7 @@ std::vector<uint8_t> encodeControl(const ChunkFrame& frame) {
     Writer w;
     putMagic(w, frame.kind);
     if (frame.kind == ChunkKind::NotModified) {
-        const int64_t span = chunkSpanMs(frame.key.source, frame.key.levelMs);
-        if (!validExtent(frame.key, frame.key.startMs + span) ||
+        if (!validKey(frame.key) ||
             (frame.state.sealed && frame.state.revision != 0)) fail();
         w.u(uint8_t(frame.state.sealed));
         w.str(frame.key.symbol); w.str(frame.key.source);
@@ -158,8 +159,7 @@ ChunkFrame decodeControl(Reader& r, ChunkFrame& out) {
         out.key.levelMs = r.i(); out.key.startMs = r.i();
         out.state.committedThroughMs = r.i(); out.state.revision = r.u<uint64_t>();
         out.contentHash = r.u<uint64_t>();
-        const int64_t span = chunkSpanMs(out.key.source, out.key.levelMs);
-        if (!validExtent(out.key, out.key.startMs + span) || (sealed && out.state.revision != 0)) fail();
+        if (!validKey(out.key) || (sealed && out.state.revision != 0)) fail();
     } else {
         out.key.symbol = r.str(); out.key.source = r.str();
         out.key.levelMs = r.i(); out.key.startMs = r.i();

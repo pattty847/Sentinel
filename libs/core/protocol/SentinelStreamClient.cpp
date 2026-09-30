@@ -218,9 +218,11 @@ SentinelStreamClient::~SentinelStreamClient() {
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
     m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
-    ++m_connectionEpoch;
     {
         std::lock_guard lock(m_chunkOrderMutex);
+        ++m_connectionEpoch;
+        m_acceptChunkFrames = true;
+        m_decodeRefusals = 0;
         m_chunkOrder.clear();
     }
     m_ioc.restart();
@@ -253,6 +255,12 @@ void SentinelStreamClient::connectToServer() {
 }
 
 void SentinelStreamClient::disconnectFromServer() {
+    {
+        std::lock_guard lock(m_chunkOrderMutex);
+        ++m_connectionEpoch;
+        m_acceptChunkFrames = false;
+        m_chunkOrder.clear();
+    }
     if (m_running) {
         sLog_Data("SentinelStreamClient disconnecting: host=" << m_host << " port=" << m_port
                   << " connected=" << m_isConnected.load());
@@ -396,33 +404,55 @@ quint64 peekEnvelopeRequestId(const std::vector<uint8_t>& frame) {
 } // namespace
 
 void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame) {
+    std::lock_guard lock(m_chunkOrderMutex);
+    if (!m_acceptChunkFrames) return;
     const size_t bytes = frame->size();
-    if (m_decodeBacklogBytes.fetch_add(bytes) + bytes > kMaxDecodeBacklogBytes) {
-        m_decodeBacklogBytes.fetch_sub(bytes);
-        sLog_Warning("Heatmap chunk refused: decode backlog full bytes=" << bytes
-                     << " backlog=" << m_decodeBacklogBytes.load());
-        emit heatmapChunkFailed({peekEnvelopeRequestId(*frame), {}, QStringLiteral("client_overloaded"),
-                                 QStringLiteral("chunk decode backlog is full")});
+    // Refusals run inline, with at most one notification per reason until the
+    // decoder makes progress. A flood must not create a second unbounded queue
+    // of rejection tasks or queued Qt signals while the decoder is stalled.
+    const auto refuse = [&](unsigned reason, const char* code, const char* message) {
+        if (m_decodeRefusals & reason) return;
+        m_decodeRefusals |= reason;
+        sLog_Warning("Heatmap chunk refused: bytes=" << bytes << " reason=" << message);
+        emit heatmapChunkFailed({peekEnvelopeRequestId(*frame), {}, QString::fromLatin1(code),
+                                 QString::fromLatin1(message)});
+    };
+    if (bytes < 14) { // SHE1 + u16 version + u64 request id
+        refuse(1, "malformed", "chunk envelope is shorter than its header");
         return;
     }
+    if (m_decodeBacklogFrames >= kMaxDecodeBacklogFrames ||
+        bytes > kMaxDecodeBacklogBytes - m_decodeBacklogBytes.load()) {
+        refuse(2, "client_overloaded", "chunk decode backlog is full");
+        return;
+    }
+    ++m_decodeBacklogFrames;
+    m_decodeBacklogBytes.fetch_add(bytes);
     // Decoding a deep hour takes milliseconds; keep it off the network thread.
     net::post(*m_decodePool, [this, frame = std::move(frame), epoch = m_connectionEpoch.load()] {
-        if (epoch == m_connectionEpoch.load()) decodeBinaryMessage(*frame);
+        if (epoch == m_connectionEpoch.load()) decodeBinaryMessage(*frame, epoch);
+        std::lock_guard lock(m_chunkOrderMutex);
+        --m_decodeBacklogFrames;
         m_decodeBacklogBytes.fetch_sub(frame->size());
+        if (epoch == m_connectionEpoch.load()) m_decodeRefusals = 0;
     });
 }
 
-void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame) {
+void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch) {
     heatmap::ChunkEnvelope envelope;
     try {
         // Validates every length and count before allocating (ChunkCodec).
-        envelope = heatmap::decodeChunkEnvelope(frame);
+        envelope = m_chunkDecoder(frame);
     } catch (const std::exception& e) {
+        std::lock_guard lock(m_chunkOrderMutex);
+        if (epoch != m_connectionEpoch.load()) return;
         sLog_Warning("Heatmap chunk frame rejected: bytes=" << frame.size() << " error=" << e.what());
         emit heatmapChunkFailed({peekEnvelopeRequestId(frame), {}, QStringLiteral("malformed"),
                                  QString::fromUtf8(e.what())});
         return;
     }
+    std::lock_guard lock(m_chunkOrderMutex);
+    if (epoch != m_connectionEpoch.load()) return;
     auto& chunk = envelope.chunk;
     if (chunk.kind == heatmap::ChunkKind::Error) {
         sLog_Probe("chunks.error", "req=" << envelope.requestId << " start=" << chunk.key.startMs
@@ -447,7 +477,7 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
 // newest: sealed beats open, then (revision, committedThroughMs) must not go back.
 bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
     const ChunkOrder incoming{frame.state.sealed, frame.state.revision, frame.state.committedThroughMs};
-    std::lock_guard lock(m_chunkOrderMutex);
+    // Caller holds m_chunkOrderMutex through publication.
     const auto key = std::make_tuple(frame.key.symbol, frame.key.source, frame.key.levelMs, frame.key.startMs);
     const auto it = m_chunkOrder.find(key);
     if (it != m_chunkOrder.end()) {

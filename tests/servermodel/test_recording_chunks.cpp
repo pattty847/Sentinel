@@ -16,6 +16,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <thread>
 
 namespace {
@@ -329,6 +330,49 @@ TEST(ChunkCodecControl, SourceIdsNotModifiedAndErrorFramesAreExactAndBounded) {
     auto reserved = errWire; reserved[6] = uint8_t(ChunkKind::LiveColumn);
     EXPECT_THROW(decodeChunk(reserved), std::invalid_argument);
 }
+TEST(ChunkCodecControl, NotModifiedTimestampBoundsBeforeArithmetic) {
+    // Exercise both native levels and both edges of the supported timestamp range.
+    for (const int64_t level : {kMinuteMs, kHourMs}) {
+        ChunkFrame frame;
+        frame.kind = ChunkKind::NotModified;
+        frame.key = {"BTC-USD", "hmc2.deep", level, epoch};
+        const int64_t span = chunkSpanMs(frame.key.source, level);
+        const auto validWire = encodeChunk(frame);
+        const size_t startAt = 8 + 1 + frame.key.symbol.size() + 1 + frame.key.source.size() + 8;
+        const int64_t last = kHmc2EndMs - span;
+        const int64_t max = std::numeric_limits<int64_t>::max();
+        const int64_t min = std::numeric_limits<int64_t>::min();
+        for (const int64_t start : {max, min, max - span + 1, max - span, min + span,
+                                   epoch - span, epoch - 1, epoch, epoch + 1,
+                                   last - 1, last, last + 1, kHmc2EndMs}) {
+            SCOPED_TRACE(::testing::Message() << "level=" << level << " start=" << start);
+            frame.key.startMs = start;
+            // Handcraft bytes from a valid frame; do not rely on the encoder to reject them.
+            auto wire = validWire;
+            write64(wire, startAt, uint64_t(start));
+            if (start == epoch || start == last) {
+                EXPECT_EQ(decodeChunk(wire).key.startMs, start);
+                EXPECT_EQ(decodeChunk(encodeChunk(frame)).key.startMs, start);
+            } else {
+                EXPECT_THROW(decodeChunk(wire), std::invalid_argument);
+                EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+            }
+        }
+        frame.key.startMs = epoch;
+        auto unknownSource = validWire;
+        unknownSource.at(8 + 1 + frame.key.symbol.size() + 1) = 'x';
+        EXPECT_THROW(decodeChunk(unknownSource), std::invalid_argument);
+        auto badLevel = validWire;
+        write64(badLevel, startAt - 8, uint64_t(max));
+        EXPECT_THROW(decodeChunk(badLevel), std::invalid_argument);
+        frame.key.levelMs = max;
+        EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+        frame.key.levelMs = level;
+        frame.key.source = "unknown";
+        EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+    }
+}
+
 TEST_F(ChunkTest, SharedCacheReplacesByBytesAndRetainsBorrowedBuffers) {
     seed(); Hmc2Reader reader(root());
     const ChunkKey key{"BTC-USD", "hmc2.deep", kMinuteMs, epoch};

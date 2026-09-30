@@ -22,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <tuple>
+#include <functional>
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
@@ -90,6 +91,7 @@ public:
     };
     // Bounded binary decode backlog; frames beyond it are refused, not queued.
     static constexpr size_t kMaxDecodeBacklogBytes = 64U * 1024U * 1024U;
+    static constexpr size_t kMaxDecodeBacklogFrames = 256;
 
     explicit SentinelStreamClient(const std::string& host, const std::string& port,
                                   const std::string& caFile = "", QObject* parent = nullptr);
@@ -171,7 +173,7 @@ signals:
                                 int64_t requestEndMs,
                                 int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
-    // Emitted from the chunk decode thread; connect with a queued connection.
+    // Emitted from decode/admission threads; connect with a queued connection.
     // chunk->kind is Chunk or NotModified.
     void heatmapChunkReceived(quint64 requestId, SentinelStreamClient::HeatmapChunkPtr chunk);
     void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
@@ -222,7 +224,7 @@ private:
     
     void handleMessage(const std::string& msg);
     void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame);
-    void decodeBinaryMessage(const std::vector<uint8_t>& frame);
+    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch);
     bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
@@ -275,9 +277,15 @@ private:
     // Replies from an older connection are dropped after reconnect.
     std::atomic<quint64> m_connectionEpoch{0};
     std::atomic<size_t> m_decodeBacklogBytes{0};
-    // Newest state accepted per chunk key (decode thread; cleared on connect).
+    size_t m_decodeBacklogFrames = 0; // queued + running, guarded by m_chunkOrderMutex
+    unsigned m_decodeRefusals = 0; // one notification per reason until decode progress
+    // Serializes epoch invalidation with ordering and success/error publication.
+    // Signal consumers must use queued connections (never reenter under this lock).
     struct ChunkOrder { bool sealed = false; uint64_t revision = 0; int64_t committedThroughMs = 0; };
     std::mutex m_chunkOrderMutex;
+    bool m_acceptChunkFrames = true; // guarded by m_chunkOrderMutex
+    // Decoder dependency also lets tests pause an in-progress decode deterministically.
+    std::function<heatmap::ChunkEnvelope(std::span<const uint8_t>)> m_chunkDecoder = heatmap::decodeChunkEnvelope;
     std::map<std::tuple<std::string, std::string, int64_t, int64_t>, ChunkOrder> m_chunkOrder;
     static constexpr size_t kMaxChunkOrderKeys = 65536;
     // One thread: decodes stay FIFO in arrival order. Declared last so it is
