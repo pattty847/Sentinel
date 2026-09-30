@@ -232,6 +232,8 @@ add_library(sentinel_lab_lib
     lab/B1Bench.cpp
     lab/OffscreenQuick.hpp
     lab/OffscreenQuick.cpp
+    lab/RhiBackend.hpp
+    lab/RhiBackend.cpp
 )
 set_target_properties(sentinel_lab_lib PROPERTIES AUTOMOC ON)
 

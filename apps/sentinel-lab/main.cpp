@@ -2,6 +2,7 @@
 #include "lab/Bench.hpp"
 #include "lab/LabChunks.hpp"
 #include "lab/LabItem.hpp"
+#include "lab/RhiBackend.hpp"
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QGuiApplication>
@@ -25,11 +26,17 @@ int main(int argc, char **argv) {
                     QByteArray(argv[i]) == "--b1-bench" ||
                     QByteArray(argv[i]) == "--tick-sweep" || QByteArray(argv[i]) == "--tick-change-frames";
     if (headless) qputenv("QT_QPA_PLATFORM", "offscreen");
+#ifdef Q_OS_WIN
+    // The offscreen QPA reads fonts from Qt's lib/fonts, which Qt no longer ships:
+    // without this the stamped debug text renders as empty boxes.
+    if (headless && qEnvironmentVariableIsEmpty("QT_QPA_FONTDIR"))
+        qputenv("QT_QPA_FONTDIR", qgetenv("WINDIR").isEmpty() ? QByteArray("C:/Windows/Fonts") : qgetenv("WINDIR") + "/Fonts");
+#endif
     QGuiApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("sentinel-lab"));
     QCommandLineParser parser;
     parser.addHelpOption();
-    parser.addOption({"bench", "Run 200 headless Metal bin passes per grid (1x, 2x) and emit JSON"});
+    parser.addOption({"bench", "Run 200 headless bin passes per grid (1x, 2x) on SENTINEL_RHI_BACKEND (or the platform default) and emit JSON"});
     parser.addOption({"first-paint", "Exit after the first lab frame and emit launch timing JSON"});
     parser.addOption({"hours", "Hours back from now", "hours", "24"});
     parser.addOption({"layer", "Recording layer: near or deep", "layer", "near"});
@@ -107,7 +114,12 @@ int main(int argc, char **argv) {
     if (parser.isSet("tick-sweep")) return lab::runTickSweep(options);
     if (parser.isSet("tick-change-frames")) return lab::runTickChangeSequence(options, parser.value("tick-change-frames"));
     if (parser.isSet("screenshot")) return lab::runScreenshot(options, parser.value("screenshot"));
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Metal);
+    const auto rhi = lab::selectedRhiBackend();
+    if (!rhi.valid) {
+        std::cerr << rhi.error.toStdString() << std::endl;
+        return 2;
+    }
+    QQuickWindow::setGraphicsApi(rhi.backend.graphicsApi);
     qmlRegisterType<lab::LabItem>("Sentinel.Lab", 1, 0, "BinLab");
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("initialHours", hours);

@@ -372,7 +372,7 @@ TEST(HeatmapTileLabItem, TilesComeBackAfterTheQRhiIsRecreated) {
         ASSERT_FALSE(second.renderFrame(&error).isNull());
         delete item;
     }
-    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+    lab::setChunkRecordingRoot({});
 }
 
 TEST(HeatmapTileLabItem, ARevisionFromOneChartRebuildsTheOtherChartsTiles) {
@@ -415,7 +415,7 @@ TEST(HeatmapTileLabItem, ARevisionFromOneChartRebuildsTheOtherChartsTiles) {
     for (auto *item : items) EXPECT_TRUE(item->settled());
     for (auto *item : items) delete item;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
-    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+    lab::setChunkRecordingRoot({});
 }
 
 void writeMinutes(const QTemporaryDir &dir, int64_t count) {
@@ -481,7 +481,7 @@ TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
     EXPECT_TRUE(rebuilt) << "both stationary charts heard the new generation";
     for (auto *item : items) delete item;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
-    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+    lab::setChunkRecordingRoot({});
 }
 
 // Re-review fix 2: every revision of a stationary visible tile is a new cache
@@ -527,7 +527,7 @@ TEST(HeatmapTileLabItem, RepeatedRevisionsOfAVisibleTileStayWithinTheTileBudget)
         delete item;
         ASSERT_FALSE(scene.renderFrame(&error).isNull());
     }
-    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+    lab::setChunkRecordingRoot({});
 }
 
 // Re-review fix 3: when the visible tiles fill the budget, a completed prefetch
@@ -566,7 +566,7 @@ TEST(HeatmapTileLabItem, BudgetEvictedPrefetchIsNotRebuiltWhileTheViewStands) {
     EXPECT_EQ(metric(item, "prefetchBudgetEvicted"), 0);
     delete item;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
-    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+    lab::setChunkRecordingRoot({});
 }
 } // namespace
 
