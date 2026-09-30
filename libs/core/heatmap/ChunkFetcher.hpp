@@ -15,6 +15,7 @@ class ChunkFetcher final : public QObject {
 public:
     using ChartId = quint64;
     static constexpr size_t kMaxInFlightChunks = 4;
+    static constexpr unsigned kMaxStoreAttempts = 5;
     static constexpr size_t kMaxInFlightBytes = 16ull << 20;
     struct Options {
         // Cold estimate is 4 MiB; warm estimates use decoded bytes. Estimates
@@ -57,7 +58,7 @@ private:
         quint64 request = 0;
         uint64_t order = 0;
         int64_t dueMs = 0;
-        unsigned busyCount = 0;
+        unsigned busyCount = 0, storeAttempts = 0;
         size_t estimate = 0;
         // Keep have_hash's body alive until NotModified (LRU may evict it).
         std::shared_ptr<const StoredChunk> held;

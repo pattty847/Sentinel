@@ -108,6 +108,7 @@ void ChunkFetcher::disconnected() {
         d.held.reset();
         d.dueMs = 0;
         d.busyCount = 0;
+        d.storeAttempts = 0;
         ++it;
     }
     sLog_Data("Chunk fetcher disconnected; retained wanted keys=" << demands_.size());
@@ -291,14 +292,17 @@ void ChunkFetcher::onReceived(quint64 request, ChunkFramePtr frame) {
             ++stats_.bodies;
         } else throw std::invalid_argument("unexpected chunk reply kind");
         if (!stored) {
-            // A newer version won insertion but was evicted in the meantime.
-            // No current body can satisfy the chart yet; obtain that version.
-            onFailed(request, frame->key, QStringLiteral("busy"), QStringLiteral("newer chunk body was evicted"));
+            // Budget rejection and an evicted winning revision are both bounded:
+            // retrying an oversized body forever cannot satisfy the chart.
+            const auto code = ++d.storeAttempts < kMaxStoreAttempts ? QStringLiteral("busy")
+                                                                   : QStringLiteral("store_rejected");
+            onFailed(request, frame->key, code, QStringLiteral("chunk store rejected body"));
             return;
         }
         current_.insert(frame->key);
         d.pending = d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key);
         d.busyCount = 0;
+        d.storeAttempts = 0;
         d.dueMs = 0;
         emit chunkStored(frame->key, stored->generation);
         finish(frame->key, d);

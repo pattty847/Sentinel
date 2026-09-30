@@ -16,6 +16,7 @@ class LocalChunkTransport final : public ChunkTransport {
 public:
     // Worker-thread fault/latch seams for deterministic tests; empty in production.
     struct TestHooks {
+        int pollIntervalMs = 1000; // <= 0 disables automatic scans
         std::function<void(recording::Hmc2Reader &, std::stop_token)> beforeAvailability;
         std::function<void(recording::Hmc2Reader &, std::stop_token)> beforeBuild;
     };
