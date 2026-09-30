@@ -1,133 +1,171 @@
-# Windows D3D11 GPU tests
+# Windows GPU tests
 
-This is the procedure for the owner to check the GPU heatmap path (S4) on Windows with the
-Direct3D 11 backend. Background: `docs/research/2026-09-gpu-heatmap-integration-plan.md`, S4.
+How to run the GPU heatmap path (S4) on Windows and read the result. Background:
+`docs/research/2026-09-gpu-heatmap-integration-plan.md`, S4.
 
 Two things are under test:
 
-1. **Compute in `QSGRenderNode::prepare()`**. This is proven on Metal. On D3D11 it has never run.
+1. **Compute in `QSGRenderNode::prepare()`** feeding the draw in the same frame.
    Test: `QsgComputeSpikeTests` (executable `test_qsg_compute_spike`).
 2. **GPU binning parity and the precision self-test.** GPU cells must equal the CPU reference
-   (`binColumn`) exactly, the paged entry buffers must work under the D3D11 buffer limits, and
-   the fast kernel must pass the runtime precision self-test on your GPU.
-   Test: `HeatmapGpuBinnerTests` (executable `test_heatmap_gpu_binner`).
+   (`binColumn`) exactly, the paged entry buffers (at most 64 MiB each) must work, and the fast
+   kernel must pass the runtime precision self-test on this GPU or the binner falls back to the
+   precise kernel. Test: `HeatmapGpuBinnerTests` (executable `test_heatmap_gpu_binner`).
 
-## Read this first: the harness is Metal-only today
+## Status (2026-09-29, RTX 4070, Qt 6.11.2, branch `windows/gpu-harness`)
 
-On current `main`, both tests create a **Metal** QRhi only:
-- `tests/render/test_heatmap_gpu_binner.cpp` (`struct Headless`) calls `QRhi::create(QRhi::Metal, ...)`
-  inside `#ifdef Q_OS_MACOS`.
-- `tests/render/test_qsg_compute_spike.cpp` uses `lab::OffscreenQuick`
-  (`libs/gui/lab/OffscreenQuick.cpp`). It creates a Metal QRhi and calls
-  `QQuickWindow::setGraphicsApi(QSGRendererInterface::Metal)`. `lab::metalDeviceAvailable()`
-  returns `false` on every platform except macOS.
-- `sentinel-lab` (`apps/sentinel-lab/main.cpp`) also forces Metal, and `--bench` is Metal-only
-  (`libs/gui/lab/Bench.cpp`).
+| Backend | QsgComputeSpike | HeatmapGpuBinner | Lab screenshot |
+|---|---|---|---|
+| **d3d12** | OK | 26 OK, 1 opt-in skip | correct heatmap |
+| **d3d11** (the default) | FAILED | 10 FAILED, 16 OK, 1 skip | background only |
 
-So on Windows every GPU case prints `[  SKIPPED ]` with `No MTLDevice`, and ctest still reports
-the test as **Passed**. **That is not a D3D11 result.**
+**D3D11 does not work today. Use D3D12 on Windows.** D3D11 has two separate problems:
 
-`QSG_RHI_BACKEND=d3d11` does not change this. That Qt variable selects the backend of a Qt Quick
-window that Qt creates itself. These tests create their QRhi directly, and the lab sets the
-graphics API in code. D3D11 is already the Qt Quick default on Windows.
+1. **Draw.** Qt's D3D11 backend maps every storage buffer to a UAV and allows UAVs only in
+   compute shaders (`Unordered access only supported at compute stage`). The production display
+   shader (`heatmap_display.frag`) and the spike read the binned cells as a storage buffer in the
+   fragment shader, so the draw is dropped. Fixing it needs a display-path change (for example
+   compute writes a texture that the fragment shader samples). Not done.
+2. **Compute.** The kernel binds 15 UAVs. Feature level 11_0 allows 8, and Qt's default D3D11
+   device never selects 11_1, so `CreateComputeShader` fails with `E_INVALIDARG`. The harness
+   asks for 11_1 (`featureLevel=0xb100` in the banner). At 11_1 the pipeline builds, but both the
+   fast and the precise kernel return wrong cells (384/384 self-test cells differ). Root cause not
+   found yet; the D3D11 debug layer is the next step. The production app would also need to ask
+   for 11_1 (`QQuickGraphicsDevice::fromAdapter(..., featureLevel)`).
 
-**Step 0 (a code slice, before Part B).** The orchestrator dispatches a small harness change:
-- In `Headless` and in `OffscreenQuick::create`, under `Q_OS_WIN`, create `QRhi::D3D11` with
-  `QRhiD3D11InitParams`. In `OffscreenQuick`, select `QSGRendererInterface::Direct3D11`.
-- Make the skip messages name the backend.
-- Make the real-data recording root configurable. Today it is hard-coded as
-  `/Volumes/T7/sentinel-data/recording` (in the test and in `libs/gui/lab/LabSources.hpp`
-  `kRecordingRoot`).
+## The harness picks the backend at run time
 
-Until that change is on `main`, run Part A only.
+`libs/gui/lab/RhiBackend.{hpp,cpp}` is used by both GPU tests, `lab::OffscreenQuick` and
+`sentinel-lab`:
+
+- `SENTINEL_RHI_BACKEND=d3d11|d3d12|vulkan|opengl|metal` selects the backend.
+- Unset: the platform default, `d3d11` on Windows, `metal` on macOS, `opengl` elsewhere.
+- The backend must create a QRhi with compute support. If it cannot, every GPU case prints
+  `GPU case skipped: <backend> backend: <reason>`.
+- Each test executable prints one banner line first, for example:
+  `[sentinel] rhi backend=d3d12 (SENTINEL_RHI_BACKEND) device="NVIDIA GeForce RTX 4070" driverApi=D3D12`
+
+A skipped gtest case still makes ctest report **Passed**. Read the banner and the skip lines.
+
+`QSG_RHI_BACKEND` does not affect these tests: they create their QRhi directly.
 
 ## Prerequisites
 
-- Visual Studio 2022 with the "Desktop development with C++" workload.
-- Qt for MSVC 2022 64-bit, with the Qt Shader Tools module. S4 was verified with Qt 6.11.2 on
-  the Mac, so use 6.11.x if you can.
+- Visual Studio 2022 with "Desktop development with C++".
+- **Open-source** Qt 6.11.x for MSVC 2022 64-bit, with Qt Charts, Qt WebSockets and Qt Shader
+  Tools. A commercial or education Qt install checks a license on every `moc` run and fails the
+  build when that license has expired (`AutoMoc: Could not request license for qtframework`).
+  Install open-source Qt in its own directory, for example `C:\QtOSS`.
 - vcpkg.
-- These environment variables, which the `windows-msvc-vs` preset in `CMakePresets.json` reads:
+- The environment variables the `windows-msvc-vs` preset reads (open a new shell afterwards):
   ```powershell
-  setx QT_MSVC C:\Qt\6.11.2\msvc2022_64   # your Qt kit path
-  setx VCPKG_ROOT C:\dev\vcpkg            # your vcpkg path
+  setx QT_MSVC C:\QtOSS\6.11.2\msvc2022_64
+  setx VCPKG_ROOT C:\dev\vcpkg
   ```
-  Open a new PowerShell after `setx`.
 
 Note: `README.md` names a preset `windows-msvc`. That preset does not exist. Use `windows-msvc-vs`.
 
-## Part A: build and smoke run (works today)
+## Build and run
 
-From the repository root in PowerShell:
+PowerShell, repository root:
 
 ```powershell
-git checkout main
-git pull
 git rev-parse --short HEAD
-cmake --preset windows-msvc-vs
-cmake --build --preset windows-msvc-vs --config Debug --target test_qsg_compute_spike test_heatmap_gpu_binner
+cmake --preset windows-msvc-vs            # add --fresh after changing QT_MSVC
+cmake --build --preset windows-msvc-vs --config RelWithDebInfo
 $env:PATH = "$env:QT_MSVC\bin;$env:PATH"
-ctest --preset windows-msvc-vs -R "QsgComputeSpikeTests|HeatmapGpuBinnerTests" -V
+$env:QT_FORCE_STDERR_LOGGING = "1"        # Qt warnings (shader, UAV) go to stderr, not the debugger
 ```
 
-- The test preset `windows-msvc-vs` runs the Debug configuration. The build step builds Debug to match.
-- The executables are in `build\windows-msvc-vs\tests\render\Debug\`.
-- The tests set `QT_QPA_PLATFORM=offscreen` themselves. If Qt reports that it cannot find the
-  `offscreen` platform plugin, also set `$env:QT_PLUGIN_PATH = "$env:QT_MSVC\plugins"`.
+GPU tests on one backend (the ctest test preset runs Debug, so pass `-C` for this build):
 
-Expected today:
-- Both targets compile and link with MSVC. This also compiles the HLSL 5.0 variants of every
-  heatmap shader through `qsb`.
-- The CPU-only cases pass: `HeatmapGpuSourceCpu.*`, `HeatmapBinGrid.*` and
-  `HeatmapGpuSelfTest.FixtureOracleIsSelfConsistent`.
-- Every GPU case is `[  SKIPPED ]` with `No MTLDevice`.
+```powershell
+$env:SENTINEL_RHI_BACKEND = "d3d12"
+ctest --test-dir build\windows-msvc-vs -C RelWithDebInfo -R "QsgComputeSpikeTests|HeatmapGpuBinnerTests" -V
+```
 
-A compile error, a link error or a crash is a real finding. Send it back.
+Or run the executables directly (in `build\windows-msvc-vs\tests\render\RelWithDebInfo\`). They set
+`QT_QPA_PLATFORM=offscreen` themselves.
 
-## Part B: the D3D11 run (after step 0 is on main)
+Precision self-test: `HeatmapGpuSelfTest.ShippedFastKernelPassesOnThisDevice`, and the run log line
+`heatmap gpu: fast kernel passed|failed the precision self-test on <backend>/<device>/...`. The
+bench and the lab screenshot JSON report the chosen kernel as `"kernel": "fast"|"precise"`.
 
-Run the same commands as Part A. Then run the real-data parity:
+### Lab
 
-1. Copy the recording from the Mac: the whole `BTC-USD` directory from
-   `/Volumes/T7/sentinel-data/recording/`. The test compares the **previous closed UTC day**
-   at the time it runs, so copy fresh data and run it the same UTC day.
-2. Put the directory where the step 0 change says the root is.
-3. Enable the opt-in case and run the executable directly:
+```powershell
+$env:SENTINEL_RHI_BACKEND = "d3d12"
+.\build\windows-msvc-vs\apps\sentinel-lab\RelWithDebInfo\sentinel-lab.exe --bench --synthetic 10000000
+.\build\windows-msvc-vs\apps\sentinel-lab\RelWithDebInfo\sentinel-lab.exe --synthetic 10000000 --screenshot screenshots\lab-synthetic.png
+```
+
+`--synthetic 10000000` builds about 9.49 M entries, 2 entry pages (at most 64 MiB each), about
+85 MB of GPU buffers. It allocates and bins on D3D11 and D3D12; results are correct on D3D12 only.
+
+Bench on D3D12 (GPU timestamps, 200 passes per grid):
+
+| grid | p50 | p95 | max |
+|---|---|---|---|
+| 1920x1080 | 0.047 ms | 0.647 ms | 0.828 ms |
+| 3840x2160 | 0.039 ms | 0.634 ms | 0.807 ms |
+
+The D3D11 bench numbers (p50 0.008 ms) are not meaningful: the kernel returns wrong cells there.
+
+### Real-data parity (opt-in)
+
+1. Copy the whole `BTC-USD` recording directory from the Mac. The test compares the **previous
+   closed UTC day** at the time it runs, so copy fresh data and run it the same UTC day.
+2. Point the harness at the directory that holds `BTC-USD\` and enable the case:
    ```powershell
+   $env:SENTINEL_RECORDING_ROOT = "D:\sentinel-data\recording"
    $env:SENTINEL_HEATMAP_REAL_PARITY = "1"
-   .\build\windows-msvc-vs\tests\render\Debug\test_heatmap_gpu_binner.exe --gtest_filter=HeatmapGpuParity.RealRecordingOptIn
+   .\build\windows-msvc-vs\tests\render\RelWithDebInfo\test_heatmap_gpu_binner.exe --gtest_filter=HeatmapGpuParity.RealRecordingOptIn
    ```
-   Without `SENTINEL_HEATMAP_REAL_PARITY=1`, the case skips with
-   `set SENTINEL_HEATMAP_REAL_PARITY=1 to compare against the real recording`. Without the data,
-   it skips with `recording directory absent`.
+   It skips with a reason when `SENTINEL_HEATMAP_REAL_PARITY` is not `1`, when
+   `SENTINEL_RECORDING_ROOT` is unset, or when `BTC-USD` is missing under it. The lab's real-data
+   mode reads the same variable.
 
-### Pass
+Not run yet on Windows (no recording copied).
 
-- `QsgComputeSpike.ComputeInRenderNodePrepareFeedsRenderInSameFrame` is `[       OK ]`, not
-  skipped. It checks that the compute output reaches the pixels in the same frame, that the rest
-  of the scene is intact, and that a second frame dispatches again.
-- Every `HeatmapGpuParity.*`, `HeatmapGpuSelfTest.*` and `HeatmapRenderNodeScene.*` case is
-  `[       OK ]`. No GPU case is skipped.
-- `HeatmapGpuSelfTest.ShippedFastKernelPassesOnThisDevice` is OK. That means the fast kernel is
-  exact on your GPU and driver under D3D11.
-- `HeatmapGpuParity.EntriesSplitAcrossPagesMatchSinglePage` is OK. That means the paged entry
-  buffers work.
-- Real parity: every `real ...` line and the final `real GPU parity total: ...` line show
+## Pass
+
+- The banner names the backend you meant to test and a real device.
+- `QsgComputeSpike.ComputeInRenderNodePrepareFeedsRenderInSameFrame` is `[       OK ]`, not skipped.
+- Every `HeatmapGpuParity.*`, `HeatmapGpuSelfTest.*`, `HeatmapRenderNodeScene.*`,
+  `HeatmapGpuAnchoring.*` and `HeatmapTickPolicyNode.*` case is `[       OK ]`. Only
+  `RealRecordingOptIn` may skip.
+- `HeatmapGpuParity.EntriesSplitAcrossPagesMatchSinglePage` is OK: the paged entry buffers work.
+- Real parity: every `real ...` line and `real GPU parity total: ...` show
   `mismatches state=0 code=0 side=0 validity=0`.
 
-### Fail
+## Fail
 
-- Any `[  FAILED  ]`, or any GPU case still `[  SKIPPED ]` after step 0.
-- `ShippedFastKernelPassesOnThisDevice` fails: the fast kernel is not exact on this GPU. The
-  binner then keeps the slower `precise` kernel. Correctness holds, but report the GPU.
-- Any non-zero mismatch count in the real parity lines.
-- A `QRhi` creation error, a shader load error, or a crash.
+- Any `[  FAILED  ]`, or a GPU case `[  SKIPPED ]` on a backend that should work.
+- `ShippedFastKernelPassesOnThisDevice` fails while the parity cases pass: the fast kernel is not
+  exact on this GPU. The binner keeps the precise kernel; report the GPU and driver.
+- `Failed to create compute shader`, `Unordered access only supported at compute stage`, a
+  `QRhi` creation error or a crash.
+
+## Other Windows ctest failures (not GPU)
+
+On 2026-09-29, with the default backend, these suites also fail on Windows:
+
+- Recording store (`Hmc2StoreTests`, `BookRecorderTests`, `RecordingChunkTests`,
+  `RecordingPageTests`, `RecordingLiveTests`, `HeatmapModelTests`, `StorageProbeTests`,
+  `RecordingServerStopTests`): `Hmc2Store: sync path=C:\ error=5`. `mkdirs` fsyncs every ancestor
+  directory up to the drive root, and a normal user cannot open `C:\` for write. A policy
+  decision (which directories must be synced) is needed.
+- `BacktestCoreTests`, `HeatmapTwapStreamerTests`: `remove_all` fails because a file is still
+  open (Windows does not delete open files).
+- `StorageProbeCliTests.KilledProcessLeavesMinuteCheckpoint`: kill semantics differ on Windows.
+- `RecordingDataProcessorTests`: passed in the first run of the day, then failed in every later
+  run (no request issued). Not investigated; appears time dependent.
 
 ## What to send back
 
-1. The output of `git rev-parse --short HEAD`.
-2. The GPU and driver version (Device Manager, or `dxdiag` > Display).
-3. The Qt version (the folder name under `QT_MSVC`).
-4. The full `ctest ... -V` output from Part A or Part B.
-5. For Part B, the full output of the real parity run.
-6. Any build errors, verbatim.
+1. `git rev-parse --short HEAD`.
+2. GPU and driver version (the banner, or `dxdiag` > Display).
+3. Qt version (the folder under `QT_MSVC`).
+4. The full `ctest ... -V` output per backend you ran.
+5. The real parity output, if run.
+6. Build errors, verbatim.
