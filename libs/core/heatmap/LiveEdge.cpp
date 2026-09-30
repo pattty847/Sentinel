@@ -42,13 +42,17 @@ bool equal(const SparseColumn &a, const SparseColumn &b) {
 int64_t hour(int64_t t) { return recording::floorDiv(t, kHourMs) * kHourMs; }
 bool dropCovered(LiveEdgeSnapshot &edge, const ChunkStore &store) {
     const auto before = edge.minutes.size();
-    std::erase_if(edge.minutes, [&](const auto &entry) {
-        const auto chunk = store.cached({edge.symbol, edge.source, kMinuteMs, hour(entry.first)});
-        return chunk && entry.first < chunk->committedThroughMs;
-    });
+    const auto missingBefore = edge.missingMinutes.size();
+    auto obsolete = [&](int64_t t) {
+        const auto chunk = store.cached({edge.symbol, edge.source, kMinuteMs, hour(t)});
+        return t < edge.openEndMs - LiveEdge::kRetainedMinutes * kMinuteMs ||
+               (chunk && t < chunk->committedThroughMs);
+    };
+    std::erase_if(edge.minutes, [&](const auto &entry) { return obsolete(entry.first); });
+    std::erase_if(edge.missingMinutes, obsolete);
     edge.proven.clear();
     for (const auto &[t, column] : edge.minutes) addRange(edge.proven, t, t + kMinuteMs);
-    return edge.minutes.size() != before;
+    return edge.minutes.size() != before || edge.missingMinutes.size() != missingBefore;
 }
 } // namespace
 LiveEdge::LiveEdge(std::string symbol, std::string source) {
@@ -62,13 +66,25 @@ bool LiveEdge::accept(std::shared_ptr<const ChunkFrame> frame, const ChunkStore 
     if (!frame || frame->kind != ChunkKind::LiveColumn || frame->key.symbol != snapshot_->symbol ||
         frame->key.source != snapshot_->source || (!fresh_ && frame->state.revision <= snapshot_->revision)) return false;
     auto next = std::make_shared<LiveEdgeSnapshot>(*snapshot_);
-    if (fresh_) next->minutes.clear(); // old uncommitted data has no proof in the new server epoch
+    if (fresh_) { // old uncommitted data has no proof in the new server epoch
+        next->minutes.clear();
+        next->missingMinutes.clear();
+    }
     next->layer = frame->columns.layer;
     next->revision = frame->state.revision;
     next->committedThroughMs = frame->state.committedThroughMs;
     next->openEndMs = frame->columns.endMs;
     ++next->version;
+    std::set<int64_t> received;
+    for (const auto &column : frame->columns.columns) received.insert(column.bucketStartMs);
+    std::erase_if(next->minutes, [&](const auto &entry) {
+        if (!(entry.second->flags & recording::kProvisional) || received.contains(entry.first)) return false;
+        next->missingMinutes.insert(entry.first);
+        return true;
+    });
     for (const auto &column : frame->columns.columns) {
+        if (column.bucketStartMs < next->openEndMs - kRetainedMinutes * kMinuteMs) continue;
+        next->missingMinutes.erase(column.bucketStartMs);
         auto &slot = next->minutes[column.bucketStartMs];
         // Reuse frozen pending minutes even when another revision transports
         // them again. No inference from kPartial: a just-closed minute may be
@@ -139,9 +155,18 @@ LiveComposer::Result LiveComposer::compose(const LiveEdgeSnapshot &edge,
         addRange(proven, t, t + kMinuteMs);
     }
     std::set<int64_t> kept;
+    // Same forming rule as TimeComposer: prove the terminal known prefix, not
+    // the frame's bounding extent (commit may precede the next open publish).
+    // An omitted provisional is a known hole, not an unobserved future minute.
+    int64_t knownEnd = startMs;
+    for (const auto &r : proven) knownEnd = std::max(knownEnd, r.endMs);
+    for (const auto t : edge.missingMinutes) {
+        const auto it = cutoffs.find(hour(t));
+        if (it == cutoffs.end() || t >= it->second) knownEnd = std::max(knownEnd, t + kMinuteMs);
+    }
     for (auto b = startMs; b < end; b += tfMs) {
-        const auto through = std::min(b + tfMs, edge.openEndMs);
-        const bool scanned = std::any_of(proven.begin(), proven.end(), [&](const auto &r) {
+        const auto through = std::min(b + tfMs, knownEnd);
+        const bool scanned = b < knownEnd && std::any_of(proven.begin(), proven.end(), [&](const auto &r) {
             return r.startMs <= b && r.endMs >= through;
         });
         if (!scanned) continue; // an unloaded interior minute is never a zero

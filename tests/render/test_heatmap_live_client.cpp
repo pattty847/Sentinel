@@ -354,6 +354,67 @@ TEST_F(LiveClient, FormingDoesNotTurnInteriorHoleIntoZero) {
     EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded);
     EXPECT_TRUE(out.columns.empty());
 }
+TEST_F(LiveClient, FiveMinuteCommitBeforeOpenPublicationKeepsTheKnownPrefix) {
+    cutoff = minute(3); transport.push(available(cutoff)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
+    send(tail(3, 3, 3, 1, kMinuteMs)); settle();
+    ASSERT_EQ(bucketState(*live(c).columns, base), BucketState::Present);
+    cutoff = minute(4); ++chunkRevision;
+    auto final = std::make_shared<ChunkFrame>(*tail(3, 3, 4, 2, kMinuteMs));
+    final->columns.endMs = minute(5); // inferred open has not published a column yet
+    send(final);
+    now += 1000; c.pollLive(); runJobs(); // final before stored revision
+    EXPECT_EQ(bucketState(*live(c).columns, base), BucketState::Present);
+    ASSERT_EQ(live(c).columns->columns.size(), 1u);
+    EXPECT_EQ(live(c).columns->columns.front().observedMs, uint64_t(4 * kMinuteMs));
+    answer(); advance(c); // now the same prefix comes entirely from the chunk
+    EXPECT_EQ(bucketState(*live(c).columns, base), BucketState::Present);
+    EXPECT_EQ(live(c).columns->columns.front().observedMs, uint64_t(4 * kMinuteMs));
+    send(tail(4, 4, 4, 3)); advance(c);
+    EXPECT_EQ(live(c).columns->columns.front().observedMs, uint64_t(4 * kMinuteMs + 1000));
+}
+TEST_F(LiveClient, LiveEdgeBoundsRetainedFinalsAndDroppedMinutesAreNotLoaded) {
+    ChunkStore local;
+    LiveEdge edge(symbol, source);
+    for (int n = 0; n <= 180; ++n) {
+        auto final = std::make_shared<ChunkFrame>(*tail(n, n, n + 1, n + 1, kMinuteMs));
+        final->key.startMs = hourOf(minute(n + 1));
+        final->columns.endMs = minute(n + 2);
+        ASSERT_TRUE(edge.accept(final, local));
+        EXPECT_LE(edge.snapshot()->minutes.size(), size_t(LiveEdge::kRetainedMinutes));
+    }
+    const auto state = edge.snapshot();
+    ASSERT_FALSE(state->minutes.empty());
+    EXPECT_GE(state->minutes.begin()->first, state->openEndMs - LiveEdge::kRetainedMinutes * kMinuteMs);
+    LiveComposer composer;
+    const auto out = composer.compose(*state, {}, kMinuteMs, base).columns;
+    EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded);
+    EXPECT_EQ(bucketState(out, minute(180)), BucketState::Present);
+}
+TEST_F(LiveClient, OmittedProvisionalLosesItsValueIncludingAtTheEndOfAFormingPrefix) {
+    for (const int missing : {1, 3}) {
+        SCOPED_TRACE(missing);
+        ChunkStore local;
+        LiveEdge edge(symbol, source);
+        ASSERT_TRUE(edge.accept(tail(0, 3, 0, 1), local));
+        auto trimmed = std::make_shared<ChunkFrame>(*tail(0, 3, 0, 2));
+        trimmed->columns.columns.erase(trimmed->columns.columns.begin() + missing);
+        trimmed->columns.scannedRanges = {{base, minute(missing)}};
+        if (missing < 3) trimmed->columns.scannedRanges.push_back({minute(missing + 1), minute(4)});
+        ASSERT_TRUE(edge.accept(trimmed, local));
+        EXPECT_FALSE(edge.snapshot()->minutes.contains(minute(missing)));
+        LiveComposer composer;
+        auto out = composer.compose(*edge.snapshot(), {}, kMinuteMs, base).columns;
+        EXPECT_EQ(bucketState(out, minute(missing)), BucketState::NotLoaded);
+        out = composer.compose(*edge.snapshot(), {}, 5 * kMinuteMs, base).columns;
+        EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded); // cannot hide the missing suffix
+        auto stored = put(local, chunk({symbol, source, kMinuteMs, base}, minute(4)));
+        edge.trim(local);
+        out = composer.compose(*edge.snapshot(), {stored}, 5 * kMinuteMs, base).columns;
+        EXPECT_EQ(bucketState(out, base), BucketState::Present);
+        EXPECT_TRUE(edge.snapshot()->missingMinutes.empty());
+    }
+}
 TEST_F(LiveClient, PublishedLiveRolloverUnionNeverShrinksAndLWaitsForUpload) {
     auto &c = chart(); settle(); upload(c); settle();
     send(tail(10, 10, 10, 1, 1000)); settle();

@@ -1,6 +1,7 @@
 #pragma once
 #include "ChunkStore.hpp"
 #include <map>
+#include <set>
 
 namespace heatmap {
 // Immutable handoff to the build pool. The version is client-local and never
@@ -10,6 +11,9 @@ struct LiveEdgeSnapshot {
     uint64_t version = 0, revision = 0;
     int64_t openEndMs = 0, committedThroughMs = 0;
     std::map<int64_t, std::shared_ptr<const SparseColumn>> minutes;
+    // Previously observed provisional minutes omitted by a newer frame. A
+    // forming prefix must not conceal these holes; a chunk/final can fill them.
+    std::set<int64_t> missingMinutes;
     std::vector<SparseColumns::TimeRange> proven;
 };
 
@@ -18,6 +22,7 @@ struct LiveEdgeSnapshot {
 // gaps, and trimming happens only after the corresponding body is in the store.
 class LiveEdge {
 public:
+    static constexpr int64_t kRetainedMinutes = 120;
     LiveEdge(std::string symbol, std::string source);
     void newEpoch(); // freeze the old snapshot until the first new-epoch frame
     bool accept(std::shared_ptr<const ChunkFrame> frame, const ChunkStore &store);
