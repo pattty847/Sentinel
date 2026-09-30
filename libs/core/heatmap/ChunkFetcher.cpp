@@ -53,9 +53,13 @@ ChunkFetcher::ChunkFetcher(ChunkStore &store, ChunkTransport &transport, Options
     });
 }
 ChunkFetcher::~ChunkFetcher() {
-    std::scoped_lock lock(relay_->mutex);
-    relay_->target = nullptr;
+    {
+        std::scoped_lock lock(relay_->mutex);
+        relay_->target = nullptr;
+    }
     store_.setRevisionListener({});
+    for (const auto &[key, d] : demands_)
+        if (!d.charts.empty()) store_.setWanted(key, false);
 }
 void ChunkFetcher::schedule() {
     if (scheduled_) return;
@@ -67,6 +71,7 @@ void ChunkFetcher::want(ChartId chart, const std::vector<ChunkKey> &keys, int pr
     for (const auto &key : keys) {
         auto &d = demands_[key];
         if (!d.order) d.order = ++order_;
+        if (d.charts.empty()) store_.setWanted(key, true); // retained while wanted
         d.charts[chart] = priority;
         const auto cached = store_.peek(key);
         if (!d.request && (!cached || (!cached->sealed && !current_.contains(key)))) d.pending = true;
@@ -76,7 +81,9 @@ void ChunkFetcher::want(ChartId chart, const std::vector<ChunkKey> &keys, int pr
 void ChunkFetcher::release(ChartId chart, const std::vector<ChunkKey> &keys) {
     Q_ASSERT(QThread::currentThread() == thread());
     for (const auto &key : keys) {
-        if (auto it = demands_.find(key); it != demands_.end()) it->second.charts.erase(chart);
+        if (auto it = demands_.find(key); it != demands_.end() && it->second.charts.erase(chart) &&
+                                          it->second.charts.empty())
+            store_.setWanted(key, false);
         prune(key);
     }
     schedule();

@@ -18,6 +18,11 @@
 //   including a get() that re-reads an evicted open chunk as a new generation.
 // - Holders of an older version keep it alive through their shared_ptr; the
 //   budget counts only what the store itself retains.
+// - Wanted keys (setWanted, maintained by ChunkFetcher for keys some chart wants)
+//   are never evicted, even a single chunk larger than the whole budget: the byte
+//   cap evicts unwanted chunks only. Otherwise a working set above the budget
+//   would evict a body before its span builds and refetch it forever. Their bytes
+//   still count (Stats::wantedBytes), so an over-budget store is visible.
 // Thread-safe. No Qt.
 #include "ChunkCodec.hpp"
 #include <atomic>
@@ -29,6 +34,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace heatmap {
@@ -82,6 +88,8 @@ public:
     // stored since the last clear()). Not counted in stats.
     uint64_t generationOf(const ChunkKey &key) const;
     bool contains(const ChunkKey &key) const { return cached(key) != nullptr; }
+    // Marks a key as wanted (exempt from eviction) or not. Not cleared by clear().
+    void setWanted(const ChunkKey &key, bool wanted);
     // Called after every revise()/reload(), and after a get() that re-read an
     // evicted open chunk under a new generation, on the calling thread, outside
     // the store lock. Not called for first loads or unchanged sealed reloads.
@@ -98,6 +106,7 @@ public:
         uint64_t sharedLoads = 0;        // get() calls that waited on another caller's load
         uint64_t evictions = 0, revisions = 0;
         size_t bytes = 0, entries = 0, maxBytes = 0;
+        size_t wantedBytes = 0;          // retained bytes of wanted keys (may exceed maxBytes)
         double loadMs = 0;               // summed loader wall time
     };
     Stats stats() const;
@@ -122,6 +131,7 @@ private:
     std::list<ChunkKey> lru_; // front = most recent
     std::unordered_map<ChunkKey, Entry, ChunkKeyHash> entries_;
     std::unordered_map<ChunkKey, std::shared_ptr<InFlight>, ChunkKeyHash> inFlight_;
+    std::unordered_set<ChunkKey, ChunkKeyHash> wanted_;
     struct Latest {
         uint64_t generation = 0, ticket = 0;
         bool sealed = false;

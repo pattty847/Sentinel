@@ -31,6 +31,8 @@ public:
     // Add/update interests; greater priority wins, then first-wanted order.
     // A current cache hit emits nothing. Eviction is not signalled: controllers
     // peek the store when consuming a key and want() again after a cache miss.
+    // A key some chart wants is marked wanted in the store, which never evicts
+    // it, so a delivered body stays retained until every chart releases it.
     void want(ChartId chart, const std::vector<ChunkKey> &keys, int priority = 0);
     void release(ChartId chart, const std::vector<ChunkKey> &keys);
     void release(ChartId chart);

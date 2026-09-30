@@ -122,15 +122,26 @@ std::shared_ptr<const StoredChunk> ChunkStore::put(const ChunkKey &key,
 
 void ChunkStore::evictLocked() {
     // Preserve the blocking lab API's keep-newest exception. The async put
-    // path obeys the byte cap even for a single oversized body; its returned
-    // pointer and generation still remain valid after immediate eviction.
-    while (bytes_ > maxBytes_ && !lru_.empty()) {
-        if (lru_.size() == 1 && !latest_.at(lru_.front()).contentHash) break;
-        const auto it = entries_.find(lru_.back());
-        bytes_ -= it->second.chunk->bytes;
-        entries_.erase(it);
-        lru_.pop_back();
+    // path obeys the byte cap for unwanted keys even for a single oversized
+    // body; wanted keys are never evicted (see setWanted).
+    for (auto it = lru_.end(); bytes_ > maxBytes_ && it != lru_.begin();) {
+        --it;
+        if (lru_.size() == 1 && !latest_.at(*it).contentHash) break;
+        if (wanted_.contains(*it)) continue;
+        const auto entry = entries_.find(*it);
+        bytes_ -= entry->second.chunk->bytes;
+        entries_.erase(entry);
+        it = lru_.erase(it);
         ++stats_.evictions;
+    }
+}
+
+void ChunkStore::setWanted(const ChunkKey &key, bool wanted) {
+    std::scoped_lock lock(mutex_);
+    if (wanted) {
+        wanted_.insert(key);
+    } else if (wanted_.erase(key)) {
+        evictLocked();
     }
 }
 
@@ -280,6 +291,8 @@ ChunkStore::Stats ChunkStore::stats() const {
     out.bytes = bytes_;
     out.entries = entries_.size();
     out.maxBytes = maxBytes_;
+    for (const auto &key : wanted_)
+        if (const auto it = entries_.find(key); it != entries_.end()) out.wantedBytes += it->second.chunk->bytes;
     return out;
 }
 void ChunkStore::resetStats() {
