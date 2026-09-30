@@ -51,10 +51,10 @@ std::optional<std::pair<std::string, std::string>> LiveCache::takeCapacityWarnin
     return std::exchange(capacityWarning_, std::nullopt);
 }
 namespace {
-void fillRawColumn(heatmap::SparseColumn& column, const Hmc2Record& record, bool open) {
+void fillRawColumn(heatmap::SparseColumn& column, const Hmc2Record& record) {
     column.bucketStartMs = record.bucketStartMs;
     column.observedMs = record.observedMs;
-    column.flags = record.flags | ((open || record.observedMs < 60'000) ? kPartial : 0);
+    column.flags = record.flags;
     column.native.resize(1);
     auto& native = column.native.front();
     native.grid = {record.header.configHash, record.header.rowTickUnits, record.header.priceScale};
@@ -72,6 +72,8 @@ void fillRawColumn(heatmap::SparseColumn& column, const Hmc2Record& record, bool
             native.baseRow = std::min(native.baseRow, lo);
         }
     }
+    // Match fromRecording even when entries outside minute bounds are filtered.
+    for (const auto& entry : record.entries) native.baseRow = std::min(native.baseRow, entry.row);
     if (native.baseRow == std::numeric_limits<int64_t>::max()) native.baseRow = 0;
     for (const auto& entry : record.entries) {
         if (entry.row < (entry.isAsk ? record.askRowLo : record.bidRowLo) ||
@@ -97,8 +99,9 @@ RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string&
         symbol_ = symbol; source_ = source;
     }
     if (!snapshot.revision || (snapshot.provisional.empty() && snapshot.committed.empty())) return {};
-    // A commit can arrive just before publishOpen. In that interval the next
-    // minute is the open minute, even though it has no observed record yet.
+    // This is the latest known minute, not a wall-clock assertion that it is
+    // forming: at rollover it can be a complete, lateness-held provisional.
+    // Preserve the recorder's flags until the next publishOpen arrives.
     int64_t open = snapshot.committedThroughMs;
     if (!snapshot.provisional.empty()) open = std::max(open, snapshot.provisional.rbegin()->first);
     if (open < kHmc2MinMs || open > kHmc2EndMs - kMinuteMs || open % kMinuteMs)
@@ -141,9 +144,9 @@ RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string&
             r.bucketStartMs < kHmc2MinMs || r.bucketStartMs > open)
             throw std::invalid_argument("invalid raw-tail record identity");
         // Frozen pending minutes are immutable. Preserve their sorted storage
-        // across open updates; only a changed record or open/closed role refills it.
-        if (filledRecords_[i] != records_[i] || (r.bucketStartMs == filledOpenMs_) != (r.bucketStartMs == open)) {
-            fillRawColumn(columns.columns[i], r, r.bucketStartMs == open);
+        // across open updates; only a changed record refills it.
+        if (filledRecords_[i] != records_[i]) {
+            fillRawColumn(columns.columns[i], r);
             filledRecords_[i] = records_[i];
         }
         const auto end = r.bucketStartMs + kMinuteMs;
@@ -151,9 +154,59 @@ RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string&
             columns.scannedRanges.back().endMs = end;
         else columns.scannedRanges.push_back({r.bucketStartMs, end});
     }
-    filledOpenMs_ = open;
-    RawTailFrame result{std::make_shared<const std::vector<uint8_t>>(encodeChunk(frame_, scratch_)),
-                        snapshot.revision, finalThrough};
+    auto rebuildRanges = [&] {
+        columns.startMs = columns.columns.front().bucketStartMs;
+        columns.scannedRanges.clear();
+        finalThrough = 0;
+        for (const auto& col : columns.columns) {
+            const auto end = col.bucketStartMs + kMinuteMs;
+            if (!columns.scannedRanges.empty() && columns.scannedRanges.back().endMs == col.bucketStartMs)
+                columns.scannedRanges.back().endMs = end;
+            else columns.scannedRanges.push_back({col.bucketStartMs, end});
+            if (!(col.flags & kProvisional)) finalThrough = end;
+        }
+    };
+    auto dropOldestPending = [&] {
+        // Preserve the newest known minute. Finals are removed newest-first:
+        // only an included final prefix can advance the subscriber's marker.
+        auto drop = std::find_if(columns.columns.begin(), std::prev(columns.columns.end()),
+            [](const auto& col) { return col.flags & kProvisional; });
+        if (drop == std::prev(columns.columns.end())) {
+            auto final = std::find_if(columns.columns.rbegin(), columns.columns.rend(),
+                [](const auto& col) { return !(col.flags & kProvisional); });
+            if (final == columns.columns.rend()) return false;
+            drop = std::prev(final.base());
+        }
+        columns.columns.erase(drop);
+        filledRecords_.clear(); // column positions no longer match the full snapshot
+        if (columns.columns.empty()) return false;
+        rebuildRanges();
+        return true;
+    };
+    std::vector<uint8_t> bytes;
+    for (;;) {
+        // Conservative native-minute payload bound (seven bytes/entry plus
+        // metadata). Trim before exceeding SHC1's 16 MiB raw allocation limit.
+        size_t bound = 2;
+        for (const auto& col : columns.columns) bound += 152 + 7 * col.native.front().entries.size();
+        if (bound <= 16 * 1024 * 1024) bytes = encodeChunk(frame_, scratch_);
+        if (bound <= 16 * 1024 * 1024 && bytes.size() <= kRawLiveByteBudget - 14) break;
+        const auto now = sentinel::log_throttle::nowMs();
+        if (now >= nextOversizeWarningMs_) {
+            nextOversizeWarningMs_ = now + 5000;
+            sLog_Warning("Raw heatmap live tail exceeds byte budget: symbol=" << symbol
+                << " source=" << source << " bytes=" << (bytes.empty() ? bound : bytes.size() + 14)
+                << " limit=" << kRawLiveByteBudget << " trimming oldest pending minutes");
+        }
+        bytes.clear();
+        if (!dropOldestPending()) {
+            // One indivisible minute can itself exceed the budget. It stays
+            // unscanned here and must arrive through chunks once committed.
+            variants_.emplace(variant, RawTailFrame{});
+            return {};
+        }
+    }
+    RawTailFrame result{std::make_shared<const std::vector<uint8_t>>(std::move(bytes)), snapshot.revision, finalThrough};
     ++encodings_;
     variants_.emplace(variant, result);
     return result;
@@ -170,9 +223,10 @@ struct LiveService::Impl {
         std::chrono::steady_clock::now().time_since_epoch()).count(); };
     uint64_t requestedTurn = 0, completedTurn = 0;
     std::condition_variable completed;
+    std::function<void(const char*)> rawWorkHook;
     std::mutex shutdownMutex;
     std::atomic<uint64_t> builds{0}, buildMicros{0}, deliveries{0}, deliveryMicros{0};
-    std::atomic<uint64_t> rawEncodings{0}, rawBuildMicros{0}, rawDeliveries{0};
+    std::atomic<uint64_t> rawEncodings{0}, rawBuildMicros{0}, rawDeliveries{0}, rawBuilds{0}, rawFailures{0};
     std::thread worker;
     explicit Impl(std::filesystem::path p) : root(std::move(p)), worker([this] { run(); }) {}
     ~Impl() { shutdown(); }
@@ -228,6 +282,7 @@ struct LiveService::Impl {
         std::map<std::pair<const RawSubscription*, std::string>, RawState> rawStates;
         std::map<Series, RawTailBuilder> rawBuilders;
         size_t nextRaw = 0;
+        LiveCadence rawFailureCadence;
         std::vector<std::pair<std::shared_ptr<RawSubscription>, std::string>> rawJobs;
         auto micros = [](auto start) { return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count(); };
@@ -243,8 +298,6 @@ struct LiveService::Impl {
                     auto s = w.lock(); return !s || !s->active.load();
                 });
                 for (const auto &w : subscriptions) if (auto s = w.lock()) views.push_back(std::move(s));
-                std::erase_if(rawSubscriptions, [](const auto& w) { auto s = w.lock(); return !s || !s->active.load(); });
-                for (const auto& w : rawSubscriptions) if (auto s = w.lock()) rawViews.push_back(std::move(s));
                 turn = requestedTurn;
             }
             if (const auto warning = cache.takeCapacityWarning())
@@ -331,57 +384,83 @@ struct LiveService::Impl {
                 }
                 state.cadence.completed(nowMs(), accepted);
             }
-            std::erase_if(rawStates, [](const auto& item) {
-                auto s = item.second.subscription.lock(); return !s || !s->active.load();
-            });
-            std::set<Series> activeSeries;
-            for (const auto& s : rawViews) for (const auto& source : s->view.sources)
-                activeSeries.emplace(s->view.symbol, source);
-            std::erase_if(rawBuilders, [&](const auto& item) { return !activeSeries.contains(item.first); });
-            // One snapshot per series per worker turn; no disk reads in this path.
-            std::map<Series, LiveCache::Snapshot> snapshots;
-            rawJobs.clear();
-            for (const auto& s : rawViews) for (const auto& source : s->view.sources) rawJobs.emplace_back(s, source);
-            const auto firstRaw = rawJobs.empty() ? 0 : nextRaw % rawJobs.size();
-            for (size_t job = 0; job < rawJobs.size(); ++job) {
-                const auto index = (firstRaw + job) % rawJobs.size();
-                const auto& [s, sourceId] = rawJobs[index];
-                if (!s->active.load()) continue;
-                auto [it, added] = rawStates.try_emplace({s.get(), sourceId});
-                auto& state = it->second;
-                if (added) { state.subscription = s; state.finalThroughMs = s->view.sinceMs; }
-                if (!state.cadence.due(nowMs())) continue;
-                const Series series{s->view.symbol, sourceId};
-                auto [sourceIt, fresh] = snapshots.try_emplace(series);
-                if (fresh) sourceIt->second = cache.snapshot(series.first, std::string(heatmap::findChunkSource(sourceId)->hmc2Layer));
-                const auto& snapshot = sourceIt->second;
-                if (!snapshot.revision || snapshot.revision == state.deliveredRevision) continue;
-                bool accepted = false;
-                try {
-                    auto& builder = rawBuilders[series];
-                    const auto before = builder.encodings();
-                    const auto start = std::chrono::steady_clock::now();
-                    const auto frame = builder.build(series.first, sourceId, snapshot, state.finalThroughMs);
-                    rawEncodings += builder.encodings() - before;
-                    rawBuildMicros += micros(start);
-                    if (frame.bytes && s->active.load()) {
-                        accepted = s->deliver(s->view, sourceId, frame);
-                        ++rawDeliveries;
+            try {
+                if (rawFailureCadence.due(nowMs())) {
+                    if (rawWorkHook) rawWorkHook("collect");
+                    {
+                        std::lock_guard lock(mutex);
+                        std::erase_if(rawSubscriptions, [](const auto& w) { auto s = w.lock(); return !s || !s->active.load(); });
+                        for (const auto& w : rawSubscriptions) if (auto s = w.lock()) rawViews.push_back(std::move(s));
                     }
-                    if (accepted) {
-                        state.deliveredRevision = frame.revision;
-                        state.finalThroughMs = std::max(state.finalThroughMs, frame.finalThroughMs);
-                        // A session has one raw slot. Start after its last
-                        // accepted source next turn so a hot symbol cannot starve peers.
-                        nextRaw = index + 1;
+                    std::erase_if(rawStates, [](const auto& item) {
+                        auto s = item.second.subscription.lock(); return !s || !s->active.load();
+                    });
+                    std::set<Series> activeSeries;
+                    for (const auto& s : rawViews) for (const auto& source : s->view.sources)
+                        activeSeries.emplace(s->view.symbol, source);
+                    std::erase_if(rawBuilders, [&](const auto& item) { return !activeSeries.contains(item.first); });
+                    // One snapshot per series per worker turn; no disk reads in this path.
+                    std::map<Series, LiveCache::Snapshot> snapshots;
+                    rawJobs.clear();
+                    for (const auto& s : rawViews) for (const auto& source : s->view.sources) rawJobs.emplace_back(s, source);
+                    const auto firstRaw = rawJobs.empty() ? 0 : nextRaw % rawJobs.size();
+                    for (size_t job = 0; job < rawJobs.size(); ++job) {
+                        const auto index = (firstRaw + job) % rawJobs.size();
+                        const auto& [s, sourceId] = rawJobs[index];
+                        if (!s->active.load()) continue;
+                        if (rawWorkHook) rawWorkHook("state");
+                        auto [it, added] = rawStates.try_emplace({s.get(), sourceId});
+                        auto& state = it->second;
+                        if (added) { state.subscription = s; state.finalThroughMs = s->view.sinceMs; }
+                        if (!state.cadence.due(nowMs())) continue;
+                        const Series series{s->view.symbol, sourceId};
+                        auto [sourceIt, fresh] = snapshots.try_emplace(series);
+                        if (fresh) {
+                            if (rawWorkHook) rawWorkHook("snapshot");
+                            sourceIt->second = cache.snapshot(series.first, std::string(heatmap::findChunkSource(sourceId)->hmc2Layer));
+                        }
+                        const auto& snapshot = sourceIt->second;
+                        if (!snapshot.revision || snapshot.revision == state.deliveredRevision) continue;
+                        bool accepted = false;
+                        try {
+                            auto& builder = rawBuilders[series];
+                            const auto before = builder.encodings();
+                            const auto start = std::chrono::steady_clock::now();
+                            ++rawBuilds;
+                            const auto frame = builder.build(series.first, sourceId, snapshot, state.finalThroughMs);
+                            rawEncodings += builder.encodings() - before;
+                            rawBuildMicros += micros(start);
+                            if (!frame.bytes) {
+                                state.deliveredRevision = snapshot.revision;
+                                continue; // empty work is consumed, not transport congestion
+                            }
+                            if (s->active.load()) {
+                                accepted = s->deliver(s->view, sourceId, frame);
+                                ++rawDeliveries;
+                            }
+                            if (accepted) {
+                                state.deliveredRevision = frame.revision;
+                                state.finalThroughMs = std::max(state.finalThroughMs, frame.finalThroughMs);
+                                // On budget pressure, start after the last
+                                // accepted source next turn so a hot symbol cannot starve peers.
+                                nextRaw = index + 1;
+                            }
+                            sLog_Probe("chunks.live.send", "symbol=" << series.first << " source=" << sourceId
+                                << " sub=" << s->view.sub << " revision=" << snapshot.revision << " accepted=" << accepted
+                                << " finalThrough=" << state.finalThroughMs << " delayMs=" << state.cadence.delayMs);
+                        } catch (const std::exception& e) {
+                            ++rawFailures;
+                            sLog_Error("Raw heatmap live failed: symbol=" << series.first << " source=" << sourceId << " error=" << e.what());
+                        }
+                        state.cadence.completed(nowMs(), accepted);
                     }
-                    sLog_Probe("chunks.live.send", "symbol=" << series.first << " source=" << sourceId
-                        << " sub=" << s->view.sub << " revision=" << snapshot.revision << " accepted=" << accepted
-                        << " finalThrough=" << state.finalThroughMs << " delayMs=" << state.cadence.delayMs);
-                } catch (const std::exception& e) {
-                    sLog_Error("Raw heatmap live failed: symbol=" << series.first << " source=" << sourceId << " error=" << e.what());
+                    rawFailureCadence = {};
                 }
-                state.cadence.completed(nowMs(), accepted);
+            } catch (const std::exception& e) {
+                ++rawFailures;
+                rawFailureCadence.completed(nowMs(), false);
+                sLog_Error("Raw heatmap live worker retry: error=" << e.what()
+                    << " delayMs=" << rawFailureCadence.delayMs);
             }
             rawJobs.clear(); // reuse capacity, but never keep weak subscriptions alive between turns
             {
@@ -398,7 +477,8 @@ void LiveService::shutdown() { impl_->shutdown(); }
 void LiveService::start() { impl_->start(); }
 LiveService::Diagnostics LiveService::diagnostics() const {
     return {impl_->builds.load(), impl_->buildMicros.load(), impl_->deliveries.load(), impl_->deliveryMicros.load(),
-            impl_->rawEncodings.load(), impl_->rawBuildMicros.load(), impl_->rawDeliveries.load()};
+            impl_->rawEncodings.load(), impl_->rawBuildMicros.load(), impl_->rawDeliveries.load(),
+            impl_->rawBuilds.load(), impl_->rawFailures.load()};
 }
 bool LiveService::publish(RecordPtr record) { return impl_->cache.publish(std::move(record)); }
 std::shared_ptr<LiveService::Subscription> LiveService::subscribe(LiveView view, Deliver deliver) {
@@ -427,6 +507,11 @@ void LiveService::setClockForTest(std::function<int64_t()> clock) {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->stopping) throw std::logic_error("live clock requires stopped service");
     impl_->clock = std::move(clock);
+}
+void LiveService::setRawWorkHookForTest(std::function<void(const char*)> hook) {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->stopping) throw std::logic_error("live work hook requires stopped service");
+    impl_->rawWorkHook = std::move(hook);
 }
 void LiveService::pollForTest() {
     std::unique_lock lock(impl_->mutex);

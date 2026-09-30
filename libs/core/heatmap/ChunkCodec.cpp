@@ -146,8 +146,6 @@ bool validState(const ChunkFrame& frame) {
             if (col.flags & ~knownFlags) return false;
             if (col.native.size() != 1 || !col.native.front().entryCoveredMs.empty()) return false;
             if (bool(col.flags & recording::kProvisional) != (col.bucketStartMs >= through)) return false;
-            if (col.bucketStartMs == frame.columns.endMs - kMinuteMs &&
-                !(col.flags & recording::kPartial)) return false;
         }
         return true;
     }

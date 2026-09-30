@@ -522,6 +522,7 @@ TEST(ChunkCodecLive, RoundTripFinalPendingOpenAcrossHourBoundary) {
         r.flags |= kProvisional;
         r.committedThroughMs = epoch + 59 * kMinuteMs;
         r.observedMs = i == 60 ? 12345 : 60000;
+        if (r.observedMs < 60000) r.flags |= kPartial;
         std::reverse(r.entries.begin(), r.entries.end());
         cache.publish(std::make_shared<Hmc2Record>(r));
     }
@@ -552,7 +553,7 @@ TEST(ChunkCodecLive, RoundTripFinalPendingOpenAcrossHourBoundary) {
 TEST(ChunkCodecLive, MalformedAndOverflowingFramesRejectedWithValidHashes) {
     LiveCache cache;
     auto record = minuteRecord(60);
-    record.flags |= kProvisional;
+    record.flags |= kProvisional | kPartial;
     record.observedMs = 12345;
     record.committedThroughMs = record.bucketStartMs;
     cache.publish(std::make_shared<Hmc2Record>(record));
@@ -583,7 +584,7 @@ TEST(ChunkCodecLive, MalformedAndOverflowingFramesRejectedWithValidHashes) {
     sealed = rewritePayload(std::move(sealed), [](auto&) {});
     EXPECT_THROW(decodeChunk(sealed), std::invalid_argument);
     // One range (18 bytes), then bucket(8), observed(8), flags(4).
-    for (uint32_t flags : {uint32_t(kPartial), uint32_t(kProvisional), uint32_t(kPartial|kProvisional|0x80000000u)}) {
+    for (uint32_t flags : {uint32_t(kPartial), uint32_t(kPartial|kProvisional|0x80000000u)}) {
         const auto broken = rewritePayload(wire, [flags](auto& raw) { write32(raw, 34, flags); });
         EXPECT_THROW(decodeChunk(broken), std::invalid_argument) << flags;
     }

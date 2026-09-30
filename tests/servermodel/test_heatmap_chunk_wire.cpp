@@ -27,8 +27,12 @@ struct HeatmapChunkWireTest {
         service.shutdown(); service.setClockForTest(std::move(clock));
     }
     static void livePoll(recording::LiveService& service) { service.pollForTest(); }
-    static bool holdRawSlot(Session& session) { return session.rawWriteSlot_->tryAcquire(); }
-    static void releaseRawSlot(Session& session) { session.rawWriteSlot_->release(); }
+    static bool holdRawSlot(Session& session) { return session.rawWriteSlot_->tryAcquire(recording::kRawLiveByteBudget); }
+    static void releaseRawSlot(Session& session) { session.rawWriteSlot_->release(recording::kRawLiveByteBudget); }
+    static size_t rawBytes(Session& session) { return session.rawWriteSlot_->bytes(); }
+    static void park(Session& session, std::promise<void>& entered, std::shared_future<void> gate) {
+        net::post(session.ws_.get_executor(), [&entered, gate] { entered.set_value(); gate.wait(); });
+    }
     static bool holdLegacySlot(Session& session) { return session.recordingWriteSlot_->tryAcquire(); }
     static void releaseLegacySlot(Session& session) { session.recordingWriteSlot_->release(); }
     static void setChunks(SentinelStreamServer& server, std::shared_ptr<recording::ChunkService> chunks) {
@@ -345,7 +349,7 @@ protected:
         auto r = minuteRecord(minute, layer);
         r.header.symbol = symbol;
         r.observedMs = observed;
-        r.flags = provisional ? recording::kProvisional : 0;
+        r.flags = (provisional ? recording::kProvisional : 0) | (observed < 60000 ? recording::kPartial : 0);
         r.committedThroughMs = r.bucketStartMs + (provisional ? 0 : kMin);
         std::reverse(r.entries.begin(), r.entries.end());
         ASSERT_TRUE(model->recordingLive()->publish(std::make_shared<Hmc2Record>(r)));
@@ -793,7 +797,7 @@ TEST(ChunkServiceWatermarks, RecorderCutoffsWinAndColdSeriesKeepAMargin) {
 }
 
 TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
-    EXPECT_TRUE(buildServerConfigPayload(config, true).at("recording").at("chunk_live").get<bool>());
+    EXPECT_TRUE(buildServerConfigPayload(config, true, true).at("recording").at("chunk_live").get<bool>());
     useLiveClock(); startAndConnect();
     auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
     ASSERT_TRUE(HeatmapChunkWireTest::holdLegacySlot(*session));
@@ -844,6 +848,50 @@ TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
     liveTurn(14000); ASSERT_EQ(inbox.liveFor(sub).size(), 4);
     EXPECT_EQ(inbox.liveFor(sub).back()->columns.columns.size(), 1);
     EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+5);
+}
+
+TEST_F(ChunkWire, LiveCapabilityRequiresRecordingAndLiveService) {
+    for (bool recording : {false, true}) for (bool live : {false, true})
+        EXPECT_EQ(buildServerConfigPayload(config, recording, live).at("recording").at("chunk_live").get<bool>(),
+                  recording && live);
+}
+
+TEST_F(ChunkWire, LiveBothSourcesEverySymbolStayOneHertzAndFifo) {
+    *liveNow = -1; // hold the worker before publishing each complete turn
+    useLiveClock(); startAndConnect();
+    auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
+    std::vector<uint64_t> ids;
+    for (int i = 0; i < 3; ++i)
+        ids.push_back(client->subscribeHeatmapLive("SYM"+std::to_string(i), {"hmc2.deep", "hmc2.near"}, kEpoch));
+    ASSERT_TRUE(poll([&] { return HeatmapChunkWireTest::rawCount(*session) == ids.size(); }));
+    for (int turn = 0; turn < 4; ++turn) {
+        for (int i = 0; i < 3; ++i) for (const auto* layer : {"deep", "near"})
+            publishLive(1, true, 1000+turn, "SYM"+std::to_string(i), layer);
+        // Park the socket executor so all six frames must be admitted together.
+        // Queued posts then exercise FIFO independently of write completion speed.
+        std::promise<void> entered, release;
+        auto gate = release.get_future().share();
+        HeatmapChunkWireTest::park(*session, entered, gate);
+        entered.get_future().get();
+        *liveNow = turn * 1000;
+        HeatmapChunkWireTest::livePoll(*model->recordingLive());
+        const auto bytes = HeatmapChunkWireTest::rawBytes(*session);
+        release.set_value(); // release before assertions or fixture teardown
+        EXPECT_GT(bytes, 0u);
+        EXPECT_LE(bytes, recording::kRawLiveByteBudget);
+        liveTurn(turn * 1000);
+        std::lock_guard lock(inbox.mutex);
+        ASSERT_EQ(inbox.live.size(), (turn+1)*6u);
+        for (int i = 0; i < 6; ++i) {
+            const auto& [id, frame] = inbox.live[turn*6+i];
+            EXPECT_EQ(id, ids[i/2]);
+            EXPECT_EQ(frame->key.source, i%2 ? "hmc2.near" : "hmc2.deep");
+            EXPECT_EQ(frame->key.symbol, "SYM"+std::to_string(i/2));
+            EXPECT_EQ(frame->state.revision, turn+1);
+            EXPECT_EQ(frame->columns.columns.back().observedMs, 1000+turn);
+        }
+    }
+    EXPECT_EQ(HeatmapChunkWireTest::rawBytes(*session), 0u);
 }
 
 TEST_F(ChunkWire, LiveMultiSymbolReplaceUnsubscribeCapAndTeardown) {
