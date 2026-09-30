@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <thread>
+#include <random>
 using namespace recording;
 namespace {
 int sourceEntries = 12000;
@@ -29,6 +30,38 @@ RecordPtr sample(int minute, int observed, bool provisional) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--raw") {
+        const int iterations = argc > 2 ? std::clamp(std::atoi(argv[2]), 2, 1000) : 50;
+        std::cout << "raw tail: 12000 shuffled entries/minute; sort, validation, hash and zstd; no disk/TLS\n"
+                     "pending_minutes clients encodings/update ms/update bytes/frame\n";
+        for (int pending : {0, 2, 60}) for (int clients : {1, 8}) {
+            LiveCache cache;
+            RawTailBuilder builder;
+            std::mt19937 random(7);
+            auto publish = [&](int minute, int observed) {
+                auto record = std::make_shared<Hmc2Record>(*sample(minute, observed, true));
+                record->committedThroughMs = kHmc2MinMs;
+                std::shuffle(record->entries.begin(), record->entries.end(), random);
+                cache.publish(record);
+            };
+            for (int i = 0; i < pending; ++i) publish(i, 60000);
+            double elapsed = 0;
+            size_t bytes = 0;
+            for (int i = 0; i <= iterations; ++i) {
+                publish(pending, 1000+i);
+                const auto snapshot = cache.snapshot("BENCH-USD", "deep");
+                const auto start = std::chrono::steady_clock::now();
+                for (int c = 0; c < clients; ++c) {
+                    const auto result = builder.build("BENCH-USD", "hmc2.deep", snapshot, kHmc2MinMs);
+                    bytes = result.bytes->size()+14;
+                }
+                if (i) elapsed += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-start).count();
+            }
+            std::cout << pending << ' ' << clients << ' ' << double(builder.encodings())/(iterations+1) << ' '
+                      << std::fixed << std::setprecision(3) << elapsed/iterations << ' ' << bytes << '\n';
+        }
+        return 0;
+    }
     const int iterations = argc > 1 ? std::clamp(std::atoi(argv[1]), 2, 30) : 5;
     if (argc > 2) { sourceEntries = 262144; nativeRows = 262144; }
     std::cout << "fixture=" << sourceEntries << " source entries/minute, 2048 display rows, "

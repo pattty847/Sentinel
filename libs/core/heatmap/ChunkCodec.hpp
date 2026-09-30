@@ -59,8 +59,11 @@ struct ChunkFrame {
 // Throws invalid_argument for malformed input or a wire-version mismatch.
 // Kinds: Chunk (full body), NotModified (key, state and content hash of the chunk
 // the requester already holds; no payload), Error (echoed key, code, message).
-// LiveColumn is reserved and rejected.
+// LiveColumn: same native body, with an extra i64 tailStart after end. The key
+// names the open minute's chunk; the body may extend into the preceding chunk.
+struct ChunkEncodeScratch { std::vector<uint8_t> raw, compressed; };
 std::vector<uint8_t> encodeChunk(const ChunkFrame& frame);
+std::vector<uint8_t> encodeChunk(const ChunkFrame& frame, ChunkEncodeScratch& scratch);
 ChunkFrame decodeChunk(std::span<const uint8_t> wire);
 // Content hash of an encoded Chunk-kind frame, from its header only (no payload
 // decode). For bytes this process encoded or already validated.

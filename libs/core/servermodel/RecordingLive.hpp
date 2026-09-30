@@ -1,11 +1,14 @@
 #pragma once
 #include "RecordingPage.hpp"
+#include "../heatmap/ChunkCodec.hpp"
 #include <atomic>
 #include <deque>
 #include <mutex>
 #include <map>
 #include <algorithm>
 
+struct RecordingLiveTest;
+struct HeatmapChunkWireTest;
 namespace recording {
 using RecordPtr = std::shared_ptr<const Hmc2Record>;
 struct LiveView {
@@ -45,6 +48,37 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+struct RawTailView {
+    std::string symbol;
+    std::vector<std::string> sources;
+    uint64_t sub = 0;
+    int64_t sinceMs = 0; // exclusive delivered-final cutoff (bucket starts >= it are resent)
+};
+struct RawTailFrame {
+    std::shared_ptr<const std::vector<uint8_t>> bytes; // SHC1, shared before per-sub SHE1 wrapping
+    uint64_t revision = 0;
+    int64_t finalThroughMs = 0;
+};
+inline constexpr size_t kRawLiveByteBudget = 1024 * 1024;
+// Worker-owned per-series encoder. Variants are keyed by the first held final
+// needed; every viewer without pending finals gets the same immutable bytes.
+class RawTailBuilder {
+public:
+    RawTailFrame build(const std::string& symbol, const std::string& source,
+                       const LiveCache::Snapshot& snapshot, int64_t sinceMs);
+    uint64_t encodings() const { return encodings_; }
+private:
+    uint64_t revision_ = 0, encodings_ = 0;
+    int64_t nextOversizeWarningMs_ = 0;
+    std::string symbol_, source_;
+    // At most 17 frames per series/revision: the first needed final is one of
+    // LiveCache's <=16 held records, or zero for the shared no-finals variant.
+    std::map<int64_t, RawTailFrame> variants_;
+    heatmap::ChunkFrame frame_;
+    heatmap::ChunkEncodeScratch scratch_;
+    std::vector<RecordPtr> records_;
+    std::vector<RecordPtr> filledRecords_;
+};
 struct LiveCadence {
     int64_t nextMs = 0;
     int64_t delayMs = 1000;
@@ -61,6 +95,22 @@ public:
     void release() { busy_.store(false); }
 private:
     std::atomic_bool busy_{false};
+};
+// Raw siblings share a byte budget, not a single in-flight frame. Account for
+// the SHE1 envelope too, from worker admission through write completion/drop.
+class LiveWriteBudget {
+public:
+    bool tryAcquire(size_t bytes) {
+        auto pending = bytes_.load();
+        do {
+            if (bytes > kRawLiveByteBudget || pending > kRawLiveByteBudget - bytes) return false;
+        } while (!bytes_.compare_exchange_weak(pending, pending + bytes));
+        return true;
+    }
+    void release(size_t bytes) { bytes_.fetch_sub(bytes); }
+    size_t bytes() const { return bytes_.load(); }
+private:
+    std::atomic_size_t bytes_{0};
 };
 struct LiveRegistrationGate {
     int64_t nextMs = 0;
@@ -80,6 +130,14 @@ public:
         std::atomic_bool active{true};
         explicit Subscription(LiveView v, Deliver d) : view(std::move(v)), deliver(std::move(d)) {}
     };
+    using RawDeliver = std::function<bool(const RawTailView&, const std::string&, const RawTailFrame&)>;
+    struct RawSubscription {
+        RawTailView view;
+        RawDeliver deliver;
+        std::atomic_bool active{true};
+        RawSubscription(RawTailView v, RawDeliver d) : view(std::move(v)), deliver(std::move(d)) {}
+    };
+    static constexpr size_t kMaxRawSubscriptions = 128; // symbols, separate from legacy views
     explicit LiveService(std::filesystem::path root);
     ~LiveService();
     // Idempotent. Deactivates subscriptions and joins in-flight delivery before
@@ -87,11 +145,23 @@ public:
     void shutdown();
     // Idempotent restart after shutdown; old subscriptions remain inactive.
     void start();
-    struct Diagnostics { uint64_t builds = 0, buildMicros = 0, deliveries = 0, deliveryMicros = 0; };
+    struct Diagnostics {
+        uint64_t builds = 0, buildMicros = 0, deliveries = 0, deliveryMicros = 0;
+        uint64_t rawEncodings = 0, rawBuildMicros = 0, rawDeliveries = 0;
+        uint64_t rawBuilds = 0, rawFailures = 0;
+    };
     Diagnostics diagnostics() const;
     bool publish(RecordPtr record);
     std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
+    std::shared_ptr<RawSubscription> subscribeRaw(RawTailView view, RawDeliver deliver);
 private:
+    friend struct ::RecordingLiveTest;
+    friend struct ::HeatmapChunkWireTest;
+    // Deterministic test seams: set the clock while stopped; run a full worker
+    // turn and wait for it to finish. Production uses steady_clock + 100 ms wake.
+    void setClockForTest(std::function<int64_t()> clock);
+    void pollForTest();
+    void setRawWorkHookForTest(std::function<void(const char*)> hook);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

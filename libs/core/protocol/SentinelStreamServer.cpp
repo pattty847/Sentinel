@@ -124,7 +124,7 @@ int64_t tradeTimestampMs(const Trade& trade) {
         std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
 }
 
-nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingAvailable) {
+nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingAvailable, bool liveAvailable) {
     nlohmann::json payload;
     payload["type"] = "server_config";
     payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
@@ -180,6 +180,7 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
     payload["default_symbols"] = cfg.defaultSymbols;
     payload["recording"] = protocol::recordingwire::capability(cfg, recordingAvailable);
     payload["recording"]["chunk_wire_version"] = heatmap::kChunkWireVersion;
+    payload["recording"]["chunk_live"] = recordingAvailable && liveAvailable;
     return payload;
 }
 
@@ -223,11 +224,17 @@ class Session : public std::enable_shared_from_this<Session> {
     std::unordered_set<std::string> subscriptions_;
     // binary: sent as a WebSocket binary frame. chunk: counted against the
     // per-session chunk byte budget instead of the slow-client write limit.
-    struct PendingWrite { std::string payload; bool recording = false; bool binary = false; bool chunk = false; };
+    struct PendingWrite {
+        std::string payload;
+        bool recording = false, binary = false, chunk = false, rawLive = false;
+        std::weak_ptr<recording::LiveService::RawSubscription> rawSubscription;
+    };
     std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
     std::shared_ptr<recording::LiveWriteSlot> recordingWriteSlot_ = std::make_shared<recording::LiveWriteSlot>();
     recording::LiveRegistrationGate recordingRegistrationGate_;
     std::shared_ptr<recording::LiveService::Subscription> recordingView_;
+    std::shared_ptr<recording::LiveWriteBudget> rawWriteSlot_ = std::make_shared<recording::LiveWriteBudget>();
+    std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
@@ -269,6 +276,7 @@ class Session : public std::enable_shared_from_this<Session> {
 
     void releaseWrite(const PendingWrite& write) {
         if (write.recording) recordingWriteSlot_->release();
+        else if (write.rawLive) rawWriteSlot_->release(write.payload.size());
         else if (write.chunk) chunkBytes_ -= std::min(chunkBytes_, write.payload.size());
         else releasePendingWriteBytes(write.payload.size());
     }
@@ -346,6 +354,8 @@ class Session : public std::enable_shared_from_this<Session> {
         overlayHistory_.clear();
         if (recordingView_) recordingView_->active.store(false);
         recordingView_.reset();
+        for (const auto& [symbol, view] : rawViews_) view->active.store(false);
+        rawViews_.clear();
         if (owner_ && m_latencySenderId != 0) {
             owner_->unregisterLatencySender(m_latencySenderId);
             m_latencySenderId = 0;
@@ -717,6 +727,7 @@ public:
 
     ~Session() {
         if (recordingView_) recordingView_->active.store(false);
+        for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         disconnectModelSignals();
     }
 
@@ -773,7 +784,8 @@ public:
 
         if (owner_) {
             auto configPayload = buildServerConfigPayload(owner_->serverConfig(),
-                                                          owner_->m_model.recordingAvailable());
+                                                          owner_->m_model.recordingAvailable(),
+                                                          owner_->m_model.recordingLive() != nullptr);
             do_write(configPayload.dump());
         }
         
@@ -983,6 +995,19 @@ public:
                     "capacity", "recording live view capacity reached or service stopped").dump());
                 sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
                     << " gen=" << view->generation << " layer=" << view->layer);
+            } else if (type == "heatmap_live_subscribe") {
+                handleLiveSubscribe(j);
+            } else if (type == "heatmap_live_unsubscribe") {
+                if (!j.contains("symbol") || !j["symbol"].is_string()) {
+                    send_error(type, "", "symbol is required");
+                    return;
+                }
+                const auto symbol = j["symbol"].get<std::string>();
+                if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
+                    it->second->active.store(false);
+                    rawViews_.erase(it);
+                    sLog_Data("Raw heatmap unsubscribe: peer=" << peer_ << " symbol=" << symbol);
+                }
             } else if (type == "heatmap_chunk_request") {
                 handleChunkRequest(j);
             } else if (type == "heatmap_history_request") {
@@ -1630,6 +1655,77 @@ public:
         do_write(payload.dump());
     }
 
+    void handleLiveSubscribe(const nlohmann::json& j) {
+        recording::RawTailView view;
+        const auto error = protocol::chunkwire::parseLiveSubscribe(j, view);
+        auto refuse = [&](heatmap::ChunkError code, const std::string& message) {
+            heatmap::ChunkFrame frame;
+            frame.kind = heatmap::ChunkKind::Error;
+            frame.key.symbol = view.symbol.size() <= protocol::chunkwire::kMaxIdLength ? view.symbol : "";
+            frame.error = code; frame.message = message;
+            const auto wire = heatmap::encodeChunkEnvelope(view.sub, heatmap::encodeChunk(frame));
+            do_write(std::string(wire.begin(), wire.end()), true);
+        };
+        if (error) { refuse(heatmap::ChunkError::InvalidRequest, *error); return; }
+        if (!model_.recordingLive()) { refuse(heatmap::ChunkError::Unavailable, "recording live unavailable"); return; }
+        const auto old = rawViews_.find(view.symbol);
+        if (old == rawViews_.end() && rawViews_.size() >= protocol::chunkwire::kMaxLiveSymbols) {
+            refuse(heatmap::ChunkError::Busy, "live symbol capacity reached"); return;
+        }
+        if (old != rawViews_.end()) { old->second->active.store(false); rawViews_.erase(old); }
+        auto weak = weak_from_this();
+        const auto executor = ws_.get_executor();
+        // Filled on this executor before any posted delivery can execute. No
+        // worker callback locks or owns a Session (same lifetime rule as legacy).
+        auto token = std::make_shared<std::weak_ptr<recording::LiveService::RawSubscription>>();
+        auto warning = std::make_shared<sentinel::log_throttle::Site>();
+        auto subscription = model_.recordingLive()->subscribeRaw(view,
+            [weak, executor, token, warning, slot = rawWriteSlot_](const recording::RawTailView& v,
+                const std::string& source, const recording::RawTailFrame& frame) {
+                if (!frame.bytes) return false;
+                if (frame.bytes->size() > recording::kRawLiveByteBudget - 14) {
+                    uint32_t suppressed = 0;
+                    if (warning->admit(5000, sentinel::log_throttle::nowMs(), suppressed))
+                        sLog_Warning("Raw heatmap live frame exceeds byte budget: symbol=" << v.symbol
+                            << " source=" << source << " bytes=" << frame.bytes->size()+14
+                            << sentinel::log_throttle::Suppressed{suppressed});
+                    return false;
+                }
+                const auto bytes = frame.bytes->size()+14;
+                if (!slot->tryAcquire(bytes)) return false;
+                try {
+                    // SHC1 is shared; SHE1 then the owning queue string still
+                    // make two per-subscriber copies (bounded by the budget).
+                    auto wire = heatmap::encodeChunkEnvelope(v.sub, *frame.bytes);
+                    net::post(executor, [weak, slot, token, bytes, payload = std::string(wire.begin(), wire.end())]() mutable {
+                        auto subscription = token->lock();
+                        auto self = weak.lock();
+                        if (!self || !subscription || !subscription->active.load() || self->closing_.load()) {
+                            slot->release(bytes); return;
+                        }
+                        PendingWrite write{std::move(payload), false, true, false, true, subscription};
+                        if (self->write_queue_.empty()) {
+                            self->write_queue_.push_back(std::move(write));
+                            self->internal_async_write();
+                        } else {
+                            // Prioritize live behind the in-flight write while
+                            // retaining FIFO among all queued raw siblings.
+                            auto position = std::next(self->write_queue_.begin());
+                            for (auto it = position; it != self->write_queue_.end(); ++it)
+                                if (it->rawLive) position = std::next(it);
+                            self->write_queue_.insert(position, std::move(write));
+                        }
+                    });
+                    return true;
+                } catch (...) { slot->release(bytes); throw; }
+            });
+        if (!subscription) { refuse(heatmap::ChunkError::Busy, "raw live service capacity reached or stopped"); return; }
+        *token = subscription;
+        rawViews_[view.symbol] = std::move(subscription);
+        sLog_Data("Raw heatmap subscribe: peer=" << peer_ << " symbol=" << view.symbol
+            << " sub=" << view.sub << " sources=" << view.sources.size() << " since=" << view.sinceMs);
+    }
+
     void onRecordingWritePost(std::string payload) {
         if (closing_.load()) { recordingWriteSlot_->release(); return; }
         // One independent <=1 MiB live payload; put it immediately behind the
@@ -1698,6 +1794,15 @@ public:
     }
     
     void internal_async_write() {
+        // Unsubscribe/replacement cancels queued raw frames; the in-flight
+        // Beast buffer remains owned until its completion callback.
+        while (!write_queue_.empty() && write_queue_.front().rawLive) {
+            const auto subscription = write_queue_.front().rawSubscription.lock();
+            if (subscription && subscription->active.load()) break;
+            releaseWrite(write_queue_.front());
+            write_queue_.pop_front();
+        }
+        if (write_queue_.empty()) return;
         ws_.binary(write_queue_.front().binary);
         ws_.async_write(
             net::buffer(write_queue_.front().payload),

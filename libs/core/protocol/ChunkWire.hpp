@@ -3,6 +3,7 @@
 // Requests and availability are text frames; chunk replies are binary SHE1/SHC1.
 #include "../heatmap/ChunkCodec.hpp"
 #include "../servermodel/ChunkService.hpp"
+#include "../servermodel/RecordingLive.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <charconv>
@@ -14,6 +15,34 @@
 namespace protocol::chunkwire {
 inline constexpr size_t kMaxStarts = 64;       // keys per heatmap_chunk_request
 inline constexpr size_t kMaxIdLength = 64;     // symbol and source ids
+inline constexpr size_t kMaxLiveSymbols = 8;
+
+inline nlohmann::json buildLiveSubscribe(const recording::RawTailView& view) {
+    return {{"type", "heatmap_live_subscribe"}, {"sub", view.sub}, {"symbol", view.symbol},
+            {"sources", view.sources}, {"since_ms", view.sinceMs}};
+}
+inline std::optional<std::string> parseLiveSubscribe(const nlohmann::json& j, recording::RawTailView& out) {
+    if (j.contains("sub") && j["sub"].is_number_unsigned()) out.sub = j["sub"].get<uint64_t>();
+    if (j.contains("symbol") && j["symbol"].is_string()) out.symbol = j["symbol"].get<std::string>();
+    if (!j.contains("sub") || !j["sub"].is_number_unsigned() || out.symbol.empty() ||
+        out.symbol.size() > kMaxIdLength) return "sub and a bounded symbol are required";
+    if (!j.contains("sources") || !j["sources"].is_array() || j["sources"].empty() ||
+        j["sources"].size() > heatmap::kChunkSources.size()) return "sources must name 1..2 supported sources";
+    for (const auto& item : j["sources"]) {
+        if (!item.is_string()) return "source must be a string";
+        const auto source = item.get<std::string>();
+        if (!heatmap::findChunkSource(source) || std::find(out.sources.begin(), out.sources.end(), source) != out.sources.end())
+            return "unknown or duplicate source";
+        out.sources.push_back(source);
+    }
+    if (!j.contains("since_ms") || !j["since_ms"].is_number_integer() ||
+        (j["since_ms"].is_number_unsigned() && j["since_ms"].get<uint64_t>() > uint64_t(recording::kHmc2EndMs)))
+        return "since_ms must be a bounded integer";
+    out.sinceMs = j["since_ms"].get<int64_t>();
+    if (out.sinceMs != 0 && (out.sinceMs < recording::kHmc2MinMs || out.sinceMs >= recording::kHmc2EndMs ||
+                             out.sinceMs % heatmap::kMinuteMs)) return "since_ms must be a supported minute cutoff or zero";
+    return std::nullopt;
+}
 
 struct Request {
     uint64_t req = 0;

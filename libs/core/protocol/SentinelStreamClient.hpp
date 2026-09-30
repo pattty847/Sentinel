@@ -115,6 +115,8 @@ public:
     // budget here: the S5 controller paces requests; the server refuses with busy.
     quint64 requestHeatmapChunks(const std::string& symbol, const std::string& source, int64_t levelMs,
                                  const std::vector<int64_t>& starts, const std::vector<uint64_t>& haveHash = {});
+    quint64 subscribeHeatmapLive(const std::string& symbol, const std::vector<std::string>& sources, int64_t sinceMs);
+    void unsubscribeHeatmapLive(const std::string& symbol);
     void requestFootprintHistory(const std::string& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -176,6 +178,7 @@ signals:
     // Emitted from decode/admission threads; connect with a queued connection.
     // chunk->kind is Chunk or NotModified.
     void heatmapChunkReceived(quint64 requestId, SentinelStreamClient::HeatmapChunkPtr chunk);
+    void heatmapLiveReceived(quint64 subscriptionId, SentinelStreamClient::HeatmapChunkPtr frame);
     void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
     // Sent on subscribe and whenever it changes. Refused on a wire-version mismatch.
     void heatmapAvailabilityReceived(const protocol::chunkwire::Availability& availability);

@@ -812,3 +812,51 @@ TEST_F(Fetcher, RecordingChunkBuildHonorsCancellationDuringScan) {
     EXPECT_EQ(control.status, recording::ReadStatus::Cancelled);
 }
 } // namespace
+
+TEST_F(Fetcher, LiveAdapterRoutesCurrentSubscriptionsAndDropsStaleHostAndConnectionEvents) {
+    fetcher.reset();
+    SentinelStreamClient client("127.0.0.1", "1"), replacement("127.0.0.1", "2");
+    protocol::SentinelStreamClientTransport adapter(client);
+    std::vector<std::pair<quint64, ChunkFramePtr>> frames;
+    QObject::connect(&adapter, &ChunkTransport::liveReceived, &app,
+        [&](quint64 id, ChunkFramePtr frame) { frames.emplace_back(id, frame); }, Qt::QueuedConnection);
+    client.connected(); drain();
+    const auto first = adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    auto live = std::make_shared<ChunkFrame>(*body(key())); live->kind = ChunkKind::LiveColumn;
+    client.heatmapLiveReceived(1, live); drain();
+    ASSERT_EQ(frames.size(), 1); EXPECT_EQ(frames.back().first, first);
+    const auto second = adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch+kMinuteMs);
+    client.heatmapLiveReceived(1, live); client.heatmapLiveReceived(2, live); drain();
+    ASSERT_EQ(frames.size(), 2); EXPECT_EQ(frames.back().first, second);
+    adapter.unsubscribeLive("BTC-USD"); client.heatmapLiveReceived(2, live); drain();
+    EXPECT_EQ(frames.size(), 2);
+    adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    client.disconnected(); client.heatmapLiveReceived(3, live); drain(); EXPECT_EQ(frames.size(), 2);
+    client.connected(); drain();
+    adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    client.connected(); client.heatmapLiveReceived(4, live); drain(); EXPECT_EQ(frames.size(), 2);
+    adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    client.heatmapLiveReceived(5, live); adapter.setClient(replacement); drain(); EXPECT_EQ(frames.size(), 2);
+    replacement.connected(); drain();
+    const auto newHost = adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    replacement.heatmapLiveReceived(1, live); drain();
+    ASSERT_EQ(frames.size(), 3); EXPECT_EQ(frames.back().first, newHost); EXPECT_NE(newHost, first);
+    auto wrongSource = std::make_shared<ChunkFrame>(*live); wrongSource->key.source = "hmc2.near";
+    replacement.heatmapLiveReceived(1, wrongSource); drain(); EXPECT_EQ(frames.size(), 3);
+    replacement.errorOccurred("heatmap chunk wire version mismatch");
+    replacement.heatmapLiveReceived(1, live); drain(); EXPECT_EQ(frames.size(), 3);
+}
+
+TEST_F(Fetcher, FakeTransportScriptsLiveSubscriptionsAndHeldReplies) {
+    fetcher.reset();
+    std::vector<quint64> ids;
+    QObject::connect(&transport, &ChunkTransport::liveReceived, &app,
+        [&](quint64 id, ChunkFramePtr) { ids.push_back(id); }, Qt::QueuedConnection);
+    const auto id = transport.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    ASSERT_EQ(transport.liveRequests.size(), 1);
+    EXPECT_EQ(transport.liveRequests.front().sinceMs, epoch);
+    transport.holdLive(id, body(key())); drain(); EXPECT_TRUE(ids.empty());
+    transport.releaseLive(); drain(); EXPECT_EQ(ids, (std::vector<quint64>{id}));
+    transport.unsubscribeLive("BTC-USD");
+    EXPECT_EQ(transport.liveUnsubscribes, (std::vector<std::string>{"BTC-USD"}));
+}
