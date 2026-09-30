@@ -390,36 +390,16 @@ void sync(const fs::path &p, bool directory = false) {
     const bool ok = directory ? syncDirectory(p, error) : syncFilePath(p, error);
     check(ok, "sync path=" + p.string() + " error=" + std::to_string(error));
 }
-// Creates the missing directories of `p`, top-down from its first existing
-// ancestor. Durability: each directory this call creates gets its parent
-// fsynced, which is what makes the new entry durable. A directory that already
-// existed is never synced, and nothing above the first existing ancestor is
-// touched (it used to sync every ancestor up to "/" or "C:\").
-void mkdirs(const fs::path &p, std::set<fs::path> &known) {
-    const auto absolute = fs::absolute(p).lexically_normal();
-    if (known.contains(absolute))
-        return;
-    std::vector<fs::path> missing; // deepest first
-    for (fs::path at = absolute;; at = at.parent_path()) {
-        std::error_code ec;
-        if (known.contains(at) || fs::is_directory(at, ec))
-            break;
-        missing.push_back(at);
-        if (at.parent_path() == at)
-            break; // a missing root: create_directory reports it
-    }
-    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
-        std::error_code ec;
-        const bool created = fs::create_directory(*it, ec);
-        // Another process may have created it meanwhile; MSVC also reports an
-        // existing drive root ("C:\") as access denied rather than existing.
-        if (!created && ec && fs::is_directory(*it))
-            ec.clear();
-        check(!ec, "create directory " + it->string() + " error=" + ec.message());
-        if (created)
-            sync(it->parent_path(), true);
-    }
-    known.insert(absolute);
+// create_directory that accepts an existing directory (another process may
+// have created it; MSVC also reports an existing drive root, "C:\", as access
+// denied rather than existing). Returns whether this call created it.
+bool createDirectory(const fs::path &dir) {
+    std::error_code ec;
+    const bool created = fs::create_directory(dir, ec);
+    if (!created && ec && fs::is_directory(dir))
+        ec.clear();
+    check(!ec, "create directory " + dir.string() + " error=" + ec.message());
+    return created;
 }
 std::string dayName(int64_t ms) {
     check(ms >= kHmc2MinMs && ms < kHmc2EndMs, "timestamp outside UTC years 2000-2200");
@@ -1137,12 +1117,49 @@ struct Hmc2Store::Impl {
     };
     std::map<fs::path, Writer> writers;
     Bytes raw, compressed, frame;
-    std::set<fs::path> knownDirectories; // exist on disk (mkdirs cache)
+    // Directories whose own entry is known durable: they exist and their parent
+    // was fsynced afterwards. Inserted only after that sync succeeded, so a
+    // failed sync is retried by the next writer that needs the directory.
+    std::set<fs::path> durableDirectories;
     std::function<void()> afterFrameHeader;
-    explicit Impl(fs::path p) : root(std::move(p)) {
+    std::function<void(const fs::path &)> beforeDirectorySync;
+    fs::path rootDir; // absolute, normalized
+    void syncDirectory(const fs::path &dir) {
+        if (beforeDirectorySync) beforeDirectorySync(dir);
+        sync(dir, true);
+    }
+    // Makes `dir` (the store root or a directory below it) exist with a durable
+    // entry: every directory from the root down gets its parent fsynced once,
+    // existing ones included (an earlier process or a failed sync may have left
+    // an entry unsynced). The root's own entry lives in the root's parent, the
+    // highest directory synced. Missing ancestors above that are created with
+    // their parent synced; existing ones are never touched (no "/" or "C:\").
+    void makeDurable(const fs::path &dir) {
+        const auto path = fs::absolute(dir).lexically_normal();
+        if (durableDirectories.contains(path))
+            return;
+        const auto parent = path.parent_path();
+        if (path == rootDir) {
+            std::vector<fs::path> missing; // above the root, deepest first
+            for (fs::path at = parent; at != at.parent_path() && !fs::is_directory(at); at = at.parent_path())
+                missing.push_back(at);
+            for (auto it = missing.rbegin(); it != missing.rend(); ++it)
+                if (createDirectory(*it))
+                    syncDirectory(it->parent_path());
+        } else {
+            const auto rel = path.lexically_relative(rootDir);
+            check(!rel.empty() && *rel.begin() != "..", "directory outside the store root: " + path.string());
+            makeDurable(parent);
+        }
+        createDirectory(path);
+        if (parent != path) // a filesystem root has no parent entry to sync
+            syncDirectory(parent);
+        durableDirectories.insert(path);
+    }
+    explicit Impl(fs::path p) : root(std::move(p)), rootDir(fs::absolute(root).lexically_normal()) {
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
-        mkdirs(root, knownDirectories);
+        makeDurable(rootDir);
         int error = 0;
         lock = acquireFileLock(root / ".lock", error);
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
@@ -1187,7 +1204,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
     const auto base = filePath(i.root, r.header, r.bucketStartMs);
     auto found = i.writers.find(base);
     if (found == i.writers.end() || headerBody(found->second.header) != headerBody(r.header)) {
-        mkdirs(base.parent_path(), i.knownDirectories);
+        i.makeDurable(base.parent_path());
         auto candidates = files(base.parent_path(), dayName(r.bucketStartMs));
         fs::path path = base;
         bool reuse = false;
@@ -1286,6 +1303,9 @@ void Hmc2Store::append(const Hmc2Record &r) {
 }
 void Hmc2Store::afterFrameHeaderForTest(std::function<void()> hook) {
     impl_->afterFrameHeader = std::move(hook);
+}
+void Hmc2Store::beforeDirectorySyncForTest(std::function<void(const fs::path &)> hook) {
+    impl_->beforeDirectorySync = std::move(hook);
 }
 std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::string &symbol, const std::string &layer,
                                              int64_t tf, int64_t start, int64_t end) {
