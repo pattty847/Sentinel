@@ -178,7 +178,7 @@ std::vector<uint32_t> buildCells(const SparseColumns &composed, const TileGrid &
 size_t TileKeyHash::operator()(const TileKey &key) const {
     size_t h = std::hash<std::string>{}(key.symbol);
     auto mix = [&](size_t v) { h ^= v + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2); };
-    mix(std::hash<std::string>{}(key.layer));
+    mix(std::hash<std::string>{}(key.source));
     mix(std::hash<int64_t>{}(key.tfMs));
     mix(std::hash<int64_t>{}(key.tickUnits));
     mix(std::hash<int64_t>{}(key.tile));

@@ -33,10 +33,6 @@
 
 namespace heatmap {
 
-// Native chunk spans (S2): minute chunks span one UTC hour; deep hour chunks one UTC day.
-inline int64_t chunkSpanMs(int64_t levelMs) {
-    return levelMs == kMinuteMs ? kHourMs : levelMs == kHourMs ? kDayMs : 0;
-}
 // Approximate resident bytes of decoded columns (vectors' element storage and
 // per-object overhead; allocator slack not included).
 size_t sparseBytes(const SparseColumns &columns);

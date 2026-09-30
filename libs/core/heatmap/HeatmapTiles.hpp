@@ -125,7 +125,7 @@ std::vector<uint32_t> buildCells(const SparseColumns &composed, const TileGrid &
 
 // ------------------------------------------------------------------ caches
 struct TileKey {
-    std::string symbol, layer;
+    std::string symbol, source;
     int64_t tfMs = 0, tickUnits = 0, tile = 0;
     uint64_t sourceGeneration = 0; // combineGenerations of the chunks it was built from
     bool operator==(const TileKey &) const = default;
