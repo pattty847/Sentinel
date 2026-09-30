@@ -116,7 +116,20 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     wCpuBytes_ = cpuBytes;
     heatmap::gpu::HeatmapTileNode::Frame frame;
     const int64_t tf = tfMs();
-    wTiles_.forEach([&](const heatmap::tiles::TileKey &, const WTile &tile, size_t) { frame.tiles.push_back(tile.ref); });
+    const bool hybrid = prepMode_ == PrepMode::Hybrid;
+    wTiles_.forEach([&](const heatmap::tiles::TileKey &, const WTile &tile, size_t) {
+        if (!hybrid) { frame.tiles.push_back(tile.ref); return; }
+        // One renderer tile per span and tick (current, and the previous one while
+        // it may still be held or fading), all binned from the span's resident source.
+        for (const int64_t tick : {wTickUnits_, wPrevTickUnits_ != wTickUnits_ ? wPrevTickUnits_ : int64_t(0)}) {
+            if (tick <= 0) continue;
+            auto ref = tile.ref;
+            ref.id = tickTileId(tile.ref.id, tick);
+            ref.grid.displayTick = heatmap::fromUnits(tick, priceScale());
+            frame.tiles.push_back(std::move(ref));
+        }
+    });
+    auto drawId = [&](uint64_t entryId) { return hybrid ? tickTileId(entryId, wTickUnits_) : entryId; };
     const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, 0);
     for (int64_t t = visible.first; t < visible.end && wTickUnits_ > 0; ++t) {
         heatmap::gpu::TileSlot slot;
@@ -124,12 +137,13 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
         slot.endBucket = heatmap::tiles::tileFirstBucket(t + 1);
         slot.expected = heatmap::tiles::tileEndMs(t, tf) > availability_.oldestMs &&
                         heatmap::tiles::tileStartMs(t, tf) < availability_.endMs;
-        const TileBase base{tf, wTickUnits_, t};
+        const TileBase base{tf, keyTick(wTickUnits_), t};
         if (const auto it = wLatest_.find(base); it != wLatest_.end())
-            if (const auto *tile = wTiles_.peek(it->second)) (tileStale(*tile) ? slot.fallback : slot.primary) = tile->ref.id;
+            if (const auto *tile = wTiles_.peek(it->second))
+                (tileStale(*tile) ? slot.fallback : slot.primary) = drawId(tile->ref.id);
         if (!slot.fallback)
             if (const auto it = wPrevious_.find(base); it != wPrevious_.end())
-                if (const auto *tile = wTiles_.peek(it->second)) slot.fallback = tile->ref.id;
+                if (const auto *tile = wTiles_.peek(it->second)) slot.fallback = drawId(tile->ref.id);
         frame.visible.push_back(slot);
     }
     frame.key = targetKey();
@@ -242,7 +256,7 @@ bool LabItem::settled() const {
         if (wTickUnits_ <= 0 || !tileStats_->complete.load() || tileStats_->drawnKey.load() != targetKey()) return false;
         const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tfMs(), 0);
         for (int64_t t = visible.first; t < visible.end; ++t)
-            if (wInFlight_.count({tfMs(), wTickUnits_, t})) return false;
+            if (wInFlight_.count({tfMs(), keyTick(wTickUnits_), t})) return false;
         return true;
     }
     return !loading_ && source_.gpu && stats_->drawnSourceId.load() == source_.gpu->id &&
@@ -606,7 +620,7 @@ void LabItem::resetChunkedState() {
     wPrevious_.clear();
     wInFlight_.clear();
     chunkLoadsInFlight_.clear();
-    wAutoUnits_ = wTickUnits_ = 0;
+    wAutoUnits_ = wTickUnits_ = wPrevTickUnits_ = 0;
 }
 
 void LabItem::startChunked(bool preserveView) {
@@ -785,7 +799,10 @@ void LabItem::updateWholeChunk() {
     }
     if (tickUnits <= 0) tickUnits = wTickUnits_;
     if (tickUnits <= 0) { update(); return; }
-    if (tickUnits != wTickUnits_) emit tickChanged();
+    if (tickUnits != wTickUnits_) {
+        if (wTickUnits_ > 0) wPrevTickUnits_ = wTickUnits_;
+        emit tickChanged();
+    }
     wTickUnits_ = tickUnits;
     const double center = (view_.priceLo + view_.priceHi) * 0.5;
     const int64_t centerBin = recording::floorDiv(heatmap::toUnits(center, priceScale()), tickUnits);
@@ -801,7 +818,7 @@ void LabItem::updateWholeChunk() {
     const auto builder = prepMode_ == PrepMode::WholeChunkCpu ? TileBuilder::Cpu : TileBuilder::Gpu;
     for (const int64_t t : order) {
         if (heatmap::tiles::tileEndMs(t, tf) <= a.oldestMs || heatmap::tiles::tileStartMs(t, tf) >= a.endMs) continue;
-        const TileBase base{tf, tickUnits, t};
+        const TileBase base{tf, keyTick(tickUnits), t};
         if (wInFlight_.count(base)) continue;
         if (const auto it = wLatest_.find(base); it != wLatest_.end())
             if (const auto *tile = wTiles_.peek(it->second); tile && !tileStale(*tile)) {
@@ -842,9 +859,10 @@ void LabItem::updateWholeChunk() {
     // Budget: never evict what is in view at the target tick or still drawn
     // (a held picture during a transition, a fading set, a fallback).
     const auto drawnIds = tileStats_->drawnIds();
-    const std::set<uint64_t> drawn(drawnIds.begin(), drawnIds.end());
+    std::set<uint64_t> drawn;
+    for (const uint64_t id : drawnIds) drawn.insert(prepMode_ == PrepMode::Hybrid ? id >> 32 : id);
     const auto evicted = wTiles_.evict([&](const heatmap::tiles::TileKey &key) {
-        if (key.tfMs == tf && key.tickUnits == tickUnits && visible.contains(key.tile)) return true;
+        if (key.tfMs == tf && key.tickUnits == keyTick(tickUnits) && visible.contains(key.tile)) return true;
         const auto *tile = wTiles_.peek(key);
         return tile && drawn.count(tile->ref.id);
     });
@@ -868,10 +886,12 @@ void LabItem::acceptTile(const TileBase &base, const TileBuild &built) {
     tile.clipped = built.clipped;
     // Budget: what the tile holds on the GPU (hybrid: its resident source).
     const auto bytes = size_t(tile.ref.viewRows && built.source ? built.source->bytes() : tile.ref.cellBytes());
-    if (const auto it = wLatest_.find(base); it != wLatest_.end() && !(it->second == built.key))
+    auto key = built.key;
+    key.tickUnits = keyTick(key.tickUnits);
+    if (const auto it = wLatest_.find(base); it != wLatest_.end() && !(it->second == key))
         wPrevious_[base] = it->second;
-    wLatest_[base] = built.key;
-    wTiles_.insert(built.key, std::move(tile), bytes);
+    wLatest_[base] = key;
+    wTiles_.insert(key, std::move(tile), bytes);
     ++wBuilds_;
     wIntermediateHits_ += built.intermediateHit;
     wClipped_ += built.clipped;

@@ -398,14 +398,23 @@ QString cell(const QJsonObject &o, const char *key, int precision = 0) {
 }
 } // namespace
 
-int runB1Bench(const QString &jsonPath, bool quick) {
+int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modeNames) {
     if (!metalDeviceAvailable()) {
         std::cout << "{\"error\":\"No MTLDevice (Metal unavailable)\"}" << std::endl;
         return 2;
     }
     std::vector<Case> cases;
-    const std::vector<PrepMode> modes{PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu,
-                                      PrepMode::Hybrid};
+    std::vector<PrepMode> modes{PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu,
+                                PrepMode::Hybrid};
+    if (!modeNames.isEmpty()) {
+        modes.clear();
+        for (const auto &name : modeNames)
+            if (const auto mode = parsePrepMode(name.trimmed()); mode && *mode != PrepMode::Full) modes.push_back(*mode);
+        if (modes.empty()) {
+            std::cout << "{\"error\":\"--b1-modes names no benchmark mode\"}" << std::endl;
+            return 2;
+        }
+    }
     for (const int dpr : quick ? std::vector<int>{1} : std::vector<int>{1, 2})
         for (const QString &layer : {QStringLiteral("near"), QStringLiteral("deep")})
             for (const int tf : quick ? std::vector<int>{1, 60} : std::vector<int>{1, 5, 60})

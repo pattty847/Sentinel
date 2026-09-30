@@ -48,6 +48,7 @@ int main(int argc, char **argv) {
     parser.addOption({"charts", "Lab items side by side (1-4); extra items show 5m, 1h, 15m of the same symbol", "n", "1"});
     parser.addOption({"b1-bench", "Headless B1: scripted pan/zoom sessions in V and W modes; prints a table, writes JSON", "json"});
     parser.addOption({"b1-quick", "With --b1-bench: a reduced matrix (1x only, 1m and 1h)"});
+    parser.addOption({"b1-modes", "With --b1-bench: comma-separated prep modes to run (default: all four)", "modes"});
     parser.addOption({"window-screenshot", "Interactive window: once every chart has settled, grab the whole window "
                                            "(controls and debug panel included) to this PNG and exit", "path"});
     parser.process(app);
@@ -91,7 +92,8 @@ int main(int argc, char **argv) {
     if (!lab::parsePrepMode(options.prep)) return 2;
     options.charts = parser.value("charts").toInt(&ok);
     if (!ok || options.charts < 1 || options.charts > 4) return 2;
-    if (parser.isSet("b1-bench")) return lab::runB1Bench(parser.value("b1-bench"), parser.isSet("b1-quick"));
+    if (parser.isSet("b1-bench")) return lab::runB1Bench(parser.value("b1-bench"), parser.isSet("b1-quick"),
+                                                             parser.isSet("b1-modes") ? parser.value("b1-modes").split(',') : QStringList{});
     if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic, tf);
     if (parser.isSet("tick-sweep")) return lab::runTickSweep(options);
     if (parser.isSet("tick-change-frames")) return lab::runTickChangeSequence(options, parser.value("tick-change-frames"));

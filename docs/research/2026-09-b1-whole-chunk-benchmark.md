@@ -35,7 +35,7 @@ Why not V (the current viewport-clipped source):
 
 What H costs:
 - Its GPU memory is the raw entries of the tile spans in view plus prefetch, over the **whole** price
-  extent: deep 1m 97 MB at 1x and 182 MB at 2x, near 1m 24-48 MB. V clips rows, so at fine ticks
+  extent: deep 1m 98 MB at 1x and 173 MB at 2x, near 1m 25-46 MB. V clips rows, so at fine ticks
   V is smaller (deep 1m $10: 16 / 53 MB).
 - The obvious next step (not measured) is to band the deep sources by price as well as by time. Keep
   tiles for a band of rows around the view resident, instead of the full $21k-$335k book. That keeps
@@ -107,54 +107,54 @@ Correctness checks:
 
 | case | V | W-gpu | W-cpu | H |
 |---|---|---|---|---|
-| deep 1m $10 1x: warm first frame | 381 | 453 | 190 | 242 |
-| deep 1m $10 1x: tick change | **20** | 320 | 161 | **20** |
+| deep 1m $10 1x: warm first frame | 381 | 453 | 190 | 237 |
+| deep 1m $10 1x: tick change | **20** | 320 | 161 | **19** |
 | deep 1m $10 1x: large vertical pan | 324 | **18** | **18** | **17** |
-| deep 1m $10 1x: large horizontal pan | 423 | 277 | 245 | 274 |
-| deep 1m $10 1x: revised chunk | 395 | 125 | 118 | 146 |
-| deep 1m $100 2x: warm first frame | 1850 | 735 | 182 | 420 |
-| deep 1m $100 2x: tick change | **17** | 610 | 182 | 130 (budget evictions) |
-| deep 1m $100 2x: large vertical pan | 642 | 19 | 20 | 19 |
-| deep 1m $100 2x: revised chunk | 1660 | 160 | 110 | 151 |
-| deep 1m $100 2x: GPU MB end / peak | 511 / 511 | 56 / 56 | 34 / 34 | 226 / 266 |
-| near 1m $1 2x: tick change | **19** | 311 | 78 | **18** |
+| deep 1m $10 1x: large horizontal pan | 423 | 277 | 245 | 261 |
+| deep 1m $10 1x: revised chunk | 395 | 125 | 118 | 165 |
+| deep 1m $100 2x: warm first frame | 1850 | 735 | 182 | 411 |
+| deep 1m $100 2x: tick change | **17** | 610 | 182 | **17** |
+| deep 1m $100 2x: large vertical pan | 642 | 19 | 20 | 28 |
+| deep 1m $100 2x: revised chunk | 1660 | 160 | 110 | 149 |
+| deep 1m $100 2x: GPU MB end / peak | 511 / 511 | 56 / 56 | 34 / 34 | 279 / 279 |
+| near 1m $1 2x: tick change | **19** | 311 | 78 | **17** |
 | near 1m $10 2x: warm first frame | 545 | 412 | 75 | 132 |
-| near 1m $10 2x: revised chunk | 542 | 113 | 76 | 96 |
+| near 1m $10 2x: revised chunk | 542 | 113 | 76 | 73 |
 | any: small pans p95 (vertical) | 20 | 20 | 20 | 20 |
-| deep 1m: small horizontal pans p95 | 20 | 38-59 | 74-95 | 53-78 |
+| deep 1m: small horizontal pans p95 | 20 | 38-59 | 74-95 | 55-77 |
 
 ### Working set right after the first frame (MB, GPU / prep CPU)
 
 | px | layer | tf | tick | V gpu / cpu | W-gpu gpu / cpu | W-cpu gpu / cpu | H gpu / cpu |
 |---|---|---|---|---|---|---|---|
-| 1x | near | 1m | $1 | 5.2 / 3.7 | 24.4 / 22.0 | 21.2 / 90.9 | 24.4 / 22.0 |
-| 1x | near | 1m | $10 | 40.8 / 35.4 | 7.3 / 22.0 | 2.1 / 84.1 | 24.4 / 22.0 |
-| 1x | near | 1m | $100 | 41.9 / 36.4 | 5.6 / 22.0 | 0.2 / 82.5 | 24.4 / 22.0 |
+| 1x | near | 1m | $1 | 5.2 / 3.7 | 24.4 / 22.0 | 21.2 / 90.9 | 24.8 / 22.3 |
+| 1x | near | 1m | $10 | 40.8 / 35.4 | 7.3 / 22.0 | 2.1 / 84.1 | 24.8 / 22.3 |
+| 1x | near | 1m | $100 | 41.9 / 36.4 | 5.6 / 22.0 | 0.2 / 82.5 | 24.8 / 22.3 |
 | 1x | near | 5m | $1 | 4.3 / 3.0 | 27.0 / 21.4 | 20.5 / 128.7 | 23.6 / 21.4 |
 | 1x | near | 5m | $10 | 24.5 / 20.9 | 8.5 / 21.4 | 2.1 / 120.2 | 23.6 / 21.4 |
 | 1x | near | 5m | $100 | 25.0 / 21.4 | 6.7 / 21.4 | 0.2 / 119.7 | 23.6 / 21.4 |
 | 1x | near | 60m | $1 | 0.8 / 0.4 | 7.8 / 2.3 | 4.9 / 17.7 | 3.0 / 2.3 |
 | 1x | near | 60m | $10 | 2.9 / 2.3 | 3.4 / 2.3 | 0.5 / 13.3 | 3.0 / 2.3 |
 | 1x | near | 60m | $100 | 2.9 / 2.3 | 2.9 / 2.3 | 0.1 / 12.9 | 3.0 / 2.3 |
-| 1x | deep | 1m | $10 | 15.9 / 13.2 | 91.1 / 94.6 | 76.6 / 249.6 | 96.8 / 94.6 |
-| 1x | deep | 1m | $100 | 116.0 / 109.4 | 29.1 / 94.6 | 7.7 / 235.8 | 97.0 / 94.8 |
-| 1x | deep | 5m | $10 | 7.0 / 5.4 | 91.4 / 66.5 | 69.3 / 244.3 | 68.6 / 66.5 |
-| 1x | deep | 5m | $100 | 52.1 / 45.4 | 29.1 / 66.5 | 6.9 / 236.9 | 68.6 / 66.5 |
+| 1x | deep | 1m | $10 | 15.9 / 13.2 | 91.1 / 94.6 | 76.6 / 249.6 | 98.0 / 95.8 |
+| 1x | deep | 1m | $100 | 116.0 / 109.4 | 29.1 / 94.6 | 7.7 / 235.8 | 98.0 / 95.8 |
+| 1x | deep | 5m | $10 | 7.0 / 5.4 | 91.4 / 66.5 | 69.3 / 244.3 | 68.8 / 66.6 |
+| 1x | deep | 5m | $100 | 52.1 / 45.4 | 29.1 / 66.5 | 6.9 / 236.9 | 68.8 / 66.6 |
 | 1x | deep | 60m | $10 | 0.8 / 0.5 | 22.0 / 5.6 | 15.5 / 45.7 | 6.2 / 5.6 |
 | 1x | deep | 60m | $100 | 4.6 / 3.8 | 8.0 / 5.6 | 1.6 / 31.0 | 6.2 / 5.6 |
-| 2x | near | 1m | $1 | 20.3 / 15.3 | 42.1 / 40.9 | 38.8 / 157.2 | 48.5 / 40.9 |
-| 2x | near | 1m | $10 | 76.6 / 72.5 | 9.1 / 40.9 | 3.9 / 156.9 | 48.5 / 40.9 |
-| 2x | near | 1m | $100 | 76.6 / 72.5 | 5.8 / 40.9 | 0.4 / 153.1 | 48.5 / 40.9 |
-| 2x | near | 5m | $1 | 8.1 / 5.7 | 27.0 / 21.4 | 20.5 / 128.7 | 25.5 / 21.4 |
-| 2x | near | 5m | $10 | 25.8 / 21.4 | 8.5 / 21.4 | 2.1 / 120.4 | 25.5 / 21.4 |
-| 2x | near | 5m | $100 | 25.8 / 21.4 | 6.7 / 21.4 | 0.2 / 119.7 | 25.5 / 21.4 |
+| 2x | near | 1m | $1 | 20.3 / 15.3 | 42.1 / 40.9 | 38.8 / 157.2 | 46.4 / 38.9 |
+| 2x | near | 1m | $10 | 76.6 / 72.5 | 9.1 / 40.9 | 3.9 / 156.9 | 46.4 / 38.9 |
+| 2x | near | 1m | $100 | 76.6 / 72.5 | 5.8 / 40.9 | 0.4 / 153.1 | 46.4 / 38.9 |
+| 2x | near | 5m | $1 | 8.1 / 5.7 | 27.0 / 21.4 | 20.5 / 128.7 | 25.6 / 21.4 |
+| 2x | near | 5m | $10 | 25.8 / 21.4 | 8.5 / 21.4 | 2.1 / 120.4 | 25.6 / 21.4 |
+| 2x | near | 5m | $100 | 25.8 / 21.4 | 6.7 / 21.4 | 0.2 / 119.7 | 25.6 / 21.4 |
 | 2x | near | 60m | $1 | 1.2 / 0.7 | 7.8 / 2.3 | 4.9 / 15.3 | 3.4 / 2.3 |
 | 2x | near | 60m | $10 | 3.0 / 2.3 | 3.4 / 2.3 | 0.5 / 13.3 | 3.4 / 2.3 |
 | 2x | near | 60m | $100 | 3.0 / 2.3 | 2.9 / 2.3 | 0.1 / 12.9 | 3.4 / 2.3 |
-| 2x | deep | 1m | $10 | 52.5 / 43.9 | 153.3 / 174.4 | 130.7 / 259.6 | 182.0 / 174.4 |
-| 2x | deep | 1m | $100 | 253.8 / 244.2 | 35.7 / 174.6 | 13.1 / 241.8 | 182.1 / 174.6 |
-| 2x | deep | 5m | $10 | 13.6 / 10.5 | 91.4 / 66.5 | 69.3 / 251.0 | 70.6 / 66.5 |
-| 2x | deep | 5m | $100 | 68.4 / 59.2 | 29.1 / 66.5 | 6.9 / 234.1 | 70.6 / 66.5 |
+| 2x | deep | 1m | $10 | 52.5 / 43.9 | 153.3 / 174.4 | 130.7 / 259.6 | 172.6 / 165.4 |
+| 2x | deep | 1m | $100 | 253.8 / 244.2 | 35.7 / 174.6 | 13.1 / 241.8 | 172.6 / 165.4 |
+| 2x | deep | 5m | $10 | 13.6 / 10.5 | 91.4 / 66.5 | 69.3 / 251.0 | 70.7 / 66.6 |
+| 2x | deep | 5m | $100 | 68.4 / 59.2 | 29.1 / 66.5 | 6.9 / 234.1 | 70.7 / 66.6 |
 | 2x | deep | 60m | $10 | 1.4 / 0.9 | 22.0 / 5.6 | 15.5 / 45.7 | 6.7 / 5.6 |
 | 2x | deep | 60m | $100 | 6.0 / 5.0 | 8.0 / 5.6 | 1.6 / 31.8 | 6.7 / 5.6 |
 
@@ -184,12 +184,12 @@ whole-chunk-cpu near      4 |      8.2      0.5     88.6    252.6     44     18 
 whole-chunk-cpu deep      1 |    176.5     23.0    206.2    224.9     26      0 |       0      479
 whole-chunk-cpu deep      2 |    230.4     15.3    250.6    252.8     34      1 |       0      580
 whole-chunk-cpu deep      4 |    284.5     15.3    312.4    224.9     47     19 |       0      729
-hybrid          near      1 |     60.4      0.0     52.9     54.5     26      0 |       0      279
-hybrid          near      2 |     79.4      0.0     69.7     71.2     34      4 |       0      275
-hybrid          near      4 |     91.7      0.0     88.6     81.6     44     24 |       0      309
-hybrid          deep      1 |    230.0      0.0    206.2    224.2     26      0 |       0      727
-hybrid          deep      2 |    287.3      0.0    250.6    252.7     34      7 |       0      767
-hybrid          deep      4 |    317.1      0.0    312.4    253.2     47     11 |       0      754
+hybrid          near      1 |     60.8      0.0     53.1     54.7     26      0 |       0      412
+hybrid          near      2 |     79.6      0.0     69.9     71.5     34      7 |       0      305
+hybrid          near      4 |     91.9      0.0     88.8     81.9     44     22 |       0      396
+hybrid          deep      1 |    230.8      0.0    206.9    224.9     26      0 |       0      785
+hybrid          deep      2 |    288.2      0.0    251.3    253.5     34      9 |       0      866
+hybrid          deep      4 |    318.4      0.0    313.1    250.4     47     20 |       0      924
 ```
 
 The decoded chunk store is the dominant shared cost: deep is 206 MB for the chunks one 1m chart needs,
@@ -198,10 +198,10 @@ sub-linearly because coarser timeframes need fewer entries.
 
 ## Budget inputs (owner item 9)
 
-- **One large chart (H, 2x, deep 1m):** about 180 MB of GPU for view plus prefetch. The tile LRU
-  climbed to its 256 MiB cap during a session (other ticks, earlier positions). A 256 MiB per-chart
-  cap is tight for 2x deep 1m: evictions caused the 130 ms tick change above.
-- **Several charts:** 4 deep charts with H: 317 MB GPU, 312 MB decoded chunks, 253 MB intermediates
+- **One large chart (H, 2x, deep 1m):** about 173 MB of GPU for view plus prefetch. Over a session
+  the tile LRU reaches its 256 MiB cap and goes above it (279 MB): tiles in view and tiles still drawn
+  are protected. A per-chart cap of about 320 MiB fits 2x deep 1m without evicting tiles in view.
+- **Several charts:** 4 deep charts with H: 318 MB GPU, 312 MB decoded chunks, 253 MB intermediates
   (capped). Near is about a third of that.
 - **Active+spare:** V keeps active and spare source sets. Its measured end-of-session GPU (up to
   511 MB) includes the spare's capacity. H has no spare set: a tick change re-bins from the resident
@@ -217,8 +217,10 @@ sub-linearly because coarser timeframes need fewer entries.
   differ slightly, and the "revised chunk" step re-reads real new minutes.
 - "Cold" means that our caches are empty; the OS file cache on the T7 was warm.
 - Only Metal was tested (no D3D11 run: FM-098).
-- The H LRU counts a resident source once per tick key that uses it (it overcounts when two ticks
-  are cached). The source pool itself is released only when no kept tile references it.
+- The first full run cached H tiles per span and tick, which counted each resident source once per
+  cached tick. Evictions then made the 2x deep 1m tick change take 130-134 ms. H tiles are now cached
+  per span, and the H rows (sessions and multi-chart) come from a rerun with that fix
+  (`--b1-modes hybrid`); the other modes' rows come from the full run of the same day.
 - The W resolution indicator in the lab is simplified (it names the grid, not the time range).
 - The price-banded H variant recommended above is **not measured**.
 - The chunk "hit%" column counts store `get()` calls. W/H call `get()` per tile (each hour chunk
@@ -231,7 +233,7 @@ sub-linearly because coarser timeframes need fewer entries.
 # the interactive lab: toggle "Prep" in the toolbar (full | viewport | whole-chunk | whole-chunk CPU | hybrid)
 ./build/mac-clang/apps/sentinel-lab/sentinel-lab --layer deep --tf 1 --prep hybrid
 ./build/mac-clang/apps/sentinel-lab/sentinel-lab --layer deep --charts 4 --prep viewport
-# the benchmark (about 7 min; --b1-quick is 1x, 1m and 1h only, about 1.5 min)
+# the benchmark (about 7 min; --b1-quick is 1x, 1m and 1h only, about 1.5 min; --b1-modes hybrid,viewport picks modes)
 ./build/mac-clang/apps/sentinel-lab/sentinel-lab --b1-bench b1.json
 ```
 
@@ -247,121 +249,121 @@ mode            px lay    tf  tick | ttfvCold ttfvWarm |  vPan95  vPanBig |  hPa
 viewport        1x near   1m    $1 |      273      154 |      20      101 |      20      285 |       17      155 |    11.3    11.3     3.7 |     85
 whole-chunk     1x near   1m    $1 |      285      264 |      20       20 |      21      244 |      165      112 |    82.9    82.9    69.3 |     33
 whole-chunk-cpu 1x near   1m    $1 |      161       93 |      20       20 |      37      152 |       57       97 |    77.5    77.5   254.0 |     68
-hybrid          1x near   1m    $1 |      189       94 |      20       20 |      21      143 |       20       90 |    78.5    78.5    69.3 |     31
+hybrid          1x near   1m    $1 |      231       93 |      20       19 |      20      152 |       20       73 |    80.8    80.8    67.7 |     43
 viewport        1x near   1m   $10 |      415      305 |      21       95 |      20      422 |       20      289 |    81.8    81.8    35.4 |     85
 whole-chunk     1x near   1m   $10 |      276      258 |      20       19 |      20      268 |      159      110 |    13.1    13.1    69.3 |     38
 whole-chunk-cpu 1x near   1m   $10 |      147       76 |      21       20 |      37      115 |       38       97 |     7.8     7.8   250.2 |     66
-hybrid          1x near   1m   $10 |      183       94 |      20       19 |      21      143 |       20       96 |    78.5    78.5    69.3 |     36
+hybrid          1x near   1m   $10 |      186       98 |      20       18 |      20      148 |       19       94 |    80.8    80.8    67.7 |     40
 viewport        1x near   1m  $100 |      412      304 |      20       96 |      20      430 |       18      282 |    84.0    84.0    36.4 |     85
 whole-chunk     1x near   1m  $100 |      285      266 |      20       16 |      20      272 |      166      123 |     6.2     6.2    69.3 |     36
 whole-chunk-cpu 1x near   1m  $100 |      163       77 |      20       20 |      37      110 |       38       72 |     0.8     0.8   249.9 |     65
-hybrid          1x near   1m  $100 |      191      112 |      20       20 |      21      153 |       19       95 |    78.5    78.5    69.3 |     31
+hybrid          1x near   1m  $100 |      187       95 |      21       19 |      20      149 |       18       91 |    80.8    80.8    67.7 |     38
 viewport        1x near   5m    $1 |      412      125 |      21       79 |      20        - |       19      144 |     8.7     8.7     3.0 |    100
 whole-chunk     1x near   5m    $1 |      332      279 |      20       19 |      20        - |      167       98 |    39.4    39.4    22.2 |    100
 whole-chunk-cpu 1x near   5m    $1 |      196       95 |      20       20 |      20        - |       58       95 |    32.9    32.9   126.2 |    100
-hybrid          1x near   5m    $1 |      209       94 |      20       17 |      20        - |       16       93 |    26.6    26.6    22.2 |    100
+hybrid          1x near   5m    $1 |      203       98 |      20       19 |      21        - |       17       96 |    26.8    26.8    22.3 |    100
 viewport        1x near   5m   $10 |      487      228 |      20       73 |      20        - |       20      208 |    49.2    49.2    20.9 |    100
 whole-chunk     1x near   5m   $10 |      351      259 |      20       17 |      20        - |      175       91 |     9.8     9.8    22.2 |    100
 whole-chunk-cpu 1x near   5m   $10 |      191       77 |      20       19 |      20        - |       36       92 |     3.3     3.3   124.3 |    100
-hybrid          1x near   5m   $10 |      200       83 |      21       18 |      21        - |       17       92 |    26.6    26.6    22.2 |    100
+hybrid          1x near   5m   $10 |      209       95 |      20       20 |      20        - |       19       70 |    26.8    26.8    22.3 |    100
 viewport        1x near   5m  $100 |      500      236 |      20       74 |      20        - |       17      223 |    50.3    50.3    21.4 |    100
 whole-chunk     1x near   5m  $100 |      334      281 |      20       17 |      20        - |      159       93 |     6.8     6.8    22.2 |    100
 whole-chunk-cpu 1x near   5m  $100 |      201       72 |      20       20 |      20        - |       56       95 |     0.3     0.3   124.1 |    100
-hybrid          1x near   5m  $100 |      202       95 |      21       19 |      20        - |       19       93 |    26.6    26.6    22.2 |    100
+hybrid          1x near   5m  $100 |      201       91 |      20       19 |      21        - |       18       72 |    26.8    26.8    22.3 |    100
 viewport        1x near  60m    $1 |      348       72 |      21       56 |      20        - |       18       90 |     1.3     1.3     0.4 |    100
 whole-chunk     1x near  60m    $1 |      283      115 |      20       23 |      21        - |       39       89 |    12.7    12.7     3.2 |    100
 whole-chunk-cpu 1x near  60m    $1 |      267       58 |      20       20 |      20        - |       36       91 |     9.9     9.9    20.3 |    100
-hybrid          1x near  60m    $1 |      267       58 |      20       19 |      20        - |       20       76 |     4.6     4.6     3.2 |    100
+hybrid          1x near  60m    $1 |      277       57 |      20       20 |      21        - |       21       94 |     4.7     4.7     3.2 |    100
 viewport        1x near  60m   $10 |      369      112 |      20       61 |      20        - |       17       89 |     5.5     5.5     2.3 |    100
 whole-chunk     1x near  60m   $10 |      288      107 |      20       20 |      20        - |       36       98 |     3.8     3.8     3.2 |    100
 whole-chunk-cpu 1x near  60m   $10 |      275       51 |      20       19 |      20        - |       39      112 |     1.0     1.0    18.1 |    100
-hybrid          1x near  60m   $10 |      262       53 |      20       18 |      20        - |       18      110 |     4.6     4.6     3.2 |    100
+hybrid          1x near  60m   $10 |      262       58 |      20       20 |      20        - |       19      109 |     4.7     4.7     3.2 |    100
 viewport        1x near  60m  $100 |      385      114 |      20       58 |      20        - |       20      114 |     5.6     5.6     2.3 |    100
 whole-chunk     1x near  60m  $100 |      288      115 |      20       19 |      20        - |       41      114 |     3.0     3.0     3.2 |    100
 whole-chunk-cpu 1x near  60m  $100 |      281       56 |      20       20 |      20        - |       40      118 |     0.1     0.1    17.9 |    100
-hybrid          1x near  60m  $100 |      268       59 |      20       20 |      20        - |       18      114 |     4.6     4.6     3.2 |    100
+hybrid          1x near  60m  $100 |      264       58 |      20       20 |      20        - |       17       91 |     4.7     4.7     3.2 |    100
 viewport        1x deep   1m   $10 |      594      381 |      21      324 |      20      423 |       20      395 |    31.6    31.6    13.2 |     84
 whole-chunk     1x deep   1m   $10 |      505      453 |      20       18 |      56      277 |      320      125 |   275.1   275.1   248.0 |     36
 whole-chunk-cpu 1x deep   1m   $10 |      280      190 |      20       18 |      95      245 |      161      118 |   252.9   253.0   263.3 |     70
-hybrid          1x deep   1m   $10 |      422      242 |      20       17 |      55      274 |       20      146 |   166.2   248.9   248.0 |     38
+hybrid          1x deep   1m   $10 |      408      237 |      20       17 |      56      261 |       19      165 |   263.6   263.6   250.5 |     40
 viewport        1x deep   1m  $100 |     1094      827 |      20      363 |      20      669 |       17      760 |   232.2   232.2   109.4 |     84
 whole-chunk     1x deep   1m  $100 |      520      454 |      20       20 |      59      278 |      307      148 |    49.9    49.9   248.0 |     36
 whole-chunk-cpu 1x deep   1m  $100 |      221      109 |      20       17 |      76      153 |      118       94 |    27.6    27.6   236.4 |     68
-hybrid          1x deep   1m  $100 |      359      268 |      20       20 |      56      250 |       19      150 |   166.5   249.1   248.3 |     36
+hybrid          1x deep   1m  $100 |      342      241 |      21       19 |      55      242 |       18      129 |   263.6   263.6   250.5 |     38
 viewport        1x deep   5m   $10 |      724      249 |      21      236 |      20        - |       18      282 |    14.2    14.2     5.4 |    100
 whole-chunk     1x deep   5m   $10 |      472      387 |      20       19 |      20        - |      237      107 |   133.7   133.7    69.6 |    100
 whole-chunk-cpu 1x deep   5m   $10 |      291      168 |      20       17 |      20        - |      107       93 |   111.5   111.5   244.0 |    100
-hybrid          1x deep   5m   $10 |      333      196 |      20       20 |      20        - |       18      111 |    74.0    74.0    69.6 |    100
+hybrid          1x deep   5m   $10 |      333      206 |      20       19 |      21        - |       20       74 |    74.4    74.4    69.9 |    100
 viewport        1x deep   5m  $100 |      849      420 |      20      207 |      20        - |       20      406 |   104.4   104.4    45.4 |    100
 whole-chunk     1x deep   5m  $100 |      462      397 |      20       18 |      20        - |      247       93 |    33.3    33.3    69.6 |    100
 whole-chunk-cpu 1x deep   5m  $100 |      254       89 |      21       20 |      20        - |      107       85 |    11.2    11.2   237.1 |    100
-hybrid          1x deep   5m  $100 |      326      208 |      20       19 |      20        - |       20      110 |    74.0    74.0    69.6 |    100
+hybrid          1x deep   5m  $100 |      310      210 |      20       18 |      21        - |       19       96 |    74.4    74.4    69.9 |    100
 viewport        1x deep  60m   $10 |      117       54 |      20       56 |      20        - |       20      115 |     1.5     1.5     0.5 |    100
 whole-chunk     1x deep  60m   $10 |      148      114 |      21       16 |      20        - |       38      115 |    37.5    37.5     8.2 |    100
 whole-chunk-cpu 1x deep  60m   $10 |       92       55 |      21       18 |      20        - |       59       93 |    31.0    31.0    52.5 |    100
-hybrid          1x deep  60m   $10 |       90       59 |      20       20 |      20        - |       20      113 |     9.6     9.6     8.2 |    100
+hybrid          1x deep  60m   $10 |      115       58 |      20       19 |      21        - |       19       75 |     9.7     9.7     8.2 |    100
 viewport        1x deep  60m  $100 |      129       96 |      21       55 |      20        - |       18      105 |     9.0     9.0     3.8 |    100
 whole-chunk     1x deep  60m  $100 |      153      113 |      20       20 |      20        - |       38      116 |     9.6     9.6     8.2 |    100
 whole-chunk-cpu 1x deep  60m  $100 |       96       73 |      20       18 |      20        - |       56       94 |     3.1     3.1    45.5 |    100
-hybrid          1x deep  60m  $100 |       91       56 |      20       19 |      20        - |       20       97 |     9.6     9.6     8.2 |    100
+hybrid          1x deep  60m  $100 |       92       54 |      20       18 |      20        - |       18       95 |     9.7     9.7     8.2 |    100
 viewport        2x near   1m    $1 |      513      269 |      20      259 |      20        - |       19      267 |    42.1    42.1    15.3 |    100
 whole-chunk     2x near   1m    $1 |      486      412 |      20       16 |      36        - |      311      106 |   100.3   100.3    79.3 |     53
 whole-chunk-cpu 2x near   1m    $1 |      217      148 |      20       20 |      72        - |       78       95 |    94.8    94.8   259.0 |     85
-hybrid          2x near   1m    $1 |      219      154 |      20       19 |      38        - |       18       73 |   102.6   102.6    79.3 |     53
+hybrid          2x near   1m    $1 |      219      129 |      20       18 |      59        - |       17       92 |   110.2   110.2    79.8 |     50
 viewport        2x near   1m   $10 |      776      545 |      20      172 |      20        - |       19      542 |   154.8   154.8    72.5 |    100
 whole-chunk     2x near   1m   $10 |      485      412 |      20       17 |      38        - |      321      113 |    15.0    15.0    79.3 |     50
 whole-chunk-cpu 2x near   1m   $10 |      193       75 |      20       17 |      57        - |       53       76 |     9.5     9.5   255.1 |     85
-hybrid          2x near   1m   $10 |      255      132 |      20       18 |      39        - |       19       96 |   102.6   102.6    79.3 |     53
+hybrid          2x near   1m   $10 |      225      132 |      20       18 |      56        - |       18       73 |   110.2   110.2    79.8 |     50
 viewport        2x near   1m  $100 |      744      554 |      20      153 |      20        - |       17      495 |   154.8   154.8    72.5 |    100
 whole-chunk     2x near   1m  $100 |      499      424 |      20       20 |      37        - |      327      135 |     6.4     6.4    79.3 |     53
 whole-chunk-cpu 2x near   1m  $100 |      203       94 |      20       17 |      60        - |       56       75 |     1.0     1.0   254.8 |     85
-hybrid          2x near   1m  $100 |      243      156 |      20       19 |      39        - |       19       92 |   102.6   102.6    79.3 |     53
+hybrid          2x near   1m  $100 |      228      128 |      20       17 |      53        - |       18       73 |   110.2   110.2    79.8 |     50
 viewport        2x near   5m    $1 |      404      134 |      20      131 |      20        - |       19      151 |    16.9    16.9     5.7 |    100
 whole-chunk     2x near   5m    $1 |      332      277 |      20       20 |      20        - |      168       90 |    39.4    39.4    22.2 |    100
 whole-chunk-cpu 2x near   5m    $1 |      239       93 |      20       19 |      20        - |       54       91 |    32.9    32.9   126.2 |    100
-hybrid          2x near   5m    $1 |      222       90 |      20       19 |      20        - |       20       76 |    30.8    30.8    22.2 |    100
+hybrid          2x near   5m    $1 |      209       93 |      20       18 |      20        - |       19       72 |    31.0    31.0    22.3 |    100
 viewport        2x near   5m   $10 |      504      227 |      20      113 |      20        - |       19      261 |    52.3    52.3    21.4 |    100
 whole-chunk     2x near   5m   $10 |      330      278 |      21       20 |      20        - |      169       98 |     9.8     9.8    22.2 |    100
 whole-chunk-cpu 2x near   5m   $10 |      200      212 |      20       19 |      20        - |       38       92 |     3.3     3.3   124.3 |    100
-hybrid          2x near   5m   $10 |      258      111 |      20       19 |      20        - |       17       93 |    30.8    30.8    22.2 |    100
+hybrid          2x near   5m   $10 |      209       94 |      20       20 |      20        - |       17       94 |    31.1    31.1    22.3 |    100
 viewport        2x near   5m  $100 |      519      216 |      20       96 |      20        - |       20      286 |    52.3    52.3    21.4 |    100
 whole-chunk     2x near   5m  $100 |      353      304 |      20       20 |      20        - |      159       92 |     6.8     6.8    22.2 |    100
 whole-chunk-cpu 2x near   5m  $100 |      206       75 |      20       17 |      20        - |       54       96 |     0.3     0.3   124.1 |    100
-hybrid          2x near   5m  $100 |      222       91 |      20       17 |      20        - |       17       74 |    30.8    30.8    22.2 |    100
+hybrid          2x near   5m  $100 |      210       94 |      20       18 |      20        - |       18       95 |    31.1    31.1    22.3 |    100
 viewport        2x near  60m    $1 |      366       75 |      20       77 |      20        - |       17      126 |     2.3     2.3     0.7 |    100
 whole-chunk     2x near  60m    $1 |      325      165 |      20       18 |      20        - |       37       92 |    12.7    12.7     3.2 |    100
 whole-chunk-cpu 2x near  60m    $1 |      389       90 |      20       17 |      20        - |       40       88 |     9.9     9.9    20.3 |    100
-hybrid          2x near  60m    $1 |      311       71 |      20       18 |      20        - |       17      113 |     5.7     5.7     3.2 |    100
+hybrid          2x near  60m    $1 |      265       55 |      20       19 |      20        - |       19       94 |     5.9     5.9     3.2 |    100
 viewport        2x near  60m   $10 |      397      115 |      21       52 |      20        - |       17      133 |     5.8     5.8     2.3 |    100
 whole-chunk     2x near  60m   $10 |      283      108 |      20       18 |      21        - |       37      115 |     3.8     3.8     3.2 |    100
 whole-chunk-cpu 2x near  60m   $10 |      261       81 |      20       18 |      20        - |       39      111 |     1.0     1.0    18.1 |    100
-hybrid          2x near  60m   $10 |      283       56 |      20       20 |      21        - |       19      109 |     5.7     5.7     3.2 |    100
+hybrid          2x near  60m   $10 |      285       53 |      20       20 |      20        - |       17       70 |     5.9     5.9     3.2 |    100
 viewport        2x near  60m  $100 |      387      111 |      20       59 |      20        - |       19      116 |     5.8     5.8     2.3 |    100
 whole-chunk     2x near  60m  $100 |      283      116 |      20       17 |      20        - |       37      115 |     3.0     3.0     3.2 |    100
 whole-chunk-cpu 2x near  60m  $100 |      290       79 |      20       17 |      20        - |       38      109 |     0.1     0.1    17.9 |    100
-hybrid          2x near  60m  $100 |      299       57 |      20       18 |      20        - |       18      116 |     5.7     5.7     3.2 |    100
+hybrid          2x near  60m  $100 |      320       73 |      20       18 |      20        - |       20       93 |     5.9     5.9     3.2 |    100
 viewport        2x deep   1m   $10 |     1282      904 |      20      705 |      20        - |       19      733 |   106.5   106.5    43.9 |    100
 whole-chunk     2x deep   1m   $10 |      914      756 |      20       17 |      38        - |      619      137 |   276.1   276.1   254.1 |     60
 whole-chunk-cpu 2x deep   1m   $10 |      412      297 |      20       17 |      77        - |      216      109 |   253.5   253.5   229.7 |     85
-hybrid          2x deep   1m   $10 |      571      442 |      20       19 |      53        - |      134      129 |   226.1   268.7   254.1 |     60
+hybrid          2x deep   1m   $10 |      582      419 |      20       18 |      77        - |       19      131 |   278.7   278.7   249.5 |     50
 viewport        2x deep   1m  $100 |     2251     1850 |      20      642 |      20        - |       17     1660 |   511.4   511.4   244.3 |    100
 whole-chunk     2x deep   1m  $100 |      973      735 |      20       19 |      58        - |      610      160 |    56.4    56.4   254.4 |     60
 whole-chunk-cpu 2x deep   1m  $100 |      353      182 |      20       20 |      74        - |      182      110 |    33.8    33.8   224.0 |     85
-hybrid          2x deep   1m  $100 |      601      420 |      20       19 |      78        - |      130      151 |   226.4   265.6   254.4 |     60
+hybrid          2x deep   1m  $100 |      584      411 |      20       28 |      72        - |       17      149 |   278.7   278.7   249.5 |     50
 viewport        2x deep   5m   $10 |      768      286 |      20      248 |      20        - |       19      287 |    27.9    27.9    10.5 |    100
 whole-chunk     2x deep   5m   $10 |      530      357 |      20       19 |      20        - |      232      107 |   133.7   133.7    69.6 |    100
 whole-chunk-cpu 2x deep   5m   $10 |      518      206 |      20       18 |      20        - |      109       95 |   111.5   111.5   262.8 |    100
-hybrid          2x deep   5m   $10 |      402      202 |      20       18 |      20        - |       17      110 |    78.1    78.1    69.6 |    100
+hybrid          2x deep   5m   $10 |      356      200 |      20       20 |      20        - |       18       96 |    78.6    78.6    69.9 |    100
 viewport        2x deep   5m  $100 |     1006      500 |      20      209 |      20        - |       18      492 |   138.0   138.0    59.2 |    100
 whole-chunk     2x deep   5m  $100 |      484      365 |      20       16 |      20        - |      242      117 |    33.3    33.3    69.6 |    100
 whole-chunk-cpu 2x deep   5m  $100 |      264       94 |      20       19 |      20        - |      111       91 |    11.2    11.2   239.5 |    100
-hybrid          2x deep   5m  $100 |      353      198 |      20       17 |      20        - |       19      107 |    78.1    78.1    69.6 |    100
+hybrid          2x deep   5m  $100 |      532      205 |      20       17 |      20        - |       19       75 |    78.6    78.6    69.9 |    100
 viewport        2x deep  60m   $10 |      134      108 |      20       58 |      20        - |       18       92 |     2.6     2.6     0.9 |    100
 whole-chunk     2x deep  60m   $10 |      170      110 |      20       20 |      20        - |       38       94 |    37.5    37.5     8.2 |    100
 whole-chunk-cpu 2x deep  60m   $10 |      110       73 |      20       19 |      20        - |       57      109 |    31.0    31.0    52.5 |    100
-hybrid          2x deep  60m   $10 |      111       57 |      20       17 |      20        - |       19      113 |    10.6    10.6     8.2 |    100
+hybrid          2x deep  60m   $10 |      114       57 |      20       18 |      20        - |       18       90 |    10.9    10.9     8.2 |    100
 viewport        2x deep  60m  $100 |      131       92 |      20       56 |      20        - |       19      111 |    11.8    11.8     5.0 |    100
 whole-chunk     2x deep  60m  $100 |      152      113 |      20       20 |      20        - |       36       90 |     9.6     9.6     8.2 |    100
 whole-chunk-cpu 2x deep  60m  $100 |       93       73 |      20       16 |      20        - |       37      109 |     3.1     3.1    45.5 |    100
-hybrid          2x deep  60m  $100 |       91       58 |      20       17 |      20        - |       17      111 |    10.6    10.6     8.2 |    100
+hybrid          2x deep  60m  $100 |      112       58 |      20       19 |      20        - |       20       71 |    10.9    10.9     8.2 |    100
 ```

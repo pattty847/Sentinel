@@ -1,5 +1,6 @@
 #pragma once
 #include <QString>
+#include <QStringList>
 
 namespace lab {
 // Slice B1 headless benchmark (docs/research/2026-09-b1-whole-chunk-benchmark.md).
@@ -14,5 +15,6 @@ namespace lab {
 //   Auto across a tick change; a revised newest chunk;
 // then multi-chart memory with 1, 2 and 4 items sharing the chunk store.
 // Prints a comparison table to stdout and writes all numbers to `jsonPath`.
-int runB1Bench(const QString &jsonPath, bool quick);
+// `modes`: prep mode names to run (empty = viewport, whole-chunk, whole-chunk-cpu, hybrid).
+int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modes = {});
 } // namespace lab
