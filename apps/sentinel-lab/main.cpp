@@ -123,11 +123,6 @@ int main(int argc, char **argv) {
                 for (auto *child : item->childItems()) collect(child);
             };
             collect(window->contentItem());
-            static int polls = 0;
-            if (qEnvironmentVariableIsSet("SENTINEL_LAB_DEBUG_WAIT") && ++polls % 30 == 0)
-                for (auto *item : items)
-                    std::cerr << "waiting: " << item->objectName().toStdString() << " settled=" << item->settled()
-                              << " " << QJsonDocument(QJsonObject::fromVariantMap(item->metrics())).toJson(QJsonDocument::Compact).constData() << "\n";
             if (items.isEmpty() || !std::all_of(items.begin(), items.end(), [](lab::LabItem *i) { return i->settled(); }))
                 return;
             poll->stop();
