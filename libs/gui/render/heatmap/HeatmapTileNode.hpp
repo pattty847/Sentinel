@@ -32,6 +32,10 @@ struct TileRef {
     BinGrid grid;    // absolute tile grid; rows include the two sentinel rows
     std::shared_ptr<const std::vector<uint32_t>> cells; // CPU-built cells, or
     std::shared_ptr<const GpuSource> source;            // the tile's source, binned on the GPU
+    // Hybrid (B1): the source stays resident on the GPU (one per tile span, shared
+    // by every tick) and the node bins only the rows around the view (grid.rows
+    // is ignored), re-binning in place when the view leaves them.
+    bool viewRows = false;
     uint64_t cellBytes() const { return uint64_t(grid.columns) * grid.rows * 4; }
 };
 struct TileSlot {
@@ -45,6 +49,7 @@ struct TileSlot {
 struct HeatmapTileStats {
     std::atomic<uint64_t> frames{0}, tilesUploaded{0}, tilesBinned{0}, uploadBytes{0}, errors{0};
     std::atomic<uint64_t> residentTiles{0}, residentBytes{0}, gpuBytes{0}, binnerBytes{0};
+    std::atomic<uint64_t> rebinnedTiles{0}; // hybrid: in-place re-bins after the view left a tile's rows
     std::atomic<uint32_t> slotCount{0}, drawnPrimary{0}, drawnFallback{0}, loadingSlots{0};
     std::atomic<bool> complete{false}, holding{false}, crossfading{false};
     std::atomic<uint64_t> drawnKey{0};
@@ -115,10 +120,13 @@ private:
     void noteError(const QString &error);
     void releaseAll();
     bool ensureResident(const TileRef &ref, QRhiCommandBuffer *cb, uint64_t &budget, bool &gpuBusy);
+    bool binBlocks(GpuTile &tile, const TileRef &ref, QRhiCommandBuffer *cb, bool viewRows);
+    bool viewRowsCovered(const GpuTile &tile) const;
     bool ensurePipeline(QRhiRenderPassDescriptor *pass, int samples);
     void addTileDraw(QRhiResourceUpdateBatch *updates, GpuTile &tile, int64_t firstBucket, int64_t endBucket,
                      int64_t tfMs, float opacity);
     void addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t firstBucket, int64_t endBucket, int64_t tfMs);
+    bool addLoadingSlot();
     bool subRect(int64_t firstBucket, int64_t endBucket, int64_t tfMs, QRectF *rect, ViewWindow *sub) const;
 };
 } // namespace heatmap::gpu

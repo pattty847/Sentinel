@@ -21,11 +21,13 @@ QString prepModeName(PrepMode mode) {
     case PrepMode::Viewport: return QStringLiteral("viewport");
     case PrepMode::WholeChunkGpu: return QStringLiteral("whole-chunk");
     case PrepMode::WholeChunkCpu: return QStringLiteral("whole-chunk-cpu");
+    case PrepMode::Hybrid: return QStringLiteral("hybrid");
     }
     return {};
 }
 std::optional<PrepMode> parsePrepMode(const QString &name) {
-    for (const auto mode : {PrepMode::Full, PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu})
+    for (const auto mode : {PrepMode::Full, PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu,
+                            PrepMode::Hybrid})
         if (prepModeName(mode) == name) return mode;
     return std::nullopt;
 }
@@ -107,7 +109,7 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     wTiles_.forEachMutable([&](const heatmap::tiles::TileKey &, WTile &tile, size_t) {
         if (resident.count(tile.ref.id)) {
             tile.ref.cells.reset();
-            tile.ref.source.reset();
+            if (!tile.ref.viewRows) tile.ref.source.reset(); // hybrid tiles re-bin from their resident source
         }
         if (tile.ref.cells) cpuBytes += tile.ref.cells->size() * 4;
     });
@@ -806,6 +808,13 @@ void LabItem::updateWholeChunk() {
                 wTiles_.find(it->second); // touch: in or next to the view
                 continue;
             }
+        if (builder == TileBuilder::Gpu) {
+            // Spans whose chunks and GpuSource are cached need no worker round trip.
+            if (const auto cached = cachedGpuTile(layerName, tf, tickUnits, t, centerBin)) {
+                acceptTile(base, *cached);
+                continue;
+            }
+        }
         wInFlight_.insert(base);
         QThreadPool::globalInstance()->start([=] {
             std::optional<TileBuild> built;
@@ -825,24 +834,7 @@ void LabItem::updateWholeChunk() {
                     }
                     return;
                 }
-                WTile tile;
-                tile.ref.id = nextTileId.fetch_add(1);
-                tile.ref.grid = {built->grid.tfMs, built->grid.firstBucket, built->grid.columns, built->grid.tick,
-                                 built->grid.firstBin, built->grid.rows};
-                tile.ref.cells = built->cells;
-                tile.ref.source = built->source;
-                tile.chunkGenerations = built->chunkGenerations;
-                tile.clipped = built->clipped;
-                const auto bytes = size_t(tile.ref.cellBytes());
-                if (const auto it = self->wLatest_.find(base); it != self->wLatest_.end() && !(it->second == built->key))
-                    self->wPrevious_[base] = it->second;
-                self->wLatest_[base] = built->key;
-                self->wTiles_.insert(built->key, std::move(tile), bytes);
-                ++self->wBuilds_;
-                self->wIntermediateHits_ += built->intermediateHit;
-                self->wClipped_ += built->clipped;
-                self->wLastBuildMs_ = built->timing.totalMs;
-                if (built->timing.chunkLoadsAfter > built->timing.chunkLoadsBefore) self->refreshChunkPresets();
+                self->acceptTile(base, *built);
                 self->viewChanged();
             }, Qt::QueuedConnection);
         });
@@ -862,6 +854,29 @@ void LabItem::updateWholeChunk() {
         if (const auto it = wPrevious_.find(base); it != wPrevious_.end() && it->second == key) wPrevious_.erase(it);
     }
     update();
+}
+
+void LabItem::acceptTile(const TileBase &base, const TileBuild &built) {
+    WTile tile;
+    tile.ref.id = nextTileId.fetch_add(1);
+    tile.ref.grid = {built.grid.tfMs, built.grid.firstBucket, built.grid.columns, built.grid.tick,
+                     built.grid.firstBin, built.grid.rows};
+    tile.ref.cells = built.cells;
+    tile.ref.source = built.source;
+    tile.ref.viewRows = prepMode_ == PrepMode::Hybrid;
+    tile.chunkGenerations = built.chunkGenerations;
+    tile.clipped = built.clipped;
+    // Budget: what the tile holds on the GPU (hybrid: its resident source).
+    const auto bytes = size_t(tile.ref.viewRows && built.source ? built.source->bytes() : tile.ref.cellBytes());
+    if (const auto it = wLatest_.find(base); it != wLatest_.end() && !(it->second == built.key))
+        wPrevious_[base] = it->second;
+    wLatest_[base] = built.key;
+    wTiles_.insert(built.key, std::move(tile), bytes);
+    ++wBuilds_;
+    wIntermediateHits_ += built.intermediateHit;
+    wClipped_ += built.clipped;
+    wLastBuildMs_ = built.timing.totalMs;
+    if (built.timing.chunkLoadsAfter > built.timing.chunkLoadsBefore) refreshChunkPresets();
 }
 
 void LabItem::reviseNewestChunk() {
@@ -931,6 +946,7 @@ QVariantMap LabItem::prepMetrics() const {
     m["tilesResident"] = qulonglong(tileStats_->residentTiles.load());
     m["tilesUploaded"] = qulonglong(tileStats_->tilesUploaded.load());
     m["tilesBinned"] = qulonglong(tileStats_->tilesBinned.load());
+    m["tilesRebinned"] = qulonglong(tileStats_->rebinnedTiles.load());
     m["tileUploadBytes"] = qulonglong(tileStats_->uploadBytes.load());
     m["prepUploadBytes"] = qulonglong(tileStats_->uploadBytes.load());
     m["binnerBytes"] = qulonglong(tileStats_->binnerBytes.load());

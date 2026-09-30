@@ -247,6 +247,50 @@ TEST(HeatmapTileNodeScene, PanIsMappingOnlyAndANewTickHoldsTheOldPictureUntilRes
     delete host;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
 }
+TEST(HeatmapTileNodeScene, TileEdgesOnPixelCentresLeaveNoSeam) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    // The geometry that showed 1-px transparent seams on real data: 1500 px over
+    // 720 one-minute columns, a tile edge 114 columns in, i.e. at x = 237.5.
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(1500, 60), &error)) << error.toStdString();
+    auto *host = new TileHost;
+    host->setParentItem(scene.window()->contentItem());
+    host->setSize(QSizeF(1500, 60));
+    const auto data = minutes(150, false);
+    const int64_t tf = minute, first = tiles::tileOfBucket(epoch / tf);
+    for (int64_t t = first; t < first + 13; ++t) {
+        ComposeOptions clip;
+        clip.startMs = tiles::tileStartMs(t, tf);
+        clip.endMs = tiles::tileEndMs(t, tf);
+        const SparseColumns *level = &data;
+        const auto composed = compose(std::span<const SparseColumns *const>(&level, 1), tf, clip);
+        const auto grid = *tiles::tileGrid(t, tf, 1000, 100, {10'000, 10'040}, 0);
+        TileRef ref;
+        ref.id = uint64_t(t - first + 1);
+        ref.grid = toBinGrid(grid);
+        ref.cells = std::make_shared<const std::vector<uint32_t>>(tiles::buildCells(composed, grid, {}));
+        host->frame.tiles.push_back(ref);
+        host->frame.visible.push_back({ref.grid.firstBucket, ref.grid.firstBucket + 64, ref.id, 0, true});
+    }
+    const double start = double(tiles::tileFirstBucket(first + 2) - 114);
+    // Above the book: every column is veiled (present, gap) or loading: opaque.
+    host->frame.view = {start * double(tf), (start + 720) * double(tf), 101'000, 101'400};
+    host->frame.key = 1;
+    host->frame.tfMs = tf;
+    QImage image;
+    for (int i = 0; i < 3; ++i) image = scene.renderFrame(&error);
+    ASSERT_FALSE(image.isNull());
+    ASSERT_TRUE(host->stats->complete.load());
+    image = image.convertToFormat(QImage::Format_RGBA8888);
+    const QRgb background = scene.window()->color().rgb();
+    int seams = 0;
+    for (int x = 0; x < image.width(); ++x) seams += image.pixelColor(x, 30).rgb() == background;
+    EXPECT_EQ(seams, 0) << "transparent pixel columns between tiles; drawn=" << host->stats->drawnPrimary.load()
+                        << " loading=" << host->stats->loadingSlots.load() << " pixel0=" << std::hex
+                        << image.pixelColor(700, 30).rgba() << " bg=" << background;
+    delete host;
+}
 } // namespace
 
 int main(int argc, char **argv) {

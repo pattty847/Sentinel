@@ -37,6 +37,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 class QRhi;
@@ -107,6 +108,16 @@ public:
     // draw state or crossfade; several calls may be recorded in one frame.
     bool binInto(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
                  QRhiBuffer *target, QString *error);
+    // Resident source pool (B1 hybrid): any number of sources stay uploaded side by
+    // side, independent of the active/spare pair. Pages `source` in within
+    // `budget` (decremented); *complete once it is fully uploaded.
+    bool uploadResident(const std::shared_ptr<const GpuSource> &source, QRhiCommandBuffer *cb, uint64_t &budget,
+                        bool *complete, QString *error);
+    bool isResident(uint64_t sourceId) const;
+    bool binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb, const BinGrid &grid,
+                         const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error);
+    void releaseResidentExcept(const std::vector<uint64_t> &keepSourceIds);
+    uint64_t residentBytes() const;
     const std::optional<BinGrid> &binnedGrid() const { return binnedGrid_; }
     uint64_t binnedSourceId() const { return binnedSourceId_; }
     // True if the last bin() used this source and output scale and the kernel
@@ -171,6 +182,7 @@ private:
     void releaseForDeadRhi(); // QRhi cleanup callback
     QRhi *rhi_ = nullptr;
     std::unique_ptr<SourceBuffers> active_, spare_;
+    std::unordered_map<uint64_t, std::unique_ptr<SourceBuffers>> resident_; // B1 hybrid pool, by source id
     bool pending_ = false;
     std::unique_ptr<QRhiBuffer> thresholds_, output_, computeParams_, drawParams_, dummy_;
     recording::SizeScale thresholdScale_{0, 0};
@@ -204,11 +216,13 @@ private:
     std::chrono::milliseconds initialRetryBackoff_{2'000};
     bool failAllocationsForTest_ = false;
     bool rebuildComputeBindings(QString *error);
-    std::unique_ptr<QRhiShaderResourceBindings> makeComputeBindings(QRhiBuffer *output, QRhiBuffer *params,
-                                                                    QString *error);
+    std::unique_ptr<QRhiShaderResourceBindings> makeComputeBindings(const SourceBuffers &source, QRhiBuffer *output,
+                                                                    QRhiBuffer *params, QString *error);
+    bool binSourceInto(const SourceBuffers &source, QRhiCommandBuffer *cb, const BinGrid &grid,
+                       const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error);
     bool ensureThresholds(QRhiResourceUpdateBatch *updates, const recording::SizeScale &outputScale, QString *error);
-    bool fillComputeParams(const BinGrid &grid, const recording::SizeScale &outputScale, void *params,
-                           QString *error) const;
+    bool fillComputeParams(const GpuSource &source, const BinGrid &grid, const recording::SizeScale &outputScale,
+                           void *params, QString *error) const;
     bool rebuildDrawBindings(QString *error);
     bool ensurePipeline(KernelVariant variant, QString *error, QRhiShaderResourceBindings *layout = nullptr);
     void driveSelfTest(QRhiCommandBuffer *cb);

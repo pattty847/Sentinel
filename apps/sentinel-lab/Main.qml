@@ -17,7 +17,7 @@ ApplicationWindow {
     property string screenshotNotice: ""
     readonly property var hysteresisPresets: [0, 0.15, 0.25, 0.4]
     readonly property var minRowPresets: [1, 1.5, 2, 3, 4]
-    readonly property var prepModes: ["full", "viewport", "whole-chunk", "whole-chunk-cpu"]
+    readonly property var prepModes: ["full", "viewport", "whole-chunk", "whole-chunk-cpu", "hybrid"]
     function money(v) { return "$" + Number(v).toString() }
     function syncTickControls() {
         tickMode.currentIndex = binLab.manualMode ? 1 : 0
@@ -186,10 +186,10 @@ ApplicationWindow {
                 Label { text: "Prep"; color: "#aab7c0"; Layout.leftMargin: 10 }
                 ComboBox {
                     id: prepBox
-                    model: ["full (S4 lab)", "viewport (V)", "whole-chunk (W)", "whole-chunk CPU (W)"]
+                    model: ["full (S4 lab)", "viewport (V)", "whole-chunk (W)", "whole-chunk CPU (W)", "hybrid (resident chunks)"]
                     Layout.preferredWidth: 190
                     ToolTip.visible: hovered
-                    ToolTip.text: "B1: viewport = source clipped to the view +-1 view, screen grid; whole-chunk = 64-column tiles binned over their whole price extent (GPU or CPU), pan/zoom = mapping only"
+                    ToolTip.text: "B1: viewport = source clipped to the view +-1 view, screen grid; whole-chunk = 64-column tiles binned over their whole price extent (GPU or CPU), pan/zoom = mapping only; hybrid = the tiles' sources stay on the GPU and each tile bins the rows around the view"
                     onActivated: {
                         var mode = root.prepModes[currentIndex]
                         root.forEachChart(function(c) { c.prepMode = mode })

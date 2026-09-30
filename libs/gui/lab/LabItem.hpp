@@ -16,6 +16,11 @@
 //   whole-chunk - W: 64-column tiles binned over their whole useful price extent
 //                 on the GPU into cached render-ready buffers; pan/zoom = mapping.
 //   whole-chunk-cpu - W with the tiles' cells built on the CPU (binColumn).
+//   hybrid      - the W tile spans' GpuSources stay resident on the GPU (whole
+//                 price extent, uploaded once per span and timeframe); each tile
+//                 bins only the rows around the view (one view height each
+//                 side), re-binned in place by a compute pass when the view
+//                 leaves them or the tick changes.
 #include "LabChunks.hpp"
 #include "LabSources.hpp"
 #include "heatmap/HeatmapResolution.hpp"
@@ -34,7 +39,7 @@
 #include <set>
 
 namespace lab {
-enum class PrepMode { Full, Viewport, WholeChunkGpu, WholeChunkCpu };
+enum class PrepMode { Full, Viewport, WholeChunkGpu, WholeChunkCpu, Hybrid };
 QString prepModeName(PrepMode mode);
 std::optional<PrepMode> parsePrepMode(const QString &name);
 
@@ -188,8 +193,10 @@ private:
     std::string layer() const { return realLayer_.toStdString(); }
     bool chunked() const { return realMode_ && prepMode_ != PrepMode::Full; }
     bool wholeChunk() const {
-        return chunked() && (prepMode_ == PrepMode::WholeChunkGpu || prepMode_ == PrepMode::WholeChunkCpu);
+        return chunked() && (prepMode_ == PrepMode::WholeChunkGpu || prepMode_ == PrepMode::WholeChunkCpu ||
+                             prepMode_ == PrepMode::Hybrid);
     }
+    void acceptTile(const TileBase &base, const TileBuild &built);
     void accept(LabSource source, bool preserveView, bool final);
     void reload(bool preserveView);
     void clampView();

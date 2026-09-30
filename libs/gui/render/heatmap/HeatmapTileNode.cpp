@@ -42,6 +42,8 @@ struct HeatmapTileNode::GpuTile {
     BinGrid grid;
     std::vector<Block> blocks;
     uint64_t drawnFrame = 0;
+    bool viewRows = false;
+    uint64_t sourceId = 0;
     uint64_t bytes() const {
         uint64_t total = 0;
         for (const auto &b : blocks) total += (b.cells ? b.cells->size() : 0) + (b.params ? b.params->size() : 0);
@@ -97,41 +99,91 @@ bool HeatmapTileNode::subRect(int64_t firstBucket, int64_t endBucket, int64_t tf
     return true;
 }
 
+// Splits `tile.grid` into row blocks and bins or uploads them. viewRows: the
+// grid's rows are the view plus one view height each side at the tile's tick.
+bool HeatmapTileNode::binBlocks(GpuTile &tile, const TileRef &ref, QRhiCommandBuffer *cb, bool viewRows) {
+    QString error;
+    if (viewRows) {
+        const auto &view = frame_.view;
+        const double tick = ref.grid.displayTick, span = view.priceHi - view.priceLo;
+        tile.grid = ref.grid;
+        tile.grid.firstBin = int64_t(std::floor((view.priceLo - span) / tick)) - 1;
+        const int64_t end = int64_t(std::ceil((view.priceHi + span) / tick)) + 1;
+        tile.grid.rows = uint32_t(std::clamp<int64_t>(end - tile.grid.firstBin, 1, 1 << 18));
+    }
+    tile.blocks.clear();
+    for (uint32_t top = 0; top < tile.grid.rows; top += kBlockRows) {
+        GpuTile::Block block;
+        block.grid = tile.grid;
+        block.grid.rows = std::min(kBlockRows, tile.grid.rows - top);
+        block.grid.firstBin = tile.grid.firstBin + int64_t(tile.grid.rows - top - block.grid.rows);
+        block.top = top == 0;
+        block.bottom = top + block.grid.rows == tile.grid.rows;
+        const uint64_t bytes = uint64_t(block.grid.columns) * block.grid.rows * 4;
+        block.cells.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, quint32((bytes + 15) / 16 * 16)));
+        if (!block.cells->create()) { noteError(QStringLiteral("tile buffer allocation failed")); return false; }
+        tile.blocks.push_back(std::move(block));
+    }
+    uint32_t top = 0;
+    auto *updates = ref.cells ? rhi_->nextResourceUpdateBatch() : nullptr;
+    for (auto &block : tile.blocks) {
+        bool ok = true;
+        if (ref.cells) {
+            const uint64_t bytes = uint64_t(block.grid.columns) * block.grid.rows * 4;
+            updates->uploadStaticBuffer(block.cells.get(), 0, quint32(bytes), ref.cells->data() + size_t(top) * ref.grid.columns);
+        } else if (viewRows) {
+            ok = binner_->binResidentInto(ref.source->id, cb, block.grid, frame_.outputScale, block.cells.get(), &error);
+        } else {
+            ok = binner_->binInto(cb, block.grid, frame_.outputScale, block.cells.get(), &error);
+        }
+        if (!ok) { if (updates) updates->release(); noteError(error); return false; }
+        top += block.grid.rows;
+    }
+    if (updates) cb->resourceUpdate(updates);
+    const auto fs = QRhiShaderResourceBinding::FragmentStage, vs = QRhiShaderResourceBinding::VertexStage;
+    for (auto &block : tile.blocks) {
+        block.params.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams)));
+        if (!block.params->create()) { noteError(QStringLiteral("tile uniform allocation failed")); return false; }
+        block.bindings.reset(rhi_->newShaderResourceBindings());
+        block.bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, block.cells.get()),
+                                     QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, block.params.get())});
+        if (!block.bindings->create()) { noteError(QStringLiteral("tile bindings failed")); return false; }
+    }
+    stats_->preciseKernel.store(binner_->currentKernel() == KernelVariant::Precise);
+    return true;
+}
+
+bool HeatmapTileNode::viewRowsCovered(const GpuTile &tile) const {
+    const double tick = tile.grid.displayTick;
+    const auto first = int64_t(std::floor(frame_.view.priceLo / tick)) - 1;
+    const auto end = int64_t(std::ceil(frame_.view.priceHi / tick)) + 1;
+    return first >= tile.grid.firstBin && end <= tile.grid.firstBin + int64_t(tile.grid.rows);
+}
+
 bool HeatmapTileNode::ensureResident(const TileRef &ref, QRhiCommandBuffer *cb, uint64_t &budget, bool &gpuBusy) {
     if (tiles_.count(ref.id) || !ref.id) return true;
     if (!ref.cells && !ref.source) return false;
-    if (!ref.grid.rows || !ref.grid.columns) return false;
+    if (!ref.grid.columns || (!ref.viewRows && !ref.grid.rows)) return false;
     const auto started = std::chrono::steady_clock::now();
     QString error;
     auto tile = std::make_unique<GpuTile>();
     tile->grid = ref.grid;
-    // Blocks from the top row down; block k holds tile rows [k * kBlockRows, ...).
-    for (uint32_t top = 0; top < ref.grid.rows; top += kBlockRows) {
-        GpuTile::Block block;
-        block.grid = ref.grid;
-        block.grid.rows = std::min(kBlockRows, ref.grid.rows - top);
-        block.grid.firstBin = ref.grid.firstBin + int64_t(ref.grid.rows - top - block.grid.rows);
-        block.top = top == 0;
-        block.bottom = top + block.grid.rows == ref.grid.rows;
-        tile->blocks.push_back(std::move(block));
-    }
-    auto createBuffers = [&](GpuTile::Block &block) {
-        const uint64_t bytes = uint64_t(block.grid.columns) * block.grid.rows * 4;
-        block.cells.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, quint32((bytes + 15) / 16 * 16)));
-        return block.cells->create();
-    };
-    if (ref.cells) {
+    tile->viewRows = ref.viewRows;
+    if (ref.viewRows) {
+        // Hybrid: page the tile's source into the resident pool (shared by every
+        // tick of this span), then bin the rows around the view.
+        bool complete = false;
+        const uint64_t before = budget;
+        if (!binner_->uploadResident(ref.source, cb, budget, &complete, &error)) { noteError(error); return false; }
+        stats_->uploadBytes.fetch_add(before - budget);
+        if (!complete) return false;
+        tile->sourceId = ref.source->id;
+        if (!binBlocks(*tile, ref, cb, true)) return false;
+        stats_->tilesBinned.fetch_add(1);
+    } else if (ref.cells) {
         if (!budget) return false;
         if (ref.cells->size() * 4 < ref.cellBytes()) { noteError(QStringLiteral("tile cells smaller than grid")); return false; }
-        auto *updates = rhi_->nextResourceUpdateBatch();
-        uint32_t top = 0;
-        for (auto &block : tile->blocks) {
-            if (!createBuffers(block)) { updates->release(); noteError(QStringLiteral("tile buffer allocation failed")); return false; }
-            const uint64_t bytes = uint64_t(block.grid.columns) * block.grid.rows * 4;
-            updates->uploadStaticBuffer(block.cells.get(), 0, quint32(bytes), ref.cells->data() + size_t(top) * ref.grid.columns);
-            top += block.grid.rows;
-        }
-        cb->resourceUpdate(updates);
+        if (!binBlocks(*tile, ref, cb, false)) return false;
         budget -= std::min(budget, ref.cellBytes());
         stats_->tilesUploaded.fetch_add(1);
         stats_->uploadBytes.fetch_add(ref.cellBytes());
@@ -153,21 +205,8 @@ bool HeatmapTileNode::ensureResident(const TileRef &ref, QRhiCommandBuffer *cb, 
             }
         }
         pendingGpuTile_ = 0;
-        for (auto &block : tile->blocks) {
-            if (!createBuffers(block)) { noteError(QStringLiteral("tile buffer allocation failed")); return false; }
-            if (!binner_->binInto(cb, block.grid, frame_.outputScale, block.cells.get(), &error)) { noteError(error); return false; }
-        }
+        if (!binBlocks(*tile, ref, cb, false)) return false;
         stats_->tilesBinned.fetch_add(1);
-        stats_->preciseKernel.store(binner_->currentKernel() == KernelVariant::Precise);
-    }
-    const auto fs = QRhiShaderResourceBinding::FragmentStage, vs = QRhiShaderResourceBinding::VertexStage;
-    for (auto &block : tile->blocks) {
-        block.params.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams)));
-        if (!block.params->create()) { noteError(QStringLiteral("tile uniform allocation failed")); return false; }
-        block.bindings.reset(rhi_->newShaderResourceBindings());
-        block.bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, block.cells.get()),
-                                     QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, block.params.get())});
-        if (!block.bindings->create()) { noteError(QStringLiteral("tile bindings failed")); return false; }
     }
     tiles_[ref.id] = std::move(tile);
     stats_->lastTileMs.store(msSince(started));
@@ -241,22 +280,25 @@ void HeatmapTileNode::addTileDraw(QRhiResourceUpdateBatch *updates, GpuTile &til
     if (any) tile.drawnFrame = frame;
 }
 
+bool HeatmapTileNode::addLoadingSlot() {
+    auto slot = std::make_unique<DrawSlot>();
+    slot->params.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams)));
+    if (!slot->params->create()) { noteError(QStringLiteral("loading uniform allocation failed")); return false; }
+    slot->bindings.reset(rhi_->newShaderResourceBindings());
+    const auto fs = QRhiShaderResourceBinding::FragmentStage, vs = QRhiShaderResourceBinding::VertexStage;
+    slot->bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, loadingCell_.get()),
+                                 QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, slot->params.get())});
+    if (!slot->bindings->create()) { noteError(QStringLiteral("loading bindings failed")); return false; }
+    loadingDraws_.push_back(std::move(slot));
+    return true;
+}
+
 void HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t firstBucket, int64_t endBucket,
                                      int64_t tfMs) {
     QRectF r;
     ViewWindow sub;
     if (!subRect(firstBucket, endBucket, tfMs, &r, &sub)) return;
-    if (loadingUsed_ == loadingDraws_.size()) {
-        auto slot = std::make_unique<DrawSlot>();
-        slot->params.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(DrawParams)));
-        if (!slot->params->create()) return noteError(QStringLiteral("loading uniform allocation failed"));
-        slot->bindings.reset(rhi_->newShaderResourceBindings());
-        const auto fs = QRhiShaderResourceBinding::FragmentStage, vs = QRhiShaderResourceBinding::VertexStage;
-        slot->bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, loadingCell_.get()),
-                                     QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, slot->params.get())});
-        if (!slot->bindings->create()) return noteError(QStringLiteral("loading bindings failed"));
-        loadingDraws_.push_back(std::move(slot));
-    }
+    if (loadingUsed_ == loadingDraws_.size() && !addLoadingSlot()) return;
     DrawParams p{};
     const QMatrix4x4 mvp = *projectionMatrix() * *matrix();
     std::memcpy(p.mvp, mvp.constData(), sizeof(p.mvp));
@@ -295,6 +337,9 @@ void HeatmapTileNode::prepare() {
         auto *updates = rhi_->nextResourceUpdateBatch();
         updates->uploadStaticBuffer(loadingCell_.get(), 0, 4, &cell);
         cb->resourceUpdate(updates);
+        // The graphics pipeline takes its binding layout from the first loading
+        // slot, so it exists before any draw needs it.
+        if (!addLoadingSlot()) return;
     }
 
     // 1. Free what the controller no longer keeps.
@@ -318,8 +363,28 @@ void HeatmapTileNode::prepare() {
     for (const auto &slot : frame_.visible) queue(slot.fallback);
     for (const auto &ref : frame_.tiles) queue(ref.id);
     for (const auto *ref : order) {
-        if (!budget && !(ref->source && binner_->activeSource() == ref->source)) break;
+        const bool free = ref->source && (binner_->activeSource() == ref->source ||
+                                          (ref->viewRows && binner_->isResident(ref->source->id)));
+        if (!budget && !free) continue;
         ensureResident(*ref, cb, budget, gpuBusy);
+    }
+
+    // Hybrid: tiles whose binned rows no longer cover the view re-bin in place
+    // (their source is resident: one compute pass, no upload).
+    {
+        std::vector<uint64_t> sources;
+        for (const auto &ref : frame_.tiles) if (ref.viewRows && ref.source) sources.push_back(ref.source->id);
+        binner_->releaseResidentExcept(sources);
+        auto rebin = [&](uint64_t id) {
+            const auto it = tiles_.find(id);
+            const auto ref = refs.find(id);
+            if (it == tiles_.end() || ref == refs.end() || !it->second->viewRows || viewRowsCovered(*it->second)) return;
+            if (!binner_->isResident(it->second->sourceId)) return;
+            if (binBlocks(*it->second, *ref->second, cb, true)) stats_->rebinnedTiles.fetch_add(1);
+        };
+        for (const auto &slot : frame_.visible) { rebin(slot.primary); rebin(slot.fallback); }
+        for (const auto &d : held_) rebin(d.id);
+        for (const auto &d : fading_) rebin(d.id);
     }
 
     // 3. Transitions.

@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     parser.addOption({"tick-sweep", "Headless E1: zoom through row heights for each h, log every tick change (JSON)"});
     parser.addOption({"tick-change-frames", "Headless E2: force an Auto tick change, save ~25 ms frames for 300 ms", "dir"});
     parser.addOption({"prep", "B1 preparation mode: full (S4/T lab), viewport (V), whole-chunk (W, GPU-binned tiles), "
-                              "whole-chunk-cpu (W, CPU-binned tiles)", "mode", "full"});
+                              "whole-chunk-cpu (W, CPU-binned tiles), hybrid (resident tile sources, rows around the view)", "mode", "full"});
     parser.addOption({"charts", "Lab items side by side (1-4); extra items show 5m, 1h, 15m of the same symbol", "n", "1"});
     parser.addOption({"b1-bench", "Headless B1: scripted pan/zoom sessions in V and W modes; prints a table, writes JSON", "json"});
     parser.addOption({"b1-quick", "With --b1-bench: a reduced matrix (1x only, 1m and 1h)"});

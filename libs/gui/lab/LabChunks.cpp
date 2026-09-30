@@ -269,6 +269,39 @@ TileBuild buildTile(const std::string &layer, int64_t tfMs, int64_t tickUnits, i
     return out;
 }
 
+std::optional<TileBuild> cachedGpuTile(const std::string &layer, int64_t tfMs, int64_t tickUnits, int64_t tile,
+                                       int64_t centerBin) {
+    const auto info = layerInfo(layer);
+    if (!info.error.empty()) return std::nullopt;
+    const int64_t start = heatmap::tiles::tileStartMs(tile, tfMs), end = heatmap::tiles::tileEndMs(tile, tfMs);
+    const auto keys = heatmap::tiles::chunksFor(kSymbol, layer, tfMs, start, end, info.availability);
+    if (keys.empty()) return std::nullopt;
+    std::vector<std::shared_ptr<const heatmap::StoredChunk>> chunks;
+    for (const auto &key : keys) {
+        auto chunk = chunkStore().cached(key);
+        if (!chunk) return std::nullopt;
+        chunks.push_back(std::move(chunk));
+    }
+    TileBuild out;
+    out.key = {kSymbol, layer, tfMs, tickUnits, tile, heatmap::tiles::combineGenerations(chunks)};
+    Intermediate inter;
+    {
+        std::scoped_lock lock(interMutex);
+        const auto *hit = intermediates.find({layer, tfMs, tile, out.key.sourceGeneration, TileBuilder::Gpu});
+        if (!hit) return std::nullopt;
+        inter = *hit;
+    }
+    out.chunkGenerations = generationsOf(chunks);
+    out.intermediateHit = true;
+    auto extent = heatmap::tiles::binsOf(inter.units, tickUnits);
+    if (extent.empty()) extent = {centerBin, centerBin + 1};
+    const auto grid = heatmap::tiles::tileGrid(tile, tfMs, tickUnits, inter.priceScale, extent, centerBin, &out.clipped);
+    if (!grid) return std::nullopt;
+    out.grid = *grid;
+    out.source = inter.gpu;
+    return out;
+}
+
 IntermediateStats intermediateStats() {
     std::scoped_lock lock(interMutex);
     return {intermediates.hits(), intermediates.misses(), intermediates.evictions(), intermediates.bytes(),

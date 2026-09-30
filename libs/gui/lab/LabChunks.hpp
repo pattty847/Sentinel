@@ -17,6 +17,7 @@
 #include "render/heatmap/HeatmapBinGrid.hpp"
 #include "render/heatmap/HeatmapGpuSource.hpp"
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace lab {
@@ -69,6 +70,12 @@ struct TileBuild {
 };
 TileBuild buildTile(const std::string &layer, int64_t tfMs, int64_t tickUnits, int64_t tile, TileBuilder builder,
                     int64_t centerBin, const recording::SizeScale &outputScale = {});
+
+// The same tile without any decode, compose or build: only when every chunk and
+// the tile span's GpuSource are cached (Gpu builder only). Lets a tick change of
+// already prepared spans reach the renderer in the same frame.
+std::optional<TileBuild> cachedGpuTile(const std::string &layer, int64_t tfMs, int64_t tickUnits, int64_t tile,
+                                       int64_t centerBin);
 
 struct IntermediateStats { uint64_t hits = 0, misses = 0, evictions = 0; size_t bytes = 0, entries = 0, maxBytes = 0; };
 IntermediateStats intermediateStats();

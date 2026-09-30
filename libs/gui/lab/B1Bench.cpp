@@ -404,7 +404,8 @@ int runB1Bench(const QString &jsonPath, bool quick) {
         return 2;
     }
     std::vector<Case> cases;
-    const std::vector<PrepMode> modes{PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu};
+    const std::vector<PrepMode> modes{PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu,
+                                      PrepMode::Hybrid};
     for (const int dpr : quick ? std::vector<int>{1} : std::vector<int>{1, 2})
         for (const QString &layer : {QStringLiteral("near"), QStringLiteral("deep")})
             for (const int tf : quick ? std::vector<int>{1, 60} : std::vector<int>{1, 5, 60})
