@@ -114,6 +114,12 @@ bool labOutputAllowed(const QString &path, QString *why) {
         if (why) *why = reason;
         return false;
     };
+    // Any ".." is refused before cleanup: QDir::cleanPath would drop "link/.."
+    // lexically, while the OS resolves the link first (POSIX), so the checked
+    // path and the written path would differ.
+    for (const QString &part : QString(path).replace(QLatin1Char('\\'), QLatin1Char('/')).split(QLatin1Char('/')))
+        if (part == QStringLiteral(".."))
+            return refuse(QStringLiteral("output path %1 contains \"..\"; give it without").arg(path));
     const QString root = QString::fromStdString(recordingRoot());
     if (root.isEmpty()) return true; // nothing to protect
     const QString rootAbsolute = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
