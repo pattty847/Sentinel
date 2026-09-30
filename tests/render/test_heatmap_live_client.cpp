@@ -155,6 +155,58 @@ TEST_F(LiveClient, OneSubscriptionAcrossTwoChartsAndLastReleaseUnsubscribes) {
     ASSERT_EQ(transport.liveUnsubscribes.size(), 1u);
     EXPECT_EQ(transport.liveUnsubscribes.front(), symbol);
 }
+TEST_F(LiveClient, LiveFramesPreserveChunkBackoffAndTerminalFailures) {
+    for (const bool cached : {false, true}) for (const auto &code : {"busy", "timeout", "unavailable", "build_failed", "store_rejected"}) {
+        SCOPED_TRACE(testing::Message() << "cached=" << cached << " code=" << code);
+        ChunkStore local;
+        FakeChunkTransport wire;
+        int64_t clock = 0;
+        ChunkFetcher::Options options;
+        options.nowMs = [&] { return clock; };
+        options.retryBaseMs = options.retryMaxMs = 5000;
+        ChunkFetcher client(local, wire, options);
+        const ChunkKey key{symbol, source, kMinuteMs, base};
+        if (cached) put(local, chunk(key, minute(9)));
+        wire.goOnline(); wire.push(available()); drainLive();
+        client.wantLive(1, symbol);
+        const auto subscription = wire.liveRequests.back().id;
+        wire.replyLive(subscription, tail(10, 10, 10, 1)); drainLive();
+        ASSERT_EQ(wire.requests.size(), 1u);
+        wire.error(wire.requests.back().id, key, QString::fromLatin1(code)); drainLive();
+        for (int i = 1; i <= 4; ++i) {
+            clock = i * 1000;
+            wire.replyLive(subscription, tail(10, 10, 10, i + 1)); drainLive();
+            client.pump(); drainLive();
+            EXPECT_EQ(wire.requests.size(), 1u);
+        }
+        clock = 5000; client.pump(); drainLive();
+        const bool retryable = std::string(code) == "busy" || std::string(code) == "timeout";
+        EXPECT_EQ(wire.requests.size(), retryable ? 2u : 1u);
+    }
+}
+TEST_F(LiveClient, RefusedSubscriptionRetriesWithBackoffAndIgnoresOldEpoch) {
+    ChunkStore local;
+    FakeChunkTransport wire;
+    int64_t clock = 0;
+    ChunkFetcher::Options options;
+    options.nowMs = [&] { return clock; };
+    ChunkFetcher client(local, wire, options);
+    wire.goOnline(); wire.push(available()); drainLive();
+    client.wantLive(1, symbol);
+    const auto first = wire.liveRequests.back().id;
+    wire.error(first, {}, QStringLiteral("busy")); drainLive();
+    wire.replyLive(first, tail(10, 10, 10, 99)); drainLive();
+    EXPECT_EQ(client.live(symbol).front()->revision, 0u);
+    clock = 99; client.pump(); drainLive(); EXPECT_EQ(wire.liveRequests.size(), 1u);
+    clock = 100; client.pump(); drainLive(); ASSERT_EQ(wire.liveRequests.size(), 2u);
+    wire.error(wire.liveRequests.back().id, {}, QStringLiteral("refused")); drainLive();
+    clock = 299; client.pump(); drainLive(); EXPECT_EQ(wire.liveRequests.size(), 2u);
+    clock = 300; client.pump(); drainLive(); ASSERT_EQ(wire.liveRequests.size(), 3u);
+    wire.replyLive(wire.liveRequests.back().id, tail(10, 10, 10, 1)); drainLive();
+    EXPECT_EQ(client.live(symbol).front()->revision, 1u);
+    client.releaseLive(1);
+    clock = 10000; client.pump(); drainLive(); EXPECT_EQ(wire.liveRequests.size(), 3u);
+}
 TEST_F(LiveClient, ReconnectNeedsFreshAvailabilitySinceStoredCutoffAndNewEpochAcceptsBackwardsRevision) {
     auto &c = chart(); settle(); send(tail(10, 10, 10, 90)); settle();
     ASSERT_TRUE(c.latestLive());

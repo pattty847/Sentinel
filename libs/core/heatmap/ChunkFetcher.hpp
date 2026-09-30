@@ -63,7 +63,7 @@ signals:
 private:
     struct Demand {
         std::map<ChartId, int> charts;
-        bool pending = false, refresh = false;
+        bool pending = false, refresh = false, failed = false;
         quint64 request = 0;
         uint64_t order = 0;
         int64_t dueMs = 0;
@@ -87,6 +87,9 @@ private:
         std::unordered_set<ChartId> charts;
         quint64 subscription = 0;
         bool attempted = false; // includes a transport that reports unsupported (0)
+        bool retryPending = false;
+        int64_t dueMs = 0;
+        unsigned failures = 0;
         std::vector<std::string> sources;
         std::map<std::string, LiveEdge> edges;
         std::unordered_set<ChunkKey, ChunkKeyHash> wanted;

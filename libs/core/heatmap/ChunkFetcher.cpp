@@ -94,6 +94,7 @@ std::vector<std::shared_ptr<const LiveEdgeSnapshot>> ChunkFetcher::live(const st
 }
 void ChunkFetcher::subscribeLive(const std::string &symbol, LiveInterest &interest) {
     if (!connected_ || !compatible_) return;
+    if (interest.retryPending && options_.nowMs() < interest.dueMs) return;
     const auto available = availability_.find(symbol);
     if (available == availability_.end()) return;
     std::vector<std::string> sources;
@@ -108,7 +109,7 @@ void ChunkFetcher::subscribeLive(const std::string &symbol, LiveInterest &intere
             since = std::min(since, chunk ? chunk->committedThroughMs : int64_t(0));
         }
     std::sort(sources.begin(), sources.end());
-    if (sources.empty() || (interest.attempted && interest.sources == sources)) return;
+    if (sources.empty() || (interest.attempted && !interest.retryPending && interest.sources == sources)) return;
     interest.sources = sources;
     for (const auto &source : sources) {
         auto [it, inserted] = interest.edges.try_emplace(source, symbol, source);
@@ -116,6 +117,7 @@ void ChunkFetcher::subscribeLive(const std::string &symbol, LiveInterest &intere
     }
     std::erase_if(interest.edges, [&](const auto &e) { return !std::binary_search(sources.begin(), sources.end(), e.first); });
     interest.attempted = true;
+    interest.retryPending = false;
     interest.subscription = transport_.subscribeLive(symbol, std::move(sources), since == INT64_MAX ? 0 : since);
     sLog_Data("Heatmap live subscribe symbol=" << symbol << " sub=" << interest.subscription << " since=" << since);
 }
@@ -123,11 +125,11 @@ void ChunkFetcher::revalidate(const ChunkKey &key) {
     auto it = demands_.find(key);
     if (it == demands_.end()) return;
     const auto stored = store_.cached(key);
-    if (stored && (stored->sealed || stored->committedThroughMs >= committedThrough(key))) return;
+    if (!stored || stored->sealed || stored->committedThroughMs >= committedThrough(key) || it->second.failed) return;
     current_.erase(key);
     auto &d = it->second;
     if (d.request) d.refresh = true;
-    else { d.pending = true; d.dueMs = 0; }
+    else d.pending = true; // a live revision must not shorten an existing retry backoff
     schedule();
 }
 void ChunkFetcher::onLive(quint64 subscription, ChunkFramePtr frame) {
@@ -137,6 +139,7 @@ void ChunkFetcher::onLive(quint64 subscription, ChunkFramePtr frame) {
     auto &interest = it->second;
     const auto edge = interest.edges.find(frame->key.source);
     if (edge == interest.edges.end() || !edge->second.accept(frame, store_)) return;
+    interest.failures = 0;
     // Keep the chunks containing the retained tail until their commits are
     // local. Existing chart wants also cover holes whose final was lost.
     std::unordered_set<ChunkKey, ChunkKeyHash> wanted;
@@ -182,8 +185,11 @@ void ChunkFetcher::want(ChartId chart, const std::vector<ChunkKey> &keys, int pr
         if (!d.order) d.order = ++order_;
         if (d.charts.empty()) store_.setWanted(key, true); // retained while wanted
         d.charts[chart] = priority;
+        // A chart can explicitly retry after fresh availability. The automatic
+        // live-tail want repeats every frame and must preserve terminal failure.
+        if (chart) d.failed = false;
         const auto cached = store_.peek(key);
-        if (!d.request && (!cached || (!cached->sealed && !current_.contains(key)))) d.pending = true;
+        if (!d.failed && !d.request && (!cached || (!cached->sealed && !current_.contains(key)))) d.pending = true;
     }
     schedule();
 }
@@ -212,6 +218,8 @@ void ChunkFetcher::disconnected() {
     for (auto &[symbol, interest] : live_) {
         interest.subscription = 0;
         interest.attempted = false;
+        interest.retryPending = false;
+        interest.failures = 0;
         for (auto &[source, edge] : interest.edges) edge.newEpoch();
     }
     retry_->stop();
@@ -227,6 +235,7 @@ void ChunkFetcher::disconnected() {
         d.pending = d.pending || d.request || !cached || !cached->sealed;
         d.request = 0;
         d.refresh = false;
+        d.failed = false;
         d.held.reset();
         d.dueMs = 0;
         d.busyCount = 0;
@@ -328,6 +337,10 @@ void ChunkFetcher::pump() {
         onFailed(id, {}, QStringLiteral("timeout"), QStringLiteral("chunk request deadline expired"));
     std::vector<ChunkKey> pending;
     int64_t nextDue = std::numeric_limits<int64_t>::max();
+    for (auto &[symbol, interest] : live_) if (interest.retryPending) {
+        if (interest.dueMs <= now) subscribeLive(symbol, interest);
+        else nextDue = std::min(nextDue, interest.dueMs);
+    }
     for (const auto &[key, d] : demands_) {
         if (!d.pending || d.request || d.charts.empty() || !ready(key)) continue;
         if (d.dueMs > now) { nextDue = std::min(nextDue, d.dueMs); continue; }
@@ -449,6 +462,15 @@ void ChunkFetcher::onFailed(quint64 request, OptionalChunkKey key, const QString
     for (auto &[symbol, interest] : live_) if (request && interest.subscription == request) {
         sLog_Warning("Heatmap live subscription failed symbol=" << symbol << " sub=" << request
                      << " code=" << code << " message=" << message);
+        transport_.unsubscribeLive(symbol);
+        interest.subscription = 0; // ignore queued frames from the refused subscription
+        int64_t delay = options_.retryBaseMs;
+        for (unsigned n = 0; n < interest.failures && delay < options_.retryMaxMs; ++n)
+            delay = std::min<int64_t>(delay * 2, options_.retryMaxMs);
+        ++interest.failures;
+        interest.dueMs = options_.nowMs() + delay;
+        interest.retryPending = true;
+        schedule();
         return;
     }
     std::vector<ChunkKey> keys;
@@ -477,6 +499,7 @@ void ChunkFetcher::onFailed(quint64 request, OptionalChunkKey key, const QString
             ++stats_.retries;
             sLog_Probe("chunks.fetch.busy", "req=" << request << " retryMs=" << delay);
         } else if (code != QStringLiteral("superseded")) {
+            d.failed = true;
             sLog_Warning("Chunk fetch failed req=" << request << " start=" << k.startMs
                          << " code=" << code << " message=" << message);
             emit chunkFailed(k, code, message);
