@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <unordered_set>
 
 namespace lab {
 QString prepModeName(PrepMode mode) {
@@ -139,6 +140,13 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
         wLostTiles_ += lost.size();
         // Render thread, GUI blocked: re-plan on the GUI thread after this sync.
         QMetaObject::invokeMethod(this, [this] { viewChanged(); }, Qt::QueuedConnection);
+    }
+    // Over budget only because a previous version was still drawn or its
+    // replacement not resident yet: evict again once the node's sets changed.
+    if (!wEvictQueued_ && wTiles_.bytes() > wTiles_.maxBytes() &&
+        (residentIds.size() != wEvictResident_ || tileStats_->drawnIds() != wEvictDrawn_)) {
+        wEvictQueued_ = true;
+        QMetaObject::invokeMethod(this, [this] { evictTiles(); }, Qt::QueuedConnection);
     }
     heatmap::gpu::HeatmapTileNode::Frame frame;
     const int64_t tf = tfMs();
@@ -621,6 +629,7 @@ void LabItem::setPrepMode(PrepMode mode) {
 
 void LabItem::setTileBudgetBytes(uint64_t bytes) {
     wTiles_.setMaxBytes(bytes);
+    wBudgetEvicted_.clear();
     viewChanged();
 }
 
@@ -645,6 +654,8 @@ void LabItem::resetChunkedState() {
     wLatest_.clear();
     wPrevious_.clear();
     wInFlight_.clear();
+    wBudgetEvicted_.clear();
+    wPlan_ = {};
     chunkLoadsInFlight_.clear();
     wAutoUnits_ = wTickUnits_ = wPrevTickUnits_ = 0;
 }
@@ -842,10 +853,18 @@ void LabItem::updateWholeChunk() {
     const QPointer<LabItem> self(this);
     const std::string layerName = layer();
     const auto builder = prepMode_ == PrepMode::WholeChunkCpu ? TileBuilder::Cpu : TileBuilder::Gpu;
+    // A prefetch tile the budget dropped is not requested again until the view
+    // (visible tiles, timeframe, tick) or the budget changes: otherwise two
+    // neighbours evict each other forever when the visible tiles fill the budget.
+    const PlanKey plan{tf, keyTick(tickUnits), visible.first, visible.end};
+    if (plan != wPlan_) {
+        wPlan_ = plan;
+        wBudgetEvicted_.clear();
+    }
     for (const int64_t t : order) {
         if (heatmap::tiles::tileEndMs(t, tf) <= a.oldestMs || heatmap::tiles::tileStartMs(t, tf) >= a.endMs) continue;
         const TileBase base{tf, keyTick(tickUnits), t};
-        if (wInFlight_.count(base)) continue;
+        if (wInFlight_.count(base) || wBudgetEvicted_.count(base)) continue;
         if (const auto it = wLatest_.find(base); it != wLatest_.end())
             if (const auto *tile = wTiles_.peek(it->second); tile && !tileStale(*tile)) {
                 wTiles_.find(it->second); // touch: in or next to the view
@@ -882,22 +901,55 @@ void LabItem::updateWholeChunk() {
             }, Qt::QueuedConnection);
         });
     }
-    // Budget: never evict what is in view at the target tick or still drawn
-    // (a held picture during a transition, a fading set, a fallback).
-    const auto drawnIds = tileStats_->drawnIds();
-    std::set<uint64_t> drawn;
-    for (const uint64_t id : drawnIds) drawn.insert(prepMode_ == PrepMode::Hybrid ? id >> 32 : id);
+    evictTiles();
+    update();
+}
+
+void LabItem::evictTiles() {
+    wEvictQueued_ = false;
+    if (!wholeChunk() || wTickUnits_ <= 0) return;
+    // Budget: never evict the current version of a tile in view at the target
+    // tick, its previous version while the current one is not resident yet (the
+    // fallback), or anything drawn in the last frame (a held picture during a
+    // transition, a fading set). Obsolete generations of a visible tile are not
+    // protected: they would otherwise pile up past the budget with each revision.
+    const int64_t tf = tfMs(), tick = keyTick(wTickUnits_);
+    const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, 0);
+    const auto wanted = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, kPrefetchTiles);
+    auto entryIds = [&](const std::vector<uint64_t> &ids) {
+        std::set<uint64_t> out;
+        for (const uint64_t id : ids) out.insert(prepMode_ == PrepMode::Hybrid ? id >> 32 : id);
+        return out;
+    };
+    wEvictDrawn_ = tileStats_->drawnIds();
+    const auto residentIds = tileStats_->residentIds();
+    wEvictResident_ = residentIds.size();
+    const auto drawn = entryIds(wEvictDrawn_);
+    const auto resident = entryIds(residentIds);
+    std::unordered_set<heatmap::tiles::TileKey, heatmap::tiles::TileKeyHash> keep;
+    for (int64_t t = visible.first; t < visible.end; ++t) {
+        const TileBase base{tf, tick, t};
+        const auto latest = wLatest_.find(base);
+        const WTile *current = latest != wLatest_.end() ? wTiles_.peek(latest->second) : nullptr;
+        if (current) keep.insert(latest->second);
+        if (!current || !resident.count(current->ref.id))
+            if (const auto previous = wPrevious_.find(base); previous != wPrevious_.end()) keep.insert(previous->second);
+    }
     const auto evicted = wTiles_.evict([&](const heatmap::tiles::TileKey &key) {
-        if (key.tfMs == tf && key.tickUnits == keyTick(tickUnits) && visible.contains(key.tile)) return true;
+        if (keep.count(key)) return true;
         const auto *tile = wTiles_.peek(key);
         return tile && drawn.count(tile->ref.id);
     });
     for (const auto &key : evicted) {
         const TileBase base{key.tfMs, key.tickUnits, key.tile};
-        if (const auto it = wLatest_.find(base); it != wLatest_.end() && it->second == key) wLatest_.erase(it);
+        if (const auto it = wLatest_.find(base); it != wLatest_.end() && it->second == key) {
+            wLatest_.erase(it);
+            if (key.tfMs == tf && key.tickUnits == tick && wanted.contains(key.tile) &&
+                !visible.contains(key.tile))
+                wBudgetEvicted_.insert(base);
+        }
         if (const auto it = wPrevious_.find(base); it != wPrevious_.end() && it->second == key) wPrevious_.erase(it);
     }
-    update();
 }
 
 void LabItem::acceptTile(const TileBase &base, const TileBuild &built) {
@@ -1001,6 +1053,7 @@ QVariantMap LabItem::prepMetrics() const {
     m["intermediateHits"] = qulonglong(wIntermediateHits_);
     m["clippedTiles"] = qulonglong(wClipped_);
     m["lostTiles"] = qulonglong(wLostTiles_);
+    m["prefetchBudgetEvicted"] = qulonglong(wBudgetEvicted_.size());
     m["loadingSlots"] = tileStats_->loadingSlots.load();
     m["holding"] = tileStats_->holding.load();
     return m;

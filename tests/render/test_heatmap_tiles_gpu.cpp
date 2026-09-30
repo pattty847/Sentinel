@@ -483,6 +483,91 @@ TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
     lab::setChunkRecordingRoot(lab::kRecordingRoot);
 }
+
+// Re-review fix 2: every revision of a stationary visible tile is a new cache
+// entry; only the current version (and its fallback until the new one is
+// resident, or what is still drawn) is protected, so obsolete generations evict
+// and the retained tiles (and so GPU residency) stay within the budget.
+TEST(HeatmapTileLabItem, RepeatedRevisionsOfAVisibleTileStayWithinTheTileBudget) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    writeMinutes(dir, 150);
+    for (const auto mode : {lab::PrepMode::WholeChunkGpu, lab::PrepMode::WholeChunkCpu}) {
+        SCOPED_TRACE(lab::prepModeName(mode).toStdString());
+        lab::setChunkRecordingRoot(dir.path().toStdString());
+        lab::OffscreenQuick scene;
+        QString error;
+        ASSERT_TRUE(scene.create(QSize(640, 240), &error)) << error.toStdString();
+        auto *item = new lab::LabItem(scene.window()->contentItem());
+        item->setSize(QSizeF(640, 240));
+        item->setTimeframeMinutes(1);
+        item->setPrepMode(mode);
+        item->loadReal(24, QStringLiteral("deep"));
+        ASSERT_TRUE(settle(scene, item, &error)) << error.toStdString();
+        // Every tile is in view (the data is narrower than the view): the budget
+        // holds exactly the current versions.
+        const double budget = metric(item, "tileBytes"), gpu = metric(item, "tileGpuBytes");
+        const double tiles = metric(item, "tiles");
+        ASSERT_GT(budget, 0);
+        item->setTileBudgetBytes(uint64_t(budget));
+        for (int revision = 0; revision < 4; ++revision) {
+            const double builds = metric(item, "prepBuilds");
+            item->reviseNewestChunk();
+            ASSERT_TRUE(pump(scene, {item}, 10'000, [&] { return metric(item, "prepBuilds") > builds && item->settled(); }, &error))
+                << "revision " << revision << " rebuilt " << error.toStdString();
+        }
+        pump(scene, {item}, 3'000, [&] { return metric(item, "tileBytes") <= budget && metric(item, "tileGpuBytes") <= gpu; },
+             &error);
+        pump(scene, {item}, 300, [] { return false; }, &error); // and it stays there
+        EXPECT_LE(metric(item, "tileBytes"), budget);
+        EXPECT_EQ(metric(item, "tiles"), tiles) << "obsolete generations were evicted";
+        EXPECT_LE(metric(item, "tileGpuBytes"), gpu) << "GPU residency follows the retained tiles";
+        EXPECT_TRUE(item->settled());
+        delete item;
+        ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    }
+    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+}
+
+// Re-review fix 3: when the visible tiles fill the budget, a completed prefetch
+// tile is evicted at once. It must not be requested again until the view or the
+// budget changes, or the two neighbours evict each other forever (W-cpu builds
+// on a worker and re-plans when each lands).
+TEST(HeatmapTileLabItem, BudgetEvictedPrefetchIsNotRebuiltWhileTheViewStands) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    writeMinutes(dir, 12 * 60);
+    lab::setChunkRecordingRoot(dir.path().toStdString());
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(640, 240), &error)) << error.toStdString();
+    auto *item = new lab::LabItem(scene.window()->contentItem());
+    item->setSize(QSizeF(640, 240));
+    item->setTimeframeMinutes(1);
+    item->setPrepMode(lab::PrepMode::WholeChunkCpu);
+    item->setTileBudgetBytes(1); // the visible tiles alone exceed it (they stay: protected)
+    // Mid-recording, so both neighbouring prefetch tiles hold data.
+    item->setInitialView({double(epoch + 5 * hour), double(epoch + 5 * hour + 100 * minute), 99'000, 101'000});
+    item->loadReal(24, QStringLiteral("deep"));
+    ASSERT_TRUE(settle(scene, item, &error)) << error.toStdString();
+    pump(scene, {item}, 3'000, [&] { return metric(item, "prepInFlight") == 0; }, &error);
+    const double builds = metric(item, "prepBuilds");
+    pump(scene, {item}, 1'000, [] { return false; }, &error);
+    EXPECT_EQ(metric(item, "prepBuilds"), builds) << "no builds without input once the view settled";
+    EXPECT_EQ(metric(item, "prepInFlight"), 0);
+    EXPECT_GT(metric(item, "prefetchBudgetEvicted"), 0) << "the prefetch tiles were built, then dropped";
+    EXPECT_TRUE(item->settled());
+    // A budget change admits prefetch again.
+    item->setTileBudgetBytes(256ull << 20);
+    EXPECT_TRUE(pump(scene, {item}, 5'000, [&] { return metric(item, "prepBuilds") > builds && metric(item, "prepInFlight") == 0; },
+                     &error));
+    EXPECT_EQ(metric(item, "prefetchBudgetEvicted"), 0);
+    delete item;
+    ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+}
 } // namespace
 
 int main(int argc, char **argv) {

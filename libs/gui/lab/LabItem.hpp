@@ -183,6 +183,16 @@ private:
     heatmap::tiles::ByteLru<heatmap::tiles::TileKey, WTile, heatmap::tiles::TileKeyHash> wTiles_{kDefaultTileBudgetBytes};
     std::map<TileBase, heatmap::tiles::TileKey> wLatest_, wPrevious_;
     std::set<TileBase> wInFlight_;
+    // Prefetch tiles the budget evicted under the current plan (not re-requested
+    // until the plan or the budget changes; see updateWholeChunk).
+    using PlanKey = std::tuple<int64_t, int64_t, int64_t, int64_t>; // tfMs, key tick, visible first/end
+    PlanKey wPlan_{};
+    std::set<TileBase> wBudgetEvicted_;
+    // The node's drawn ids and resident count at the last eviction pass: while
+    // over budget, a change re-runs it (updatePaintNode queues evictTiles()).
+    std::vector<uint64_t> wEvictDrawn_;
+    size_t wEvictResident_ = 0;
+    bool wEvictQueued_ = false;
     int64_t wAutoUnits_ = 0, wTickUnits_ = 0;
     int64_t wPrevTickUnits_ = 0; // hybrid: the tick before the last change (held/fading draws)
     uint64_t wBuilds_ = 0, wIntermediateHits_ = 0, wClipped_ = 0, wLostTiles_ = 0;
@@ -199,6 +209,8 @@ private:
                              prepMode_ == PrepMode::Hybrid);
     }
     void acceptTile(const TileBase &base, const TileBuild &built);
+    // Enforces the W tile budget (protection rules inside); records budget-evicted prefetch.
+    void evictTiles();
     // Hybrid tiles are cached per span (their resident source serves every tick):
     // the cache key has tick 0 and the renderer sees one tile id per span and tick.
     int64_t keyTick(int64_t tickUnits) const { return prepMode_ == PrepMode::Hybrid ? 0 : tickUnits; }
