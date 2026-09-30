@@ -101,6 +101,12 @@ public:
     // (its own output buffer) for a crossfade; a failed bin keeps both unchanged.
     bool bin(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
              QString *error, bool keepPrevious = false);
+    // Whole-chunk tiles (B1): one compute pass over the active source into a
+    // caller-owned storage buffer of at least columns * rows * 4 bytes (same
+    // cell encoding as the binner's own grid). Does not touch the binner's grid,
+    // draw state or crossfade; several calls may be recorded in one frame.
+    bool binInto(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
+                 QRhiBuffer *target, QString *error);
     const std::optional<BinGrid> &binnedGrid() const { return binnedGrid_; }
     uint64_t binnedSourceId() const { return binnedSourceId_; }
     // True if the last bin() used this source and output scale and the kernel
@@ -198,8 +204,13 @@ private:
     std::chrono::milliseconds initialRetryBackoff_{2'000};
     bool failAllocationsForTest_ = false;
     bool rebuildComputeBindings(QString *error);
+    std::unique_ptr<QRhiShaderResourceBindings> makeComputeBindings(QRhiBuffer *output, QRhiBuffer *params,
+                                                                    QString *error);
+    bool ensureThresholds(QRhiResourceUpdateBatch *updates, const recording::SizeScale &outputScale, QString *error);
+    bool fillComputeParams(const BinGrid &grid, const recording::SizeScale &outputScale, void *params,
+                           QString *error) const;
     bool rebuildDrawBindings(QString *error);
-    bool ensurePipeline(KernelVariant variant, QString *error);
+    bool ensurePipeline(KernelVariant variant, QString *error, QRhiShaderResourceBindings *layout = nullptr);
     void driveSelfTest(QRhiCommandBuffer *cb);
     QString deviceKey() const;
 };

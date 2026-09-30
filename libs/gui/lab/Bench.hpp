@@ -19,6 +19,8 @@ struct LabRunOptions {
     double zoomRowsPx = 0;     // --zoom-rows-px: one commonTick() row this many physical px tall
     bool crossfade = true;     // 150 ms (spec rule 8); --no-crossfade for a hard switch
     double panColumns = 0;     // --pan-columns (screenshot only)
+    QString prep = QStringLiteral("full"); // --prep: full | viewport | whole-chunk | whole-chunk-cpu (B1)
+    int charts = 1;            // --charts: lab items sharing one process-wide chunk store (B1)
 };
 // Applies the tick options to an item (before or after its source loads).
 void applyTickOptions(LabItem &item, const LabRunOptions &options);

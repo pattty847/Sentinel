@@ -72,6 +72,19 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
     return true;
 }
 
+bool OffscreenQuick::renderFrameOnly(QString *error) {
+    if (!control_ || !target_) {
+        if (error) *error = QStringLiteral("offscreen scene was not created");
+        return false;
+    }
+    control_->polishItems();
+    control_->beginFrame();
+    control_->sync();
+    control_->render();
+    control_->endFrame(); // offscreen frame: waits for GPU completion
+    return true;
+}
+
 QImage OffscreenQuick::renderFrame(QString *error) {
     if (!control_ || !target_) {
         if (error) *error = QStringLiteral("offscreen scene was not created");

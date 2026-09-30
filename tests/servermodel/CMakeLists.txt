@@ -126,6 +126,13 @@ add_test(NAME HeatmapTickPolicyTests COMMAND test_heatmap_tick_policy)
 set_tests_properties(HeatmapTickPolicyTests PROPERTIES LABELS "servermodel;heatmap")
 add_dependencies(servermodel_tests test_heatmap_tick_policy)
 
+add_executable(test_heatmap_tiles test_heatmap_tiles.cpp)
+target_include_directories(test_heatmap_tiles PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_tiles PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME HeatmapTileTests COMMAND test_heatmap_tiles)
+set_tests_properties(HeatmapTileTests PROPERTIES LABELS "servermodel;heatmap")
+add_dependencies(servermodel_tests test_heatmap_tiles)
+
 add_executable(test_recording_chunks test_recording_chunks.cpp)
 target_include_directories(test_recording_chunks PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_recording_chunks PRIVATE sentinel_core GTest::gtest_main Qt6::Core

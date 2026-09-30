@@ -43,15 +43,25 @@ NativeColumn combine(std::span<const NativeColumn* const> sources, detail::Decod
 }
 }
 SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
+    std::vector<const SparseColumns*> pointers;
+    pointers.reserve(levels.size());
+    for (const auto& level : levels) pointers.push_back(&level);
+    return compose(std::span<const SparseColumns* const>(pointers), tfMs);
+}
+SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs, const ComposeOptions& options) {
     if (tfMs < kMinuteMs || tfMs > kDayMs || tfMs % kMinuteMs || levels.empty())
         throw std::invalid_argument("invalid heatmap timeframe or empty levels");
+    if (options.startMs.has_value() != options.endMs.has_value() ||
+        (options.startMs && (*options.startMs % tfMs || *options.endMs % tfMs || *options.endMs <= *options.startMs)))
+        throw std::invalid_argument("invalid heatmap compose clip");
     SparseColumns out;
-    out.symbol = levels.front().symbol;
-    out.layer = levels.front().layer;
+    out.symbol = levels.front()->symbol;
+    out.layer = levels.front()->layer;
     out.tfMs = tfMs;
     std::vector<const SparseColumns*> selected;
-    for (const auto& level : levels) {
-        validate(level);
+    for (const auto* levelPointer : levels) {
+        const auto& level = *levelPointer;
+        if (!options.trustedInputs) validate(level);
         if (level.symbol != out.symbol || level.layer != out.layer)
             throw std::invalid_argument("mixed symbols or layers in heatmap composition");
         if (level.tfMs == kHourMs && level.layer != "deep")
@@ -91,9 +101,17 @@ SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
     }
     // Only full output buckets are proven scanned. Discarding partial output
     // aggregates keeps recomposition safe; S5 retains the original input chunks.
+    if (options.startMs) {
+        out.startMs = *options.startMs;
+        out.endMs = *options.endMs;
+    }
     for (const auto& range : united) {
-        const auto start = recording::floorDiv(range.startMs + tfMs - 1, tfMs) * tfMs;
-        const auto end = recording::floorDiv(range.endMs, tfMs) * tfMs;
+        auto start = recording::floorDiv(range.startMs + tfMs - 1, tfMs) * tfMs;
+        auto end = recording::floorDiv(range.endMs, tfMs) * tfMs;
+        if (options.startMs) {
+            start = std::max(start, *options.startMs);
+            end = std::min(end, *options.endMs);
+        }
         if (start < end) out.scannedRanges.push_back({start, end});
     }
     std::vector<const SparseColumn*> sourceColumns;
@@ -133,7 +151,7 @@ SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
         for (const auto& group : groups) column.native.push_back(combine(group.sources, tables));
         out.columns.push_back(std::move(column));
     }
-    validate(out);
+    if (!options.trustedInputs) validate(out);
     return out;
 }
 } // namespace heatmap

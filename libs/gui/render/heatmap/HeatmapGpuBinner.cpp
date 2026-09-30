@@ -304,10 +304,11 @@ bool HeatmapGpuBinner::uploadAll(QRhiCommandBuffer *cb, QString *error) {
     return true;
 }
 
-bool HeatmapGpuBinner::rebuildComputeBindings(QString *error) {
+std::unique_ptr<QRhiShaderResourceBindings> HeatmapGpuBinner::makeComputeBindings(QRhiBuffer *output, QRhiBuffer *params,
+                                                                                  QString *error) {
     if (!dummy_) {
         dummy_ = makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, 16, error);
-        if (!dummy_) return false;
+        if (!dummy_) return {};
     }
     const auto cs = QRhiShaderResourceBinding::ComputeStage;
     QVarLengthArray<QRhiShaderResourceBinding, 20> list{
@@ -316,8 +317,8 @@ bool HeatmapGpuBinner::rebuildComputeBindings(QString *error) {
         QRhiShaderResourceBinding::bufferLoad(2, cs, active_->groups.get()),
         QRhiShaderResourceBinding::bufferLoad(3, cs, active_->runs.get()),
         QRhiShaderResourceBinding::bufferLoad(5, cs, thresholds_.get()),
-        QRhiShaderResourceBinding::bufferStore(6, cs, output_.get()),
-        QRhiShaderResourceBinding::uniformBuffer(7, cs, computeParams_.get()),
+        QRhiShaderResourceBinding::bufferStore(6, cs, output),
+        QRhiShaderResourceBinding::uniformBuffer(7, cs, params),
         QRhiShaderResourceBinding::bufferLoad(8, cs, active_->rowIndex.get())};
     for (uint32_t p = 0; p < kMaxEntryPages; ++p) {
         // Bind only this source's pages; spare capacity from older sources is never read.
@@ -326,13 +327,22 @@ bool HeatmapGpuBinner::rebuildComputeBindings(QString *error) {
     }
     auto bindings = std::unique_ptr<QRhiShaderResourceBindings>(rhi_->newShaderResourceBindings());
     bindings->setBindings(list.cbegin(), list.cend());
-    if (!bindings->create()) return fail(error, QStringLiteral("heatmap compute bindings failed"));
+    if (!bindings->create()) {
+        fail(error, QStringLiteral("heatmap compute bindings failed"));
+        return {};
+    }
+    return bindings;
+}
+
+bool HeatmapGpuBinner::rebuildComputeBindings(QString *error) {
+    auto bindings = makeComputeBindings(output_.get(), computeParams_.get(), error);
+    if (!bindings) return false;
     computeBindings_ = std::move(bindings); // layout-compatible with both pipelines
     computeBoundTo_ = active_.get();
     return true;
 }
 
-bool HeatmapGpuBinner::ensurePipeline(KernelVariant variant, QString *error) {
+bool HeatmapGpuBinner::ensurePipeline(KernelVariant variant, QString *error, QRhiShaderResourceBindings *layout) {
     auto &pipeline = compute_[size_t(variant)];
     if (pipeline) return true;
     const QString path = variant == KernelVariant::Fast ? fastShaderPath_ : QString::fromLatin1(kPreciseShader);
@@ -340,7 +350,7 @@ bool HeatmapGpuBinner::ensurePipeline(KernelVariant variant, QString *error) {
     if (!shader.isValid()) return fail(error, QStringLiteral("compute shader missing: %1").arg(path));
     pipeline.reset(rhi_->newComputePipeline());
     pipeline->setShaderStage({QRhiShaderStage::Compute, shader});
-    pipeline->setShaderResourceBindings(computeBindings_.get());
+    pipeline->setShaderResourceBindings(layout ? layout : computeBindings_.get());
     if (!pipeline->create()) {
         pipeline.reset();
         return fail(error, QStringLiteral("heatmap compute pipeline failed"));
@@ -460,17 +470,7 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
         return false;
     };
     if (swapped && !drawParams_) return bail();
-    if (!thresholds_ || !sameScale(thresholdScale_, outputScale)) {
-        const auto &table = cachedEncodeThresholds(outputScale);
-        if (!thresholds_) {
-            thresholds_ = makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
-                                     table.size() * sizeof(FloatFloat), error);
-            if (!thresholds_) return bail();
-            computeBoundTo_ = nullptr;
-        }
-        updates->uploadStaticBuffer(thresholds_.get(), 0, quint32(table.size() * sizeof(FloatFloat)), table.data());
-        thresholdScale_ = outputScale;
-    }
+    if (!ensureThresholds(updates, outputScale, error)) return bail();
     const uint64_t cellBytes = uint64_t(grid.columns) * grid.rows * 4;
     if (!output_ || output_->size() < cellBytes) {
         output_ = makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, cellBytes + cellBytes / 4, error);
@@ -483,17 +483,51 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
     const KernelVariant kernel = currentKernel();
     if (!ensurePipeline(kernel, error)) return bail();
 
+    ComputeParams params{};
+    if (!fillComputeParams(grid, outputScale, &params, error)) {
+        bail();
+        return false;
+    }
+    if (!keepPrevious) previousGrid_.reset();
+    updates->updateDynamicBuffer(computeParams_.get(), 0, sizeof(params), &params);
+    cb->beginComputePass(updates);
+    cb->setComputePipeline(compute_[size_t(kernel)].get());
+    cb->setShaderResources(computeBindings_.get());
+    cb->dispatch(int((grid.columns + 15) / 16), int((grid.rows + 3) / 4), 1); // heatmap_bin.comp local size
+    cb->endComputePass();
+    binnedGrid_ = grid;
+    binnedSourceId_ = source.id;
+    binnedScale_ = outputScale;
+    binnedKernel_ = kernel;
+    return true;
+}
+
+bool HeatmapGpuBinner::ensureThresholds(QRhiResourceUpdateBatch *updates, const recording::SizeScale &outputScale,
+                                        QString *error) {
+    if (thresholds_ && sameScale(thresholdScale_, outputScale)) return true;
+    const auto &table = cachedEncodeThresholds(outputScale);
+    if (!thresholds_) {
+        thresholds_ = makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                 table.size() * sizeof(FloatFloat), error);
+        if (!thresholds_) return false;
+        computeBoundTo_ = nullptr;
+    }
+    updates->uploadStaticBuffer(thresholds_.get(), 0, quint32(table.size() * sizeof(FloatFloat)), table.data());
+    thresholdScale_ = outputScale;
+    return true;
+}
+
+bool HeatmapGpuBinner::fillComputeParams(const BinGrid &grid, const recording::SizeScale &outputScale,
+                                         void *out, QString *error) const {
+    const auto &source = *active_->source;
     const auto factors = tickFactors(source, grid.displayTick);
     uint32_t maxFactor = 0;
     for (const auto f : factors) maxFactor = std::max(maxFactor, f);
     const double topRow = double(std::max(std::abs(grid.firstBin), std::abs(grid.firstBin + grid.rows))) * maxFactor;
-    if (topRow >= double(std::numeric_limits<int32_t>::max())) {
-        bail();
+    if (topRow >= double(std::numeric_limits<int32_t>::max()))
         return fail(error, QStringLiteral("heatmap grid native rows exceed int32"));
-    }
-    if (!keepPrevious) previousGrid_.reset();
     constexpr double big = double(1 << 30);
-    ComputeParams params{};
+    auto &params = *static_cast<ComputeParams *>(out);
     params.dims = {grid.columns, grid.rows, uint32_t(source.bucketSlots.size()), source.wide ? 1u : 0u};
     params.time = {clampToInt32(double(grid.firstBucket - source.firstBucket), -big, big),
                    clampToInt32(double(source.availableFirstBucket - grid.firstBucket), 0, grid.columns),
@@ -506,16 +540,38 @@ bool HeatmapGpuBinner::bin(QRhiCommandBuffer *cb, const BinGrid &grid,
     params.factors = factors;
     params.codeScale = {float(outputScale.floor), float(outputScale.codesPerOctave), 0, 0};
     params.paging = {source.pageShift(), source.wordsPerEntry(), 0, 0};
-    updates->updateDynamicBuffer(computeParams_.get(), 0, sizeof(params), &params);
+    return true;
+}
+
+bool HeatmapGpuBinner::binInto(QRhiCommandBuffer *cb, const BinGrid &grid, const recording::SizeScale &outputScale,
+                               QRhiBuffer *target, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
+    if (!active_) return fail(error, QStringLiteral("no uploaded heatmap source"));
+    const auto &source = *active_->source;
+    if (!cb || !target || grid.tfMs != source.tfMs || !grid.columns || !grid.rows ||
+        grid.columns > kMaxGridColumns || grid.rows > kMaxGridRows || !(grid.displayTick > 0) ||
+        target->size() < uint64_t(grid.columns) * grid.rows * 4)
+        return fail(error, QStringLiteral("invalid heatmap tile grid or target"));
+    driveSelfTest(cb);
+    auto *updates = rhi_->nextResourceUpdateBatch();
+    // A Dynamic uniform buffer is written when its batch is committed, so several
+    // bins recorded in one frame each need their own parameter buffer.
+    auto params = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(ComputeParams), error);
+    if (!params || !ensureThresholds(updates, outputScale, error)) { updates->release(); return false; }
+    auto bindings = makeComputeBindings(target, params.get(), error);
+    const KernelVariant kernel = currentKernel();
+    if (!bindings || !ensurePipeline(kernel, error, bindings.get())) { updates->release(); return false; }
+    ComputeParams values{};
+    if (!fillComputeParams(grid, outputScale, &values, error)) { updates->release(); return false; }
+    updates->updateDynamicBuffer(params.get(), 0, sizeof(values), &values);
     cb->beginComputePass(updates);
     cb->setComputePipeline(compute_[size_t(kernel)].get());
-    cb->setShaderResources(computeBindings_.get());
+    cb->setShaderResources(bindings.get());
     cb->dispatch(int((grid.columns + 15) / 16), int((grid.rows + 3) / 4), 1); // heatmap_bin.comp local size
     cb->endComputePass();
-    binnedGrid_ = grid;
-    binnedSourceId_ = source.id;
-    binnedScale_ = outputScale;
-    binnedKernel_ = kernel;
+    // Released by QRhi once the frames recording them have completed.
+    params.release()->deleteLater();
+    bindings.release()->deleteLater();
     return true;
 }
 

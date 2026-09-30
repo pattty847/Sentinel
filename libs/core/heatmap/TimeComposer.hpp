@@ -1,5 +1,6 @@
 #pragma once
 #include "SparseColumns.hpp"
+#include <optional>
 #include <span>
 
 namespace heatmap {
@@ -12,6 +13,19 @@ namespace heatmap {
 // scannedRanges proves ONLY complete output buckets; bounding start/end includes
 // unloaded holes and partial edge buckets. Query bucketState() to distinguish
 // NotLoaded from a proven recorder Gap. Incomplete output aggregates are omitted.
+struct ComposeOptions {
+    // Output range clip [startMs, endMs), both multiples of tfMs: only buckets in
+    // it are composed and proven scanned (B1 tiles compose a tile span out of the
+    // chunks that overlap it). Unset: the union of the inputs.
+    std::optional<int64_t> startMs, endMs;
+    // Skip validate() of inputs and output. Only for inputs that were validated
+    // once already (ChunkStore validates every chunk it loads).
+    bool trustedInputs = false;
+};
+// Several non-overlapping inputs of one level (e.g. consecutive hour chunks of
+// minutes) are allowed; they are treated as one level.
+SparseColumns compose(std::span<const SparseColumns* const> levelColumns, int64_t tfMs,
+                      const ComposeOptions& options = {});
 SparseColumns compose(std::span<const SparseColumns> levelColumns, int64_t tfMs);
 inline SparseColumns compose(const SparseColumns& columns, int64_t tfMs) {
     return compose(std::span<const SparseColumns>(&columns, 1), tfMs);

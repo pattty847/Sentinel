@@ -27,7 +27,11 @@ vec4 shade() {
     // changes this mapping, so the picture translates by sub-bin amounts.
     float fx = floor(mapping.x + uv.x * mapping.y);
     float fy = floor(mapping.z + uv.y * mapping.w);
-    if (fx < 0.0 || fy < 0.0 || fx >= float(dims.x) || fy >= float(dims.y)) return vec4(0.0);
+    if (fx < 0.0 || fx >= float(dims.x)) return vec4(0.0);
+    // dims.z bit 0 (whole-chunk tiles, B1): rows beyond the grid repeat its top
+    // and bottom sentinel rows, which hold each column's outside-the-book state.
+    if ((dims.z & 1u) != 0u) fy = clamp(fy, 0.0, float(dims.y) - 1.0);
+    else if (fy < 0.0 || fy >= float(dims.y)) return vec4(0.0);
     uint cell = cells[uint(fy) * dims.x + uint(fx)];
     uint state = (cell >> 16u) & 3u;
     if (state == 0u) return vec4(0.0); // no data: background shows through

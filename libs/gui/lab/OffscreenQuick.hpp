@@ -32,6 +32,8 @@ public:
     // Polish, sync, render one frame and read the colour target back (RGBA8,
     // top-left origin). Returns a null image on failure.
     QImage renderFrame(QString *error);
+    // The same frame without the readback (timing runs). Waits for the GPU.
+    bool renderFrameOnly(QString *error);
 private:
     std::unique_ptr<QRhi> rhi_;
     std::unique_ptr<QQuickRenderControl> control_;
