@@ -132,7 +132,9 @@ package-lock.json
 .code-review-graph/
 
 # AI settings
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 CLAUDE.md
 # AGENTS.md
 GEMINI.md
@@ -148,3 +150,9 @@ docs/REFACTOR_PLAN.md
 
 data/
 screenshots/
+
+# Headless GUI runs (scripts/dev/cloud-gui.sh)
+.cloud-run/
+# Local config overrides (loaded after config/*_config.yaml)
+config/.server_config.yaml
+config/.client_config.yaml
