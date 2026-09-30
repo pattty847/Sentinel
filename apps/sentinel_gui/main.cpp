@@ -28,14 +28,18 @@ This version modularizes startup logic for maintainability and clarity.
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
 #include "config/GuiConfigStore.hpp"
+#include <QQuickWindow>
 #include <QResource>
 #include <QCoreApplication>
 #include <QDir>
 // --- Hardware backend/environment setup ---
 void configureGraphicsBackend() {
     #ifdef Q_OS_WIN
-        // Force OpenGL on Windows for heatmap texture uploads.
-        qputenv("QSG_RHI_BACKEND", "opengl");
+        // Direct3D 12 on Windows: the GPU heatmap needs storage buffers in the
+        // fragment stage and more UAVs than D3D11 offers. QSG_RHI_BACKEND still
+        // overrides it (setGraphicsApi would win over the variable, so skip it).
+        if (qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND"))
+            QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);
     #elif defined(Q_OS_MACOS)
         // Default to Metal on macOS; non-OpenGL upload fallback handles heatmap/footprint updates.
         qputenv("QSG_RHI_BACKEND", "metal"); 
@@ -108,7 +112,9 @@ int main(int argc, char *argv[])
     configureGraphicsBackend();
     configureSurfaceFormat();
     sLog_App("GUI startup: server=" << clientConfig.server.host << ":" << clientConfig.server.port
-             << " rhiBackend=" << qgetenv("QSG_RHI_BACKEND")
+             << " rhiBackend=" << (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND") ? qgetenv("QSG_RHI_BACKEND")
+                                   : QQuickWindow::graphicsApi() == QSGRendererInterface::Direct3D12 ? QByteArray("d3d12")
+                                                                                                     : QByteArray("qt-default"))
              << " renderLoop=" << qgetenv("QSG_RENDER_LOOP"));
 
     const int disableCompress = qEnvironmentVariableIntValue("SENTINEL_DISABLE_HF_EVENT_COMPRESSION");
