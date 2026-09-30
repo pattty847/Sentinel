@@ -69,6 +69,8 @@ add_library(sentinel_core
     heatmap/LocalChunkTransport.hpp
     protocol/SentinelStreamClientTransport.cpp
     protocol/SentinelStreamClientTransport.hpp
+    heatmap/HeatmapSpanPlanner.cpp
+    heatmap/HeatmapSpanPlanner.hpp
     heatmap/HeatmapTiles.cpp
     heatmap/HeatmapTiles.hpp
     servermodel/Hmc2Store.cpp

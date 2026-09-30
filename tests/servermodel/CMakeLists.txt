@@ -210,3 +210,9 @@ target_link_libraries(test_chunk_fetcher PRIVATE sentinel_core GTest::gtest_main
 add_test(NAME ChunkFetcherTests COMMAND test_chunk_fetcher)
 set_tests_properties(ChunkFetcherTests PROPERTIES LABELS "servermodel;heatmap" TIMEOUT 30)
 add_dependencies(servermodel_tests test_chunk_fetcher)
+
+add_executable(test_heatmap_span_planner test_heatmap_span_planner.cpp)
+target_link_libraries(test_heatmap_span_planner PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME HeatmapSpanPlannerTests COMMAND test_heatmap_span_planner)
+set_tests_properties(HeatmapSpanPlannerTests PROPERTIES LABELS "servermodel;heatmap")
+add_dependencies(servermodel_tests test_heatmap_span_planner)
