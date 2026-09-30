@@ -84,7 +84,9 @@ protected:
     ChunkFetcher fetcher{store, transport};
     int64_t now = 0, cutoff = minute(10);
     uint64_t chunkRevision = 1;
-    std::function<int64_t()> composeClock;
+    // Cadence tests must not enter cost backoff because the host was descheduled.
+    // The backoff cases override this with an explicitly measured 6 ms update.
+    std::function<int64_t()> composeClock = [] { return int64_t(0); };
     std::deque<std::function<void()>> jobs;
     std::unique_ptr<SpanSourceCache> cache;
     std::vector<std::unique_ptr<HeatmapSourceController>> charts;
