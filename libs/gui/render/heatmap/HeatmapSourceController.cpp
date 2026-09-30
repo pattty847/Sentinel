@@ -865,6 +865,29 @@ void HeatmapSourceController::reconcile() {
         const bool guarded = isGuarded(span.rank.tier);
         const size_t need = guarded ? bytes : withHeadroom(bytes);
         auto cpuOver = [&] { return cache_.pinnedBytes() + cpuAdmitted + cpu > cache_.maxBytes(); };
+        // A full node (no credit) still makes room for this span from strictly
+        // lower-ranked content (recent-tf, farther prefetch): the node frees
+        // what the snapshot stops listing before it uploads anything new, so
+        // the victims' bytes count as credit at once (S5c: without this, stale
+        // prefetch behind a pan kept the cap full and starved the new side).
+        while (!guarded && !blocked && credit < need) {
+            auto victim = slots_.end();
+            for (auto it = slots_.begin(); it != slots_.end(); ++it) {
+                const auto &rank = it->second.plan.rank;
+                if (!isGuarded(rank.tier) && span.rank < rank && (victim == slots_.end() || victim->second.plan.rank < rank))
+                    victim = it;
+            }
+            if (victim == slots_.end()) break;
+            sLog_Probe("heatmap.controller.evict", "chart=" << chart_ << " tile=" << victim->first.tile << " tier="
+                       << spanTierName(victim->second.plan.rank.tier) << " for=" << span.id.tile << " credit");
+            const size_t bytesOf = gpuBytes(victim->second), freed = outstanding(victim->second);
+            used -= std::min(used, bytesOf);
+            credit += bytesOf;
+            reserved -= std::min(freed, reserved);
+            slots_.erase(victim); // releases its CPU claims
+            ++stats_.evictions;
+            dirty_ = true;
+        }
         if (!guarded && (blocked || credit < need)) {
             ++stats_.suppressed;
             blocked = true;

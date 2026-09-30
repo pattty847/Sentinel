@@ -654,6 +654,29 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
         for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
 }
 
+// S5c: a full node (no credit) still admits prefetch on the side the view moves
+// to, by evicting strictly lower-ranked prefetch left behind (the node frees
+// what the snapshot stops listing). Without it the stale side kept the cap full.
+TEST_F(SourceController, CreditBlockedPrefetchEvictsLowerRankedPrefetchAfterAPan) {
+    constexpr size_t estimate = 1024; // below one real build: one victim makes room
+    auto &a = chart(1ull << 30, estimate);
+    view(a);
+    settle();
+    const int64_t visible = tiles::tileOfBucket(epoch / kMinuteMs);
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    upload(a, 0); // everything resident, the node full
+    settle();
+    // Pan two tiles left: the old visible tile is right-side prefetch at distance 2.
+    a.setView("BTC-USD", kMinuteMs, double(epoch - 2 * tileMs), double(epoch - tileMs));
+    settle();
+    std::map<int64_t, SpanRank> ranks;
+    for (const auto &span : a.latestSnapshot()->spans) ranks[span.id.tile] = span.rank;
+    EXPECT_TRUE(ranks.contains(visible - 3)) << "left prefetch at distance 1 admitted";
+    EXPECT_FALSE(ranks.contains(visible)) << "right prefetch at distance 2 made room";
+    EXPECT_TRUE(ranks.contains(visible - 1)) << "equal rank on the right is never evicted";
+    EXPECT_GT(a.stats().evictions, 0u);
+}
+
 // S5c node contract addition: a source the node reports missing (its GPU cap
 // evicted it after the upload, or a new node never held it) is rebuilt from the
 // local chunks when the image was released; the others are untouched.
