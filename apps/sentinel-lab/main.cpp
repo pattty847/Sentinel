@@ -25,7 +25,8 @@ int main(int argc, char **argv) {
         headless |= QByteArray(argv[i]) == "--bench" || QByteArray(argv[i]) == "--screenshot" ||
                     QByteArray(argv[i]) == "--b1-bench" ||
                     QByteArray(argv[i]) == "--tick-sweep" || QByteArray(argv[i]) == "--tick-change-frames";
-    if (headless) qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Offscreen unless set: Vulkan needs a real platform plugin (QT_QPA_PLATFORM=windows|xcb).
+    if (headless && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
 #ifdef Q_OS_WIN
     // The offscreen QPA reads fonts from Qt's lib/fonts, which Qt no longer ships:
     // without this the stamped debug text renders as empty boxes.

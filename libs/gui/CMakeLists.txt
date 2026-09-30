@@ -396,6 +396,9 @@ target_link_libraries(sentinel_lab_lib
     PUBLIC sentinel_core sentinel_heatmap_gpu Qt6::Core Qt6::Gui Qt6::Quick Qt6::Qml Qt6::QuickControls2
     PRIVATE Qt6::GuiPrivate
 )
+if(WIN32)
+    target_link_libraries(sentinel_lab_lib PRIVATE d3d12) # D3D12GetDebugInterface (SENTINEL_RHI_DEBUG=2)
+endif()
 
 target_compile_definitions(sentinel_gui_lib
     PRIVATE
