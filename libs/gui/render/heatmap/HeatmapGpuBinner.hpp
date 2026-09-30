@@ -187,6 +187,12 @@ private:
     std::unique_ptr<QRhiBuffer> thresholds_, output_, computeParams_, drawParams_, dummy_;
     recording::SizeScale thresholdScale_{0, 0};
     std::unique_ptr<QRhiShaderResourceBindings> computeBindings_, drawBindings_;
+    // Pipelines are created against these layout templates (same binding points,
+    // types and stages, backed only by binner-owned buffers), which live as long as
+    // the pipelines. computeBindings_/drawBindings_ are replaced per source and
+    // crossfade, and Vulkan invalidates a pipeline whose creation-time layout is gone.
+    std::unique_ptr<QRhiBuffer> layoutUniform_;
+    std::unique_ptr<QRhiShaderResourceBindings> computeLayout_, drawLayout_;
     std::array<std::unique_ptr<QRhiComputePipeline>, 2> compute_; // Fast, Precise
     std::unique_ptr<QRhiGraphicsPipeline> graphics_;
     QVector<quint32> graphicsFormat_;
@@ -224,7 +230,8 @@ private:
     bool fillComputeParams(const GpuSource &source, const BinGrid &grid, const recording::SizeScale &outputScale,
                            void *params, QString *error) const;
     bool rebuildDrawBindings(QString *error);
-    bool ensurePipeline(KernelVariant variant, QString *error, QRhiShaderResourceBindings *layout = nullptr);
+    bool ensureLayouts(QString *error);
+    bool ensurePipeline(KernelVariant variant, QString *error);
     void driveSelfTest(QRhiCommandBuffer *cb);
     QString deviceKey() const;
 };
