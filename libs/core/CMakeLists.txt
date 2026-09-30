@@ -63,6 +63,8 @@ add_library(sentinel_core
     heatmap/ChunkStore.cpp
     heatmap/ChunkStore.hpp
     heatmap/ChunkTransport.hpp
+    heatmap/LiveEdge.cpp
+    heatmap/LiveEdge.hpp
     heatmap/ChunkFetcher.cpp
     heatmap/ChunkFetcher.hpp
     heatmap/LocalChunkTransport.cpp

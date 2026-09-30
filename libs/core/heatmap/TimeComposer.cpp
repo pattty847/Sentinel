@@ -41,6 +41,39 @@ NativeColumn combine(std::span<const NativeColumn* const> sources, detail::Decod
     }
     return out;
 }
+SparseColumn composeColumnWithTables(std::span<const SparseColumn* const> sources, int64_t startMs, int64_t tfMs,
+                                     detail::DecodeTables &tables) {
+    SparseColumn column;
+    column.bucketStartMs = startMs;
+    struct Group { Identity key; std::vector<const NativeColumn*> sources; };
+    std::vector<Group> groups;
+    for (const auto* source : sources) {
+        column.observedMs += source->observedMs;
+        column.flags |= source->flags;
+        for (const auto& native : source->native) {
+            const auto key = identity(native);
+            auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group.key == key; });
+            if (it == groups.end()) groups.push_back({key, {&native}});
+            else it->sources.push_back(&native);
+        }
+    }
+    column.flags &= ~recording::kPartial;
+    if (column.observedMs < uint64_t(tfMs)) column.flags |= recording::kPartial;
+    std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+    for (const auto& group : groups) column.native.push_back(combine(group.sources, tables));
+    return column;
+}
+} // namespace
+SparseColumn composeColumn(std::span<const SparseColumn* const> sources, int64_t startMs, int64_t tfMs) {
+    if (sources.size() == 1) {
+        auto out = *sources.front();
+        out.bucketStartMs = startMs;
+        out.flags &= ~recording::kPartial;
+        if (out.observedMs < uint64_t(tfMs)) out.flags |= recording::kPartial;
+        return out;
+    }
+    detail::DecodeTables tables;
+    return composeColumnWithTables(sources, startMs, tfMs, tables);
 }
 SparseColumns compose(std::span<const SparseColumns> levels, int64_t tfMs) {
     std::vector<const SparseColumns*> pointers;
@@ -88,6 +121,10 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
                     throw std::invalid_argument("overlapping incompatible heatmap levels");
         }
     }
+    // Fixed chunk extents may extend beyond their proven open cutoff. The
+    // terminal scanned prefix, not the bounding end, defines the forming edge.
+    int64_t availableEnd = 0;
+    for (const auto &range : scanned) availableEnd = std::max(availableEnd, range.endMs);
     out.startMs = recording::floorDiv(out.startMs, tfMs) * tfMs;
     if (out.endMs > std::numeric_limits<int64_t>::max() - tfMs)
         throw std::invalid_argument("heatmap time range overflow");
@@ -108,6 +145,8 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
     for (const auto& range : united) {
         auto start = recording::floorDiv(range.startMs + tfMs - 1, tfMs) * tfMs;
         auto end = recording::floorDiv(range.endMs, tfMs) * tfMs;
+        if (options.forming && range.endMs == availableEnd && range.endMs % tfMs && start <= end)
+            end += tfMs;
         if (options.startMs) {
             start = std::max(start, *options.startMs);
             end = std::min(end, *options.endMs);
@@ -130,26 +169,10 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
     });
     detail::DecodeTables tables;
     for (size_t i = 0; i < sourceColumns.size();) {
-        SparseColumn column;
-        column.bucketStartMs = recording::floorDiv(sourceColumns[i]->bucketStartMs, tfMs) * tfMs;
-        struct Group { Identity key; std::vector<const NativeColumn*> sources; };
-        std::vector<Group> groups;
-        do {
-            const auto& source = *sourceColumns[i++];
-            column.observedMs += source.observedMs;
-            column.flags |= source.flags;
-            for (const auto& native : source.native) {
-                const auto key = identity(native);
-                auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group.key == key; });
-                if (it == groups.end()) groups.push_back({key, {&native}});
-                else it->sources.push_back(&native);
-            }
-        } while (i < sourceColumns.size() && sourceColumns[i]->bucketStartMs < column.bucketStartMs + tfMs);
-        column.flags &= ~recording::kPartial;
-        if (column.observedMs < uint64_t(tfMs)) column.flags |= recording::kPartial;
-        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
-        for (const auto& group : groups) column.native.push_back(combine(group.sources, tables));
-        out.columns.push_back(std::move(column));
+        const auto begin = i;
+        const auto bucket = recording::floorDiv(sourceColumns[i]->bucketStartMs, tfMs) * tfMs;
+        while (i < sourceColumns.size() && sourceColumns[i]->bucketStartMs < bucket + tfMs) ++i;
+        out.columns.push_back(composeColumnWithTables(std::span(sourceColumns).subspan(begin, i - begin), bucket, tfMs, tables));
     }
     if (!options.trustedInputs) validate(out);
     return out;

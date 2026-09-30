@@ -1,0 +1,497 @@
+#include "protocol/SentinelStreamClient.hpp"
+#include "render/heatmap/HeatmapSourceController.hpp"
+#include "heatmap/TimeComposer.hpp"
+#include "heatmap/BinCell.hpp"
+#include "servermodel/BookRecorder.hpp"
+#include "servermodel/RecordingLive.hpp"
+#include <QTemporaryDir>
+#include "../servermodel/FakeChunkTransport.hpp"
+#include <QCoreApplication>
+#include <QEvent>
+#include <gtest/gtest.h>
+#include <deque>
+#include <set>
+
+namespace {
+using namespace heatmap;
+constexpr int64_t base = (recording::kHmc2MinMs / kDayMs + 4) * kDayMs;
+const std::string symbol = "BTC-USD", source = "hmc2.deep";
+int64_t minute(int n) { return base + n * kMinuteMs; }
+int64_t hourOf(int64_t t) { return recording::floorDiv(t, kHourMs) * kHourMs; }
+void drainLive() { for (int i = 0; i < 48; ++i) QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); }
+SparseColumn col(int64_t t, uint64_t observed = kMinuteMs, double size = 3) {
+    NativeColumn n;
+    n.grid = {1, 100, 100};
+    n.baseRow = 95;
+    n.observedMs = observed;
+    n.coverage[0] = {{95, 105, observed}};
+    n.coverage[1] = n.coverage[0];
+    n.entries = {{0, recording::encodeSize(size)}, {packRowSide(101, 95, true), recording::encodeSize(size * 2)}};
+    return {t, observed, observed < kMinuteMs ? recording::kPartial : 0u, {std::move(n)}};
+}
+ChunkAvailability available(int64_t cutoff = minute(10), bool twoSources = false) {
+    ChunkAvailability a;
+    a.symbol = symbol;
+    a.chunkWireVersion = kChunkWireVersion;
+    for (const auto &s : kChunkSources) if (twoSources || s.id == source) {
+        protocol::chunkwire::SourceInfo info;
+        info.id = s.id;
+        info.latestGrid = protocol::chunkwire::GridInfo{};
+        info.latestGrid->priceScale = 100;
+        info.levels.push_back({kMinuteMs, kHourMs, cutoff, base, cutoff - kMinuteMs});
+        a.sources.push_back(std::move(info));
+    }
+    return a;
+}
+ChunkFramePtr chunk(const ChunkKey &key, int64_t cutoff, uint64_t revision = 1, double size = 3) {
+    auto f = std::make_shared<ChunkFrame>();
+    f->key = key;
+    const auto end = key.startMs + kHourMs;
+    const auto through = std::clamp(cutoff, key.startMs, end);
+    f->state = {through == end, through, revision};
+    f->contentHash = uint64_t(through) + revision;
+    f->columns = {symbol, std::string(findChunkSource(key.source)->hmc2Layer), kMinuteMs, key.startMs, end, {}, {}};
+    if (through > key.startMs) f->columns.scannedRanges = {{key.startMs, through}};
+    for (auto t = std::max(base, key.startMs); t < through; t += kMinuteMs) f->columns.columns.push_back(col(t, kMinuteMs, size));
+    return f;
+}
+ChunkFramePtr tail(int first, int open, int committed, uint64_t revision, uint64_t observed = 1000,
+                   std::string id = source) {
+    auto f = std::make_shared<ChunkFrame>();
+    f->kind = ChunkKind::LiveColumn;
+    f->key = {symbol, id, kMinuteMs, hourOf(minute(open))};
+    f->state = {false, minute(committed), revision};
+    f->columns = {symbol, std::string(findChunkSource(id)->hmc2Layer), kMinuteMs, minute(first), minute(open + 1), {}, {}};
+    for (int m = first; m <= open; ++m) {
+        auto c = col(minute(m), m == open ? observed : kMinuteMs);
+        if (m >= committed) c.flags |= recording::kProvisional;
+        f->columns.columns.push_back(std::move(c));
+    }
+    f->columns.scannedRanges = {{minute(first), minute(open + 1)}};
+    return f;
+}
+std::shared_ptr<const StoredChunk> put(ChunkStore &store, ChunkFramePtr frame) {
+    return store.put(frame->key, std::shared_ptr<const SparseColumns>(frame, &frame->columns), frame->state, frame->contentHash);
+}
+class LiveClient : public testing::Test {
+protected:
+    int argc = 1;
+    char name[16] = "live-client";
+    char *argv[2]{name, nullptr};
+    QCoreApplication app{argc, argv};
+    ChunkStore store;
+    FakeChunkTransport transport;
+    ChunkFetcher fetcher{store, transport};
+    int64_t now = 0, cutoff = minute(10);
+    uint64_t chunkRevision = 1;
+    std::function<int64_t()> composeClock;
+    std::deque<std::function<void()>> jobs;
+    std::unique_ptr<SpanSourceCache> cache;
+    std::vector<std::unique_ptr<HeatmapSourceController>> charts;
+    size_t answered = 0;
+    void SetUp() override {
+        SpanSourceCache::Options options;
+        options.executor = [this](std::function<void()> job, int) { jobs.push_back(std::move(job)); };
+        cache = std::make_unique<SpanSourceCache>(options);
+        transport.goOnline(); transport.push(available(cutoff)); drainLive();
+    }
+    void TearDown() override { charts.clear(); jobs.clear(); cache.reset(); drainLive(); }
+    HeatmapSourceController &chart(int64_t tf = kMinuteMs, int viewEnd = 80) {
+        HeatmapSourceController::Options options;
+        options.capacityPollMs = 0;
+        options.nowMs = [this] { return now; };
+        options.composeNowNs = composeClock;
+        charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
+        charts.back()->setView(symbol, tf, double(base), double(minute(viewEnd)));
+        drainLive();
+        return *charts.back();
+    }
+    void answer() {
+        for (int round = 0; round < 50; ++round) {
+            drainLive();
+            if (answered == transport.requests.size()) return;
+            while (answered < transport.requests.size()) {
+                const auto r = transport.requests[answered++];
+                for (size_t i = 0; i < r.starts.size(); ++i) transport.reply(r.id, chunk(r.key(i), cutoff, chunkRevision));
+            }
+        }
+        FAIL() << "chunk requests did not settle";
+    }
+    void runJobs() {
+        for (int round = 0; round < 50; ++round) {
+            drainLive();
+            if (jobs.empty()) return;
+            auto queued = std::move(jobs); jobs.clear();
+            for (auto &job : queued) job();
+        }
+        FAIL() << "builds did not settle";
+    }
+    void settle() { for (int i = 0; i < 4; ++i) { answer(); runJobs(); } }
+    void advance(HeatmapSourceController &c, int ms = 1000) { now += ms; c.pollLive(); settle(); }
+    quint64 sub() { EXPECT_FALSE(transport.liveRequests.empty()); return transport.liveRequests.back().id; }
+    void send(ChunkFramePtr f) { transport.replyLive(sub(), std::move(f)); drainLive(); }
+    const LiveSourceSnapshot &live(HeatmapSourceController &c) {
+        EXPECT_TRUE(c.latestLive());
+        return c.latestLive()->sources.at(0);
+    }
+    std::vector<SpanSourceKey> uploadKeys(HeatmapSourceController &c) {
+        std::vector<SpanSourceKey> keys;
+        for (const auto &span : c.latestSnapshot()->spans)
+            for (const auto &s : span.sources) if (s.build) keys.push_back(s.build->key);
+        return keys;
+    }
+    void upload(HeatmapSourceController &c) {
+        c.capacity()->report(300ull << 20, uploadKeys(c)); c.pollCapacity(); drainLive();
+    }
+};
+
+TEST_F(LiveClient, OneSubscriptionAcrossTwoChartsAndLastReleaseUnsubscribes) {
+    auto &a = chart(); auto &b = chart(5 * kMinuteMs);
+    ASSERT_EQ(transport.liveRequests.size(), 1u);
+    EXPECT_EQ(transport.liveRequests.front().symbol, symbol);
+    a.setView("", 0, 0, 0); drainLive();
+    EXPECT_TRUE(transport.liveUnsubscribes.empty());
+    b.setView("", 0, 0, 0); drainLive();
+    ASSERT_EQ(transport.liveUnsubscribes.size(), 1u);
+    EXPECT_EQ(transport.liveUnsubscribes.front(), symbol);
+}
+TEST_F(LiveClient, ReconnectNeedsFreshAvailabilitySinceStoredCutoffAndNewEpochAcceptsBackwardsRevision) {
+    auto &c = chart(); settle(); send(tail(10, 10, 10, 90)); settle();
+    ASSERT_TRUE(c.latestLive());
+    const auto oldSub = sub();
+    transport.holdLive(oldSub, tail(10, 10, 10, 99, 9000));
+    const auto frozen = c.latestLive();
+    transport.goOffline(); drainLive();
+    transport.push(available()); drainLive(); // availability before connected cannot unlock
+    EXPECT_EQ(transport.liveRequests.size(), 1u);
+    transport.goOnline(); drainLive();
+    EXPECT_EQ(transport.liveRequests.size(), 1u);
+    EXPECT_EQ(c.latestLive(), frozen);
+    transport.push(available()); drainLive();
+    ASSERT_EQ(transport.liveRequests.size(), 2u);
+    EXPECT_EQ(transport.liveRequests.back().sinceMs, cutoff);
+    EXPECT_NE(sub(), oldSub);
+    transport.releaseLive(); drainLive();
+    EXPECT_EQ(fetcher.live(symbol).front()->revision, 90u);
+    send(tail(10, 10, 10, 1, 2000)); advance(c);
+    EXPECT_EQ(live(c).revision, 1u);
+    EXPECT_EQ(live(c).columns->columns.back().observedMs, 2000u);
+    send(tail(10, 10, 10, 1, 3000)); advance(c);
+    EXPECT_EQ(live(c).columns->columns.back().observedMs, 2000u); // duplicate in this epoch ignored
+}
+TEST_F(LiveClient, AheadFrameImmediatelyRevalidatesWithHashAndFollowsAnOlderInflightReply) {
+    auto &c = chart(); settle();
+    const ChunkKey key{symbol, source, kMinuteMs, base};
+    const auto hash = store.cached(key)->contentHash;
+    const auto count = transport.requests.size();
+    send(tail(10, 11, 11, 1));
+    ASSERT_GT(transport.requests.size(), count);
+    const auto request = transport.requests.back();
+    const auto at = std::find(request.starts.begin(), request.starts.end(), base);
+    ASSERT_NE(at, request.starts.end());
+    EXPECT_EQ(request.hashes[size_t(at - request.starts.begin())], hash);
+    send(tail(10, 12, 12, 2)); // another commit while the request is in flight
+    transport.reply(request.id, chunk(key, minute(11), 2)); drainLive();
+    ASSERT_GT(transport.requests.size(), count + 1);
+    EXPECT_EQ(transport.requests.back().hashes[0], uint64_t(minute(11)) + 2);
+    cutoff = minute(12); chunkRevision = 3; settle();
+    EXPECT_EQ(store.cached(key)->committedThroughMs, cutoff);
+    EXPECT_TRUE(c.latestLive());
+}
+
+TEST_F(LiveClient, HandoverFinalBeforeRevisionRevisionBeforeFinalAndLostFinal) {
+    for (int order = 0; order < 3; ++order) {
+        SCOPED_TRACE(order);
+        ChunkStore local;
+        FakeChunkTransport wire;
+        ChunkFetcher client(local, wire);
+        wire.goOnline(); wire.push(available()); drainLive();
+        client.wantLive(1, symbol);
+        auto accept = [&](ChunkFramePtr frame) {
+            wire.replyLive(wire.liveRequests.back().id, std::move(frame)); drainLive();
+        };
+        auto state = [&] { return client.live(symbol).front(); };
+        LiveComposer composer;
+        const ChunkKey key{symbol, source, kMinuteMs, base};
+        auto stored = put(local, chunk(key, minute(10)));
+        // A missing final scenario starts without the provisional too, proving
+        // it cannot be fabricated from the bounding tail range.
+        if (order != 2) accept(tail(10, 10, 10, 1, kMinuteMs));
+        else accept(tail(11, 11, 10, 1));
+        auto check = [&](bool chunkOwns, bool known) {
+            const auto output = composer.compose(*state(), {stored}, kMinuteMs, minute(10)).columns;
+            EXPECT_EQ(bucketState(output, minute(10)), known ? BucketState::Present : BucketState::NotLoaded);
+            if (known) {
+                ASSERT_FALSE(output.columns.empty());
+                const auto &column = output.columns.front();
+                EXPECT_EQ(column.observedMs, uint64_t(kMinuteMs)); // never counted twice
+                const auto expected = col(minute(10), kMinuteMs, chunkOwns ? 7 : 3);
+                EXPECT_EQ(recording::encodeSize(double(entryNumerator(column.native.front(), 0) /
+                          column.native.front().observedMs)), expected.native.front().entries.front().code);
+            }
+        };
+        check(false, order != 2);
+        if (order == 0) { accept(tail(10, 11, 11, 2)); check(false, true); }
+        stored = put(local, chunk(key, minute(11), 2, 7));
+        // Composer's cutoff rule must work even before the queued trim arrives.
+        check(true, true);
+        drainLive(); EXPECT_FALSE(state()->minutes.contains(minute(10)));
+        if (order == 1) { accept(tail(10, 11, 11, 2)); check(true, true); }
+        if (order == 2) { accept(tail(11, 11, 11, 2)); check(true, true); }
+    }
+}
+
+TEST_F(LiveClient, FormingAtOneFiveAndSixtyMinutesMatchesAllMinuteBinOracleAndCachesPrefix) {
+    for (const int tfMinutes : {1, 5, 60}) {
+        SCOPED_TRACE(tfMinutes);
+        const auto tf = tfMinutes * kMinuteMs;
+        ChunkStore local;
+        LiveEdge edge(symbol, source);
+        LiveComposer composer;
+        const int committed = tfMinutes == 1 ? 10 : tfMinutes - 3;
+        const int open = tfMinutes == 1 ? 12 : tfMinutes - 2;
+        const int begin = tfMinutes == 1 ? 10 : 0;
+        const ChunkKey key{symbol, source, kMinuteMs, base};
+        const auto stored = put(local, chunk(key, minute(committed)));
+        ASSERT_TRUE(edge.accept(tail(committed, open, committed, 1, 1200), local));
+        composer.compose(*edge.snapshot(), {stored}, tf, minute(begin));
+        ASSERT_TRUE(edge.accept(tail(committed, open, committed, 2, 2300), local));
+        const auto updated = composer.compose(*edge.snapshot(), {stored}, tf, minute(begin));
+        EXPECT_EQ(updated.composedBuckets, 1u);
+        EXPECT_EQ(updated.committedPieces, 0u); // neither committed nor frozen pending prefix re-aggregated
+        auto all = tail(begin, open, committed, 2, 2300)->columns;
+        for (int i = begin; i < committed; ++i) all.columns[i - begin].flags &= ~recording::kProvisional;
+        ComposeOptions options; options.forming = true;
+        const SparseColumns *ptr = &all;
+        const auto oracle = compose(std::span(&ptr, 1), tf, options);
+        ASSERT_EQ(updated.columns.columns.size(), oracle.columns.size());
+        for (size_t i = 0; i < oracle.columns.size(); ++i) {
+            EXPECT_EQ(updated.columns.columns[i].observedMs, oracle.columns[i].observedMs);
+            for (const double tick : {1.0, 5.0}) {
+                const auto a = binColumn(updated.columns.columns[i], 90, 110, tick);
+                const auto b = binColumn(oracle.columns[i], 90, 110, tick);
+                ASSERT_EQ(a.size(), b.size());
+                for (size_t row = 0; row < a.size(); ++row) {
+                    EXPECT_EQ(a[row].code, b[row].code); EXPECT_EQ(a[row].valid, b[row].valid);
+                }
+            }
+        }
+        const auto defaultHistory = compose(std::span(&ptr, 1), tf);
+        if (tfMinutes > 1) EXPECT_TRUE(defaultHistory.columns.empty()); // default keeps complete only
+    }
+}
+TEST_F(LiveClient, FormingUsesTheProvenCutoffInsideAFixedChunkExtent) {
+    auto data = tail(0, 3, 0, 1)->columns;
+    data.endMs = base + kHourMs; // bounding extent proves no future minutes
+    const SparseColumns *ptr = &data;
+    ComposeOptions forming; forming.forming = true;
+    const auto out = compose(std::span(&ptr, 1), 5 * kMinuteMs, forming);
+    EXPECT_EQ(bucketState(out, base), BucketState::Present);
+    ASSERT_EQ(out.columns.size(), 1u);
+    EXPECT_EQ(out.columns.front().observedMs, uint64_t(3 * kMinuteMs + 1000));
+    EXPECT_EQ(bucketState(out, minute(5)), BucketState::NotLoaded);
+    EXPECT_TRUE(compose(std::span(&ptr, 1), 5 * kMinuteMs).columns.empty());
+}
+TEST_F(LiveClient, FormingDoesNotTurnInteriorHoleIntoZero) {
+    auto all = tail(0, 3, 0, 1)->columns;
+    all.columns.erase(all.columns.begin() + 1);
+    all.scannedRanges = {{minute(0), minute(1)}, {minute(2), minute(4)}};
+    const SparseColumns *ptr = &all;
+    ComposeOptions forming; forming.forming = true;
+    const auto out = compose(std::span(&ptr, 1), 5 * kMinuteMs, forming);
+    EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded);
+    EXPECT_TRUE(out.columns.empty());
+}
+TEST_F(LiveClient, PublishedLiveRolloverUnionNeverShrinksAndLWaitsForUpload) {
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1, 1000)); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).startMs, minute(10));
+    const auto spanBeforeLiveUpdate = c.latestSnapshot();
+    send(tail(10, 10, 10, 2, 2000)); advance(c);
+    EXPECT_EQ(c.latestSnapshot(), spanBeforeLiveUpdate); // live revisions don't re-index spans
+    std::set<int64_t> previouslyCovered;
+    auto checkUnion = [&] {
+        std::set<int64_t> covered;
+        for (const auto &span : c.latestSnapshot()->spans)
+            for (const auto &s : span.sources) if (s.build)
+                for (const auto &column : s.build->resolution.columns)
+                    for (const auto &r : column.sources) if (r.state == BucketState::Present) covered.insert(column.startMs);
+        for (const auto &s : c.latestLive()->sources)
+            for (const auto &column : s.columns->columns) covered.insert(column.bucketStartMs);
+        for (const auto t : previouslyCovered) EXPECT_TRUE(covered.contains(t)) << t;
+        previouslyCovered = std::move(covered);
+    };
+    checkUnion();
+    // The final appears before disk revision. Also covers the ~1 s rollover
+    // frame whose newest provisional is complete rather than kPartial.
+    send(tail(10, 10, 10, 3, kMinuteMs)); advance(c); checkUnion();
+    EXPECT_EQ(live(c).columns->columns.back().observedMs, uint64_t(kMinuteMs));
+    cutoff = minute(11); ++chunkRevision;
+    send(tail(10, 11, 11, 4)); answer();
+    EXPECT_EQ(live(c).startMs, minute(10));
+    runJobs(); advance(c); checkUnion();
+    // Span build is published, but the node could still draw the older build.
+    EXPECT_EQ(live(c).startMs, minute(10));
+    EXPECT_EQ(bucketState(*live(c).columns, minute(10)), BucketState::Present);
+    upload(c); advance(c); checkUnion();
+    EXPECT_EQ(live(c).startMs, minute(11));
+    EXPECT_EQ(bucketState(*live(c).columns, minute(10)), BucketState::NotLoaded);
+}
+TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
+    auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
+    send(tail(10, 11, 10, 1, 1000)); // queue live job; hold it while newer data arrives
+    ASSERT_FALSE(jobs.empty());
+    send(tail(10, 11, 10, 2, 2000)); runJobs(); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).revision, 2u);
+    EXPECT_GT(c.stats().liveStaleResults, 0u);
+    const auto publication = c.latestLive();
+    const auto count = c.stats().liveComposedBuckets;
+    send(tail(10, 11, 10, 3, 3000)); runJobs();
+    EXPECT_EQ(c.latestLive(), publication); // same clock tick, no second publication
+    now += 999; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), publication);
+    now += 1; c.pollLive(); runJobs();
+    EXPECT_EQ(live(c).revision, 3u);
+    EXPECT_EQ(c.stats().liveComposedBuckets - count, 1u);
+    const auto summary = c.latestResolution();
+    ASSERT_TRUE(summary);
+    const auto it = std::find_if(summary->columns.begin(), summary->columns.end(), [](const auto &r) {
+        return r.startMs == minute(10);
+    });
+    ASSERT_NE(it, summary->columns.end());
+    EXPECT_TRUE(std::any_of(it->sources.begin(), it->sources.end(), [](const auto &s) { return s.state == BucketState::Present; }));
+    EXPECT_TRUE(std::any_of(summary->columns.begin(), summary->columns.end(), [](const auto &r) { return r.startMs == base; }));
+}
+TEST_F(LiveClient, MultiSourceLUsesTheLowestUploadedEndAndReconnectUsesMinimumCutoff) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(); settle(); upload(c); settle();
+    ASSERT_EQ(transport.liveRequests.size(), 1u);
+    ASSERT_EQ(transport.liveRequests.back().sources.size(), 2u);
+    send(tail(10, 10, 10, 1));
+    send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    ASSERT_EQ(c.latestLive()->sources.size(), 2u);
+    cutoff = minute(11); ++chunkRevision;
+    send(tail(10, 11, 11, 2));
+    send(tail(10, 11, 11, 2, 1000, "hmc2.near")); settle(); advance(c);
+    auto keys = uploadKeys(c);
+    std::erase_if(keys, [](const auto &key) { return key.source != source; });
+    c.capacity()->report(300ull << 20, keys); c.pollCapacity(); advance(c);
+    for (const auto &s : c.latestLive()->sources) EXPECT_EQ(s.startMs, minute(10));
+    upload(c); advance(c);
+    for (const auto &s : c.latestLive()->sources) EXPECT_EQ(s.startMs, minute(11));
+    // Only one source's chunk advances, so since_ms uses the slower one.
+    put(store, chunk({symbol, source, kMinuteMs, base}, minute(12), 3)); drainLive();
+    transport.goOffline(); transport.goOnline(); transport.push(available(minute(12), true)); drainLive();
+    EXPECT_EQ(transport.liveRequests.back().sinceMs, minute(11));
+}
+TEST_F(LiveClient, HourBoundaryLostFinalAndDelayedUploadKeepBothMinutesCovered) {
+    cutoff = minute(59); ++chunkRevision; transport.push(available(cutoff)); drainLive();
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(59, 59, 59, 1, kMinuteMs)); settle();
+    ASSERT_EQ(live(c).startMs, minute(59));
+    cutoff = minute(60); ++chunkRevision;
+    // No final 59 in this frame; the previous provisional bridges the seam.
+    send(tail(60, 60, 60, 2)); settle(); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(59));
+    EXPECT_EQ(bucketState(*live(c).columns, minute(59)), BucketState::Present);
+    EXPECT_EQ(bucketState(*live(c).columns, minute(60)), BucketState::Present);
+    EXPECT_FALSE(fetcher.live(symbol).front()->minutes.contains(minute(59))); // now supplied from sealed chunk
+    upload(c); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(60));
+}
+TEST_F(LiveClient, CoarseTimeframesKeepOneHzAndDoNotFetchFromTheBeginningOfTheTile) {
+    for (const int tfMinutes : {60, 240, 1440}) {
+        SCOPED_TRACE(tfMinutes);
+        charts.clear(); jobs.clear(); drainLive();
+        cutoff = minute(tfMinutes - 3); ++chunkRevision;
+        transport.push(available(cutoff)); drainLive();
+        auto &c = chart(tfMinutes * kMinuteMs, tfMinutes * 2); settle(); upload(c); settle();
+        send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 1, 1000)); settle();
+        ASSERT_TRUE(c.latestLive());
+        EXPECT_EQ(live(c).startMs, base);
+        EXPECT_EQ(c.stats().liveIntervalMs, 1000);
+        const auto count = c.stats().liveComposedBuckets, pieces = c.stats().liveCommittedPieces;
+        const auto span = c.latestSnapshot();
+        send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 2, 2000)); advance(c);
+        EXPECT_EQ(live(c).revision, 2u);
+        EXPECT_EQ(c.stats().liveComposedBuckets - count, 1u);
+        EXPECT_EQ(c.stats().liveCommittedPieces, pieces);
+        EXPECT_EQ(c.latestSnapshot(), span);
+        for (const auto &r : transport.requests) for (auto start : r.starts) EXPECT_GE(start, base);
+    }
+}
+TEST_F(LiveClient, TimeframeChangeDropsOldPoolResultAndChartDestructionIsSafe) {
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); ASSERT_FALSE(jobs.empty());
+    c.setView(symbol, 5 * kMinuteMs, base, minute(80)); drainLive();
+    settle();
+    ASSERT_TRUE(c.latestLive()); EXPECT_EQ(c.latestLive()->tfMs, 5 * kMinuteMs);
+    EXPECT_GT(c.stats().liveStaleResults, 0u);
+    now += 1000; send(tail(10, 10, 10, 2, 2000)); c.pollLive();
+    ASSERT_FALSE(jobs.empty());
+    charts.clear(); runJobs();
+    EXPECT_EQ(cache->stats().jobs, 0u);
+    EXPECT_FALSE(transport.liveUnsubscribes.empty());
+}
+TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
+    int64_t clock = 0;
+    composeClock = [&] { const auto t = clock; clock += 6'000'000; return t; };
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(c.stats().liveIntervalMs, 5000);
+    EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 6);
+    const auto first = c.latestLive();
+    send(tail(10, 10, 10, 2, 2000));
+    advance(c, 4999); EXPECT_EQ(c.latestLive(), first);
+    advance(c, 1); EXPECT_EQ(live(c).revision, 2u);
+}
+TEST_F(LiveClient, RecorderReplayMatchesLiveBuilderAndAnalyticalTwapAtOneAndFiveMinutes) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    recording::LiveCache mailbox;
+    int64_t localNow = base;
+    recording::RecorderConfig config{dir.path().toStdString(), 100, {}, {{"deep", 100, 0.5, 2, false}}, 2000, 10000};
+    config.publisher = [&](recording::RecordPtr record) { mailbox.publish(std::move(record)); };
+    recording::BookRecorder recorder(config, [&] { return localNow; });
+    recorder.onSnapshot(symbol, base, {{true, 99, 2}, {false, 101, 4}}); recorder.drainForTest();
+    localNow = base + 30000;
+    recorder.onUpdates(symbol, localNow, {{true, 99, 6}, {false, 101, 8}}); recorder.drainForTest();
+    localNow = base + 90000;
+    recorder.onTick(localNow); recorder.drainForTest();
+    // 1m committed: bid (2*30s + 6*30s)/60s = 4. Current
+    // minute: bid 6 over 30s. Five-minute forming mean = 14/3.
+    const auto snapshot = mailbox.snapshot(symbol, "deep");
+    ASSERT_EQ(snapshot.committedThroughMs, minute(1));
+    recording::RawTailBuilder raw;
+    const auto bytes = raw.build(symbol, source, snapshot, base).bytes;
+    ASSERT_TRUE(bytes);
+    const auto frame = std::make_shared<ChunkFrame>(decodeChunk(*bytes));
+    fetcher.wantLive(42, symbol);
+    send(frame);
+    recording::Hmc2Reader reader(dir.path().toStdString());
+    for (const auto tf : {kMinuteMs, 5 * kMinuteMs}) {
+        LiveComposer composer;
+        const auto actual = composer.compose(*fetcher.live(symbol).front(), {}, tf, base).columns;
+        recording::LiveBuilder legacy({symbol, "deep", tf, {90, 1, 20}, 1});
+        const auto expected = legacy.build(reader, snapshot);
+        ASSERT_EQ(expected.status, recording::BuildStatus::Complete);
+        ASSERT_FALSE(actual.columns.empty());
+        const auto &last = actual.columns.back();
+        const auto match = std::find_if(expected.columns.begin(), expected.columns.end(), [&](const auto &c) {
+            return c.bucketStartMs == last.bucketStartMs;
+        });
+        ASSERT_NE(match, expected.columns.end());
+        EXPECT_EQ(last.observedMs, match->observedMs);
+        const auto bins = binColumn(last, 90, 110, 1);
+        ASSERT_EQ(bins.size(), match->cells.size());
+        for (size_t i = 0; i < bins.size(); ++i) {
+            EXPECT_EQ(bins[i].code, match->cells[i]) << "tf=" << tf << " row=" << i;
+            EXPECT_EQ(bins[i].valid, (match->validity[i / 8] & (1u << (i % 8))) != 0);
+        }
+        const auto bid = binCell(last, 99, 1);
+        EXPECT_NEAR(bid.bid, tf == kMinuteMs ? 6 : 14.0 / 3, .01);
+    }
+}
+} // namespace
