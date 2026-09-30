@@ -1,6 +1,6 @@
 # Plan: GPU-binned heatmap in the main chart, and removal of the page/re-band path
 
-Status 2026-09-30: S1, S2, S3 (fa4575f), S4, T and B1 landed; B1 hybrid adopted. S5 is planned in `2026-09-s5-plan.md` (owner-approved, supersedes the S5 row and the pre-B1 hosting/active-spare wording below where they differ); S5a in progress. New slice S5L (live edge) runs before S6.
+Status 2026-09-30: S1, S2, S3, S4, T, B1, S5a, S5b and S5c landed. S5 is specified in `2026-09-s5-plan.md` and the live edge in `2026-09-s5l-plan.md` (both owner-approved; they supersede the S5 row, the pre-B1 hosting/active-spare wording and the live-column message design below where they differ: the live edge uses SHC1 kind 2 `LiveColumn`, sources not layers, and includes the lateness-held pending minutes). S5L-a in progress; S6 follows S5L.
 
 ## Owner decisions (2026-09-29, tick contract revised the same afternoon)
 
@@ -186,7 +186,7 @@ possible one-frame misalignment).
 - **Text JSON, requests only:**
   - `heatmap_chunk_request {req, symbol, source, level_ms, starts[], have_hash[]}` (S3: `source`
     replaced `layer`; ids `hmc2.near`/`hmc2.deep` are migration-only)
-  - `heatmap_live_subscribe {symbol, layers[]}`
+  - `heatmap_live_subscribe {symbol, sources[]}`
   - Server response `heatmap_availability {sources: {oldest, latest, native grids/generations, levels}}`,
     sent on subscribe and whenever it changes.
   - `layer` is migration-only. It names an HMC2 layer while HMC2 is the source. With
