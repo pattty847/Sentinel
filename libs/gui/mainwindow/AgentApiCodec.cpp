@@ -496,15 +496,15 @@ QJsonObject tradesJson(const TradesSnapshot& s) {
 QJsonObject wallsJson(const WallsSnapshot& s) {
     QJsonArray rows;
     for (const auto& w : s.data.walls) rows.append(QJsonObject{
-        {"bucketStartMs", w.bucketStartMs}, {"priceLow", w.priceLow},
+        {"bucketStartMs", qint64(w.bucketStartMs)}, {"priceLow", w.priceLow},
         {"priceHigh", w.priceHigh}, {"side", w.ask ? "ask" : "bid"},
         {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming},
-        {"meanQty", w.meanQty}, {"firstSeenMs", w.firstSeenMs}, {"lastSeenMs", w.lastSeenMs},
-        {"columns", w.columns}});
+        {"meanQty", w.meanQty}, {"firstSeenMs", qint64(w.firstSeenMs)}, {"lastSeenMs", qint64(w.lastSeenMs)},
+        {"columns", qint64(w.columns)}});
     return envelope(s.meta, {{"basis", "recording-twap-sum"},
         {"bandTick", s.data.bandTick > 0 ? QJsonValue(s.data.bandTick) : QJsonValue(QJsonValue::Null)},
-        {"loadedRange", QJsonArray{s.data.loadedStartMs, s.data.loadedEndMs}},
-        {"recordedColumns", s.data.recordedColumns}, {"missingColumns", s.data.missingColumns},
+        {"loadedRange", QJsonArray{qint64(s.data.loadedStartMs), qint64(s.data.loadedEndMs)}},
+        {"recordedColumns", qint64(s.data.recordedColumns)}, {"missingColumns", qint64(s.data.missingColumns)},
         {"note", "Aggregated resting size per cell, not individual orders"}, {"walls", rows}});
 }
 

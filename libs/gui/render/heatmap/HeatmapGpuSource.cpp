@@ -343,7 +343,7 @@ GpuSource buildGpuSource(const SparseColumns& data, const GpuSourceOptions& opti
     if (coveredLo < coveredHi) { out.coveredPriceLo = coveredLo; out.coveredPriceHi = coveredHi; }
     if (out.entryPages() > kMaxEntryPages)
         throw std::invalid_argument("heatmap source exceeds the GPU entry pages (clip rows or use a coarser timeframe)");
-    for (const uint64_t bytes : {out.bucketSlots.size() * 4ull, out.columnGroups.size() * 4ull,
+    for (const uint64_t bytes : std::initializer_list<uint64_t>{out.bucketSlots.size() * 4ull, out.columnGroups.size() * 4ull,
                                  out.groups.size() * uint64_t(sizeof(GroupMeta)), out.runs.size() * 8ull,
                                  out.rowIndex.size() * 4ull})
         if (bytes > kMaxGpuBufferBytes) throw std::invalid_argument("heatmap source index buffer exceeds 128 MiB");
