@@ -390,25 +390,36 @@ void sync(const fs::path &p, bool directory = false) {
     const bool ok = directory ? syncDirectory(p, error) : syncFilePath(p, error);
     check(ok, "sync path=" + p.string() + " error=" + std::to_string(error));
 }
-// Each store re-syncs the existing directory chain on first use, including
-// directories left behind by an earlier process that crashed before syncing.
-void mkdirs(const fs::path &p, std::set<fs::path> &synced) {
+// Creates the missing directories of `p`, top-down from its first existing
+// ancestor. Durability: each directory this call creates gets its parent
+// fsynced, which is what makes the new entry durable. A directory that already
+// existed is never synced, and nothing above the first existing ancestor is
+// touched (it used to sync every ancestor up to "/" or "C:\").
+void mkdirs(const fs::path &p, std::set<fs::path> &known) {
     const auto absolute = fs::absolute(p).lexically_normal();
-    if (synced.contains(absolute))
+    if (known.contains(absolute))
         return;
-    const auto parent = absolute.parent_path();
-    if (parent != absolute)
-        mkdirs(parent, synced);
-    std::error_code ec;
-    // An existing directory is fine; MSVC reports a drive root ("C:\") as
-    // access denied instead of already existing.
-    if (!fs::create_directory(absolute, ec) && ec && fs::is_directory(absolute))
-        ec.clear();
-    check(!ec, "create directory " + absolute.string() + " error=" + ec.message());
-    sync(absolute, true);
-    if (parent != absolute)
-        sync(parent, true);
-    synced.insert(absolute);
+    std::vector<fs::path> missing; // deepest first
+    for (fs::path at = absolute;; at = at.parent_path()) {
+        std::error_code ec;
+        if (known.contains(at) || fs::is_directory(at, ec))
+            break;
+        missing.push_back(at);
+        if (at.parent_path() == at)
+            break; // a missing root: create_directory reports it
+    }
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+        std::error_code ec;
+        const bool created = fs::create_directory(*it, ec);
+        // Another process may have created it meanwhile; MSVC also reports an
+        // existing drive root ("C:\") as access denied rather than existing.
+        if (!created && ec && fs::is_directory(*it))
+            ec.clear();
+        check(!ec, "create directory " + it->string() + " error=" + ec.message());
+        if (created)
+            sync(it->parent_path(), true);
+    }
+    known.insert(absolute);
 }
 std::string dayName(int64_t ms) {
     check(ms >= kHmc2MinMs && ms < kHmc2EndMs, "timestamp outside UTC years 2000-2200");
@@ -1126,12 +1137,12 @@ struct Hmc2Store::Impl {
     };
     std::map<fs::path, Writer> writers;
     Bytes raw, compressed, frame;
-    std::set<fs::path> syncedDirectories;
+    std::set<fs::path> knownDirectories; // exist on disk (mkdirs cache)
     std::function<void()> afterFrameHeader;
     explicit Impl(fs::path p) : root(std::move(p)) {
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
-        mkdirs(root, syncedDirectories);
+        mkdirs(root, knownDirectories);
         int error = 0;
         lock = acquireFileLock(root / ".lock", error);
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
@@ -1176,7 +1187,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
     const auto base = filePath(i.root, r.header, r.bucketStartMs);
     auto found = i.writers.find(base);
     if (found == i.writers.end() || headerBody(found->second.header) != headerBody(r.header)) {
-        mkdirs(base.parent_path(), i.syncedDirectories);
+        mkdirs(base.parent_path(), i.knownDirectories);
         auto candidates = files(base.parent_path(), dayName(r.bucketStartMs));
         fs::path path = base;
         bool reuse = false;

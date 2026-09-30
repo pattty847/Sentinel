@@ -15,6 +15,10 @@
 #include "servermodel/PersistenceIo.hpp"
 
 using namespace recording;
+
+// Some cases capture stderr to check store warnings. Without a console (ctest,
+// CI) Qt on Windows logs to OutputDebugString instead; force stderr before main.
+static const bool kQtLogsToStderr = qputenv("QT_FORCE_STDERR_LOGGING", "1");
 namespace {
 constexpr int64_t kEpoch = kHmc2MinMs;
 class StoreTest : public testing::Test {
@@ -148,6 +152,23 @@ class StoreTest : public testing::Test {
         return frame;
     }
 };
+// Every platform: a store opens under a fresh temp directory whose chain up to
+// the drive root includes directories the user cannot fsync (C:\ on Windows),
+// creates its missing directories, writes and reads back.
+TEST_F(StoreTest, OpensAndWritesUnderFreshNestedDirectory) {
+    const auto nested = root() / "fresh" / "nested" / "recording";
+    ASSERT_FALSE(std::filesystem::exists(nested));
+    const auto r = record(120000);
+    {
+        Hmc2Store store(nested);
+        store.append(r);
+    }
+    EXPECT_TRUE(std::filesystem::is_directory(nested));
+    const auto rows = Hmc2Store::readRange(nested, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].bucketStartMs, r.bucketStartMs);
+}
+
 TEST_F(StoreTest, RoundTripAndBucketUtcPath) {
     auto r = record(86400000 - 60000);
     {
