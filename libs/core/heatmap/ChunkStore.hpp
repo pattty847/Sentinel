@@ -14,7 +14,8 @@
 // - Ordering: every acquisition (get() load, revise(), reload()) takes a ticket
 //   when it starts. A completion never replaces a version whose ticket is newer,
 //   so a slow load that started before a revision cannot overwrite it.
-// - A listener is told about every revision (after the store lock is released).
+// - A listener is told about every revision (after the store lock is released),
+//   including a get() that re-reads an evicted open chunk as a new generation.
 // - Holders of an older version keep it alive through their shared_ptr; the
 //   budget counts only what the store itself retains.
 // Thread-safe. No Qt.
@@ -76,8 +77,9 @@ public:
     // stored since the last clear()). Not counted in stats.
     uint64_t generationOf(const ChunkKey &key) const;
     bool contains(const ChunkKey &key) const { return cached(key) != nullptr; }
-    // Called after every revise()/reload() that stored a new version, on the
-    // calling thread, outside the store lock.
+    // Called after every revise()/reload(), and after a get() that re-read an
+    // evicted open chunk under a new generation, on the calling thread, outside
+    // the store lock. Not called for first loads or unchanged sealed reloads.
     void setRevisionListener(std::function<void(const ChunkKey &)> listener);
     uint64_t revisionCount() const;
     // Stores a new version (an open chunk's revision, or a reload). Returns it.

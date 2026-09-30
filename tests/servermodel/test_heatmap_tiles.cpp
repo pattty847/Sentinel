@@ -261,6 +261,31 @@ TEST(HeatmapChunkStore, RevisionListenerHearsEveryRevision) {
     EXPECT_EQ(store.revisionCount(), 2u);
 }
 
+// Re-review fix: get() re-reading an evicted open chunk stores a new generation;
+// a chart that did not ask must hear it. First loads and sealed reloads are silent.
+TEST(HeatmapChunkStore, AGetThatReReadsAnEvictedOpenChunkIsARevision) {
+    ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
+        const int64_t h = (key.startMs - epoch) / hour;
+        return ChunkStore::Loaded{makeHourChunk(h), h != 5, 0}; // hour 5 is the open chunk
+    });
+    std::vector<int64_t> heard;
+    store.setRevisionListener([&](const ChunkKey &key) { heard.push_back(key.startMs); });
+    const ChunkKey sealedKey{"BTC-USD", "deep", minute, epoch + hour}, openKey{"BTC-USD", "deep", minute, epoch + 5 * hour};
+    const auto open = store.get(openKey);
+    store.get(sealedKey);
+    EXPECT_TRUE(heard.empty()) << "first loads are not revisions";
+    store.setMaxBytes(1);
+    ASSERT_EQ(store.cached(openKey), nullptr);
+    const auto again = store.get(openKey); // evicts the sealed chunk
+    ASSERT_NE(again->generation, open->generation);
+    ASSERT_EQ(heard.size(), 1u) << "the new generation of an open chunk is announced";
+    EXPECT_EQ(heard[0], openKey.startMs);
+    ASSERT_EQ(store.cached(sealedKey), nullptr);
+    store.get(sealedKey);
+    EXPECT_EQ(heard.size(), 1u) << "a sealed reload keeps its generation and stays silent";
+    EXPECT_EQ(store.revisionCount(), 1u);
+}
+
 TEST(HeatmapChunkStore, RevisionGetsANewGenerationAndOldHoldersKeepTheirVersion) {
     ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour, 0, 30), false, 1};

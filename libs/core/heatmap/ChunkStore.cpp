@@ -123,6 +123,7 @@ std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
     // is discarded and the key is loaded again under a new ticket.
     std::shared_ptr<const StoredChunk> result;
     std::exception_ptr error;
+    bool changed = false; // an evicted chunk came back as a different version
     try {
         for (int attempt = 0; !result; ++attempt) {
             if (attempt == 3) throw std::runtime_error("heatmap chunk kept changing during its load");
@@ -132,7 +133,14 @@ std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
             std::scoped_lock lock(mutex_);
             ++stats_.loads;
             stats_.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-            result = insertLocked(key, std::move(loaded), ticket, false);
+            const auto known = latest_.find(key);
+            const uint64_t before = known == latest_.end() ? 0 : known->second.generation;
+            bool stored = false;
+            result = insertLocked(key, std::move(loaded), ticket, false, &stored);
+            // Re-reading an evicted OPEN chunk stores a new generation: charts that
+            // hold tiles of the old one must hear it like any other revision. A
+            // first load (before == 0) and a sealed reload (same generation) are not.
+            changed = stored && before != 0 && result->generation != before;
             if (!result) ticket = ++nextTicket_;
         }
     } catch (...) {
@@ -147,6 +155,7 @@ std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
     }
     loaded_.notify_all();
     if (error) std::rethrow_exception(error);
+    if (changed) notify(key);
     return result;
 }
 

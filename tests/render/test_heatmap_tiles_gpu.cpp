@@ -417,6 +417,72 @@ TEST(HeatmapTileLabItem, ARevisionFromOneChartRebuildsTheOtherChartsTiles) {
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
     lab::setChunkRecordingRoot(lab::kRecordingRoot);
 }
+
+void writeMinutes(const QTemporaryDir &dir, int64_t count) {
+    recording::Hmc2Store writer(dir.path().toStdString());
+    for (int64_t i = 0; i < count; ++i) writer.append(syntheticMinute(i));
+}
+// Renders frames for `ms`, or until done() holds (then returns true). Offscreen
+// rendering has no frameSwapped, so the items are asked to redraw each frame
+// (as the lab window's continuous redraw does).
+template <class Done>
+bool pump(lab::OffscreenQuick &scene, const std::vector<lab::LabItem *> &items, int ms, Done done, QString *error) {
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        for (auto *item : items) item->update();
+        if (scene.renderFrame(error).isNull()) return false;
+        if (done()) return true;
+    }
+    return false;
+}
+double metric(const lab::LabItem *item, const char *name) { return item->metrics().value(name).toDouble(); }
+
+// Re-review fix 1: a get() that re-reads an evicted OPEN chunk stores a new
+// generation. Charts that hold tiles or sources of the old one must hear it,
+// even when neither of them asked (here the test itself reads it back).
+TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    writeMinutes(dir, 150); // hour 2 is still open
+    lab::setChunkRecordingRoot(dir.path().toStdString());
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(640, 480), &error)) << error.toStdString();
+    std::vector<lab::LabItem *> items;
+    const lab::PrepMode modes[] = {lab::PrepMode::WholeChunkCpu, lab::PrepMode::Viewport};
+    for (int i = 0; i < 2; ++i) {
+        auto *item = new lab::LabItem(scene.window()->contentItem());
+        item->setPosition(QPointF(0, 240 * i));
+        item->setSize(QSizeF(640, 240));
+        item->setTimeframeMinutes(1);
+        item->setPrepMode(modes[i]);
+        item->loadReal(24, QStringLiteral("deep"));
+        items.push_back(item);
+    }
+    for (auto *item : items) ASSERT_TRUE(settle(scene, item, &error)) << error.toStdString();
+    auto &store = lab::chunkStore();
+    const heatmap::ChunkKey open{lab::kSymbol, "deep", minute, epoch + 2 * hour}, sealed{lab::kSymbol, "deep", minute, epoch};
+    ASSERT_NE(store.cached(open), nullptr);
+    ASSERT_FALSE(store.cached(open)->sealed);
+    const uint64_t before = store.generationOf(open);
+    ASSERT_NE(store.peek(sealed), nullptr); // the newest entry survives the squeeze below
+    store.setMaxBytes(1);
+    store.setMaxBytes(512ull << 20);
+    ASSERT_EQ(store.cached(open), nullptr);
+    const double builds[] = {metric(items[0], "prepBuilds"), metric(items[1], "prepBuilds")};
+    ASSERT_NE(store.get(open)->generation, before) << "re-read open chunk is a new version";
+    const bool rebuilt = pump(scene, items, 5'000, [&] {
+        return metric(items[0], "prepBuilds") > builds[0] && metric(items[1], "prepBuilds") > builds[1] &&
+               items[0]->settled() && items[1]->settled();
+    }, &error);
+    EXPECT_TRUE(rebuilt) << "both stationary charts heard the new generation";
+    for (auto *item : items) delete item;
+    ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+}
 } // namespace
 
 int main(int argc, char **argv) {
