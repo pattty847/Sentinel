@@ -13,8 +13,12 @@ namespace lab {
 // directory, as the server does). Empty when neither is available; real-data
 // paths then report or skip.
 std::string recordingRoot();
-// True when `path` lies inside the recording root (read-only for lab outputs).
-bool insideRecordingRoot(const QString &path);
+// Lab outputs must never land inside the recording root (read-only for the
+// lab). False, with `why`, when `path` is inside it however it gets there
+// (aliases, symlinks, junctions, not-yet-created descendants), or when either
+// path cannot be resolved (fail closed). Call before creating directories and
+// again right before writing.
+bool labOutputAllowed(const QString &path, QString *why = nullptr);
 
 struct LabSource {
     std::shared_ptr<const heatmap::SparseColumns> columns;

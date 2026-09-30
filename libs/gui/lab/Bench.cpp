@@ -294,9 +294,9 @@ double median(std::vector<double> v) {
 } // namespace
 
 int runScreenshot(const LabRunOptions &options, const QString &path) {
-    const QString output = QFileInfo(path).absoluteFilePath();
-    if (insideRecordingRoot(output)) {
-        print({{"error", QStringLiteral("recording directory is read-only")}, {"screenshot", path}});
+    QString why;
+    if (!labOutputAllowed(path, &why)) { // before the run; again before mkpath and the write
+        print({{"error", why}, {"screenshot", path}});
         return 2;
     }
     HeadlessLab lab;
@@ -313,7 +313,15 @@ int runScreenshot(const LabRunOptions &options, const QString &path) {
     const auto metrics = lab.item->metrics();
     QImage image = lab.image.convertToFormat(QImage::Format_RGBA8888);
     annotate(image, metrics, lab.item->resolutionIndicator());
-    QDir().mkpath(QFileInfo(path).absolutePath());
+    bool allowed = labOutputAllowed(path, &why);
+    if (allowed) {
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        allowed = labOutputAllowed(path, &why); // what mkpath created may resolve differently
+    }
+    if (!allowed) {
+        print({{"error", why}, {"screenshot", path}});
+        return 2;
+    }
     if (!image.save(path, "PNG")) {
         print({{"error", QStringLiteral("PNG save failed")}, {"screenshot", path}});
         return 2;
@@ -411,8 +419,9 @@ int runTickSweep(const LabRunOptions &options) {
     return 0;
 }
 int runTickChangeSequence(const LabRunOptions &options, const QString &dir) {
-    if (insideRecordingRoot(dir)) {
-        print({{"error", QStringLiteral("recording directory is read-only")}});
+    QString why;
+    if (!labOutputAllowed(dir, &why)) { // before the run; again before mkpath and each frame
+        print({{"error", why}});
         return 2;
     }
     HeadlessLab lab;
@@ -420,7 +429,15 @@ int runTickChangeSequence(const LabRunOptions &options, const QString &dir) {
         print({{"error", lab.error}});
         return 2;
     }
-    QDir().mkpath(dir);
+    bool allowed = labOutputAllowed(dir, &why);
+    if (allowed) {
+        QDir().mkpath(dir);
+        allowed = labOutputAllowed(dir, &why);
+    }
+    if (!allowed) {
+        print({{"error", why}});
+        return 2;
+    }
     auto *item = lab.item;
     const double before = item->metrics().value("tick").toDouble();
     // Common-tick rows shrink 5x: Auto rows fall below minRowPx * (1 - h) for any h <= 0.4.
@@ -440,6 +457,7 @@ int runTickChangeSequence(const LabRunOptions &options, const QString &dir) {
         annotate(image, m, QStringLiteral("t=%1 ms after the zoom  crossfading=%2")
                                .arg(ms).arg(m.value("crossfading").toBool() ? "yes" : "no"));
         const QString path = QStringLiteral("%1/tick-change-%2ms.png").arg(dir).arg(ms, 3, 10, QLatin1Char('0'));
+        if (!labOutputAllowed(path, &why)) { print({{"error", why}}); return 2; }
         if (!image.save(path, "PNG")) { print({{"error", QStringLiteral("PNG save failed")}}); return 2; }
         frames.append(QJsonObject{{"ms", double(ms)}, {"tick", m.value("tick").toDouble()},
                                   {"crossfading", m.value("crossfading").toBool()}, {"path", path}});
