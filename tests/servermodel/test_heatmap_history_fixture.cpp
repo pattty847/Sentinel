@@ -183,7 +183,7 @@ TEST_F(HistoryFixture, ReferenceLineKeepsItsPriceAcrossTheBandShift) {
 TEST_F(HistoryFixture, RolledPagesPreserveObservedCoverageAndUtcDays) {
     IdleSource source;
     HeatmapTwapStreamer streamer(source, streamerConfig());
-    for (const int64_t tf : {300'000LL, 900'000LL, kDayMs}) {
+    for (const int64_t tf : {int64_t{300'000}, int64_t{900'000}, kDayMs}) {
         std::vector<HeatmapTwapStreamer::HistoryColumn> cols;
         int width = 0, height = 0;
         ASSERT_TRUE(streamer.fetchHistory(m_spec.symbol, tf, 0, 1024, width, height, cols));
