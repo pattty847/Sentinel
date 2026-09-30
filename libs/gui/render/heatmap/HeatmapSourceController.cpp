@@ -13,15 +13,23 @@ namespace {
 std::atomic<uint64_t> nextChart{1};
 size_t withHeadroom(size_t bytes) { return bytes + (bytes + 9) / 10; }
 bool isRetained(SpanTier tier) { return tier == SpanTier::Fallback || tier == SpanTier::RecentTf; }
+bool isGuarded(SpanTier tier) { return tier <= SpanTier::Fallback; }
 template <class T> void mix(size_t &h, const T &value) {
     h ^= std::hash<T>{}(value) + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2);
 }
+template <class T> size_t capacityBytes(const std::vector<T> &v) { return v.capacity() * sizeof(T); }
+size_t imageBytes(const gpu::GpuSource &s) {
+    return sizeof(s) + s.symbol.capacity() + s.layer.capacity() + capacityBytes(s.ticks) +
+           capacityBytes(s.bucketSlots) + capacityBytes(s.columnGroups) + capacityBytes(s.groups) +
+           capacityBytes(s.runs) + capacityBytes(s.rowIndex) + capacityBytes(s.entries);
+}
 size_t resolutionBytes(const ResolutionSummary &summary) {
-    size_t bytes = summary.columns.capacity() * sizeof(ColumnResolution);
-    for (const auto &column : summary.columns)
+    size_t bytes = capacityBytes(summary.columns);
+    for (const auto &column : summary.columns) {
+        bytes += capacityBytes(column.sources);
         for (const auto &source : column.sources)
-            bytes += sizeof(SourceResolution) + source.nativeTicks.capacity() * sizeof(int64_t) +
-                     source.bands.capacity() * sizeof(PriceRange);
+            bytes += source.source.capacity() + capacityBytes(source.nativeTicks) + capacityBytes(source.bands);
+    }
     return bytes;
 }
 } // namespace
@@ -48,7 +56,7 @@ size_t SpanSourceKeyHash::operator()(const SpanSourceKey &key) const {
     return h;
 }
 
-SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input) {
+SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input, std::shared_ptr<std::atomic<int64_t>> liveBytes) {
     const auto &key = input.key;
     const int64_t start = key.span.startMs(), end = key.span.endMs();
     // SparseColumns::layer is migration metadata; identity stays the source id.
@@ -58,13 +66,24 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input) {
     options.availableEndMs = key.availableEndMs;
     auto out = std::make_shared<SpanSourceBuild>();
     out->key = key;
-    out->gpu = std::make_shared<const gpu::GpuSource>(gpu::buildGpuSource(composed, options));
+    auto image = std::make_unique<gpu::GpuSource>(gpu::buildGpuSource(composed, options));
+    out->uploadBytes = size_t(image->bytes());
+    const size_t cpu = imageBytes(*image);
+    if (liveBytes) {
+        liveBytes->fetch_add(int64_t(cpu));
+        out->gpu = std::shared_ptr<const gpu::GpuSource>(image.release(), [liveBytes, cpu](const gpu::GpuSource *p) {
+            liveBytes->fetch_sub(int64_t(cpu));
+            delete p;
+        });
+    } else {
+        out->gpu = std::move(image);
+    }
     out->resolution = summarizeResolution(composed, key.source, key.span.tfMs, start, end, key.priceScale);
     for (const auto &column : out->resolution.columns)
         for (const auto &source : column.sources)
             if (source.commonUnits > 0)
                 out->commonUnits = out->commonUnits ? std::lcm(out->commonUnits, source.commonUnits) : source.commonUnits;
-    out->bytes = size_t(out->gpu->bytes()) + resolutionBytes(out->resolution);
+    out->bytes = sizeof(SpanSourceBuild) + cpu + resolutionBytes(out->resolution);
     return out;
 }
 
@@ -72,41 +91,127 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input) {
 struct SpanSourceCache::State {
     Options options;
     Stats stats;
-    tiles::ByteLru<SpanSourceKey, SpanSourceBuildPtr, SpanSourceKeyHash> lru{256ull << 20};
+    std::shared_ptr<std::atomic<int64_t>> liveBytes = std::make_shared<std::atomic<int64_t>>(0);
+    tiles::ByteLru<SpanSourceKey, SpanSourceBuildPtr, SpanSourceKeyHash> lru{SIZE_MAX};
     std::unordered_map<SpanSourceKey, std::weak_ptr<const SpanSourceBuild>, SpanSourceKeyHash> live;
     struct Waiter {
         QPointer<QObject> context;
         Completion completion;
     };
-    std::unordered_map<SpanSourceKey, std::vector<Waiter>, SpanSourceKeyHash> pending;
-    void trim() {
-        lru.evict();
-        std::erase_if(live, [](const auto &entry) { return entry.second.expired(); });
-    }
+    struct Job {
+        size_t reserved = 0;
+        std::vector<Waiter> waiters;
+    };
+    std::unordered_map<SpanSourceKey, Job, SpanSourceKeyHash> pending;
+    struct Claim {
+        size_t bytes = 0;
+        unsigned count = 0;
+    };
+    std::unordered_map<SpanSourceKey, Claim, SpanSourceKeyHash> claims;
+    size_t claimedBytes = 0, reservedBytes = 0;
+    std::map<std::pair<SpanId, std::string>, Hint> hints;
+    std::vector<HeatmapSourceController *> controllers;
 };
 SpanSourceCache::SpanSourceCache(QObject *parent) : SpanSourceCache(Options{}, parent) {}
 SpanSourceCache::SpanSourceCache(Options options, QObject *parent)
-    : QObject(parent), state_(std::make_unique<State>()) {
+    : QObject(parent), state_(std::make_shared<State>()) {
     options.maxJobs = std::max<size_t>(1, options.maxJobs);
-    state_->lru.setMaxBytes(options.maxBytes);
     pool_.setMaxThreadCount(std::max(1, options.threads));
     pool_.setObjectName(QStringLiteral("heatmap-span-build"));
     state_->options = std::move(options);
 }
 SpanSourceCache::~SpanSourceCache() { pool_.waitForDone(); }
+size_t SpanSourceCache::maxBytes() const { return state_->options.maxBytes; }
 void SpanSourceCache::setMaxBytes(size_t bytes) {
     state_->options.maxBytes = bytes;
-    state_->lru.setMaxBytes(bytes);
-    state_->trim();
+    trim();
+}
+size_t SpanSourceCache::pinnedBytes() const { return state_->claimedBytes + state_->reservedBytes; }
+SpanSourceCache::Hint SpanSourceCache::hint(const SpanId &span, const std::string &source) const {
+    const auto it = state_->hints.find({span, source});
+    return it == state_->hints.end() ? Hint{} : it->second;
 }
 SpanSourceCache::Stats SpanSourceCache::stats() const {
     auto out = state_->stats;
     out.bytes = state_->lru.bytes();
     out.entries = state_->lru.size();
-    out.evictions = state_->lru.evictions();
     out.jobs = state_->pending.size();
+    out.claimedBytes = state_->claimedBytes;
+    out.reservedBytes = state_->reservedBytes;
+    out.liveBytes = state_->liveBytes->load();
     return out;
 }
+void SpanSourceCache::attach(HeatmapSourceController *controller) { state_->controllers.push_back(controller); }
+void SpanSourceCache::detach(HeatmapSourceController *controller) { std::erase(state_->controllers, controller); }
+
+void SpanSourceCache::trim() {
+    auto &s = *state_;
+    // Unclaimed LRU images fill what the pinned images leave, oldest out first.
+    std::vector<std::pair<SpanSourceKey, size_t>> unclaimed; // most recent first
+    size_t unclaimedBytes = 0;
+    s.lru.forEach([&](const SpanSourceKey &key, const SpanSourceBuildPtr &, size_t bytes) {
+        if (s.claims.contains(key)) return;
+        unclaimed.emplace_back(key, bytes);
+        unclaimedBytes += bytes;
+    });
+    const size_t pinned = s.claimedBytes + s.reservedBytes;
+    for (auto it = unclaimed.rbegin(); it != unclaimed.rend() && pinned + unclaimedBytes > s.options.maxBytes; ++it) {
+        s.lru.erase(it->first);
+        unclaimedBytes -= it->second;
+        ++s.stats.evictions;
+    }
+    std::erase_if(s.live, [](const auto &entry) { return entry.second.expired(); });
+    if (s.claimedBytes > s.options.maxBytes && !relieving_) {
+        relieving_ = true;
+        QMetaObject::invokeMethod(this, [this] { relieve(); }, Qt::QueuedConnection);
+    }
+}
+
+void SpanSourceCache::relieve() {
+    relieving_ = false;
+    auto &s = *state_;
+    while (s.claimedBytes > s.options.maxBytes) {
+        // The lowest-rank releasable slot of any controller goes first.
+        HeatmapSourceController *owner = nullptr;
+        std::optional<std::pair<SpanRank, SpanId>> worst;
+        for (auto *controller : s.controllers)
+            for (const auto &candidate : controller->releasable())
+                if (!worst || worst->first < candidate.first) {
+                    worst = candidate;
+                    owner = controller;
+                }
+        if (!owner) {
+            sLog_Probe("heatmap.cache.pressure", "claimed=" << s.claimedBytes << " max=" << s.options.maxBytes
+                       << " (visible and fallback only)");
+            break;
+        }
+        ++s.stats.pressureDrops;
+        owner->dropForMemory(worst->second); // releases its claims synchronously
+    }
+}
+
+std::shared_ptr<void> SpanSourceCache::claim(const SpanSourceBuildPtr &build) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!build || !build->gpu) return {};
+    auto &c = state_->claims[build->key];
+    if (!c.count++) {
+        c.bytes = build->bytes;
+        state_->claimedBytes += c.bytes;
+    }
+    std::weak_ptr<State> weak = state_;
+    auto token = std::shared_ptr<void>(static_cast<void *>(state_.get()), [this, weak, key = build->key](void *) {
+        const auto s = weak.lock();
+        if (!s) return; // the cache is gone
+        const auto it = s->claims.find(key);
+        if (it == s->claims.end() || --it->second.count) return;
+        s->claimedBytes -= it->second.bytes;
+        s->claims.erase(it);
+        trim();
+    });
+    trim();
+    return token;
+}
+
 SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (const auto *hit = state_->lru.find(key)) {
@@ -116,49 +221,58 @@ SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     const auto it = state_->live.find(key);
     if (it == state_->live.end()) return nullptr;
     auto build = it->second.lock();
-    if (!build) return nullptr;
+    if (!build || !build->gpu) return nullptr;
     ++state_->stats.hits;
     state_->lru.insert(key, build, build->bytes); // in use again: cache it
-    state_->trim();
+    trim();
     return build;
 }
-bool SpanSourceCache::request(SpanSourceInput input, int priority, QObject *context, Completion completion) {
+
+bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserveBytes, QObject *context,
+                              Completion completion) {
     Q_ASSERT(QThread::currentThread() == thread() && context && context->thread() == thread());
     auto &s = *state_;
     if (const auto it = s.pending.find(input.key); it != s.pending.end()) {
         ++s.stats.sharedBuilds;
-        it->second.push_back({context, std::move(completion)});
+        it->second.waiters.push_back({context, std::move(completion)});
         return true;
     }
     if (s.pending.size() >= s.options.maxJobs) return false;
-    s.pending[input.key].push_back({context, std::move(completion)});
+    auto &job = s.pending[input.key];
+    job.reserved = reserveBytes;
+    job.waiters.push_back({context, std::move(completion)});
+    s.reservedBytes += reserveBytes;
     ++s.stats.builds;
-    auto job = [this, input = std::move(input)] {
+    auto run = [this, input = std::move(input), live = s.liveBytes, before = s.options.beforeBuild] {
         SpanSourceBuildPtr build;
         QString error;
         try {
-            build = buildSpanSource(input);
+            if (before) before();
+            build = buildSpanSource(input, live);
         } catch (const std::exception &e) {
             error = QString::fromUtf8(e.what());
         }
         QMetaObject::invokeMethod(this, [this, key = input.key, build, error] {
             auto &s = *state_;
-            auto waiters = std::move(s.pending.at(key));
+            auto job = std::move(s.pending.at(key));
             s.pending.erase(key);
+            s.reservedBytes -= job.reserved;
             if (build) {
                 s.lru.insert(key, build, build->bytes);
                 s.live[key] = build;
-                s.trim();
+                s.hints[{key.span, key.source}] = {build->bytes, build->uploadBytes};
+                if (s.hints.size() > 16384) s.hints.clear(); // size hints only; rebuilt on demand
             } else {
                 ++s.stats.failures;
             }
-            for (auto &waiter : waiters)
+            for (auto &waiter : job.waiters)
                 if (waiter.context) waiter.completion(build, error);
+            trim();
             emit settled();
         }, Qt::QueuedConnection);
     };
-    if (s.options.executor) s.options.executor(std::move(job), priority);
-    else pool_.start(std::move(job), priority);
+    if (s.options.executor) s.options.executor(std::move(run), priority);
+    else pool_.start(std::move(run), priority);
     return true;
 }
 
@@ -169,9 +283,9 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
 HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache,
                                                  Options options, QObject *parent)
     : QObject(parent), store_(store), fetcher_(fetcher), cache_(cache), options_(options),
-      chart_(nextChart.fetch_add(1)), credits_(options.gpuBytes), capacity_(std::make_shared<HeatmapCapacity>()) {
-    capacity_->freeBytes.store(options_.gpuBytes);
+      chart_(nextChart.fetch_add(1)), reportedFree_(options.gpuBytes), capacity_(std::make_shared<HeatmapCapacity>()) {
     epoch_ = capacity_->capacityEpoch.load();
+    cache_.attach(this);
     auto changed = [this](const ChunkKey &key, quint64) {
         if (!wanted_.contains(key)) return;
         failedChunks_.erase(key);
@@ -205,7 +319,11 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         timer->start();
     }
 }
-HeatmapSourceController::~HeatmapSourceController() { fetcher_.release(chart_); }
+HeatmapSourceController::~HeatmapSourceController() {
+    cache_.detach(this);
+    slots_.clear(); // releases claims while the cache is alive
+    fetcher_.release(chart_);
+}
 
 bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache) {
     if (!budgets.valid()) return false;
@@ -241,6 +359,10 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
                 retained_.push_back(id);
         }
         visibleReady_ = false;
+        // Builds of the old serial are dropped on completion: forget them, so a
+        // return to that tf rejoins the build or takes it from the cache.
+        for (auto &[id, slot] : slots_)
+            for (auto &[name, source] : slot.sources) source.pending.reset();
     }
     if (symbol != symbol_ || tfMs != tfMs_)
         sLog_Data("Heatmap controller view chart=" << chart_ << " symbol=" << symbol << " tf=" << tfMs
@@ -264,6 +386,7 @@ void HeatmapSourceController::setTickRequest(TickMode mode, int64_t units) {
 void HeatmapSourceController::setGpuBudget(size_t bytes) {
     Q_ASSERT(QThread::currentThread() == thread());
     options_.gpuBytes = bytes;
+    if (!reported_) reportedFree_ = bytes;
     schedule();
 }
 
@@ -276,8 +399,39 @@ void HeatmapSourceController::pollCapacity() {
     const auto epoch = capacity_->capacityEpoch.load(std::memory_order_acquire);
     if (epoch == epoch_) return;
     epoch_ = epoch;
-    credits_ = capacity_->freeBytes.load(std::memory_order_relaxed);
-    sLog_Probe("heatmap.controller.capacity", "chart=" << chart_ << " epoch=" << epoch << " free=" << credits_);
+    auto report = capacity_->take();
+    reported_ = true;
+    reportedFree_ = report.freeBytes;
+    for (const auto &key : report.uploaded) {
+        const auto slot = slots_.find(key.span);
+        if (slot == slots_.end()) continue;
+        const auto it = slot->second.sources.find(key.source);
+        if (it == slot->second.sources.end()) continue;
+        auto &source = it->second;
+        if (!source.ready || source.ready->key != key) continue; // an older version: not ours now
+        source.uploaded = true;
+        if (source.ready->gpu) {
+            // The node holds the GPU copy; keep the metadata, release the image.
+            auto light = std::make_shared<SpanSourceBuild>(*source.ready);
+            light->gpu.reset();
+            source.ready = std::move(light);
+            source.claim.reset();
+            ++stats_.releasedImages;
+            dirty_ = true;
+        }
+    }
+    if (report.lost) {
+        // The node lost its GPU copies: released images are rebuilt from chunks.
+        for (auto &[id, slot] : slots_)
+            for (auto &[name, source] : slot.sources) {
+                source.uploaded = false;
+                if (source.ready && !source.ready->gpu) source.ready.reset();
+            }
+        dirty_ = true;
+        sLog_Data("Heatmap controller chart=" << chart_ << " rebuilding released images after GPU loss");
+    }
+    sLog_Probe("heatmap.controller.capacity", "chart=" << chart_ << " epoch=" << epoch << " free=" << reportedFree_
+               << " uploaded=" << report.uploaded.size());
     schedule();
 }
 
@@ -299,27 +453,75 @@ std::vector<SourceAvailability> HeatmapSourceController::sources() {
             priceScale_ = source.latestGrid->priceScale;
             break;
         }
+    // Keep each level's interval: hour chunks only where hour rollups exist.
     for (const auto &source : available->sources) {
         SourceAvailability a{source.id, {}};
         int64_t oldest = INT64_MAX;
         for (const auto &level : source.levels) {
             oldest = std::min(oldest, level.oldestMs);
             a.time.endMs = std::max(a.time.endMs, level.committedThroughMs);
-            if (level.levelMs == kHourMs) a.time.hourThroughMs = level.committedThroughMs;
+            if (level.levelMs == kMinuteMs) a.time.minuteOldestMs = level.oldestMs;
+            if (level.levelMs == kHourMs) {
+                a.time.hourOldestMs = level.oldestMs;
+                a.time.hourThroughMs = level.committedThroughMs;
+            }
         }
         a.time.oldestMs = oldest;
+        // No minute level: no minute history anywhere.
+        if (!a.time.minuteOldestMs) a.time.minuteOldestMs = INT64_MAX;
         if (a.time.endMs > a.time.oldestMs) out.push_back(std::move(a));
     }
     return out;
 }
 
-size_t HeatmapSourceController::slotBytes(const Slot &slot) const {
+size_t HeatmapSourceController::estimate(const SpanId &span, const std::string &source, bool upload) const {
+    const auto hint = cache_.hint(span, source);
+    const size_t known = upload ? hint.uploadBytes : hint.bytes;
+    return known ? known : options_.sourceEstimateBytes;
+}
+size_t HeatmapSourceController::gpuBytes(const Slot &slot) const {
     size_t bytes = 0;
-    for (const auto &source : slot.plan.sources) {
-        const auto it = slot.sources.find(source.source);
-        bytes += it != slot.sources.end() && it->second.ready ? it->second.ready->bytes : options_.sourceEstimateBytes;
+    for (const auto &planned : slot.plan.sources) {
+        const auto it = slot.sources.find(planned.source);
+        bytes += it != slot.sources.end() && it->second.ready ? it->second.ready->uploadBytes
+                                                               : estimate(slot.plan.id, planned.source, true);
     }
     return bytes;
+}
+size_t HeatmapSourceController::outstanding(const Slot &slot) const {
+    size_t bytes = 0;
+    for (const auto &planned : slot.plan.sources) {
+        const auto it = slot.sources.find(planned.source);
+        if (it != slot.sources.end() && it->second.uploaded) continue;
+        bytes += it != slot.sources.end() && it->second.ready ? it->second.ready->uploadBytes
+                                                               : estimate(slot.plan.id, planned.source, true);
+    }
+    return bytes;
+}
+
+std::vector<std::pair<SpanRank, SpanId>> HeatmapSourceController::releasable() const {
+    std::vector<std::pair<SpanRank, SpanId>> out;
+    for (const auto &[id, slot] : slots_) {
+        if (isGuarded(slot.plan.rank.tier)) continue;
+        if (std::any_of(slot.sources.begin(), slot.sources.end(), [](const auto &s) { return bool(s.second.claim); }))
+            out.emplace_back(slot.plan.rank, id);
+    }
+    return out;
+}
+void HeatmapSourceController::dropForMemory(const SpanId &span) {
+    sLog_Probe("heatmap.controller.cpu_drop", "chart=" << chart_ << " tf=" << span.tfMs << " tile=" << span.tile);
+    slots_.erase(span);
+    ++stats_.pressureDrops;
+    dirty_ = true;
+    schedule();
+}
+
+void HeatmapSourceController::setReady(SourceSlot &source, SpanSourceBuildPtr build) {
+    source.claim = cache_.claim(build);
+    source.ready = std::move(build);
+    source.uploaded = false;
+    source.failed.reset();
+    dirty_ = true;
 }
 
 void HeatmapSourceController::reconcile() {
@@ -339,72 +541,88 @@ void HeatmapSourceController::reconcile() {
     }
     const auto plan = planSpans(symbol_, tfMs_, timeLoMs_, timeHiMs_, available, retained);
 
-    // Drop what the plan no longer names.
-    std::set<SpanId> planned;
-    for (const auto &span : plan) planned.insert(span.id);
+    // Every surviving slot takes its new plan, rank and sources before anything
+    // is measured or admitted; the rest leaves.
+    std::map<SpanId, const PlannedSpan *> planned;
+    for (const auto &span : plan) planned.emplace(span.id, &span);
     for (auto it = slots_.begin(); it != slots_.end();) {
-        if (planned.contains(it->first)) { ++it; continue; }
-        it = slots_.erase(it);
-        dirty_ = true;
+        const auto p = planned.find(it->first);
+        if (p == planned.end()) {
+            it = slots_.erase(it);
+            dirty_ = true;
+            continue;
+        }
+        auto &slot = it->second;
+        const auto &span = *p->second;
+        if (slot.plan.rank != span.rank) dirty_ = true;
+        slot.plan = span;
+        std::erase_if(slot.sources, [&](const auto &entry) {
+            return std::none_of(span.sources.begin(), span.sources.end(),
+                                [&](const auto &s) { return s.source == entry.first; });
+        });
+        ++it;
     }
 
     // Admission, strictly by rank. Visible and fallback always enter; the rest
-    // needs GPU room and node credit of bytes + 10%. Eviction only removes
-    // content ranked below what it admits, so admit/evict cannot ping-pong.
-    size_t used = 0;
-    for (const auto &[id, slot] : slots_) used += slotBytes(slot);
+    // needs GPU room, node credit of bytes + 10% and CPU tier room. Eviction
+    // only removes content ranked below what it admits, so it cannot ping-pong.
+    size_t used = 0, reserved = 0;
+    for (const auto &[id, slot] : slots_) {
+        used += gpuBytes(slot);
+        reserved += outstanding(slot);
+    }
+    size_t credit = reportedFree_ > reserved ? reportedFree_ - reserved : 0;
+    size_t cpuAdmitted = 0; // CPU estimates of spans admitted below (not yet requested)
     stats_.suppressed = 0;
     bool blocked = false;
     for (const auto &span : plan) {
-        if (auto it = slots_.find(span.id); it != slots_.end()) {
-            auto &slot = it->second;
-            if (slot.plan.rank != span.rank) dirty_ = true;
-            slot.plan = span;
-            std::erase_if(slot.sources, [&](const auto &entry) {
-                return std::none_of(span.sources.begin(), span.sources.end(),
-                                    [&](const auto &s) { return s.source == entry.first; });
-            });
-            continue;
+        if (slots_.contains(span.id) || isRetained(span.rank.tier)) continue;
+        size_t bytes = 0, cpu = 0;
+        for (const auto &source : span.sources) {
+            bytes += estimate(span.id, source.source, true);
+            cpu += estimate(span.id, source.source, false);
         }
-        if (isRetained(span.rank.tier)) continue;
-        const size_t bytes = span.sources.size() * options_.sourceEstimateBytes;
-        const bool guarded = span.rank.tier <= SpanTier::Fallback;
+        const bool guarded = isGuarded(span.rank.tier);
         const size_t need = guarded ? bytes : withHeadroom(bytes);
-        if (!guarded && (blocked || credits_ < need)) {
+        auto cpuOver = [&] { return cache_.pinnedBytes() + cpuAdmitted + cpu > cache_.maxBytes(); };
+        if (!guarded && (blocked || credit < need)) {
             ++stats_.suppressed;
             blocked = true;
             continue;
         }
-        while (used + need > options_.gpuBytes) {
+        while (used + need > options_.gpuBytes || (!guarded && cpuOver())) {
             auto victim = slots_.end();
             for (auto it = slots_.begin(); it != slots_.end(); ++it) {
                 const auto &rank = it->second.plan.rank;
-                if (rank.tier > SpanTier::Fallback && span.rank < rank &&
-                    (victim == slots_.end() || victim->second.plan.rank < rank))
+                if (!isGuarded(rank.tier) && span.rank < rank && (victim == slots_.end() || victim->second.plan.rank < rank))
                     victim = it;
             }
             if (victim == slots_.end()) break;
             sLog_Probe("heatmap.controller.evict", "chart=" << chart_ << " tile=" << victim->first.tile << " tier="
                        << spanTierName(victim->second.plan.rank.tier) << " for=" << span.id.tile);
-            used -= std::min(used, slotBytes(victim->second));
-            slots_.erase(victim);
+            used -= std::min(used, gpuBytes(victim->second));
+            const size_t freed = outstanding(victim->second);
+            credit += std::min(freed, reserved);
+            reserved -= std::min(freed, reserved);
+            slots_.erase(victim); // releases its CPU claims
             ++stats_.evictions;
             dirty_ = true;
         }
-        if (!guarded && used + need > options_.gpuBytes) {
+        if (!guarded && (used + need > options_.gpuBytes || cpuOver())) {
             ++stats_.suppressed;
             blocked = true;
             continue;
         }
         slots_.emplace(span.id, Slot{span, {}});
         used += bytes;
-        credits_ -= std::min(credits_, bytes);
+        credit -= std::min(credit, bytes);
+        cpuAdmitted += cpu;
         ++stats_.admissions;
         dirty_ = true;
     }
     if (stats_.suppressed)
         sLog_Probe("heatmap.controller.suppressed", "chart=" << chart_ << " spans=" << stats_.suppressed
-                   << " credits=" << credits_ << " used=" << used);
+                   << " credit=" << credit << " used=" << used);
 
     // Chunk demand: the best rank of any span needing a key wins. Retained spans
     // are already built and need nothing.
@@ -427,7 +645,8 @@ void HeatmapSourceController::reconcile() {
         wanted_.insert(key);
         if (!failedChunks_.contains(key)) byPriority[priority].push_back(key);
     }
-    // A cached key emits nothing: the peeks below consume it. A miss re-arms here.
+    // A cached key emits nothing: the peeks below consume it. A miss re-arms
+    // here; the store keeps wanted keys, so a delivered body is not refetched.
     for (auto &[priority, keys] : byPriority) {
         std::sort(keys.begin(), keys.end(), [](const auto &a, const auto &b) {
             return std::tie(a.startMs, a.source, a.levelMs) < std::tie(b.startMs, b.source, b.levelMs);
@@ -465,15 +684,13 @@ void HeatmapSourceController::reconcile() {
                 source.failed == input.key)
                 continue;
             if (auto hit = cache_.find(input.key)) {
-                source.ready = std::move(hit);
-                source.pending.reset();
-                dirty_ = true;
+                setReady(source, std::move(hit));
                 continue;
             }
             if (refused) continue;
             const auto key = input.key;
             const auto serial = serial_;
-            if (cache_.request(std::move(input), span.rank.fetchPriority(), this,
+            if (cache_.request(std::move(input), span.rank.fetchPriority(), estimate(span.id, key.source, false), this,
                                [this, serial, key](SpanSourceBuildPtr build, const QString &error) {
                                    onBuilt(serial, key, std::move(build), error);
                                }))
@@ -498,23 +715,31 @@ void HeatmapSourceController::onBuilt(uint64_t serial, const SpanSourceKey &key,
         if (const auto it = slot->second.sources.find(key.source);
             it != slot->second.sources.end() && it->second.pending == key)
             found = &it->second;
-    if (!found) { // an older serial, or the slot moved on to another key
+    if (!found) { // an older serial, or the slot moved on to another request
         ++stats_.staleResults;
         sLog_Probe("heatmap.controller.stale", "chart=" << chart_ << " tile=" << key.span.tile << " source=" << key.source);
         return;
     }
     auto &s = *found;
     s.pending.reset();
+    if (s.expected && *s.expected != key) {
+        // Superseded while queued (the replacement was refused by a full queue):
+        // keep the published version; reconcile requests the newest key.
+        ++stats_.staleResults;
+        sLog_Probe("heatmap.controller.stale", "chart=" << chart_ << " tile=" << key.span.tile << " source="
+                   << key.source << " superseded");
+        schedule();
+        return;
+    }
     if (!build) {
         s.failed = key;
         sLog_Warning("Heatmap span build failed chart=" << chart_ << " symbol=" << key.span.symbol << " tf="
                      << key.span.tfMs << " tile=" << key.span.tile << " source=" << key.source << " error=" << error);
         emit buildFailed(error);
     } else {
-        s.ready = std::move(build);
-        s.failed.reset();
         sLog_Probe("heatmap.controller.built", "chart=" << chart_ << " tf=" << key.span.tfMs << " tile=" << key.span.tile
-                   << " source=" << key.source << " bytes=" << s.ready->bytes);
+                   << " source=" << key.source << " bytes=" << build->bytes);
+        setReady(s, std::move(build));
     }
     dirty_ = true;
     schedule();

@@ -56,10 +56,13 @@ struct SpanSourceKeyHash {
 };
 struct SpanSourceBuild {
     SpanSourceKey key;
+    // The CPU upload image. nullptr in a snapshot means the node reported the
+    // upload and the controller released the image (see HeatmapCapacity).
     std::shared_ptr<const gpu::GpuSource> gpu;
     ResolutionSummary resolution; // this source's columns of the span
     int64_t commonUnits = 0;      // LCM of every column's common tick (0 = no data)
-    size_t bytes = 0;
+    size_t bytes = 0;             // CPU allocation (vector capacities) of the build
+    size_t uploadBytes = 0;       // GPU payload (gpu::GpuSource::bytes())
 };
 using SpanSourceBuildPtr = std::shared_ptr<const SpanSourceBuild>;
 struct SpanSourceInput {
@@ -67,14 +70,29 @@ struct SpanSourceInput {
     std::vector<std::shared_ptr<const StoredChunk>> chunks; // the generations of key
 };
 // Composes the chunks at the span's tf and builds the upload image and the
-// resolution summary. Pure; any thread; throws what the builders throw.
-SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input);
+// resolution summary. Pure; any thread; throws what the builders throw. When
+// liveBytes is given, it holds the CPU bytes of the image while it is alive.
+SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input,
+                                   std::shared_ptr<std::atomic<int64_t>> liveBytes = {});
 
-// One per process, on the heatmap-data thread, shared by every controller:
-// a byte-bounded LRU of span-source builds plus a weak registry, so a build that
-// some chart still publishes is shared even after the LRU dropped it. Concurrent
-// requests for one key share a single build. At most maxJobs keys are queued or
-// running; request() refuses more and emits settled() when a job finishes.
+class HeatmapSourceController;
+
+// One per process, on the heatmap-data thread, shared by every controller. It
+// must outlive them.
+// - Builds: a bounded pool (2 threads); concurrent requests for one key share
+//   one build; at most maxJobs keys are queued or running (request() refuses
+//   more and emits settled() when a job finishes).
+// - Sharing: an LRU of builds plus a weak registry, so a build some chart still
+//   holds is shared even after the LRU dropped it.
+// - CPU tier (maxBytes, HeatmapBudgets::spanSources): controllers claim the
+//   images they hold; claimed images plus reservations of running builds are
+//   pinned. The LRU keeps unclaimed images only within what is left. When the
+//   claimed bytes alone exceed the tier, the cache drops the lowest-rank slots
+//   of all controllers (prefetch, recent-tf; never visible or fallback) until
+//   they fit. Controllers admit prefetch only with CPU room (size hints of past
+//   builds make that admission match the real sizes).
+// - liveBytes counts every image alive anywhere (slots, LRU, snapshots, the
+//   node's copy of a snapshot): snapshots lag by at most one frame.
 class SpanSourceCache final : public QObject {
     Q_OBJECT
 public:
@@ -85,43 +103,91 @@ public:
         // Runs a build job; default: the cache's thread pool, by priority. Tests
         // inject a queue they run explicitly (deterministic, no sleeps).
         std::function<void(std::function<void()> job, int priority)> executor;
+        std::function<void()> beforeBuild; // tests only: runs on the build thread
     };
     explicit SpanSourceCache(QObject *parent = nullptr);
     explicit SpanSourceCache(Options options, QObject *parent = nullptr);
     ~SpanSourceCache() override;
     using Completion = std::function<void(SpanSourceBuildPtr build, QString error)>;
-    // A cached or still-published build (touches the LRU), or nullptr.
+    // A cached or still-held build (touches the LRU), or nullptr.
     SpanSourceBuildPtr find(const SpanSourceKey &key);
-    // Builds input (or joins the build in flight for its key). The completion
-    // runs on this thread, unless `context` was destroyed. False when the queue
-    // is full: retry after settled().
-    bool request(SpanSourceInput input, int priority, QObject *context, Completion completion);
+    // Builds input (or joins the build in flight for its key), reserving
+    // reserveBytes of the tier until it completes. The completion runs on this
+    // thread, unless `context` was destroyed. False when the queue is full:
+    // retry after settled().
+    bool request(SpanSourceInput input, int priority, size_t reserveBytes, QObject *context, Completion completion);
+    // Pins an image in the CPU tier until the returned token is destroyed (on
+    // this thread). A key claimed by several holders counts once.
+    std::shared_ptr<void> claim(const SpanSourceBuildPtr &build);
+    // Sizes of the last build of (span, source) at any generation; 0 unknown.
+    struct Hint { size_t bytes = 0, uploadBytes = 0; };
+    Hint hint(const SpanId &span, const std::string &source) const;
+    size_t pinnedBytes() const; // claimed + reserved
+    size_t maxBytes() const;
     void setMaxBytes(size_t bytes);
     struct Stats {
-        uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0;
-        size_t bytes = 0, entries = 0, jobs = 0;
+        uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0, pressureDrops = 0;
+        size_t bytes = 0, entries = 0, jobs = 0; // LRU
+        size_t claimedBytes = 0, reservedBytes = 0;
+        int64_t liveBytes = 0;
     };
     Stats stats() const;
 signals:
     void settled();
 private:
+    friend class HeatmapSourceController;
     struct State;
-    std::unique_ptr<State> state_;
+    std::shared_ptr<State> state_;
     QThreadPool pool_;
+    bool relieving_ = false;
+    void attach(HeatmapSourceController *controller);
+    void detach(HeatmapSourceController *controller);
+    void trim();
+    void relieve();
 };
 
-// Written by the render thread (HeatmapTileNode, S5c), read by the controller:
-// the node stores its free GPU bytes, then bumps capacityEpoch whenever it frees
-// bytes (a transition retires, a revision shrinks a source). Every admission
-// consumes the last reported free bytes, so the node reports after every
-// release, not only once. No QObject access.
+// The node side of the capacity contract (HeatmapTileNode, S5c; render thread,
+// no QObject access). The node calls report() whenever its resident bytes
+// change: after an upload as well as after a release (a transition retires, a
+// revision shrinks a source). freeBytes is the per-chart cap minus resident
+// bytes; `uploaded` names the span sources it has uploaded since its last
+// report (their CPU images are then released: the node keeps the GPU copy,
+// identified by SpanSourceBuild::key); `lost` says the node lost its GPU copies
+// (QRhi loss), and the controller rebuilds the released images.
+// The controller's credit is freeBytes minus its outstanding reservations (every
+// admitted source not reported uploaded, at its built size or estimate), so a
+// build smaller than its estimate returns credit at once, and a static view makes
+// progress without new reports.
 struct HeatmapCapacity {
-    std::atomic<size_t> freeBytes{320ull << 20};
     std::atomic<uint64_t> capacityEpoch{0};
-    void reportFree(size_t bytes) {
-        freeBytes.store(bytes, std::memory_order_relaxed);
+    void report(size_t freeBytes, std::vector<SpanSourceKey> uploaded = {}, bool lost = false) {
+        {
+            std::scoped_lock lock(mutex_);
+            free_ = freeBytes;
+            for (auto &key : uploaded) uploaded_.push_back(std::move(key));
+            lost_ = lost_ || lost;
+        }
         capacityEpoch.fetch_add(1, std::memory_order_release);
     }
+    void reportFree(size_t freeBytes) { report(freeBytes); }
+    struct Report {
+        size_t freeBytes = 0;
+        std::vector<SpanSourceKey> uploaded;
+        bool lost = false;
+    };
+    // Controller: the latest free bytes and everything reported since the last take.
+    Report take() {
+        std::scoped_lock lock(mutex_);
+        Report out{free_, std::move(uploaded_), lost_};
+        uploaded_.clear();
+        lost_ = false;
+        return out;
+    }
+private:
+    std::mutex mutex_;
+    size_t free_ = 0;
+    std::vector<SpanSourceKey> uploaded_;
+    bool lost_ = false;
 };
 
 struct SpanSourceSnapshot {
@@ -153,9 +219,9 @@ class HeatmapSourceController final : public QObject {
     Q_OBJECT
 public:
     struct Options {
-        size_t gpuBytes = 320ull << 20;       // per-chart cap (HeatmapBudgets::gpuPerChart)
-        size_t sourceEstimateBytes = 8ull << 20; // admission estimate of an unbuilt span source
-        int capacityPollMs = 16;              // <= 0: tests call pollCapacity()
+        size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
+        size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
+        int capacityPollMs = 16;                 // <= 0: tests call pollCapacity()
     };
     HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache, Options options,
                             QObject *parent = nullptr);
@@ -163,8 +229,9 @@ public:
                             QObject *parent = nullptr);
     ~HeatmapSourceController() override;
     // Owner thread only (queue from others). A symbol or tf change bumps the
-    // serial; the previous tf's built visible spans stay as fallback, then as
-    // the recent-tf tier, so switching back republishes them without a build.
+    // serial (in-flight builds of the old serial are dropped and rejoined from
+    // the cache); the previous tf's built visible spans stay as fallback, then
+    // as the recent-tf tier, so switching back republishes them without a build.
     void setView(const std::string &symbol, int64_t tfMs, double timeLoMs, double timeHiMs);
     // The tick the GUI drew. Sources are tick-free, so this never rebuilds;
     // node residency uses it (S5c).
@@ -178,11 +245,13 @@ public:
     std::shared_ptr<const SpanSet> latestSnapshot() const;
     std::shared_ptr<HeatmapCapacity> capacity() const { return capacity_; }
 
-    // Re-reads the capacity epoch; after a bump, suppressed prefetch is
-    // re-admitted strictly by rank while free >= bytes + 10%.
+    // Applies node reports (free bytes, uploads, loss) after a capacity epoch
+    // bump; suppressed prefetch is re-admitted strictly by rank while the
+    // credit is >= bytes + 10%.
     void pollCapacity();
     struct Stats {
         uint64_t publications = 0, staleResults = 0, evictions = 0, admissions = 0;
+        uint64_t pressureDrops = 0, releasedImages = 0;
         size_t suppressed = 0; // spans suppressed by the last reconcile
     };
     Stats stats() const { return stats_; } // owner thread only
@@ -191,8 +260,11 @@ signals:
     void snapshotChanged();
     void buildFailed(QString message);
 private:
+    friend class SpanSourceCache;
     struct SourceSlot {
-        SpanSourceBuildPtr ready;
+        SpanSourceBuildPtr ready;   // gpu == nullptr once released after upload
+        std::shared_ptr<void> claim; // CPU tier claim while the image is held
+        bool uploaded = false;       // the node reported ready's upload
         std::optional<SpanSourceKey> expected, pending, failed;
     };
     struct Slot {
@@ -211,7 +283,8 @@ private:
     int64_t tickUnits_ = 0;
     double priceScale_ = 100;
     uint64_t serial_ = 0, version_ = 0, epoch_ = 0;
-    size_t credits_ = 0;
+    size_t reportedFree_ = 0;
+    bool reported_ = false;
     bool scheduled_ = false, dirty_ = false, refused_ = false, visibleReady_ = true;
     std::map<SpanId, Slot> slots_;
     std::vector<SpanId> retained_; // previous tf's visible spans
@@ -224,8 +297,14 @@ private:
     void reconcile();
     void publish();
     void reset();
+    void setReady(SourceSlot &source, SpanSourceBuildPtr build);
     void onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
-    size_t slotBytes(const Slot &slot) const;
+    size_t estimate(const SpanId &span, const std::string &source, bool upload) const;
+    size_t gpuBytes(const Slot &slot) const;
+    size_t outstanding(const Slot &slot) const;
     std::vector<SourceAvailability> sources();
+    // SpanSourceCache pressure relief.
+    std::vector<std::pair<SpanRank, SpanId>> releasable() const;
+    void dropForMemory(const SpanId &span);
 };
 } // namespace heatmap

@@ -3,8 +3,12 @@
 #include "../servermodel/FakeChunkTransport.hpp"
 #include <QCoreApplication>
 #include <QEvent>
+#include <QEventLoop>
+#include <QTimer>
 #include <gtest/gtest.h>
 #include <climits>
+#include <condition_variable>
+#include <mutex>
 #include <deque>
 #include <map>
 #include <set>
@@ -20,7 +24,8 @@ constexpr int64_t tileMs = tiles::kTileColumns * kMinuteMs;
 // Deliberately not "near"/"deep" by position: the controller must not care.
 bool coarse(const std::string &source) { return findChunkSource(source)->hourLevel; }
 
-ChunkAvailability availability() {
+// Hour level (oldest, committed-through) for sources that have one; 0 = none.
+ChunkAvailability availability(int64_t end = availableEnd, int64_t hourFrom = 0, int64_t hourThrough = 0) {
     ChunkAvailability a;
     a.symbol = "BTC-USD";
     a.chunkWireVersion = kChunkWireVersion;
@@ -29,23 +34,30 @@ ChunkAvailability availability() {
         s.id = source.id;
         s.latestGrid = protocol::chunkwire::GridInfo{};
         s.latestGrid->priceScale = 100;
-        s.levels.push_back({kMinuteMs, kHourMs, availableEnd, availableStart, availableEnd - kMinuteMs});
+        s.levels.push_back({kMinuteMs, kHourMs, end, availableStart, end - kMinuteMs});
+        if (source.hourLevel && hourThrough)
+            s.levels.push_back({kHourMs, kDayMs, hourThrough, hourFrom, hourThrough - kHourMs});
         a.sources.push_back(std::move(s));
     }
     return a;
 }
+// Hour rollups exist from here on (hour-level chunks omit earlier columns but
+// still scan their whole day, as the server does).
+int64_t hourOldest = 0;
 // Fine source: $1 rows over $95-$105. Coarse source: $5 rows over $0-$200.
 ChunkFramePtr body(const ChunkKey &key, uint64_t revision = 1) {
     auto frame = std::make_shared<ChunkFrame>();
     frame->key = key;
-    frame->state = {true, key.startMs + kHourMs, revision};
+    const int64_t span = chunkSpanMs(key.source, key.levelMs);
+    frame->state = {true, key.startMs + span, revision};
     frame->contentHash = revision;
     const bool isCoarse = coarse(key.source);
     const int64_t tick = isCoarse ? 500 : 100, lo = isCoarse ? 0 : 9500, hi = isCoarse ? 20000 : 10500;
     frame->columns = {key.symbol, std::string(findChunkSource(key.source)->hmc2Layer), key.levelMs, key.startMs,
-                      key.startMs + kHourMs, {}, {}};
-    frame->columns.scannedRanges = {{key.startMs, key.startMs + kHourMs}};
-    for (auto t = key.startMs; t < key.startMs + kHourMs; t += key.levelMs) {
+                      key.startMs + span, {}, {}};
+    frame->columns.scannedRanges = {{key.startMs, key.startMs + span}};
+    for (auto t = key.startMs; t < key.startMs + span; t += key.levelMs) {
+        if (key.levelMs == kHourMs && t < hourOldest) continue;
         NativeColumn n;
         n.grid = {1, tick, 100};
         n.observedMs = uint64_t(key.levelMs);
@@ -56,6 +68,11 @@ ChunkFramePtr body(const ChunkKey &key, uint64_t revision = 1) {
         frame->columns.columns.push_back({t, uint64_t(key.levelMs), 0, {std::move(n)}});
     }
     return frame;
+}
+void revise(ChunkStore &store, const ChunkKey &key, uint64_t revision) {
+    const auto frame = body(key, revision);
+    ASSERT_TRUE(store.put(key, std::shared_ptr<const SparseColumns>(frame, &frame->columns), frame->state,
+                          frame->contentHash));
 }
 void drain() {
     for (int i = 0; i < 32; ++i) QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
@@ -93,6 +110,7 @@ protected:
     size_t answered = 0;
 
     void SetUp() override {
+        hourOldest = 0;
         makeCache();
         transport.goOnline();
         transport.push(availability());
@@ -103,6 +121,13 @@ protected:
         jobs.clear();
         cache.reset();
         drain();
+    }
+    size_t visibleUploadBytes(const SpanSet &set) {
+        size_t bytes = 0;
+        for (const auto &span : set.spans)
+            if (span.rank.tier == SpanTier::Visible)
+                for (const auto &source : span.sources) bytes += source.build ? source.build->uploadBytes : 0;
+        return bytes;
     }
     void makeCache(size_t maxBytes = 256ull << 20, size_t maxJobs = 8) {
         SpanSourceCache::Options options;
@@ -121,6 +146,29 @@ protected:
     }
     void view(HeatmapSourceController &c, int64_t tfMs = kMinuteMs) {
         c.setView("BTC-USD", tfMs, double(epoch), double(epoch + tileMs));
+    }
+    // Answers every outstanding request (and follow-ups); builds stay queued.
+    void answerAll() {
+        for (int i = 0; i < 1000; ++i) {
+            drain();
+            if (answered == transport.requests.size()) break;
+            while (answered < transport.requests.size()) {
+                const auto request = transport.requests[answered++];
+                for (size_t k = 0; k < request.starts.size(); ++k) transport.reply(request.id, body(request.key(k)));
+            }
+        }
+    }
+    // Fake node frame: uploads every image of the latest snapshot and reports.
+    size_t upload(HeatmapSourceController &c, size_t freeBytes) {
+        std::vector<SpanSourceKey> uploaded;
+        for (const auto &span : c.latestSnapshot()->spans)
+            for (const auto &source : span.sources)
+                if (source.build && source.build->gpu) uploaded.push_back(source.build->key);
+        const size_t count = uploaded.size();
+        c.capacity()->report(freeBytes, std::move(uploaded));
+        c.pollCapacity();
+        step();
+        return count;
     }
     // One round: every outstanding request answered, then queued builds run.
     bool step() {
@@ -237,8 +285,6 @@ TEST_F(SourceController, TwoChartsShareEveryChunkAndEverySpanBuild) {
 }
 
 TEST_F(SourceController, RecentTimeframeReturnsWithoutRequestsOrBuilds) {
-    // No LRU: only recent-tf retention can keep the previous tf's sources.
-    makeCache(1);
     auto &a = chart();
     view(a, kMinuteMs);
     settle();
@@ -246,25 +292,22 @@ TEST_F(SourceController, RecentTimeframeReturnsWithoutRequestsOrBuilds) {
     ASSERT_EQ(oneMinute.size(), 2u);
     view(a, 5 * kMinuteMs);
     settle();
-    const auto middle = a.latestSnapshot();
-    EXPECT_EQ(middle->tfMs, 5 * kMinuteMs);
-    EXPECT_EQ(builds(*middle, SpanTier::RecentTf), oneMinute);
+    EXPECT_EQ(a.latestSnapshot()->tfMs, 5 * kMinuteMs);
+    EXPECT_EQ(builds(*a.latestSnapshot(), SpanTier::RecentTf), oneMinute);
+    // No CPU room beyond what the slots claim: the LRU keeps nothing else, so
+    // only recent-tf retention can keep the 1m view.
+    cache->setMaxBytes(cache->stats().claimedBytes);
     const auto requests = requestedKeys().size();
-    const auto built = cache->stats().builds;
     // Switch back: the visible spans are published on the first reconcile,
     // before any build job runs or any chunk is answered.
     view(a, kMinuteMs);
     drain();
-    const auto back = a.latestSnapshot();
-    EXPECT_EQ(back->tfMs, kMinuteMs);
-    EXPECT_TRUE(visibleComplete(*back));
-    EXPECT_EQ(builds(*back, SpanTier::Visible), oneMinute);
+    EXPECT_EQ(a.latestSnapshot()->tfMs, kMinuteMs);
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+    EXPECT_EQ(builds(*a.latestSnapshot(), SpanTier::Visible), oneMinute);
     EXPECT_EQ(requestedKeys().size(), requests);
     settle();
     EXPECT_EQ(requestedKeys().size(), requests); // zero requests overall
-    // Only the 1m prefetch spans (not retained, no LRU) were rebuilt.
-    EXPECT_EQ(cache->stats().builds, built + 8);
-    EXPECT_EQ(builds(*a.latestSnapshot(), SpanTier::RecentTf).size(), 2u); // the 5m view
 }
 
 TEST_F(SourceController, RevisionRebuildsBothChartsAffectedSpansExactlyOnce) {
@@ -325,14 +368,13 @@ TEST_F(SourceController, SuppressedPrefetchReturnsAfterCapacityEpochAndStaticVie
     EXPECT_EQ(a.stats().suppressed, 4u);
     ASSERT_EQ(a.latestSnapshot()->spans.size(), 1u);
     EXPECT_EQ(cache->stats().builds, 2u);
-    // Freed bytes below bytes + 10% admit nothing.
-    a.capacity()->reportFree(need - 1);
-    a.pollCapacity();
+    // The node uploads the view; free bytes below bytes + 10% admit nothing.
+    EXPECT_EQ(upload(a, need - 1), 2u);
     settle();
     EXPECT_EQ(a.latestSnapshot()->spans.size(), 1u);
     EXPECT_EQ(cache->stats().builds, 2u);
-    // Same view and budget; only the capacity epoch changes. The nearest
-    // prefetch span returns, strictly by rank.
+    // A release leaves exactly bytes + 10%: only the capacity epoch changed,
+    // and the nearest prefetch span returns, strictly by rank.
     a.capacity()->reportFree(need);
     a.pollCapacity();
     settle();
@@ -342,11 +384,15 @@ TEST_F(SourceController, SuppressedPrefetchReturnsAfterCapacityEpochAndStaticVie
     EXPECT_TRUE(admitted->spans[1].complete);
     EXPECT_EQ(cache->stats().builds, 4u);
     EXPECT_EQ(a.stats().suppressed, 3u);
-    // Static view: repeated epoch bumps without new room change nothing.
+    size_t prefetchBytes = 0;
+    for (const auto &source : admitted->spans[1].sources) prefetchBytes += source.build->uploadBytes;
+    // Static view: the node uploads that span, then keeps reporting without new room.
+    upload(a, need - prefetchBytes);
     const auto stable = cache->stats();
     const auto stats = a.stats();
+    const auto version = a.latestSnapshot()->version;
     for (int i = 0; i < 20; ++i) {
-        a.capacity()->reportFree(need - 1);
+        a.capacity()->reportFree(need - prefetchBytes);
         a.pollCapacity();
         settle();
     }
@@ -354,7 +400,7 @@ TEST_F(SourceController, SuppressedPrefetchReturnsAfterCapacityEpochAndStaticVie
     EXPECT_EQ(cache->stats().evictions, stable.evictions);
     EXPECT_EQ(a.stats().evictions, 0u);
     EXPECT_EQ(a.stats().admissions, stats.admissions);
-    EXPECT_EQ(a.latestSnapshot()->version, admitted->version);
+    EXPECT_EQ(a.latestSnapshot()->version, version);
 }
 
 TEST_F(SourceController, TightGpuBudgetEvictsOnlyLowerRanks) {
@@ -465,7 +511,7 @@ TEST_F(SourceController, BuildSupersededByARevisionIsDroppedForTheNewerOne) {
     EXPECT_TRUE(checked);
 }
 
-TEST_F(SourceController, BudgetsAreConfigurableAndPublishedBuildsStayShared) {
+TEST_F(SourceController, BudgetsAreConfigurableAndATinyCpuTierKeepsOnlyTheView) {
     HeatmapBudgets budgets;
     budgets.cpuCeiling = 1;
     EXPECT_FALSE(HeatmapSourceController::applyBudgets(budgets, store, *cache));
@@ -473,13 +519,324 @@ TEST_F(SourceController, BudgetsAreConfigurableAndPublishedBuildsStayShared) {
     budgets.spanSources = 1;
     EXPECT_TRUE(HeatmapSourceController::applyBudgets(budgets, store, *cache));
     EXPECT_EQ(store.stats().maxBytes, budgets.decodedChunks);
+    EXPECT_EQ(cache->maxBytes(), 1u);
     auto &a = chart();
     auto &b = chart();
     view(a);
     view(b);
     settle();
-    EXPECT_LE(cache->stats().bytes, 1u);
-    EXPECT_EQ(cache->stats().builds, 10u); // the weak registry still shares
+    // Visible spans always enter; prefetch has no CPU room. One shared build.
+    EXPECT_EQ(cache->stats().builds, 2u);
+    EXPECT_EQ(a.latestSnapshot()->spans.size(), 1u);
     EXPECT_EQ(builds(*a.latestSnapshot()), builds(*b.latestSnapshot()));
+    size_t claimed = 0;
+    for (const auto *build : builds(*a.latestSnapshot())) claimed += build->bytes;
+    EXPECT_EQ(cache->stats().claimedBytes, claimed); // counted once for two charts
+}
+
+
+// Review fix 1: a decoded budget smaller than one chunk must not refetch forever.
+TEST_F(SourceController, ChunksLargerThanTheDecodedBudgetAreFetchedOnce) {
+    store.setMaxBytes(1);
+    auto &a = chart();
+    view(a);
+    settle();
+    std::set<std::tuple<std::string, int64_t, int64_t>> unique;
+    for (const auto &key : requestedKeys()) unique.emplace(key.source, key.levelMs, key.startMs);
+    EXPECT_EQ(requestedKeys().size(), unique.size());
+    EXPECT_EQ(store.stats().loads, unique.size());
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    for (const auto &span : a.latestSnapshot()->spans) EXPECT_TRUE(span.complete);
+    charts.clear(); // no chart wants them: the budget applies again
+    drain();
+    EXPECT_EQ(store.stats().entries, 0u);
+}
+
+// Review fix 2: a rebuild dropped for an old serial is rejoined on return.
+TEST_F(SourceController, ReturningToATimeframeRejoinsARebuildStartedBeforeLeavingIt) {
+    auto &a = chart();
+    view(a, kMinuteMs);
+    settle();
+    const SpanSnapshot *visible = nullptr;
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible) visible = &span;
+    ASSERT_TRUE(visible);
+    const auto g = visible->sources[0].build->key.generations.front();
+    const ChunkKey key{g.symbol, g.source, g.levelMs, g.startMs};
+    revise(store, key, 2);
+    drain();
+    ASSERT_FALSE(jobs.empty()); // the rebuild is queued
+    view(a, 5 * kMinuteMs);
+    settle(); // the rebuild completes under the old serial and is dropped
+    EXPECT_GT(a.stats().staleResults, 0u);
+    view(a, kMinuteMs);
+    settle();
+    bool checked = false;
+    for (const auto &span : a.latestSnapshot()->spans) {
+        if (span.rank.tier != SpanTier::Visible) continue;
+        EXPECT_TRUE(span.complete);
+        for (const auto &source : span.sources)
+            for (const auto &gen : source.build->key.generations)
+                if (gen.source == key.source && gen.startMs == key.startMs) {
+                    EXPECT_EQ(gen.generation, store.generationOf(key));
+                    checked = true;
+                }
+    }
+    EXPECT_TRUE(checked);
+}
+
+// Review fix 3: claimed images are bounded by the CPU tier across charts.
+TEST_F(SourceController, CpuTierDropsTheLowestRanksAcrossCharts) {
+    size_t spanBytes = 0; // CPU size of one 1m span (both sources), measured
+    {
+        auto &x = chart();
+        view(x);
+        settle();
+        for (const auto &span : x.latestSnapshot()->spans)
+            if (span.rank.tier == SpanTier::Visible)
+                for (const auto &source : span.sources) spanBytes += source.build->bytes;
+    }
+    charts.clear();
+    ASSERT_GT(spanBytes, 0u);
+    makeCache(spanBytes * 7 / 2); // room for 3.5 spans; no size hints yet
+    // 1-byte estimates: admission cannot foresee the real size.
+    auto &a = chart(320ull << 20, 1);
+    auto &b = chart(320ull << 20, 1);
+    view(a);
+    view(b);
+    settle();
+    const auto stats = cache->stats();
+    EXPECT_LE(stats.claimedBytes, cache->maxBytes());
+    EXPECT_LE(size_t(stats.liveBytes), cache->maxBytes());
+    EXPECT_GT(stats.pressureDrops, 0u);
+    for (auto *c : {&a, &b}) {
+        const auto snapshot = c->latestSnapshot();
+        ASSERT_EQ(snapshot->spans.size(), 3u);
+        EXPECT_TRUE(visibleComplete(*snapshot));
+        for (const auto &span : snapshot->spans)
+            if (span.rank.tier != SpanTier::Visible) EXPECT_EQ(span.rank, (SpanRank{SpanTier::Prefetch, 1}));
+    }
+    // Stable: size hints now keep the dropped spans out.
+    const auto built = cache->stats().builds;
+    a.setGpuBudget(320ull << 20);
+    b.setGpuBudget(320ull << 20);
+    settle();
+    EXPECT_EQ(cache->stats().builds, built);
+}
+
+// Review fix 3 (S5c hook): uploaded images are released and rebuilt after loss.
+TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
+    auto &a = chart();
+    view(a);
+    settle();
+    EXPECT_GT(cache->stats().claimedBytes, 0u);
+    EXPECT_EQ(upload(a, 1ull << 30), 10u);
+    for (const auto &span : a.latestSnapshot()->spans) {
+        EXPECT_TRUE(span.complete);
+        for (const auto &source : span.sources) {
+            ASSERT_TRUE(source.build);
+            EXPECT_FALSE(source.build->gpu); // the node draws its resident copy
+        }
+    }
+    EXPECT_EQ(cache->stats().claimedBytes, 0u);
+    EXPECT_EQ(a.stats().releasedImages, 10u);
+    cache->setMaxBytes(0); // nothing unclaimed stays cached
+    EXPECT_EQ(cache->stats().liveBytes, 0);
+    cache->setMaxBytes(256ull << 20);
+    const auto requests = requestedKeys().size();
+    const auto built = cache->stats().builds;
+    a.capacity()->report(1ull << 30, {}, true); // QRhi lost
+    a.pollCapacity();
+    settle();
+    EXPECT_EQ(cache->stats().builds, built + 10);
+    EXPECT_EQ(requestedKeys().size(), requests); // rebuilt from local chunks
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+}
+
+// Review fix 4: surviving slots take their new ranks before admission.
+TEST_F(SourceController, NewlyVisibleSlotsAreNotEvictedWhenTheViewExpands) {
+    constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;
+    // Room for the visible span and four prefetch spans, by estimate.
+    auto &a = chart(4 * span + need, estimate);
+    view(a);
+    drain(); // nothing answered or built: all sizes are estimates
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    const int64_t t = tiles::tileOfBucket(epoch / kMinuteMs);
+    // The view grows left to four tiles: t-2 and t-1 become visible, t-3 is new.
+    a.setView("BTC-USD", kMinuteMs, double(tiles::tileStartMs(t - 3, kMinuteMs)), double(tiles::tileEndMs(t, kMinuteMs)));
+    drain();
+    EXPECT_EQ(a.stats().evictions, 1u); // only t+2, the farthest prefetch
+    std::map<int64_t, SpanRank> ranks;
+    for (const auto &s : a.latestSnapshot()->spans) ranks[s.id.tile] = s.rank;
+    EXPECT_EQ(ranks, (std::map<int64_t, SpanRank>{{t - 3, {}}, {t - 2, {}}, {t - 1, {}}, {t, {}},
+                                                   {t + 1, {SpanTier::Prefetch, 1}}}));
+}
+
+TEST_F(SourceController, DemotedFallbackIsEvictableInTheSameReconcile) {
+    size_t oneMinute = 0, fiveMinute = 0; // GPU sizes of the visible spans, measured
+    {
+        auto &x = chart();
+        view(x, kMinuteMs);
+        settle();
+        oneMinute = visibleUploadBytes(*x.latestSnapshot());
+        view(x, 5 * kMinuteMs);
+        settle();
+        fiveMinute = visibleUploadBytes(*x.latestSnapshot());
+    }
+    charts.clear();
+    makeCache(); // no size hints: the 5m prefetch is estimated
+    constexpr size_t estimate = 1u << 20;
+    const size_t need = 2 * estimate + (2 * estimate + 9) / 10;
+    auto &a = chart(320ull << 20, estimate);
+    a.capacity()->reportFree(1ull << 40);
+    a.pollCapacity();
+    view(a, kMinuteMs);
+    settle();
+    // Room for the 5m view and one prefetch span, but not also the 1m fallback.
+    a.setGpuBudget(fiveMinute + need + oneMinute / 2);
+    view(a, 5 * kMinuteMs);
+    settle();
+    bool prefetch = false;
+    for (const auto &span : a.latestSnapshot()->spans) {
+        EXPECT_EQ(span.id.tfMs, 5 * kMinuteMs) << spanTierName(span.rank.tier);
+        prefetch = prefetch || span.rank.tier == SpanTier::Prefetch;
+    }
+    EXPECT_TRUE(prefetch);
+    EXPECT_GE(a.stats().evictions, 1u);
+}
+
+// Review fix 5: hour chunks only where the hour level has data.
+TEST_F(SourceController, HourChunksStartWhereHourRollupsStart) {
+    const int64_t day = (availableStart / kDayMs + 1) * kDayMs; // first day start after the oldest minute
+    hourOldest = day + 5 * kHourMs;
+    transport.push(availability(day + 3 * kDayMs, hourOldest, day + 2 * kDayMs));
+    drain();
+    auto &a = chart();
+    a.setView("BTC-USD", kHourMs, double(day), double(day + 2 * kDayMs));
+    settle();
+    size_t hours = 0;
+    for (const auto &key : requestedKeys())
+        if (key.levelMs == kHourMs) {
+            ++hours;
+            EXPECT_GE(key.startMs, day + kDayMs);
+        }
+    EXPECT_GT(hours, 0u);
+    // The first partial day composes from minutes: its hours before the first
+    // rollup are data, not recorder gaps.
+    bool checked = false;
+    for (const auto &column : a.latestSnapshot()->resolution.columns)
+        if (column.startMs == day + 2 * kHourMs)
+            for (const auto &source : column.sources)
+                if (coarse(source.source)) {
+                    EXPECT_EQ(source.state, BucketState::Present);
+                    checked = true;
+                }
+    EXPECT_TRUE(checked);
+}
+
+// Review fix 6: builds smaller than their estimates return credit at once.
+TEST_F(SourceController, SmallerBuildsReturnCreditWithoutANewNodeReport) {
+    constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;
+    auto &a = chart(64ull << 20, estimate);
+    // One report: the view's estimate plus just under one prefetch span.
+    a.capacity()->reportFree(span + need - 1);
+    a.pollCapacity();
+    const auto epochNow = a.capacity()->capacityEpoch.load();
+    view(a);
+    drain();
+    EXPECT_EQ(a.latestSnapshot()->spans.size(), 1u);
+    settle(); // real builds are far smaller than the estimates
+    EXPECT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    EXPECT_EQ(a.capacity()->capacityEpoch.load(), epochNow);
+}
+
+// Review fix 7: a refused replacement must not let the obsolete build publish.
+TEST_F(SourceController, SupersededBuildIsNotPublishedWhenTheQueueRefusedItsReplacement) {
+    makeCache(256ull << 20, 1);
+    auto &a = chart();
+    view(a);
+    answerAll();
+    ASSERT_EQ(jobs.size(), 1u); // the view's first source (queue of one)
+    const ChunkKey key{"BTC-USD", std::string(kChunkSources[0].id), kMinuteMs, epoch / kHourMs * kHourMs};
+    revise(store, key, 2);
+    drain();
+    ASSERT_EQ(jobs.size(), 1u); // the replacement was refused
+    auto job = std::move(jobs.front());
+    jobs.pop_front();
+    job();
+    drain();
+    EXPECT_GT(a.stats().staleResults, 0u);
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources)
+            if (source.build)
+                for (const auto &g : source.build->key.generations)
+                    if (g.source == key.source && g.startMs == key.startMs)
+                        EXPECT_EQ(g.generation, store.generationOf(key));
+    settle();
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+// Default pool path: controllers and the cache go away with builds in flight.
+TEST_F(SourceController, DestructionWithBuildsInFlightOnTheRealPool) {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool open = false;
+        int entered = 0;
+    } gate;
+    auto waitEntered = [&] {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&] { return gate.entered > 0; });
+    };
+    auto open = [&](bool value) {
+        {
+            std::scoped_lock lock(gate.mutex);
+            gate.open = value;
+            gate.entered = 0;
+        }
+        gate.changed.notify_all();
+    };
+    SpanSourceCache::Options options; // no executor: the cache's QThreadPool
+    options.beforeBuild = [&] {
+        std::unique_lock lock(gate.mutex);
+        ++gate.entered;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&] { return gate.open; });
+    };
+    cache = std::make_unique<SpanSourceCache>(options);
+    // 1. Controllers destroyed while builds run; completions arrive afterwards.
+    view(chart());
+    view(chart());
+    answerAll();
+    waitEntered();
+    charts.clear();
+    open(true);
+    {
+        // Completions arrive as queued calls; the watchdog only guards a deadlock.
+        QEventLoop loop;
+        QTimer watchdog;
+        watchdog.setSingleShot(true);
+        QObject::connect(&watchdog, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(cache.get(), &SpanSourceCache::settled, &loop, [&] {
+            if (!cache->stats().jobs) loop.quit();
+        });
+        watchdog.start(10'000);
+        if (cache->stats().jobs) loop.exec();
+    }
+    ASSERT_EQ(cache->stats().jobs, 0u);
+    EXPECT_EQ(cache->stats().claimedBytes, 0u);
+    // 2. The cache destroyed right after its builds are released.
+    open(false);
+    store.clear();
+    auto &c = chart();
+    c.setView("BTC-USD", kMinuteMs, double(epoch + 20 * tileMs), double(epoch + 21 * tileMs));
+    answerAll();
+    waitEntered();
+    charts.clear();
+    open(true);
+    cache.reset(); // joins the pool; completions queued for it are discarded
+    drain();
+    SUCCEED();
 }
 } // namespace

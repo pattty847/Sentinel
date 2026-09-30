@@ -227,11 +227,17 @@ sources coarsest common tick first, stale flags, merged `ResolutionSummary`)
 through a mutex-guarded latest pointer and a queued signal. A tf switch keeps
 the previous tf's built visible spans as fallback until the new view is built,
 then as recent-tf (no chunk demand, no rebuild; switching back republishes
-them). Admission is strictly by rank: visible and fallback always enter;
-prefetch needs GPU room and node credit (`HeatmapCapacity`: free bytes plus an
-epoch the node bumps after it frees bytes) of bytes + 10%; eviction removes only
-content ranked below what it admits. Results for an older serial or a
-superseded key are dropped.
+them). Admission is strictly by rank, after every surviving slot has taken its
+new rank: visible and fallback always enter; prefetch needs GPU room, CPU tier
+room and node credit of bytes + 10%; eviction removes only content ranked below
+what it admits. The node reports through `HeatmapCapacity` whenever its
+resident bytes change (free bytes, uploaded span sources, GPU loss); credit is
+free bytes minus the controller's outstanding (not yet uploaded) reservations,
+and an uploaded source's CPU image is released (rebuilt from chunks after a
+loss). The span-source tier pins claimed images; above it the cache drops the
+lowest-rank prefetch/recent-tf slots of all charts. Results for an older
+serial, or not matching the source's current desired key, are dropped. The
+chunk store never evicts a key some chart wants.
 
 ### Coordinate system: TimeAxisMapping
 
