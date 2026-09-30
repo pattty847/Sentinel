@@ -33,7 +33,8 @@ Exchange WebSocket → Transport → Auth (optional) → Dispatch → Callbacks 
 ### 1. Transport (`ws/`)
 
 - **WsTransport** — Abstract interface: connection lifecycle, send/receive, status/error callbacks.
-- **BeastWsTransport** — Boost.Beast over SSL on a Boost.Asio `io_context`. All operations run on a single strand (serialized, no mutex). Supports async I/O, reconnection with backoff, and keep-alive ping.
+- **BeastWsTransport** — Boost.Beast over SSL on a Boost.Asio `io_context`. All operations run on a single strand (serialized, no mutex). Supports async I/O and keep-alive ping.
+- **MarketDataCoreEngine recovery** — Every transport-down notification, including a failed initial handshake, schedules one retry. Backoff starts at 1 s, doubles to a 30 s cap, and resets on transport-up. Duplicate down notifications share the pending retry. The watchdog keeps rearming through outages; a connected stream with no heartbeat for 20 s requests one close, waits for transport-down, then retries with at least 5 s backoff. A healthy connection keeps its existing subscriptions and message handling.
 
 ### 2. Authentication (`auth/`)
 

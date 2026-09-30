@@ -152,9 +152,9 @@ int runApplication(QCoreApplication& app) {
                          !session.error().empty() ? "capture failure" : "duration elapsed";
             stopped = true; app.quit(); return;
         }
-        // The shared engine handles sequence/heartbeat resync. A failed initial
-        // handshake never starts its heartbeat watchdog; recover that stalled
-        // engine here without altering sentinel-server's reconnect behavior.
+        // The shared engine retries every failed connection with bounded backoff.
+        // Retain this independent safety net for a transport that never completes
+        // its connect/close callback; every supervisor restart is recorded.
         const auto down = disconnectedSince.load();
         if (down && now - down > 60LL * 1000000000) {
             engine->stop(); engine.reset();

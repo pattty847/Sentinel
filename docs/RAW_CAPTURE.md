@@ -113,10 +113,13 @@ the capture with an explicit error. Fsync cannot recover bytes still in the
 queue or current block; with defaults, block flush is targeted at one second or
 1 MiB, plus disk scheduling delay.
 
-The shared engine retains its sequence checking and heartbeat resync. A
-capture-only supervisor recreates an engine disconnected for 60 seconds, covering
-initial-handshake failures before the shared heartbeat watchdog starts. The
-restart reason is recorded. No server reconnect behavior changes.
+The shared engine retries transport failures (including initial handshakes) with
+1 s exponential backoff capped at 30 s, resetting on a successful connection.
+Its heartbeat watchdog stays armed across failed retries; the existing 20 s
+stale threshold and 5 s minimum stale-heartbeat backoff remain. This recovery fix
+also applies to the server. A capture-only supervisor still recreates an engine
+disconnected for 60 seconds as an independent safety net for a transport whose
+connect/close callback never completes. The restart reason is recorded.
 
 ## RAWL2 v1 format
 

@@ -92,3 +92,10 @@ target_link_libraries(test_sentinel_stream_client_write PRIVATE sentinel_core GT
 add_test(NAME SentinelStreamClientWriteTests COMMAND test_sentinel_stream_client_write)
 set_tests_properties(SentinelStreamClientWriteTests PROPERTIES LABELS "marketdata" TIMEOUT 30)
 add_dependencies(marketdata_tests test_sentinel_stream_client_write)
+
+add_executable(test_market_data_engine_reconnect test_market_data_engine_reconnect.cpp)
+target_link_libraries(test_market_data_engine_reconnect PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_market_data_engine_reconnect PRIVATE SENTINEL_TEST_CA="${CMAKE_SOURCE_DIR}/resources/certs/ca-bundle.crt")
+add_test(NAME MarketDataEngineReconnectTests COMMAND test_market_data_engine_reconnect)
+set_tests_properties(MarketDataEngineReconnectTests PROPERTIES LABELS "marketdata" TIMEOUT 30)
+add_dependencies(marketdata_tests test_market_data_engine_reconnect)
