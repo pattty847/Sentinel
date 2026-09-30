@@ -31,8 +31,10 @@ std::vector<PlannedSpan> planSpans(const std::string &symbol, int64_t tfMs, doub
     const auto visible = tiles::tilesCovering(lo, hi, tfMs);
     if (visible.count() > 0 && tfMs % kMinuteMs == 0) {
         const int64_t margin = prefetchTiles(lo, hi, tfMs);
+        const int64_t centre = std::clamp(tiles::tileOfBucket(recording::floorDiv(int64_t(std::floor((lo + hi) / 2)), tfMs)),
+                                          visible.first, visible.end - 1);
         for (int64_t tile = visible.first - margin; tile < visible.end + margin; ++tile) {
-            PlannedSpan span{{symbol, tfMs, tile}, {}, {}};
+            PlannedSpan span{{symbol, tfMs, tile}, {SpanTier::Visible, std::abs(tile - centre)}, {}};
             if (!visible.contains(tile))
                 span.rank = {SpanTier::Prefetch, tile < visible.first ? visible.first - tile : tile - visible.end + 1};
             const int64_t start = span.id.startMs(), end = span.id.endMs();

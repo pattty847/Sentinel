@@ -4,6 +4,7 @@
 #include <QThread>
 #include <QTimer>
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -111,6 +112,8 @@ struct SpanSourceCache::State {
     size_t claimedBytes = 0, reservedBytes = 0;
     std::map<std::pair<SpanId, std::string>, Hint> hints;
     std::vector<HeatmapSourceController *> controllers;
+    std::unordered_map<const HeatmapSourceController *, size_t> ledger; // CPU commitments
+    size_t committed = 0;
 };
 SpanSourceCache::SpanSourceCache(QObject *parent) : SpanSourceCache(Options{}, parent) {}
 SpanSourceCache::SpanSourceCache(Options options, QObject *parent)
@@ -125,6 +128,32 @@ size_t SpanSourceCache::maxBytes() const { return state_->options.maxBytes; }
 void SpanSourceCache::setMaxBytes(size_t bytes) {
     state_->options.maxBytes = bytes;
     trim();
+    emit budgetsChanged();
+}
+size_t SpanSourceCache::cpuCeiling() const { return state_->options.cpuCeiling; }
+void SpanSourceCache::setCpuCeiling(size_t bytes) {
+    state_->options.cpuCeiling = bytes;
+    emit budgetsChanged();
+}
+size_t SpanSourceCache::committedCpuBytes() const { return state_->committed; }
+void SpanSourceCache::commitCpu(const HeatmapSourceController *controller, size_t bytes) {
+    auto &entry = state_->ledger[controller];
+    const size_t old = entry;
+    entry = bytes;
+    state_->committed = state_->committed - old + bytes;
+    if (bytes < old) freed();
+}
+size_t SpanSourceCache::committedByOthers(const HeatmapSourceController *controller) const {
+    const auto it = state_->ledger.find(controller);
+    return state_->committed - (it == state_->ledger.end() ? 0 : it->second);
+}
+void SpanSourceCache::freed() {
+    if (freeing_) return;
+    freeing_ = true;
+    QMetaObject::invokeMethod(this, [this] {
+        freeing_ = false;
+        emit capacityFreed();
+    }, Qt::QueuedConnection);
 }
 size_t SpanSourceCache::pinnedBytes() const { return state_->claimedBytes + state_->reservedBytes; }
 SpanSourceCache::Hint SpanSourceCache::hint(const SpanId &span, const std::string &source) const {
@@ -142,7 +171,11 @@ SpanSourceCache::Stats SpanSourceCache::stats() const {
     return out;
 }
 void SpanSourceCache::attach(HeatmapSourceController *controller) { state_->controllers.push_back(controller); }
-void SpanSourceCache::detach(HeatmapSourceController *controller) { std::erase(state_->controllers, controller); }
+void SpanSourceCache::detach(HeatmapSourceController *controller) {
+    std::erase(state_->controllers, controller);
+    commitCpu(controller, 0);
+    state_->ledger.erase(controller);
+}
 
 void SpanSourceCache::trim() {
     auto &s = *state_;
@@ -207,6 +240,7 @@ std::shared_ptr<void> SpanSourceCache::claim(const SpanSourceBuildPtr &build) {
         s->claimedBytes -= it->second.bytes;
         s->claims.erase(it);
         trim();
+        freed();
     });
     trim();
     return token;
@@ -268,6 +302,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
             for (auto &waiter : job.waiters)
                 if (waiter.context) waiter.completion(build, error);
             trim();
+            if (job.reserved) freed();
             emit settled();
         }, Qt::QueuedConnection);
     };
@@ -292,7 +327,10 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         schedule();
     };
     connect(&fetcher_, &ChunkFetcher::chunkStored, this, changed, Qt::QueuedConnection);
-    connect(&fetcher_, &ChunkFetcher::chunkRevised, this, changed, Qt::QueuedConnection);
+    // A revision matters even for a chunk no longer wanted: a built span may use it.
+    connect(&fetcher_, &ChunkFetcher::chunkRevised, this, [this](const ChunkKey &key, quint64) {
+        if (key.symbol == symbol_) schedule();
+    }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::chunkFailed, this, [this](const ChunkKey &key, const QString &, const QString &) {
         if (!wanted_.contains(key)) return;
         failedChunks_.insert(key); // build the span without it (those buckets draw loading)
@@ -312,6 +350,11 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
     connect(&cache_, &SpanSourceCache::settled, this, [this] {
         if (refused_) schedule();
     }, Qt::QueuedConnection);
+    // Coalesced by the cache; schedule() coalesces again (one reconcile per turn).
+    connect(&cache_, &SpanSourceCache::capacityFreed, this, [this] {
+        if (cpuSuppressed_) schedule();
+    }, Qt::QueuedConnection);
+    connect(&cache_, &SpanSourceCache::budgetsChanged, this, &HeatmapSourceController::schedule, Qt::QueuedConnection);
     if (options_.capacityPollMs > 0) {
         auto *timer = new QTimer(this);
         timer->setInterval(options_.capacityPollMs);
@@ -329,6 +372,7 @@ bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkS
     if (!budgets.valid()) return false;
     store.setMaxBytes(budgets.decodedChunks);
     cache.setMaxBytes(budgets.spanSources);
+    cache.setCpuCeiling(budgets.cpuCeiling);
     return true;
 }
 
@@ -421,12 +465,26 @@ void HeatmapSourceController::pollCapacity() {
         }
     }
     if (report.lost) {
-        // The node lost its GPU copies: released images are rebuilt from chunks.
-        for (auto &[id, slot] : slots_)
+        // The node lost its GPU copies. Released images of drawn content are
+        // rebuilt from chunks (visible, prefetch, and fallback, which is still
+        // drawn); recent-tf retention of a released image is dropped instead.
+        for (auto it = slots_.begin(); it != slots_.end();) {
+            auto &slot = it->second;
+            const bool released = std::any_of(slot.sources.begin(), slot.sources.end(), [](const auto &s) {
+                return s.second.ready && !s.second.ready->gpu;
+            });
+            if (released && slot.plan.rank.tier == SpanTier::RecentTf) {
+                it = slots_.erase(it);
+                continue;
+            }
             for (auto &[name, source] : slot.sources) {
                 source.uploaded = false;
-                if (source.ready && !source.ready->gpu) source.ready.reset();
+                if (!source.ready || source.ready->gpu) continue;
+                source.ready.reset();
+                source.lostRebuild = isRetained(slot.plan.rank.tier);
             }
+            ++it;
+        }
         dirty_ = true;
         sLog_Data("Heatmap controller chart=" << chart_ << " rebuilding released images after GPU loss");
     }
@@ -520,8 +578,67 @@ void HeatmapSourceController::setReady(SourceSlot &source, SpanSourceBuildPtr bu
     source.claim = cache_.claim(build);
     source.ready = std::move(build);
     source.uploaded = false;
+    source.lostRebuild = false;
     source.failed.reset();
     dirty_ = true;
+}
+
+size_t HeatmapSourceController::chunkCost(const ChunkKey &key) const {
+    const auto it = chunkBytes_.find(key);
+    return it != chunkBytes_.end() ? it->second : options_.chunkEstimateBytes;
+}
+
+HeatmapSourceController::SourceNeed HeatmapSourceController::need(const Slot &slot, const SpanSourcePlan &planned) {
+    SourceNeed out;
+    auto &key = out.input.key;
+    key = {slot.plan.id, planned.source, planned.availableStartMs, planned.availableEndMs, priceScale_, {}};
+    std::vector<ChunkKey> keys; // the chunks a build uses; failed ones are left out
+    for (const auto &chunkKey : planned.chunks) {
+        if (auto chunk = store_.cached(chunkKey)) {
+            if (chunkBytes_.size() > 65536) chunkBytes_.clear(); // size hints only
+            chunkBytes_[chunkKey] = chunk->bytes;
+            key.generations.push_back({chunkKey.symbol, chunkKey.source, chunkKey.levelMs, chunkKey.startMs,
+                                       chunk->generation, chunk->sealed});
+            out.input.chunks.push_back(std::move(chunk));
+            keys.push_back(chunkKey);
+        } else if (!failedChunks_.contains(chunkKey)) {
+            out.complete = false;
+            keys.push_back(chunkKey);
+        }
+    }
+    std::sort(key.generations.begin(), key.generations.end());
+    const auto it = slot.sources.find(planned.source);
+    const SourceSlot *source = it == slot.sources.end() ? nullptr : &it->second;
+    if (isRetained(slot.plan.rank.tier) && !(source && source->lostRebuild)) return out; // built, drawn as is
+    const SpanSourceBuild *ready = source && source->ready ? source->ready.get() : nullptr;
+    out.build = !ready;
+    if (ready) {
+        const auto &have = ready->key;
+        // A changed plan (bounds, scale, chunk set) or a revised chunk needs a
+        // build, even while some of the new inputs are still missing.
+        out.build = have.span != key.span || have.availableStartMs != key.availableStartMs ||
+                    have.availableEndMs != key.availableEndMs || have.priceScale != key.priceScale ||
+                    have.generations.size() != keys.size();
+        for (size_t i = 0; !out.build && i < keys.size(); ++i) {
+            const auto match = std::find_if(have.generations.begin(), have.generations.end(), [&](const auto &g) {
+                return g.source == keys[i].source && g.levelMs == keys[i].levelMs && g.startMs == keys[i].startMs;
+            });
+            if (match == have.generations.end()) { out.build = true; break; }
+            for (const auto &g : key.generations)
+                if (g.source == match->source && g.levelMs == match->levelMs && g.startMs == match->startMs &&
+                    g.generation != match->generation)
+                    out.build = true;
+        }
+    }
+    if (out.build) {
+        out.want = std::move(keys);
+    } else {
+        // Built: only open chunks stay wanted (their revisions must arrive);
+        // sealed ones become evictable and are wanted again for a rebuild.
+        for (const auto &g : ready->key.generations)
+            if (!g.sealed) out.want.push_back({g.symbol, g.source, g.levelMs, g.startMs});
+    }
+    return out;
 }
 
 void HeatmapSourceController::reconcile() {
@@ -572,8 +689,17 @@ void HeatmapSourceController::reconcile() {
         reserved += outstanding(slot);
     }
     size_t credit = reportedFree_ > reserved ? reportedFree_ - reserved : 0;
-    size_t cpuAdmitted = 0; // CPU estimates of spans admitted below (not yet requested)
+    // CPU estimates of sources admitted but neither built nor requested yet
+    // (the cache pins only claims and running builds).
+    size_t cpuAdmitted = 0;
+    for (const auto &[id, slot] : slots_)
+        for (const auto &planned : slot.plan.sources) {
+            const auto it = slot.sources.find(planned.source);
+            if (it == slot.sources.end() || (!it->second.ready && !it->second.pending))
+                cpuAdmitted += estimate(id, planned.source, false);
+        }
     stats_.suppressed = 0;
+    cpuSuppressed_ = false;
     bool blocked = false;
     for (const auto &span : plan) {
         if (slots_.contains(span.id) || isRetained(span.rank.tier)) continue;
@@ -609,6 +735,7 @@ void HeatmapSourceController::reconcile() {
             dirty_ = true;
         }
         if (!guarded && (used + need > options_.gpuBytes || cpuOver())) {
+            cpuSuppressed_ = cpuSuppressed_ || cpuOver();
             ++stats_.suppressed;
             blocked = true;
             continue;
@@ -624,17 +751,103 @@ void HeatmapSourceController::reconcile() {
         sLog_Probe("heatmap.controller.suppressed", "chart=" << chart_ << " spans=" << stats_.suppressed
                    << " credit=" << credit << " used=" << used);
 
-    // Chunk demand: the best rank of any span needing a key wins. Retained spans
-    // are already built and need nothing.
-    std::unordered_map<ChunkKey, int, ChunkKeyHash> demands;
-    for (const auto &span : plan) {
-        if (isRetained(span.rank.tier) || !slots_.contains(span.id)) continue;
-        for (const auto &source : span.sources)
-            for (const auto &key : source.chunks) {
-                auto [it, inserted] = demands.emplace(key, span.rank.fetchPriority());
-                if (!inserted) it->second = std::max(it->second, span.rank.fetchPriority());
-            }
+    // What each source needs now (after admission, before the ceiling).
+    std::map<SpanId, std::vector<SourceNeed>> needs;
+    for (const auto &[id, slot] : slots_) {
+        auto &list = needs[id];
+        for (const auto &planned : slot.plan.sources) list.push_back(need(slot, planned));
     }
+
+    // Process-wide CPU ceiling over wanted decoded chunks plus span images.
+    // This chart commits what it pins; above the ceiling it gives up recent-tf,
+    // then prefetch (far first), then fallback, then visible spans farthest from
+    // the view centre. The nearest visible span always stays, even alone above
+    // the ceiling, so a chart never shows nothing.
+    auto committed = [&] {
+        std::unordered_set<ChunkKey, ChunkKeyHash> keys;
+        size_t bytes = 0;
+        for (const auto &[id, slot] : slots_) {
+            const auto &list = needs.at(id);
+            for (size_t i = 0; i < slot.plan.sources.size(); ++i) {
+                const auto &planned = slot.plan.sources[i];
+                const auto it = slot.sources.find(planned.source);
+                if (it != slot.sources.end() && it->second.ready && it->second.ready->gpu) bytes += it->second.ready->bytes;
+                if (list[i].build) bytes += estimate(id, planned.source, false);
+                for (const auto &key : list[i].want)
+                    if (keys.insert(key).second) bytes += chunkCost(key);
+            }
+        }
+        return bytes;
+    };
+    const size_t ceiling = cache_.cpuCeiling(), others = cache_.committedByOthers(this);
+    size_t mine = committed();
+    std::optional<SpanId> keeper; // the nearest visible span
+    for (const auto &[id, slot] : slots_)
+        if (slot.plan.rank.tier == SpanTier::Visible && (!keeper || slot.plan.rank < slots_.at(*keeper).plan.rank))
+            keeper = id;
+    auto lossOrder = [](SpanTier tier) {
+        return tier == SpanTier::RecentTf ? 0 : tier == SpanTier::Prefetch ? 1 : tier == SpanTier::Fallback ? 2 : 3;
+    };
+    std::vector<SpanId> refusedSpans;
+    size_t refusedBytes = 0;
+    while (others + mine > ceiling) {
+        auto victim = slots_.end();
+        for (auto it = slots_.begin(); it != slots_.end(); ++it) {
+            if (keeper && it->first == *keeper) continue;
+            const auto &rank = it->second.plan.rank;
+            if (victim == slots_.end()) { victim = it; continue; }
+            const auto &worst = victim->second.plan.rank;
+            if (std::pair(lossOrder(rank.tier), -rank.distance) < std::pair(lossOrder(worst.tier), -worst.distance))
+                victim = it;
+        }
+        if (victim == slots_.end()) break;
+        const auto id = victim->first;
+        const auto tier = victim->second.plan.rank.tier;
+        const size_t before = mine;
+        slots_.erase(victim); // releases its CPU claims
+        needs.erase(id);
+        mine = committed();
+        if (tier == SpanTier::Visible) {
+            refusedSpans.push_back(id);
+            refusedBytes += before - std::min(before, mine);
+        } else if (tier == SpanTier::Prefetch) {
+            ++stats_.suppressed;
+        }
+        cpuSuppressed_ = true;
+        dirty_ = true;
+    }
+    cache_.commitCpu(this, mine);
+    stats_.committedBytes = mine;
+    stats_.refused = refusedSpans.size();
+    if (refusedSpans != cpuRefused_ || refusedBytes != cpuRefusedBytes_) dirty_ = true;
+    cpuRefused_ = std::move(refusedSpans);
+    cpuRefusedBytes_ = refusedBytes;
+    if (!cpuRefused_.empty()) {
+        stats_.refusals += cpuRefused_.size();
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - lastRefusalWarnMs_ >= 5000) {
+            sLog_Warning("Heatmap CPU ceiling refused visible spans chart=" << chart_ << " symbol=" << symbol_
+                         << " tf=" << tfMs_ << " spans=" << cpuRefused_.size() << " bytes=" << cpuRefusedBytes_
+                         << " committed=" << others + mine << " ceiling=" << ceiling
+                         << " (suppressed " << quietRefusals_ << ")");
+            lastRefusalWarnMs_ = now;
+            quietRefusals_ = 0;
+        } else {
+            ++quietRefusals_;
+        }
+    }
+
+    // Chunk demand: the best rank of any span needing a key wins. Built sources
+    // keep only their open chunks; retained spans need nothing unless a GPU loss
+    // makes them rebuild.
+    std::unordered_map<ChunkKey, int, ChunkKeyHash> demands;
+    for (const auto &[id, slot] : slots_)
+        for (const auto &n : needs.at(id))
+            for (const auto &key : n.want) {
+                auto [it, inserted] = demands.emplace(key, slot.plan.rank.fetchPriority());
+                if (!inserted) it->second = std::max(it->second, slot.plan.rank.fetchPriority());
+            }
     std::vector<ChunkKey> released;
     for (const auto &key : wanted_)
         if (!demands.contains(key)) released.push_back(key);
@@ -655,43 +868,37 @@ void HeatmapSourceController::reconcile() {
     }
 
     // Builds, by rank. Each source of a span builds on its own once all of its
-    // chunks are local (failed chunks are left out and draw loading).
-    bool refused = false, visibleReady = true;
+    // chunks are local (failed chunks are left out and draw loading). A changed
+    // plan invalidates `expected` at once, so an older build in flight cannot
+    // complete as current; the published version stays as a stale fallback.
+    bool refused = false, visibleReady = true, hits = false;
     for (const auto &span : plan) {
         const auto it = slots_.find(span.id);
-        if (it == slots_.end() || isRetained(span.rank.tier)) continue;
+        if (it == slots_.end()) continue;
         auto &slot = it->second;
-        for (const auto &plannedSource : span.sources) {
-            auto &source = slot.sources[plannedSource.source];
-            SpanSourceInput input;
-            input.key = {span.id, plannedSource.source, plannedSource.availableStartMs,
-                         plannedSource.availableEndMs, priceScale_, {}};
-            bool complete = true;
-            for (const auto &key : plannedSource.chunks) {
-                if (auto chunk = store_.peek(key)) {
-                    input.key.generations.push_back({key.symbol, key.source, key.levelMs, key.startMs, chunk->generation});
-                    input.chunks.push_back(std::move(chunk));
-                } else if (!failedChunks_.contains(key)) {
-                    complete = false;
-                }
-            }
-            const bool done = source.ready || (complete && input.chunks.empty());
-            if (span.rank.tier == SpanTier::Visible && !done && !source.failed) visibleReady = false;
-            if (!complete || input.chunks.empty()) continue;
-            std::sort(input.key.generations.begin(), input.key.generations.end());
-            source.expected = input.key;
-            if ((source.ready && source.ready->key == input.key) || source.pending == input.key ||
-                source.failed == input.key)
+        auto &list = needs.at(span.id);
+        for (size_t i = 0; i < slot.plan.sources.size(); ++i) {
+            auto &n = list[i];
+            auto &source = slot.sources[slot.plan.sources[i].source];
+            const bool done = source.ready || (n.complete && n.input.chunks.empty());
+            if (slot.plan.rank.tier == SpanTier::Visible && !done && !source.failed) visibleReady = false;
+            if (!n.build) {
+                if (source.ready) source.expected = source.ready->key;
                 continue;
-            if (auto hit = cache_.find(input.key)) {
+            }
+            source.expected = n.input.key;
+            if (!n.complete || n.input.chunks.empty()) continue;
+            if (source.pending == n.input.key || source.failed == n.input.key) continue;
+            if (auto hit = cache_.find(n.input.key)) {
                 setReady(source, std::move(hit));
+                hits = true; // demand above still wants its chunks: reconcile again
                 continue;
             }
             if (refused) continue;
-            const auto key = input.key;
+            const auto key = n.input.key;
             const auto serial = serial_;
-            if (cache_.request(std::move(input), span.rank.fetchPriority(), estimate(span.id, key.source, false), this,
-                               [this, serial, key](SpanSourceBuildPtr build, const QString &error) {
+            if (cache_.request(std::move(n.input), slot.plan.rank.fetchPriority(), estimate(span.id, key.source, false),
+                               this, [this, serial, key](SpanSourceBuildPtr build, const QString &error) {
                                    onBuilt(serial, key, std::move(build), error);
                                }))
                 source.pending = key;
@@ -699,6 +906,7 @@ void HeatmapSourceController::reconcile() {
         }
     }
     refused_ = refused;
+    if (hits) schedule();
     if (!visibleReady_ && visibleReady) {
         // The new tf's view is complete: fallback spans become the recent-tf tier.
         visibleReady_ = true;
@@ -754,6 +962,8 @@ void HeatmapSourceController::publish() {
     set->priceScale = priceScale_;
     set->resolution.tfMs = tfMs_;
     set->resolution.priceScale = priceScale_;
+    set->refused = cpuRefused_;
+    set->refusedBytes = cpuRefusedBytes_;
     for (const auto &[id, slot] : slots_) {
         SpanSnapshot span{id, slot.plan.rank, {}, true};
         for (const auto &planned : slot.plan.sources) {

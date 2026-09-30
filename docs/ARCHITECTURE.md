@@ -235,9 +235,14 @@ resident bytes change (free bytes, uploaded span sources, GPU loss); credit is
 free bytes minus the controller's outstanding (not yet uploaded) reservations,
 and an uploaded source's CPU image is released (rebuilt from chunks after a
 loss). The span-source tier pins claimed images; above it the cache drops the
-lowest-rank prefetch/recent-tf slots of all charts. Results for an older
-serial, or not matching the source's current desired key, are dropped. The
-chunk store never evicts a key some chart wants.
+lowest-rank prefetch/recent-tf slots of all charts. A process-wide CPU ceiling
+(1 GiB default) bounds wanted decoded chunks plus span images: each chart
+commits its share to a ledger and, above the ceiling, gives up recent-tf,
+prefetch, fallback, then the visible spans farthest from its view centre (they
+draw as loading and are listed in `SpanSet::refused`); its nearest visible span
+always stays. A built source keeps only its open chunks wanted. Results for an
+older serial, or not matching the source's current desired key, are dropped.
+The chunk store never evicts a key some chart wants.
 
 ### Coordinate system: TimeAxisMapping
 

@@ -39,6 +39,7 @@ struct ChunkGeneration {
     std::string symbol, source;
     int64_t levelMs = 0, startMs = 0;
     uint64_t generation = 0;
+    bool sealed = false; // sealing is a new generation, so this never disagrees
     auto operator<=>(const ChunkGeneration &) const = default;
 };
 // Identity of one span's source build: equal keys build identical sources, so
@@ -93,6 +94,13 @@ class HeatmapSourceController;
 //   builds make that admission match the real sizes).
 // - liveBytes counts every image alive anywhere (slots, LRU, snapshots, the
 //   node's copy of a snapshot): snapshots lag by at most one frame.
+// - CPU ceiling (HeatmapBudgets::cpuCeiling): each controller commits what it
+//   pins (wanted decoded chunks plus span images, measured or estimated) to a
+//   process-wide ledger and keeps the ledger total at or under the ceiling by
+//   refusing its own lowest-priority work (see HeatmapSourceController).
+// - capacityFreed() is emitted at most once per event-loop turn after pinned
+//   bytes or ledger commitments shrink, so controllers suppressed for CPU room
+//   re-admit without another event.
 class SpanSourceCache final : public QObject {
     Q_OBJECT
 public:
@@ -104,6 +112,7 @@ public:
         // inject a queue they run explicitly (deterministic, no sleeps).
         std::function<void(std::function<void()> job, int priority)> executor;
         std::function<void()> beforeBuild; // tests only: runs on the build thread
+        size_t cpuCeiling = 1024ull << 20;  // process-wide CPU ceiling (HeatmapBudgets)
     };
     explicit SpanSourceCache(QObject *parent = nullptr);
     explicit SpanSourceCache(Options options, QObject *parent = nullptr);
@@ -125,6 +134,9 @@ public:
     size_t pinnedBytes() const; // claimed + reserved
     size_t maxBytes() const;
     void setMaxBytes(size_t bytes);
+    size_t cpuCeiling() const;
+    void setCpuCeiling(size_t bytes);
+    size_t committedCpuBytes() const; // ledger total of every controller
     struct Stats {
         uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0, pressureDrops = 0;
         size_t bytes = 0, entries = 0, jobs = 0; // LRU
@@ -134,16 +146,21 @@ public:
     Stats stats() const;
 signals:
     void settled();
+    void capacityFreed();
+    void budgetsChanged(); // every controller re-checks its admissions
 private:
     friend class HeatmapSourceController;
     struct State;
     std::shared_ptr<State> state_;
     QThreadPool pool_;
-    bool relieving_ = false;
+    bool relieving_ = false, freeing_ = false;
     void attach(HeatmapSourceController *controller);
     void detach(HeatmapSourceController *controller);
     void trim();
     void relieve();
+    void freed(); // coalesced capacityFreed()
+    void commitCpu(const HeatmapSourceController *controller, size_t bytes);
+    size_t committedByOthers(const HeatmapSourceController *controller) const;
 };
 
 // The node side of the capacity contract (HeatmapTileNode, S5c; render thread,
@@ -212,8 +229,20 @@ struct SpanSet {
     double priceScale = 100;
     std::vector<SpanSnapshot> spans; // by rank
     ResolutionSummary resolution;    // built spans of tfMs, ascending columns
+    // Visible spans refused by the process-wide CPU ceiling (farthest from the
+    // view centre first). They draw as loading, not veil, and the UI can say why.
+    std::vector<SpanId> refused;
+    size_t refusedBytes = 0; // their estimated CPU cost
 };
 
+// CPU ceiling: the controller commits its wanted decoded chunks plus span
+// images to the cache's ledger and keeps the process-wide total at or under
+// SpanSourceCache::cpuCeiling(). Above it the chart gives up recent-tf, then
+// prefetch (farthest first), then fallback, then its visible spans farthest from
+// the view centre; its nearest visible span always stays, alone even above the
+// ceiling. Refused visible spans are listed in SpanSet::refused and draw as
+// loading. A built source keeps only its open chunks wanted; sealed ones become
+// evictable and are wanted again for any rebuild (GPU loss, CPU drop).
 // The store, fetcher and cache must outlive every controller.
 class HeatmapSourceController final : public QObject {
     Q_OBJECT
@@ -221,6 +250,7 @@ public:
     struct Options {
         size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
+        size_t chunkEstimateBytes = 4ull << 20;  // decoded size of a chunk never seen (as ChunkFetcher)
         int capacityPollMs = 16;                 // <= 0: tests call pollCapacity()
     };
     HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache, Options options,
@@ -252,7 +282,10 @@ public:
     struct Stats {
         uint64_t publications = 0, staleResults = 0, evictions = 0, admissions = 0;
         uint64_t pressureDrops = 0, releasedImages = 0;
-        size_t suppressed = 0; // spans suppressed by the last reconcile
+        uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
+        size_t suppressed = 0;    // spans suppressed by the last reconcile
+        size_t refused = 0;       // visible spans refused by the last reconcile
+        size_t committedBytes = 0; // this chart's CPU commitment (ledger)
     };
     Stats stats() const { return stats_; } // owner thread only
 signals:
@@ -265,6 +298,7 @@ private:
         SpanSourceBuildPtr ready;   // gpu == nullptr once released after upload
         std::shared_ptr<void> claim; // CPU tier claim while the image is held
         bool uploaded = false;       // the node reported ready's upload
+        bool lostRebuild = false;    // a retained source rebuilds after GPU loss
         std::optional<SpanSourceKey> expected, pending, failed;
     };
     struct Slot {
@@ -285,7 +319,12 @@ private:
     uint64_t serial_ = 0, version_ = 0, epoch_ = 0;
     size_t reportedFree_ = 0;
     bool reported_ = false;
-    bool scheduled_ = false, dirty_ = false, refused_ = false, visibleReady_ = true;
+    bool scheduled_ = false, dirty_ = false, refused_ = false, visibleReady_ = true, cpuSuppressed_ = false;
+    std::vector<SpanId> cpuRefused_;
+    size_t cpuRefusedBytes_ = 0;
+    int64_t lastRefusalWarnMs_ = 0;
+    uint32_t quietRefusals_ = 0;
+    std::unordered_map<ChunkKey, size_t, ChunkKeyHash> chunkBytes_; // last seen decoded sizes
     std::map<SpanId, Slot> slots_;
     std::vector<SpanId> retained_; // previous tf's visible spans
     std::unordered_set<ChunkKey, ChunkKeyHash> wanted_, failedChunks_;
@@ -298,6 +337,15 @@ private:
     void publish();
     void reset();
     void setReady(SourceSlot &source, SpanSourceBuildPtr build);
+    // What one planned source of a slot needs now: its current input, whether
+    // it must (re)build, and the chunk keys to keep wanted.
+    struct SourceNeed {
+        SpanSourceInput input;
+        bool complete = true, build = false;
+        std::vector<ChunkKey> want;
+    };
+    SourceNeed need(const Slot &slot, const SpanSourcePlan &planned);
+    size_t chunkCost(const ChunkKey &key) const;
     void onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
     size_t estimate(const SpanId &span, const std::string &source, bool upload) const;
     size_t gpuBytes(const Slot &slot) const;

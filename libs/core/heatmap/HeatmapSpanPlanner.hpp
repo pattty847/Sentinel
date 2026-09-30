@@ -24,7 +24,10 @@ enum class SpanTier : uint8_t { Visible, Fallback, Prefetch, RecentTf };
 const char *spanTierName(SpanTier tier);
 struct SpanRank {
     SpanTier tier = SpanTier::Visible;
-    int64_t distance = 0; // prefetch: tiles outside the view (1 = adjacent)
+    // Visible: tiles from the view's centre tile (0 = centre), so the spans
+    // nearest the centre come first (and are refused last under the CPU
+    // ceiling). Prefetch: tiles outside the view (1 = adjacent).
+    int64_t distance = 0;
     auto operator<=>(const SpanRank &) const = default;
     // ChunkFetcher priority: greater wins, strictly monotonic in rank.
     int fetchPriority() const;
@@ -55,7 +58,8 @@ struct PlannedSpan {
 // Prefetch tiles per side: at least 2, or one view width (B1: 1 tile measured a
 // p95 of 56-59 ms on small horizontal pans).
 int64_t prefetchTiles(double timeLoMs, double timeHiMs, int64_t tfMs);
-// Visible spans, then prefetch by distance (left before right at equal distance),
+// Visible spans by distance from the view centre, then prefetch by distance
+// (left before right at equal distance),
 // then `retained` spans (other timeframes; they keep their own rank). A span with
 // no chunk of any source (outside every source's availability) is left out.
 // Sorted by rank; an id that appears twice keeps its best rank.

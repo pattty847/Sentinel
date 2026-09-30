@@ -669,7 +669,9 @@ TEST_F(SourceController, NewlyVisibleSlotsAreNotEvictedWhenTheViewExpands) {
     EXPECT_EQ(a.stats().evictions, 1u); // only t+2, the farthest prefetch
     std::map<int64_t, SpanRank> ranks;
     for (const auto &s : a.latestSnapshot()->spans) ranks[s.id.tile] = s.rank;
-    EXPECT_EQ(ranks, (std::map<int64_t, SpanRank>{{t - 3, {}}, {t - 2, {}}, {t - 1, {}}, {t, {}},
+    // Visible spans rank by distance from the centre tile (t - 1).
+    constexpr auto V = SpanTier::Visible;
+    EXPECT_EQ(ranks, (std::map<int64_t, SpanRank>{{t - 3, {V, 2}}, {t - 2, {V, 1}}, {t - 1, {V, 0}}, {t, {V, 1}},
                                                    {t + 1, {SpanTier::Prefetch, 1}}}));
 }
 
@@ -838,5 +840,189 @@ TEST_F(SourceController, DestructionWithBuildsInFlightOnTheRealPool) {
     cache.reset(); // joins the pool; completions queued for it are discarded
     drain();
     SUCCEED();
+}
+
+// Re-review P1: the process-wide CPU ceiling refuses the farthest visible spans.
+TEST_F(SourceController, CpuCeilingRefusesTheFarthestVisibleSpansAcrossCharts) {
+    size_t spanBytes = 0; // CPU size of one built 1m span's images, measured
+    {
+        auto &x = chart();
+        view(x);
+        settle();
+        for (const auto &span : x.latestSnapshot()->spans)
+            if (span.rank.tier == SpanTier::Visible)
+                for (const auto &source : span.sources) spanBytes += source.build->bytes;
+    }
+    charts.clear();
+    makeCache();
+    const size_t ceiling = 9 * spanBytes + spanBytes / 2;
+    cache->setCpuCeiling(ceiling);
+    auto &a = chart(320ull << 20, spanBytes);
+    view(a);
+    settle();
+    auto &b = chart(320ull << 20, spanBytes);
+    // A wide view: eight tiles.
+    b.setView("BTC-USD", kMinuteMs, double(epoch + 12 * tileMs), double(epoch + 20 * tileMs));
+    settle();
+    EXPECT_LE(cache->committedCpuBytes(), ceiling);
+    EXPECT_LE(store.stats().wantedBytes + cache->pinnedBytes(), ceiling);
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+    const auto snapshot = b.latestSnapshot();
+    ASSERT_FALSE(snapshot->refused.empty());
+    EXPECT_GT(snapshot->refusedBytes, 0u);
+    EXPECT_EQ(b.stats().refused, snapshot->refused.size());
+    const int64_t centre = tiles::tileOfBucket((epoch + 16 * tileMs) / kMinuteMs);
+    int64_t farthestAdmitted = -1;
+    size_t visible = 0;
+    for (const auto &span : snapshot->spans)
+        if (span.rank.tier == SpanTier::Visible) {
+            ++visible;
+            EXPECT_TRUE(span.complete);
+            farthestAdmitted = std::max(farthestAdmitted, std::abs(span.id.tile - centre));
+        }
+    EXPECT_GE(visible, 1u);
+    EXPECT_EQ(visible + snapshot->refused.size(), 8u);
+    for (const auto &id : snapshot->refused) EXPECT_GE(std::abs(id.tile - centre), farthestAdmitted) << id.tile;
+}
+
+TEST_F(SourceController, ASpanLargerThanTheWholeCeilingIsAdmittedAlone) {
+    cache->setCpuCeiling(1);
+    auto &a = chart();
+    a.setView("BTC-USD", kMinuteMs, double(epoch - tileMs), double(epoch + 2 * tileMs)); // three tiles
+    settle();
+    const auto snapshot = a.latestSnapshot();
+    ASSERT_EQ(snapshot->spans.size(), 1u);
+    EXPECT_TRUE(snapshot->spans[0].complete);
+    EXPECT_EQ(snapshot->spans[0].id.tile, tiles::tileOfBucket(epoch / kMinuteMs)); // the centre
+    EXPECT_EQ(snapshot->refused.size(), 2u);
+    EXPECT_GT(a.stats().refusals, 0u);
+}
+
+// Re-review P1: decoded chunks stay wanted only while a build needs them.
+TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAgain) {
+    auto &a = chart();
+    view(a);
+    answerAll(); // chunks in, builds queued
+    EXPECT_GT(store.stats().wantedBytes, 0u);
+    settle();
+    EXPECT_EQ(store.stats().wantedBytes, 0u); // all built; the test chunks are sealed
+    EXPECT_EQ(upload(a, 1ull << 30), 10u);
+    store.setMaxBytes(1); // unwanted chunks are evictable now
+    EXPECT_EQ(store.stats().entries, 0u);
+    cache->setMaxBytes(0); // no cached copies of the released images either
+    cache->setMaxBytes(256ull << 20);
+    const auto requests = requestedKeys().size();
+    a.capacity()->report(1ull << 30, {}, true); // GPU loss
+    a.pollCapacity();
+    drain();
+    EXPECT_GT(requestedKeys().size(), requests); // wanted again, refetched
+    settle();
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+    EXPECT_EQ(store.stats().wantedBytes, 0u);
+}
+
+// A source made ready from the cache after demand was computed must not leave
+// its chunks wanted (one more reconcile follows a cache hit).
+TEST_F(SourceController, LossRecoveredFromTheCacheLeavesNothingWanted) {
+    auto &a = chart();
+    view(a);
+    settle();
+    upload(a, 1ull << 30); // images released; the cache LRU still holds them
+    const auto built = cache->stats().builds;
+    a.capacity()->report(1ull << 30, {}, true);
+    a.pollCapacity();
+    settle();
+    EXPECT_EQ(cache->stats().builds, built); // all from the cache
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+    EXPECT_EQ(store.stats().wantedBytes, 0u);
+}
+
+// Re-review P2: a GPU loss rebuilds the drawn fallback, drops recent-tf.
+TEST_F(SourceController, GpuLossRebuildsFallbackAndDropsReleasedRecentTimeframe) {
+    auto &a = chart();
+    view(a, kMinuteMs);
+    settle();
+    upload(a, 1ull << 30);
+    view(a, 5 * kMinuteMs);
+    drain(); // the 5m view is still loading: 1m is the fallback
+    a.capacity()->report(1ull << 30, {}, true);
+    a.pollCapacity();
+    drain();
+    // Run only the queued builds; the 5m chunks stay unanswered.
+    while (!jobs.empty()) {
+        auto job = std::move(jobs.front());
+        jobs.pop_front();
+        job();
+        drain();
+    }
+    bool fallback = false;
+    for (const auto &span : a.latestSnapshot()->spans) {
+        if (span.id.tfMs != kMinuteMs) continue;
+        EXPECT_EQ(span.rank.tier, SpanTier::Fallback);
+        fallback = true;
+        for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+    }
+    EXPECT_TRUE(fallback);
+    // The 5m view completes (1m becomes recent-tf); after uploads and another
+    // loss, released recent-tf retention is dropped rather than rebuilt.
+    settle();
+    upload(a, 1ull << 30);
+    a.capacity()->report(1ull << 30, {}, true);
+    a.pollCapacity();
+    settle();
+    for (const auto &span : a.latestSnapshot()->spans) {
+        EXPECT_EQ(span.id.tfMs, 5 * kMinuteMs);
+        for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+    }
+}
+
+// Re-review P2: an availability advance invalidates the build in flight.
+TEST_F(SourceController, PlanChangeInvalidatesABuildInFlightBeforeItsNewChunkArrives) {
+    const int64_t h0 = epoch / kHourMs * kHourMs;
+    transport.push(availability(h0 + kHourMs));
+    drain();
+    auto &a = chart();
+    view(a);
+    answerAll(); // builds for the old plan are queued, not run
+    ASSERT_FALSE(jobs.empty());
+    transport.push(availability(h0 + 2 * kHourMs)); // the visible span now needs chunk h0 + 1h
+    drain();
+    const auto newChunk = std::find_if(transport.requests.begin() + long(answered), transport.requests.end(),
+                                       [&](const auto &r) { return r.starts.front() == h0 + kHourMs; });
+    ASSERT_NE(newChunk, transport.requests.end()); // requested, deliberately unanswered
+    while (!jobs.empty()) {
+        auto job = std::move(jobs.front());
+        jobs.pop_front();
+        job();
+        drain();
+    }
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible) EXPECT_FALSE(span.complete) << "an obsolete plan built as current";
+    EXPECT_GT(a.stats().staleResults, 0u);
+    settle();
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+// Re-review P2: freed CPU wakes another chart suppressed for CPU room.
+TEST_F(SourceController, FreedCpuCapacityWakesASuppressedChart) {
+    auto &a = chart();
+    view(a);
+    settle();
+    size_t spanBytes = 0;
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible)
+            for (const auto &source : span.sources) spanBytes += source.build->bytes;
+    cache->setMaxBytes(6 * spanBytes + spanBytes / 2); // A's five spans plus B's view
+    step();
+    auto &b = chart(320ull << 20, spanBytes / 2);
+    b.setView("BTC-USD", kMinuteMs, double(epoch + 20 * tileMs), double(epoch + 21 * tileMs));
+    settle();
+    ASSERT_EQ(b.latestSnapshot()->spans.size(), 1u); // prefetch suppressed by A's claims
+    const auto *bPtr = &b;
+    charts.erase(charts.begin()); // A closes; nothing else happens
+    settle();
+    EXPECT_EQ(bPtr->latestSnapshot()->spans.size(), 5u);
 }
 } // namespace
