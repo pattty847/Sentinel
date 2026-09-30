@@ -71,6 +71,7 @@ public:
     // Already decoded, immutable columns (may alias a ChunkFrame). No copy.
     // Equal hashes keep the generation, including after eviction; sealing is
     // one revision even if the caller supplies the same hash. Older states lose.
+    // Unlike legacy get(), put never retains more bytes than the store budget.
     std::shared_ptr<const StoredChunk> put(const ChunkKey &key, std::shared_ptr<const SparseColumns> columns,
                                             ChunkState state, uint64_t contentHash);
 

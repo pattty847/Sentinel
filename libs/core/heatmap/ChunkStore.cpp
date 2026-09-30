@@ -53,7 +53,7 @@ std::shared_ptr<const StoredChunk> ChunkStore::insertSharedLocked(const ChunkKey
         // A newer acquisition already stored its version: keep it. If it was
         // evicted meanwhile, this older data must not come back as current.
         if (auto current = cachedLocked(key); current) return current;
-        if (!revision && latest.sealed && state.sealed) {
+        if (!revision && latest.sealed && state.sealed && (!hash || latest.contentHash == hash)) {
             // Same immutable content: fall through and re-cache it under the
             // newer ticket and the same generation.
             ticket = latest.ticket;
@@ -121,9 +121,11 @@ std::shared_ptr<const StoredChunk> ChunkStore::put(const ChunkKey &key,
 }
 
 void ChunkStore::evictLocked() {
-    // Keep at least the newest entry even when it alone exceeds the budget: the
-    // caller holds it anyway, and dropping it would only force a reload.
-    while (bytes_ > maxBytes_ && lru_.size() > 1) {
+    // Preserve the blocking lab API's keep-newest exception. The async put
+    // path obeys the byte cap even for a single oversized body; its returned
+    // pointer and generation still remain valid after immediate eviction.
+    while (bytes_ > maxBytes_ && !lru_.empty()) {
+        if (lru_.size() == 1 && !latest_.at(lru_.front()).contentHash) break;
         const auto it = entries_.find(lru_.back());
         bytes_ -= it->second.chunk->bytes;
         entries_.erase(it);

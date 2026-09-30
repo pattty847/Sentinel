@@ -340,6 +340,17 @@ TEST(HeatmapChunkStore, PutAnnouncesChangedContentAndSealingExactlyOnce) {
         << "late open body cannot replace sealed state";
     EXPECT_EQ(store.revisionCount(), 2u);
 }
+TEST(HeatmapChunkStore, PutNeverRetainsAnOversizedBodyBeyondTheBudget) {
+    ChunkStore store(1);
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
+    const auto held = store.put(key, std::make_shared<const SparseColumns>(makeHourChunk(0)),
+                                {true, epoch + hour, 0}, 17);
+    ASSERT_TRUE(held);
+    EXPECT_LE(store.stats().bytes, store.stats().maxBytes);
+    EXPECT_FALSE(store.peek(key));
+    EXPECT_EQ(store.generationOf(key), held->generation);
+}
+
 TEST(HeatmapChunkStore, PutWinsTheTicketAgainstAnOlderBlockingLoad) {
     std::promise<void> entered, release;
     auto released = release.get_future().share();

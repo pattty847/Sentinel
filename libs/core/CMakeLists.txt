@@ -62,6 +62,13 @@ add_library(sentinel_core
     heatmap/RecordingLoader.hpp
     heatmap/ChunkStore.cpp
     heatmap/ChunkStore.hpp
+    heatmap/ChunkTransport.hpp
+    heatmap/ChunkFetcher.cpp
+    heatmap/ChunkFetcher.hpp
+    heatmap/LocalChunkTransport.cpp
+    heatmap/LocalChunkTransport.hpp
+    protocol/SentinelStreamClientTransport.cpp
+    protocol/SentinelStreamClientTransport.hpp
     heatmap/HeatmapTiles.cpp
     heatmap/HeatmapTiles.hpp
     servermodel/Hmc2Store.cpp
