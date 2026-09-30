@@ -188,6 +188,31 @@ TEST_F(StoreTest, OpensAndWritesUnderFreshNestedDirectory) {
     EXPECT_EQ(rows[0].bucketStartMs, r.bucketStartMs);
 }
 
+// An append creates root/BTC-USD, then fsync of root fails. The retry finds
+// BTC-USD existing; it must still fsync root before reporting success, or a
+// power loss can drop the directory entry that holds written records.
+TEST_F(StoreTest, FailedParentSyncIsRetriedBeforeTheNextAppendSucceeds) {
+    Hmc2Store store(root());
+    const auto rootDir = std::filesystem::absolute(root()).lexically_normal();
+    std::vector<std::filesystem::path> synced;
+    bool failRoot = true;
+    store.beforeDirectorySyncForTest([&](const std::filesystem::path &dir) {
+        synced.push_back(std::filesystem::absolute(dir).lexically_normal());
+        if (failRoot && synced.back() == rootDir) {
+            failRoot = false;
+            throw std::runtime_error("injected directory sync failure");
+        }
+    });
+    const auto r = record();
+    EXPECT_THROW(store.append(r), std::runtime_error);
+    ASSERT_FALSE(failRoot) << "the first append must have tried to sync the root";
+    synced.clear();
+    store.append(r);
+    EXPECT_NE(std::find(synced.begin(), synced.end(), rootDir), synced.end())
+        << "the retry reported success without re-syncing the root";
+    EXPECT_EQ(read().size(), 1u);
+}
+
 TEST_F(StoreTest, RoundTripAndBucketUtcPath) {
     auto r = record(86400000 - 60000);
     {
