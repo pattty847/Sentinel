@@ -139,6 +139,10 @@ int main(int argc, char **argv) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         if (!window) return 2;
         const QString path = parser.value("window-screenshot");
+        if (QString why; !lab::labOutputAllowed(path, &why)) { // before the run; again before the write
+            std::cerr << why.toStdString() << std::endl;
+            return 2;
+        }
         auto *poll = new QTimer(&app);
         QObject::connect(poll, &QTimer::timeout, &app, [window, path, &app, poll] {
             QList<lab::LabItem *> items;
@@ -158,6 +162,12 @@ int main(int argc, char **argv) {
                           << " status=" << item->status().toStdString() << "\n";
             }
             QTimer::singleShot(700, &app, [window, path, &app] { // let the panel refresh its metrics
+                QString why;
+                if (!lab::labOutputAllowed(path, &why)) {
+                    std::cerr << why.toStdString() << std::endl;
+                    app.exit(2);
+                    return;
+                }
                 app.exit(window->grabWindow().save(path, "PNG") ? 0 : 2);
             });
         });

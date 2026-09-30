@@ -4,6 +4,7 @@
 // itself a link into the root. Links are symlinks, or junctions on Windows.
 #include "lab/LabSources.hpp"
 #include <QDir>
+#include <QFile>
 #include <QProcess>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
@@ -86,6 +87,49 @@ TEST_F(LabOutputGuard, UnresolvableLinkFailsClosed) {
     QString why;
     EXPECT_FALSE(lab::labOutputAllowed(q(link / "shot.png"), &why));
     EXPECT_FALSE(why.isEmpty());
+}
+
+// The lab's own writers go through the guard before the run and before the
+// write: --b1-bench opens its JSON WriteOnly, --window-screenshot saves a PNG.
+QByteArray readAll(const fs::path &p) {
+    QFile f(q(p));
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+int runLab(const QStringList &args, const fs::path &root, QByteArray *output) {
+    QProcess lab;
+    auto env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("SENTINEL_RECORDING_ROOT"), q(root));
+    env.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
+    lab.setProcessEnvironment(env);
+    lab.setProcessChannelMode(QProcess::MergedChannels);
+    lab.start(QStringLiteral(SENTINEL_LAB_EXECUTABLE), args);
+    if (!lab.waitForFinished(90'000)) {
+        lab.kill();
+        lab.waitForFinished(5'000);
+    }
+    if (output) *output = lab.readAll();
+    return lab.exitStatus() == QProcess::NormalExit ? lab.exitCode() : -1;
+}
+
+TEST_F(LabOutputGuard, B1BenchRefusesAJsonPathInsideTheRootAndLeavesTheFile) {
+    const auto target = root / "BTC-USD" / "keep.json";
+    { QFile f(q(target)); ASSERT_TRUE(f.open(QIODevice::WriteOnly)); f.write("recording data"); }
+    QByteArray output;
+    EXPECT_EQ(runLab({QStringLiteral("--b1-bench"), q(target), QStringLiteral("--b1-quick"),
+                      QStringLiteral("--b1-modes"), QStringLiteral("hybrid")}, root, &output), 2)
+        << output.toStdString();
+    EXPECT_EQ(readAll(target), QByteArray("recording data"));
+    EXPECT_TRUE(output.contains("recording root")) << output.toStdString();
+}
+
+TEST_F(LabOutputGuard, WindowScreenshotRefusesAPathInsideTheRoot) {
+    const auto target = root / "window.png";
+    QByteArray output;
+    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("20000"), QStringLiteral("--window-screenshot"),
+                      q(target)}, root, &output), 2)
+        << output.toStdString();
+    EXPECT_FALSE(fs::exists(target));
+    EXPECT_TRUE(output.contains("recording root")) << output.toStdString();
 }
 
 TEST_F(LabOutputGuard, PathsOutsideTheConfiguredRootAreAllowedWithoutTheOverride) {
