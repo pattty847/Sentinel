@@ -164,14 +164,15 @@ inline void releaseFileLock(LockHandle fd) {
 }
 inline bool syncDirectory(const std::filesystem::path &path, int &error) {
 #ifdef _WIN32
-    // Request a real metadata flush. Some Windows filesystems deny directory
-    // flushes; surface that failure instead of claiming unprovided durability.
+    // Best effort on Windows: request a metadata flush, but a directory the user
+    // may not open for write (a drive root, C:\Users) is not a failure. NTFS
+    // journals directory metadata; file-data flushes (syncFile) stay mandatory.
     HANDLE fd =
         CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (fd == INVALID_HANDLE_VALUE) {
         error = static_cast<int>(GetLastError());
-        return false;
+        return error == ERROR_ACCESS_DENIED;
     }
     const bool ok = FlushFileBuffers(fd) != 0;
     if (!ok)

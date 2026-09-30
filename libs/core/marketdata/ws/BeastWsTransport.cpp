@@ -57,7 +57,10 @@ void BeastWsTransport::armDeadline(uint64_t id, std::chrono::milliseconds timeou
         if (phase_ == Phase::Closing) {
             sLog_Warning("MDC transport close timed out, dropping socket: timeoutMs=" << timeout.count()
                          << " host=" << host_);
-            finishClose(id, net::error::timed_out);
+            // Explicit text: net::error::timed_out's message is platform prose
+            // (WSAETIMEDOUT on Windows never says "timed out").
+            finishClose(id, net::error::timed_out,
+                        "close timed out after " + std::to_string(timeout.count()) + "ms");
             return;
         }
         // The handshake can succeed while this expiry is already queued; cancel()
@@ -81,13 +84,13 @@ void BeastWsTransport::fail(uint64_t id, const std::string& error) {
     if (onStatus_) onStatus_(false);
 }
 
-void BeastWsTransport::finishClose(uint64_t id, beast::error_code ec) {
+void BeastWsTransport::finishClose(uint64_t id, beast::error_code ec, const std::string& error) {
     if (id != attempt_) return;
     ++attempt_;
     phase_ = Phase::Idle;
     cancelTimers();
     closeSocket();
-    if (ec && onError_) onError_(ec.message());
+    if (ec && onError_) onError_(error.empty() ? ec.message() : error);
     if (onStatus_) onStatus_(false);
 }
 

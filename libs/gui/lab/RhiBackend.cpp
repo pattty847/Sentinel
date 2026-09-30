@@ -2,8 +2,14 @@
 #include <QOffscreenSurface>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
+#include <cstdio>
 #ifdef Q_OS_MACOS
 #include <dlfcn.h>
+#endif
+#ifdef Q_OS_WIN
+#include <d3d12.h>
+#include <d3d12sdklayers.h>
+#include <wrl/client.h>
 #endif
 #if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
 #include <QVulkanInstance>
@@ -33,13 +39,47 @@ constexpr int kD3DFeatureLevel11_1 = 0xb100; // D3D_FEATURE_LEVEL_11_1
 
 const char *platformDefault() {
 #if defined(Q_OS_WIN)
-    return "d3d11";
+    return "d3d12"; // D3D11 cannot run the heatmap (docs/WINDOWS_GPU_TESTS.md)
 #elif defined(Q_OS_MACOS)
     return "metal";
 #else
     return "opengl";
 #endif
 }
+// SENTINEL_RHI_DEBUG=1: D3D11/D3D12 debug layer, Vulkan validation layer.
+// SENTINEL_RHI_DEBUG=2 also turns on D3D12 GPU-based validation (slow).
+int rhiDebugLevel() {
+    return qEnvironmentVariableIntValue("SENTINEL_RHI_DEBUG");
+}
+
+#ifdef Q_OS_WIN
+// The D3D12 debug layer reports to a debugger only; print its messages to
+// stderr so a test run shows them.
+void CALLBACK printD3D12Message(D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id,
+                                LPCSTR description, void *) {
+    static const char *names[] = {"CORRUPTION", "ERROR", "WARNING", "INFO", "MESSAGE"};
+    const int s = int(severity);
+    std::fprintf(stderr, "[d3d12 %s #%d] %s\n", s >= 0 && s < 5 ? names[s] : "?", int(id), description);
+}
+
+void enableD3D12GpuValidation() {
+    Microsoft::WRL::ComPtr<ID3D12Debug1> debug;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+        debug->EnableDebugLayer();
+        debug->SetEnableGPUBasedValidation(TRUE);
+    }
+}
+
+void installD3D12MessageCallback(QRhi *rhi) {
+    const auto *handles = static_cast<const QRhiD3D12NativeHandles *>(rhi->nativeHandles());
+    auto *device = handles ? static_cast<ID3D12Device *>(handles->dev) : nullptr;
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue1> queue;
+    DWORD cookie = 0;
+    if (!device || FAILED(device->QueryInterface(IID_PPV_ARGS(&queue))) ||
+        FAILED(queue->RegisterMessageCallback(printD3D12Message, D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie)))
+        std::fprintf(stderr, "[d3d12] debug message callback unavailable (needs ID3D12InfoQueue1)\n");
+}
+#endif
 } // namespace
 
 RhiSelection selectedRhiBackend() {
@@ -106,7 +146,7 @@ bool HeadlessRhi::create(bool timestamps) {
 #ifdef Q_OS_WIN
     case QSGRendererInterface::Direct3D11: {
         QRhiD3D11InitParams init;
-        init.enableDebugLayer = qEnvironmentVariableIntValue("SENTINEL_RHI_DEBUG_LAYER") != 0;
+        init.enableDebugLayer = rhiDebugLevel() > 0;
         // Ask for feature level 11_1: the heatmap kernel binds more than the 8
         // UAVs that 11_0 allows per compute shader (Qt maps every storage buffer
         // to a UAV). Qt's default device creation never selects 11_1.
@@ -118,8 +158,10 @@ bool HeadlessRhi::create(bool timestamps) {
     }
     case QSGRendererInterface::Direct3D12: {
         QRhiD3D12InitParams init;
-        init.enableDebugLayer = qEnvironmentVariableIntValue("SENTINEL_RHI_DEBUG_LAYER") != 0;
+        init.enableDebugLayer = rhiDebugLevel() > 0;
+        if (rhiDebugLevel() > 1) enableD3D12GpuValidation();
         rhi.reset(QRhi::create(QRhi::D3D12, &init, flags));
+        if (rhi && init.enableDebugLayer) installD3D12MessageCallback(rhi.get());
         break;
     }
 #endif
@@ -127,8 +169,10 @@ bool HeadlessRhi::create(bool timestamps) {
     case QSGRendererInterface::Vulkan: {
         vulkan = std::make_shared<QVulkanInstance>();
         vulkan->setExtensions(QRhiVulkanInitParams::preferredInstanceExtensions());
+        if (rhiDebugLevel() > 0) vulkan->setLayers({"VK_LAYER_KHRONOS_validation"});
         if (!vulkan->create())
-            return fail(QStringLiteral("vulkan backend: QVulkanInstance::create failed (no Vulkan loader or driver)"));
+            return fail(QStringLiteral("vulkan backend: QVulkanInstance::create failed (no Vulkan loader or driver, "
+                                       "or the offscreen QPA: set QT_QPA_PLATFORM=windows or xcb)"));
         QRhiVulkanInitParams init;
         init.inst = vulkan.get();
         rhi.reset(QRhi::create(QRhi::Vulkan, &init, flags));

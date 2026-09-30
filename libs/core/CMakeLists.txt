@@ -41,6 +41,7 @@ add_library(sentinel_core
     servermodel/BookRecorder.hpp
     servermodel/RecordingLive.cpp
     servermodel/RecordingLive.hpp
+    servermodel/RecordingDir.hpp
     servermodel/RecordingPage.cpp
     servermodel/RecordingPage.hpp
     servermodel/RecordingChunks.cpp

@@ -173,6 +173,14 @@ target_include_directories(test_heatmap_tiles_gpu PRIVATE ${CMAKE_SOURCE_DIR}/li
 target_link_libraries(test_heatmap_tiles_gpu PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME HeatmapTileGpuTests COMMAND test_heatmap_tiles_gpu)
 set_tests_properties(HeatmapTileGpuTests PROPERTIES LABELS "render;heatmap")
+# Lab outputs never land inside the recording root (links, aliases, missing descendants).
+add_executable(test_lab_output_guard test_lab_output_guard.cpp)
+target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_lab_output_guard PRIVATE sentinel_lab_lib GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_lab_output_guard PRIVATE SENTINEL_LAB_EXECUTABLE="$<TARGET_FILE:sentinel_lab>")
+add_dependencies(test_lab_output_guard sentinel_lab)
+add_test(NAME LabOutputGuardTests COMMAND test_lab_output_guard)
+set_tests_properties(LabOutputGuardTests PROPERTIES LABELS "render;lab")
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
 # FM-099: a readback result freed before its frame completes is a silent heap
 # write without Guard Malloc; under it a wrong teardown order crashes. Covers the

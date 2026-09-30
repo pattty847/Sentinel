@@ -37,6 +37,18 @@ TEST(RecordingBandPolicy, TrailingDebounceAndCancellation) {
     EXPECT_FALSE(state.ready(500));
 }
 
+// A timer that fires 1 ms early (149 ms on Windows under load) must re-arm for
+// the remainder, never for zero or a full new period.
+TEST(RecordingBandPolicy, RemainingTimeRearmsAnEarlyTimer) {
+    Debounce state;
+    state.changed(100);
+    EXPECT_EQ(state.remainingMs(249), 1);
+    EXPECT_EQ(state.remainingMs(200), 50);
+    EXPECT_EQ(state.remainingMs(100), kDebounceMs);
+    EXPECT_EQ(state.remainingMs(400), 1);   // already late: fire as soon as possible
+    EXPECT_EQ(state.remainingMs(50), kDebounceMs); // clock before the change: at most one period
+}
+
 TEST(RecordingBandPolicy, IdealTickIsLadderTickForTwoPixelRows) {
     // $100 over 500 px: $0.2/px -> 2 px rows need $0.4 -> native $1.
     EXPECT_DOUBLE_EQ(idealTick(View{0, 60'000, 83'000, 83'100, 1000, 500, false}, 2), 1.0);

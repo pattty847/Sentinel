@@ -1,6 +1,7 @@
 #include "B1Bench.hpp"
 #include "LabChunks.hpp"
 #include "LabItem.hpp"
+#include "LabSources.hpp"
 #include "OffscreenQuick.hpp"
 #include "RhiBackend.hpp"
 #include <QCoreApplication>
@@ -400,6 +401,12 @@ QString cell(const QJsonObject &o, const char *key, int precision = 0) {
 } // namespace
 
 int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modeNames) {
+    // The JSON is opened WriteOnly: never inside the recording root. Checked
+    // before the run and again before the write.
+    if (QString why; !jsonPath.isEmpty() && !labOutputAllowed(jsonPath, &why)) {
+        std::cout << QJsonDocument(QJsonObject{{"error", why}}).toJson(QJsonDocument::Compact).toStdString() << std::endl;
+        return 2;
+    }
     if (const QString why = gpuUnavailableReason(); !why.isEmpty()) {
         std::cout << QJsonDocument(QJsonObject{{"error", why}}).toJson(QJsonDocument::Compact).toStdString() << std::endl;
         return 2;
@@ -447,6 +454,10 @@ int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modeNames
                              {"elapsed_s", since(started) / 1000},
                              {"pinned_end_ms", double(pinnedEndMs())}};
     if (!jsonPath.isEmpty()) {
+        if (QString why; !labOutputAllowed(jsonPath, &why)) {
+            std::cout << QJsonDocument(QJsonObject{{"error", why}}).toJson(QJsonDocument::Compact).toStdString() << std::endl;
+            return 2;
+        }
         QFile file(jsonPath);
         if (file.open(QIODevice::WriteOnly)) file.write(QJsonDocument(result).toJson(QJsonDocument::Indented));
     }

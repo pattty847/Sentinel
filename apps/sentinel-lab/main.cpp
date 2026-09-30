@@ -25,7 +25,8 @@ int main(int argc, char **argv) {
         headless |= QByteArray(argv[i]) == "--bench" || QByteArray(argv[i]) == "--screenshot" ||
                     QByteArray(argv[i]) == "--b1-bench" ||
                     QByteArray(argv[i]) == "--tick-sweep" || QByteArray(argv[i]) == "--tick-change-frames";
-    if (headless) qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Offscreen unless set: Vulkan needs a real platform plugin (QT_QPA_PLATFORM=windows|xcb).
+    if (headless && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
 #ifdef Q_OS_WIN
     // The offscreen QPA reads fonts from Qt's lib/fonts, which Qt no longer ships:
     // without this the stamped debug text renders as empty boxes.
@@ -138,6 +139,10 @@ int main(int argc, char **argv) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         if (!window) return 2;
         const QString path = parser.value("window-screenshot");
+        if (QString why; !lab::labOutputAllowed(path, &why)) { // before the run; again before the write
+            std::cerr << why.toStdString() << std::endl;
+            return 2;
+        }
         auto *poll = new QTimer(&app);
         QObject::connect(poll, &QTimer::timeout, &app, [window, path, &app, poll] {
             QList<lab::LabItem *> items;
@@ -157,6 +162,12 @@ int main(int argc, char **argv) {
                           << " status=" << item->status().toStdString() << "\n";
             }
             QTimer::singleShot(700, &app, [window, path, &app] { // let the panel refresh its metrics
+                QString why;
+                if (!lab::labOutputAllowed(path, &why)) {
+                    std::cerr << why.toStdString() << std::endl;
+                    app.exit(2);
+                    return;
+                }
                 app.exit(window->grabWindow().save(path, "PNG") ? 0 : 2);
             });
         });

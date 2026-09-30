@@ -13,8 +13,13 @@
 #include <zstd.h>
 #include "servermodel/HmcolFormat.hpp"
 #include "servermodel/PersistenceIo.hpp"
+#include "servermodel/RecordingDir.hpp"
 
 using namespace recording;
+
+// Some cases capture stderr to check store warnings. Without a console (ctest,
+// CI) Qt on Windows logs to OutputDebugString instead; force stderr before main.
+static const bool kQtLogsToStderr = qputenv("QT_FORCE_STDERR_LOGGING", "1");
 namespace {
 constexpr int64_t kEpoch = kHmc2MinMs;
 class StoreTest : public testing::Test {
@@ -148,6 +153,141 @@ class StoreTest : public testing::Test {
         return frame;
     }
 };
+// The server and the lab share this rule (recording.dir, fallback while its
+// /Volumes/<name> volume is unmounted). "/Volumes/..." has no drive on Windows,
+// so it must count as unmounted there too, never become C:\Volumes\...
+TEST(RecordingDir, UnmountedVolumeUsesFallbackOrNothing) {
+    const std::string absent = "/Volumes/SentinelDefinitelyAbsentVolume/recording";
+    EXPECT_FALSE(volumeMounted(absent));
+    auto choice = resolveRecordingDir(absent, "data/recording");
+    EXPECT_EQ(choice.dir, std::filesystem::path("data/recording"));
+    EXPECT_TRUE(choice.fallback);
+    choice = resolveRecordingDir(absent, "");
+    EXPECT_TRUE(choice.dir.empty());
+    const auto plain = std::filesystem::temp_directory_path() / "recording";
+    choice = resolveRecordingDir(plain.string(), "data/recording");
+    EXPECT_EQ(choice.dir, plain);
+    EXPECT_FALSE(choice.fallback);
+    EXPECT_TRUE(volumeMounted("data/recording")); // relative: the working directory decides
+}
+
+#ifdef _WIN32
+// "/Volumes/<name>" is a macOS mount point. On Windows it names C:\Volumes\<name>,
+// which may exist (left behind by an older build); it must still count as not
+// mounted, or the server records to the boot disk.
+TEST(RecordingDir, VolumesPathIsNeverMountedOnWindowsEvenIfTheDirectoryExists) {
+    namespace fs = std::filesystem;
+    const fs::path volumes("/Volumes");
+    const fs::path volume = volumes / "SentinelTestVolume-RecordingDir";
+    const bool hadVolumes = fs::exists(volumes);
+    std::error_code ec;
+    fs::create_directories(volume, ec);
+    if (ec) GTEST_SKIP() << "cannot create " << fs::absolute(volume).string() << ": " << ec.message();
+    const bool mounted = volumeMounted(volume / "recording");
+    fs::remove(volume, ec);
+    if (!hadVolumes) fs::remove(volumes, ec);
+    EXPECT_FALSE(mounted);
+    const auto choice = resolveRecordingDir((volume / "recording").generic_string(), "data/recording");
+    EXPECT_TRUE(choice.fallback);
+}
+#endif
+
+// Every platform: a store opens under a fresh temp directory whose chain up to
+// the drive root includes directories the user cannot fsync (C:\ on Windows),
+// creates its missing directories, writes and reads back.
+TEST_F(StoreTest, OpensAndWritesUnderFreshNestedDirectory) {
+    const auto nested = root() / "fresh" / "nested" / "recording";
+    ASSERT_FALSE(std::filesystem::exists(nested));
+    const auto r = record(120000);
+    {
+        Hmc2Store store(nested);
+        store.append(r);
+    }
+    EXPECT_TRUE(std::filesystem::is_directory(nested));
+    const auto rows = Hmc2Store::readRange(nested, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].bucketStartMs, r.bucketStartMs);
+}
+
+// Records directory syncs (and can fail one) for the whole process while alive.
+struct DirectorySyncProbe {
+    std::vector<std::filesystem::path> synced;
+    std::filesystem::path failOnce;
+    explicit DirectorySyncProbe(std::filesystem::path fail = {}) : failOnce(key(fail)) {
+        Hmc2Store::setDirectorySyncHookForTest([this](const std::filesystem::path &dir) {
+            synced.push_back(key(dir));
+            if (!failOnce.empty() && synced.back() == failOnce) {
+                failOnce.clear();
+                throw std::runtime_error("injected directory sync failure");
+            }
+        });
+    }
+    ~DirectorySyncProbe() { Hmc2Store::setDirectorySyncHookForTest({}); }
+    static std::filesystem::path key(const std::filesystem::path &p) {
+        if (p.empty()) return p;
+        auto k = std::filesystem::absolute(p).lexically_normal();
+        while (!k.has_filename() && k.has_relative_path()) k = k.parent_path();
+        return k;
+    }
+    bool saw(const std::filesystem::path &dir) const {
+        return std::find(synced.begin(), synced.end(), key(dir)) != synced.end();
+    }
+};
+
+// An append creates root/BTC-USD, then fsync of root fails. The retry finds
+// BTC-USD existing; it must still fsync root before reporting success, or a
+// power loss can drop the directory entry that holds written records.
+TEST_F(StoreTest, FailedParentSyncIsRetriedBeforeTheNextAppendSucceeds) {
+    Hmc2Store store(root());
+    DirectorySyncProbe probe(root());
+    const auto r = record();
+    EXPECT_THROW(store.append(r), std::runtime_error);
+    ASSERT_TRUE(probe.failOnce.empty()) << "the first append must have tried to sync the root";
+    probe.synced.clear();
+    store.append(r);
+    EXPECT_TRUE(probe.saw(root())) << "the retry reported success without re-syncing the root";
+    EXPECT_EQ(read().size(), 1u);
+}
+
+// Construction creates existing/new/recording, then fsync of `existing` fails
+// and the constructor throws with `new` left behind. The next construction
+// must sync `existing` again: every ancestor's parent is synced once per store.
+TEST_F(StoreTest, FailedAncestorSyncDuringConstructionIsRetriedByTheNextStore) {
+    const auto existing = root() / "existing";
+    std::filesystem::create_directories(existing);
+    const auto storeRoot = existing / "new" / "recording";
+    {
+        DirectorySyncProbe probe(existing);
+        EXPECT_THROW(Hmc2Store store(storeRoot), std::runtime_error);
+        ASSERT_TRUE(probe.failOnce.empty()) << "construction must have tried to sync " << existing.string();
+    }
+    ASSERT_TRUE(std::filesystem::is_directory(existing / "new"));
+    DirectorySyncProbe probe;
+    Hmc2Store store(storeRoot);
+    EXPECT_TRUE(probe.saw(existing)) << "the second store never synced " << existing.string();
+    EXPECT_TRUE(probe.saw(existing / "new"));
+    store.append(record());
+    EXPECT_EQ(Hmc2Store::readRange(storeRoot, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000).size(), 1u);
+}
+
+// "/data/recording/" and "/data/recording/." name the same root: the append
+// walk must recognise it (a mismatch made every append throw).
+TEST_F(StoreTest, RootWithTrailingSeparatorOrDotAppendsAndReadsBack) {
+    std::vector<std::string> suffixes{"/", "/."};
+#ifdef _WIN32
+    suffixes.push_back("\\");
+#endif
+    for (size_t i = 0; i < suffixes.size(); ++i) {
+        const auto dir = root() / ("store" + std::to_string(i));
+        {
+            Hmc2Store store(dir.string() + suffixes[i]);
+            store.append(record());
+        }
+        EXPECT_EQ(Hmc2Store::readRange(dir, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000).size(), 1u)
+            << "root suffix " << suffixes[i];
+    }
+}
+
 TEST_F(StoreTest, RoundTripAndBucketUtcPath) {
     auto r = record(86400000 - 60000);
     {

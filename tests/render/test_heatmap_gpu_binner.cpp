@@ -825,7 +825,7 @@ TEST(HeatmapGpuParity, RealRecordingOptIn) {
     Headless gpu;
     if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const std::string rootName = lab::recordingRoot();
-    if (rootName.empty()) GTEST_SKIP() << "set SENTINEL_RECORDING_ROOT to the directory holding BTC-USD/";
+    if (rootName.empty()) GTEST_SKIP() << "no recording root: set SENTINEL_RECORDING_ROOT or recording.dir in config/server_config.yaml";
     const std::filesystem::path root = std::filesystem::u8path(rootName);
     if (!std::filesystem::exists(root / "BTC-USD"))
         GTEST_SKIP() << "recording directory absent: " << (root / "BTC-USD").string();
@@ -1314,7 +1314,8 @@ TEST(LabItemZoom, ShiftWheelScalesPriceOnlyWithinTheClamps) {
 } // namespace
 
 int main(int argc, char **argv) {
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Offscreen unless set: Vulkan needs a real platform plugin (QT_QPA_PLATFORM=windows|xcb).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;

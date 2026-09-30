@@ -305,14 +305,16 @@ TEST(BacktestCore, TickBinaryTradeEventSourceParsesTradeFiles) {
         out.write(reinterpret_cast<const char*>(&tradePayload), sizeof(tradePayload));
     }
 
-    trading::TickBinaryTradeEventSource source(tempDir, "BTC-USD");
-    auto event = source.next();
-    ASSERT_TRUE(event.has_value());
-    ASSERT_TRUE(event->trade.has_value());
-    EXPECT_EQ(event->trade->symbol, "BTC-USD");
-    EXPECT_EQ(event->trade->timestampMs, 2000);
-    EXPECT_DOUBLE_EQ(event->trade->price, 123.45);
-    EXPECT_DOUBLE_EQ(event->trade->qty, 0.75);
+    { // the reader keeps 00.bin open until EOF: close it before removing the directory (Windows)
+        trading::TickBinaryTradeEventSource source(tempDir, "BTC-USD");
+        auto event = source.next();
+        ASSERT_TRUE(event.has_value());
+        ASSERT_TRUE(event->trade.has_value());
+        EXPECT_EQ(event->trade->symbol, "BTC-USD");
+        EXPECT_EQ(event->trade->timestampMs, 2000);
+        EXPECT_DOUBLE_EQ(event->trade->price, 123.45);
+        EXPECT_DOUBLE_EQ(event->trade->qty, 0.75);
+    }
 
     fs::remove_all(tempDir);
 }

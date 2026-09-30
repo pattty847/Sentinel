@@ -1,5 +1,7 @@
 #include "LabSources.hpp"
+#include "ConfigLoader.hpp"
 #include "heatmap/RecordingLoader.hpp"
+#include "servermodel/RecordingDir.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include <QDir>
 #include <QFileInfo>
@@ -50,31 +52,96 @@ double medianRecentPrice(const heatmap::SparseColumns &data) {
 }
 
 std::string recordingRoot() {
-    return qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed().toStdString();
+    const QString override = qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed();
+    if (!override.isEmpty()) return override.toStdString();
+    // Otherwise where the server records: the same config files, read relative to
+    // the working directory, and the same dir/fallback rule (RecordingDir.hpp).
+    static const std::string configured = [] {
+        ServerConfig config;
+        if (!ConfigLoader::loadServerConfig("config/server_config.yaml", &config)) return std::string();
+        ConfigLoader::loadServerConfig("config/.server_config.yaml", &config);
+        const auto choice = recording::resolveRecordingDir(config.recording.dir, config.recording.fallbackDir);
+        if (choice.dir.empty()) return std::string();
+        return std::filesystem::absolute(choice.dir).lexically_normal().string();
+    }();
+    return configured;
 }
 
-bool insideRecordingRoot(const QString &path) {
-    const QString root = QString::fromStdString(recordingRoot());
-    if (root.isEmpty()) return false;
+namespace {
 #ifdef Q_OS_WIN
-    constexpr auto cs = Qt::CaseInsensitive;
+constexpr auto kPathCase = Qt::CaseInsensitive;
 #else
-    constexpr auto cs = Qt::CaseSensitive;
+constexpr auto kPathCase = Qt::CaseSensitive;
 #endif
-    const QString base = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
-    auto inside = [&](const QString &p) {
-        const QString clean = QDir::cleanPath(p);
-        return !clean.isEmpty() && (clean.compare(base, cs) == 0 || clean.startsWith(base + '/', cs));
+// `path` is `root` or below it, compared by whole components (no name prefixes).
+bool withinComponents(const QString &path, const QString &root) {
+    const QStringList p = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    const QStringList r = root.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (r.isEmpty() || p.size() < r.size()) return false;
+    for (qsizetype i = 0; i < r.size(); ++i)
+        if (p[i].compare(r[i], kPathCase) != 0) return false;
+    return true;
+}
+// Where an absolute path really points: the canonical path of its nearest
+// existing ancestor (symlinks and NTFS junctions resolved; Qt's
+// canonicalFilePath leaves junctions alone) plus the components that do not
+// exist yet. A link counts as existing even when dangling, so it is resolved,
+// fails, and the caller refuses. Empty when it cannot be resolved.
+QString resolvedPath(const QString &absolute) {
+    namespace fs = std::filesystem;
+    fs::path existing(absolute.toStdWString());
+    std::vector<fs::path> missing; // deepest first
+    for (;;) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(existing, ec);
+        if (ec && status.type() != fs::file_type::not_found) return {};
+        if (fs::exists(status)) break;
+        const fs::path parent = existing.parent_path();
+        if (parent == existing) return {};
+        missing.push_back(existing.filename());
+        existing = parent;
+    }
+    std::error_code ec;
+    fs::path resolved = fs::canonical(existing, ec);
+    if (ec) return {};
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) resolved /= *it;
+    return QDir::cleanPath(QDir::fromNativeSeparators(QString::fromStdWString(resolved.wstring())));
+}
+} // namespace
+
+bool labOutputAllowed(const QString &path, QString *why) {
+    auto refuse = [&](const QString &reason) {
+        if (why) *why = reason;
+        return false;
     };
-    const QFileInfo file(path);
-    return inside(file.absoluteFilePath()) || inside(file.absoluteDir().canonicalPath());
+    // Any ".." is refused before cleanup: QDir::cleanPath would drop "link/.."
+    // lexically, while the OS resolves the link first (POSIX), so the checked
+    // path and the written path would differ.
+    for (const QString &part : QString(path).replace(QLatin1Char('\\'), QLatin1Char('/')).split(QLatin1Char('/')))
+        if (part == QStringLiteral(".."))
+            return refuse(QStringLiteral("output path %1 contains \"..\"; give it without").arg(path));
+    const QString root = QString::fromStdString(recordingRoot());
+    if (root.isEmpty()) return true; // nothing to protect
+    const QString rootAbsolute = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
+    const QString rootResolved = resolvedPath(rootAbsolute);
+    if (rootResolved.isEmpty()) return refuse(QStringLiteral("cannot resolve the recording root %1").arg(root));
+    if (path.isEmpty()) return refuse(QStringLiteral("empty output path"));
+    const QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    const QString resolved = resolvedPath(absolute);
+    if (resolved.isEmpty()) return refuse(QStringLiteral("cannot resolve output path %1").arg(path));
+    for (const QString &candidate : {absolute, resolved})
+        for (const QString &base : {rootAbsolute, rootResolved})
+            if (withinComponents(candidate, base))
+                return refuse(QStringLiteral("output %1 is inside the recording root %2 (read-only)").arg(path, root));
+    return true;
 }
 
 LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &rootIn) {
     const std::string root = rootIn.empty() ? recordingRoot() : rootIn;
-    if (root.empty()) throw std::runtime_error("SENTINEL_RECORDING_ROOT is not set (directory holding BTC-USD/)");
+    if (root.empty()) throw std::runtime_error("no recording root: set SENTINEL_RECORDING_ROOT or recording.dir in "
+                                             "config/server_config.yaml (the directory holding BTC-USD/)");
     if (!std::filesystem::is_directory(std::filesystem::u8path(root) / "BTC-USD"))
-        throw std::runtime_error("no BTC-USD recording under SENTINEL_RECORDING_ROOT=" + root);
+        throw std::runtime_error("no BTC-USD recording under the recording root " + root);
     if (hours < 1 || loadHours < 1 || tfMs < heatmap::kMinuteMs || tfMs > heatmap::kDayMs ||
         tfMs % heatmap::kMinuteMs || (layer != "near" && layer != "deep"))
         throw std::invalid_argument("invalid lab recording request");

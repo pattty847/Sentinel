@@ -390,25 +390,16 @@ void sync(const fs::path &p, bool directory = false) {
     const bool ok = directory ? syncDirectory(p, error) : syncFilePath(p, error);
     check(ok, "sync path=" + p.string() + " error=" + std::to_string(error));
 }
-// Each store re-syncs the existing directory chain on first use, including
-// directories left behind by an earlier process that crashed before syncing.
-void mkdirs(const fs::path &p, std::set<fs::path> &synced) {
-    const auto absolute = fs::absolute(p).lexically_normal();
-    if (synced.contains(absolute))
-        return;
-    const auto parent = absolute.parent_path();
-    if (parent != absolute)
-        mkdirs(parent, synced);
+// create_directory that accepts an existing directory (another process may
+// have created it; MSVC also reports an existing drive root, "C:\", as access
+// denied rather than existing). Returns whether this call created it.
+bool createDirectory(const fs::path &dir) {
     std::error_code ec;
-    // An existing directory is fine; MSVC reports a drive root ("C:\") as
-    // access denied instead of already existing.
-    if (!fs::create_directory(absolute, ec) && ec && fs::is_directory(absolute))
+    const bool created = fs::create_directory(dir, ec);
+    if (!created && ec && fs::is_directory(dir))
         ec.clear();
-    check(!ec, "create directory " + absolute.string() + " error=" + ec.message());
-    sync(absolute, true);
-    if (parent != absolute)
-        sync(parent, true);
-    synced.insert(absolute);
+    check(!ec, "create directory " + dir.string() + " error=" + ec.message());
+    return created;
 }
 std::string dayName(int64_t ms) {
     check(ms >= kHmc2MinMs && ms < kHmc2EndMs, "timestamp outside UTC years 2000-2200");
@@ -1116,6 +1107,20 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
     return next.value;
 }
 
+namespace {
+std::function<void(const fs::path &)> directorySyncHook; // tests: setDirectorySyncHookForTest
+
+// One identity for a directory, used for the durable cache and the root
+// comparison: absolute and normalized, without the empty last component that
+// lexically_normal keeps for "/data/recording/" or "/data/recording/.".
+// Filesystem roots ("/", "C:\") keep their separator.
+fs::path directoryKey(const fs::path &dir) {
+    auto key = fs::absolute(dir).lexically_normal();
+    while (!key.has_filename() && key.has_relative_path())
+        key = key.parent_path();
+    return key;
+}
+}
 struct Hmc2Store::Impl {
     fs::path root;
     LockHandle lock = noLock;
@@ -1126,12 +1131,53 @@ struct Hmc2Store::Impl {
     };
     std::map<fs::path, Writer> writers;
     Bytes raw, compressed, frame;
-    std::set<fs::path> syncedDirectories;
+    // Directories whose own entry is known durable: they exist and their parent
+    // was fsynced afterwards. Inserted only after that sync succeeded, so a
+    // failed sync is retried by the next writer that needs the directory.
+    std::set<fs::path> durableDirectories;
     std::function<void()> afterFrameHeader;
-    explicit Impl(fs::path p) : root(std::move(p)) {
+    fs::path rootDir; // directoryKey(root)
+    void syncDirectory(const fs::path &dir) {
+        if (directorySyncHook) directorySyncHook(dir);
+        sync(dir, true);
+    }
+    // Construction, once per store: create the root and any missing ancestors,
+    // then fsync the parent of every directory from the root up to the
+    // filesystem root, existing ones included. A directory created by a store
+    // whose construction failed (or by a crashed process) is thus made durable
+    // by the next store. POSIX errors propagate; on Windows a directory that
+    // cannot be opened for write (C:\, C:\Users) is skipped (PersistenceIo).
+    void makeRootDurable() {
+        std::vector<fs::path> missing; // the root and missing ancestors, deepest first
+        for (fs::path at = rootDir; at != at.parent_path() && !fs::is_directory(at); at = at.parent_path())
+            missing.push_back(at);
+        for (auto it = missing.rbegin(); it != missing.rend(); ++it)
+            createDirectory(*it);
+        for (fs::path at = rootDir; at != at.parent_path(); at = at.parent_path())
+            syncDirectory(at.parent_path());
+        durableDirectories.insert(rootDir);
+    }
+    // Appends: makes `dir` (below the root) exist with a durable entry. Each
+    // directory from the root down gets its parent fsynced once, existing ones
+    // included (an earlier process or a failed sync may have left an entry
+    // unsynced), and is cached only after that sync succeeded.
+    void makeDurable(const fs::path &dir) {
+        const auto path = directoryKey(dir);
+        if (durableDirectories.contains(path))
+            return;
+        const auto rel = path.lexically_relative(rootDir);
+        check(!rel.empty() && *rel.begin() != ".." && *rel.begin() != ".",
+              "directory outside the store root: " + path.string());
+        const auto parent = path.parent_path();
+        makeDurable(parent);
+        createDirectory(path);
+        syncDirectory(parent);
+        durableDirectories.insert(path);
+    }
+    explicit Impl(fs::path p) : root(std::move(p)), rootDir(directoryKey(root)) {
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
-        mkdirs(root, syncedDirectories);
+        makeRootDurable();
         int error = 0;
         lock = acquireFileLock(root / ".lock", error);
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
@@ -1176,7 +1222,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
     const auto base = filePath(i.root, r.header, r.bucketStartMs);
     auto found = i.writers.find(base);
     if (found == i.writers.end() || headerBody(found->second.header) != headerBody(r.header)) {
-        mkdirs(base.parent_path(), i.syncedDirectories);
+        i.makeDurable(base.parent_path());
         auto candidates = files(base.parent_path(), dayName(r.bucketStartMs));
         fs::path path = base;
         bool reuse = false;
@@ -1275,6 +1321,9 @@ void Hmc2Store::append(const Hmc2Record &r) {
 }
 void Hmc2Store::afterFrameHeaderForTest(std::function<void()> hook) {
     impl_->afterFrameHeader = std::move(hook);
+}
+void Hmc2Store::setDirectorySyncHookForTest(std::function<void(const fs::path &)> hook) {
+    directorySyncHook = std::move(hook);
 }
 std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::string &symbol, const std::string &layer,
                                              int64_t tf, int64_t start, int64_t end) {

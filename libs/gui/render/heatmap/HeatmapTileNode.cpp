@@ -62,9 +62,9 @@ HeatmapTileNode::~HeatmapTileNode() { releaseResources(); }
 void HeatmapTileNode::releaseAll() {
     binner_.reset(); // completes its own in-flight readbacks first
     tiles_.clear();
+    pipeline_.reset(); // before the loading draws: it was created with the first one's bindings
     loadingDraws_.clear();
     loadingCell_.reset();
-    pipeline_.reset();
     held_.clear();
     fading_.clear();
     tileDraws_.clear();

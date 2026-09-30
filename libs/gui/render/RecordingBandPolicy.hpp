@@ -71,5 +71,11 @@ struct Debounce {
     void changed(int64_t nowMs) { changedAtMs = nowMs; pending = true; }
     void cancel() { pending = false; }
     bool ready(int64_t nowMs) const { return pending && nowMs - changedAtMs >= kDebounceMs; }
+    // Time left until ready(), at least 1 ms: a timer that fires before the clock
+    // reaches kDebounceMs must re-arm for this long instead of dropping the change.
+    int remainingMs(int64_t nowMs) const {
+        const int64_t left = kDebounceMs - (nowMs - changedAtMs);
+        return int(left < 1 ? 1 : left > kDebounceMs ? kDebounceMs : left);
+    }
 };
 } // namespace recording_view
