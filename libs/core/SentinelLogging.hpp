@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <string>
@@ -15,6 +16,13 @@ class QProcessEnvironment;
 // Qt6: disambiguate QDebug << std::string
 inline QDebug operator<<(QDebug debug, const std::string& str) {
     debug << QString::fromStdString(str);
+    return debug;
+}
+
+// std::filesystem::path only converts to std::string where its native char is
+// char (POSIX); on Windows it is wchar_t, so log it explicitly.
+inline QDebug operator<<(QDebug debug, const std::filesystem::path& path) {
+    debug << QString::fromStdU16String(path.u16string());
     return debug;
 }
 
