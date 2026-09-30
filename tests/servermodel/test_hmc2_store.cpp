@@ -13,6 +13,7 @@
 #include <zstd.h>
 #include "servermodel/HmcolFormat.hpp"
 #include "servermodel/PersistenceIo.hpp"
+#include "servermodel/RecordingDir.hpp"
 
 using namespace recording;
 
@@ -152,6 +153,24 @@ class StoreTest : public testing::Test {
         return frame;
     }
 };
+// The server and the lab share this rule (recording.dir, fallback while its
+// /Volumes/<name> volume is unmounted). "/Volumes/..." has no drive on Windows,
+// so it must count as unmounted there too, never become C:\Volumes\...
+TEST(RecordingDir, UnmountedVolumeUsesFallbackOrNothing) {
+    const std::string absent = "/Volumes/SentinelDefinitelyAbsentVolume/recording";
+    EXPECT_FALSE(volumeMounted(absent));
+    auto choice = resolveRecordingDir(absent, "data/recording");
+    EXPECT_EQ(choice.dir, std::filesystem::path("data/recording"));
+    EXPECT_TRUE(choice.fallback);
+    choice = resolveRecordingDir(absent, "");
+    EXPECT_TRUE(choice.dir.empty());
+    const auto plain = std::filesystem::temp_directory_path() / "recording";
+    choice = resolveRecordingDir(plain.string(), "data/recording");
+    EXPECT_EQ(choice.dir, plain);
+    EXPECT_FALSE(choice.fallback);
+    EXPECT_TRUE(volumeMounted("data/recording")); // relative: the working directory decides
+}
+
 // Every platform: a store opens under a fresh temp directory whose chain up to
 // the drive root includes directories the user cannot fsync (C:\ on Windows),
 // creates its missing directories, writes and reads back.

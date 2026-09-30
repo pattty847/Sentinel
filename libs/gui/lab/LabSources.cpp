@@ -1,5 +1,7 @@
 #include "LabSources.hpp"
+#include "ConfigLoader.hpp"
 #include "heatmap/RecordingLoader.hpp"
+#include "servermodel/RecordingDir.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include <QDir>
 #include <QFileInfo>
@@ -50,7 +52,19 @@ double medianRecentPrice(const heatmap::SparseColumns &data) {
 }
 
 std::string recordingRoot() {
-    return qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed().toStdString();
+    const QString override = qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed();
+    if (!override.isEmpty()) return override.toStdString();
+    // Otherwise where the server records: the same config files, read relative to
+    // the working directory, and the same dir/fallback rule (RecordingDir.hpp).
+    static const std::string configured = [] {
+        ServerConfig config;
+        if (!ConfigLoader::loadServerConfig("config/server_config.yaml", &config)) return std::string();
+        ConfigLoader::loadServerConfig("config/.server_config.yaml", &config);
+        const auto choice = recording::resolveRecordingDir(config.recording.dir, config.recording.fallbackDir);
+        if (choice.dir.empty()) return std::string();
+        return std::filesystem::absolute(choice.dir).lexically_normal().string();
+    }();
+    return configured;
 }
 
 bool insideRecordingRoot(const QString &path) {
@@ -72,9 +86,10 @@ bool insideRecordingRoot(const QString &path) {
 
 LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &rootIn) {
     const std::string root = rootIn.empty() ? recordingRoot() : rootIn;
-    if (root.empty()) throw std::runtime_error("SENTINEL_RECORDING_ROOT is not set (directory holding BTC-USD/)");
+    if (root.empty()) throw std::runtime_error("no recording root: set SENTINEL_RECORDING_ROOT or recording.dir in "
+                                             "config/server_config.yaml (the directory holding BTC-USD/)");
     if (!std::filesystem::is_directory(std::filesystem::u8path(root) / "BTC-USD"))
-        throw std::runtime_error("no BTC-USD recording under SENTINEL_RECORDING_ROOT=" + root);
+        throw std::runtime_error("no BTC-USD recording under the recording root " + root);
     if (hours < 1 || loadHours < 1 || tfMs < heatmap::kMinuteMs || tfMs > heatmap::kDayMs ||
         tfMs % heatmap::kMinuteMs || (layer != "near" && layer != "deep"))
         throw std::invalid_argument("invalid lab recording request");

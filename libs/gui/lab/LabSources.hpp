@@ -7,8 +7,11 @@
 #include <string>
 
 namespace lab {
-// Recording root (the directory holding BTC-USD/) from SENTINEL_RECORDING_ROOT.
-// Empty when unset: real-data paths then report or skip instead of guessing.
+// Recording root (the directory holding BTC-USD/): SENTINEL_RECORDING_ROOT, else
+// where the server records (config/server_config.yaml recording.dir, or its
+// fallback_dir while dir's volume is unmounted; read relative to the working
+// directory, as the server does). Empty when neither is available; real-data
+// paths then report or skip.
 std::string recordingRoot();
 // True when `path` lies inside the recording root (read-only for lab outputs).
 bool insideRecordingRoot(const QString &path);

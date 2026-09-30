@@ -1,5 +1,6 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
+#include "RecordingDir.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -134,16 +135,6 @@ ServerDataModel::~ServerDataModel() {
 }
 
 namespace {
-// "/Volumes/T7/..." is only usable while that volume is mounted; writing there
-// otherwise would silently fill the boot disk under /Volumes.
-bool volumeMounted(const std::filesystem::path& dir) {
-    auto it = dir.begin();
-    if (dir.is_absolute() && it != dir.end() && ++it != dir.end() && *it == "Volumes" && ++it != dir.end()) {
-        return std::filesystem::is_directory(std::filesystem::path("/Volumes") / *it);
-    }
-    return true;
-}
-
 std::vector<recording::Level> toRecorderLevels(const std::vector<OrderBookLevel>& bids,
                                                const std::vector<OrderBookLevel>& asks) {
     std::vector<recording::Level> levels;
@@ -160,17 +151,15 @@ void ServerDataModel::startRecorder() {
         sLog_App("Recording v2 disabled (recording.enabled=false)");
         return;
     }
-    std::filesystem::path dir = rc.dir;
-    if (!volumeMounted(dir)) {
-        if (rc.fallbackDir.empty()) {
-            sLog_Warning("Recording v2 not started: volume for " << dir.string()
-                         << " is not mounted and recording.fallback_dir is empty");
-            return;
-        }
-        sLog_Warning("Recording v2: volume for " << dir.string() << " not mounted, using fallback "
-                     << rc.fallbackDir);
-        dir = rc.fallbackDir;
+    const auto choice = recording::resolveRecordingDir(rc.dir, rc.fallbackDir); // shared with the lab
+    if (choice.dir.empty()) {
+        sLog_Warning("Recording v2 not started: volume for " << rc.dir
+                     << " is not mounted and recording.fallback_dir is empty");
+        return;
     }
+    if (choice.fallback)
+        sLog_Warning("Recording v2: volume for " << rc.dir << " not mounted, using fallback " << rc.fallbackDir);
+    const std::filesystem::path dir = choice.dir;
     recording::RecorderConfig cfg;
     cfg.root = dir;
     cfg.priceScale = rc.priceScale;
