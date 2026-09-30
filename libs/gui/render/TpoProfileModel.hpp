@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <bit>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -109,7 +110,7 @@ public:
         for (int w = 0; w < m_words; ++w) {
             uint64_t bits = words[w];
             while (bits) {
-                const int bit = __builtin_ctzll(bits);
+                const int bit = std::countr_zero(bits);
                 fn(w * 64 + bit);
                 bits &= bits - 1;
             }

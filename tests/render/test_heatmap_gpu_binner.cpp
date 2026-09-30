@@ -954,7 +954,7 @@ TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
     const uint64_t baseRebins = item->stats->rebins.load();
     ASSERT_GE(baseRebins, 1u);
     // Bin [100000, 100010) is rows y in [40, 50).
-    const int y = 45;
+    static constexpr int y = 45; // static: MSVC rejects a plain local as a default argument
     auto at = [&](int x, int yy = y) { return frame.pixelColor(x, yy); };
     EXPECT_EQ(at(10), QColor(Qt::black)) << "no data draws nothing";
     const QColor loadA = at(50), loadB = at(55); // 5 px diagonal stripes
