@@ -12,6 +12,19 @@ using Clock = std::chrono::steady_clock;
 double msSince(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
+LabSource finish(heatmap::SparseColumns composed, heatmap::gpu::GpuSourceOptions options, LabSource out) {
+    uint64_t entries = 0;
+    for (const auto &c : composed.columns) for (const auto &n : c.native) entries += n.entries.size();
+    out.sparseEntries = entries;
+    out.medianPrice = medianRecentPrice(composed);
+    const auto built = Clock::now();
+    out.gpu = std::make_shared<const heatmap::gpu::GpuSource>(heatmap::gpu::buildGpuSource(composed, options));
+    out.buildMs = msSince(built);
+    out.columns = std::make_shared<const heatmap::SparseColumns>(std::move(composed));
+    return out;
+}
+} // namespace
+
 // Median over recent columns of the best-bid/best-ask midpoint (highest bid
 // entry, lowest ask entry): the market price the initial view centres on.
 double medianRecentPrice(const heatmap::SparseColumns &data) {
@@ -32,18 +45,6 @@ double medianRecentPrice(const heatmap::SparseColumns &data) {
     std::nth_element(mids.begin(), mids.begin() + mids.size() / 2, mids.end());
     return mids[mids.size() / 2];
 }
-LabSource finish(heatmap::SparseColumns composed, heatmap::gpu::GpuSourceOptions options, LabSource out) {
-    uint64_t entries = 0;
-    for (const auto &c : composed.columns) for (const auto &n : c.native) entries += n.entries.size();
-    out.sparseEntries = entries;
-    out.medianPrice = medianRecentPrice(composed);
-    const auto built = Clock::now();
-    out.gpu = std::make_shared<const heatmap::gpu::GpuSource>(heatmap::gpu::buildGpuSource(composed, options));
-    out.buildMs = msSince(built);
-    out.columns = std::make_shared<const heatmap::SparseColumns>(std::move(composed));
-    return out;
-}
-} // namespace
 
 LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &root) {
     if (hours < 1 || loadHours < 1 || tfMs < heatmap::kMinuteMs || tfMs > heatmap::kDayMs ||

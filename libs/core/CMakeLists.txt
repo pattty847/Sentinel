@@ -57,6 +57,10 @@ add_library(sentinel_core
     heatmap/HeatmapResolution.hpp
     heatmap/RecordingLoader.cpp
     heatmap/RecordingLoader.hpp
+    heatmap/ChunkStore.cpp
+    heatmap/ChunkStore.hpp
+    heatmap/HeatmapTiles.cpp
+    heatmap/HeatmapTiles.hpp
     servermodel/Hmc2Store.cpp
     servermodel/Hmc2Store.hpp
     servermodel/HeatmapColumnStore.hpp

@@ -17,6 +17,7 @@ ApplicationWindow {
     property string screenshotNotice: ""
     readonly property var hysteresisPresets: [0, 0.15, 0.25, 0.4]
     readonly property var minRowPresets: [1, 1.5, 2, 3, 4]
+    readonly property var prepModes: ["full", "viewport", "whole-chunk", "whole-chunk-cpu", "hybrid"]
     function money(v) { return "$" + Number(v).toString() }
     function syncTickControls() {
         tickMode.currentIndex = binLab.manualMode ? 1 : 0
@@ -27,6 +28,8 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        binLab.prepMode = initialPrep
+        prepBox.currentIndex = prepModes.indexOf(initialPrep)
         binLab.timeframeMinutes = initialTf
         syncTickControls()
         var presets = [1, 5, 15, 60, 240, 1440]
@@ -40,7 +43,7 @@ ApplicationWindow {
             binLab.loadSynthetic(initialSynthetic)
         } else {
             hours.value = initialHours
-            layer.currentIndex = initialLayer === "deep" ? 1 : 0
+            layerBox.currentIndex = initialLayer === "deep" ? 1 : 0
             binLab.loadReal(initialHours, initialLayer)
         }
     }
@@ -74,6 +77,85 @@ ApplicationWindow {
         function onPresetsChanged() { root.syncTickControls() }
     }
 
+    component ChartCell: Rectangle {
+            id: cell
+            property alias lab: cellLab
+            property string labName: ""
+            property var cellMetrics: ({})
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            color: "#080d12"
+            border.color: "#2c3d49"
+            BinLab { id: cellLab; objectName: cell.labName; anchors.fill: parent }
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                property real oldX: 0
+                property real oldY: 0
+                onPressed: function(mouse) { oldX = mouse.x; oldY = mouse.y }
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        cellLab.pan(mouse.x - oldX, mouse.y - oldY)
+                        oldX = mouse.x; oldY = mouse.y
+                    }
+                }
+                onWheel: function(wheel) {
+                    cellLab.wheelZoom(wheel.angleDelta.x, wheel.angleDelta.y,
+                                     (wheel.modifiers & Qt.ShiftModifier) !== 0,
+                                     wheel.x / width, wheel.y / height)
+                    wheel.accepted = true
+                }
+            }
+            Rectangle {
+                anchors.fill: parent
+                visible: cellLab.status.startsWith("Timeframe unavailable:")
+                color: "#080d12"
+                Label {
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 40, 520)
+                    text: cellLab.status
+                    color: "#e2b5a6"
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+            }
+            Rectangle {
+                anchors.left: parent.left; anchors.bottom: parent.bottom
+                anchors.margins: 14
+                width: hint.implicitWidth + 20; height: hint.implicitHeight + 12
+                color: "#ba101820"
+                Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price     S  screenshot"; color: "#9fb4bf"; font.pixelSize: 12 }
+            }
+            // Resolution indicator (Manual): columns that cannot build the locked tick veil.
+            Rectangle {
+                anchors.left: parent.left; anchors.top: parent.top
+                anchors.margins: 14
+                visible: (cell.cellMetrics.indicator || "") !== ""
+                width: Math.min(parent.width - 28, indicator.implicitWidth + 20); height: indicator.implicitHeight + 12
+                color: "#dd1c1408"
+                border.color: "#f0b46a"
+                Label {
+                    id: indicator
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, parent.parent.width - 48)
+                    text: cell.cellMetrics.indicator || ""
+                    color: "#f0b46a"; font.pixelSize: 13; wrapMode: Text.WordWrap
+                }
+            }
+            Label {
+                anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10
+                text: cellLab.timeframeMinutes + "m · " + cellLab.prepMode + " · " +
+                      ((cell.cellMetrics.gpuBytes || 0) / 1048576).toFixed(1) + " MB GPU"
+                color: "#a6e7e9"; font.family: "Menlo"; font.pixelSize: 12
+            }
+        }
+
+    readonly property var binLab: mainCell.lab
+    function forEachChart(f) {
+        f(mainCell.lab)
+        for (var i = 0; i < extraCharts.count; ++i) f(extraCharts.itemAt(i).lab)
+    }
+
     header: Rectangle {
         height: 112
         color: "#101820"
@@ -93,12 +175,24 @@ ApplicationWindow {
                 }
                 Label { text: "Hours"; color: "#aab7c0"; visible: source.currentIndex === 0 }
                 SpinBox { id: hours; from: 1; to: 720; value: 24; visible: source.currentIndex === 0; Layout.preferredWidth: 95 }
-                ComboBox { id: layer; model: ["near", "deep"]; visible: source.currentIndex === 0; Layout.preferredWidth: 90 }
+                ComboBox { id: layerBox; model: ["near", "deep"]; visible: source.currentIndex === 0; Layout.preferredWidth: 90 }
                 Button {
                     text: "Load"
                     onClicked: {
-                        if (source.currentIndex === 0) binLab.loadReal(hours.value, layer.currentText)
+                        if (source.currentIndex === 0) root.forEachChart(function(c) { c.loadReal(hours.value, layerBox.currentText) })
                         else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : 10000000)
+                    }
+                }
+                Label { text: "Prep"; color: "#aab7c0"; Layout.leftMargin: 10 }
+                ComboBox {
+                    id: prepBox
+                    model: ["full (S4 lab)", "viewport (V)", "whole-chunk (W)", "whole-chunk CPU (W)", "hybrid (resident chunks)"]
+                    Layout.preferredWidth: 190
+                    ToolTip.visible: hovered
+                    ToolTip.text: "B1: viewport = source clipped to the view +-1 view, screen grid; whole-chunk = 64-column tiles binned over their whole price extent (GPU or CPU), pan/zoom = mapping only; hybrid = the tiles' sources stay on the GPU and each tile bins the rows around the view"
+                    onActivated: {
+                        var mode = root.prepModes[currentIndex]
+                        root.forEachChart(function(c) { c.prepMode = mode })
                     }
                 }
                 Label { text: binLab.status; color: "#b9c9d2"; elide: Text.ElideRight; Layout.fillWidth: true }
@@ -173,65 +267,27 @@ ApplicationWindow {
         anchors.fill: parent
         anchors.margins: 12
         spacing: 12
-        Rectangle {
+        GridLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: "#080d12"
-            border.color: "#2c3d49"
-            BinLab { id: binLab; objectName: "binLab"; anchors.fill: parent }
-            MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                property real oldX: 0
-                property real oldY: 0
-                onPressed: function(mouse) { oldX = mouse.x; oldY = mouse.y }
-                onPositionChanged: function(mouse) {
-                    if (pressed) {
-                        binLab.pan(mouse.x - oldX, mouse.y - oldY)
-                        oldX = mouse.x; oldY = mouse.y
+            columns: chartCount > 1 ? 2 : 1
+            rowSpacing: 6
+            columnSpacing: 6
+            ChartCell { id: mainCell; labName: "binLab"; cellMetrics: root.metrics }
+            Repeater {
+                id: extraCharts
+                model: Math.max(0, chartCount - 1)
+                delegate: ChartCell {
+                    labName: "extraLab" + index
+                    Component.onCompleted: {
+                        lab.timeframeMinutes = [5, 60, 15][index]
+                        lab.prepMode = initialPrep
+                        lab.loadReal(initialHours, initialLayer) // controls are not complete yet
                     }
-                }
-                onWheel: function(wheel) {
-                    binLab.wheelZoom(wheel.angleDelta.x, wheel.angleDelta.y,
-                                     (wheel.modifiers & Qt.ShiftModifier) !== 0,
-                                     wheel.x / width, wheel.y / height)
-                    wheel.accepted = true
-                }
-            }
-            Rectangle {
-                anchors.fill: parent
-                visible: binLab.status.startsWith("Timeframe unavailable:")
-                color: "#080d12"
-                Label {
-                    anchors.centerIn: parent
-                    width: Math.min(parent.width - 40, 520)
-                    text: binLab.status
-                    color: "#e2b5a6"
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                }
-            }
-            Rectangle {
-                anchors.left: parent.left; anchors.bottom: parent.bottom
-                anchors.margins: 14
-                width: hint.implicitWidth + 20; height: hint.implicitHeight + 12
-                color: "#ba101820"
-                Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price     S  screenshot"; color: "#9fb4bf"; font.pixelSize: 12 }
-            }
-            // Resolution indicator (Manual): columns that cannot build the locked tick veil.
-            Rectangle {
-                anchors.left: parent.left; anchors.top: parent.top
-                anchors.margins: 14
-                visible: (root.metrics.indicator || "") !== ""
-                width: Math.min(parent.width - 28, indicator.implicitWidth + 20); height: indicator.implicitHeight + 12
-                color: "#dd1c1408"
-                border.color: "#f0b46a"
-                Label {
-                    id: indicator
-                    anchors.centerIn: parent
-                    width: Math.min(implicitWidth, parent.parent.width - 48)
-                    text: root.metrics.indicator || ""
-                    color: "#f0b46a"; font.pixelSize: 13; wrapMode: Text.WordWrap
+                    Timer {
+                        interval: 500; repeat: true; running: true
+                        onTriggered: parent.cellMetrics = parent.lab.metrics()
+                    }
                 }
             }
         }
@@ -291,6 +347,32 @@ ApplicationWindow {
                     visible: (root.metrics.indicator || "") !== ""
                     text: root.metrics.indicator || ""
                     color: "#f0b46a"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
+                }
+                Label { text: "PREP (B1)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                Repeater {
+                    model: [
+                        ["Prep mode", "prep", "", 0], ["GPU memory", "gpuBytes", " MB", 1],
+                        ["Prep CPU (source/cells)", "prepCpuBytes", " MB", 1], ["Decoded chunks", "chunkBytes", " MB", 1],
+                        ["Tile intermediates", "interBytes", " MB", 1], ["Process footprint", "footprintBytes", " MB", 1],
+                        ["Last prep", "lastPrepMs", " ms", 0], ["Prep builds", "prepBuilds", "", 0],
+                        ["Tiles kept / resident", "tiles", "", 0], ["Chunk hits", "chunkHits", "", 0],
+                        ["Chunk misses", "chunkMisses", "", 0], ["Chunk decodes", "chunkLoads", "", 0]
+                    ]
+                    delegate: RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.metrics[modelData[1]] !== undefined
+                        Label { text: modelData[0]; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
+                        Label {
+                            text: {
+                                var value = root.metrics[modelData[1]]
+                                if (value === undefined) return "—"
+                                if (modelData[3] === 1) return (value / 1048576).toFixed(1) + modelData[2]
+                                if (modelData[1] === "tiles") return value + " / " + (root.metrics.tilesResident || 0)
+                                return typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) + modelData[2] : String(value)
+                            }
+                            color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12
+                        }
+                    }
                 }
                 Label { text: "RENDER"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
                 Repeater {

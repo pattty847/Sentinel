@@ -167,6 +167,12 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
     OUTPUTS heatmap_bin_unguarded.comp.qsb
 )
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
+# B1: whole-chunk tiles (GPU binInto vs CPU cells, HeatmapTileNode transitions).
+add_executable(test_heatmap_tiles_gpu test_heatmap_tiles_gpu.cpp)
+target_include_directories(test_heatmap_tiles_gpu PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_tiles_gpu PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME HeatmapTileGpuTests COMMAND test_heatmap_tiles_gpu)
+set_tests_properties(HeatmapTileGpuTests PROPERTIES LABELS "render;heatmap")
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
 # FM-099: a readback result freed before its frame completes is a silent heap
 # write without Guard Malloc; under it a wrong teardown order crashes. Covers the

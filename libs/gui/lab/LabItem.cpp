@@ -13,10 +13,32 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <unordered_set>
 
 namespace lab {
+QString prepModeName(PrepMode mode) {
+    switch (mode) {
+    case PrepMode::Full: return QStringLiteral("full");
+    case PrepMode::Viewport: return QStringLiteral("viewport");
+    case PrepMode::WholeChunkGpu: return QStringLiteral("whole-chunk");
+    case PrepMode::WholeChunkCpu: return QStringLiteral("whole-chunk-cpu");
+    case PrepMode::Hybrid: return QStringLiteral("hybrid");
+    }
+    return {};
+}
+std::optional<PrepMode> parsePrepMode(const QString &name) {
+    for (const auto mode : {PrepMode::Full, PrepMode::Viewport, PrepMode::WholeChunkGpu, PrepMode::WholeChunkCpu,
+                            PrepMode::Hybrid})
+        if (prepModeName(mode) == name) return mode;
+    return std::nullopt;
+}
+
 namespace {
-constexpr uint64_t kUploadBudgetBytes = 2ull << 20; // plan default: 2 MiB per frame
+std::atomic<uint64_t> nextTileId{1};
+double msSince(const QElapsedTimer &timer) { return timer.nsecsElapsed() / 1e6; }
+QString chunkKeyText(const heatmap::ChunkKey &key) {
+    return QStringLiteral("%1/%2").arg(key.levelMs).arg(key.startMs);
+}
 QString unavailableStatus(QString detail) { return QStringLiteral("Timeframe unavailable: %1").arg(detail.trimmed()); }
 QString money(double price) { return QStringLiteral("$") + QString::number(price, 'g', 12); }
 QString utc(int64_t ms) {
@@ -28,6 +50,14 @@ LabItem::LabItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     heatmap::gpu::prewarmPrecisionSelfTest(); // fixture builds on a worker, not in prepare()
     launched_.start();
+    // A revision stored by any chart (or the live feed) makes every chart re-check
+    // what it prepared, and pick up the refreshed availability.
+    connect(chunkEvents(), &ChunkEvents::chunkRevised, this, [this] {
+        if (!chunked() || !haveAvailability_) return;
+        const auto info = layerInfo(layer());
+        if (info.error.empty()) availability_ = info.availability;
+        viewChanged();
+    }, Qt::QueuedConnection);
 }
 LabItem::~LabItem() { loadGeneration_->fetch_add(1); }
 
@@ -40,7 +70,8 @@ void LabItem::itemChange(ItemChange change, const ItemChangeData &value) {
             frameConnection_ = connect(value.window, &QQuickWindow::frameSwapped, this, [this] {
                 if (lastFrame_.isValid()) frameMs_ = lastFrame_.nsecsElapsed() / 1e6;
                 lastFrame_.start();
-                if (firstFrameMs_ == 0 && stats_->drawnSourceId.load() != 0) firstFrameMs_ = launched_.nsecsElapsed() / 1e6;
+                if (firstFrameMs_ == 0 && (stats_->drawnSourceId.load() != 0 || tileStats_->drawnPrimary.load() != 0))
+                    firstFrameMs_ = launched_.nsecsElapsed() / 1e6;
                 update();
             }, Qt::QueuedConnection);
         }
@@ -49,23 +80,114 @@ void LabItem::itemChange(ItemChange change, const ItemChangeData &value) {
 }
 
 QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
-    auto *node = old ? static_cast<heatmap::gpu::HeatmapRenderNode *>(old)
-                     : new heatmap::gpu::HeatmapRenderNode(stats_);
-    heatmap::gpu::HeatmapRenderNode::Frame frame;
-    frame.source = source_.gpu;
+    // A plain root whose one child is the node of the current prep mode.
+    QSGNode *root = old ? old : new QSGNode;
+    const int want = wholeChunk() ? 1 : 0;
+    if (shownNode_ != want || !root->firstChild()) {
+        if (QSGNode *child = root->firstChild()) {
+            root->removeChildNode(child);
+            delete child; // render thread; the node releases its GPU resources
+        }
+        if (want) root->appendChildNode(new heatmap::gpu::HeatmapTileNode(tileStats_));
+        else root->appendChildNode(new heatmap::gpu::HeatmapRenderNode(stats_));
+        shownNode_ = want;
+    }
+    if (want == 0) {
+        auto *node = static_cast<heatmap::gpu::HeatmapRenderNode *>(root->firstChild());
+        heatmap::gpu::HeatmapRenderNode::Frame frame;
+        frame.source = chunked() ? vSource_.gpu : source_.gpu;
+        frame.view = view_;
+        // The node picks the tick for the source it actually draws (Auto: commonTick
+        // of the active source's data in view), so a pending source cannot veil it.
+        frame.tick.mode = manualMode_ ? heatmap::TickMode::Manual : heatmap::TickMode::Auto;
+        frame.tick.manualTick = manualTick_;
+        frame.tick.minRowPx = minRowPx_;
+        frame.tick.hysteresis = hysteresis_;
+        frame.tick.crossfadeMs = crossfade_ ? kCrossfadeMs : 0;
+        frame.tick.heightPx = height() * devicePixelRatio();
+        frame.rect = QRectF(0, 0, width(), height());
+        frame.uploadBudgetBytes = uploadBudget_;
+        node->setFrame(std::move(frame));
+        return root;
+    }
+    auto *node = static_cast<heatmap::gpu::HeatmapTileNode *>(root->firstChild());
+    // Resident tiles no longer need their CPU copy (GUI thread is blocked here).
+    const auto residentIds = tileStats_->residentIds();
+    const std::set<uint64_t> resident(residentIds.begin(), residentIds.end());
+    size_t cpuBytes = 0;
+    // A tile whose CPU data was dropped and that the node no longer holds lost
+    // its GPU copy (QRhi or scene graph recreated, node replaced): forget it so
+    // the controller rebuilds it from the chunk store.
+    std::vector<heatmap::tiles::TileKey> lost;
+    wTiles_.forEachMutable([&](const heatmap::tiles::TileKey &key, WTile &tile, size_t) {
+        if (resident.count(tile.ref.id)) {
+            tile.wasResident = true;
+            tile.ref.cells.reset();
+            if (!tile.ref.viewRows) tile.ref.source.reset(); // hybrid tiles re-bin from their resident source
+        } else if (tile.wasResident && !tile.ref.cells && !tile.ref.source) {
+            lost.push_back(key);
+        }
+        if (tile.ref.cells) cpuBytes += tile.ref.cells->size() * 4;
+    });
+    wCpuBytes_ = cpuBytes;
+    if (!lost.empty()) {
+        for (const auto &key : lost) {
+            wTiles_.erase(key);
+            const TileBase base{key.tfMs, key.tickUnits, key.tile};
+            if (const auto it = wLatest_.find(base); it != wLatest_.end() && it->second == key) wLatest_.erase(it);
+            if (const auto it = wPrevious_.find(base); it != wPrevious_.end() && it->second == key) wPrevious_.erase(it);
+        }
+        wLostTiles_ += lost.size();
+        // Render thread, GUI blocked: re-plan on the GUI thread after this sync.
+        QMetaObject::invokeMethod(this, [this] { viewChanged(); }, Qt::QueuedConnection);
+    }
+    // Over budget only because a previous version was still drawn or its
+    // replacement not resident yet: evict again once the node's sets changed.
+    if (!wEvictQueued_ && wTiles_.bytes() > wTiles_.maxBytes() &&
+        (residentIds.size() != wEvictResident_ || tileStats_->drawnIds() != wEvictDrawn_)) {
+        wEvictQueued_ = true;
+        QMetaObject::invokeMethod(this, [this] { evictTiles(); }, Qt::QueuedConnection);
+    }
+    heatmap::gpu::HeatmapTileNode::Frame frame;
+    const int64_t tf = tfMs();
+    const bool hybrid = prepMode_ == PrepMode::Hybrid;
+    wTiles_.forEach([&](const heatmap::tiles::TileKey &, const WTile &tile, size_t) {
+        if (!hybrid) { frame.tiles.push_back(tile.ref); return; }
+        // One renderer tile per span and tick (current, and the previous one while
+        // it may still be held or fading), all binned from the span's resident source.
+        for (const int64_t tick : {wTickUnits_, wPrevTickUnits_ != wTickUnits_ ? wPrevTickUnits_ : int64_t(0)}) {
+            if (tick <= 0) continue;
+            auto ref = tile.ref;
+            ref.id = tickTileId(tile.ref.id, tick);
+            ref.grid.displayTick = heatmap::fromUnits(tick, priceScale());
+            frame.tiles.push_back(std::move(ref));
+        }
+    });
+    auto drawId = [&](uint64_t entryId) { return hybrid ? tickTileId(entryId, wTickUnits_) : entryId; };
+    const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, 0);
+    for (int64_t t = visible.first; t < visible.end && wTickUnits_ > 0; ++t) {
+        heatmap::gpu::TileSlot slot;
+        slot.firstBucket = heatmap::tiles::tileFirstBucket(t);
+        slot.endBucket = heatmap::tiles::tileFirstBucket(t + 1);
+        slot.expected = heatmap::tiles::tileEndMs(t, tf) > availability_.oldestMs &&
+                        heatmap::tiles::tileStartMs(t, tf) < availability_.endMs;
+        const TileBase base{tf, keyTick(wTickUnits_), t};
+        if (const auto it = wLatest_.find(base); it != wLatest_.end())
+            if (const auto *tile = wTiles_.peek(it->second))
+                (tileStale(*tile) ? slot.fallback : slot.primary) = drawId(tile->ref.id);
+        if (!slot.fallback)
+            if (const auto it = wPrevious_.find(base); it != wPrevious_.end())
+                if (const auto *tile = wTiles_.peek(it->second)) slot.fallback = drawId(tile->ref.id);
+        frame.visible.push_back(slot);
+    }
+    frame.key = targetKey();
+    frame.tfMs = tf;
     frame.view = view_;
-    // The node picks the tick for the source it actually draws (Auto: commonTick
-    // of the active source's data in view), so a pending source cannot veil it.
-    frame.tick.mode = manualMode_ ? heatmap::TickMode::Manual : heatmap::TickMode::Auto;
-    frame.tick.manualTick = manualTick_;
-    frame.tick.minRowPx = minRowPx_;
-    frame.tick.hysteresis = hysteresis_;
-    frame.tick.crossfadeMs = crossfade_ ? kCrossfadeMs : 0;
-    frame.tick.heightPx = height() * devicePixelRatio();
     frame.rect = QRectF(0, 0, width(), height());
-    frame.uploadBudgetBytes = kUploadBudgetBytes;
+    frame.uploadBudgetBytes = uploadBudget_;
+    frame.crossfadeMs = crossfade_ ? kCrossfadeMs : 0;
     node->setFrame(std::move(frame));
-    return node;
+    return root;
 }
 
 void LabItem::geometryChange(const QRectF &next, const QRectF &previous) {
@@ -75,6 +197,34 @@ void LabItem::geometryChange(const QRectF &next, const QRectF &previous) {
 }
 
 double LabItem::devicePixelRatio() const { return window() ? window()->effectiveDevicePixelRatio() : 1.0; }
+
+std::string LabItem::symbol() const {
+    if (chunked()) return kSymbol;
+    return source_.gpu ? source_.gpu->symbol : std::string();
+}
+double LabItem::priceScale() const {
+    if (chunked()) return vSource_.gpu ? vSource_.gpu->priceScale : 100.0; // BTC grids use 100 units per dollar
+    return source_.gpu ? source_.gpu->priceScale : 100.0;
+}
+bool LabItem::hasContent() const {
+    if (!chunked()) return source_.gpu != nullptr;
+    return haveAvailability_;
+}
+uint64_t LabItem::targetKey() const {
+    return uint64_t(tfMs()) * 1'000'003ull ^ uint64_t(wTickUnits_) * 0x9e3779b97f4a7c15ull;
+}
+double LabItem::finestTick() const {
+    if (!chunked()) return source_.gpu ? heatmap::gpu::commonTick(*source_.gpu) : 1.0;
+    if (!wholeChunk() && vSource_.gpu) return heatmap::gpu::commonTick(*vSource_.gpu);
+    const int64_t units = cachedCommonUnits(layer(), tfMs(), view_.timeLoMs, view_.timeHiMs);
+    return units > 0 ? heatmap::fromUnits(units, priceScale()) : 1.0;
+}
+double LabItem::commonTickInViewAny() const {
+    const heatmap::gpu::GpuSource *gpu = !chunked() ? source_.gpu.get() : wholeChunk() ? nullptr : vSource_.gpu.get();
+    if (gpu) return heatmap::gpu::commonTickInView(*gpu, view_.timeLoMs, view_.timeHiMs);
+    const int64_t units = chunked() ? cachedCommonUnits(layer(), tfMs(), view_.timeLoMs, view_.timeHiMs) : 0;
+    return units > 0 ? heatmap::fromUnits(units, priceScale()) : 0;
+}
 
 // Spec rules 1, 2 and 9: time zoom-out stops at one column per physical pixel;
 // in Manual, price zoom-out stops at one row per physical pixel.
@@ -132,6 +282,17 @@ void LabItem::restoreTick() {
 }
 
 bool LabItem::settled() const {
+    if (chunked()) {
+        if (!haveAvailability_) return false;
+        if (!wholeChunk())
+            return !vInFlight_ && vSource_.gpu && viewportCovers() && stats_->drawnSourceId.load() == vSource_.gpu->id &&
+                   !stats_->uploadPending.load();
+        if (wTickUnits_ <= 0 || !tileStats_->complete.load() || tileStats_->drawnKey.load() != targetKey()) return false;
+        const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tfMs(), 0);
+        for (int64_t t = visible.first; t < visible.end; ++t)
+            if (wInFlight_.count({tfMs(), keyTick(wTickUnits_), t})) return false;
+        return true;
+    }
     return !loading_ && source_.gpu && stats_->drawnSourceId.load() == source_.gpu->id &&
            !stats_->uploadPending.load();
 }
@@ -179,7 +340,8 @@ void LabItem::accept(LabSource source, bool preserveView, bool final) {
 void LabItem::loadReal(int hours, const QString &layer) {
     if (hours < 1 || hours > 24 * 30 || (layer != "near" && layer != "deep")) return;
     realHours_ = hours; realLayer_ = layer; realMode_ = true;
-    reload(false);
+    if (prepMode_ != PrepMode::Full) startChunked(false);
+    else reload(false);
 }
 void LabItem::loadSynthetic(int count) {
     if (count < 1 || count > 30'000'000) return;
@@ -233,12 +395,12 @@ void LabItem::reload(bool preserveView) {
 }
 
 void LabItem::pan(double dx, double dy) {
-    if (!source_.gpu || width() <= 0 || height() <= 0) return;
+    if (!hasContent() || width() <= 0 || height() <= 0) return;
     const double dt = dx / width() * (view_.timeHiMs - view_.timeLoMs);
     const double dp = dy / height() * (view_.priceHi - view_.priceLo);
     view_.timeLoMs -= dt; view_.timeHiMs -= dt;
     view_.priceLo += dp; view_.priceHi += dp;
-    update();
+    viewChanged();
 }
 
 void LabItem::setTimeframeMinutes(int minutes) {
@@ -248,7 +410,8 @@ void LabItem::setTimeframeMinutes(int minutes) {
     clampView();
     emit timeframeChanged();
     // The old source keeps drawing at its own timeframe until the new one is uploaded.
-    if (source_.gpu) reload(true);
+    if (chunked()) viewChanged();
+    else if (source_.gpu) reload(true);
     update();
 }
 
@@ -263,15 +426,17 @@ void LabItem::setManualMode(bool manual) {
         rememberTick();
     }
     // Back to Auto: the node evaluates the Auto rule fresh from the current zoom.
+    wAutoUnits_ = 0;
     clampView();
     emit tickChanged();
-    update();
+    viewChanged();
 }
 
 // The tick drawn now if it is a preset, else the finest preset the loaded data builds.
 double LabItem::fallbackManualTick() const {
     const double drawn = stats_->tick.load();
     if (heatmap::isPresetUnits(heatmap::toUnits(drawn, priceScale()))) return drawn;
+    if (wholeChunk() && wTickUnits_ > 0) return heatmap::fromUnits(wTickUnits_, priceScale());
     if (!offeredTicks_.isEmpty()) return offeredTicks_.front().toDouble();
     return source_.gpu ? heatmap::fromUnits(heatmap::presetAtLeast(0, heatmap::toUnits(heatmap::gpu::commonTick(*source_.gpu),
                                                                                      priceScale())), priceScale())
@@ -292,20 +457,20 @@ void LabItem::setManualTick(double tick) {
     else rememberTick();
     clampView();
     if (changed) emit tickChanged();
-    update();
+    viewChanged();
 }
 
 void LabItem::setHysteresis(double h) {
     if (!std::isfinite(h) || h < 0 || h > 0.9 || h == hysteresis_) return;
     hysteresis_ = h;
     emit tickChanged();
-    update();
+    viewChanged();
 }
 void LabItem::setMinRowPx(double px) {
     if (!std::isfinite(px) || px < 0.5 || px > 32 || px == minRowPx_) return;
     minRowPx_ = px;
     emit tickChanged();
-    update();
+    viewChanged();
 }
 void LabItem::setCrossfade(bool enabled) {
     if (crossfade_ == enabled) return;
@@ -315,7 +480,7 @@ void LabItem::setCrossfade(bool enabled) {
 }
 
 void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY) {
-    if (!source_.gpu) return;
+    if (!hasContent()) return;
     const double factor = std::exp(-steps * 0.12);
     const double dpr = devicePixelRatio();
     if (!priceOnly) {
@@ -329,7 +494,7 @@ void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY)
         view_.timeHiMs = view_.timeLoMs + wanted;
     }
     const double priceSpan = view_.priceHi - view_.priceLo;
-    const double finest = heatmap::gpu::commonTick(*source_.gpu);
+    const double finest = finestTick();
     double desired = std::max(finest * 4, priceSpan * factor);
     if (manualMode_) {
         const double maximum = heatmap::maxManualPriceSpan(std::max(1.0, height()) * dpr, manualTick_);
@@ -339,7 +504,7 @@ void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY)
     const double center = view_.priceLo + a * priceSpan;
     view_.priceLo = center - a * desired;
     view_.priceHi = view_.priceLo + desired;
-    update();
+    viewChanged();
 }
 
 void LabItem::wheelZoom(double angleX, double angleY, bool priceOnly, double anchorX, double anchorY) {
@@ -350,19 +515,31 @@ void LabItem::wheelZoom(double angleX, double angleY, bool priceOnly, double anc
 }
 
 void LabItem::zoomToRowPx(double px) {
-    if (!source_.gpu || !(px > 0) || !std::isfinite(px) || !(height() > 0)) return;
-    const double common = heatmap::gpu::commonTickInView(*source_.gpu, view_.timeLoMs, view_.timeHiMs);
+    if (!hasContent() || !(px > 0) || !std::isfinite(px) || !(height() > 0)) return;
+    const double common = commonTickInViewAny();
+    if (!(common > 0)) return;
     const double span = height() * devicePixelRatio() * common / px;
     const double center = (view_.priceLo + view_.priceHi) * 0.5;
     view_.priceLo = center - span * 0.5;
     view_.priceHi = center + span * 0.5;
     clampView();
-    update();
+    viewChanged();
 }
 
 QString LabItem::resolutionIndicator() const {
-    if (!manualMode_ || !source_.gpu) return {};
-    const auto &gpu = *source_.gpu;
+    if (!manualMode_) return {};
+    if (wholeChunk()) {
+        const int64_t tick = heatmap::toUnits(manualTick_, priceScale());
+        int64_t bad = 0;
+        for (const int64_t units : cachedColumnCommonUnits(layer(), tfMs(), view_.timeLoMs, view_.timeHiMs))
+            if (!heatmap::buildsOn(tick, units)) bad = bad ? std::lcm(bad, units) : units;
+        if (!bad) return {};
+        return QStringLiteral("Resolution: %1 unavailable for some columns in view (recorded on a %2 grid). Veiled, not coarsened.")
+            .arg(money(manualTick_), money(heatmap::fromUnits(bad, priceScale())));
+    }
+    const heatmap::gpu::GpuSource *source = chunked() ? vSource_.gpu.get() : source_.gpu.get();
+    if (!source) return {};
+    const auto &gpu = *source;
     const double tf = double(gpu.tfMs);
     const auto first = int64_t(std::floor(view_.timeLoMs / tf)), end = int64_t(std::ceil(view_.timeHiMs / tf));
     const auto coverage = heatmap::gpu::tickCoverage(gpu, first, end, manualTick_);
@@ -377,7 +554,7 @@ QString LabItem::resolutionIndicator() const {
 }
 
 bool LabItem::saveScreenshot(const QString &path) {
-    if (!window() || !source_.gpu) return false;
+    if (!window() || !hasContent()) return false;
     const QString target = path.isEmpty() ?
         QStringLiteral("screenshots/lab-%1.png").arg(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss")) : path;
     const QFileInfo file(target);
@@ -389,8 +566,8 @@ bool LabItem::saveScreenshot(const QString &path) {
 }
 
 QVariantMap LabItem::metrics() const {
-    const auto *gpu = source_.gpu.get();
-    return {{"fps", frameMs_ > 0 ? 1000.0 / frameMs_ : 0.0}, {"frameMs", frameMs_},
+    const auto *gpu = chunked() ? vSource_.gpu.get() : source_.gpu.get();
+    QVariantMap m{{"fps", frameMs_ > 0 ? 1000.0 / frameMs_ : 0.0}, {"frameMs", frameMs_},
             {"binSubmitMs", stats_->binSubmitMs.load()}, {"gpuFrameMs", stats_->gpuFrameMs.load()},
             {"firstFrameMs", firstFrameMs_}, {"entries", gpu ? qlonglong(gpu->entryCount) : 0},
             {"gpuBytes", qulonglong(stats_->gpuBytes.load())},
@@ -410,5 +587,475 @@ QVariantMap LabItem::metrics() const {
             {"loadMs", source_.loadMs}, {"composeMs", source_.composeMs}, {"buildMs", source_.buildMs},
             {"settled", settled()},
             {"kernel", stats_->preciseKernel.load() ? QStringLiteral("precise") : QStringLiteral("fast")}};
+    if (wholeChunk()) {
+        const double tick = heatmap::fromUnits(wTickUnits_, priceScale());
+        m["tick"] = tick;
+        m["commonTick"] = commonTickInViewAny();
+        m["rowPx"] = tick > 0 && view_.priceHi > view_.priceLo ? tick * height() * devicePixelRatio() / (view_.priceHi - view_.priceLo) : 0.0;
+        m["gpuBytes"] = qulonglong(tileStats_->gpuBytes.load());
+        m["gpuFrameMs"] = tileStats_->gpuFrameMs.load();
+        m["crossfading"] = tileStats_->crossfading.load();
+        m["errors"] = qulonglong(tileStats_->errors.load());
+        m["uploadPending"] = !tileStats_->complete.load();
+        m["columns"] = qulonglong(tileStats_->slotCount.load() * heatmap::tiles::kTileColumns);
+    }
+    m.insert(prepMetrics());
+    return m;
+}
+
+// ------------------------------------------------------------------ B1 prep modes
+
+void LabItem::setPrepModeString(const QString &mode) {
+    if (const auto parsed = parsePrepMode(mode)) setPrepMode(*parsed);
+}
+
+void LabItem::setPrepMode(PrepMode mode) {
+    if (mode == prepMode_) return;
+    const bool wasChunked = chunked();
+    prepMode_ = mode;
+    emit prepModeChanged();
+    if (!realMode_) { update(); return; } // synthetic data: always the full path
+    if (mode == PrepMode::Full) {
+        resetChunkedState();
+        reload(true);
+    } else {
+        source_ = LabSource{}; // the full-range source is not used by V/W
+        loading_ = false;
+        if (!wasChunked || !haveAvailability_) startChunked(true);
+        else viewChanged();
+    }
+    update();
+}
+
+void LabItem::setTileBudgetBytes(uint64_t bytes) {
+    wTiles_.setMaxBytes(bytes);
+    wBudgetEvicted_.clear();
+    viewChanged();
+}
+
+void LabItem::setView(const heatmap::gpu::ViewWindow &view) {
+    view_ = view;
+    viewChanged();
+}
+
+void LabItem::viewChanged() {
+    if (chunked()) {
+        if (wholeChunk()) updateWholeChunk();
+        else updateViewport();
+    }
+    update();
+}
+
+void LabItem::resetChunkedState() {
+    ++chunkSerial_; // results of builds in flight are dropped
+    vSource_ = ViewportSource{};
+    vInFlight_ = false;
+    wTiles_.clear();
+    wLatest_.clear();
+    wPrevious_.clear();
+    wInFlight_.clear();
+    wBudgetEvicted_.clear();
+    wPlan_ = {};
+    chunkLoadsInFlight_.clear();
+    wAutoUnits_ = wTickUnits_ = wPrevTickUnits_ = 0;
+}
+
+void LabItem::startChunked(bool preserveView) {
+    resetChunkedState();
+    haveAvailability_ = false;
+    const uint64_t serial = chunkSerial_;
+    status_ = QStringLiteral("Loading %1 (%2)...").arg(realLayer_, prepModeName(prepMode_));
+    emit statusChanged();
+    const QPointer<LabItem> self(this);
+    const std::string layerName = layer();
+    QThreadPool::globalInstance()->start([=] {
+        LayerInfo info;
+        double price = 0;
+        try {
+            info = layerInfo(layerName, true);
+            if (info.error.empty()) price = recentMedianPrice(layerName);
+        } catch (const std::exception &e) {
+            info.error = e.what();
+        }
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [=] {
+            if (!self || self->chunkSerial_ != serial) return;
+            if (!info.error.empty()) {
+                self->status_ = unavailableStatus(QString::fromStdString(info.error));
+                emit self->statusChanged();
+                return;
+            }
+            self->availability_ = info.availability;
+            self->haveAvailability_ = true;
+            if (self->pendingView_) {
+                self->view_ = *self->pendingView_;
+                self->pendingView_.reset();
+            } else if (!preserveView || !(self->view_.priceHi > self->view_.priceLo)) {
+                const int64_t tf = self->tfMs();
+                const double end = double(recording::floorDiv(info.availability.endMs + tf - 1, tf) * tf);
+                const double span = std::min(double(self->realHours_) * heatmap::kHourMs,
+                                             heatmap::maxTimeSpanMs(std::max(1.0, self->width()) * self->devicePixelRatio(), tf));
+                self->view_.timeHiMs = end;
+                self->view_.timeLoMs = end - span;
+                const double center = price > 0 ? price : 100'000;
+                self->view_.priceLo = center * 0.98;
+                self->view_.priceHi = center * 1.02;
+            }
+            self->status_ = QStringLiteral("Real %1 · prep %2").arg(self->realLayer_, prepModeName(self->prepMode_));
+            emit self->statusChanged();
+            self->restoreTick();
+            self->refreshChunkPresets();
+            self->clampView();
+            if (self->initialRowPx_ > 0 && self->commonTickInViewAny() > 0) {
+                self->zoomToRowPx(self->initialRowPx_); // the newest chunks are decoded by now
+                self->initialRowPx_ = 0;
+            }
+            self->viewChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
+bool LabItem::viewportCovers() const {
+    if (!vSource_.gpu || vSource_.gpu->tfMs != tfMs()) return false;
+    for (const auto &[key, generation] : vSource_.chunkGenerations) {
+        const uint64_t now = chunkStore().generationOf(key);
+        if (now && now != generation) return false; // a revised chunk intersects the source
+    }
+    const auto &a = availability_;
+    const double lo = std::max(view_.timeLoMs, double(a.oldestMs)), hi = std::min(view_.timeHiMs, double(a.endMs));
+    const auto &r = vSource_.region;
+    const bool time = !(hi > lo) || (r.timeLoMs <= lo && r.timeHiMs >= hi);
+    return time && r.priceLo <= view_.priceLo && r.priceHi >= view_.priceHi;
+}
+
+void LabItem::updateViewport() {
+    if (!chunked() || wholeChunk() || !haveAvailability_ || !(width() > 0) || !(height() > 0)) return;
+    if (vInFlight_ || viewportCovers()) return; // a build in flight re-checks when it lands
+    // Prepared region: the view plus one view width/height on each side (plan prefetch rule).
+    const double w = view_.timeHiMs - view_.timeLoMs, h = view_.priceHi - view_.priceLo;
+    const heatmap::gpu::ViewWindow region{view_.timeLoMs - w, view_.timeHiMs + w, view_.priceLo - h, view_.priceHi + h};
+    vInFlight_ = true;
+    const uint64_t serial = chunkSerial_;
+    const QPointer<LabItem> self(this);
+    const std::string layerName = layer();
+    const int64_t tf = tfMs();
+    QElapsedTimer requested;
+    requested.start();
+    QThreadPool::globalInstance()->start([=] {
+        std::optional<ViewportSource> built;
+        QString error;
+        try {
+            built = buildViewportSource(layerName, tf, region);
+        } catch (const std::exception &e) {
+            error = QString::fromUtf8(e.what());
+        }
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [=] {
+            if (!self || self->chunkSerial_ != serial) return;
+            self->vInFlight_ = false;
+            if (!built) {
+                self->status_ = unavailableStatus(error);
+                emit self->statusChanged();
+                return;
+            }
+            const bool loaded = built->timing.chunkLoadsAfter > built->timing.chunkLoadsBefore;
+            self->vSource_ = std::move(*built);
+            ++self->vBuilds_;
+            self->vUploadBytes_ += self->vSource_.gpu ? self->vSource_.gpu->bytes() : 0;
+            self->vLastRequestMs_ = msSince(requested);
+            if (loaded) self->refreshChunkPresets();
+            self->viewChanged(); // the view may have moved on while this built
+        }, Qt::QueuedConnection);
+    });
+}
+
+bool LabItem::tileStale(const WTile &tile) const {
+    for (const auto &[key, generation] : tile.chunkGenerations) {
+        const uint64_t now = chunkStore().generationOf(key);
+        if (now && now != generation) return true;
+    }
+    return false;
+}
+
+void LabItem::requestChunks(double loMs, double hiMs) {
+    if (!(hiMs > loMs)) return;
+    const int64_t tf = tfMs();
+    const auto keys = chunkKeysFor(layer(), tf, int64_t(std::floor(loMs / double(tf))) * tf,
+                                   int64_t(std::ceil(hiMs / double(tf))) * tf);
+    const uint64_t serial = chunkSerial_;
+    const QPointer<LabItem> self(this);
+    for (const auto &key : keys) {
+        const std::string id = chunkKeyText(key).toStdString();
+        if (chunkStore().contains(key) || chunkLoadsInFlight_.count(id)) continue;
+        chunkLoadsInFlight_.insert(id);
+        QThreadPool::globalInstance()->start([=] {
+            try { chunkStore().get(key); } catch (const std::exception &) {}
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [=] {
+                if (!self || self->chunkSerial_ != serial) return;
+                self->chunkLoadsInFlight_.erase(id);
+                self->refreshChunkPresets();
+                self->viewChanged();
+            }, Qt::QueuedConnection);
+        });
+    }
+}
+
+void LabItem::refreshChunkPresets() {
+    if (!chunked() || !haveAvailability_) return;
+    const auto commons = cachedColumnCommonUnits(layer(), tfMs(), double(availability_.oldestMs), double(availability_.endMs));
+    if (commons.empty()) return;
+    const int64_t finest = *std::min_element(commons.begin(), commons.end());
+    QVariantList offered;
+    for (const int64_t units : heatmap::manualPresetUnits(commons, finest * 1000))
+        offered.push_back(heatmap::fromUnits(units, priceScale()));
+    if (offered != offeredTicks_) { offeredTicks_ = offered; emit presetsChanged(); }
+}
+
+void LabItem::updateWholeChunk() {
+    if (!wholeChunk() || !haveAvailability_ || !(width() > 0) || !(height() > 0)) return;
+    const int64_t tf = tfMs();
+    const auto &a = availability_;
+    const double dataLo = std::max(view_.timeLoMs, double(a.oldestMs)), dataHi = std::min(view_.timeHiMs, double(a.endMs));
+    // Tick: Manual obeys; Auto follows the data in view (chunks must be decoded
+    // to know its native grids; until then the previous tick keeps drawing).
+    int64_t tickUnits = 0;
+    if (manualMode_) {
+        tickUnits = heatmap::toUnits(manualTick_, priceScale());
+        if (!heatmap::isPresetUnits(tickUnits)) tickUnits = 0;
+    } else {
+        const int64_t common = dataHi > dataLo ? cachedCommonUnits(layer(), tf, dataLo, dataHi) : 0;
+        const auto keys = dataHi > dataLo ? chunkKeysFor(layer(), tf, int64_t(std::floor(dataLo / double(tf))) * tf,
+                                                         int64_t(std::ceil(dataHi / double(tf))) * tf)
+                                          : std::vector<heatmap::ChunkKey>{};
+        bool allCached = true;
+        for (const auto &key : keys) allCached = allCached && chunkStore().contains(key);
+        if (!allCached) requestChunks(dataLo, dataHi);
+        if (common > 0) {
+            const double unitsPerPx = (view_.priceHi - view_.priceLo) * priceScale() / std::max(1.0, height() * devicePixelRatio());
+            tickUnits = heatmap::autoTickUnits(wAutoUnits_, common, unitsPerPx, {minRowPx_, hysteresis_});
+            if (tickUnits > 0) wAutoUnits_ = tickUnits;
+        }
+    }
+    if (tickUnits <= 0) tickUnits = wTickUnits_;
+    if (tickUnits <= 0) { update(); return; }
+    if (tickUnits != wTickUnits_) {
+        if (wTickUnits_ > 0) wPrevTickUnits_ = wTickUnits_;
+        emit tickChanged();
+    }
+    wTickUnits_ = tickUnits;
+    const double center = (view_.priceLo + view_.priceHi) * 0.5;
+    const int64_t centerBin = recording::floorDiv(heatmap::toUnits(center, priceScale()), tickUnits);
+    const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, 0);
+    const auto wanted = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, kPrefetchTiles);
+    std::vector<int64_t> order;
+    for (int64_t t = visible.first; t < visible.end; ++t) order.push_back(t);
+    for (int64_t t = wanted.first; t < visible.first; ++t) order.push_back(t);
+    for (int64_t t = visible.end; t < wanted.end; ++t) order.push_back(t);
+    const uint64_t serial = chunkSerial_;
+    const QPointer<LabItem> self(this);
+    const std::string layerName = layer();
+    const auto builder = prepMode_ == PrepMode::WholeChunkCpu ? TileBuilder::Cpu : TileBuilder::Gpu;
+    // A prefetch tile the budget dropped is not requested again until the view
+    // (visible tiles, timeframe, tick) or the budget changes: otherwise two
+    // neighbours evict each other forever when the visible tiles fill the budget.
+    const PlanKey plan{tf, keyTick(tickUnits), visible.first, visible.end};
+    if (plan != wPlan_) {
+        wPlan_ = plan;
+        wBudgetEvicted_.clear();
+    }
+    for (const int64_t t : order) {
+        if (heatmap::tiles::tileEndMs(t, tf) <= a.oldestMs || heatmap::tiles::tileStartMs(t, tf) >= a.endMs) continue;
+        const TileBase base{tf, keyTick(tickUnits), t};
+        if (wInFlight_.count(base) || wBudgetEvicted_.count(base)) continue;
+        if (const auto it = wLatest_.find(base); it != wLatest_.end())
+            if (const auto *tile = wTiles_.peek(it->second); tile && !tileStale(*tile)) {
+                wTiles_.find(it->second); // touch: in or next to the view
+                continue;
+            }
+        if (builder == TileBuilder::Gpu) {
+            // Spans whose chunks and GpuSource are cached need no worker round trip.
+            if (const auto cached = cachedGpuTile(layerName, tf, tickUnits, t, centerBin)) {
+                acceptTile(base, *cached);
+                continue;
+            }
+        }
+        wInFlight_.insert(base);
+        QThreadPool::globalInstance()->start([=] {
+            std::optional<TileBuild> built;
+            QString error;
+            try {
+                built = buildTile(layerName, tf, tickUnits, t, builder, centerBin);
+            } catch (const std::exception &e) {
+                error = QString::fromUtf8(e.what());
+            }
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [=] {
+                if (!self || self->chunkSerial_ != serial) return;
+                self->wInFlight_.erase(base);
+                if (!built || built->empty) {
+                    if (!built) {
+                        self->status_ = unavailableStatus(error);
+                        emit self->statusChanged();
+                    }
+                    return;
+                }
+                self->acceptTile(base, *built);
+                self->viewChanged();
+            }, Qt::QueuedConnection);
+        });
+    }
+    evictTiles();
+    update();
+}
+
+void LabItem::evictTiles() {
+    wEvictQueued_ = false;
+    if (!wholeChunk() || wTickUnits_ <= 0) return;
+    // Budget: never evict the current version of a tile in view at the target
+    // tick, its previous version while the current one is not resident yet (the
+    // fallback), or anything drawn in the last frame (a held picture during a
+    // transition, a fading set). Obsolete generations of a visible tile are not
+    // protected: they would otherwise pile up past the budget with each revision.
+    const int64_t tf = tfMs(), tick = keyTick(wTickUnits_);
+    const auto visible = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, 0);
+    const auto wanted = heatmap::tiles::tilesCovering(view_.timeLoMs, view_.timeHiMs, tf, kPrefetchTiles);
+    auto entryIds = [&](const std::vector<uint64_t> &ids) {
+        std::set<uint64_t> out;
+        for (const uint64_t id : ids) out.insert(prepMode_ == PrepMode::Hybrid ? id >> 32 : id);
+        return out;
+    };
+    wEvictDrawn_ = tileStats_->drawnIds();
+    const auto residentIds = tileStats_->residentIds();
+    wEvictResident_ = residentIds.size();
+    const auto drawn = entryIds(wEvictDrawn_);
+    const auto resident = entryIds(residentIds);
+    std::unordered_set<heatmap::tiles::TileKey, heatmap::tiles::TileKeyHash> keep;
+    for (int64_t t = visible.first; t < visible.end; ++t) {
+        const TileBase base{tf, tick, t};
+        const auto latest = wLatest_.find(base);
+        const WTile *current = latest != wLatest_.end() ? wTiles_.peek(latest->second) : nullptr;
+        if (current) keep.insert(latest->second);
+        if (!current || !resident.count(current->ref.id))
+            if (const auto previous = wPrevious_.find(base); previous != wPrevious_.end()) keep.insert(previous->second);
+    }
+    const auto evicted = wTiles_.evict([&](const heatmap::tiles::TileKey &key) {
+        if (keep.count(key)) return true;
+        const auto *tile = wTiles_.peek(key);
+        return tile && drawn.count(tile->ref.id);
+    });
+    for (const auto &key : evicted) {
+        const TileBase base{key.tfMs, key.tickUnits, key.tile};
+        if (const auto it = wLatest_.find(base); it != wLatest_.end() && it->second == key) {
+            wLatest_.erase(it);
+            if (key.tfMs == tf && key.tickUnits == tick && wanted.contains(key.tile) &&
+                !visible.contains(key.tile))
+                wBudgetEvicted_.insert(base);
+        }
+        if (const auto it = wPrevious_.find(base); it != wPrevious_.end() && it->second == key) wPrevious_.erase(it);
+    }
+}
+
+void LabItem::acceptTile(const TileBase &base, const TileBuild &built) {
+    WTile tile;
+    tile.ref.id = nextTileId.fetch_add(1);
+    tile.ref.grid = {built.grid.tfMs, built.grid.firstBucket, built.grid.columns, built.grid.tick,
+                     built.grid.firstBin, built.grid.rows};
+    tile.ref.cells = built.cells;
+    tile.ref.source = built.source;
+    tile.ref.viewRows = prepMode_ == PrepMode::Hybrid;
+    tile.chunkGenerations = built.chunkGenerations;
+    tile.clipped = built.clipped;
+    // Budget: what the tile holds on the GPU (hybrid: its resident source).
+    const auto bytes = size_t(tile.ref.viewRows && built.source ? built.source->bytes() : tile.ref.cellBytes());
+    auto key = built.key;
+    key.tickUnits = keyTick(key.tickUnits);
+    if (const auto it = wLatest_.find(base); it != wLatest_.end() && !(it->second == key))
+        wPrevious_[base] = it->second;
+    wLatest_[base] = key;
+    wTiles_.insert(key, std::move(tile), bytes);
+    ++wBuilds_;
+    wIntermediateHits_ += built.intermediateHit;
+    wClipped_ += built.clipped;
+    wLastBuildMs_ = built.timing.totalMs;
+    if (built.timing.chunkLoadsAfter > built.timing.chunkLoadsBefore) refreshChunkPresets();
+}
+
+void LabItem::reviseNewestChunk() {
+    if (!chunked() || !haveAvailability_) return;
+    const uint64_t serial = chunkSerial_;
+    const QPointer<LabItem> self(this);
+    const std::string layerName = layer();
+    QThreadPool::globalInstance()->start([=] {
+        LayerInfo info;
+        try {
+            info = layerInfo(layerName, true);
+            if (info.error.empty()) {
+                const int64_t newest = recording::floorDiv(info.availability.endMs - 1, heatmap::kHourMs) * heatmap::kHourMs;
+                chunkStore().reload({kSymbol, layerName, heatmap::kMinuteMs, newest});
+            }
+        } catch (const std::exception &) {
+        }
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [=] {
+            if (!self || self->chunkSerial_ != serial || !info.error.empty()) return;
+            self->availability_ = info.availability;
+            self->viewChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
+QVariantMap LabItem::prepMetrics() const {
+    const auto store = chunkStore().stats();
+    const auto inter = intermediateStats();
+    QVariantMap m{{"prep", prepModeName(prepMode_)},
+                  {"chunkBytes", qulonglong(store.bytes)}, {"chunkEntries", qulonglong(store.entries)},
+                  {"chunkHits", qulonglong(store.hits)}, {"chunkMisses", qulonglong(store.misses)},
+                  {"chunkLoads", qulonglong(store.loads)}, {"chunkSharedLoads", qulonglong(store.sharedLoads)},
+                  {"chunkEvictions", qulonglong(store.evictions)}, {"chunkLoadMs", store.loadMs},
+                  {"interBytes", qulonglong(inter.bytes)}, {"interHits", qulonglong(inter.hits)},
+                  {"interMisses", qulonglong(inter.misses)},
+                  {"footprintBytes", qulonglong(processFootprintBytes())}};
+    if (!chunked()) {
+        m["prepCpuBytes"] = qulonglong(source_.gpu ? source_.gpu->bytes() : 0);
+        m["lastPrepMs"] = source_.loadMs + source_.composeMs + source_.buildMs;
+        return m;
+    }
+    if (!wholeChunk()) {
+        m["prepCpuBytes"] = qulonglong(vSource_.cpuBytes);
+        m["lastPrepMs"] = vSource_.timing.totalMs;
+        m["lastPrepChunkMs"] = vSource_.timing.chunkMs;
+        m["lastPrepComposeMs"] = vSource_.timing.composeMs;
+        m["lastPrepBuildMs"] = vSource_.timing.buildMs;
+        m["lastRequestMs"] = vLastRequestMs_;
+        m["prepBuilds"] = qulonglong(vBuilds_);
+        m["prepUploadBytes"] = qulonglong(vUploadBytes_);
+        m["prepSourceEntries"] = qulonglong(vSource_.gpu ? vSource_.gpu->entryCount : 0);
+        m["prepInFlight"] = vInFlight_ ? 1 : 0;
+        m["prepChunks"] = qulonglong(vSource_.timing.chunks);
+        m["regionMinutes"] = (vSource_.region.timeHiMs - vSource_.region.timeLoMs) / 60'000.0;
+        m["regionPrice"] = vSource_.region.priceHi - vSource_.region.priceLo;
+        return m;
+    }
+    m["prepCpuBytes"] = qulonglong(wCpuBytes_);
+    m["lastPrepMs"] = wLastBuildMs_;
+    m["prepBuilds"] = qulonglong(wBuilds_);
+    m["prepInFlight"] = qulonglong(wInFlight_.size());
+    m["tiles"] = qulonglong(wTiles_.size());
+    m["tileBytes"] = qulonglong(wTiles_.bytes());
+    m["tileHits"] = qulonglong(wTiles_.hits());
+    m["tileMisses"] = qulonglong(wTiles_.misses());
+    m["tileEvictions"] = qulonglong(wTiles_.evictions());
+    m["tilesResident"] = qulonglong(tileStats_->residentTiles.load());
+    m["tilesUploaded"] = qulonglong(tileStats_->tilesUploaded.load());
+    m["tilesBinned"] = qulonglong(tileStats_->tilesBinned.load());
+    m["tilesRebinned"] = qulonglong(tileStats_->rebinnedTiles.load());
+    m["tileUploadBytes"] = qulonglong(tileStats_->uploadBytes.load());
+    m["prepUploadBytes"] = qulonglong(tileStats_->uploadBytes.load());
+    m["binnerBytes"] = qulonglong(tileStats_->binnerBytes.load());
+    m["tileGpuBytes"] = qulonglong(tileStats_->residentBytes.load());
+    m["tileNodePrepareMs"] = tileStats_->prepareMs.load();
+    m["intermediateHits"] = qulonglong(wIntermediateHits_);
+    m["clippedTiles"] = qulonglong(wClipped_);
+    m["lostTiles"] = qulonglong(wLostTiles_);
+    m["prefetchBudgetEvicted"] = qulonglong(wBudgetEvicted_.size());
+    m["loadingSlots"] = tileStats_->loadingSlots.load();
+    m["holding"] = tileStats_->holding.load();
+    return m;
 }
 } // namespace lab

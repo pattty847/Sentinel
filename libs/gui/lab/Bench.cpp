@@ -234,6 +234,7 @@ struct HeadlessLab {
         item->setParentItem(scene.window()->contentItem());
         item->setSize(QSizeF(size));
         item->setTimeframeMinutes(options.tfMinutes);
+        if (const auto prep = parsePrepMode(options.prep)) item->setPrepMode(*prep);
         applyTickOptions(*item, options);
         if (options.synthetic) item->loadSynthetic(int(options.synthetic));
         else item->loadReal(options.hours, options.layer);

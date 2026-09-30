@@ -4,7 +4,7 @@ layout(std140, binding = 1) uniform Draw {
     mat4 mvp;
     vec4 rect;     // item-space x, y, width, height
     vec4 mapping;  // left column offset, columns across rect, top row offset, rows down rect
-    uvec4 dims;    // grid columns, rows
+    uvec4 dims;    // grid columns, rows, flags (bit 0: clamp rows)
     vec4 style;    // code floor, code range, opacity, unused
 };
 void main() {

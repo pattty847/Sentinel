@@ -1,6 +1,6 @@
 # Plan: GPU-binned heatmap in the main chart, and removal of the page/re-band path
 
-Status 2026-09-29: S1, S2 and S4 landed; TPO profiles landed. Next: legacy phase 2 (L), then S3. See section 4.
+Status 2026-09-29: S1, S2 and S4 landed; TPO profiles landed; B1 measured (recommends the hybrid, owner to decide). Next: legacy phase 2 (L), then S3. See section 4.
 
 ## Owner decisions (2026-09-29, tick contract revised the same afternoon)
 
@@ -287,7 +287,7 @@ possible one-frame misalignment).
 | S2 | Server chunks: `RecordingChunks` + `ChunkCodec` | new core files | Round-trip exact; real-root bench (below). | Landed (`07b61b1`) |
 | S3 | Wire: binary framing and new messages | SentinelStreamServer/Client, SentinelStreamProtocol.hpp | Loopback TLS test: chunk, not_modified, live revision ordering, backlog bounds, stop/teardown. | **Next**, after L |
 | S4 | GPU: binner, render node, shaders; lab repointed | libs/gui/render/heatmap, sentinel-lab | Readback vs `binCell` exact. About 2 ms full-day deep 1m re-bin accepted by the owner. D3D11 run by the owner. | Landed (`4c5a991`); D3D11 run open |
-| B1 | **Benchmark: whole-chunk render-ready price aggregation vs viewport clipping** | libs/gui/lab (Bench, LabSources) | See below. Decides the render-ready source shape and the budget policy. | Before S5 finalizes |
+| B1 | **Benchmark: whole-chunk render-ready price aggregation vs viewport clipping** | libs/gui/lab (Bench, LabSources) | See below. Decides the render-ready source shape and the budget policy. | Measured (`lt-claude/b1-whole-chunk`, `2026-09-b1-whole-chunk-benchmark.md`): recommends the hybrid (resident 64-column tile sources, bin the rows around the view); owner decision pending |
 | T | Tick and zoom contract | HeatmapResolution.hpp, HeatmapRenderNode, lab | Auto (default, 2 px + hysteresis) and Manual tick modes; presets multiples of `commonTick()` (BTC from $1); column = timeframe, time clamp 1 column/px; Manual price clamp 1 row/px; no auto-timeframe. Lab experiments E1-E3 of the interaction spec. Unit tests. | Before S5 |
 | S5 | Controller: `HeatmapSourceController` + process-wide `ChunkDiskCache` | new files, fake-transport tests | Chunk set and prefetch per viewport; global RAM budget shared by two charts with no duplicate decode; active/spare swap never blanks; switch to a recently used tf < 50 ms from cache; reconnect resume. | After B1, T |
 | S6 | Integration behind toggle | UGR*, MainWindowGpu.cpp, FrameContextBuilder, UgrFrameMath, TimeAxisMapping | Cold start <= 1 s to first data frame. Zero full-texture rebuilds. Zoom repaints in the next frame with no tick or tf change. No stretched columns on tf switch. A/B screenshots via Agent API. | |

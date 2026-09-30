@@ -18,6 +18,9 @@ struct LabSource {
     double medianPrice = 0;                // of recent entries, for the initial view
 };
 
+// Median over the newest 30 columns of the best-bid/best-ask midpoint (0 if none).
+double medianRecentPrice(const heatmap::SparseColumns &data);
+
 // Range [endMs - hours, endMs) ending at the newest recorded minute, aligned to
 // tfMs. Deep hour multiples use persisted hours plus the open hour's minute tail
 // (heatmap::loadRecordingLevels); everything else composes minutes. `loadHours`
