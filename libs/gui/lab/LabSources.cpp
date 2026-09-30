@@ -67,21 +67,67 @@ std::string recordingRoot() {
     return configured;
 }
 
-bool insideRecordingRoot(const QString &path) {
-    const QString root = QString::fromStdString(recordingRoot());
-    if (root.isEmpty()) return false;
+namespace {
 #ifdef Q_OS_WIN
-    constexpr auto cs = Qt::CaseInsensitive;
+constexpr auto kPathCase = Qt::CaseInsensitive;
 #else
-    constexpr auto cs = Qt::CaseSensitive;
+constexpr auto kPathCase = Qt::CaseSensitive;
 #endif
-    const QString base = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
-    auto inside = [&](const QString &p) {
-        const QString clean = QDir::cleanPath(p);
-        return !clean.isEmpty() && (clean.compare(base, cs) == 0 || clean.startsWith(base + '/', cs));
+// `path` is `root` or below it, compared by whole components (no name prefixes).
+bool withinComponents(const QString &path, const QString &root) {
+    const QStringList p = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    const QStringList r = root.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (r.isEmpty() || p.size() < r.size()) return false;
+    for (qsizetype i = 0; i < r.size(); ++i)
+        if (p[i].compare(r[i], kPathCase) != 0) return false;
+    return true;
+}
+// Where an absolute path really points: the canonical path of its nearest
+// existing ancestor (symlinks and NTFS junctions resolved; Qt's
+// canonicalFilePath leaves junctions alone) plus the components that do not
+// exist yet. A link counts as existing even when dangling, so it is resolved,
+// fails, and the caller refuses. Empty when it cannot be resolved.
+QString resolvedPath(const QString &absolute) {
+    namespace fs = std::filesystem;
+    fs::path existing(absolute.toStdWString());
+    std::vector<fs::path> missing; // deepest first
+    for (;;) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(existing, ec);
+        if (ec && status.type() != fs::file_type::not_found) return {};
+        if (fs::exists(status)) break;
+        const fs::path parent = existing.parent_path();
+        if (parent == existing) return {};
+        missing.push_back(existing.filename());
+        existing = parent;
+    }
+    std::error_code ec;
+    fs::path resolved = fs::canonical(existing, ec);
+    if (ec) return {};
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) resolved /= *it;
+    return QDir::cleanPath(QDir::fromNativeSeparators(QString::fromStdWString(resolved.wstring())));
+}
+} // namespace
+
+bool labOutputAllowed(const QString &path, QString *why) {
+    auto refuse = [&](const QString &reason) {
+        if (why) *why = reason;
+        return false;
     };
-    const QFileInfo file(path);
-    return inside(file.absoluteFilePath()) || inside(file.absoluteDir().canonicalPath());
+    const QString root = QString::fromStdString(recordingRoot());
+    if (root.isEmpty()) return true; // nothing to protect
+    const QString rootAbsolute = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
+    const QString rootResolved = resolvedPath(rootAbsolute);
+    if (rootResolved.isEmpty()) return refuse(QStringLiteral("cannot resolve the recording root %1").arg(root));
+    if (path.isEmpty()) return refuse(QStringLiteral("empty output path"));
+    const QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    const QString resolved = resolvedPath(absolute);
+    if (resolved.isEmpty()) return refuse(QStringLiteral("cannot resolve output path %1").arg(path));
+    for (const QString &candidate : {absolute, resolved})
+        for (const QString &base : {rootAbsolute, rootResolved})
+            if (withinComponents(candidate, base))
+                return refuse(QStringLiteral("output %1 is inside the recording root %2 (read-only)").arg(path, root));
+    return true;
 }
 
 LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &rootIn) {
