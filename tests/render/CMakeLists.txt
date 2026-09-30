@@ -197,3 +197,15 @@ target_include_directories(test_TpoProfileModel PRIVATE ${CMAKE_SOURCE_DIR}/libs
 target_link_libraries(test_TpoProfileModel PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TpoProfileModelTests COMMAND test_TpoProfileModel)
 set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")
+
+# S5b CPU controller: compile only CPU sources, link QtCore (no GPU required).
+add_executable(test_heatmap_source_controller
+    test_heatmap_source_controller.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.hpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapGpuSource.cpp
+)
+target_include_directories(test_heatmap_source_controller PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_heatmap_source_controller PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME HeatmapSourceControllerTests COMMAND test_heatmap_source_controller)
+set_tests_properties(HeatmapSourceControllerTests PROPERTIES LABELS "render;heatmap" TIMEOUT 45)

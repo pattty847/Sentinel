@@ -200,6 +200,39 @@ must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
 into `UnifiedGridRenderer` (S6). Results and limits:
 [GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md), S4.
 
+### Heatmap span planning and source controller (slice S5b)
+
+`HeatmapSpanPlanner` (core, pure) plans epoch-aligned tile spans for several
+chunk sources: per span and source id, the chunk keys (`tiles::chunksFor`) and
+the source's availability clipped to the span; ranks visible > fallback >
+prefetch (by tile distance, at least 2 tiles or one view width per side) >
+recent-tf. Source ids are data (`kChunkSources`); nothing branches on them.
+Its `ResolutionSummary` is tick-free: per column and source, the native ticks,
+their LCM and the full-coverage price bands. Tick selection reuses the slice-T
+hysteresis (`autoTickUnitsIf`): Auto takes only presets that build every row in
+view that some source covers (rows no source covers veil at every tick and
+never block a tick), so the fine band reaches $1 when the rows in view lie
+inside it; Manual offers every preset some loaded source builds, and
+`veiledRanges` names the columns and price ranges a locked tick veils.
+
+`HeatmapSourceController` (`libs/gui/render/heatmap`, QtCore only; it lives in
+the GUI library because it builds `gpu::GpuSource` images) runs per chart on
+the heatmap-data thread with the `ChunkFetcher`. It wants chunks by rank
+priority, peeks the store on `chunkStored`/`chunkRevised`, and builds each
+(span, source) on the process-wide `SpanSourceCache` (2-thread pool, bounded
+queue, byte-bounded LRU plus a weak registry of published builds), keyed by
+source, tf, span, clipped availability and chunk generations, so charts share
+one build. It publishes an immutable, tick-free `SpanSet` (spans by rank,
+sources coarsest common tick first, stale flags, merged `ResolutionSummary`)
+through a mutex-guarded latest pointer and a queued signal. A tf switch keeps
+the previous tf's built visible spans as fallback until the new view is built,
+then as recent-tf (no chunk demand, no rebuild; switching back republishes
+them). Admission is strictly by rank: visible and fallback always enter;
+prefetch needs GPU room and node credit (`HeatmapCapacity`: free bytes plus an
+epoch the node bumps after it frees bytes) of bytes + 10%; eviction removes only
+content ranked below what it admits. Results for an older serial or a
+superseded key are dropped.
+
 ### Coordinate system: TimeAxisMapping
 
 All chart layers (heatmap, candles, labels, TPO, footprint) share one mapping: **TimeAxisMapping** (`libs/gui/render/TimeAxisMapping.hpp`). It is produced once per frame in `UnifiedGridRenderer::updatePaintNode()` and consumed by all renderers in that frame.
