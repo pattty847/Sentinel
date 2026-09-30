@@ -64,24 +64,21 @@ uint64_t chunkHash(std::span<const uint8_t> prefix, std::span<const uint8_t> raw
     for (auto b : raw) { h ^= b; h *= 1099511628211ULL; }
     return h;
 }
-uint8_t layerCode(const std::string& layer) {
-    if (layer == "near") return 1;
-    if (layer == "deep") return 2;
-    fail(); return 0;
+bool validKey(const ChunkKey& key) {
+    const int64_t span = chunkSpanMs(key.source, key.levelMs);
+    return span && !key.symbol.empty() &&
+           key.startMs >= recording::kHmc2MinMs && key.startMs % span == 0 &&
+           key.startMs <= recording::kHmc2EndMs - span;
 }
 bool validExtent(const ChunkKey& key, int64_t end) {
-    const int64_t span = key.levelMs == kMinuteMs ? kHourMs :
-                         key.levelMs == kHourMs && key.layer == "deep" ? kDayMs : 0;
-    return span && !key.symbol.empty() && (key.layer == "near" || key.layer == "deep") &&
-           key.startMs >= recording::kHmc2MinMs && key.startMs % span == 0 &&
-           key.startMs <= recording::kHmc2EndMs - span &&
-           end == key.startMs + span;
+    return validKey(key) && end == key.startMs + chunkSpanMs(key.source, key.levelMs);
 }
-std::string layerName(uint8_t code) {
-    if (code == 1) return "near";
-    if (code == 2) return "deep";
-    fail(); return {};
+std::string_view hmc2Layer(const std::string& source) {
+    const auto* s = findChunkSource(source);
+    if (!s) fail();
+    return s->hmc2Layer;
 }
+bool knownError(uint16_t code) { return code >= 1 && code <= 4; }
 struct HeaderGrid {
     GridIdentity grid;
     recording::SizeScale scale;
@@ -130,11 +127,81 @@ bool validState(const ChunkFrame& frame) {
     return frame.columns.scannedRanges.empty() ||
            frame.columns.scannedRanges.back().endMs <= frame.state.committedThroughMs;
 }
+void putMagic(Writer& w, ChunkKind kind) {
+    for (char c : "SHC1") { if (c) w.u(uint8_t(c)); }
+    w.u(kChunkWireVersion); w.u(uint8_t(kind));
+}
+// NotModified: u8 sealed, key, i64 committedThrough, u64 revision, u64 content hash.
+// Error: key as sent (not validated), u16 code, message. Both are exact-length.
+std::vector<uint8_t> encodeControl(const ChunkFrame& frame) {
+    Writer w;
+    putMagic(w, frame.kind);
+    if (frame.kind == ChunkKind::NotModified) {
+        if (!validKey(frame.key) ||
+            (frame.state.sealed && frame.state.revision != 0)) fail();
+        w.u(uint8_t(frame.state.sealed));
+        w.str(frame.key.symbol); w.str(frame.key.source);
+        w.i(frame.key.levelMs); w.i(frame.key.startMs);
+        w.i(frame.state.committedThroughMs); w.u(frame.state.revision); w.u(frame.contentHash);
+    } else {
+        if (!knownError(uint16_t(frame.error))) fail();
+        w.str(frame.key.symbol); w.str(frame.key.source);
+        w.i(frame.key.levelMs); w.i(frame.key.startMs);
+        w.u(uint16_t(frame.error)); w.str(frame.message);
+    }
+    return std::move(w.data);
+}
+ChunkFrame decodeControl(Reader& r, ChunkFrame& out) {
+    if (out.kind == ChunkKind::NotModified) {
+        const auto sealed = r.u<uint8_t>(); if (sealed > 1) fail();
+        out.state.sealed = sealed;
+        out.key.symbol = r.str(); out.key.source = r.str();
+        out.key.levelMs = r.i(); out.key.startMs = r.i();
+        out.state.committedThroughMs = r.i(); out.state.revision = r.u<uint64_t>();
+        out.contentHash = r.u<uint64_t>();
+        if (!validKey(out.key) || (sealed && out.state.revision != 0)) fail();
+    } else {
+        out.key.symbol = r.str(); out.key.source = r.str();
+        out.key.levelMs = r.i(); out.key.startMs = r.i();
+        const auto code = r.u<uint16_t>();
+        if (!knownError(code)) fail();
+        out.error = ChunkError(code);
+        out.message = r.str();
+    }
+    if (r.pos != r.data.size()) fail();
+    return std::move(out);
+}
 } // namespace
 
+const ChunkSource* findChunkSource(std::string_view id) {
+    for (const auto& s : kChunkSources) if (s.id == id) return &s;
+    return nullptr;
+}
+const ChunkSource* chunkSourceForHmc2Layer(std::string_view layer) {
+    for (const auto& s : kChunkSources) if (s.hmc2Layer == layer) return &s;
+    return nullptr;
+}
+int64_t chunkSpanMs(std::string_view source, int64_t levelMs) {
+    const auto* s = findChunkSource(source);
+    if (!s) return 0;
+    if (levelMs == kMinuteMs) return kHourMs;
+    return levelMs == kHourMs && s->hourLevel ? kDayMs : 0;
+}
+const char* chunkErrorName(ChunkError code) {
+    switch (code) {
+        case ChunkError::InvalidRequest: return "invalid_request";
+        case ChunkError::Unavailable: return "unavailable";
+        case ChunkError::Busy: return "busy";
+        case ChunkError::BuildFailed: return "build_failed";
+    }
+    return "unknown";
+}
+
 std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
+    if (frame.kind == ChunkKind::NotModified || frame.kind == ChunkKind::Error) return encodeControl(frame);
     if (frame.kind != ChunkKind::Chunk || frame.key.symbol != frame.columns.symbol ||
-        frame.key.layer != frame.columns.layer || frame.key.levelMs != frame.columns.tfMs ||
+        !findChunkSource(frame.key.source) || hmc2Layer(frame.key.source) != frame.columns.layer ||
+        frame.key.levelMs != frame.columns.tfMs ||
         frame.key.startMs != frame.columns.startMs ||
         !validExtent(frame.key, frame.columns.endMs) || !validState(frame)) fail();
     validate(frame.columns);
@@ -182,7 +249,7 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame) {
     Writer wire;
     for (char c : "SHC1") { if (c) wire.u(uint8_t(c)); }
     wire.u(kChunkWireVersion); wire.u(uint8_t(frame.kind)); wire.u(uint8_t(frame.state.sealed));
-    wire.str(frame.key.symbol); wire.u(layerCode(frame.key.layer));
+    wire.str(frame.key.symbol); wire.str(frame.key.source);
     wire.i(frame.key.levelMs); wire.i(frame.key.startMs); wire.i(frame.columns.endMs);
     const auto common = commonGrid(frame.columns);
     putGrid(wire, common.grid, common.scale);
@@ -200,11 +267,12 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
     if (h.u<uint16_t>() != kChunkWireVersion) fail();
     ChunkFrame out;
     out.kind = ChunkKind(h.u<uint8_t>());
+    if (out.kind == ChunkKind::NotModified || out.kind == ChunkKind::Error) return decodeControl(h, out);
     if (out.kind != ChunkKind::Chunk) fail();
     const auto sealed = h.u<uint8_t>(); if (sealed > 1) fail();
     out.state.sealed = sealed;
     out.key.symbol = h.str();
-    out.key.layer = layerName(h.u<uint8_t>());
+    out.key.source = h.str();
     out.key.levelMs = h.i(); out.key.startMs = h.i(); const auto end = h.i();
     const auto headerGrid = getGrid(h);
     out.state.committedThroughMs = h.i(); out.state.revision = h.u<uint64_t>();
@@ -222,7 +290,7 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
     if (ZSTD_isError(decoded) || decoded != rawLen ||
         chunkHash(wire.first(hashOffset), raw) != out.contentHash) fail();
     Reader r{raw};
-    out.columns = {out.key.symbol, out.key.layer, out.key.levelMs, out.key.startMs, end};
+    out.columns = {out.key.symbol, std::string(hmc2Layer(out.key.source)), out.key.levelMs, out.key.startMs, end};
     const auto nRanges = r.u<uint16_t>();
     if (nRanges > kMaxColumns) fail();
     r.requireCount(nRanges, 16);
@@ -287,6 +355,16 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
         common.scale.floor != headerGrid.scale.floor ||
         common.scale.codesPerOctave != headerGrid.scale.codesPerOctave) fail();
     return out;
+}
+uint64_t chunkContentHash(std::span<const uint8_t> wire) {
+    Reader h{wire};
+    for (char c : "SHC1") { if (c && h.u<uint8_t>() != uint8_t(c)) fail(); }
+    if (h.u<uint16_t>() != kChunkWireVersion || ChunkKind(h.u<uint8_t>()) != ChunkKind::Chunk) fail();
+    h.u<uint8_t>(); h.str(); h.str();          // sealed, symbol, source
+    constexpr size_t kSkip = 24 + 40 + 8 + 8;  // level/start/end, grid, through, revision
+    if (wire.size() - h.pos < kSkip) fail();
+    h.pos += kSkip;
+    return h.u<uint64_t>();
 }
 std::vector<uint8_t> encodeChunkEnvelope(uint64_t requestId, std::span<const uint8_t> chunkWire) {
     if (chunkWire.size() > kMaxPayload - 14 || chunkWire.size() < 6) fail();

@@ -4,6 +4,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
 #include "RecordingHistoryWire.hpp"
+#include "ChunkWire.hpp"
 #include <list>
 #include "SentinelLogging.hpp"
 #include "../servermodel/SessionManager.hpp"
@@ -178,6 +179,7 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
     };
     payload["default_symbols"] = cfg.defaultSymbols;
     payload["recording"] = protocol::recordingwire::capability(cfg, recordingAvailable);
+    payload["recording"]["chunk_wire_version"] = heatmap::kChunkWireVersion;
     return payload;
 }
 
@@ -212,13 +214,16 @@ double resolveMidPrice(const LiveOrderBook& book) {
 
 class Session : public std::enable_shared_from_this<Session> {
     friend struct RecordingServerStopTest;
+    friend struct HeatmapChunkWireTest;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
     SentinelStreamServer* owner_ = nullptr;
     std::string peer_;  // "ip:port" of the client, for log lines only
     std::unordered_set<std::string> subscriptions_;
-    struct PendingWrite { std::string payload; bool recording = false; };
+    // binary: sent as a WebSocket binary frame. chunk: counted against the
+    // per-session chunk byte budget instead of the slow-client write limit.
+    struct PendingWrite { std::string payload; bool recording = false; bool binary = false; bool chunk = false; };
     std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
     std::shared_ptr<recording::LiveWriteSlot> recordingWriteSlot_ = std::make_shared<recording::LiveWriteSlot>();
     recording::LiveRegistrationGate recordingRegistrationGate_;
@@ -248,6 +253,25 @@ class Session : public std::enable_shared_from_this<Session> {
 
     static constexpr size_t kMaxPendingWriteBytes = 16U * 1024U * 1024U;
     static constexpr size_t kMaxPendingModelEvents = 2048U;
+    // Heatmap chunk budget (executor-only counters). A job is admitted only while
+    // fewer than kMaxChunkJobs are building and queued chunk replies hold less than
+    // kMaxChunkBytes; anything else gets an explicit Busy error frame. One reply
+    // (at most 16 MiB) can overshoot the byte budget per admitted job. Half of the
+    // server-wide history pool (8), so one session cannot starve candle/TPO history.
+    static constexpr size_t kMaxChunkJobs = 4U;
+    static constexpr size_t kMaxChunkBytes = 32U * 1024U * 1024U;
+    size_t chunkJobs_ = 0;
+    size_t chunkBytes_ = 0;
+    // Availability push: last message sent and the watermark fingerprint it
+    // was built from, per subscribed symbol. Executor-only.
+    struct AvailabilityState { std::vector<int64_t> fingerprint; std::string sent; bool busy = false; };
+    std::unordered_map<std::string, AvailabilityState> availability_;
+
+    void releaseWrite(const PendingWrite& write) {
+        if (write.recording) recordingWriteSlot_->release();
+        else if (write.chunk) chunkBytes_ -= std::min(chunkBytes_, write.payload.size());
+        else releasePendingWriteBytes(write.payload.size());
+    }
 
     void releasePendingWriteBytes(size_t bytes) {
         size_t current = pendingWriteBytes_.load(std::memory_order_relaxed);
@@ -317,6 +341,8 @@ class Session : public std::enable_shared_from_this<Session> {
 
         disconnectModelSignals();
         overlayTimer_.cancel();
+        availabilityTimer_.cancel();
+        availability_.clear();
         overlayHistory_.clear();
         if (recordingView_) recordingView_->active.store(false);
         recordingView_.reset();
@@ -342,10 +368,8 @@ class Session : public std::enable_shared_from_this<Session> {
         beast::get_lowest_layer(ws_).socket().close(ignored);
 
         if (write_queue_.size() > 1) {
-            for (auto it = std::next(write_queue_.begin()); it != write_queue_.end(); ++it) {
-                if (it->recording) recordingWriteSlot_->release();
-                else releasePendingWriteBytes(it->payload.size());
-            }
+            for (auto it = std::next(write_queue_.begin()); it != write_queue_.end(); ++it)
+                releaseWrite(*it);
             write_queue_.erase(std::next(write_queue_.begin()), write_queue_.end());
         }
 
@@ -367,6 +391,7 @@ class Session : public std::enable_shared_from_this<Session> {
     // by the history queue (8) plus the running job; erased on completion/cancel.
     std::map<std::string, std::shared_ptr<std::atomic_bool>> tpoRequestCancel_;
     net::steady_timer overlayTimer_{ws_.get_executor()};
+    net::steady_timer availabilityTimer_{ws_.get_executor()};
     bool overlayBusy_ = false;
     size_t overlayCursor_ = 0;
     uint64_t nextOverlayGeneration_ = 1;
@@ -568,6 +593,115 @@ class Session : public std::enable_shared_from_this<Session> {
         }
     }
 
+    std::shared_ptr<recording::ChunkService> chunkService() const {
+        return owner_ ? owner_->m_chunks : nullptr;
+    }
+    static std::string chunkEnvelope(uint64_t req, const std::vector<uint8_t>& body) {
+        const auto wire = heatmap::encodeChunkEnvelope(req, body);
+        return std::string(reinterpret_cast<const char*>(wire.data()), wire.size());
+    }
+    // Immediate refusals are small and go through the ordinary write limit.
+    void sendChunkError(uint64_t req, const heatmap::ChunkKey& key, heatmap::ChunkError code,
+                        const std::string& message) {
+        sLog_Probe("chunks.refuse", "peer=" << peer_ << " req=" << req << " start=" << key.startMs
+                   << " code=" << heatmap::chunkErrorName(code) << " message=" << message);
+        do_write(chunkEnvelope(req, *recording::chunkErrorFrame(key, code, message)), true);
+    }
+    void handleChunkRequest(const nlohmann::json& j) {
+        protocol::chunkwire::Request q;
+        if (const auto error = protocol::chunkwire::parseRequest(j, q)) {
+            sLog_Warning("Chunk request rejected: peer=" << peer_ << " req=" << q.req << " reason=" << *error);
+            sendChunkError(q.req, {q.symbol, q.source, q.levelMs, 0}, heatmap::ChunkError::InvalidRequest, *error);
+            return;
+        }
+        const auto service = chunkService();
+        size_t admitted = 0;
+        for (size_t i = 0; i < q.starts.size(); ++i) {
+            const auto key = q.key(i);
+            if (!service) {
+                sendChunkError(q.req, key, heatmap::ChunkError::Unavailable, "recording chunks unavailable");
+                continue;
+            }
+            if (chunkJobs_ >= kMaxChunkJobs || chunkBytes_ >= kMaxChunkBytes) {
+                sendChunkError(q.req, key, heatmap::ChunkError::Busy,
+                               "session chunk budget exhausted: jobs=" + std::to_string(chunkJobs_) +
+                               " bytes=" + std::to_string(chunkBytes_));
+                continue;
+            }
+            ++chunkJobs_;
+            const bool queued = owner_->submitHistoryTask(
+                [weak = weak_from_this(), executor = ws_.get_executor(), service, key,
+                 have = q.haveHash[i], req = q.req] {
+                    auto payload = chunkEnvelope(req, *service->serve(key, have));
+                    net::post(executor, [weak, payload = std::move(payload)]() mutable {
+                        if (auto self = weak.lock()) self->onChunkReply(std::move(payload));
+                    });
+                });
+            if (!queued) {
+                --chunkJobs_;
+                sendChunkError(q.req, key, heatmap::ChunkError::Busy, "server chunk workers busy");
+                continue;
+            }
+            ++admitted;
+        }
+        sLog_Probe("chunks.request", "peer=" << peer_ << " req=" << q.req << " symbol=" << q.symbol
+                   << " source=" << q.source << " level=" << q.levelMs << " starts=" << q.starts.size()
+                   << " admitted=" << admitted << " jobs=" << chunkJobs_ << " bytes=" << chunkBytes_);
+    }
+    // Executor: a worker finished one admitted job.
+    void onChunkReply(std::string payload) {
+        if (chunkJobs_ > 0) --chunkJobs_;
+        if (closing_.load(std::memory_order_acquire)) return;
+        chunkBytes_ += payload.size();
+        write_queue_.push_back({std::move(payload), false, true, true});
+        if (write_queue_.size() == 1) internal_async_write();
+    }
+    void pushAvailability(const std::string& symbol) {
+        const auto service = chunkService();
+        if (!service || closing_.load()) return;
+        auto& state = availability_[symbol];
+        if (state.busy) return;
+        auto fingerprint = service->availabilityFingerprint(symbol);
+        if (!state.sent.empty() && fingerprint == state.fingerprint) return;
+        state.busy = true;
+        const bool queued = owner_->submitHistoryTask(
+            [weak = weak_from_this(), executor = ws_.get_executor(), service, symbol, fingerprint] {
+                std::string payload;
+                try {
+                    payload = protocol::chunkwire::buildAvailability(symbol, service->availability(symbol)).dump();
+                } catch (const std::exception& e) {
+                    sLog_Warning("Heatmap availability failed: symbol=" << symbol << " error=" << e.what());
+                }
+                net::post(executor, [weak, symbol, fingerprint, payload = std::move(payload)]() mutable {
+                    if (auto self = weak.lock()) self->onAvailability(symbol, std::move(fingerprint), std::move(payload));
+                });
+            });
+        if (!queued) state.busy = false; // the availability timer retries
+    }
+    void onAvailability(const std::string& symbol, std::vector<int64_t> fingerprint, std::string payload) {
+        if (closing_.load()) return;
+        const auto it = availability_.find(symbol);
+        if (it == availability_.end()) return; // unsubscribed meanwhile
+        it->second.busy = false;
+        if (payload.empty()) return;            // failed; the timer retries
+        it->second.fingerprint = std::move(fingerprint);
+        if (payload == it->second.sent) return;
+        it->second.sent = payload;
+        do_write(std::move(payload));
+    }
+    void armAvailabilityTimer() {
+        if (closing_.load() || !chunkService()) return;
+        availabilityTimer_.expires_after(std::chrono::seconds(1));
+        availabilityTimer_.async_wait([weak = weak_from_this()](beast::error_code ec) {
+            if (auto self = weak.lock(); self && !ec && !self->closing_.load()) {
+                std::vector<std::string> symbols;
+                for (const auto& [symbol, state] : self->availability_) symbols.push_back(symbol);
+                for (const auto& symbol : symbols) self->pushAvailability(symbol);
+                self->armAvailabilityTimer();
+            }
+        });
+    }
+
 public:
     explicit Session(tcp::socket&& socket, ssl::context& ctx,
                      ServerDataModel& model, SentinelStreamServer* owner)
@@ -709,6 +843,7 @@ public:
             m_tradingBroadcasterRegistered = true;
         }
         armOverlayTimer();
+        armAvailabilityTimer();
         do_read();
     }
 
@@ -739,6 +874,13 @@ public:
         if(ec)
             return fail(ec, "read");
 
+        if (ws_.got_binary()) {
+            // Clients send JSON requests only; binary frames are server -> client.
+            sLog_Warning("Ignoring binary frame from client: peer=" << peer_ << " bytes=" << buffer_.size());
+            buffer_.consume(buffer_.size());
+            do_read();
+            return;
+        }
         std::string msg = beast::buffers_to_string(buffer_.data());
         handle_message(msg);
         buffer_.consume(buffer_.size());
@@ -795,7 +937,9 @@ public:
                     snapshot["asks"] = asksJson;
                     
                     do_write(snapshot.dump());
-                    
+                    // Availability is (re)sent on every subscribe, then on change.
+                    availability_[symbol].sent.clear();
+                    pushAvailability(symbol);
                 }
             } else if (type == "heatmap_recording_view") {
                 const auto view = protocol::recordingwire::parseView(j);
@@ -839,6 +983,8 @@ public:
                     "capacity", "recording live view capacity reached or service stopped").dump());
                 sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
                     << " gen=" << view->generation << " layer=" << view->layer);
+            } else if (type == "heatmap_chunk_request") {
+                handleChunkRequest(j);
             } else if (type == "heatmap_history_request") {
                 std::string symbol = j.value("symbol", "");
                 const std::string source = j.value("source", std::string("legacy"));
@@ -1161,6 +1307,7 @@ public:
                  if (const auto it = overlays_.find(symbol); it != overlays_.end())
                      it->second.cancelled->store(true);
                  overlays_.erase(symbol);
+                 availability_.erase(symbol);
                  std::erase_if(overlayHistory_, [&](const auto& q) {
                      if (q.symbol != symbol) return false;
                      // Queued pages never reach pumpOverlays(); release their cancel flags here.
@@ -1493,7 +1640,7 @@ public:
         } else write_queue_.insert(std::next(write_queue_.begin()), {std::move(payload), true});
     }
 
-    void do_write(std::string payload) {
+    void do_write(std::string payload, bool binary = false) {
         if (payload.empty() || closing_.load(std::memory_order_acquire)) {
             return;
         }
@@ -1520,7 +1667,7 @@ public:
             beast::bind_front_handler(
                 &Session::on_write_post,
                 shared_from_this(),
-                std::move(payload)));
+                std::move(payload), binary));
     }
 
     void send_error(const std::string& context, const std::string& symbol, const std::string& message) {
@@ -1536,12 +1683,12 @@ public:
         do_write(err.dump());
     }
     
-    void on_write_post(std::string payload) {
+    void on_write_post(std::string payload, bool binary) {
         if (closing_.load(std::memory_order_acquire)) {
             releasePendingWriteBytes(payload.size());
             return;
         }
-        write_queue_.push_back({std::move(payload), false});
+        write_queue_.push_back({std::move(payload), false, binary});
         
         if (write_queue_.size() > 1) {
             return;
@@ -1551,6 +1698,7 @@ public:
     }
     
     void internal_async_write() {
+        ws_.binary(write_queue_.front().binary);
         ws_.async_write(
             net::buffer(write_queue_.front().payload),
             beast::bind_front_handler(
@@ -1560,8 +1708,7 @@ public:
     
     void on_write_complete(beast::error_code ec, std::size_t) {
         if (!write_queue_.empty()) {
-            if (write_queue_.front().recording) recordingWriteSlot_->release();
-            else releasePendingWriteBytes(write_queue_.front().payload.size());
+            releaseWrite(write_queue_.front());
             write_queue_.pop_front();
         }
         if (ec) {
@@ -1598,6 +1745,17 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
     , m_serverConfig(config)
     , m_port(port)
 {
+    if (model.recordingDir()) {
+        m_chunks = std::make_shared<recording::ChunkService>(
+            *model.recordingDir(),
+            [&model](const std::string& symbol, const std::string& layer) {
+                return model.recordingWatermarks(symbol, layer);
+            },
+            [] {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            });
+    }
 }
 
 SentinelStreamServer::~SentinelStreamServer() {

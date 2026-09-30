@@ -25,18 +25,19 @@ TileRange tilesCovering(double timeLoMs, double timeHiMs, int64_t tfMs, int64_t 
     return {tileOfBucket(first) - marginTiles, tileOfBucket(end - 1) + 1 + marginTiles};
 }
 
-std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &layer, int64_t tfMs,
+std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &source, int64_t tfMs,
                                 int64_t startMs, int64_t endMs, const Availability &availability) {
     std::vector<ChunkKey> out;
     const int64_t lo = std::max(startMs, availability.oldestMs), hi = std::min(endMs, availability.endMs);
     if (hi <= lo || tfMs <= 0) return out;
-    const bool hours = layer == "deep" && tfMs % kHourMs == 0 && availability.hourThroughMs > 0;
+    const auto *src = findChunkSource(source);
+    const bool hours = src && src->hourLevel && tfMs % kHourMs == 0 && availability.hourThroughMs > 0;
     const int64_t split = hours ? std::clamp(availability.hourThroughMs, lo, hi) : lo;
     if (split > lo)
         for (int64_t s = floorDiv(lo, kDayMs) * kDayMs; s < split; s += kDayMs)
-            out.push_back({symbol, layer, kHourMs, s});
+            out.push_back({symbol, source, kHourMs, s});
     for (int64_t s = floorDiv(split, kHourMs) * kHourMs; s < hi; s += kHourMs)
-        out.push_back({symbol, layer, kMinuteMs, s});
+        out.push_back({symbol, source, kMinuteMs, s});
     return out;
 }
 

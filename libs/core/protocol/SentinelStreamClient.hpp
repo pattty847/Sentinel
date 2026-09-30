@@ -17,6 +17,12 @@
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
 #include "RecordingHistoryWire.hpp"
+#include "ChunkWire.hpp"
+#include <boost/asio/thread_pool.hpp>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <functional>
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
@@ -35,6 +41,7 @@ class SentinelStreamClient : public QObject {
     friend struct TradeOverlayWireTest;
     friend struct CandleDataSourceTest;
     friend struct SentinelStreamClientWriteTest;
+    friend struct HeatmapChunkWireTest;
     Q_OBJECT
 public:
     struct HeatmapHistoryColumn {
@@ -72,6 +79,20 @@ public:
         bool isClosed = false;
     };
 
+    // Decoded chunk replies are immutable and shared, never copied per receiver.
+    using HeatmapChunkPtr = std::shared_ptr<const heatmap::ChunkFrame>;
+    struct HeatmapChunkError {
+        quint64 requestId = 0;     // 0 when a malformed frame carried no readable id
+        heatmap::ChunkKey key;     // as echoed by the server; empty for local errors
+        // Server: invalid_request | unavailable | busy | build_failed.
+        // Local:  malformed (hostile/corrupt frame) | superseded (an older open
+        // revision arrived after a newer one) | client_overloaded (decode backlog).
+        QString code, message;
+    };
+    // Bounded binary decode backlog; frames beyond it are refused, not queued.
+    static constexpr size_t kMaxDecodeBacklogBytes = 64U * 1024U * 1024U;
+    static constexpr size_t kMaxDecodeBacklogFrames = 256;
+
     explicit SentinelStreamClient(const std::string& host, const std::string& port,
                                   const std::string& caFile = "", QObject* parent = nullptr);
     ~SentinelStreamClient();
@@ -88,6 +109,12 @@ public:
     void registerRecordingView(const recording::LiveView& view);
     void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request);
     static std::optional<RecordingHistoryPage> parseRecordingHistoryChunk(const nlohmann::json& msg);
+    // One heatmap_chunk_request. Each start yields exactly one heatmapChunkReceived
+    // (Chunk or NotModified) or heatmapChunkFailed carrying the returned id.
+    // haveHash is empty or parallel to starts (0 = not held). No client-side
+    // budget here: the S5 controller paces requests; the server refuses with busy.
+    quint64 requestHeatmapChunks(const std::string& symbol, const std::string& source, int64_t levelMs,
+                                 const std::vector<int64_t>& starts, const std::vector<uint64_t>& haveHash = {});
     void requestFootprintHistory(const std::string& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -146,6 +173,12 @@ signals:
                                 int64_t requestEndMs,
                                 int64_t oldestAvailableMs,
                                 const QVector<HeatmapHistoryColumn>& columns);
+    // Emitted from decode/admission threads; connect with a queued connection.
+    // chunk->kind is Chunk or NotModified.
+    void heatmapChunkReceived(quint64 requestId, SentinelStreamClient::HeatmapChunkPtr chunk);
+    void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
+    // Sent on subscribe and whenever it changes. Refused on a wire-version mismatch.
+    void heatmapAvailabilityReceived(const protocol::chunkwire::Availability& availability);
     void recordingViewError(const QString& symbol, uint64_t generation, const QString& code,
                             const QString& message, int retryMs);
     void recordingHeatmapLiveReceived(const RecordingHistoryPage& page);
@@ -190,6 +223,9 @@ private:
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
     
     void handleMessage(const std::string& msg);
+    void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame);
+    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch);
+    bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
     void handleL2UpdateMessage(const nlohmann::json& msg);
@@ -236,6 +272,25 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
     std::atomic<quint64> m_candleDeliveryGeneration{0};
+
+    std::atomic<quint64> m_nextChunkRequestId{0};
+    // Replies from an older connection are dropped after reconnect.
+    std::atomic<quint64> m_connectionEpoch{0};
+    std::atomic<size_t> m_decodeBacklogBytes{0};
+    size_t m_decodeBacklogFrames = 0; // queued + running, guarded by m_chunkOrderMutex
+    unsigned m_decodeRefusals = 0; // one notification per reason until decode progress
+    // Serializes epoch invalidation with ordering and success/error publication.
+    // Signal consumers must use queued connections (never reenter under this lock).
+    struct ChunkOrder { bool sealed = false; uint64_t revision = 0; int64_t committedThroughMs = 0; };
+    std::mutex m_chunkOrderMutex;
+    bool m_acceptChunkFrames = true; // guarded by m_chunkOrderMutex
+    // Decoder dependency also lets tests pause an in-progress decode deterministically.
+    std::function<heatmap::ChunkEnvelope(std::span<const uint8_t>)> m_chunkDecoder = heatmap::decodeChunkEnvelope;
+    std::map<std::tuple<std::string, std::string, int64_t, int64_t>, ChunkOrder> m_chunkOrder;
+    static constexpr size_t kMaxChunkOrderKeys = 65536;
+    // One thread: decodes stay FIFO in arrival order. Declared last so it is
+    // joined (in the destructor) before anything it touches is destroyed.
+    std::unique_ptr<net::thread_pool> m_decodePool;
 };
 
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)
@@ -243,3 +298,6 @@ Q_DECLARE_METATYPE(SentinelStreamClient::RecordingHistoryPage)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(SentinelStreamClient::CandleBar)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::CandleBar>)
+Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkPtr)
+Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkError)
+Q_DECLARE_METATYPE(protocol::chunkwire::Availability)

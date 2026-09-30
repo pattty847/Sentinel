@@ -55,10 +55,11 @@ struct Availability {
     int64_t hourThroughMs = 0; // deep hour rollups exist before this (exclusive; 0 = none)
 };
 // Native chunk keys needed to compose [startMs, endMs) at tfMs, restricted to the
-// available range. Deep hour-multiple timeframes use hour chunks (one UTC day)
+// available range. `source` is a chunk source id (ChunkCodec kChunkSources). For a
+// source with an hour level, hour-multiple timeframes use hour chunks (one UTC day)
 // before hourThroughMs and minute chunks (one UTC hour) after it (the open tail),
 // as loadRecordingLevels; every other timeframe composes minutes. Ascending.
-std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &layer, int64_t tfMs,
+std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &source, int64_t tfMs,
                                 int64_t startMs, int64_t endMs, const Availability &availability);
 // Composes [startMs, endMs) (multiples of tfMs) from stored chunks in any order.
 // No chunks: an empty source with nothing scanned (every bucket NotLoaded).

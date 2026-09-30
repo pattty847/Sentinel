@@ -28,6 +28,8 @@ enum class MessageType {
     HeatmapHistoryRequest,
     HeatmapHistoryChunk,
     HeatmapRecordingLive,
+    HeatmapChunkRequest,  // JSON request; replies are binary SHE1/SHC1 frames
+    HeatmapAvailability,
     CandleHistoryRequest,
     CandleHistoryChunk,
     CandleBarUpdate,
@@ -66,6 +68,8 @@ inline std::string toString(MessageType t) {
         case MessageType::HeatmapHistoryRequest: return "heatmap_history_request";
         case MessageType::HeatmapRecordingLive: return "heatmap_recording_live";
         case MessageType::HeatmapHistoryChunk: return "heatmap_history_chunk";
+        case MessageType::HeatmapChunkRequest: return "heatmap_chunk_request";
+        case MessageType::HeatmapAvailability: return "heatmap_availability";
         case MessageType::CandleHistoryRequest: return "candle_history_request";
         case MessageType::CandleHistoryChunk: return "candle_history_chunk";
         case MessageType::CandleBarUpdate: return "candle_bar_update";
@@ -103,6 +107,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "heatmap_history_request") return MessageType::HeatmapHistoryRequest;
     if (s == "heatmap_recording_live") return MessageType::HeatmapRecordingLive;
     if (s == "heatmap_history_chunk") return MessageType::HeatmapHistoryChunk;
+    if (s == "heatmap_chunk_request") return MessageType::HeatmapChunkRequest;
+    if (s == "heatmap_availability") return MessageType::HeatmapAvailability;
     if (s == "candle_history_request") return MessageType::CandleHistoryRequest;
     if (s == "candle_history_chunk") return MessageType::CandleHistoryChunk;
     if (s == "candle_bar_update") return MessageType::CandleBarUpdate;

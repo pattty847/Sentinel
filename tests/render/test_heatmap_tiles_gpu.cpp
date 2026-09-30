@@ -457,7 +457,7 @@ TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
     }
     for (auto *item : items) ASSERT_TRUE(settle(scene, item, &error)) << error.toStdString();
     auto &store = lab::chunkStore();
-    const heatmap::ChunkKey open{lab::kSymbol, "deep", minute, epoch + 2 * hour}, sealed{lab::kSymbol, "deep", minute, epoch};
+    const heatmap::ChunkKey open{lab::kSymbol, "hmc2.deep", minute, epoch + 2 * hour}, sealed{lab::kSymbol, "hmc2.deep", minute, epoch};
     ASSERT_NE(store.cached(open), nullptr);
     ASSERT_FALSE(store.cached(open)->sealed);
     const uint64_t before = store.generationOf(open);

@@ -16,6 +16,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <thread>
 
 namespace {
@@ -39,7 +40,8 @@ void write64(std::vector<uint8_t>& wire, size_t offset, uint64_t n) {
 }
 struct WireOffsets { size_t hash, columns, entries, rawLen, zLen, payload; };
 WireOffsets offsets(const std::vector<uint8_t>& wire) {
-    const size_t hash = 9 + wire.at(8) + 1 + 24 + 40 + 8 + 8;
+    const size_t source = 9 + wire.at(8);
+    const size_t hash = source + 1 + wire.at(source) + 24 + 40 + 8 + 8;
     return {hash, hash+8, hash+12, hash+16, hash+20, hash+24};
 }
 uint64_t chunkHash(const std::vector<uint8_t>& wire, size_t prefixLen, const std::vector<uint8_t>& raw) {
@@ -144,8 +146,8 @@ protected:
 };
 TEST_F(ChunkTest, RoundTripGapsGridChangesCoverageAndOpenSealedState) {
     seed(); Hmc2Reader reader(root());
-    ChunkKey first{"BTC-USD", "deep", kMinuteMs, epoch};
-    ChunkKey second{"BTC-USD", "deep", kMinuteMs, epoch + kHourMs};
+    ChunkKey first{"BTC-USD", "hmc2.deep", kMinuteMs, epoch};
+    ChunkKey second{"BTC-USD", "hmc2.deep", kMinuteMs, epoch + kHourMs};
     const auto a = buildChunk(reader, first), b = buildChunk(reader, second);
     ASSERT_EQ(a.scannedRanges.size(), 1); EXPECT_EQ(a.scannedRanges[0].startMs, epoch);
     EXPECT_EQ(a.scannedRanges[0].endMs, epoch + kHourMs);
@@ -206,14 +208,14 @@ TEST_F(ChunkTest, RoundTripGapsGridChangesCoverageAndOpenSealedState) {
     EXPECT_TRUE(std::equal(response1.begin()+14, response1.end(), response2.begin()+14));
     cache.put(std::move(otherWire)); EXPECT_FALSE(cache.get(first));
     EXPECT_EQ(cache.size(), 1);
-    auto version = encoded; version[4] = 2;
+    auto version = encoded; version[4] = 1; // v1 (layer codes) is refused, no shim
     EXPECT_THROW(decodeChunk(version), std::invalid_argument);
     encoded.back() ^= 1;
     EXPECT_THROW(decodeChunk(encoded), std::invalid_argument);
 }
 TEST_F(ChunkTest, HourCoverageSidecarsRoundTripAndComposedV1IsRejected) {
     seed(); Hmc2Reader reader(root());
-    ChunkKey hourKey{"BTC-USD", "deep", kHourMs, epoch};
+    ChunkKey hourKey{"BTC-USD", "hmc2.deep", kHourMs, epoch};
     auto hours = buildChunk(reader, hourKey);
     const BookRecorder::Watermarks minuteOnly{epoch+kDayMs, epoch};
     EXPECT_FALSE(chunkState(hourKey, minuteOnly, 5).sealed);
@@ -225,7 +227,7 @@ TEST_F(ChunkTest, HourCoverageSidecarsRoundTripAndComposedV1IsRejected) {
     std::vector<uint8_t> hourWire;
     ASSERT_NO_THROW(hourWire = encodeChunk(f));
     ASSERT_NO_THROW(same(hours, decodeChunk(hourWire).columns));
-    auto minutes = buildChunk(reader, {"BTC-USD", "deep", kMinuteMs, epoch});
+    auto minutes = buildChunk(reader, {"BTC-USD", "hmc2.deep", kMinuteMs, epoch});
     auto composed = compose(minutes, 5 * kMinuteMs);
     ASSERT_FALSE(composed.columns.empty());
     EXPECT_TRUE(composed.columns.front().native.front().composed);
@@ -236,13 +238,13 @@ TEST_F(ChunkTest, HourCoverageSidecarsRoundTripAndComposedV1IsRejected) {
     EXPECT_EQ(composedHour.endMs, epoch + kHourMs);
     EXPECT_NO_THROW(validate(composedHour));
     composedHour.endMs = epoch + kDayMs; // partial scan inside a day-sized hour chunk
-    ChunkFrame cf{ChunkKind::Chunk, {"BTC-USD", "deep", kHourMs, epoch},
+    ChunkFrame cf{ChunkKind::Chunk, {"BTC-USD", "hmc2.deep", kHourMs, epoch},
                   {false, epoch+kHourMs, 0}, composedHour};
     EXPECT_THROW(encodeChunk(cf), std::invalid_argument);
 }
 TEST_F(ChunkTest, MalformedHeadersAndPayloadsAreBounded) {
     seed(); Hmc2Reader reader(root());
-    const ChunkKey key{"BTC-USD", "deep", kMinuteMs, epoch};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", kMinuteMs, epoch};
     auto wire = encodeChunk({ChunkKind::Chunk, key, {true, epoch+kHourMs, 0}, buildChunk(reader, key)});
     const auto o = offsets(wire);
     for (size_t len = 0; len < wire.size(); ++len)
@@ -278,9 +280,102 @@ TEST_F(ChunkTest, MalformedHeadersAndPayloadsAreBounded) {
     prematureSeal = rewritePayload(std::move(prematureSeal), [](auto&) {});
     EXPECT_THROW(decodeChunk(prematureSeal), std::invalid_argument);
 }
+TEST(ChunkCodecControl, SourceIdsNotModifiedAndErrorFramesAreExactAndBounded) {
+    // Only neutral source ids travel; HMC2 layer names are not valid ids.
+    EXPECT_EQ(chunkSpanMs("hmc2.near", kMinuteMs), kHourMs);
+    EXPECT_EQ(chunkSpanMs("hmc2.near", kHourMs), 0);
+    EXPECT_EQ(chunkSpanMs("hmc2.deep", kHourMs), kDayMs);
+    EXPECT_EQ(chunkSpanMs("deep", kMinuteMs), 0);
+    EXPECT_THROW(chunkEndMs({"BTC-USD", "deep", kMinuteMs, epoch}), std::invalid_argument);
+    ChunkFrame nm;
+    nm.kind = ChunkKind::NotModified;
+    nm.key = {"BTC-USD", "hmc2.near", kMinuteMs, epoch};
+    nm.state = {false, epoch + 30 * kMinuteMs, 31};
+    nm.contentHash = 0x0123456789abcdefULL;
+    const auto nmWire = encodeChunk(nm);
+    const auto nmBack = decodeChunkEnvelope(encodeChunkEnvelope(5, nmWire));
+    EXPECT_EQ(nmBack.requestId, 5);
+    EXPECT_EQ(nmBack.chunk.kind, ChunkKind::NotModified);
+    EXPECT_EQ(nmBack.chunk.key, nm.key);
+    EXPECT_EQ(nmBack.chunk.state.committedThroughMs, nm.state.committedThroughMs);
+    EXPECT_EQ(nmBack.chunk.state.revision, 31);
+    EXPECT_EQ(nmBack.chunk.contentHash, nm.contentHash);
+    for (size_t len = 0; len < nmWire.size(); ++len)
+        EXPECT_THROW(decodeChunk(std::span(nmWire.data(), len)), std::invalid_argument) << len;
+    auto trailing = nmWire; trailing.push_back(0);
+    EXPECT_THROW(decodeChunk(trailing), std::invalid_argument);
+    auto badSeal = nm; badSeal.state = {true, epoch + kHourMs, 3};
+    EXPECT_THROW(encodeChunk(badSeal), std::invalid_argument);
+    auto badKey = nm; badKey.key.startMs += kMinuteMs;
+    EXPECT_THROW(encodeChunk(badKey), std::invalid_argument);
+
+    ChunkFrame err;
+    err.kind = ChunkKind::Error;
+    err.key = {"NOT A SYMBOL", "whatever", 7, -1}; // echoed as sent
+    err.error = ChunkError::Busy;
+    err.message = "session chunk budget exhausted";
+    const auto errWire = encodeChunk(err);
+    const auto errBack = decodeChunk(errWire);
+    EXPECT_EQ(errBack.kind, ChunkKind::Error);
+    EXPECT_EQ(errBack.key, err.key);
+    EXPECT_EQ(errBack.error, ChunkError::Busy);
+    EXPECT_EQ(errBack.message, err.message);
+    EXPECT_STREQ(chunkErrorName(errBack.error), "busy");
+    for (size_t len = 0; len < errWire.size(); ++len)
+        EXPECT_THROW(decodeChunk(std::span(errWire.data(), len)), std::invalid_argument) << len;
+    auto unknownCode = err; unknownCode.error = ChunkError(99);
+    EXPECT_THROW(encodeChunk(unknownCode), std::invalid_argument);
+    auto longMessage = err; longMessage.message.assign(256, 'x');
+    EXPECT_THROW(encodeChunk(longMessage), std::invalid_argument);
+    auto reserved = errWire; reserved[6] = uint8_t(ChunkKind::LiveColumn);
+    EXPECT_THROW(decodeChunk(reserved), std::invalid_argument);
+}
+TEST(ChunkCodecControl, NotModifiedTimestampBoundsBeforeArithmetic) {
+    // Exercise both native levels and both edges of the supported timestamp range.
+    for (const int64_t level : {kMinuteMs, kHourMs}) {
+        ChunkFrame frame;
+        frame.kind = ChunkKind::NotModified;
+        frame.key = {"BTC-USD", "hmc2.deep", level, epoch};
+        const int64_t span = chunkSpanMs(frame.key.source, level);
+        const auto validWire = encodeChunk(frame);
+        const size_t startAt = 8 + 1 + frame.key.symbol.size() + 1 + frame.key.source.size() + 8;
+        const int64_t last = kHmc2EndMs - span;
+        const int64_t max = std::numeric_limits<int64_t>::max();
+        const int64_t min = std::numeric_limits<int64_t>::min();
+        for (const int64_t start : {max, min, max - span + 1, max - span, min + span,
+                                   epoch - span, epoch - 1, epoch, epoch + 1,
+                                   last - 1, last, last + 1, kHmc2EndMs}) {
+            SCOPED_TRACE(::testing::Message() << "level=" << level << " start=" << start);
+            frame.key.startMs = start;
+            // Handcraft bytes from a valid frame; do not rely on the encoder to reject them.
+            auto wire = validWire;
+            write64(wire, startAt, uint64_t(start));
+            if (start == epoch || start == last) {
+                EXPECT_EQ(decodeChunk(wire).key.startMs, start);
+                EXPECT_EQ(decodeChunk(encodeChunk(frame)).key.startMs, start);
+            } else {
+                EXPECT_THROW(decodeChunk(wire), std::invalid_argument);
+                EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+            }
+        }
+        frame.key.startMs = epoch;
+        auto unknownSource = validWire;
+        unknownSource.at(8 + 1 + frame.key.symbol.size() + 1) = 'x';
+        EXPECT_THROW(decodeChunk(unknownSource), std::invalid_argument);
+        auto badLevel = validWire;
+        write64(badLevel, startAt - 8, uint64_t(max));
+        EXPECT_THROW(decodeChunk(badLevel), std::invalid_argument);
+        frame.key.levelMs = max;
+        EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+        frame.key.levelMs = level;
+        frame.key.source = "unknown";
+        EXPECT_THROW(encodeChunk(frame), std::invalid_argument);
+    }
+}
+
 TEST_F(ChunkTest, SharedCacheReplacesByBytesAndRetainsBorrowedBuffers) {
     seed(); Hmc2Reader reader(root());
-    const ChunkKey key{"BTC-USD", "deep", kMinuteMs, epoch};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", kMinuteMs, epoch};
     ChunkFrame a{ChunkKind::Chunk, key, {true, epoch+kHourMs, 0}, buildChunk(reader, key)};
     auto oldWire = encodeChunk(a);
     auto b = a; b.columns.columns.front().flags |= kLateEvents;
@@ -315,10 +410,10 @@ TEST_F(ChunkTest, SharedCacheReplacesByBytesAndRetainsBorrowedBuffers) {
 TEST_F(ChunkTest, DecodeEncodeBuildChunkMatchesBuildPage) {
     seed(); Hmc2Reader reader(root());
     std::array<SparseColumns, 2> chunks{
-        buildChunk(reader, {"BTC-USD", "deep", kMinuteMs, epoch}),
-        buildChunk(reader, {"BTC-USD", "deep", kMinuteMs, epoch+kHourMs})};
+        buildChunk(reader, {"BTC-USD", "hmc2.deep", kMinuteMs, epoch}),
+        buildChunk(reader, {"BTC-USD", "hmc2.deep", kMinuteMs, epoch+kHourMs})};
     for (auto& c : chunks) {
-        ChunkKey key{c.symbol, c.layer, c.tfMs, c.startMs};
+        ChunkKey key{c.symbol, "hmc2." + c.layer, c.tfMs, c.startMs};
         c = decodeChunk(encodeChunk({ChunkKind::Chunk, key, {true, c.endMs, 0}, c})).columns;
     }
     for (int64_t tf : {kMinuteMs, 5*kMinuteMs}) {
@@ -360,7 +455,7 @@ TEST_F(ChunkTest, RecorderLevelWatermarksKeepUnwrittenHourNotLoaded) {
     BookRecorder recorder(std::move(cfg), [&] { return local; });
     recorder.onSnapshot("BTC-USD", local, {{true, 99., 2.}, {false, 101., 4.}});
     recorder.drainForTest();
-    const ChunkKey hourKey{"BTC-USD", "deep", kHourMs, epoch};
+    const ChunkKey hourKey{"BTC-USD", "hmc2.deep", kHourMs, epoch};
     local = epoch + kHourMs + 1999;
     recorder.onTick(local);
     recorder.drainForTest();
@@ -398,7 +493,7 @@ TEST(ChunkBench, LastComplete24Hours) {
         ASSERT_GE(end - 24*kHourMs, kHmc2MinMs);
         size_t totalBytes = 0; double coldMs = 0, encMs = 0, decMs = 0;
         for (int i = 0; i < 24; ++i) {
-            ChunkKey key{"BTC-USD", layer, kMinuteMs, end - (24-i)*kHourMs};
+            ChunkKey key{"BTC-USD", std::string("hmc2.") + layer, kMinuteMs, end - (24-i)*kHourMs};
             const auto start = Clock::now();
             Hmc2Reader cold(root);
             const auto chunk = buildChunk(cold, key);

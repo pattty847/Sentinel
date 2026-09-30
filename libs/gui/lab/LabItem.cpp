@@ -986,7 +986,7 @@ void LabItem::reviseNewestChunk() {
             info = layerInfo(layerName, true);
             if (info.error.empty()) {
                 const int64_t newest = recording::floorDiv(info.availability.endMs - 1, heatmap::kHourMs) * heatmap::kHourMs;
-                chunkStore().reload({kSymbol, layerName, heatmap::kMinuteMs, newest});
+                chunkStore().reload({kSymbol, std::string(heatmap::chunkSourceForHmc2Layer(layerName)->id), heatmap::kMinuteMs, newest});
             }
         } catch (const std::exception &) {
         }
