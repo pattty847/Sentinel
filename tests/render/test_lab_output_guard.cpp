@@ -132,6 +132,23 @@ TEST_F(LabOutputGuard, WindowScreenshotRefusesAPathInsideTheRoot) {
     EXPECT_TRUE(output.contains("recording root")) << output.toStdString();
 }
 
+// "link/.." must not be cleaned lexically before the link is resolved: with
+// link -> recording/BTC-USD, "link/../result.png" is recording/result.png on
+// POSIX. Any ".." component is refused, checked through a real writer.
+TEST_F(LabOutputGuard, DotDotAfterALinkIsRefusedByTheScreenshotWriter) {
+    const auto link = base / "link";
+    if (!makeDirectoryLink(link, root / "BTC-USD")) GTEST_SKIP() << "cannot create a directory link here";
+    const QString requested = q(link) + QStringLiteral("/../result.png");
+    EXPECT_FALSE(lab::labOutputAllowed(requested));
+    QByteArray output;
+    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("20000"), QStringLiteral("--screenshot"), requested},
+                     root, &output), 2)
+        << output.toStdString();
+    EXPECT_TRUE(output.contains("..")) << output.toStdString();
+    EXPECT_FALSE(fs::exists(root / "result.png"));
+    EXPECT_FALSE(fs::exists(base / "result.png"));
+}
+
 TEST_F(LabOutputGuard, PathsOutsideTheConfiguredRootAreAllowedWithoutTheOverride) {
     qunsetenv("SENTINEL_RECORDING_ROOT"); // the config default (if any) is not this temp directory
     EXPECT_TRUE(allowed(base / "anywhere.png"));

@@ -15,9 +15,9 @@ namespace lab {
 std::string recordingRoot();
 // Lab outputs must never land inside the recording root (read-only for the
 // lab). False, with `why`, when `path` is inside it however it gets there
-// (aliases, symlinks, junctions, not-yet-created descendants), or when either
-// path cannot be resolved (fail closed). Call before creating directories and
-// again right before writing.
+// (aliases, symlinks, junctions, not-yet-created descendants), when the path
+// has a ".." component, or when either path cannot be resolved (fail closed).
+// Call before creating directories and again right before writing.
 bool labOutputAllowed(const QString &path, QString *why = nullptr);
 
 struct LabSource {
