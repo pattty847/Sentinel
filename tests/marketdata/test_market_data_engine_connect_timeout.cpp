@@ -56,7 +56,17 @@ class Peer {
 public:
     enum class Mode { AcceptTcpOnly, WsSilent, WsHeartbeats };
     Peer(ssl::context& tls, Mode mode) : m_tls(tls), m_mode(mode) {
-        accept();
+        // "localhost" resolves to ::1 first on Windows, and a refused loopback
+        // connect takes ~2 s there (SYN retries): longer than these connect
+        // deadlines. Listen on ::1 too, same port, so the first address answers.
+        beast::error_code ec;
+        m_acceptor6.open(tcp::v6(), ec);
+        if (!ec) m_acceptor6.set_option(net::ip::v6_only(true), ec);
+        if (!ec) m_acceptor6.bind({net::ip::address_v6::loopback(), m_acceptor.local_endpoint().port()}, ec);
+        if (!ec) m_acceptor6.listen(net::socket_base::max_listen_connections, ec);
+        if (ec) m_acceptor6.close(ec); // no IPv6 loopback: localhost is IPv4 only here
+        accept(m_acceptor);
+        if (m_acceptor6.is_open()) accept(m_acceptor6);
         m_thread = std::thread([this] { m_io.run(); });
     }
     ~Peer() {
@@ -76,8 +86,8 @@ private:
         net::steady_timer timer;
         uint64_t sequence = 0;
     };
-    void accept() {
-        m_acceptor.async_accept([this](beast::error_code ec, tcp::socket socket) {
+    void accept(tcp::acceptor& acceptor) {
+        acceptor.async_accept([this, &acceptor](beast::error_code ec, tcp::socket socket) {
             if (ec) return;
             { std::lock_guard lock(m_mutex); m_accepts.push_back(Clock::now()); }
             auto session = std::make_shared<Session>(std::move(socket), m_tls);
@@ -91,7 +101,7 @@ private:
                     });
                 });
             }
-            accept();
+            accept(acceptor);
         });
     }
     void heartbeat(std::shared_ptr<Session> session) {
@@ -109,6 +119,7 @@ private:
     net::io_context m_io;
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_guard{net::make_work_guard(m_io)};
     tcp::acceptor m_acceptor{m_io, {net::ip::make_address("127.0.0.1"), 0}};
+    tcp::acceptor m_acceptor6{m_io};
     std::vector<std::shared_ptr<Session>> m_sessions;
     mutable std::mutex m_mutex;
     std::vector<Clock::time_point> m_accepts;

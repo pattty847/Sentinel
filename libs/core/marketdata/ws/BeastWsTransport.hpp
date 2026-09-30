@@ -90,7 +90,8 @@ private:
     void closeSocket();
     void armDeadline(uint64_t id, std::chrono::milliseconds timeout);
     void fail(uint64_t id, const std::string& error);
-    void finishClose(uint64_t id, beast::error_code ec);
+    // error: reported instead of ec.message() when not empty.
+    void finishClose(uint64_t id, beast::error_code ec, const std::string& error = {});
 
     // Handlers
     void onResolve(uint64_t id, beast::error_code ec, tcp::resolver::results_type results);
