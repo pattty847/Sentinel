@@ -249,6 +249,13 @@ void SpanSourceCache::freed() {
         emit capacityFreed();
     }, Qt::QueuedConnection);
 }
+void SpanSourceCache::resizeLiveReservation(const HeatmapSourceController *self, size_t before, size_t after,
+                                           bool atKeeper) {
+    const auto it = state_->commitments.find(self);
+    if (it == state_->commitments.end()) return;
+    Q_ASSERT(it->second.reservation >= before);
+    commitCpu(self, it->second.keys, it->second.reservation - before + after, atKeeper);
+}
 size_t SpanSourceCache::pinnedBytes() const { return state_->claimedBytes + state_->reservedBytes; }
 SpanSourceCache::Hint SpanSourceCache::hint(const SpanId &span, const std::string &source) const {
     const auto it = state_->hints.find({span, source});
@@ -477,17 +484,19 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
     cache_.attach(this);
     auto changed = [this](const ChunkKey &key, quint64) {
         if (!wanted_.contains(key) && !liveWanted_.contains(key)) return;
-        invalidateLive();
+        if (liveWanted_.contains(key)) invalidateLive();
         failedChunks_.erase(key);
         schedule();
     };
     connect(&fetcher_, &ChunkFetcher::chunkStored, this, changed, Qt::QueuedConnection);
     // A revision matters even for a chunk no longer wanted: a built span may use it.
     connect(&fetcher_, &ChunkFetcher::chunkRevised, this, [this](const ChunkKey &key, quint64) {
-        if (key.symbol == symbol_) { invalidateLive(); schedule(); }
+        if (key.symbol != symbol_) return;
+        if (liveWanted_.contains(key)) invalidateLive();
+        schedule();
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::liveChanged, this, [this](const QString &symbol) {
-        if (symbol.toStdString() == symbol_) { invalidateLive(); schedule(); }
+        if (symbol.toStdString() == symbol_) { invalidateLive(); refreshLive(); }
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::chunkFailed, this, [this](const ChunkKey &key, const QString &, const QString &) {
         if (!wanted_.contains(key)) return;
@@ -624,30 +633,58 @@ void HeatmapSourceController::mergeLatestResolution() {
     summary->tfMs = tfMs_;
     summary->priceScale = priceScale_;
     if (latest_) *summary = latest_->resolution;
-    if (latestLive_ && latestLive_->serial == serial_) mergeResolution(*summary, latestLive_->resolution);
+    if (latestLive_ && latestLive_->serial == serial_ && summary->tfMs == latestLive_->tfMs) {
+        auto at = summary->columns.begin();
+        for (const auto &column : latestLive_->resolution.columns) {
+            at = std::lower_bound(at, summary->columns.end(), column.startMs,
+                                 [](const auto &c, int64_t t) { return c.startMs < t; });
+            if (at == summary->columns.end() || at->startMs != column.startMs)
+                at = summary->columns.insert(at, {column.startMs, {}});
+            for (const auto &live : column.sources) {
+                const auto history = std::find_if(at->sources.begin(), at->sources.end(),
+                                                 [&](const auto &s) { return s.source == live.source; });
+                if (history == at->sources.end()) at->sources.push_back(live);
+                else if (history->state == BucketState::NotLoaded) *history = live;
+            }
+            ++at;
+        }
+    }
     latestResolution_ = std::move(summary);
 }
 void HeatmapSourceController::invalidateLive() {
-    ++liveToken_;
     liveDirty_ = true;
 }
+bool HeatmapSourceController::overlapsLive(const SpanId &span) const {
+    if (span.symbol != symbol_ || span.tfMs != tfMs_) return false;
+    for (const auto &edge : fetcher_.live(symbol_)) {
+        const auto start = liveStarts_.find(edge->source);
+        if (start != liveStarts_.end() && span.endMs() > start->second && span.startMs() < edge->openEndMs)
+            return true;
+    }
+    return false;
+}
+void HeatmapSourceController::setLiveBytes(size_t bytes) {
+    cache_.resizeLiveReservation(this, stats_.liveBytes, bytes, slots_.size() <= 1);
+    stats_.committedBytes = stats_.committedBytes - std::min(stats_.committedBytes, stats_.liveBytes) + bytes;
+    stats_.liveBytes = bytes;
+    if (cache_.committedCpuBytes() > cache_.cpuCeiling() && slots_.size() > 1) schedule();
+}
 void HeatmapSourceController::resetLive() {
-    ++liveToken_;
     liveDirty_ = false;
     liveTimer_->stop();
     liveDueMs_ = 0;
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveIntervalMs = 1000;
-    stats_.liveBytes = 0;
+    setLiveBytes(0);
     liveWanted_.clear();
     // An old job owns its old composer until it finishes; it cannot mutate the
-    // new timeframe's cache or publish after the serial/token changes.
+    // new timeframe's cache or publish after the serial/state changes.
     liveWork_ = std::make_shared<LiveWork>();
     {
         std::scoped_lock lock(latestMutex_);
         latestLive_.reset();
-        latestResolution_.reset();
+        mergeLatestResolution(); // retain the history summary while live is absent
     }
     emit liveChanged();
 }
@@ -766,7 +803,7 @@ void HeatmapSourceController::pollLive() {
         size_t bytes = 0;
     };
     auto result = std::make_shared<Result>();
-    const auto token = liveToken_, serial = serial_;
+    const auto serial = serial_;
     const auto tf = tfMs_;
     const auto scale = priceScale_;
     const auto symbol = symbol_;
@@ -807,7 +844,7 @@ void HeatmapSourceController::pollLive() {
         result->ms = double(clock() - begin) / 1e6;
         result->snapshot = std::move(out);
     };
-    auto done = [this, result, token, serial, state = liveWork_](const QString &error) {
+    auto done = [this, result, serial, started = now, state = liveWork_](const QString &error) {
         liveRunning_ = false;
         stats_.liveComposeMs = result->ms;
         stats_.liveComposedBuckets += result->buckets;
@@ -828,14 +865,12 @@ void HeatmapSourceController::pollLive() {
         sLog_Probe("heatmap.live.compose", "chart=" << chart_ << " symbol=" << symbol_ << " tf=" << tfMs_
                    << " ms=" << result->ms << " buckets=" << result->buckets << " committed=" << result->pieces
                    << " interval=" << stats_.liveIntervalMs);
-        if (state == liveWork_) stats_.liveBytes = token == liveToken_
-            ? result->bytes : std::max(stats_.liveBytes, result->bytes);
-        if (serial != serial_ || token != liveToken_) {
+        if (serial != serial_ || state != liveWork_) {
             ++stats_.liveStaleResults;
-            pollLive(); // newest input may run immediately; obsolete work is not a publication
+            pollLive(); // a different chart serial/state needs its own first picture
             return;
         }
-        liveDueMs_ = options_.nowMs() + stats_.liveIntervalMs;
+        liveDueMs_ = started + stats_.liveIntervalMs;
         if (!error.isEmpty()) {
             sLog_Warning("Heatmap live build failed chart=" << chart_ << " symbol=" << symbol_ << " error=" << error);
             emit buildFailed(error);
@@ -844,18 +879,22 @@ void HeatmapSourceController::pollLive() {
             return;
         }
         result->snapshot->version = ++liveVersion_;
+        setLiveBytes(result->bytes);
         {
             std::scoped_lock lock(latestMutex_);
             latestLive_ = result->snapshot;
             mergeLatestResolution();
         }
         ++stats_.livePublications;
-        schedule(); // account for retained live cache/image bytes in the CPU ledger
         emit liveChanged();
+        // Inputs that changed during this job are still dirty. Its consistent
+        // result is drawable now; the newest inputs run at the next cadence.
+        pollLive();
     };
     if (cache_.requestLive(std::move(keys), reservation, this, std::move(work), std::move(done))) {
         liveDirty_ = false;
         liveRunning_ = true;
+        liveDueMs_ = now + stats_.liveIntervalMs;
     } // a full pool retries on settled()
 }
 
@@ -876,7 +915,7 @@ void HeatmapSourceController::pollCapacity() {
         source.uploaded = true;
         source.drawCompleteEnd = source.ready->completeEndMs;
         liveUploadedEnds_[{key.span, key.source}] = source.ready->completeEndMs;
-        invalidateLive();
+        if (overlapsLive(key.span)) invalidateLive();
         if (source.ready->gpu) {
             // The node holds the GPU copy; keep the metadata, release the image.
             auto light = std::make_shared<SpanSourceBuild>(*source.ready);
@@ -1031,7 +1070,7 @@ void HeatmapSourceController::setReady(SourceSlot &source, SpanSourceBuildPtr bu
     source.lostRebuild = false;
     source.failed.reset();
     dirty_ = true;
-    invalidateLive();
+    if (overlapsLive(source.ready->key.span)) invalidateLive();
 }
 
 size_t HeatmapSourceController::chunkCost(const ChunkKey &key) const {

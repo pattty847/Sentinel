@@ -396,8 +396,8 @@ TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     ASSERT_FALSE(jobs.empty());
     send(tail(10, 11, 10, 2, 2000)); runJobs(); settle();
     ASSERT_TRUE(c.latestLive());
-    EXPECT_EQ(live(c).revision, 2u);
-    EXPECT_GT(c.stats().liveStaleResults, 0u);
+    EXPECT_EQ(live(c).revision, 1u); // publish consistent captured input, coalesce newer input
+    EXPECT_EQ(c.stats().liveStaleResults, 0u);
     const auto publication = c.latestLive();
     const auto count = c.stats().liveComposedBuckets;
     send(tail(10, 11, 10, 3, 3000)); runJobs();
@@ -415,13 +415,71 @@ TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     EXPECT_TRUE(std::any_of(it->sources.begin(), it->sources.end(), [](const auto &s) { return s.state == BucketState::Present; }));
     EXPECT_TRUE(std::any_of(summary->columns.begin(), summary->columns.end(), [](const auto &r) { return r.startMs == base; }));
 }
+TEST_F(LiveClient, UnrelatedHistoryEventsDoNotDiscardLiveJobsOrBypassCadenceAndBackoff) {
+    for (const int costMs : {0, 6}) {
+        SCOPED_TRACE(costMs);
+        charts.clear(); jobs.clear(); drainLive();
+        int64_t workerClock = 0;
+        composeClock = [&] { const auto t = workerClock; workerClock += costMs * 1'000'000; return t; };
+        now = 0; cutoff = minute(130); ++chunkRevision;
+        transport.push(available(cutoff)); drainLive();
+        auto &c = chart(kMinuteMs, 150); settle(); upload(c); settle();
+        send(tail(130, 130, 130, 1));
+        ASSERT_EQ(jobs.size(), 1u);
+        auto heldLiveJob = std::move(jobs.front()); jobs.pop_front();
+        auto historyBurst = [&] {
+            for (int i = 0; i < 3; ++i) {
+                put(store, chunk({symbol, source, kMinuteMs, base}, cutoff, ++chunkRevision));
+                drainLive(); runJobs();
+                auto keys = uploadKeys(c);
+                std::erase_if(keys, [](const auto &k) { return k.span.startMs() >= minute(64); });
+                c.capacity()->report(300ull << 20, keys); c.pollCapacity(); drainLive();
+            }
+        };
+        historyBurst();
+        send(tail(130, 130, 130, 2, 2000));
+        now = 500; heldLiveJob(); drainLive(); runJobs();
+        ASSERT_TRUE(c.latestLive());
+        EXPECT_EQ(live(c).revision, 1u);
+        EXPECT_EQ(c.stats().liveStaleResults, 0u);
+        EXPECT_EQ(c.stats().livePublications, 1u);
+        const auto first = c.latestLive();
+        const int interval = costMs > 5 ? 5000 : 1000;
+        EXPECT_EQ(c.stats().liveIntervalMs, interval);
+        historyBurst();
+        now = interval - 1; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), first);
+        now = interval; c.pollLive(); runJobs(); EXPECT_EQ(live(c).revision, 2u);
+        EXPECT_EQ(c.stats().livePublications, 2u); // due from job start, not completion
+        historyBurst();
+        now += interval; c.pollLive(); runJobs();
+        EXPECT_EQ(c.stats().livePublications, 2u); // no live input changed
+    }
+}
+TEST_F(LiveClient, WarmLiveFrameDoesNotReconcileSpansAndAutoHasUniqueSources) {
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    const auto reconciles = c.stats().reconciles;
+    send(tail(10, 10, 10, 2, 2000)); advance(c);
+    EXPECT_EQ(c.stats().reconciles, reconciles);
+    cutoff = minute(11); ++chunkRevision;
+    send(tail(10, 11, 11, 3)); settle(); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(10)); // history/live overlap until upload
+    for (const auto &column : c.latestResolution()->columns) {
+        std::set<std::string> names;
+        for (const auto &s : column.sources) EXPECT_TRUE(names.insert(s.source).second) << column.startMs;
+    }
+    c.setView(symbol, 5 * kMinuteMs, base, minute(80));
+    ASSERT_TRUE(c.latestResolution()); // reset keeps historical Auto available
+    EXPECT_FALSE(c.latestResolution()->columns.empty());
+    settle();
+}
 TEST_F(LiveClient, MultiSourceLUsesTheLowestUploadedEndAndReconnectUsesMinimumCutoff) {
     transport.push(available(cutoff, true)); drainLive();
     auto &c = chart(); settle(); upload(c); settle();
     ASSERT_EQ(transport.liveRequests.size(), 1u);
     ASSERT_EQ(transport.liveRequests.back().sources.size(), 2u);
     send(tail(10, 10, 10, 1));
-    send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle(); advance(c);
     ASSERT_EQ(c.latestLive()->sources.size(), 2u);
     cutoff = minute(11); ++chunkRevision;
     send(tail(10, 11, 11, 2));

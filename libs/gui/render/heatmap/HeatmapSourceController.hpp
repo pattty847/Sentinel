@@ -197,6 +197,7 @@ private:
     // to shed; over the ceiling, that emits overCeiling().
     void commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
                    bool atKeeper);
+    void resizeLiveReservation(const HeatmapSourceController *self, size_t before, size_t after, bool atKeeper);
     // The ledger total if `self` committed `keys` and `reservation` instead.
     size_t projectedCpuBytes(const HeatmapSourceController *self, const std::vector<ChunkBytes> &keys,
                              size_t reservation) const;
@@ -419,7 +420,7 @@ private:
     struct LiveWork;
     std::shared_ptr<LiveWork> liveWork_;
     QTimer *liveTimer_ = nullptr;
-    uint64_t liveToken_ = 0, liveVersion_ = 0;
+    uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
     int64_t liveDueMs_ = 0;
     std::map<std::string, int64_t> liveStarts_;
@@ -428,6 +429,8 @@ private:
     Stats stats_;
     void refreshLive();
     void invalidateLive();
+    bool overlapsLive(const SpanId &span) const;
+    void setLiveBytes(size_t bytes);
     void resetLive();
     void mergeLatestResolution(); // caller holds latestMutex_
     void schedule();
