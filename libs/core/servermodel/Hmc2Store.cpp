@@ -400,7 +400,10 @@ void mkdirs(const fs::path &p, std::set<fs::path> &synced) {
     if (parent != absolute)
         mkdirs(parent, synced);
     std::error_code ec;
-    fs::create_directory(absolute, ec);
+    // An existing directory is fine; MSVC reports a drive root ("C:\") as
+    // access denied instead of already existing.
+    if (!fs::create_directory(absolute, ec) && ec && fs::is_directory(absolute))
+        ec.clear();
     check(!ec, "create directory " + absolute.string() + " error=" + ec.message());
     sync(absolute, true);
     if (parent != absolute)
