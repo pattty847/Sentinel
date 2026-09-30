@@ -1131,4 +1131,115 @@ TEST_F(SourceController, ABackfilledChunkChangesTheBuildIdentityBeforeItArrives)
     settle();
     EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
 }
+
+// Last round A: dropping pending spans that share chunks never raises the total
+// (their running jobs keep the keys; the union does not grow).
+TEST_F(SourceController, DroppingPendingSpansThatShareChunksNeverRaisesTheTotal) {
+    makeCache(256ull << 20, 64); // every build is a queued job
+    auto &a = chart();
+    view(a);
+    answerAll();
+    ASSERT_EQ(jobs.size(), 10u); // adjacent spans share hour chunks
+    const size_t before = cache->committedCpuBytes();
+    cache->setCpuCeiling(before - 1); // force shedding
+    drain();
+    EXPECT_EQ(a.latestSnapshot()->spans.size(), 1u); // shed down to the keeper
+    EXPECT_LE(cache->committedCpuBytes(), before);
+}
+
+// Last round A: a job and a surviving span that share chunks count them once.
+TEST_F(SourceController, AJobAndASpanSharingChunksCountThemOnce) {
+    makeCache(256ull << 20, 64);
+    view(chart());
+    answerAll();
+    ASSERT_EQ(jobs.size(), 10u);
+    charts.clear(); // the jobs alone own the chunks now
+    drain();
+    const size_t jobsOnly = cache->committedCpuBytes();
+    ASSERT_GT(jobsOnly, 0u);
+    view(chart()); // the same view: same chunks, joins the same jobs
+    drain();
+    EXPECT_EQ(cache->stats().jobs, 10u);
+    EXPECT_EQ(cache->committedCpuBytes(), jobsOnly);
+}
+
+// Last round B: a keeper whose jobs exist before its commit still makes the
+// other charts shed.
+TEST_F(SourceController, AKeeperWithJobsBeforeItsCommitStillMakesOthersShed) {
+    auto &a = chart();
+    view(a);
+    settle();
+    size_t spanBytes = 0;
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible)
+            for (const auto &source : span.sources) spanBytes += source.build->bytes;
+    const int64_t far = epoch + 20 * tileMs;
+    {   // Warm B's chunks in the store (not its builds): its first pass requests jobs.
+        auto &x = chart();
+        x.setView("BTC-USD", kMinuteMs, double(far), double(far + tileMs));
+        settle();
+    }
+    charts.pop_back();
+    drain();
+    cache->setMaxBytes(0); // no cached builds for B
+    cache->setMaxBytes(256ull << 20);
+    const size_t ceiling = 5 * spanBytes + spanBytes / 2;
+    cache->setCpuCeiling(ceiling);
+    step();
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    auto &b = chart(320ull << 20, spanBytes / 2);
+    b.setView("BTC-USD", kMinuteMs, double(far), double(far + tileMs));
+    settle();
+    EXPECT_LT(a.latestSnapshot()->spans.size(), 5u); // A shed
+    EXPECT_LE(cache->committedCpuBytes(), ceiling);
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+    EXPECT_TRUE(visibleComplete(*b.latestSnapshot()));
+}
+
+// Last round C: clearing failures does not change the plan identity.
+TEST_F(SourceController, ClearedFailuresKeepThePlanAndTheBuild) {
+    const int64_t h0 = epoch / kHourMs * kHourMs;
+    const ChunkKey failing{"BTC-USD", std::string(kChunkSources[0].id), kMinuteMs, h0};
+    auto &a = chart();
+    view(a);
+    for (int i = 0; i < 1000; ++i) { // answer everything; the failing chunk errors
+        drain();
+        if (answered == transport.requests.size()) break;
+        while (answered < transport.requests.size()) {
+            const auto request = transport.requests[answered++];
+            for (size_t k = 0; k < request.starts.size(); ++k) {
+                if (request.key(k) == failing) transport.error(request.id, request.key(k), QStringLiteral("build_failed"));
+                else transport.reply(request.id, body(request.key(k)));
+            }
+        }
+    }
+    settle();
+    const SpanSnapshot *visible = nullptr;
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible) visible = &span;
+    ASSERT_TRUE(visible && visible->complete); // built without the failed chunk
+    std::vector<const SpanSourceBuild *> built;
+    for (const auto &source : visible->sources) {
+        built.push_back(source.build.get());
+        for (const auto &g : source.build->key.generations)
+            EXPECT_FALSE(g.source == failing.source && g.startMs == failing.startMs); // really left out
+    }
+    const size_t requestsBefore = transport.requests.size();
+    const auto builds = cache->stats().builds;
+    transport.push(availability()); // clears the controller's failures; same plan
+    drain();
+    for (const auto &span : a.latestSnapshot()->spans) {
+        if (span.rank.tier != SpanTier::Visible) continue;
+        EXPECT_TRUE(span.complete) << "clearing failures invalidated the build";
+        for (size_t i = 0; i < span.sources.size(); ++i) EXPECT_EQ(span.sources[i].build.get(), built[i]);
+    }
+    EXPECT_EQ(cache->stats().builds, builds);
+    EXPECT_TRUE(jobs.empty());
+    // The failure retry is separate: the chunk is requested again.
+    bool retried = false;
+    for (size_t r = requestsBefore; r < transport.requests.size(); ++r)
+        for (size_t k = 0; k < transport.requests[r].starts.size(); ++k)
+            retried = retried || transport.requests[r].key(k) == failing;
+    EXPECT_TRUE(retried);
+}
 } // namespace

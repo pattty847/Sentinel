@@ -81,6 +81,7 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input,
                                    std::shared_ptr<std::atomic<int64_t>> liveBytes = {});
 
 class HeatmapSourceController;
+using ChunkBytes = std::pair<ChunkKey, size_t>;
 
 // One per process, on the heatmap-data thread, shared by every controller. It
 // must outlive them.
@@ -98,15 +99,16 @@ class HeatmapSourceController;
 //   builds make that admission match the real sizes).
 // - liveBytes counts every image alive anywhere (slots, LRU, snapshots, the
 //   node's copy of a snapshot): snapshots lag by at most one frame.
-// - CPU ceiling (HeatmapBudgets::cpuCeiling): each controller commits what it
-//   pins (wanted decoded chunks plus span images, measured or estimated) to a
-//   process-wide ledger and keeps the ledger total at or under the ceiling by
-//   refusing its own lowest-priority work (see HeatmapSourceController). The
-//   total also counts every build job no controller covers (a job holds its
-//   input chunks and reservation until it finishes, even after its slot left),
-//   each once. When a commitment raises the total above the ceiling (a chart
-//   down to its keeper), overCeiling() asks every chart to shed by its own loss
-//   order; shedding never raises the total, so it cannot oscillate.
+// - CPU ceiling (HeatmapBudgets::cpuCeiling): one set-based ledger.
+//   total = bytes of the UNION of chunk keys referenced by any owner (a chart's
+//   commitment, or a running job, which owns its input chunks until it
+//   finishes) + build reservations (running jobs, and builds a chart still has
+//   to request) + claimed image bytes. A chunk counts once however many owners
+//   hold it, so a dropped slot's running job keeps its keys without growing the
+//   union, and removing an owner only shrinks it: shedding is monotonic. After
+//   a commit over the ceiling from a chart at its keeper, overCeiling() asks
+//   the other charts to shed by their own loss order (never below their
+//   keeper); charts already at their keeper ignore it, so it terminates.
 // - capacityFreed() is emitted at most once per event-loop turn after pinned
 //   bytes or ledger commitments shrink, so controllers suppressed for CPU room
 //   re-admit without another event.
@@ -169,13 +171,14 @@ private:
     void trim();
     void relieve();
     void freed(); // coalesced capacityFreed()
-    using KeySet = std::unordered_set<SpanSourceKey, SpanSourceKeyHash>;
-    // `covers`: the build keys whose jobs this commitment already includes.
-    void commitCpu(const HeatmapSourceController *controller, size_t bytes, KeySet covers = {});
-    // Everything but the controller's own commitment, counting jobs that
-    // neither another controller nor `selfCovers` covers.
-    size_t committedByOthers(const HeatmapSourceController *controller, const KeySet &selfCovers) const;
-    size_t uncoveredJobBytes(const HeatmapSourceController *self, const KeySet *selfCovers) const;
+    // A chart's commitment: the chunk keys it references (with their sizes) and
+    // the reservation of builds it still has to request. atKeeper: nothing left
+    // to shed; over the ceiling, that emits overCeiling().
+    void commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
+                   bool atKeeper);
+    // The ledger total if `self` committed `keys` and `reservation` instead.
+    size_t projectedCpuBytes(const HeatmapSourceController *self, const std::vector<ChunkBytes> &keys,
+                             size_t reservation) const;
 };
 
 // The node side of the capacity contract (HeatmapTileNode, S5c; render thread,
@@ -356,11 +359,12 @@ private:
     // it must (re)build, and the chunk keys to keep wanted.
     struct SourceNeed {
         SpanSourceInput input;
+        SpanSourceKey desired; // input.key, kept after input is moved to a build
         bool complete = true, build = false;
         std::vector<ChunkKey> want;
     };
     SourceNeed need(const Slot &slot, const SpanSourcePlan &planned);
-    SpanSourceCache::KeySet covers() const; // keys of this chart's pending builds
+
     size_t chunkCost(const ChunkKey &key) const;
     void onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
     size_t estimate(const SpanId &span, const std::string &source, bool upload) const;
