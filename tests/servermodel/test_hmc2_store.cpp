@@ -1156,13 +1156,13 @@ TEST_F(StoreTest, IncrementalAppendChecksTailAndResumesPartialDiscovery) {
     ReadControl changed;
     reader.availability("BTC-USD", "deep", 60000, changed);
     EXPECT_GT(reader.diagnosticsForTest().indexedFrames, before.indexedFrames + 2);
-    Hmc2Reader small(root());
+    Hmc2Reader tiny(root()); // not "small": a macro in the Windows SDK (rpcndr.h)
     size_t seen = 0;
     for (int attempt = 0; attempt < 30 && !seen; ++attempt) {
         ReadControl c;
         c.limits.maxSourceRecords = 1;
         c.limits.maxEntriesVisited = 1;
-        small.visit("BTC-USD", "deep", 60000, kEpoch + 14 * 60000, kEpoch + 15 * 60000,
+        tiny.visit("BTC-USD", "deep", 60000, kEpoch + 14 * 60000, kEpoch + 15 * 60000,
                     [&](const auto &) { ++seen; }, c);
     }
     EXPECT_EQ(seen, 1); // neither day discovery nor a delta chain can livelock

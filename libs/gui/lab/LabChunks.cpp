@@ -24,10 +24,10 @@ using heatmap::kHourMs;
 using heatmap::kMinuteMs;
 
 std::mutex rootMutex;
-std::string recordingRoot = kRecordingRoot;
+std::string chunkRoot; // empty: recordingRoot() (SENTINEL_RECORDING_ROOT)
 std::string currentRoot() {
     std::scoped_lock lock(rootMutex);
-    return recordingRoot;
+    return chunkRoot.empty() ? recordingRoot() : chunkRoot;
 }
 
 std::mutex infoMutex;
@@ -169,7 +169,7 @@ int64_t pinnedEndMs() { return pinnedEnd.load(); }
 void setChunkRecordingRoot(const std::string &root) {
     {
         std::scoped_lock lock(rootMutex);
-        recordingRoot = root;
+        chunkRoot = root;
     }
     {
         std::scoped_lock lock(infoMutex);

@@ -26,7 +26,7 @@ inline constexpr const char *kSymbol = "BTC-USD";
 
 // Process-wide caches (plan budgets: 512 MiB decoded chunks; tile intermediates 256 MiB).
 heatmap::ChunkStore &chunkStore();
-void setChunkRecordingRoot(const std::string &root); // before first use (tests)
+void setChunkRecordingRoot(const std::string &root); // tests; empty restores recordingRoot()
 // Pins the recording's end (exclusive, UTC ms; 0 = live): availability, and so
 // every chunk, stops there. Benchmarks use a closed past range so every mode
 // sees the same sealed data. Clears the caches.

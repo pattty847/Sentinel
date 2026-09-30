@@ -2,6 +2,7 @@
 #include "LabChunks.hpp"
 #include "LabItem.hpp"
 #include "OffscreenQuick.hpp"
+#include "RhiBackend.hpp"
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QFile>
@@ -399,8 +400,8 @@ QString cell(const QJsonObject &o, const char *key, int precision = 0) {
 } // namespace
 
 int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modeNames) {
-    if (!metalDeviceAvailable()) {
-        std::cout << "{\"error\":\"No MTLDevice (Metal unavailable)\"}" << std::endl;
+    if (const QString why = gpuUnavailableReason(); !why.isEmpty()) {
+        std::cout << QJsonDocument(QJsonObject{{"error", why}}).toJson(QJsonDocument::Compact).toStdString() << std::endl;
         return 2;
     }
     std::vector<Case> cases;

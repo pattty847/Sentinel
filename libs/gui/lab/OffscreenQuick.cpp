@@ -5,27 +5,11 @@
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
 #include <rhi/qrhi.h>
-#include <rhi/qrhi_platform.h>
-#ifdef Q_OS_MACOS
-#include <dlfcn.h>
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
+#include <QVulkanInstance>
 #endif
 
 namespace lab {
-bool metalDeviceAvailable() {
-#ifdef Q_OS_MACOS
-    static const bool available = [] {
-        void *metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW);
-        auto create = metal ? reinterpret_cast<void *(*)()>(dlsym(metal, "MTLCreateSystemDefaultDevice")) : nullptr;
-        const bool ok = create && create();
-        if (metal) dlclose(metal);
-        return ok;
-    }();
-    return available;
-#else
-    return false;
-#endif
-}
-
 OffscreenQuick::OffscreenQuick() = default;
 OffscreenQuick::~OffscreenQuick() {
     // Scene graph resources belong to the render control; release them before
@@ -33,39 +17,39 @@ OffscreenQuick::~OffscreenQuick() {
     window_.reset();
     control_.reset();
     target_.reset(); pass_.reset(); depth_.reset(); color_.reset();
-    rhi_.reset();
+    // device_ (the QRhi) is destroyed last, as a member.
 }
 
 bool OffscreenQuick::create(QSize pixelSize, QString *error) {
-    auto fail = [&](const char *message) {
-        if (error) *error = QString::fromLatin1(message);
+    auto fail = [&](const QString &message) {
+        if (error) *error = message;
         return false;
     };
-    if (!metalDeviceAvailable()) return fail("No MTLDevice (Metal unavailable)");
-#ifdef Q_OS_MACOS
-    QRhiMetalInitParams init;
-    rhi_.reset(QRhi::create(QRhi::Metal, &init, QRhi::EnableTimestamps));
-#endif
-    if (!rhi_) return fail("Metal QRhi creation failed");
+    if (!device_.create(true)) return fail(device_.error);
+    QRhi *rhi = device_.rhi.get();
+    const QString name = device_.backend.name;
     // The offscreen QPA would otherwise select the software adaptation.
     QQuickWindow::setSceneGraphBackend(QStringLiteral("rhi"));
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Metal);
+    QQuickWindow::setGraphicsApi(device_.backend.graphicsApi);
     control_ = std::make_unique<QQuickRenderControl>();
     window_ = std::make_unique<QQuickWindow>(control_.get());
-    window_->setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi_.get()));
-    if (!control_->initialize()) return fail("QQuickRenderControl::initialize failed");
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
+    if (device_.vulkan) window_->setVulkanInstance(device_.vulkan.get());
+#endif
+    window_->setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi));
+    if (!control_->initialize()) return fail(name + QStringLiteral(" backend: QQuickRenderControl::initialize failed"));
     size_ = pixelSize;
-    color_.reset(rhi_->newTexture(QRhiTexture::RGBA8, size_, 1,
+    color_.reset(rhi->newTexture(QRhiTexture::RGBA8, size_, 1,
                                   QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
-    if (!color_->create()) return fail("colour target creation failed");
-    depth_.reset(rhi_->newTexture(QRhiTexture::D24S8, size_, 1, QRhiTexture::RenderTarget));
-    if (!depth_->create()) return fail("depth target creation failed");
+    if (!color_->create()) return fail(name + QStringLiteral(" backend: colour target creation failed"));
+    depth_.reset(rhi->newTexture(QRhiTexture::D24S8, size_, 1, QRhiTexture::RenderTarget));
+    if (!depth_->create()) return fail(name + QStringLiteral(" backend: depth target creation failed"));
     QRhiTextureRenderTargetDescription description(QRhiColorAttachment(color_.get()));
     description.setDepthTexture(depth_.get());
-    target_.reset(rhi_->newTextureRenderTarget(description));
+    target_.reset(rhi->newTextureRenderTarget(description));
     pass_.reset(target_->newCompatibleRenderPassDescriptor());
     target_->setRenderPassDescriptor(pass_.get());
-    if (!target_->create()) return fail("render target creation failed");
+    if (!target_->create()) return fail(name + QStringLiteral(" backend: render target creation failed"));
     window_->setRenderTarget(QQuickRenderTarget::fromRhiRenderTarget(target_.get()));
     window_->resize(size_);
     window_->contentItem()->setSize(QSizeF(size_));
@@ -95,7 +79,7 @@ QImage OffscreenQuick::renderFrame(QString *error) {
     control_->sync();
     control_->render();
     QRhiReadbackResult readback;
-    auto *updates = rhi_->nextResourceUpdateBatch();
+    auto *updates = device_.rhi->nextResourceUpdateBatch();
     updates->readBackTexture(QRhiReadbackDescription(color_.get()), &readback);
     control_->commandBuffer()->resourceUpdate(updates);
     control_->endFrame(); // offscreen frame: waits for GPU completion
@@ -103,7 +87,9 @@ QImage OffscreenQuick::renderFrame(QString *error) {
         if (error) *error = QStringLiteral("scene readback failed");
         return {};
     }
-    return QImage(reinterpret_cast<const uchar *>(readback.data.constData()), size_.width(), size_.height(),
-                  QImage::Format_RGBA8888_Premultiplied).copy();
+    QImage image(reinterpret_cast<const uchar *>(readback.data.constData()), size_.width(), size_.height(),
+                 QImage::Format_RGBA8888_Premultiplied);
+    // OpenGL reads back bottom row first; every other backend is top-left.
+    return device_.rhi->isYUpInFramebuffer() ? image.mirrored() : image.copy();
 }
 } // namespace lab
