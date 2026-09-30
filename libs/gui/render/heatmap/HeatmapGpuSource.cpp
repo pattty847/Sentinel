@@ -192,9 +192,12 @@ const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale
 }
 
 std::array<uint32_t, kMaxTicks> tickFactors(const GpuSource& source, double displayTick) {
+    return tickFactors(source.ticks, displayTick);
+}
+std::array<uint32_t, kMaxTicks> tickFactors(const std::vector<double>& ticks, double displayTick) {
     std::array<uint32_t, kMaxTicks> factors{};
-    for (size_t i = 0; i < source.ticks.size() && i < kMaxTicks; ++i) {
-        const double factor = displayTick / source.ticks[i];
+    for (size_t i = 0; i < ticks.size() && i < kMaxTicks; ++i) {
+        const double factor = displayTick / ticks[i];
         if (!std::isfinite(factor) || factor < 1 || std::abs(factor - std::round(factor)) >= 1e-8 ||
             factor > double(std::numeric_limits<int32_t>::max())) continue;
         factors[i] = static_cast<uint32_t>(std::llround(factor));

@@ -8,6 +8,10 @@
 // Result per cell (uint):
 //   bits 0..14 log code, bit 15 ask-dominant, bits 16..17 state
 //   state 0 = no data, 1 = loading, 2 = veil (scanned, not proven), 3 = valid.
+// Fill pass (dims.w bit 1, S5 owner decision 1): the output already holds the
+// cells of a coarser source binned at the same grid. Only cells it left as veil
+// are considered, and only a valid result replaces them; every other cell is
+// left untouched (a finer source never overrides data, loading or no data).
 layout(local_size_x = 16, local_size_y = 4) in; // 16 columns x 4 bins: measured best of 1x64..64x1 on M4
 
 struct GroupMeta {
@@ -21,7 +25,7 @@ layout(std430, binding = 1) readonly buffer ColumnGroups { uint columnGroups[]; 
 layout(std430, binding = 2) readonly buffer Groups { GroupMeta groups[]; };
 layout(std430, binding = 3) readonly buffer Runs { ivec2 runs[]; };
 layout(std430, binding = 5) readonly buffer Thresholds { uvec2 thresholds[]; };
-layout(std430, binding = 6) writeonly buffer Output { uint cells[]; };
+layout(std430, binding = 6) buffer Output { uint cells[]; }; // read by the fill pass
 layout(std430, binding = 8) readonly buffer RowIndex { uint rowIndex[]; };
 // Entries are split into pages of at most 64 MiB (D3D11 guarantees 128 MB per
 // buffer). Page p holds entries [p << paging.x, (p + 1) << paging.x).
@@ -35,7 +39,7 @@ layout(std430, binding = 15) readonly buffer Page6 { uint page6[]; };
 layout(std430, binding = 16) readonly buffer Page7 { uint page7[]; };
 const uint kRowIndexStride = 16u; // HeatmapGpuSource.hpp
 layout(std140, binding = 7) uniform Params {
-    uvec4 dims;    // columns, rows, source slots, flags (bit 0: wide entries)
+    uvec4 dims;    // columns, rows, source slots, flags (bit 0: wide entries, bit 1: fill pass)
     ivec4 time;    // slot of column 0, first available column, available end column, threshold count
     ivec4 price;   // absolute display bin of the bottom row, clip bin lo, clip bin end, zero (see opaque())
     uvec4 factors[4]; // native rows per display bin, per tick index (0 = incompatible)
@@ -46,6 +50,7 @@ layout(std140, binding = 7) uniform Params {
 const uint kNotLoaded = 0xffffffffu;
 const uint kGap = 0xfffffffeu;
 const uint kNoData = 0u, kLoading = 1u, kVeil = 2u, kValid = 3u;
+const uint kFillPass = 2u; // dims.w
 
 // Float-float arithmetic. Metal compiles with fast math (reassociation allowed),
 // which folds the error terms of two-sum to zero. Two variants, chosen at run
@@ -150,19 +155,22 @@ void main() {
     uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
     if (x >= dims.x || y >= dims.y) return;
     uint outIndex = y * dims.x + x;
+    // Fill pass: keep every cell the earlier pass did not veil (in range: x, y checked).
+    bool fill = (dims.w & kFillPass) != 0u;
+    if (fill && ((cells[outIndex] >> 16) & 3u) != kVeil) return;
     int column = int(x);
-    if (column < time.y || column >= time.z) { cells[outIndex] = kNoData << 16; return; }
+    if (column < time.y || column >= time.z) { if (!fill) cells[outIndex] = kNoData << 16; return; }
     int slot = time.x + column;
     // Clamped load, then select (see ENTRY_KEY): never read slots[] out of range.
     uint slotValue = slots[min(uint(max(slot, 0)), max(dims.z, 1u) - 1u)];
     uint source = (slot < 0 || slot >= int(dims.z)) ? kNotLoaded : slotValue;
     int bin = price.x + int(dims.y - 1u - y);
-    if (source == kNotLoaded || bin < price.y || bin >= price.z) { cells[outIndex] = kLoading << 16; return; }
-    if (source == kGap) { cells[outIndex] = kVeil << 16; return; }
+    if (source == kNotLoaded || bin < price.y || bin >= price.z) { if (!fill) cells[outIndex] = kLoading << 16; return; }
+    if (source == kGap) { if (!fill) cells[outIndex] = kVeil << 16; return; }
     uint g0 = columnGroups[source], g1 = columnGroups[source + 1u];
     for (uint g = g0; g < g1; ++g) {
         uint t = groups[g].tickIndex;
-        if (factors[t >> 2u][t & 3u] == 0u) { cells[outIndex] = kVeil << 16; return; }
+        if (factors[t >> 2u][t & 3u] == 0u) { if (!fill) cells[outIndex] = kVeil << 16; return; }
     }
     bool valid = g1 > g0;
     vec2 bid = vec2(0.0), ask = vec2(0.0);
@@ -197,6 +205,7 @@ void main() {
         default: WALK_GROUP(page7) break;
         }
     }
+    if (fill && !valid) return; // the veil stays
     bid = ffNormalize(bid);
     ask = ffNormalize(ask);
     bool askSide = ffGreater(ask, bid);

@@ -654,6 +654,41 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
         for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
 }
 
+// S5c node contract addition: a source the node reports missing (its GPU cap
+// evicted it after the upload, or a new node never held it) is rebuilt from the
+// local chunks when the image was released; the others are untouched.
+TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
+    auto &a = chart();
+    view(a);
+    settle();
+    ASSERT_EQ(upload(a, 1ull << 30), 10u);
+    const auto released = a.latestSnapshot();
+    const SpanSourceKey *missing = nullptr;
+    for (const auto &span : released->spans)
+        if (span.rank.tier == SpanTier::Visible) missing = &span.sources.front().build->key;
+    ASSERT_TRUE(missing);
+    const SpanSourceKey key = *missing;
+    const auto requests = requestedKeys().size();
+    const auto built = cache->stats().builds;
+    cache->setMaxBytes(0); // nothing unclaimed stays cached: the rebuild is a real build
+    cache->setMaxBytes(256ull << 20);
+    a.capacity()->report(1ull << 30, {}, false, {key});
+    a.pollCapacity();
+    settle();
+    EXPECT_EQ(cache->stats().builds, built + 1) << "only the missing source rebuilt";
+    EXPECT_EQ(requestedKeys().size(), requests) << "from local chunks";
+    size_t withImage = 0;
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources) {
+            ASSERT_TRUE(source.build);
+            if (source.build->gpu) {
+                ++withImage;
+                EXPECT_EQ(source.build->key, key);
+            }
+        }
+    EXPECT_EQ(withImage, 1u);
+}
+
 // Review fix 4: surviving slots take their new ranks before admission.
 TEST_F(SourceController, NewlyVisibleSlotsAreNotEvictedWhenTheViewExpands) {
     constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;

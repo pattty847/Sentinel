@@ -90,7 +90,7 @@ TEST_F(LabOutputGuard, UnresolvableLinkFailsClosed) {
 }
 
 // The lab's own writers go through the guard before the run and before the
-// write: --b1-bench opens its JSON WriteOnly, --window-screenshot saves a PNG.
+// write: --s5-bench opens its JSON WriteOnly, --window-screenshot saves a PNG.
 QByteArray readAll(const fs::path &p) {
     QFile f(q(p));
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
@@ -111,12 +111,11 @@ int runLab(const QStringList &args, const fs::path &root, QByteArray *output) {
     return lab.exitStatus() == QProcess::NormalExit ? lab.exitCode() : -1;
 }
 
-TEST_F(LabOutputGuard, B1BenchRefusesAJsonPathInsideTheRootAndLeavesTheFile) {
+TEST_F(LabOutputGuard, S5BenchRefusesAJsonPathInsideTheRootAndLeavesTheFile) {
     const auto target = root / "BTC-USD" / "keep.json";
     { QFile f(q(target)); ASSERT_TRUE(f.open(QIODevice::WriteOnly)); f.write("recording data"); }
     QByteArray output;
-    EXPECT_EQ(runLab({QStringLiteral("--b1-bench"), q(target), QStringLiteral("--b1-quick"),
-                      QStringLiteral("--b1-modes"), QStringLiteral("hybrid")}, root, &output), 2)
+    EXPECT_EQ(runLab({QStringLiteral("--s5-bench"), q(target), QStringLiteral("--s5-quick")}, root, &output), 2)
         << output.toStdString();
     EXPECT_EQ(readAll(target), QByteArray("recording data"));
     EXPECT_TRUE(output.contains("recording root")) << output.toStdString();

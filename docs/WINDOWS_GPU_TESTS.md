@@ -136,8 +136,8 @@ D3D12, RTX 4070, 200 bin passes per grid; bin times are GPU timestamps, upload i
 100,000,000 does not run: `--synthetic` accepts at most 30,000,000, and a source holds at most
 8 pages of 64 MiB (`kMaxEntryPages`), about 67.1 M compact entries.
 
-B1 hybrid (`--b1-bench out.json --b1-quick --b1-modes hybrid`) needs a recording; synthetic data
-always uses the full path. It ran on D3D12 against 5 minutes of live recording: time to first
+The S5c bench (`--s5-bench out.json --s5-quick`, the production path) needs a recording. The
+B1 hybrid bench it replaced ran on D3D12 against 5 minutes of live recording: time to first
 view about 0.75 s, pan and tick-change p95 about 31 ms, 1 to 3 MB of GPU memory. Too little data
 to compare with the Mac.
 
@@ -175,9 +175,10 @@ The Agent API screenshot `target=main` does not capture the chart on D3D12: the 
 
 - The banner names the backend you meant to test and a real device.
 - `QsgComputeSpike.ComputeInRenderNodePrepareFeedsRenderInSameFrame` is `[       OK ]`.
-- Every `HeatmapGpuParity.*`, `HeatmapGpuSelfTest.*`, `HeatmapRenderNodeScene.*`,
-  `HeatmapGpuAnchoring.*`, `HeatmapTickPolicyNode.*` and tiles case is `[       OK ]`. Only
-  `RealRecordingOptIn` may skip.
+- Every `HeatmapGpuParity.*`, `HeatmapGpuSelfTest.*`, `HeatmapGpuAnchoring.*`,
+  `HeatmapTickPolicy.*` case (`test_heatmap_gpu_binner`), every `HeatmapFillPass.*`,
+  `HeatmapTileNodeScene.*` and `NodeWithController.*` case (`test_heatmap_tile_node`) and every
+  `LabItemTest.*` case (`test_lab_item`) is `[       OK ]`. Only `RealRecordingOptIn` may skip.
 - With `SENTINEL_RHI_DEBUG=1`: no `[d3d12 ERROR` line, and no Vulkan message that names a
   `heatmap.*` buffer or a pipeline layout.
 

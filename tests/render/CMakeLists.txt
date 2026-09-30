@@ -148,8 +148,8 @@ qt_add_shaders(test_qsg_compute_spike spike_shaders
 add_test(NAME QsgComputeSpikeTests COMMAND test_qsg_compute_spike)
 set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")
 
-# S4: GPU price binning parity vs heatmap::binColumn, grid/threshold unit tests
-# and the HeatmapRenderNode scene test. GPU cases skip without a Metal device;
+# S4: GPU price binning parity vs heatmap::binColumn and grid/threshold unit
+# tests. GPU cases skip without a compute-capable QRhi;
 # SENTINEL_HEATMAP_REAL_PARITY=1 adds the real-recording comparison.
 add_executable(test_heatmap_gpu_binner test_heatmap_gpu_binner.cpp)
 target_include_directories(test_heatmap_gpu_binner PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
@@ -167,12 +167,19 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
     OUTPUTS heatmap_bin_unguarded.comp.qsb
 )
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
-# B1: whole-chunk tiles (GPU binInto vs CPU cells, HeatmapTileNode transitions).
-add_executable(test_heatmap_tiles_gpu test_heatmap_tiles_gpu.cpp)
-target_include_directories(test_heatmap_tiles_gpu PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
-target_link_libraries(test_heatmap_tiles_gpu PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
-add_test(NAME HeatmapTileGpuTests COMMAND test_heatmap_tiles_gpu)
-set_tests_properties(HeatmapTileGpuTests PROPERTIES LABELS "render;heatmap")
+# S5c: HeatmapTileNode on the SpanSet (retention, cap, capacity reports, QRhi
+# loss, never-blank transitions) and the bin kernel's fill pass vs the CPU oracle.
+add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp)
+target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)
+set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
+# S5c: the lab chart on the production path over a synthetic HMC2 recording.
+add_executable(test_lab_item test_lab_item.cpp)
+target_include_directories(test_lab_item PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_lab_item PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME LabItemTests COMMAND test_lab_item)
+set_tests_properties(LabItemTests PROPERTIES LABELS "render;heatmap;lab")
 # Lab outputs never land inside the recording root (links, aliases, missing descendants).
 add_executable(test_lab_output_guard test_lab_output_guard.cpp)
 target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
@@ -187,8 +194,12 @@ set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
 # binner-first, QRhi-first and scene-graph invalidation orders.
 if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
     add_test(NAME HeatmapGpuReadbackTeardownGuardMalloc COMMAND test_heatmap_gpu_binner
-             "--gtest_filter=HeatmapGpuSelfTest.DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst:HeatmapGpuLifetime.*:HeatmapRenderNodeScene.SceneGraphInvalidation*")
+             "--gtest_filter=HeatmapGpuSelfTest.DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst:HeatmapGpuLifetime.*")
     set_tests_properties(HeatmapGpuReadbackTeardownGuardMalloc PROPERTIES LABELS "render;heatmap"
+                         ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
+    add_test(NAME HeatmapTileNodeTeardownGuardMalloc COMMAND test_heatmap_tile_node
+             "--gtest_filter=HeatmapTileNodeScene.SceneGraphInvalidation*")
+    set_tests_properties(HeatmapTileNodeTeardownGuardMalloc PROPERTIES LABELS "render;heatmap"
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
 endif()
 

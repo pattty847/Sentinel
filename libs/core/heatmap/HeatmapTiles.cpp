@@ -204,4 +204,8 @@ size_t TileKeyHash::operator()(const TileKey &key) const {
     mix(std::hash<uint64_t>{}(key.sourceGeneration));
     return h;
 }
+void fillVeiled(std::vector<uint32_t> &cells, const std::vector<uint32_t> &fill) {
+    for (size_t i = 0; i < cells.size() && i < fill.size(); ++i)
+        if (cellState(cells[i]) == kCellVeil && cellState(fill[i]) == kCellValid) cells[i] = fill[i];
+}
 } // namespace heatmap::tiles

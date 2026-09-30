@@ -562,6 +562,26 @@ void HeatmapSourceController::pollCapacity() {
             dirty_ = true;
         }
     }
+    // Single sources the node no longer holds (its cap evicted them) or never
+    // held (a new node): as a loss, for those keys only.
+    for (const auto &key : report.missing) {
+        const auto slot = slots_.find(key.span);
+        if (slot == slots_.end()) continue;
+        const auto it = slot->second.sources.find(key.source);
+        if (it == slot->second.sources.end() || !it->second.ready || it->second.ready->key != key) continue;
+        auto &source = it->second;
+        source.uploaded = false;
+        dirty_ = true;
+        if (source.ready->gpu) continue; // the image is still here: the node uploads it again
+        if (slot->second.plan.rank.tier == SpanTier::RecentTf) {
+            slots_.erase(slot);
+            continue;
+        }
+        source.ready.reset();
+        source.lostRebuild = isRetained(slot->second.plan.rank.tier);
+    }
+    if (!report.missing.empty())
+        sLog_Probe("heatmap.controller.missing", "chart=" << chart_ << " sources=" << report.missing.size());
     if (report.lost) {
         // The node lost its GPU copies. Released images of drawn content are
         // rebuilt from chunks (visible, prefetch, and fallback, which is still
@@ -764,6 +784,24 @@ void HeatmapSourceController::reconcile() {
         return;
     }
     const auto available = sources();
+    // The time this tf can plan spans for: minute history, and hour rollups for
+    // hour-multiple timeframes (tiles::chunksFor), not an earlier level the tf
+    // never reads (the node would wait for spans that are never planned).
+    int64_t availableStart = 0, availableEnd = 0;
+    for (const auto &source : available) {
+        int64_t lo = source.time.minuteOldestMs;
+        if (tfMs_ % kHourMs == 0 && source.time.hourThroughMs > source.time.hourOldestMs && source.time.hourOldestMs > 0)
+            lo = std::min(lo, source.time.hourOldestMs);
+        if (lo == INT64_MAX || lo >= source.time.endMs) continue;
+        lo = std::max(lo, source.time.oldestMs);
+        availableStart = availableEnd ? std::min(availableStart, lo) : lo;
+        availableEnd = std::max(availableEnd, source.time.endMs);
+    }
+    if (availableStart != availableStartMs_ || availableEnd != availableEndMs_) {
+        availableStartMs_ = availableStart;
+        availableEndMs_ = availableEnd;
+        dirty_ = true;
+    }
     const SpanTier retainedTier = visibleReady_ ? SpanTier::RecentTf : SpanTier::Fallback;
     std::erase_if(retained_, [&](const SpanId &id) { return !slots_.contains(id); });
     std::vector<PlannedSpan> retained;
@@ -1097,6 +1135,8 @@ void HeatmapSourceController::publish() {
     set->resolution.priceScale = priceScale_;
     set->refused = cpuRefused_;
     set->refusedBytes = cpuRefusedBytes_;
+    set->availableStartMs = availableStartMs_;
+    set->availableEndMs = availableEndMs_;
     for (const auto &[id, slot] : slots_) {
         SpanSnapshot span{id, slot.plan.rank, {}, true};
         for (const auto &planned : slot.plan.sources) {
@@ -1105,6 +1145,7 @@ void HeatmapSourceController::publish() {
             if (it != slot.sources.end()) {
                 source.build = it->second.ready;
                 source.stale = source.build && it->second.expected && source.build->key != *it->second.expected;
+                source.failed = it->second.failed && !it->second.pending;
             }
             span.complete = span.complete && source.build && !source.stale;
             if (source.build && id.tfMs == tfMs_) mergeResolution(set->resolution, source.build->resolution);

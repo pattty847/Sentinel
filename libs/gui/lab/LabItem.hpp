@@ -1,48 +1,33 @@
 #pragma once
-// Benchmark/inspection harness for the production heatmap GPU path: a plain
-// QQuickItem hosting heatmap::gpu::HeatmapRenderNode in the normal scene graph,
-// fed by heatmap::SparseColumns composed on a worker thread.
-// Slice T (docs/research/2026-09-heatmap-interaction-spec.md, experiments E1-E3):
-// a column is exactly the selected timeframe (no auto-timeframe); time zoom-out
-// clamps at one column per physical pixel; tick is Auto (minRowPx + hysteresis)
-// or Manual (locked preset, remembered per symbol and timeframe, price zoom-out
-// clamped at one row per physical pixel, never coarsened).
-// Slice B1 (docs/research/2026-09-b1-whole-chunk-benchmark.md): the preparation
-// mode ("prep") of real recordings, all fed from one process-wide chunk store:
-//   full        - the S4/T lab path: the whole requested range as one source
-//                 (no row clip); screen-sized grid, re-bin on leaving the guard.
-//   viewport    - V: a source clipped to the view plus one view each side (time
-//                 and price), rebuilt when the view leaves it; screen-sized grid.
-//   whole-chunk - W: 64-column tiles binned over their whole useful price extent
-//                 on the GPU into cached render-ready buffers; pan/zoom = mapping.
-//   whole-chunk-cpu - W with the tiles' cells built on the CPU (binColumn).
-//   hybrid      - the W tile spans' GpuSources stay resident on the GPU (whole
-//                 price extent, uploaded once per span and timeframe); each tile
-//                 bins only the rows around the view (one view height each
-//                 side), re-binned in place by a compute pass when the view
-//                 leaves them or the tick changes.
-#include "LabChunks.hpp"
-#include "LabSources.hpp"
+// The GPU heatmap lab chart, on the production path the main chart takes in S6
+// (slice S5c, docs/research/2026-09-s5-plan.md):
+//   LocalChunkTransport -> ChunkFetcher -> ChunkStore -> HeatmapSourceController
+//   (all on the "heatmap-data" thread, LabData) -> SpanSet -> HeatmapTileNode.
+// The item owns the view and the tick policy (interaction spec,
+// docs/research/2026-09-heatmap-interaction-spec.md):
+// - a column is exactly the selected timeframe; time zoom-out clamps at one
+//   column per physical pixel;
+// - Auto tick (default): the smallest preset whose rows are at least minRowPx
+//   tall that the data builds on every row in view (the SpanSet's resolution
+//   summary), with hysteresis h; Manual: a locked preset, remembered per symbol
+//   and timeframe, price zoom-out clamped at one row per physical pixel, never
+//   coarsened (unbuildable rows veil and the resolution indicator names them);
+// - the tick is chosen in updatePaintNode (GUI blocked) and handed to the node in
+//   the same frame, then posted to the controller;
+// - a 150 ms crossfade on tick change (a setting turns it into a hard switch).
+// E4 (near-band seam): bandEdges() gives the edges of the finest source's
+// coverage band in view, drawn over the chart when showBandEdges is on.
+#include "LabData.hpp"
 #include "heatmap/HeatmapResolution.hpp"
-#include "heatmap/HeatmapTiles.hpp"
-#include "render/heatmap/HeatmapRenderNode.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include <QElapsedTimer>
 #include <QQuickItem>
 #include <QVariantList>
 #include <QVariantMap>
-#include <atomic>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <set>
 
 namespace lab {
-enum class PrepMode { Full, Viewport, WholeChunkGpu, WholeChunkCpu, Hybrid };
-QString prepModeName(PrepMode mode);
-std::optional<PrepMode> parsePrepMode(const QString &name);
-
 class LabItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
@@ -53,13 +38,10 @@ class LabItem : public QQuickItem {
     Q_PROPERTY(double minRowPx READ minRowPx WRITE setMinRowPx NOTIFY tickChanged)
     Q_PROPERTY(bool crossfade READ crossfade WRITE setCrossfade NOTIFY tickChanged)
     Q_PROPERTY(QVariantList offeredTicks READ offeredTicks NOTIFY presetsChanged)
-    Q_PROPERTY(QString prepMode READ prepModeString WRITE setPrepModeString NOTIFY prepModeChanged)
+    Q_PROPERTY(bool showBandEdges READ showBandEdges WRITE setShowBandEdges NOTIFY bandEdgesChanged)
 public:
     static constexpr double kCrossfadeMs = 150; // spec rule 8 (owner chose it after E2)
-    // B1: one per-frame upload budget for every mode (was 2 MiB in S4/T).
     static constexpr uint64_t kDefaultUploadBudgetBytes = 8ull << 20;
-    static constexpr uint64_t kDefaultTileBudgetBytes = 256ull << 20; // W render-ready tiles per chart
-    static constexpr int64_t kPrefetchTiles = 1;                      // W: tiles beyond the view, each side
     explicit LabItem(QQuickItem *parent = nullptr);
     ~LabItem() override;
     QString status() const { return status_; }
@@ -70,10 +52,7 @@ public:
     double minRowPx() const { return minRowPx_; }
     bool crossfade() const { return crossfade_; }
     QVariantList offeredTicks() const { return offeredTicks_; }
-    PrepMode prep() const { return prepMode_; }
-    QString prepModeString() const { return prepModeName(prepMode_); }
-    void setPrepModeString(const QString &mode);
-    void setPrepMode(PrepMode mode);
+    bool showBandEdges() const { return showBandEdges_; }
     void setTimeframeMinutes(int minutes);
     // true: lock the remembered tick for (symbol, timeframe), else the tick drawn now.
     void setManualMode(bool manual);
@@ -82,161 +61,121 @@ public:
     void setHysteresis(double h);
     void setMinRowPx(double px);
     void setCrossfade(bool enabled);
+    void setShowBandEdges(bool show);
     // Remember Manual ticks across runs (QSettings). Off for headless runs.
     void setPersistTickMemory(bool persist);
-    // Once the first complete source is shown: zoom price so one commonTick() row
-    // of the data in view is this many physical pixels tall (0 = off).
+    // Once the first spans are drawn: zoom price so one common-tick row of the data
+    // in view is this many physical pixels tall (0 = off).
     void setInitialRowPx(double px) { initialRowPx_ = px; }
     void setUploadBudgetBytes(uint64_t bytes) { uploadBudget_ = std::max<uint64_t>(bytes, 1); }
-    void setTileBudgetBytes(uint64_t bytes);
-    Q_INVOKABLE void loadReal(int hours, const QString &layer);
-    Q_INVOKABLE void loadSynthetic(int count);
+    // Per-chart GPU cap (node and controller); default HeatmapBudgets::gpuPerChart.
+    void setGpuCapBytes(uint64_t bytes);
+    // Starts the chart on kSymbol: the newest `hours` (clamped to one column per
+    // pixel), price +-2 % around the recent mid once the first spans are built.
+    Q_INVOKABLE void loadReal(int hours);
     Q_INVOKABLE void pan(double dx, double dy);
     Q_INVOKABLE void zoom(double steps, bool priceOnly, double anchorX, double anchorY);
     // Wheel input (angle deltas in 1/8 degree). priceOnly (Shift) scales the price
     // axis only; macOS delivers Shift+wheel as horizontal scroll, so with Shift
     // whichever axis moved is used.
     Q_INVOKABLE void wheelZoom(double angleX, double angleY, bool priceOnly, double anchorX, double anchorY);
-    // Price zoom about the view centre: one commonTick() row of the data in view
-    // is `px` physical pixels tall (Manual clamps still apply).
+    // Price zoom about the view centre: one common-tick row of the data in view is
+    // `px` physical pixels tall (Manual clamps still apply).
     Q_INVOKABLE void zoomToRowPx(double px);
     Q_INVOKABLE QVariantMap metrics() const;
     Q_INVOKABLE bool saveScreenshot(const QString &path = {});
-    // Manual only: why some columns in view draw the veil instead of the locked
-    // tick (empty when every column in view can build it, or in Auto).
-    QString resolutionIndicator() const;
+    // Columns and price ranges in view that draw the veil at the tick (no source
+    // builds it there); empty when none.
+    Q_INVOKABLE QString resolutionIndicator() const;
+    // E4: runs of columns in view with the finest source's full-coverage band, as
+    // [x0, x1, yTop, yBottom] in item coordinates (price outside the view clamps).
+    Q_INVOKABLE QVariantList bandEdges() const;
     double devicePixelRatio() const;
-    // True once the newest requested source (all load phases) is uploaded and drawn.
-    // In the V/W modes: the whole view is drawn from the prepared representation
-    // of the current timeframe and tick (no loading hatch from missing prep, no
-    // stale or held picture, no build in flight for the view).
+    // True once the whole view is drawn from complete content of the current
+    // timeframe and tick: no loading hatch, no held, fallback or partial picture,
+    // every visible span built at its latest generation and resident.
     bool settled() const;
-    // Scripted sessions (B1 bench).
     heatmap::gpu::ViewWindow view() const { return view_; }
     void setView(const heatmap::gpu::ViewWindow &view);
-    // V/W: the view to show once the recording's availability is known, instead
-    // of the default (newest `hours`, +-2 % around the recent price).
+    // The view to show once the first spans are built (instead of the default).
     void setInitialView(const heatmap::gpu::ViewWindow &view) { pendingView_ = view; }
-    // Re-reads availability and reloads the newest (open) chunk as a new revision,
-    // as if the server had sent a revised live chunk.
-    Q_INVOKABLE void reviseNewestChunk();
-    bool hasContent() const;
+    bool hasContent() const { return loaded_; }
+    int64_t tickUnits() const { return tickUnits_; }
+    const heatmap::gpu::HeatmapTileStats &tileStats() const { return *tileStats_; }
+    std::shared_ptr<const heatmap::SpanSet> snapshot() const { return snapshot_; }
+    // Tests: the controller (lives on the data thread).
+    heatmap::HeatmapSourceController *controller() const { return controller_; }
 signals:
     void statusChanged();
     void timeframeChanged();
     void tickChanged();
     void presetsChanged();
-    void prepModeChanged();
+    void bandEdgesChanged();
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void itemChange(ItemChange change, const ItemChangeData &value) override;
 private:
-    struct WTile {
-        heatmap::gpu::TileRef ref;
-        std::vector<std::pair<heatmap::ChunkKey, uint64_t>> chunkGenerations;
-        bool clipped = false;
-        bool wasResident = false; // the node reported it resident at least once
-    };
-    using TileBase = std::tuple<int64_t, int64_t, int64_t>; // tfMs, tickUnits, tile
     heatmap::gpu::ViewWindow view_;
-    LabSource source_;
-    bool loading_ = false;
-    std::shared_ptr<heatmap::gpu::HeatmapRenderStats> stats_ = std::make_shared<heatmap::gpu::HeatmapRenderStats>();
+    std::optional<heatmap::gpu::ViewWindow> pendingView_;
+    bool loaded_ = false, priceKnown_ = false;
+    int hours_ = 24;
+    heatmap::HeatmapSourceController *controller_ = nullptr;
+    std::shared_ptr<heatmap::HeatmapCapacity> capacity_;
+    std::shared_ptr<const heatmap::SpanSet> snapshot_;
     std::shared_ptr<heatmap::gpu::HeatmapTileStats> tileStats_ = std::make_shared<heatmap::gpu::HeatmapTileStats>();
-    std::shared_ptr<std::atomic<uint64_t>> loadGeneration_ = std::make_shared<std::atomic<uint64_t>>(0);
-    std::shared_ptr<std::mutex> loadMutex_ = std::make_shared<std::mutex>();
     QString status_ = QStringLiteral("Select a source");
-    int realHours_ = 24;
-    QString realLayer_ = QStringLiteral("near");
-    bool realMode_ = false;
-    int syntheticCount_ = 0;
     int timeframeMinutes_ = 1;
     bool manualMode_ = false;
     double manualTick_ = 0;
-    bool explicitTickPending_ = false; // set before the symbol is known: store it on accept
+    bool explicitTickPending_ = false;
     double hysteresis_ = 0.25, minRowPx_ = 2;
-    bool crossfade_ = true; // owner choice after E2 (spec rule 8)
+    bool crossfade_ = true;
+    bool showBandEdges_ = false;
     bool persistTickMemory_ = false;
     double initialRowPx_ = 0;
     heatmap::ManualTickMemory tickMemory_;
     QVariantList offeredTicks_;
+    uint64_t uploadBudget_ = kDefaultUploadBudgetBytes;
+    uint64_t gpuCap_ = heatmap::HeatmapBudgets{}.gpuPerChart;
+    // Tick state (written in updatePaintNode while the GUI thread is blocked).
+    int64_t tickUnits_ = 0, autoUnits_ = 0, postedTickUnits_ = -1;
+    bool postedManual_ = false;
+    struct TickKey {
+        uint64_t version = 0;
+        const heatmap::SpanSet *set = nullptr;
+        heatmap::gpu::ViewWindow view;
+        double heightPx = 0, minRowPx = 0, h = 0;
+        int64_t current = 0;
+        bool operator==(const TickKey &) const = default;
+    } tickKey_;
+    uint64_t tickChanges_ = 0;
+    uint64_t viewSerial_ = 0, renderedSerial_ = 0; // settled() needs a frame of the current view
     QElapsedTimer launched_, lastFrame_;
     double frameMs_ = 0, firstFrameMs_ = 0;
     QMetaObject::Connection frameConnection_;
-    uint64_t uploadBudget_ = kDefaultUploadBudgetBytes;
-    PrepMode prepMode_ = PrepMode::Full;
-    int shownNode_ = -1; // 0 = HeatmapRenderNode, 1 = HeatmapTileNode
-
-    // ---- chunked modes (V, W): shared
-    bool haveAvailability_ = false;
-    heatmap::tiles::Availability availability_;
-    uint64_t chunkSerial_ = 0; // invalidates worker results after a reload
-    std::set<std::string> chunkLoadsInFlight_; // "levelMs/startMs"
-    // ---- V
-    ViewportSource vSource_;
-    bool vInFlight_ = false;
-    uint64_t vBuilds_ = 0, vUploadBytes_ = 0;
-    std::optional<heatmap::gpu::ViewWindow> pendingView_;
-    double vLastRequestMs_ = 0; // wall time from request to accepted source
-    // ---- W
-    heatmap::tiles::ByteLru<heatmap::tiles::TileKey, WTile, heatmap::tiles::TileKeyHash> wTiles_{kDefaultTileBudgetBytes};
-    std::map<TileBase, heatmap::tiles::TileKey> wLatest_, wPrevious_;
-    std::set<TileBase> wInFlight_;
-    // Prefetch tiles the budget evicted under the current plan (not re-requested
-    // until the plan or the budget changes; see updateWholeChunk).
-    using PlanKey = std::tuple<int64_t, int64_t, int64_t, int64_t>; // tfMs, key tick, visible first/end
-    PlanKey wPlan_{};
-    std::set<TileBase> wBudgetEvicted_;
-    // The node's drawn ids and resident count at the last eviction pass: while
-    // over budget, a change re-runs it (updatePaintNode queues evictTiles()).
-    std::vector<uint64_t> wEvictDrawn_;
-    size_t wEvictResident_ = 0;
-    bool wEvictQueued_ = false;
-    int64_t wAutoUnits_ = 0, wTickUnits_ = 0;
-    int64_t wPrevTickUnits_ = 0; // hybrid: the tick before the last change (held/fading draws)
-    uint64_t wBuilds_ = 0, wIntermediateHits_ = 0, wClipped_ = 0, wLostTiles_ = 0;
-    double wLastBuildMs_ = 0;
-    size_t wCpuBytes_ = 0; // render-ready data not yet handed to the GPU
+    // Controller stats, fetched asynchronously for the debug panel.
+    struct ControllerStats {
+        heatmap::HeatmapSourceController::Stats stats;
+        bool valid = false;
+    };
+    std::shared_ptr<ControllerStats> controllerStats_ = std::make_shared<ControllerStats>();
 
     int64_t tfMs() const { return int64_t(timeframeMinutes_) * 60'000; }
-    std::string symbol() const;
-    double priceScale() const;
-    std::string layer() const { return realLayer_.toStdString(); }
-    bool chunked() const { return realMode_ && prepMode_ != PrepMode::Full; }
-    bool wholeChunk() const {
-        return chunked() && (prepMode_ == PrepMode::WholeChunkGpu || prepMode_ == PrepMode::WholeChunkCpu ||
-                             prepMode_ == PrepMode::Hybrid);
-    }
-    void acceptTile(const TileBase &base, const TileBuild &built);
-    // Enforces the W tile budget (protection rules inside); records budget-evicted prefetch.
-    void evictTiles();
-    // Hybrid tiles are cached per span (their resident source serves every tick):
-    // the cache key has tick 0 and the renderer sees one tile id per span and tick.
-    int64_t keyTick(int64_t tickUnits) const { return prepMode_ == PrepMode::Hybrid ? 0 : tickUnits; }
-    static uint64_t tickTileId(uint64_t entryId, int64_t tickUnits) {
-        return (entryId << 32) | uint64_t(uint32_t(tickUnits));
-    }
-    void accept(LabSource source, bool preserveView, bool final);
-    void reload(bool preserveView);
+    std::string symbol() const { return kSymbol; }
+    double priceScale() const { return snapshot_ ? snapshot_->priceScale : 100.0; }
+    void onSnapshot();
+    void postView();
+    int64_t chooseTick(); // Auto/Manual; GUI state only (called with the GUI thread owning or blocked)
     void clampView();
     void rememberTick();
     void restoreTick();
     double fallbackManualTick() const;
     void loadTickMemory();
-    // A view, timeframe, tick or mode change: re-plan the prepared data, repaint.
+    void refreshPresets();
+    void initialisePrice();
+    double commonTickInView() const;
+    // A view, timeframe, tick or mode change: post the view, repaint.
     void viewChanged();
-    void startChunked(bool preserveView);
-    void resetChunkedState();
-    void updateViewport();
-    void updateWholeChunk();
-    void requestChunks(double loMs, double hiMs);
-    void refreshChunkPresets();
-    bool viewportCovers() const;
-    bool tileStale(const WTile &tile) const;
-    uint64_t targetKey() const;
-    double finestTick() const;
-    double commonTickInViewAny() const;
-    QVariantMap prepMetrics() const;
 };
 } // namespace lab

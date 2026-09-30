@@ -103,13 +103,6 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
         const double fullSpan = std::min(coveredHi - coveredLo, 2 * std::min(mid - coveredLo, coveredHi - mid));
         const double tf = double(gpu.tfMs);
         const double totalMs = double(source.endMs - source.startMs);
-        // Smoke-test the display pipeline once (timed passes are compute only).
-        std::unique_ptr<QRhiTexture> color(rhi->newTexture(QRhiTexture::RGBA8, QSize(32, 32), 1, QRhiTexture::RenderTarget));
-        if (!color->create()) throw std::runtime_error("smoke texture failed");
-        std::unique_ptr<QRhiTextureRenderTarget> target(rhi->newTextureRenderTarget({QRhiColorAttachment(color.get())}));
-        std::unique_ptr<QRhiRenderPassDescriptor> pass(target->newCompatibleRenderPassDescriptor());
-        target->setRenderPassDescriptor(pass.get());
-        if (!target->create()) throw std::runtime_error("smoke target failed");
 
         auto sweep = [&](uint32_t widthPx, uint32_t heightPx, int dpr) -> QJsonObject {
             struct Level { double zoom = 0; uint64_t visible = 0; uint32_t cols = 0, rows = 0, factor = 0; std::vector<double> gpuMs, cpuMs; };
@@ -142,19 +135,7 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
                 if (i < int(levels.size())) level.visible = visibleEntries(gpu, *grid);
                 const auto started = Clock::now();
                 if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) throw std::runtime_error("begin frame failed");
-                bool ok = binner.bin(cb, *grid, {}, &error);
-                if (ok && i == 0) {
-                    ok = binner.prepareDraw(pass.get(), 1, &error);
-                    if (ok) {
-                        auto *updates = rhi->nextResourceUpdateBatch();
-                        binner.updateDraw(updates, QMatrix4x4(), QRectF(-1, -1, 2, 2), heatmap::gpu::mappingFor(*grid, view));
-                        cb->beginPass(target.get(), Qt::black, {1.0f, 0}, updates);
-                        cb->setViewport(QRhiViewport(0, 0, 32, 32));
-                        cb->setScissor(QRhiScissor(0, 0, 32, 32));
-                        binner.recordDraw(cb);
-                        cb->endPass();
-                    }
-                }
+                const bool ok = binner.bin(cb, *grid, {}, &error);
                 if (rhi->endOffscreenFrame() != QRhi::FrameOpSuccess || !ok)
                     throw std::runtime_error(("GPU bin failed: " + error).toStdString());
                 const double wall = elapsed(started);
@@ -216,6 +197,8 @@ void applyTickOptions(LabItem &item, const LabRunOptions &options) {
     if (options.tick > 0) item.setManualTick(options.tick);
     else if (options.manual) item.setManualMode(true);
     if (options.zoomRowsPx > 0) item.setInitialRowPx(options.zoomRowsPx);
+    item.setShowBandEdges(options.bandEdges);
+    if (options.gpuCapBytes) item.setGpuCapBytes(options.gpuCapBytes);
 }
 
 namespace {
@@ -232,10 +215,12 @@ struct HeadlessLab {
         item->setParentItem(scene.window()->contentItem());
         item->setSize(QSizeF(size));
         item->setTimeframeMinutes(options.tfMinutes);
-        if (const auto prep = parsePrepMode(options.prep)) item->setPrepMode(*prep);
         applyTickOptions(*item, options);
-        if (options.synthetic) item->loadSynthetic(int(options.synthetic));
-        else item->loadReal(options.hours, options.layer);
+        if (options.centerPrice > 0) { // a fixed price view once settled (E4 band-edge screenshots)
+            pendingCenter = options.centerPrice;
+            pendingSpan = options.priceSpan;
+        }
+        item->loadReal(options.hours);
         return true;
     }
     bool frame() {
@@ -244,12 +229,23 @@ struct HeadlessLab {
         image = scene.renderFrame(&error);
         return !image.isNull();
     }
+    double pendingCenter = 0, pendingSpan = 0;
     bool settle(qint64 timeoutMs) {
         QElapsedTimer timer;
         timer.start();
         int settledFrames = 0;
         while (timer.elapsed() < timeoutMs) {
             if (!frame()) return false;
+            if (pendingCenter > 0 && item->hasContent() && item->metrics().value("settled").toBool()) {
+                auto v = item->view();
+                const double span = pendingSpan > 0 ? pendingSpan : v.priceHi - v.priceLo;
+                v.priceLo = pendingCenter - span / 2;
+                v.priceHi = pendingCenter + span / 2;
+                item->setView(v);
+                pendingCenter = 0;
+                settledFrames = 0;
+                continue;
+            }
             if (!item->settled()) { settledFrames = 0; continue; }
             if (++settledFrames >= 3) return true;
         }
@@ -261,19 +257,32 @@ struct HeadlessLab {
 QString money(double v) { return QStringLiteral("$") + QString::number(v, 'g', 12); }
 
 // Debug state stamped on screenshots (the QML panel is not part of the headless scene).
-void annotate(QImage &image, const QVariantMap &m, const QString &indicator) {
+void annotate(QImage &image, const QVariantMap &m, const QString &indicator, const QVariantList &bandEdges = {},
+              double scale = 1) {
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing);
+    // E4: the finest source's band edges (dashed), in item coordinates.
+    if (!bandEdges.isEmpty()) {
+        QPen pen(QColor(0xff, 0xd8, 0x4a), 2, Qt::DashLine);
+        painter.setPen(pen);
+        for (const auto &v : bandEdges) {
+            const auto e = v.toList();
+            if (e.size() != 4) continue;
+            const double x0 = e[0].toDouble() * scale, x1 = e[1].toDouble() * scale;
+            for (const double y : {e[2].toDouble() * scale, e[3].toDouble() * scale})
+                if (y >= 0 && y <= image.height()) painter.drawLine(QPointF(x0, y), QPointF(x1, y));
+        }
+    }
     QFont font(QStringLiteral("Menlo"));
     font.setPixelSize(15);
     painter.setFont(font);
-    const QString line = QStringLiteral("mode=%1  tick=%2  h=%3  minRowPx=%4  commonTick(view)=%5  rows=%6px  "
-                                        "tf=%7m  re-bin CPU submit=%8 ms  bins=%9  tick changes=%10")
+    const QString line = QStringLiteral("mode=%1  tick=%2  h=%3  minRowPx=%4  rows=%5px  tf=%6m  last re-bin=%7 ms  "
+                                        "resident=%8 MB  refused spans=%9  tick changes=%10")
         .arg(m.value("mode").toString(), money(m.value("tick").toDouble()))
         .arg(m.value("hysteresis").toDouble()).arg(m.value("minRowPx").toDouble())
-        .arg(money(m.value("commonTick").toDouble()))
         .arg(m.value("rowPx").toDouble(), 0, 'f', 2).arg(m.value("timeframeMinutes").toInt())
-        .arg(m.value("binSubmitMs").toDouble(), 0, 'f', 3).arg(m.value("rebins").toULongLong())
+        .arg(m.value("lastBinMs").toDouble(), 0, 'f', 3)
+        .arg(m.value("residentBytes").toDouble() / 1048576.0, 0, 'f', 1).arg(m.value("refusedSpans").toInt())
         .arg(m.value("tickChanges").toULongLong());
     const QFontMetrics fm(font);
     auto box = [&](int y, const QString &text, QColor color) {
@@ -312,7 +321,9 @@ int runScreenshot(const LabRunOptions &options, const QString &path) {
     }
     const auto metrics = lab.item->metrics();
     QImage image = lab.image.convertToFormat(QImage::Format_RGBA8888);
-    annotate(image, metrics, lab.item->resolutionIndicator());
+    annotate(image, metrics, lab.item->resolutionIndicator(),
+             options.bandEdges ? lab.item->bandEdges() : QVariantList{},
+             double(image.width()) / std::max(1.0, lab.item->width()));
     bool allowed = labOutputAllowed(path, &why);
     if (allowed) {
         QDir().mkpath(QFileInfo(path).absolutePath());
@@ -368,7 +379,7 @@ int runTickSweep(const LabRunOptions &options) {
             const auto m = item->metrics();
             const double next = m.value("tick").toDouble();
             if (next == tick) return 0;
-            const double ms = m.value("tickChangeBinMs").toDouble();
+            const double ms = m.value("lastBinMs").toDouble();
             if (!lab.frame()) return 2; // GPU time is reported one frame late
             const double gpu = item->metrics().value("gpuFrameMs").toDouble();
             binMs.push_back(ms);
@@ -413,8 +424,7 @@ int runTickSweep(const LabRunOptions &options) {
         summaries.append(summary);
     }
     const auto m = item->metrics();
-    print({{"sweep", summaries}, {"source", options.synthetic ? QStringLiteral("synthetic") : options.layer},
-           {"hours", options.hours}, {"timeframe_minutes", options.tfMinutes}, {"min_row_px", options.minRowPx},
+    print({{"sweep", summaries}, {"hours", options.hours}, {"timeframe_minutes", options.tfMinutes}, {"min_row_px", options.minRowPx},
            {"step", kStep}, {"errors", m.value("errors").toDouble()}});
     return 0;
 }

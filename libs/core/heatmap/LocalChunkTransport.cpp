@@ -22,7 +22,8 @@ struct LocalChunkTransport::Worker : QObject {
     }
 };
 namespace {
-ChunkAvailability readAvailability(recording::Hmc2Reader &reader, const std::string &symbol, std::stop_token stop) {
+ChunkAvailability readAvailability(recording::Hmc2Reader &reader, const std::string &symbol, std::stop_token stop,
+                                   int64_t pinnedEndMs) {
     ChunkAvailability out;
     out.symbol = symbol;
     out.chunkWireVersion = kChunkWireVersion;
@@ -39,7 +40,12 @@ ChunkAvailability readAvailability(recording::Hmc2Reader &reader, const std::str
             if (control.status != recording::ReadStatus::Complete)
                 throw std::runtime_error("local chunk availability scan incomplete");
             if (!a.oldestMs || !a.latestMs) continue;
-            info.levels.push_back({level, span, *a.latestMs + level, *a.oldestMs, *a.latestMs});
+            int64_t latest = *a.latestMs;
+            if (pinnedEndMs > 0) { // the recorder "stopped" at the pin: whole buckets before it
+                latest = std::min(latest, recording::floorDiv(pinnedEndMs, level) * level - level);
+                if (latest < *a.oldestMs) continue;
+            }
+            info.levels.push_back({level, span, latest + level, *a.oldestMs, latest});
             if (level == kMinuteMs && a.latestHeader) {
                 const auto &h = *a.latestHeader;
                 info.latestGrid = protocol::chunkwire::GridInfo{h.configHash, h.rowTickUnits, h.priceScale,
@@ -117,7 +123,7 @@ void LocalChunkTransport::refreshAvailability(const std::string &symbol, bool fo
         try {
             auto &reader = worker_->reader();
             if (worker_->hooks.beforeAvailability) worker_->hooks.beforeAvailability(reader, stop);
-            auto next = readAvailability(reader, symbol, stop);
+            auto next = readAvailability(reader, symbol, stop, worker_->hooks.pinnedEndMs);
             if (stop.stop_requested()) return;
             const auto previous = worker_->availability.find(symbol);
             const bool changed = previous == worker_->availability.end() || !sameAvailability(previous->second, next);
