@@ -723,8 +723,16 @@ void DataProcessor::scheduleRecordingBand() {
 }
 
 void DataProcessor::applyRecordingBand() {
+    const int64_t now = m_recordingClock.elapsed();
+    // The timer can fire a millisecond before the clock shows kDebounceMs (seen on
+    // Windows under load: 149 ms). Re-arm for the rest; returning here would drop
+    // the band until the view changed again.
+    if (m_recordingDebounce.pending && !m_recordingDebounce.ready(now)) {
+        m_recordingBandTimer->start(m_recordingDebounce.remainingMs(now));
+        return;
+    }
     if (!recordingMode() || !m_recordingConnected || !m_recordingView.valid() ||
-        !m_recordingDebounce.ready(m_recordingClock.elapsed())) return;
+        !m_recordingDebounce.ready(now)) return;
     const auto band = recording_view::requestBand(m_recordingView, m_recordingMinRowPx);
     if (!band.valid()) return;
     ensureHeatmapWindow(m_forcedTimeframeMs, m_heatmapGridWidth, recording_view::kRows);
