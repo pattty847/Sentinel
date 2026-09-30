@@ -8,6 +8,7 @@
 #include "lab/LabChunks.hpp"
 #include "lab/LabItem.hpp"
 #include "lab/OffscreenQuick.hpp"
+#include "lab/RhiBackend.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include "servermodel/Hmc2Store.hpp"
@@ -18,7 +19,6 @@
 #include <QQuickWindow>
 #include <gtest/gtest.h>
 #include <rhi/qrhi.h>
-#include <rhi/qrhi_platform.h>
 #include <cmath>
 #include <cstring>
 
@@ -58,15 +58,8 @@ SparseColumns minutes(int64_t count, bool farWall) {
     return out;
 }
 
-struct Headless {
-    std::unique_ptr<QRhi> rhi;
-    Headless() {
-        if (!lab::metalDeviceAvailable()) return;
-#ifdef Q_OS_MACOS
-        QRhiMetalInitParams init;
-        rhi.reset(QRhi::create(QRhi::Metal, &init));
-#endif
-    }
+struct Headless : lab::HeadlessRhi {
+    Headless() { create(); }
 };
 
 BinGrid toBinGrid(const tiles::TileGrid &g) { return {g.tfMs, g.firstBucket, g.columns, g.tick, g.firstBin, g.rows}; }
@@ -98,7 +91,7 @@ std::vector<uint32_t> binTile(QRhi *rhi, HeatmapGpuBinner &binner, const BinGrid
 
 TEST(HeatmapTileGpu, BinIntoMatchesTheCpuRenderReadyCellsExactly) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice; GPU tile parity requires Metal";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     for (const bool farWall : {false, true}) {
         const auto data = minutes(150, farWall);
         for (const int64_t tf : {minute, 5 * minute}) {
@@ -168,7 +161,7 @@ public:
 };
 
 TEST(HeatmapTileNodeScene, PanIsMappingOnlyAndANewTickHoldsTheOldPictureUntilResident) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     lab::OffscreenQuick scene;
     QString error;
     ASSERT_TRUE(scene.create(QSize(320, 200), &error)) << error.toStdString();
@@ -252,7 +245,7 @@ TEST(HeatmapTileNodeScene, PanIsMappingOnlyAndANewTickHoldsTheOldPictureUntilRes
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
 }
 TEST(HeatmapTileNodeScene, TileEdgesOnPixelCentresLeaveNoSeam) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     // The geometry that showed 1-px transparent seams on real data: 1500 px over
     // 720 one-minute columns, a tile edge 114 columns in, i.e. at x = 237.5.
     lab::OffscreenQuick scene;
@@ -332,7 +325,7 @@ bool settle(lab::OffscreenQuick &scene, lab::LabItem *item, QString *error) {
 }
 
 TEST(HeatmapTileLabItem, TilesComeBackAfterTheQRhiIsRecreated) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     {
@@ -376,7 +369,7 @@ TEST(HeatmapTileLabItem, TilesComeBackAfterTheQRhiIsRecreated) {
 }
 
 TEST(HeatmapTileLabItem, ARevisionFromOneChartRebuildsTheOtherChartsTiles) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     {
@@ -443,7 +436,7 @@ double metric(const lab::LabItem *item, const char *name) { return item->metrics
 // generation. Charts that hold tiles or sources of the old one must hear it,
 // even when neither of them asked (here the test itself reads it back).
 TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     writeMinutes(dir, 150); // hour 2 is still open
@@ -489,7 +482,7 @@ TEST(HeatmapTileLabItem, AnEvictedOpenChunkReadAgainRebuildsStationaryCharts) {
 // resident, or what is still drawn) is protected, so obsolete generations evict
 // and the retained tiles (and so GPU residency) stay within the budget.
 TEST(HeatmapTileLabItem, RepeatedRevisionsOfAVisibleTileStayWithinTheTileBudget) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     writeMinutes(dir, 150);
@@ -535,7 +528,7 @@ TEST(HeatmapTileLabItem, RepeatedRevisionsOfAVisibleTileStayWithinTheTileBudget)
 // budget changes, or the two neighbours evict each other forever (W-cpu builds
 // on a worker and re-plans when each lands).
 TEST(HeatmapTileLabItem, BudgetEvictedPrefetchIsNotRebuiltWhileTheViewStands) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << why.toStdString();
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     writeMinutes(dir, 12 * 60);
