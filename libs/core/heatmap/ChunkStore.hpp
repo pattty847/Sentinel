@@ -4,14 +4,22 @@
 // preparation mode, bounded by one global byte budget (LRU).
 // - Concurrent get() calls for the same key share a single load: no chart ever
 //   decodes a chunk that another chart is already decoding (no redundant decode).
-// - An open (unsealed) chunk can be replaced by a newer revision (revise()). Each
-//   stored version gets a process-unique generation; anything derived from a
-//   chunk (composed tiles, render-ready tiles, GPU sources) records the
-//   generations it was built from and is stale once any of them changes.
+// - An open (unsealed) chunk can be replaced by a newer revision (revise(),
+//   reload()). Each stored version gets a process-unique generation; anything
+//   derived from a chunk (composed tiles, render-ready tiles, GPU sources)
+//   records the generations it was built from and is stale once any differs
+//   from latestGeneration(). The latest generation of a key survives eviction,
+//   so "evicted" never reads as "unchanged" after a revision; re-loading an
+//   evicted SEALED chunk keeps its generation (sealed chunks never change).
+// - Ordering: every acquisition (get() load, revise(), reload()) takes a ticket
+//   when it starts. A completion never replaces a version whose ticket is newer,
+//   so a slow load that started before a revision cannot overwrite it.
+// - A listener is told about every revision (after the store lock is released).
 // - Holders of an older version keep it alive through their shared_ptr; the
 //   budget counts only what the store itself retains.
 // Thread-safe. No Qt.
 #include "ChunkCodec.hpp"
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -42,6 +50,7 @@ struct StoredChunk {
     bool sealed = false;
     uint64_t revision = 0;   // caller-defined (wire revision of an open chunk)
     uint64_t generation = 0; // process-unique per stored version
+    uint64_t ticket = 0;     // acquisition order (see Ordering above)
     size_t bytes = 0;
 };
 
@@ -63,9 +72,14 @@ public:
     std::shared_ptr<const StoredChunk> peek(const ChunkKey &key);
     // Cached chunk or nullptr, without touching LRU order or stats (inspection).
     std::shared_ptr<const StoredChunk> cached(const ChunkKey &key) const;
-    // Current generation of a cached key (0 when absent). Not counted in stats.
+    // Latest generation ever stored for the key, cached or evicted (0 = never
+    // stored since the last clear()). Not counted in stats.
     uint64_t generationOf(const ChunkKey &key) const;
-    bool contains(const ChunkKey &key) const { return generationOf(key) != 0; }
+    bool contains(const ChunkKey &key) const { return cached(key) != nullptr; }
+    // Called after every revise()/reload() that stored a new version, on the
+    // calling thread, outside the store lock.
+    void setRevisionListener(std::function<void(const ChunkKey &)> listener);
+    uint64_t revisionCount() const;
     // Stores a new version (an open chunk's revision, or a reload). Returns it.
     std::shared_ptr<const StoredChunk> revise(const ChunkKey &key, Loaded loaded);
     // Reloads through the loader and stores the result as a new version.
@@ -101,8 +115,18 @@ private:
     std::list<ChunkKey> lru_; // front = most recent
     std::unordered_map<ChunkKey, Entry, ChunkKeyHash> entries_;
     std::unordered_map<ChunkKey, std::shared_ptr<InFlight>, ChunkKeyHash> inFlight_;
+    struct Latest { uint64_t generation = 0, ticket = 0; bool sealed = false; };
+    std::unordered_map<ChunkKey, Latest, ChunkKeyHash> latest_; // survives eviction
+    uint64_t nextTicket_ = 0;
+    std::function<void(const ChunkKey &)> listener_;
+    std::atomic<uint64_t> revisionCount_{0};
     Stats stats_;
-    std::shared_ptr<const StoredChunk> insertLocked(const ChunkKey &key, Loaded loaded);
+    void notify(const ChunkKey &key);
+    // Stores unless a version with a newer ticket exists (then returns that one).
+    // *stored tells which happened.
+    std::shared_ptr<const StoredChunk> insertLocked(const ChunkKey &key, Loaded loaded, uint64_t ticket,
+                                                    bool revision, bool *stored = nullptr);
+    std::shared_ptr<const StoredChunk> cachedLocked(const ChunkKey &key) const;
     void evictLocked();
 };
 } // namespace heatmap

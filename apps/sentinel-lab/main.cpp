@@ -1,7 +1,9 @@
 #include "lab/B1Bench.hpp"
 #include "lab/Bench.hpp"
+#include "lab/LabChunks.hpp"
 #include "lab/LabItem.hpp"
 #include <QCommandLineParser>
+#include <QDateTime>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -48,6 +50,8 @@ int main(int argc, char **argv) {
     parser.addOption({"charts", "Lab items side by side (1-4); extra items show 5m, 1h, 15m of the same symbol", "n", "1"});
     parser.addOption({"b1-bench", "Headless B1: scripted pan/zoom sessions in V and W modes; prints a table, writes JSON", "json"});
     parser.addOption({"b1-quick", "With --b1-bench: a reduced matrix (1x only, 1m and 1h)"});
+    parser.addOption({"end-utc", "Pin the recording's end (exclusive), e.g. 2026-09-30T00:00:00Z: viewport/whole-chunk/hybrid "
+                                 "modes and --b1-bench see only this closed range (default: live)", "time"});
     parser.addOption({"b1-modes", "With --b1-bench: comma-separated prep modes to run (default: all four)", "modes"});
     parser.addOption({"window-screenshot", "Interactive window: once every chart has settled, grab the whole window "
                                            "(controls and debug panel included) to this PNG and exit", "path"});
@@ -92,6 +96,11 @@ int main(int argc, char **argv) {
     if (!lab::parsePrepMode(options.prep)) return 2;
     options.charts = parser.value("charts").toInt(&ok);
     if (!ok || options.charts < 1 || options.charts > 4) return 2;
+    if (parser.isSet("end-utc")) {
+        const auto end = QDateTime::fromString(parser.value("end-utc"), Qt::ISODate);
+        if (!end.isValid()) return 2;
+        lab::setPinnedEndMs(end.toMSecsSinceEpoch());
+    }
     if (parser.isSet("b1-bench")) return lab::runB1Bench(parser.value("b1-bench"), parser.isSet("b1-quick"),
                                                              parser.isSet("b1-modes") ? parser.value("b1-modes").split(',') : QStringList{});
     if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic, tf);

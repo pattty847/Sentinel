@@ -49,6 +49,14 @@ LabItem::LabItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     heatmap::gpu::prewarmPrecisionSelfTest(); // fixture builds on a worker, not in prepare()
     launched_.start();
+    // A revision stored by any chart (or the live feed) makes every chart re-check
+    // what it prepared, and pick up the refreshed availability.
+    connect(chunkEvents(), &ChunkEvents::chunkRevised, this, [this] {
+        if (!chunked() || !haveAvailability_) return;
+        const auto info = layerInfo(layer());
+        if (info.error.empty()) availability_ = info.availability;
+        viewChanged();
+    }, Qt::QueuedConnection);
 }
 LabItem::~LabItem() { loadGeneration_->fetch_add(1); }
 
@@ -106,14 +114,32 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     const auto residentIds = tileStats_->residentIds();
     const std::set<uint64_t> resident(residentIds.begin(), residentIds.end());
     size_t cpuBytes = 0;
-    wTiles_.forEachMutable([&](const heatmap::tiles::TileKey &, WTile &tile, size_t) {
+    // A tile whose CPU data was dropped and that the node no longer holds lost
+    // its GPU copy (QRhi or scene graph recreated, node replaced): forget it so
+    // the controller rebuilds it from the chunk store.
+    std::vector<heatmap::tiles::TileKey> lost;
+    wTiles_.forEachMutable([&](const heatmap::tiles::TileKey &key, WTile &tile, size_t) {
         if (resident.count(tile.ref.id)) {
+            tile.wasResident = true;
             tile.ref.cells.reset();
             if (!tile.ref.viewRows) tile.ref.source.reset(); // hybrid tiles re-bin from their resident source
+        } else if (tile.wasResident && !tile.ref.cells && !tile.ref.source) {
+            lost.push_back(key);
         }
         if (tile.ref.cells) cpuBytes += tile.ref.cells->size() * 4;
     });
     wCpuBytes_ = cpuBytes;
+    if (!lost.empty()) {
+        for (const auto &key : lost) {
+            wTiles_.erase(key);
+            const TileBase base{key.tfMs, key.tickUnits, key.tile};
+            if (const auto it = wLatest_.find(base); it != wLatest_.end() && it->second == key) wLatest_.erase(it);
+            if (const auto it = wPrevious_.find(base); it != wPrevious_.end() && it->second == key) wPrevious_.erase(it);
+        }
+        wLostTiles_ += lost.size();
+        // Render thread, GUI blocked: re-plan on the GUI thread after this sync.
+        QMetaObject::invokeMethod(this, [this] { viewChanged(); }, Qt::QueuedConnection);
+    }
     heatmap::gpu::HeatmapTileNode::Frame frame;
     const int64_t tf = tfMs();
     const bool hybrid = prepMode_ == PrepMode::Hybrid;
@@ -974,6 +1000,7 @@ QVariantMap LabItem::prepMetrics() const {
     m["tileNodePrepareMs"] = tileStats_->prepareMs.load();
     m["intermediateHits"] = qulonglong(wIntermediateHits_);
     m["clippedTiles"] = qulonglong(wClipped_);
+    m["lostTiles"] = qulonglong(wLostTiles_);
     m["loadingSlots"] = tileStats_->loadingSlots.load();
     m["holding"] = tileStats_->holding.load();
     return m;

@@ -70,6 +70,13 @@ void HeatmapTileNode::releaseAll() {
     tileDraws_.clear();
     drawnKey_ = 0;
     pendingGpuTile_ = 0;
+    // Nothing is resident any more: the controller must not rely on GPU copies.
+    stats_->complete.store(false);
+    stats_->residentTiles.store(0);
+    stats_->drawnKey.store(0);
+    std::scoped_lock lock(stats_->mutex);
+    stats_->resident.clear();
+    stats_->drawn.clear();
 }
 
 void HeatmapTileNode::releaseResources() {

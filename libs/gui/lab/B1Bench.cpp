@@ -443,7 +443,8 @@ int runB1Bench(const QString &jsonPath, bool quick, const QStringList &modeNames
                              {"upload_budget_bytes", double(LabItem::kDefaultUploadBudgetBytes)},
                              {"tile_budget_bytes", double(LabItem::kDefaultTileBudgetBytes)},
                              {"tile_columns", double(heatmap::tiles::kTileColumns)},
-                             {"elapsed_s", since(started) / 1000}};
+                             {"elapsed_s", since(started) / 1000},
+                             {"pinned_end_ms", double(pinnedEndMs())}};
     if (!jsonPath.isEmpty()) {
         QFile file(jsonPath);
         if (file.open(QIODevice::WriteOnly)) file.write(QJsonDocument(result).toJson(QJsonDocument::Indented));

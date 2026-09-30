@@ -136,6 +136,7 @@ private:
         heatmap::gpu::TileRef ref;
         std::vector<std::pair<heatmap::ChunkKey, uint64_t>> chunkGenerations;
         bool clipped = false;
+        bool wasResident = false; // the node reported it resident at least once
     };
     using TileBase = std::tuple<int64_t, int64_t, int64_t>; // tfMs, tickUnits, tile
     heatmap::gpu::ViewWindow view_;
@@ -184,7 +185,7 @@ private:
     std::set<TileBase> wInFlight_;
     int64_t wAutoUnits_ = 0, wTickUnits_ = 0;
     int64_t wPrevTickUnits_ = 0; // hybrid: the tick before the last change (held/fading draws)
-    uint64_t wBuilds_ = 0, wIntermediateHits_ = 0, wClipped_ = 0;
+    uint64_t wBuilds_ = 0, wIntermediateHits_ = 0, wClipped_ = 0, wLostTiles_ = 0;
     double wLastBuildMs_ = 0;
     size_t wCpuBytes_ = 0; // render-ready data not yet handed to the GPU
 

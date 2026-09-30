@@ -13,6 +13,7 @@
 // change rebuilds cells without recomposing.
 // All functions are thread-safe; builders run on worker threads.
 #include "heatmap/ChunkStore.hpp"
+#include <QObject>
 #include "heatmap/HeatmapTiles.hpp"
 #include "render/heatmap/HeatmapBinGrid.hpp"
 #include "render/heatmap/HeatmapGpuSource.hpp"
@@ -26,6 +27,20 @@ inline constexpr const char *kSymbol = "BTC-USD";
 // Process-wide caches (plan budgets: 512 MiB decoded chunks; tile intermediates 256 MiB).
 heatmap::ChunkStore &chunkStore();
 void setChunkRecordingRoot(const std::string &root); // before first use (tests)
+// Pins the recording's end (exclusive, UTC ms; 0 = live): availability, and so
+// every chunk, stops there. Benchmarks use a closed past range so every mode
+// sees the same sealed data. Clears the caches.
+void setPinnedEndMs(int64_t endMs);
+int64_t pinnedEndMs();
+
+// Queued (GUI-thread) notification of every chunk revision in the store, so
+// every chart re-checks its prepared data, not only the one that asked.
+class ChunkEvents : public QObject {
+    Q_OBJECT
+signals:
+    void chunkRevised();
+};
+ChunkEvents *chunkEvents(); // lives on the thread of the QCoreApplication
 
 struct LayerInfo {
     heatmap::tiles::Availability availability;

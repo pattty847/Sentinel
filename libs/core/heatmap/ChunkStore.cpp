@@ -1,6 +1,7 @@
 #include "ChunkStore.hpp"
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 
 namespace heatmap {
 namespace {
@@ -32,14 +33,39 @@ size_t ChunkKeyHash::operator()(const ChunkKey &key) const {
 
 ChunkStore::ChunkStore(size_t maxBytes, Loader loader) : loader_(std::move(loader)), maxBytes_(maxBytes) {}
 
-std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key, Loaded loaded) {
+std::shared_ptr<const StoredChunk> ChunkStore::cachedLocked(const ChunkKey &key) const {
+    const auto it = entries_.find(key);
+    return it == entries_.end() ? nullptr : it->second.chunk;
+}
+
+std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key, Loaded loaded, uint64_t ticket,
+                                                            bool revision, bool *stored) {
+    if (stored) *stored = false;
+    auto &latest = latest_[key];
+    if (latest.ticket > ticket) {
+        // A newer acquisition already stored its version: keep it. If it was
+        // evicted meanwhile, this older data must not come back as current.
+        if (auto current = cachedLocked(key); current) return current;
+        if (!revision && latest.sealed && loaded.sealed) {
+            // Same immutable content: fall through and re-cache it under the
+            // newer ticket and the same generation.
+            ticket = latest.ticket;
+        } else {
+            return nullptr;
+        }
+    }
     auto chunk = std::make_shared<StoredChunk>();
     chunk->key = key;
     chunk->sealed = loaded.sealed;
     chunk->revision = loaded.revision;
-    chunk->generation = nextGeneration.fetch_add(1);
+    // A sealed chunk never changes: re-loading it after eviction keeps its
+    // generation, so nothing derived from it goes stale for no reason.
+    const bool sameContent = !revision && loaded.sealed && latest.sealed && latest.generation;
+    chunk->generation = sameContent ? latest.generation : nextGeneration.fetch_add(1);
+    chunk->ticket = ticket;
     chunk->bytes = sparseBytes(loaded.columns);
     chunk->columns = std::make_shared<const SparseColumns>(std::move(loaded.columns));
+    latest = {chunk->generation, ticket, chunk->sealed};
     if (auto it = entries_.find(key); it != entries_.end()) {
         bytes_ -= it->second.chunk->bytes;
         lru_.erase(it->second.lru);
@@ -49,6 +75,7 @@ std::shared_ptr<const StoredChunk> ChunkStore::insertLocked(const ChunkKey &key,
     entries_[key] = {chunk, lru_.begin()};
     bytes_ += chunk->bytes;
     evictLocked();
+    if (stored) *stored = true;
     return chunk;
 }
 
@@ -67,6 +94,7 @@ void ChunkStore::evictLocked() {
 std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
     std::shared_ptr<InFlight> flight;
     bool owner = false;
+    uint64_t ticket = 0;
     {
         std::unique_lock lock(mutex_);
         if (auto it = entries_.find(key); it != entries_.end()) {
@@ -79,6 +107,7 @@ std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
         if (!slot) {
             slot = std::make_shared<InFlight>();
             owner = true;
+            ticket = ++nextTicket_;
         } else {
             ++stats_.sharedLoads;
         }
@@ -89,17 +118,23 @@ std::shared_ptr<const StoredChunk> ChunkStore::get(const ChunkKey &key) {
             return flight->result;
         }
     }
-    // Owner: load outside the lock, then publish to waiters.
-    const auto started = std::chrono::steady_clock::now();
+    // Owner: load outside the lock, then publish to waiters. If a newer
+    // revision was stored and evicted while this (older) load ran, the result
+    // is discarded and the key is loaded again under a new ticket.
     std::shared_ptr<const StoredChunk> result;
     std::exception_ptr error;
     try {
-        Loaded loaded = loader_(key);
-        validate(loaded.columns);
-        std::scoped_lock lock(mutex_);
-        ++stats_.loads;
-        stats_.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-        result = insertLocked(key, std::move(loaded));
+        for (int attempt = 0; !result; ++attempt) {
+            if (attempt == 3) throw std::runtime_error("heatmap chunk kept changing during its load");
+            const auto started = std::chrono::steady_clock::now();
+            Loaded loaded = loader_(key);
+            validate(loaded.columns);
+            std::scoped_lock lock(mutex_);
+            ++stats_.loads;
+            stats_.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            result = insertLocked(key, std::move(loaded), ticket, false);
+            if (!result) ticket = ++nextTicket_;
+        }
     } catch (...) {
         error = std::current_exception();
     }
@@ -126,33 +161,66 @@ std::shared_ptr<const StoredChunk> ChunkStore::peek(const ChunkKey &key) {
 
 std::shared_ptr<const StoredChunk> ChunkStore::cached(const ChunkKey &key) const {
     std::scoped_lock lock(mutex_);
-    const auto it = entries_.find(key);
-    return it == entries_.end() ? nullptr : it->second.chunk;
+    return cachedLocked(key);
 }
 
 uint64_t ChunkStore::generationOf(const ChunkKey &key) const {
     std::scoped_lock lock(mutex_);
-    const auto it = entries_.find(key);
-    return it == entries_.end() ? 0 : it->second.chunk->generation;
+    const auto it = latest_.find(key);
+    return it == latest_.end() ? 0 : it->second.generation;
 }
 
 std::shared_ptr<const StoredChunk> ChunkStore::revise(const ChunkKey &key, Loaded loaded) {
     validate(loaded.columns);
-    std::scoped_lock lock(mutex_);
-    ++stats_.revisions;
-    return insertLocked(key, std::move(loaded));
+    std::shared_ptr<const StoredChunk> result;
+    bool stored = false;
+    {
+        std::scoped_lock lock(mutex_);
+        ++stats_.revisions;
+        result = insertLocked(key, std::move(loaded), ++nextTicket_, true, &stored);
+    }
+    if (stored) notify(key);
+    return result;
 }
 
 std::shared_ptr<const StoredChunk> ChunkStore::reload(const ChunkKey &key) {
+    uint64_t ticket = 0;
+    {
+        std::scoped_lock lock(mutex_);
+        ticket = ++nextTicket_; // newer than any load already in flight
+    }
     const auto started = std::chrono::steady_clock::now();
     Loaded loaded = loader_(key);
     validate(loaded.columns);
-    std::scoped_lock lock(mutex_);
-    ++stats_.loads;
-    ++stats_.revisions;
-    stats_.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    return insertLocked(key, std::move(loaded));
+    std::shared_ptr<const StoredChunk> result;
+    bool stored = false;
+    {
+        std::scoped_lock lock(mutex_);
+        ++stats_.loads;
+        ++stats_.revisions;
+        stats_.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        result = insertLocked(key, std::move(loaded), ticket, true, &stored);
+    }
+    notify(key); // even when a newer load won: charts re-check what they hold
+    return result;
 }
+
+void ChunkStore::notify(const ChunkKey &key) {
+    revisionCount_.fetch_add(1);
+    std::function<void(const ChunkKey &)> listener;
+    {
+        std::scoped_lock lock(mutex_);
+        listener = listener_;
+    }
+    if (listener) listener(key);
+}
+
+void ChunkStore::setRevisionListener(std::function<void(const ChunkKey &)> listener) {
+    std::scoped_lock lock(mutex_);
+    listener_ = std::move(listener);
+}
+
+uint64_t ChunkStore::revisionCount() const { return revisionCount_.load(); }
 
 ChunkStore::Stats ChunkStore::stats() const {
     std::scoped_lock lock(mutex_);
@@ -170,6 +238,7 @@ void ChunkStore::clear() {
     std::scoped_lock lock(mutex_);
     entries_.clear();
     lru_.clear();
+    latest_.clear(); // derived objects built before a clear() compare as unknown, not stale
     bytes_ = 0;
 }
 void ChunkStore::setMaxBytes(size_t bytes) {

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <thread>
 
 namespace {
@@ -117,12 +118,26 @@ TEST(HeatmapChunkStore, SharesOneDecodePerKeyAndEvictsByBytes) {
     EXPECT_EQ(first->columns->columns.size(), makeHourChunk(0).columns.size()) << "holders keep evicted versions";
 }
 
+// Blocks a loader until the test opens it (deterministic overlap, no sleeps).
+struct Gate {
+    std::promise<void> opened;
+    std::shared_future<void> wait = opened.get_future().share();
+    void open() { opened.set_value(); }
+};
+// Spins (bounded) until pred() holds; the store's counters say when every
+// caller is waiting on the shared load.
+template <class Pred> bool eventually(Pred pred) {
+    for (int i = 0; i < 20'000'000 && !pred(); ++i) std::this_thread::yield();
+    return pred();
+}
+
 TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
     std::atomic<int> loads{0};
     std::atomic<bool> fail{false};
+    auto gate = std::make_shared<Gate>();
     ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
         ++loads;
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        gate->wait.wait();
         if (fail) throw std::runtime_error("disk gone");
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour), true, 0};
     });
@@ -130,12 +145,14 @@ TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
     std::vector<std::thread> threads;
     std::vector<std::shared_ptr<const StoredChunk>> results(4);
     for (int i = 0; i < 4; ++i) threads.emplace_back([&, i] { results[i] = store.get(key); });
+    ASSERT_TRUE(eventually([&] { return store.stats().sharedLoads == 3; })) << "three charts wait on the first";
+    gate->open();
     for (auto &t : threads) t.join();
     EXPECT_EQ(loads.load(), 1) << "four charts, one decode";
     for (const auto &r : results) EXPECT_EQ(r, results[0]);
-    EXPECT_EQ(store.stats().sharedLoads + 1, 4u);
 
     fail = true;
+    gate = std::make_shared<Gate>();
     const ChunkKey other{"BTC-USD", "deep", minute, epoch + 3 * hour};
     std::atomic<int> errors{0};
     threads.clear();
@@ -143,9 +160,85 @@ TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
         threads.emplace_back([&] {
             try { store.get(other); } catch (const std::runtime_error &) { ++errors; }
         });
+    ASSERT_TRUE(eventually([&] { return store.stats().sharedLoads == 5; }));
+    gate->open();
     for (auto &t : threads) t.join();
-    EXPECT_EQ(errors.load(), 3);
+    EXPECT_EQ(errors.load(), 3) << "waiters rethrow the owner's failure";
     EXPECT_FALSE(store.contains(other));
+}
+
+TEST(HeatmapChunkStore, ASlowLoadNeverReplacesARevisionThatArrivedDuringIt) {
+    auto gate = std::make_shared<Gate>();
+    std::atomic<int> loads{0};
+    ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
+        const int n = ++loads;
+        if (n == 1) gate->wait.wait(); // the stale read (30 minutes) blocks
+        return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour, 0, n == 1 ? 30 : 50), false, 0};
+    });
+    const ChunkKey key{"BTC-USD", "deep", minute, epoch};
+    std::shared_ptr<const StoredChunk> fromGet;
+    std::thread slow([&] { fromGet = store.get(key); });
+    ASSERT_TRUE(eventually([&] { return loads.load() == 1; }));
+    const auto revised = store.revise(key, {makeHourChunk(0, 0, 45), false, 7});
+    gate->open();
+    slow.join();
+    EXPECT_EQ(fromGet, revised) << "the older load returns the newer revision";
+    EXPECT_EQ(store.cached(key), revised);
+    EXPECT_EQ(store.generationOf(key), revised->generation);
+    // A reload started after the in-flight get also wins over it.
+    auto gate2 = std::make_shared<Gate>();
+    std::atomic<int> loads2{0};
+    ChunkStore other(1ull << 30, [&](const ChunkKey &k) {
+        const int n = ++loads2;
+        if (n == 1) gate2->wait.wait();
+        return ChunkStore::Loaded{makeHourChunk((k.startMs - epoch) / hour, 0, n == 1 ? 30 : 55), false, 0};
+    });
+    std::thread slow2([&] { fromGet = other.get(key); });
+    ASSERT_TRUE(eventually([&] { return loads2.load() == 1; }));
+    const auto reloaded = other.reload(key); // second loader call: 55 minutes
+    gate2->open();
+    slow2.join();
+    EXPECT_EQ(fromGet, reloaded);
+    EXPECT_EQ(other.cached(key)->columns->scannedRanges.back().endMs, epoch + 55 * minute);
+}
+
+TEST(HeatmapChunkStore, LatestGenerationSurvivesEvictionAndSealedReloadsKeepIt) {
+    std::atomic<int> loads{0};
+    ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
+        ++loads;
+        const int64_t h = (key.startMs - epoch) / hour;
+        return ChunkStore::Loaded{makeHourChunk(h), h != 5, 0}; // hour 5 is the open chunk
+    });
+    const ChunkKey sealedKey{"BTC-USD", "deep", minute, epoch + hour}, openKey{"BTC-USD", "deep", minute, epoch + 5 * hour};
+    const auto sealed = store.get(sealedKey);
+    const auto open = store.get(openKey);
+    const auto revised = store.revise(openKey, {makeHourChunk(5, 1), false, 2});
+    store.setMaxBytes(1); // evict everything but the newest
+    EXPECT_EQ(store.cached(sealedKey), nullptr);
+    EXPECT_EQ(store.generationOf(sealedKey), sealed->generation) << "eviction does not forget the version";
+    EXPECT_EQ(store.generationOf(openKey), revised->generation);
+    EXPECT_NE(store.generationOf(openKey), open->generation) << "a tile built from the first version is stale";
+    store.setMaxBytes(1ull << 30);
+    EXPECT_EQ(store.get(sealedKey)->generation, sealed->generation) << "sealed content never changes";
+    store.setMaxBytes(1);
+    store.get(sealedKey); // evicts the open chunk
+    ASSERT_EQ(store.cached(openKey), nullptr);
+    EXPECT_NE(store.get(openKey)->generation, revised->generation) << "an open chunk re-read from disk is a new version";
+}
+
+TEST(HeatmapChunkStore, RevisionListenerHearsEveryRevision) {
+    ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
+        return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour), false, 0};
+    });
+    std::vector<int64_t> heard;
+    store.setRevisionListener([&](const ChunkKey &key) { heard.push_back(key.startMs); });
+    const ChunkKey key{"BTC-USD", "deep", minute, epoch};
+    store.get(key);
+    EXPECT_TRUE(heard.empty()) << "a first load is not a revision";
+    store.reload(key);
+    store.revise(key, {makeHourChunk(0, 3), false, 1});
+    EXPECT_EQ(heard.size(), 2u);
+    EXPECT_EQ(store.revisionCount(), 2u);
 }
 
 TEST(HeatmapChunkStore, RevisionGetsANewGenerationAndOldHoldersKeepTheirVersion) {

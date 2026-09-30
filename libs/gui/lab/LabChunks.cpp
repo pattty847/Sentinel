@@ -2,6 +2,8 @@
 #include "LabSources.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include "servermodel/RecordingChunks.hpp"
+#include <QCoreApplication>
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -30,6 +32,7 @@ std::string currentRoot() {
 
 std::mutex infoMutex;
 std::map<std::string, LayerInfo> infos;
+std::atomic<int64_t> pinnedEnd{0};
 
 LayerInfo readLayerInfo(const std::string &layer) {
     LayerInfo info;
@@ -48,6 +51,11 @@ LayerInfo readLayerInfo(const std::string &layer) {
         a.oldestMs = minutes.oldestMs.value_or(a.endMs);
         if (hours.oldestMs) a.oldestMs = std::min(a.oldestMs, *hours.oldestMs);
         a.hourThroughMs = hours.latestMs ? *hours.latestMs + kHourMs : 0;
+        if (const int64_t pin = pinnedEnd.load(); pin > 0) {
+            a.endMs = std::min(a.endMs, pin);
+            a.hourThroughMs = std::min(a.hourThroughMs, recording::floorDiv(pin, kHourMs) * kHourMs);
+            if (a.oldestMs >= a.endMs) info.error = "no " + layer + " recording before the pinned end";
+        }
     } catch (const std::exception &e) {
         info.error = e.what();
     }
@@ -125,10 +133,39 @@ std::vector<std::pair<heatmap::ChunkKey, uint64_t>> generationsOf(
 }
 } // namespace
 
+ChunkEvents *chunkEvents() {
+    static ChunkEvents *events = [] {
+        auto *e = new ChunkEvents; // process lifetime
+        if (QCoreApplication::instance()) e->moveToThread(QCoreApplication::instance()->thread());
+        return e;
+    }();
+    return events;
+}
+
 heatmap::ChunkStore &chunkStore() {
     static heatmap::ChunkStore store(512ull << 20, loadChunk);
+    static const bool listening = [] {
+        (void)chunkEvents(); // created before any worker can revise
+        store.setRevisionListener([](const heatmap::ChunkKey &) {
+            // Any thread: queued to the GUI thread, where every chart listens.
+            QMetaObject::invokeMethod(chunkEvents(), &ChunkEvents::chunkRevised, Qt::QueuedConnection);
+        });
+        return true;
+    }();
+    (void)listening;
     return store;
 }
+
+void setPinnedEndMs(int64_t endMs) {
+    pinnedEnd.store(std::max<int64_t>(endMs, 0));
+    {
+        std::scoped_lock lock(infoMutex);
+        infos.clear();
+    }
+    chunkStore().clear();
+    clearIntermediates();
+}
+int64_t pinnedEndMs() { return pinnedEnd.load(); }
 void setChunkRecordingRoot(const std::string &root) {
     {
         std::scoped_lock lock(rootMutex);

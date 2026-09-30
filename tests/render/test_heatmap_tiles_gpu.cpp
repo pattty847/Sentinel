@@ -5,11 +5,15 @@
 // GPU cases skip cleanly without a Metal device.
 #include "heatmap/HeatmapTiles.hpp"
 #include "heatmap/TimeComposer.hpp"
+#include "lab/LabChunks.hpp"
+#include "lab/LabItem.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include "servermodel/Hmc2Store.hpp"
+#include <QElapsedTimer>
 #include <QGuiApplication>
+#include <QTemporaryDir>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <gtest/gtest.h>
@@ -290,6 +294,128 @@ TEST(HeatmapTileNodeScene, TileEdgesOnPixelCentresLeaveNoSeam) {
                         << " loading=" << host->stats->loadingSlots.load() << " pixel0=" << std::hex
                         << image.pixelColor(700, 30).rgba() << " bg=" << background;
     delete host;
+}
+
+// Review fix: tiles whose CPU data was dropped after upload must come back when
+// the QRhi (and so every GPU tile) is recreated: the lab item notices the loss
+// and rebuilds them from the chunk store.
+recording::Hmc2Record syntheticMinute(int64_t i) {
+    recording::Hmc2Record r;
+    r.header = {"BTC-USD", "deep", minute, 100, 1000, {}, 77};
+    r.bucketStartMs = epoch + i * minute;
+    r.observedMs = uint32_t(minute);
+    const int64_t mid = 10'000 + (i % 30); // $100,000 + drift, $10 rows
+    r.bidRowLo = r.askRowLo = mid - 40;
+    r.bidRowHi = r.askRowHi = mid + 39;
+    r.midOpen = r.midClose = r.midMin = r.midMax = double(mid) * 10;
+    for (int64_t row = mid - 40; row < mid + 40; ++row) {
+        const bool ask = row >= mid;
+        const auto code = recording::encodeSize(0.01 * (1 + (row * 7 + i) % 53), r.header.sizeScale);
+        r.entries.push_back({row, ask, code, code, r.observedMs});
+    }
+    return r;
+}
+
+bool settle(lab::OffscreenQuick &scene, lab::LabItem *item, QString *error) {
+    QElapsedTimer timer;
+    timer.start();
+    int settled = 0;
+    while (timer.elapsed() < 30'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        item->update();
+        if (scene.renderFrame(error).isNull()) return false;
+        settled = item->settled() ? settled + 1 : 0;
+        if (settled >= 3) return true;
+    }
+    if (error) *error = QStringLiteral("did not settle: ") + item->status();
+    return false;
+}
+
+TEST(HeatmapTileLabItem, TilesComeBackAfterTheQRhiIsRecreated) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    {
+        recording::Hmc2Store writer(dir.path().toStdString());
+        for (int64_t i = 0; i < 4 * 60; ++i) writer.append(syntheticMinute(i));
+    }
+    lab::setChunkRecordingRoot(dir.path().toStdString());
+    for (const auto mode : {lab::PrepMode::WholeChunkGpu, lab::PrepMode::WholeChunkCpu, lab::PrepMode::Hybrid}) {
+        SCOPED_TRACE(lab::prepModeName(mode).toStdString());
+        lab::setChunkRecordingRoot(dir.path().toStdString()); // cold caches per mode
+        auto *item = new lab::LabItem;
+        item->setSize(QSizeF(640, 240));
+        item->setTimeframeMinutes(1);
+        item->setPrepMode(mode);
+        QString error;
+        auto first = std::make_unique<lab::OffscreenQuick>();
+        ASSERT_TRUE(first->create(QSize(640, 240), &error)) << error.toStdString();
+        item->setParentItem(first->window()->contentItem());
+        item->loadReal(24, QStringLiteral("deep"));
+        ASSERT_TRUE(settle(*first, item, &error)) << error.toStdString();
+        const auto before = item->metrics();
+        ASSERT_GT(before.value("tilesResident").toULongLong(), 0u);
+        // Take the item out, destroy the scene and its QRhi, show it in a new one.
+        item->setParentItem(nullptr);
+        ASSERT_FALSE(first->renderFrame(&error).isNull());
+        first.reset();
+        lab::OffscreenQuick second;
+        ASSERT_TRUE(second.create(QSize(640, 240), &error)) << error.toStdString();
+        item->setParentItem(second.window()->contentItem());
+        ASSERT_TRUE(settle(second, item, &error)) << error.toStdString();
+        const auto after = item->metrics();
+        EXPECT_GT(after.value("tilesResident").toULongLong(), 0u);
+        EXPECT_EQ(after.value("errors").toULongLong(), 0u);
+        if (mode != lab::PrepMode::Hybrid) // hybrid keeps its sources and re-bins without a rebuild
+            EXPECT_GT(after.value("lostTiles").toULongLong(), 0u) << "lost GPU copies were rebuilt";
+        item->setParentItem(nullptr);
+        ASSERT_FALSE(second.renderFrame(&error).isNull());
+        delete item;
+    }
+    lab::setChunkRecordingRoot(lab::kRecordingRoot);
+}
+
+TEST(HeatmapTileLabItem, ARevisionFromOneChartRebuildsTheOtherChartsTiles) {
+    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    {
+        recording::Hmc2Store writer(dir.path().toStdString());
+        for (int64_t i = 0; i < 3 * 60; ++i) writer.append(syntheticMinute(i));
+    }
+    lab::setChunkRecordingRoot(dir.path().toStdString());
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(640, 480), &error)) << error.toStdString();
+    std::vector<lab::LabItem *> items;
+    const lab::PrepMode modes[] = {lab::PrepMode::WholeChunkGpu, lab::PrepMode::Viewport};
+    for (int i = 0; i < 2; ++i) {
+        auto *item = new lab::LabItem(scene.window()->contentItem());
+        item->setPosition(QPointF(0, 240 * i));
+        item->setSize(QSizeF(640, 240));
+        item->setTimeframeMinutes(1);
+        item->setPrepMode(modes[i]);
+        item->loadReal(24, QStringLiteral("deep"));
+        items.push_back(item);
+    }
+    for (auto *item : items) ASSERT_TRUE(settle(scene, item, &error)) << error.toStdString();
+    const double builds = items[1]->metrics().value("prepBuilds").toDouble();
+    const double tiles = items[0]->metrics().value("prepBuilds").toDouble();
+    items[0]->reviseNewestChunk(); // only the first chart asks
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 20'000 && (items[1]->metrics().value("prepBuilds").toDouble() == builds ||
+                                        items[0]->metrics().value("prepBuilds").toDouble() == tiles ||
+                                        !items[0]->settled() || !items[1]->settled())) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    }
+    EXPECT_GT(items[0]->metrics().value("prepBuilds").toDouble(), tiles) << "the asking chart rebuilt its newest tile";
+    EXPECT_GT(items[1]->metrics().value("prepBuilds").toDouble(), builds) << "the other chart heard the revision";
+    for (auto *item : items) EXPECT_TRUE(item->settled());
+    for (auto *item : items) delete item;
+    ASSERT_FALSE(scene.renderFrame(&error).isNull());
+    lab::setChunkRecordingRoot(lab::kRecordingRoot);
 }
 } // namespace
 
