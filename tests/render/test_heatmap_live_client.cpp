@@ -391,6 +391,20 @@ TEST_F(LiveClient, LiveEdgeBoundsRetainedFinalsAndDroppedMinutesAreNotLoaded) {
     EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded);
     EXPECT_EQ(bucketState(out, minute(180)), BucketState::Present);
 }
+TEST_F(LiveClient, UnobservedOpenDoesNotConcealAMissingFinalBeforeCutoff) {
+    ChunkStore local;
+    LiveEdge edge(symbol, source);
+    auto stored = put(local, chunk({symbol, source, kMinuteMs, base}, minute(2)));
+    auto final = std::make_shared<ChunkFrame>(*tail(2, 2, 4, 1, kMinuteMs));
+    final->columns.endMs = minute(5); // minute 3 final was never received; minute 4 has not published
+    ASSERT_TRUE(edge.accept(final, local));
+    LiveComposer composer;
+    auto out = composer.compose(*edge.snapshot(), {stored}, 5 * kMinuteMs, base).columns;
+    EXPECT_EQ(bucketState(out, base), BucketState::NotLoaded);
+    stored = put(local, chunk({symbol, source, kMinuteMs, base}, minute(4), 2));
+    out = composer.compose(*edge.snapshot(), {stored}, 5 * kMinuteMs, base).columns;
+    EXPECT_EQ(bucketState(out, base), BucketState::Present);
+}
 TEST_F(LiveClient, OmittedProvisionalLosesItsValueIncludingAtTheEndOfAFormingPrefix) {
     for (const int missing : {1, 3}) {
         SCOPED_TRACE(missing);
@@ -450,6 +464,92 @@ TEST_F(LiveClient, PublishedLiveRolloverUnionNeverShrinksAndLWaitsForUpload) {
     upload(c); advance(c); checkUnion();
     EXPECT_EQ(live(c).startMs, minute(11));
     EXPECT_EQ(bucketState(*live(c).columns, minute(10)), BucketState::NotLoaded);
+}
+TEST_F(LiveClient, DroppedDrawnSpanReleasesTheLiveBridgeEvenIfItRemainsPrefetch) {
+    auto &c = chart(kMinuteMs, 90); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    cutoff = minute(70); ++chunkRevision;
+    send(tail(70, 70, 70, 2)); settle(); advance(c);
+    ASSERT_EQ(live(c).startMs, minute(10)); // older visible build still needs the bridge
+    c.setView(symbol, kMinuteMs, minute(64), minute(90)); settle(); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(70));
+    EXPECT_EQ(live(c).columns->columns.size(), 1u);
+    EXPECT_LE(c.stats().liveUploadedSpans, 1u);
+    c.setView(symbol, kMinuteMs, minute(65), minute(90)); settle(); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(70)); // a later reconcile cannot revive the old E
+}
+TEST_F(LiveClient, MissingDrawnSpanReleasesLBeforeItsRebuildOrUpload) {
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    const auto missing = uploadKeys(c);
+    ASSERT_EQ(missing.size(), 1u);
+    cutoff = minute(11); ++chunkRevision;
+    send(tail(10, 11, 11, 2)); // leave chunk request and replacement span build pending
+    now = 1000;
+    c.capacity()->report(300ull << 20, {}, false, missing); c.pollCapacity(); drainLive();
+    ASSERT_FALSE(jobs.empty());
+    auto liveJob = std::move(jobs.front()); jobs.pop_front(); liveJob(); drainLive();
+    ASSERT_FALSE(jobs.empty()); // replacement span has not run, much less uploaded
+    EXPECT_EQ(live(c).startMs, minute(11));
+    EXPECT_EQ(c.stats().liveUploadedSpans, 0u);
+    settle(); advance(c);
+    EXPECT_EQ(live(c).startMs, minute(11));
+}
+TEST_F(LiveClient, LiveWindowLagIsCappedByTwoHoursOrSixtyFourBuckets) {
+    for (const int tfMinutes : {1, 5}) {
+        SCOPED_TRACE(tfMinutes);
+        charts.clear(); jobs.clear(); drainLive();
+        cutoff = minute(10); ++chunkRevision; transport.push(available(cutoff)); drainLive();
+        auto &c = chart(tfMinutes * kMinuteMs, 300); settle(); upload(c); settle();
+        send(tail(10, 10, 10, 1)); settle();
+        ASSERT_EQ(live(c).startMs, minute(10));
+        const int open = tfMinutes == 1 ? 75 : 135;
+        cutoff = minute(open); ++chunkRevision;
+        send(tail(open, open, open, 2)); settle(); advance(c);
+        EXPECT_EQ(live(c).startMs, minute(open)); // even a still-visible old span cannot pin forever
+        EXPECT_EQ(live(c).columns->columns.size(), 1u);
+    }
+}
+TEST_F(LiveClient, StalledCommitAndSlowerSourceCannotPinAnUnboundedCommonWindow) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(kMinuteMs, 200); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle(); advance(c);
+    ASSERT_EQ(c.latestLive()->sources.size(), 2u);
+    send(tail(145, 145, 10, 2)); // no commit progress, and no new frame from near
+    settle(); advance(c);
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u); // near has no live data inside the bounded window
+    EXPECT_EQ(c.latestLive()->sources.front().source, source);
+    for (const auto &s : c.latestLive()->sources) {
+        EXPECT_EQ(s.startMs, minute(145));
+        EXPECT_LE(s.columns->columns.size(), 1u);
+    }
+}
+TEST_F(LiveClient, UploadedAcknowledgementsStayInsideTheCurrentLiveWindow) {
+    auto &c = chart(kMinuteMs, 300); settle(); upload(c); settle();
+    uint64_t revision = 0;
+    for (const int open : {10, 70, 130, 190, 250}) {
+        cutoff = minute(open); ++chunkRevision;
+        send(tail(open, open, open, ++revision)); settle(); advance(c);
+        upload(c); settle(); advance(c);
+        EXPECT_EQ(live(c).startMs, minute(open));
+        EXPECT_LE(c.stats().liveUploadedSpans, 1u);
+    }
+}
+TEST_F(LiveClient, PanningAcrossLiveBoundaryKeepsSubscriptionForThreeSeconds) {
+    auto &a = chart(); auto &b = chart(5 * kMinuteMs); settle();
+    auto leave = [&](HeatmapSourceController &c, int64_t tf) { c.setView(symbol, tf, base, minute(5)); drainLive(); };
+    leave(a, kMinuteMs); leave(b, 5 * kMinuteMs);
+    now = 2999; a.pollLive(); b.pollLive(); drainLive();
+    EXPECT_TRUE(transport.liveUnsubscribes.empty());
+    a.setView(symbol, kMinuteMs, base, minute(80)); drainLive();
+    now = 3000; b.pollLive(); drainLive();
+    EXPECT_TRUE(transport.liveUnsubscribes.empty()); // one chart returned before the grace period
+    EXPECT_EQ(transport.liveRequests.size(), 1u);
+    leave(a, kMinuteMs);
+    now = 5999; a.pollLive(); drainLive(); EXPECT_TRUE(transport.liveUnsubscribes.empty());
+    now = 6000; a.pollLive(); drainLive(); ASSERT_EQ(transport.liveUnsubscribes.size(), 1u);
+    a.setView(symbol, kMinuteMs, base, minute(80)); drainLive();
+    EXPECT_EQ(transport.liveRequests.size(), 2u);
 }
 TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
@@ -562,7 +662,7 @@ TEST_F(LiveClient, HourBoundaryLostFinalAndDelayedUploadKeepBothMinutesCovered) 
     send(tail(59, 59, 59, 1, kMinuteMs)); settle();
     ASSERT_EQ(live(c).startMs, minute(59));
     cutoff = minute(60); ++chunkRevision;
-    // No final 59 in this frame; the previous provisional bridges the seam.
+    // No final 59 in this frame; it stays unknown until the chunk arrives.
     send(tail(60, 60, 60, 2)); settle(); advance(c);
     EXPECT_EQ(live(c).startMs, minute(59));
     EXPECT_EQ(bucketState(*live(c).columns, minute(59)), BucketState::Present);

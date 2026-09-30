@@ -317,6 +317,11 @@ struct LiveSnapshot {
 class HeatmapSourceController final : public QObject {
     Q_OBJECT
 public:
+    // Bound the bridge behind the newest live bucket; its forming bucket is
+    // additional. Pans release interest after a grace period; reset releases now.
+    static constexpr int64_t kMaxLiveLagMs = 2 * kHourMs;
+    static constexpr int64_t kMaxLiveLagBuckets = 64;
+    static constexpr int kLiveReleaseDelayMs = 3000;
     struct Options {
         size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
@@ -360,6 +365,7 @@ public:
         uint64_t pressureDrops = 0, releasedImages = 0, reconciles = 0;
         uint64_t livePublications = 0, liveStaleResults = 0, liveComposedBuckets = 0, liveCommittedPieces = 0;
         size_t liveBytes = 0; // composer cache + published columns/image/summary, in CPU ledger
+        size_t liveUploadedSpans = 0; // acknowledgements retained inside the live window
         double liveComposeMs = 0;
         int liveIntervalMs = 1000;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
@@ -381,6 +387,7 @@ private:
         std::shared_ptr<void> claim; // CPU tier claim while the image is held
         std::optional<int64_t> drawCompleteEnd; // lowest published E until replacement upload
         bool uploaded = false;       // the node reported ready's upload
+        bool drawMissing = false;    // explicit loss: a queued replacement is not proof of drawing
         bool lostRebuild = false;    // a retained source rebuilds after GPU loss
         std::optional<SpanSourceKey> expected, pending, failed;
     };
@@ -420,6 +427,9 @@ private:
     struct LiveWork;
     std::shared_ptr<LiveWork> liveWork_;
     QTimer *liveTimer_ = nullptr;
+    QTimer *liveReleaseTimer_ = nullptr;
+    std::optional<int64_t> liveReleaseMs_;
+    bool liveInterested_ = false;
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
     int64_t liveDueMs_ = 0;

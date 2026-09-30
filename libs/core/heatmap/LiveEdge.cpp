@@ -158,14 +158,16 @@ LiveComposer::Result LiveComposer::compose(const LiveEdgeSnapshot &edge,
     // Same forming rule as TimeComposer: prove the terminal known prefix, not
     // the frame's bounding extent (commit may precede the next open publish).
     // An omitted provisional is a known hole, not an unobserved future minute.
-    int64_t knownEnd = startMs;
+    int64_t knownEnd = std::max(startMs, edge.committedThroughMs);
     for (const auto &r : proven) knownEnd = std::max(knownEnd, r.endMs);
     for (const auto t : edge.missingMinutes) {
         const auto it = cutoffs.find(hour(t));
         if (it == cutoffs.end() || t >= it->second) knownEnd = std::max(knownEnd, t + kMinuteMs);
     }
     for (auto b = startMs; b < end; b += tfMs) {
-        const auto through = std::min(b + tfMs, knownEnd);
+        // Only the newest live bucket can have an unobserved future suffix.
+        // Missing committed minutes or older capped records remain holes.
+        const auto through = b + tfMs == end ? std::min(b + tfMs, knownEnd) : b + tfMs;
         const bool scanned = b < knownEnd && std::any_of(proven.begin(), proven.end(), [&](const auto &r) {
             return r.startMs <= b && r.endMs >= through;
         });
