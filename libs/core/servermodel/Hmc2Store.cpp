@@ -1107,6 +1107,20 @@ SeriesAvailability Hmc2Reader::availability(const std::string &symbol, const std
     return next.value;
 }
 
+namespace {
+std::function<void(const fs::path &)> directorySyncHook; // tests: setDirectorySyncHookForTest
+
+// One identity for a directory, used for the durable cache and the root
+// comparison: absolute and normalized, without the empty last component that
+// lexically_normal keeps for "/data/recording/" or "/data/recording/.".
+// Filesystem roots ("/", "C:\") keep their separator.
+fs::path directoryKey(const fs::path &dir) {
+    auto key = fs::absolute(dir).lexically_normal();
+    while (!key.has_filename() && key.has_relative_path())
+        key = key.parent_path();
+    return key;
+}
+}
 struct Hmc2Store::Impl {
     fs::path root;
     LockHandle lock = noLock;
@@ -1122,44 +1136,48 @@ struct Hmc2Store::Impl {
     // failed sync is retried by the next writer that needs the directory.
     std::set<fs::path> durableDirectories;
     std::function<void()> afterFrameHeader;
-    std::function<void(const fs::path &)> beforeDirectorySync;
-    fs::path rootDir; // absolute, normalized
+    fs::path rootDir; // directoryKey(root)
     void syncDirectory(const fs::path &dir) {
-        if (beforeDirectorySync) beforeDirectorySync(dir);
+        if (directorySyncHook) directorySyncHook(dir);
         sync(dir, true);
     }
-    // Makes `dir` (the store root or a directory below it) exist with a durable
-    // entry: every directory from the root down gets its parent fsynced once,
-    // existing ones included (an earlier process or a failed sync may have left
-    // an entry unsynced). The root's own entry lives in the root's parent, the
-    // highest directory synced. Missing ancestors above that are created with
-    // their parent synced; existing ones are never touched (no "/" or "C:\").
+    // Construction, once per store: create the root and any missing ancestors,
+    // then fsync the parent of every directory from the root up to the
+    // filesystem root, existing ones included. A directory created by a store
+    // whose construction failed (or by a crashed process) is thus made durable
+    // by the next store. POSIX errors propagate; on Windows a directory that
+    // cannot be opened for write (C:\, C:\Users) is skipped (PersistenceIo).
+    void makeRootDurable() {
+        std::vector<fs::path> missing; // the root and missing ancestors, deepest first
+        for (fs::path at = rootDir; at != at.parent_path() && !fs::is_directory(at); at = at.parent_path())
+            missing.push_back(at);
+        for (auto it = missing.rbegin(); it != missing.rend(); ++it)
+            createDirectory(*it);
+        for (fs::path at = rootDir; at != at.parent_path(); at = at.parent_path())
+            syncDirectory(at.parent_path());
+        durableDirectories.insert(rootDir);
+    }
+    // Appends: makes `dir` (below the root) exist with a durable entry. Each
+    // directory from the root down gets its parent fsynced once, existing ones
+    // included (an earlier process or a failed sync may have left an entry
+    // unsynced), and is cached only after that sync succeeded.
     void makeDurable(const fs::path &dir) {
-        const auto path = fs::absolute(dir).lexically_normal();
+        const auto path = directoryKey(dir);
         if (durableDirectories.contains(path))
             return;
+        const auto rel = path.lexically_relative(rootDir);
+        check(!rel.empty() && *rel.begin() != ".." && *rel.begin() != ".",
+              "directory outside the store root: " + path.string());
         const auto parent = path.parent_path();
-        if (path == rootDir) {
-            std::vector<fs::path> missing; // above the root, deepest first
-            for (fs::path at = parent; at != at.parent_path() && !fs::is_directory(at); at = at.parent_path())
-                missing.push_back(at);
-            for (auto it = missing.rbegin(); it != missing.rend(); ++it)
-                if (createDirectory(*it))
-                    syncDirectory(it->parent_path());
-        } else {
-            const auto rel = path.lexically_relative(rootDir);
-            check(!rel.empty() && *rel.begin() != "..", "directory outside the store root: " + path.string());
-            makeDurable(parent);
-        }
+        makeDurable(parent);
         createDirectory(path);
-        if (parent != path) // a filesystem root has no parent entry to sync
-            syncDirectory(parent);
+        syncDirectory(parent);
         durableDirectories.insert(path);
     }
-    explicit Impl(fs::path p) : root(std::move(p)), rootDir(fs::absolute(root).lexically_normal()) {
+    explicit Impl(fs::path p) : root(std::move(p)), rootDir(directoryKey(root)) {
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
-        makeDurable(rootDir);
+        makeRootDurable();
         int error = 0;
         lock = acquireFileLock(root / ".lock", error);
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
@@ -1304,8 +1322,8 @@ void Hmc2Store::append(const Hmc2Record &r) {
 void Hmc2Store::afterFrameHeaderForTest(std::function<void()> hook) {
     impl_->afterFrameHeader = std::move(hook);
 }
-void Hmc2Store::beforeDirectorySyncForTest(std::function<void(const fs::path &)> hook) {
-    impl_->beforeDirectorySync = std::move(hook);
+void Hmc2Store::setDirectorySyncHookForTest(std::function<void(const fs::path &)> hook) {
+    directorySyncHook = std::move(hook);
 }
 std::vector<Hmc2Record> Hmc2Store::readRange(const fs::path &root, const std::string &symbol, const std::string &layer,
                                              int64_t tf, int64_t start, int64_t end) {

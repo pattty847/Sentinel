@@ -141,9 +141,10 @@ class Hmc2Store {
     // One-shot hook after flushing the next record's frame header. Tests can
     // throw to simulate a torn write or rendezvous with a concurrent reader.
     void afterFrameHeaderForTest(std::function<void()> hook);
-    // Called with each directory before the store fsyncs it. Tests record the
-    // syncs or throw to simulate a failed directory sync.
-    void beforeDirectorySyncForTest(std::function<void(const std::filesystem::path &)> hook);
+    // Process-wide: called with each directory before any store fsyncs it, in
+    // construction and appends. Tests record the syncs or throw to simulate a
+    // failed directory sync; pass {} to clear.
+    static void setDirectorySyncHookForTest(std::function<void(const std::filesystem::path &)> hook);
     static std::vector<Hmc2Record> readRange(const std::filesystem::path &root, const std::string &symbol,
                                              const std::string &layer, int64_t tfMs, int64_t startMs, int64_t endMs);
     static std::filesystem::path filePath(const std::filesystem::path &root, const Hmc2Header &header,
