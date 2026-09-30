@@ -22,11 +22,14 @@ public:
         std::function<size_t(const ChunkKey &)> estimateBytes;
         std::function<int64_t()> nowMs; // monotonic; injectable for retry tests
         int retryBaseMs = 100, retryMaxMs = 5000;
+        int requestTimeoutMs = 30'000; // deadline from request admission, not last reply
     };
     ChunkFetcher(ChunkStore &store, ChunkTransport &transport, QObject *parent = nullptr);
     ChunkFetcher(ChunkStore &store, ChunkTransport &transport, Options options, QObject *parent = nullptr);
     ~ChunkFetcher() override;
     // Add/update interests; greater priority wins, then first-wanted order.
+    // A current cache hit emits nothing. Eviction is not signalled: controllers
+    // peek the store when consuming a key and want() again after a cache miss.
     void want(ChartId chart, const std::vector<ChunkKey> &keys, int priority = 0);
     void release(ChartId chart, const std::vector<ChunkKey> &keys);
     void release(ChartId chart);
@@ -66,7 +69,8 @@ private:
     QTimer *retry_;
     std::shared_ptr<RevisionRelay> relay_;
     std::unordered_map<ChunkKey, Demand, ChunkKeyHash> demands_;
-    std::unordered_map<quint64, std::vector<ChunkKey>> requests_;
+    struct Request { std::vector<ChunkKey> keys; int64_t deadlineMs = 0; };
+    std::unordered_map<quint64, Request> requests_;
     std::unordered_set<ChunkKey, ChunkKeyHash> current_;
     std::map<std::string, ChunkAvailability> availability_;
     Stats stats_;

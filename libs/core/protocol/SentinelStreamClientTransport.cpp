@@ -2,6 +2,7 @@
 #include "SentinelStreamClientTransport.hpp"
 #include "../SentinelLogging.hpp"
 #include <algorithm>
+#include <QThread>
 
 namespace protocol {
 SentinelStreamClientTransport::SentinelStreamClientTransport(SentinelStreamClient &client, QObject *parent)
@@ -11,6 +12,7 @@ void SentinelStreamClientTransport::setClient(SentinelStreamClient &client) {
     if (client_ == &client) return;
     if (client_) QObject::disconnect(client_, nullptr, this, nullptr);
     requests_.clear();
+    connected_ = false;
     emit disconnected();
     emit hostChanged();
     attach(client);
@@ -21,11 +23,20 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
     client_ = &client;
     const auto epoch = ++epoch_;
     connect(&client, &SentinelStreamClient::connected, this, [this, epoch] {
-        if (epoch == epoch_) emit connected();
+        if (epoch != epoch_) return;
+        // Explicit disconnectFromServer() drops writes without emitting down.
+        // A second up must invalidate that connection's requests and freshness.
+        if (connected_ || !requests_.empty()) {
+            requests_.clear();
+            emit disconnected();
+        }
+        connected_ = true;
+        emit connected();
     }, Qt::QueuedConnection);
     connect(&client, &SentinelStreamClient::disconnected, this, [this, epoch] {
         if (epoch != epoch_) return;
         requests_.clear();
+        connected_ = false;
         emit disconnected();
     }, Qt::QueuedConnection);
     connect(&client, &SentinelStreamClient::heatmapChunkReceived, this,
@@ -65,12 +76,18 @@ void SentinelStreamClientTransport::retire(quint64 wireId, heatmap::OptionalChun
     if (!wireId) { requests_.clear(); return; }
     const auto it = requests_.find(wireId);
     if (it == requests_.end()) return;
-    if (key) std::erase(it->second.keys, *key);
-    if (!key || it->second.keys.empty()) requests_.erase(it);
+    const auto removed = key ? std::erase(it->second.keys, *key) : 0;
+    if (!key || !removed || it->second.keys.empty()) requests_.erase(it);
+}
+
+void SentinelStreamClientTransport::forget(quint64 requestId) {
+    Q_ASSERT(thread() == QThread::currentThread());
+    std::erase_if(requests_, [requestId](const auto &entry) { return entry.second.id == requestId; });
 }
 
 quint64 SentinelStreamClientTransport::request(const std::string &symbol, const std::string &source,
     int64_t levelMs, std::vector<int64_t> starts, std::vector<std::optional<uint64_t>> haveHash) {
+    Q_ASSERT(thread() == QThread::currentThread());
     const auto id = ++nextRequest_;
     if (!client_) {
         QMetaObject::invokeMethod(this, [this, id] {

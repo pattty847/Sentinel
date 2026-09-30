@@ -9,6 +9,8 @@
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <future>
+#include <condition_variable>
+#include <atomic>
 #include <set>
 
 namespace {
@@ -68,6 +70,42 @@ std::shared_ptr<const StoredChunk> put(ChunkStore &store, const ChunkFramePtr &f
 // Drain enough turns for transport -> fetcher -> scheduler/listener -> chart.
 void drain() {
     for (int i = 0; i < 20; ++i) QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+}
+// Timeout is only a deadlock watchdog. Completion is driven by queued signals.
+bool await(QEventLoop &loop, const std::function<bool()> &done) {
+    if (done()) return true;
+    QTimer watchdog;
+    watchdog.setSingleShot(true);
+    QObject::connect(&watchdog, &QTimer::timeout, &loop, &QEventLoop::quit);
+    watchdog.start(5000);
+    loop.exec();
+    return done();
+}
+struct WorkerGate {
+    std::promise<void> entered;
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool open = false;
+    void wait(std::stop_token stop) {
+        entered.set_value();
+        std::unique_lock lock(mutex);
+        changed.wait(lock, stop, [&] { return open; });
+    }
+    void release() {
+        std::scoped_lock lock(mutex);
+        open = true;
+        changed.notify_all();
+    }
+};
+recording::Hmc2Record localRecord(int minute = 0) {
+    recording::Hmc2Record r;
+    r.header = {"BTC-USD", "deep", kMinuteMs, 100., 100, {}, 7};
+    r.bucketStartMs = epoch + minute * kMinuteMs;
+    r.observedMs = kMinuteMs;
+    r.bidRowLo = r.askRowLo = 100;
+    r.bidRowHi = r.askRowHi = 110;
+    r.entries = {{101, false, recording::encodeSize(2), 0, uint32_t(kMinuteMs)}};
+    return r;
 }
 class Fetcher : public testing::Test {
 protected:
@@ -154,6 +192,11 @@ TEST_F(Fetcher, BatchesBySeriesAndCapsChunksAndEstimatedBytes) {
     EXPECT_EQ(fetcher->stats().inFlightChunks, 1u) << "byte cap binds before the four-chunk cap";
     EXPECT_EQ(fetcher->stats().inFlightBytes, 9ull << 20);
     EXPECT_EQ(transport.requests.back().starts.size(), 1u);
+    const auto count = transport.requests.size();
+    answer(transport.requests.back());
+    ASSERT_EQ(transport.requests.size(), count + 1);
+    EXPECT_EQ(transport.requests.back().key(0), key(21));
+    EXPECT_EQ(fetcher->stats().inFlightBytes, 9ull << 20);
 }
 TEST_F(Fetcher, SeparatesSymbolsSourcesAndLevelsAndHonorsPriority) {
     online();
@@ -448,5 +491,284 @@ TEST_F(Fetcher, LocalTransportReadsSyntheticHmc2WithoutWriterLockAndReusesHash) 
     EXPECT_NE(generations[2], generations[1]);
     EXPECT_EQ(store.peek(key())->columns->columns.size(), 2u);
     EXPECT_EQ(store.revisionCount(), 1u);
+}
+
+TEST_F(Fetcher, AdapterSecondConnectedReleasesLostSlotsAndRequiresFreshAvailability) {
+    fetcher.reset();
+    SentinelStreamClient client("127.0.0.1", "1");
+    protocol::SentinelStreamClientTransport adapter(client);
+    ChunkFetcher remote(store, adapter);
+    client.connected(); client.heatmapAvailabilityReceived(available()); drain();
+    remote.want(1, {key(), key(1), key(2), key(3)}); drain();
+    ASSERT_EQ(remote.stats().inFlightChunks, 4u);
+    // disconnectFromServer() has no disconnected signal; replay its public
+    // observable sequence: another connected, then (later) availability.
+    client.connected(); drain();
+    EXPECT_EQ(remote.stats().inFlightChunks, 0u);
+    EXPECT_FALSE(remote.availability("BTC-USD"));
+    EXPECT_EQ(remote.stats().requests, 1u);
+    client.heatmapChunkReceived(1, body(key())); drain();
+    EXPECT_FALSE(store.contains(key()));
+    client.heatmapAvailabilityReceived(available()); drain();
+    ASSERT_EQ(remote.stats().requests, 2u);
+    EXPECT_EQ(remote.stats().inFlightChunks, 4u);
+    for (int i = 0; i < 4; ++i) client.heatmapChunkReceived(2, body(key(i)));
+    drain();
+    EXPECT_EQ(remote.stats().inFlightChunks, 0u);
+    EXPECT_EQ(store.stats().loads, 4u);
+}
+TEST_F(Fetcher, LostRepliesExpireAfterThirtySecondsAndRetryWithBackoff) {
+    online(); fetcher->want(1, {key(), key(1), key(2), key(3)}); drain();
+    const auto lost = transport.requests.front();
+    now += 29'999; fetcher->pump(); drain();
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 4u);
+    EXPECT_EQ(transport.requests.size(), 1u);
+    ++now; fetcher->pump(); drain();
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+    EXPECT_EQ(fetcher->stats().inFlightBytes, 0u);
+    EXPECT_EQ(transport.forgotten, std::vector<quint64>{lost.id});
+    EXPECT_TRUE(failures.empty());
+    // Late replies to the abandoned request do not satisfy its replacement.
+    transport.reply(lost.id, body(key())); drain();
+    EXPECT_FALSE(store.contains(key()));
+    now += 99; fetcher->pump(); drain();
+    EXPECT_EQ(transport.requests.size(), 1u);
+    ++now; fetcher->pump(); drain();
+    ASSERT_EQ(transport.requests.size(), 2u);
+    EXPECT_EQ(transport.requests.back().starts, lost.starts);
+    answer(transport.requests.back());
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+    EXPECT_EQ(store.stats().loads, 4u);
+}
+TEST_F(Fetcher, VisibleKeyBlockedByBytesRunsBeforeFurtherPrefetch) {
+    fetcher.reset();
+    create([](const ChunkKey &k) { return k == key(1) ? 12ull << 20 : 8ull << 20; });
+    online();
+    fetcher->want(1, {key()}, 0); drain(); // existing 8 MiB prefetch
+    fetcher->want(1, {key(1)}, 20);       // visible needs 12 MiB
+    fetcher->want(1, {key(2)}, 0);       // another 8 MiB prefetch would fit
+    drain();
+    ASSERT_EQ(transport.requests.size(), 1u) << "leave spare bytes for the blocked visible key";
+    answer(transport.requests.front());
+    ASSERT_EQ(transport.requests.size(), 2u);
+    EXPECT_EQ(transport.requests.back().key(0), key(1));
+    EXPECT_EQ(fetcher->stats().inFlightBytes, 12ull << 20);
+    answer(transport.requests.back());
+    ASSERT_EQ(transport.requests.size(), 3u);
+    EXPECT_EQ(transport.requests.back().key(0), key(2));
+}
+TEST_F(Fetcher, RequestLevelSentinelErrorRetiresAllRemainingKeysOfThatRequest) {
+    online(); fetcher->want(1, {key(), key(1), key(0, "hmc2.near")}); drain();
+    const auto request = transport.requests.front();
+    auto sentinel = key(); sentinel.startMs = 0;
+    transport.error(request.id, sentinel, "invalid_request"); drain();
+    EXPECT_EQ(failures, (std::vector<ChunkKey>{key(), key(1)}));
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 1u);
+    EXPECT_EQ(transport.forgotten, std::vector<quint64>{request.id});
+    answer(transport.requests.back());
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+}
+TEST_F(Fetcher, UnreadableRequestIdRetriesKeysNotShownBad) {
+    online(); fetcher->want(1, {key(), key(1)}); drain();
+    transport.error(0, key(), "malformed"); drain();
+    EXPECT_EQ(failures, std::vector<ChunkKey>{key()});
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+    now += 100; fetcher->pump(); drain();
+    ASSERT_EQ(transport.requests.size(), 2u);
+    EXPECT_EQ(transport.requests.back().starts, std::vector<int64_t>{key(1).startMs});
+    transport.error(0, {}, "malformed"); drain();
+    EXPECT_EQ(failures.size(), 1u);
+    now += 200; fetcher->pump(); drain();
+    ASSERT_EQ(transport.requests.size(), 3u);
+    answer(transport.requests.back());
+    EXPECT_TRUE(store.contains(key(1)));
+}
+TEST_F(Fetcher, RejectedStoreInsertionRetriesInsteadOfLosingTheWantedKey) {
+    online(); fetcher->want(1, {key()}); drain();
+    const auto request = transport.requests.front();
+    // Another producer installs a later revision, then it is evicted before
+    // this request returns. The older reply cannot be returned as current.
+    put(store, body(key(), 45));
+    store.setMaxBytes(1);
+    ASSERT_FALSE(store.contains(key()));
+    transport.reply(request.id, body(key(), 30)); drain();
+    EXPECT_EQ(fetcher->stats().inFlightChunks, 0u);
+    EXPECT_TRUE(failures.empty());
+    store.setMaxBytes(512ull << 20);
+    now += 100; fetcher->pump(); drain();
+    ASSERT_EQ(transport.requests.size(), 2u);
+    answer(transport.requests.back(), 45);
+    EXPECT_TRUE(store.contains(key()));
+}
+TEST_F(Fetcher, DisconnectAndClearResetBackoffToItsBaseDelay) {
+    online(); fetcher->want(1, {key()}); drain();
+    transport.error(transport.requests.back().id, key(), "busy"); drain();
+    now += 100; fetcher->pump(); drain();
+    transport.error(transport.requests.back().id, key(), "busy"); drain();
+    reconnect();
+    auto count = transport.requests.size();
+    transport.error(transport.requests.back().id, key(), "busy"); drain();
+    now += 100; fetcher->pump(); drain();
+    EXPECT_EQ(transport.requests.size(), count + 1);
+    transport.error(transport.requests.back().id, key(), "busy"); drain();
+    fetcher->hostChanged(); transport.push(available()); drain();
+    count = transport.requests.size();
+    transport.error(transport.requests.back().id, key(), "busy"); drain();
+    now += 100; fetcher->pump(); drain();
+    EXPECT_EQ(transport.requests.size(), count + 1);
+}
+TEST_F(Fetcher, QueuedCallsAndNotificationsCrossARealDataThread) {
+    fetcher.reset();
+    QThread dataThread;
+    auto *host = new QObject;
+    auto *fake = new FakeChunkTransport;
+    fake->setParent(host);
+    auto *remote = new ChunkFetcher(store, *fake, host);
+    host->moveToThread(&dataThread);
+    QObject::connect(&dataThread, &QThread::finished, host, &QObject::deleteLater);
+    QEventLoop loop;
+    bool received = false;
+    QThread *admissionThread = nullptr;
+    struct Join { QThread &thread; ~Join() { thread.quit(); thread.wait(); } } join{dataThread};
+    QObject::connect(remote, &ChunkFetcher::chunkStored, &loop, [&](ChunkKey k, quint64 generation) {
+        EXPECT_EQ(QThread::currentThread(), app.thread());
+        EXPECT_EQ(k, key());
+        EXPECT_EQ(generation, store.generationOf(key()));
+        received = true; loop.quit();
+    }, Qt::QueuedConnection);
+    dataThread.start();
+    QMetaObject::invokeMethod(host, [&, host, fake, remote] {
+        admissionThread = QThread::currentThread();
+        fake->goOnline(); fake->push(available()); remote->want(1, {key()});
+        QMetaObject::invokeMethod(host, [fake] {
+            if (!fake->requests.empty()) fake->reply(fake->requests.front().id, body(key()));
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+    ASSERT_TRUE(await(loop, [&] { return received; }));
+    EXPECT_EQ(admissionThread, &dataThread);
+    EXPECT_NE(admissionThread, app.thread());
+    EXPECT_TRUE(store.contains(key()));
+}
+TEST_F(Fetcher, LocalAvailabilityFailureDoesNotFailAnOutstandingRequest) {
+    fetcher.reset();
+    QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+    recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
+    WorkerGate gate;
+    int scans = 0;
+    LocalChunkTransport::TestHooks hooks;
+    hooks.beforeAvailability = [&](recording::Hmc2Reader &, std::stop_token stop) {
+        if (++scans == 2) { gate.wait(stop); throw std::runtime_error("scripted availability failure"); }
+    };
+    LocalChunkTransport local(dir.path().toStdString(), hooks);
+    ChunkFetcher::Options options;
+    options.nowMs = [] { return int64_t{1000}; }; // retries cannot race the scripted reply
+    ChunkFetcher reader(store, local, options);
+    QEventLoop loop;
+    int availabilityCount = 0, requestErrors = 0, replies = 0;
+    QObject::connect(&reader, &ChunkFetcher::availabilityChanged, &loop, [&](ChunkAvailability) {
+        ++availabilityCount; loop.quit();
+    }, Qt::QueuedConnection);
+    QObject::connect(&reader, &ChunkFetcher::chunkFailed, &loop, [&](ChunkKey, QString, QString) {
+        ++requestErrors;
+    }, Qt::QueuedConnection);
+    QObject::connect(&local, &ChunkTransport::received, &loop, [&](quint64, ChunkFramePtr) {
+        ++replies; loop.quit();
+    }, Qt::QueuedConnection);
+    local.start({"BTC-USD"});
+    ASSERT_TRUE(await(loop, [&] { return availabilityCount == 1; }));
+    local.refreshAvailability("BTC-USD");
+    gate.entered.get_future().wait(); // availability scan holds the worker
+    reader.want(1, {key()}); drain(); // request is admitted behind the scan
+    EXPECT_EQ(reader.stats().inFlightChunks, 1u);
+    gate.release();
+    ASSERT_TRUE(await(loop, [&] { return replies == 1; }));
+    drain();
+    EXPECT_EQ(requestErrors, 0);
+    EXPECT_TRUE(store.contains(key()));
+    EXPECT_EQ(reader.stats().inFlightChunks, 0u);
+}
+TEST_F(Fetcher, LocalRequestsReuseAvailabilityAndUnchangedRefreshDoesNotPublish) {
+    fetcher.reset();
+    QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+    recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
+    std::atomic<int> scans{0};
+    LocalChunkTransport::TestHooks hooks;
+    hooks.beforeAvailability = [&](recording::Hmc2Reader &, std::stop_token) { ++scans; };
+    LocalChunkTransport local(dir.path().toStdString(), hooks);
+    ChunkFetcher reader(store, local);
+    QEventLoop loop;
+    int publications = 0, replies = 0;
+    QObject::connect(&reader, &ChunkFetcher::availabilityChanged, &loop, [&](ChunkAvailability) {
+        ++publications; loop.quit();
+    }, Qt::QueuedConnection);
+    QObject::connect(&local, &ChunkTransport::received, &loop, [&](quint64, ChunkFramePtr) {
+        ++replies; loop.quit();
+    }, Qt::QueuedConnection);
+    local.start({"BTC-USD"}); ASSERT_TRUE(await(loop, [&] { return publications == 1; }));
+    reader.want(1, {key()}); drain();
+    ASSERT_TRUE(await(loop, [&] { return replies == 1; })); drain();
+    EXPECT_EQ(scans, 1);
+    // Worker FIFO: the following reply is a barrier after this refresh.
+    local.refreshAvailability("BTC-USD");
+    local.request("BTC-USD", "hmc2.deep", kMinuteMs, {epoch}, {});
+    ASSERT_TRUE(await(loop, [&] { return replies == 2; })); drain();
+    EXPECT_EQ(scans, 2);
+    EXPECT_EQ(publications, 1);
+}
+TEST_F(Fetcher, LocalDestructorCancelsAnActiveReaderScan) {
+    fetcher.reset();
+    QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+    recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
+    WorkerGate gate;
+    std::atomic<bool> cancelled{false};
+    LocalChunkTransport::TestHooks hooks;
+    hooks.beforeBuild = [&](recording::Hmc2Reader &reader, std::stop_token stop) {
+        reader.beforeCandidateForTest([&, stop] { gate.wait(stop); cancelled = stop.stop_requested(); });
+    };
+    auto local = std::make_unique<LocalChunkTransport>(dir.path().toStdString(), hooks);
+    QEventLoop loop;
+    bool available = false;
+    QObject::connect(local.get(), &ChunkTransport::availability, &loop, [&](ChunkAvailability) {
+        available = true; loop.quit();
+    }, Qt::QueuedConnection);
+    local->start({"BTC-USD"}); ASSERT_TRUE(await(loop, [&] { return available; }));
+    local->request("BTC-USD", "hmc2.deep", kMinuteMs, {epoch}, {});
+    gate.entered.get_future().wait();
+    local.reset(); // requests stop, wakes the latch, and joins the cancelled read
+    EXPECT_TRUE(cancelled);
+}
+TEST_F(Fetcher, LocalRequestsUseTheAdvertisedCutoffUntilAvailabilityRefreshes) {
+    fetcher.reset();
+    QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+    recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
+    LocalChunkTransport local(dir.path().toStdString());
+    ChunkFetcher reader(store, local);
+    QEventLoop loop;
+    bool ready = false, received = false;
+    QObject::connect(&reader, &ChunkFetcher::availabilityChanged, &loop, [&](ChunkAvailability) {
+        ready = true; loop.quit();
+    }, Qt::QueuedConnection);
+    QObject::connect(&reader, &ChunkFetcher::chunkStored, &loop, [&](ChunkKey, quint64) {
+        received = true; loop.quit();
+    }, Qt::QueuedConnection);
+    local.start({"BTC-USD"}); ASSERT_TRUE(await(loop, [&] { return ready; }));
+    writer.append(localRecord(1)); // no availability refresh yet
+    reader.want(1, {key()}); drain();
+    ASSERT_TRUE(await(loop, [&] { return received; }));
+    const auto cached = store.peek(key()); ASSERT_TRUE(cached);
+    EXPECT_EQ(cached->committedThroughMs, epoch + kMinuteMs);
+    EXPECT_EQ(cached->columns->columns.size(), 1u);
+}
+TEST_F(Fetcher, RecordingChunkBuildHonorsCancellationDuringScan) {
+    QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+    recording::Hmc2Store writer(dir.path().toStdString()); writer.append(localRecord());
+    recording::Hmc2Reader reader(dir.path().toStdString());
+    std::stop_source stop;
+    recording::ReadControl control;
+    control.stop = stop.get_token();
+    reader.beforeCandidateForTest([&] { stop.request_stop(); });
+    const recording::BookRecorder::Watermarks marks{epoch + kMinuteMs, 0};
+    EXPECT_THROW(recording::buildChunk(reader, key(), marks, control), std::runtime_error);
+    EXPECT_EQ(control.status, recording::ReadStatus::Cancelled);
 }
 } // namespace

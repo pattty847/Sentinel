@@ -16,6 +16,8 @@ public:
         heatmap::ChunkKey key(size_t i) const { return {symbol, source, levelMs, starts.at(i)}; }
     };
     std::vector<Request> requests;
+    std::vector<quint64> forgotten;
+    void forget(quint64 id) override { forgotten.push_back(id); }
     std::vector<std::pair<quint64, heatmap::ChunkFramePtr>> held;
     quint64 request(const std::string &symbol, const std::string &source, int64_t levelMs,
                     std::vector<int64_t> starts, std::vector<std::optional<uint64_t>> hashes) override {

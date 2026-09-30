@@ -27,6 +27,7 @@ ChunkFetcher::ChunkFetcher(ChunkStore &store, ChunkTransport &transport, Options
     };
     options_.retryBaseMs = std::max(1, options_.retryBaseMs);
     options_.retryMaxMs = std::max(options_.retryBaseMs, options_.retryMaxMs);
+    options_.requestTimeoutMs = std::max(1, options_.requestTimeoutMs);
     retry_->setSingleShot(true);
     connect(retry_, &QTimer::timeout, this, &ChunkFetcher::pump);
     connect(&transport_, &ChunkTransport::connected, this, [this] {
@@ -92,6 +93,7 @@ void ChunkFetcher::prune(const ChunkKey &key) {
 void ChunkFetcher::disconnected() {
     connected_ = false;
     retry_->stop();
+    for (const auto &[id, request] : requests_) transport_.forget(id);
     requests_.clear();
     availability_.clear();
     current_.clear();
@@ -105,6 +107,7 @@ void ChunkFetcher::disconnected() {
         d.refresh = false;
         d.held.reset();
         d.dueMs = 0;
+        d.busyCount = 0;
         ++it;
     }
     sLog_Data("Chunk fetcher disconnected; retained wanted keys=" << demands_.size());
@@ -185,6 +188,11 @@ void ChunkFetcher::pump() {
     retry_->stop();
     if (!connected_ || !compatible_) return;
     const auto now = options_.nowMs();
+    std::vector<quint64> expired;
+    for (const auto &[id, request] : requests_)
+        if (request.deadlineMs <= now) expired.push_back(id);
+    for (const auto id : expired)
+        onFailed(id, {}, QStringLiteral("timeout"), QStringLiteral("chunk request deadline expired"));
     std::vector<ChunkKey> pending;
     int64_t nextDue = std::numeric_limits<int64_t>::max();
     for (const auto &[key, d] : demands_) {
@@ -208,7 +216,9 @@ void ChunkFetcher::pump() {
     for (const auto &key : pending) {
         const auto bytes = estimate(key);
         if (stats_.inFlightChunks == kMaxInFlightChunks) break;
-        if (bytes > kMaxInFlightBytes - stats_.inFlightBytes) continue;
+        // Do not fill spare bytes with lower ranks while visible work waits;
+        // doing so could keep the higher-priority key blocked indefinitely.
+        if (bytes > kMaxInFlightBytes - stats_.inFlightBytes) break;
         auto &d = demands_.at(key);
         d.held = store_.peek(key);
         d.estimate = bytes;
@@ -235,19 +245,23 @@ void ChunkFetcher::pump() {
         }
         const auto id = transport_.request(first.symbol, first.source, first.levelMs, std::move(starts), std::move(hashes));
         for (const auto &key : batch) demands_.at(key).request = id;
-        requests_[id] = std::move(batch);
+        requests_[id] = {std::move(batch), now + options_.requestTimeoutMs};
         ++stats_.requests;
-        stats_.requestedChunks += requests_[id].size();
-        sLog_Probe("chunks.fetch.request", "req=" << id << " keys=" << requests_[id].size()
+        stats_.requestedChunks += requests_[id].keys.size();
+        sLog_Probe("chunks.fetch.request", "req=" << id << " keys=" << requests_[id].keys.size()
                    << " flight=" << stats_.inFlightChunks << " bytes=" << stats_.inFlightBytes);
     }
+    for (const auto &[id, request] : requests_) nextDue = std::min(nextDue, request.deadlineMs);
     if (nextDue != std::numeric_limits<int64_t>::max())
-        retry_->start(int(std::min<int64_t>(nextDue - now, options_.retryMaxMs)));
+        retry_->start(int(std::min<int64_t>(nextDue - now, std::numeric_limits<int>::max())));
 }
 void ChunkFetcher::finish(const ChunkKey &key, Demand &d) {
     if (auto it = requests_.find(d.request); it != requests_.end()) {
-        std::erase(it->second, key);
-        if (it->second.empty()) requests_.erase(it);
+        std::erase(it->second.keys, key);
+        if (it->second.keys.empty()) {
+            transport_.forget(d.request);
+            requests_.erase(it);
+        }
     }
     --stats_.inFlightChunks;
     stats_.inFlightBytes -= d.estimate;
@@ -276,13 +290,17 @@ void ChunkFetcher::onReceived(quint64 request, ChunkFramePtr frame) {
             stored = store_.put(frame->key, std::move(columns), frame->state, frame->contentHash);
             ++stats_.bodies;
         } else throw std::invalid_argument("unexpected chunk reply kind");
-        if (stored) {
-            current_.insert(frame->key);
-            d.pending = d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key);
-            d.busyCount = 0;
-            d.dueMs = 0;
-            emit chunkStored(frame->key, stored->generation);
+        if (!stored) {
+            // A newer version won insertion but was evicted in the meantime.
+            // No current body can satisfy the chart yet; obtain that version.
+            onFailed(request, frame->key, QStringLiteral("busy"), QStringLiteral("newer chunk body was evicted"));
+            return;
         }
+        current_.insert(frame->key);
+        d.pending = d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key);
+        d.busyCount = 0;
+        d.dueMs = 0;
+        emit chunkStored(frame->key, stored->generation);
         finish(frame->key, d);
         prune(frame->key);
         schedule();
@@ -293,17 +311,21 @@ void ChunkFetcher::onReceived(quint64 request, ChunkFramePtr frame) {
 void ChunkFetcher::onFailed(quint64 request, OptionalChunkKey key, const QString &code, const QString &message) {
     std::vector<ChunkKey> keys;
     if (const auto it = requests_.find(request); it != requests_.end()) {
-        for (const auto &candidate : it->second) if (!key || *key == candidate) keys.push_back(candidate);
-    } else if (!request && !key) {
-        // No readable envelope id: none of the outstanding replies can be
-        // identified safely. Fail them all instead of permanently leaking slots.
-        for (const auto &[id, batch] : requests_) keys.insert(keys.end(), batch.begin(), batch.end());
+        for (const auto &candidate : it->second.keys) if (!key || *key == candidate) keys.push_back(candidate);
+        // Request-level refusals can echo a sentinel start (0), not a real key.
+        if (keys.empty()) keys = it->second.keys;
+    } else if (!request) {
+        // No readable envelope id: recover the slots, but only an explicitly
+        // identified key is proven bad. Retry every other key with backoff.
+        for (const auto &[id, batch] : requests_) keys.insert(keys.end(), batch.keys.begin(), batch.keys.end());
     }
     for (const auto &k : keys) {
         auto &d = demands_.at(k);
         finish(k, d);
         d.pending = false;
-        if (code == QStringLiteral("busy") || code == QStringLiteral("client_overloaded")) {
+        const bool unidentified = !request && (!key || *key != k);
+        if (unidentified || code == QStringLiteral("busy") || code == QStringLiteral("client_overloaded") ||
+            code == QStringLiteral("timeout")) {
             int64_t delay = options_.retryBaseMs;
             for (unsigned n = 0; n < d.busyCount && delay < options_.retryMaxMs; ++n)
                 delay = std::min<int64_t>(delay * 2, options_.retryMaxMs);

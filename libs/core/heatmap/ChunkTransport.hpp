@@ -25,6 +25,9 @@ public:
     explicit ChunkTransport(QObject *parent = nullptr) : QObject(parent) {}
     virtual quint64 request(const std::string &symbol, const std::string &source, int64_t levelMs,
                             std::vector<int64_t> starts, std::vector<std::optional<uint64_t>> haveHash) = 0;
+    // Retire local request bookkeeping (e.g. after a deadline). This does not
+    // cancel server work; any later reply must be ignored by the fetcher.
+    virtual void forget(quint64 requestId) { Q_UNUSED(requestId); }
 signals:
     void received(quint64 requestId, heatmap::ChunkFramePtr frame);
     void failed(quint64 requestId, heatmap::OptionalChunkKey key, QString code, QString message);
