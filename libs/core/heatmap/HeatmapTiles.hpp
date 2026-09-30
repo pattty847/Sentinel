@@ -50,15 +50,22 @@ TileRange tilesCovering(double timeLoMs, double timeHiMs, int64_t tfMs, int64_t 
 
 // ------------------------------------------------------------------ chunks
 struct Availability {
-    int64_t oldestMs = 0;    // oldest recorded time of the layer
+    int64_t oldestMs = 0;    // oldest recorded time of the source (any level)
     int64_t endMs = 0;       // exclusive end of the newest recorded minute
-    int64_t hourThroughMs = 0; // deep hour rollups exist before this (exclusive; 0 = none)
+    int64_t hourThroughMs = 0; // hour rollups exist before this (exclusive; 0 = none)
+    // Per-level lower bounds (0 = unknown: oldestMs, and hour chunks from the
+    // start of the range, the lab's single-interval behaviour).
+    int64_t minuteOldestMs = 0, hourOldestMs = 0;
 };
 // Native chunk keys needed to compose [startMs, endMs) at tfMs, restricted to the
 // available range. `source` is a chunk source id (ChunkCodec kChunkSources). For a
 // source with an hour level, hour-multiple timeframes use hour chunks (one UTC day)
-// before hourThroughMs and minute chunks (one UTC hour) after it (the open tail),
-// as loadRecordingLevels; every other timeframe composes minutes. Ascending.
+// only inside the advertised hour interval [hourOldestMs, hourThroughMs) and minute
+// chunks (one UTC hour) before and after it (the open tail). An hour chunk scans
+// its whole day, so its hours before hourOldestMs read as recorder gaps, and gaps
+// of a coarser level supersede minutes: the day holding hourOldestMs therefore
+// uses minutes when minute history starts at or before hourOldestMs. Every other timeframe composes
+// minutes. Ascending.
 std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &source, int64_t tfMs,
                                 int64_t startMs, int64_t endMs, const Availability &availability);
 // Composes [startMs, endMs) (multiples of tfMs) from stored chunks in any order.
