@@ -212,6 +212,7 @@ set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")
 # S5b CPU controller: compile only CPU sources, link QtCore (no GPU required).
 add_executable(test_heatmap_source_controller
     test_heatmap_source_controller.cpp
+    test_heatmap_live_client.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.hpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapGpuSource.cpp

@@ -65,6 +65,7 @@ struct SpanSourceBuild {
     // upload and the controller released the image (see HeatmapCapacity).
     std::shared_ptr<const gpu::GpuSource> gpu;
     ResolutionSummary resolution; // this source's columns of the span
+    int64_t completeEndMs = 0;    // last fully scanned bucket end (for the live draw clip)
     int64_t commonUnits = 0;      // LCM of every column's common tick (0 = no data)
     size_t bytes = 0;             // CPU allocation (vector capacities) of the build
     size_t uploadBytes = 0;       // GPU payload (gpu::GpuSource::bytes())
@@ -155,6 +156,10 @@ public:
     // (plan section 4: span images are not kept after upload; a GPU loss
     // rebuilds from chunks).
     void released(const SpanSourceKey &key);
+    // Same bounded build pool and input-chunk ledger as span jobs. One live job
+    // per chart may run; the controller coalesces further updates, latest wins.
+    bool requestLive(std::vector<ChunkBytes> chunks, size_t reserveBytes, QObject *context,
+                     std::function<void()> work, std::function<void(QString)> completion);
     // Sizes of the last build of (span, source) at any generation; 0 unknown.
     struct Hint { size_t bytes = 0, uploadBytes = 0; };
     Hint hint(const SpanId &span, const std::string &source) const;
@@ -192,6 +197,7 @@ private:
     // to shed; over the ceiling, that emits overCeiling().
     void commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
                    bool atKeeper);
+    void resizeLiveReservation(const HeatmapSourceController *self, size_t before, size_t after, bool atKeeper);
     // The ledger total if `self` committed `keys` and `reservation` instead.
     size_t projectedCpuBytes(const HeatmapSourceController *self, const std::vector<ChunkBytes> &keys,
                              size_t reservation) const;
@@ -281,6 +287,24 @@ struct SpanSet {
     int64_t availableStartMs = 0, availableEndMs = 0;
 };
 
+struct LiveSourceSnapshot {
+    std::string source;
+    uint64_t revision = 0; // server revision; identity for uploads is LiveSnapshot::version
+    int64_t startMs = 0, openEndMs = 0; // [L, openEnd), not rounded to tf
+    std::shared_ptr<const SparseColumns> columns;
+    std::shared_ptr<const gpu::GpuSource> gpu;
+    int64_t commonUnits = 0;
+};
+// Published separately: a live revision never changes the SpanSet pointer or
+// makes the node re-index spans. Keep old snapshots with held/fading pictures.
+struct LiveSnapshot {
+    uint64_t version = 0, serial = 0;
+    std::string symbol;
+    int64_t tfMs = 0;
+    std::vector<LiveSourceSnapshot> sources; // coarsest common tick first
+    ResolutionSummary resolution; // live columns; latestResolution() merges history
+};
+
 // CPU ceiling: the controller commits its wanted decoded chunks plus span
 // images to the cache's ledger and keeps the process-wide total at or under
 // SpanSourceCache::cpuCeiling(). Above it the chart gives up recent-tf, then
@@ -293,11 +317,18 @@ struct SpanSet {
 class HeatmapSourceController final : public QObject {
     Q_OBJECT
 public:
+    // Bound the bridge behind the newest live bucket; its forming bucket is
+    // additional. Pans release interest after a grace period; reset releases now.
+    static constexpr int64_t kMaxLiveLagMs = 2 * kHourMs;
+    static constexpr int64_t kMaxLiveLagBuckets = 64;
+    static constexpr int kLiveReleaseDelayMs = 3000;
     struct Options {
         size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
         size_t chunkEstimateBytes = 4ull << 20;  // decoded size of a chunk never seen (as ChunkFetcher)
-        int capacityPollMs = 16;                 // <= 0: tests call pollCapacity()
+        int capacityPollMs = 16;                // <= 0: tests call pollCapacity()
+        std::function<int64_t()> composeNowNs;   // worker clock; tests inject measured cost
+        std::function<int64_t()> nowMs;          // monotonic clock; injected in deterministic tests
     };
     HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache, Options options,
                             QObject *parent = nullptr);
@@ -319,8 +350,12 @@ public:
 
     // Any thread (including updatePaintNode).
     std::shared_ptr<const SpanSet> latestSnapshot() const;
+    std::shared_ptr<const LiveSnapshot> latestLive() const;
+    std::shared_ptr<const ResolutionSummary> latestResolution() const; // Auto: history + live
     std::shared_ptr<HeatmapCapacity> capacity() const { return capacity_; }
 
+    // Owner thread only; normally timer-driven, tests advance Options::nowMs.
+    void pollLive();
     // Applies node reports (free bytes, uploads, loss) after a capacity epoch
     // bump; suppressed prefetch is re-admitted strictly by rank while the
     // credit is >= bytes + 10%.
@@ -328,6 +363,11 @@ public:
     struct Stats {
         uint64_t publications = 0, staleResults = 0, evictions = 0, admissions = 0;
         uint64_t pressureDrops = 0, releasedImages = 0, reconciles = 0;
+        uint64_t livePublications = 0, liveStaleResults = 0, liveComposedBuckets = 0, liveCommittedPieces = 0;
+        size_t liveBytes = 0; // composer cache + published columns/image/summary, in CPU ledger
+        size_t liveUploadedSpans = 0; // acknowledgements retained inside the live window
+        double liveComposeMs = 0;
+        int liveIntervalMs = 1000;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
         size_t suppressed = 0;    // spans suppressed by the last reconcile
         size_t refused = 0;       // visible spans refused by the last reconcile
@@ -335,15 +375,19 @@ public:
     };
     Stats stats() const { return stats_; } // owner thread only
 signals:
-    // Connect queued, then take latestSnapshot().
+    // Connect queued, then take latestSnapshot() / latestLive() respectively.
+    // Auto uses latestResolution() after either signal.
     void snapshotChanged();
+    void liveChanged();
     void buildFailed(QString message);
 private:
     friend class SpanSourceCache;
     struct SourceSlot {
         SpanSourceBuildPtr ready;   // gpu == nullptr once released after upload
         std::shared_ptr<void> claim; // CPU tier claim while the image is held
+        std::optional<int64_t> drawCompleteEnd; // lowest published E until replacement upload
         bool uploaded = false;       // the node reported ready's upload
+        bool drawMissing = false;    // explicit loss: a queued replacement is not proof of drawing
         bool lostRebuild = false;    // a retained source rebuilds after GPU loss
         std::optional<SpanSourceKey> expected, pending, failed;
     };
@@ -378,7 +422,27 @@ private:
     std::shared_ptr<HeatmapCapacity> capacity_;
     mutable std::mutex latestMutex_;
     std::shared_ptr<const SpanSet> latest_;
+    std::shared_ptr<const LiveSnapshot> latestLive_;
+    std::shared_ptr<const ResolutionSummary> latestResolution_;
+    struct LiveWork;
+    std::shared_ptr<LiveWork> liveWork_;
+    QTimer *liveTimer_ = nullptr;
+    QTimer *liveReleaseTimer_ = nullptr;
+    std::optional<int64_t> liveReleaseMs_;
+    bool liveInterested_ = false;
+    uint64_t liveVersion_ = 0;
+    bool liveRunning_ = false, liveDirty_ = false;
+    int64_t liveDueMs_ = 0;
+    std::map<std::string, int64_t> liveStarts_;
+    std::map<std::pair<SpanId, std::string>, int64_t> liveUploadedEnds_;
+    std::unordered_set<ChunkKey, ChunkKeyHash> liveWanted_;
     Stats stats_;
+    void refreshLive();
+    void invalidateLive();
+    bool overlapsLive(const SpanId &span) const;
+    void setLiveBytes(size_t bytes);
+    void resetLive();
+    void mergeLatestResolution(); // caller holds latestMutex_
     void schedule();
     void reconcile();
     void publish();

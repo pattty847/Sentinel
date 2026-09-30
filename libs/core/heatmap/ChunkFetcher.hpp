@@ -1,6 +1,7 @@
 #pragma once
 #include "ChunkStore.hpp"
 #include "ChunkTransport.hpp"
+#include "LiveEdge.hpp"
 #include <QTimer>
 #include <map>
 #include <unordered_set>
@@ -36,6 +37,11 @@ public:
     void want(ChartId chart, const std::vector<ChunkKey> &keys, int priority = 0);
     void release(ChartId chart, const std::vector<ChunkKey> &keys);
     void release(ChartId chart);
+    // ChartId 0 is reserved for the fetcher's live-tail chunk wants. A chart
+    // wants one symbol; all its sources share one process-wide subscription.
+    void wantLive(ChartId chart, const std::string &symbol);
+    void releaseLive(ChartId chart);
+    std::vector<std::shared_ptr<const LiveEdgeSnapshot>> live(const std::string &symbol) const;
     void hostChanged(); // discard cache + old replies; wait for fresh availability
     void wireVersionMismatch();
     // Pump is normally scheduled automatically. Tests can advance nowMs then
@@ -53,10 +59,11 @@ signals:
     void chunkFailed(heatmap::ChunkKey key, QString code, QString message);
     void availabilityChanged(heatmap::ChunkAvailability value);
     void storeCleared();
+    void liveChanged(QString symbol);
 private:
     struct Demand {
         std::map<ChartId, int> charts;
-        bool pending = false, refresh = false;
+        bool pending = false, refresh = false, failed = false;
         quint64 request = 0;
         uint64_t order = 0;
         int64_t dueMs = 0;
@@ -76,6 +83,22 @@ private:
     std::unordered_map<quint64, Request> requests_;
     std::unordered_set<ChunkKey, ChunkKeyHash> current_;
     std::map<std::string, ChunkAvailability> availability_;
+    struct LiveInterest {
+        std::unordered_set<ChartId> charts;
+        quint64 subscription = 0;
+        bool attempted = false; // includes a transport that reports unsupported (0)
+        bool retryPending = false;
+        int64_t dueMs = 0;
+        unsigned failures = 0;
+        std::vector<std::string> sources;
+        std::map<std::string, LiveEdge> edges;
+        std::unordered_set<ChunkKey, ChunkKeyHash> wanted;
+    };
+    std::map<std::string, LiveInterest> live_;
+    void subscribeLive(const std::string &symbol, LiveInterest &interest);
+    void onLive(quint64 subscription, ChunkFramePtr frame);
+    void trimLive(const ChunkKey &key);
+    void revalidate(const ChunkKey &key);
     Stats stats_;
     uint64_t order_ = 0;
     bool connected_ = false, compatible_ = true, scheduled_ = false;
