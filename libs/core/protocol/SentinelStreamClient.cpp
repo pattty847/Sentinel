@@ -202,15 +202,27 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
     qRegisterMetaType<ServerConfig>("ServerConfig");
+    qRegisterMetaType<HeatmapChunkPtr>("SentinelStreamClient::HeatmapChunkPtr");
+    qRegisterMetaType<HeatmapChunkError>("SentinelStreamClient::HeatmapChunkError");
+    qRegisterMetaType<protocol::chunkwire::Availability>("protocol::chunkwire::Availability");
+    m_decodePool = std::make_unique<net::thread_pool>(1);
 }
 
 SentinelStreamClient::~SentinelStreamClient() {
     disconnectFromServer();
+    // Queued decodes are abandoned; a running one finishes before members die.
+    m_decodePool->stop();
+    m_decodePool->join();
 }
 
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
     m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
+    ++m_connectionEpoch;
+    {
+        std::lock_guard lock(m_chunkOrderMutex);
+        m_chunkOrder.clear();
+    }
     m_ioc.restart();
     m_isConnected = false;
     Q_ASSERT(!m_writeInFlight); // disconnect drains completions before queue reuse
@@ -355,6 +367,101 @@ void SentinelStreamClient::requestRecordingHeatmapHistory(const protocol::record
         m_writeQueue.push_back(std::move(payload));
         if (m_isConnected && m_writeQueue.size() == 1) doWrite();
     });
+}
+
+quint64 SentinelStreamClient::requestHeatmapChunks(const std::string& symbol, const std::string& source,
+                                                  int64_t levelMs, const std::vector<int64_t>& starts,
+                                                  const std::vector<uint64_t>& haveHash) {
+    protocol::chunkwire::Request q;
+    q.req = ++m_nextChunkRequestId;
+    q.symbol = symbol; q.source = source; q.levelMs = levelMs; q.starts = starts;
+    q.haveHash = haveHash.empty() ? std::vector<uint64_t>(starts.size(), 0) : haveHash;
+    sLog_Probe("chunks.request", "req=" << q.req << " symbol=" << symbol << " source=" << source
+               << " level=" << levelMs << " starts=" << starts.size());
+    net::post(m_strand, [this, payload = protocol::chunkwire::buildRequest(q).dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+    return q.req;
+}
+
+namespace {
+quint64 peekEnvelopeRequestId(const std::vector<uint8_t>& frame) {
+    static constexpr uint8_t kMagic[4] = {'S', 'H', 'E', '1'};
+    if (frame.size() < 14 || !std::equal(kMagic, kMagic + 4, frame.begin())) return 0;
+    quint64 id = 0;
+    for (int i = 0; i < 8; ++i) id |= quint64(frame[6 + i]) << (8 * i);
+    return id;
+}
+} // namespace
+
+void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame) {
+    const size_t bytes = frame->size();
+    if (m_decodeBacklogBytes.fetch_add(bytes) + bytes > kMaxDecodeBacklogBytes) {
+        m_decodeBacklogBytes.fetch_sub(bytes);
+        sLog_Warning("Heatmap chunk refused: decode backlog full bytes=" << bytes
+                     << " backlog=" << m_decodeBacklogBytes.load());
+        emit heatmapChunkFailed({peekEnvelopeRequestId(*frame), {}, QStringLiteral("client_overloaded"),
+                                 QStringLiteral("chunk decode backlog is full")});
+        return;
+    }
+    // Decoding a deep hour takes milliseconds; keep it off the network thread.
+    net::post(*m_decodePool, [this, frame = std::move(frame), epoch = m_connectionEpoch.load()] {
+        if (epoch == m_connectionEpoch.load()) decodeBinaryMessage(*frame);
+        m_decodeBacklogBytes.fetch_sub(frame->size());
+    });
+}
+
+void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame) {
+    heatmap::ChunkEnvelope envelope;
+    try {
+        // Validates every length and count before allocating (ChunkCodec).
+        envelope = heatmap::decodeChunkEnvelope(frame);
+    } catch (const std::exception& e) {
+        sLog_Warning("Heatmap chunk frame rejected: bytes=" << frame.size() << " error=" << e.what());
+        emit heatmapChunkFailed({peekEnvelopeRequestId(frame), {}, QStringLiteral("malformed"),
+                                 QString::fromUtf8(e.what())});
+        return;
+    }
+    auto& chunk = envelope.chunk;
+    if (chunk.kind == heatmap::ChunkKind::Error) {
+        sLog_Probe("chunks.error", "req=" << envelope.requestId << " start=" << chunk.key.startMs
+                   << " code=" << heatmap::chunkErrorName(chunk.error) << " message=" << chunk.message);
+        emit heatmapChunkFailed({envelope.requestId, chunk.key,
+                                 QString::fromLatin1(heatmap::chunkErrorName(chunk.error)),
+                                 QString::fromUtf8(chunk.message.data(), qsizetype(chunk.message.size()))});
+        return;
+    }
+    if (!acceptChunkOrder(chunk)) {
+        emit heatmapChunkFailed({envelope.requestId, chunk.key, QStringLiteral("superseded"),
+                                 QStringLiteral("a newer revision of this chunk was already delivered")});
+        return;
+    }
+    sLog_Probe("chunks.receive", "req=" << envelope.requestId << " source=" << chunk.key.source
+               << " start=" << chunk.key.startMs << " kind=" << int(chunk.kind) << " sealed=" << chunk.state.sealed
+               << " rev=" << chunk.state.revision << " bytes=" << frame.size());
+    emit heatmapChunkReceived(envelope.requestId, std::make_shared<const heatmap::ChunkFrame>(std::move(chunk)));
+}
+
+// Replies for one key can finish out of order on the server's workers. Keep the
+// newest: sealed beats open, then (revision, committedThroughMs) must not go back.
+bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
+    const ChunkOrder incoming{frame.state.sealed, frame.state.revision, frame.state.committedThroughMs};
+    std::lock_guard lock(m_chunkOrderMutex);
+    const auto key = std::make_tuple(frame.key.symbol, frame.key.source, frame.key.levelMs, frame.key.startMs);
+    const auto it = m_chunkOrder.find(key);
+    if (it != m_chunkOrder.end()) {
+        const auto& prev = it->second;
+        if (!incoming.sealed && (prev.sealed ||
+            std::tie(incoming.revision, incoming.committedThroughMs) <
+                std::tie(prev.revision, prev.committedThroughMs)))
+            return false;
+        it->second = incoming;
+        return true;
+    }
+    if (m_chunkOrder.size() >= kMaxChunkOrderKeys) m_chunkOrder.clear(); // bounded; ordering restarts
+    m_chunkOrder.emplace(key, incoming);
+    return true;
 }
 
 void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
@@ -572,6 +679,14 @@ void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes
         return;
     }
     
+    if (m_ws->got_binary()) {
+        auto frame = std::make_shared<std::vector<uint8_t>>(bytes_transferred);
+        net::buffer_copy(net::buffer(*frame), m_buffer.data());
+        m_buffer.consume(bytes_transferred);
+        handleBinaryMessage(std::move(frame));
+        doRead();
+        return;
+    }
     std::string msg = boost::beast::buffers_to_string(m_buffer.data());
     m_buffer.consume(bytes_transferred);
     
@@ -637,6 +752,17 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::HeatmapHistoryChunk:
                 handleHeatmapHistoryChunkMessage(msg);
                 return;
+            case protocol::MessageType::HeatmapAvailability: {
+                const auto availability = protocol::chunkwire::parseAvailability(msg);
+                if (availability.chunkWireVersion != heatmap::kChunkWireVersion) {
+                    sLog_Error("Heatmap chunk wire version mismatch: server=" << availability.chunkWireVersion
+                               << " client=" << heatmap::kChunkWireVersion << " (chunks refused)");
+                    emit errorOccurred(QStringLiteral("heatmap chunk wire version mismatch"));
+                    return;
+                }
+                emit heatmapAvailabilityReceived(availability);
+                return;
+            }
             case protocol::MessageType::CandleHistoryChunk:
                 handleCandleHistoryChunkMessage(msg);
                 return;
