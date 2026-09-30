@@ -129,6 +129,11 @@ struct CellOptions {
 // same grid: binColumn per present column; incompatible native grids veil the
 // column; unscanned buckets draw loading; outside availability draws no data.
 std::vector<uint32_t> buildCells(const SparseColumns &composed, const TileGrid &grid, const CellOptions &options);
+// The fill-pass rule of the GPU kernel (S5 owner decision 1): the coarsest source
+// that builds the tick is binned first; each finer source then replaces only the
+// cells still veiled, and only with valid ones. `fill` holds the finer source's
+// cells on the same grid (buildCells). Test oracle for heatmap_bin.comp's fill pass.
+void fillVeiled(std::vector<uint32_t> &cells, const std::vector<uint32_t> &fill);
 
 // ------------------------------------------------------------------ caches
 struct TileKey {

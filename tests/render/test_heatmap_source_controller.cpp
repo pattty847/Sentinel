@@ -640,9 +640,7 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
     }
     EXPECT_EQ(cache->stats().claimedBytes, 0u);
     EXPECT_EQ(a.stats().releasedImages, 10u);
-    cache->setMaxBytes(0); // nothing unclaimed stays cached
-    EXPECT_EQ(cache->stats().liveBytes, 0);
-    cache->setMaxBytes(256ull << 20);
+    EXPECT_EQ(cache->stats().liveBytes, 0) << "no image stays after the upload (the LRU is not shrunk)";
     const auto requests = requestedKeys().size();
     const auto built = cache->stats().builds;
     a.capacity()->report(1ull << 30, {}, true); // QRhi lost
@@ -652,6 +650,131 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
     EXPECT_EQ(requestedKeys().size(), requests); // rebuilt from local chunks
     for (const auto &span : a.latestSnapshot()->spans)
         for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
+}
+
+// S5c: a full node (no credit) still admits prefetch on the side the view moves
+// to, by evicting strictly lower-ranked prefetch left behind (the node frees
+// what the snapshot stops listing). Without it the stale side kept the cap full.
+TEST_F(SourceController, CreditBlockedPrefetchEvictsLowerRankedPrefetchAfterAPan) {
+    constexpr size_t estimate = 1024; // below one real build: one victim makes room
+    auto &a = chart(1ull << 30, estimate);
+    view(a);
+    settle();
+    const int64_t visible = tiles::tileOfBucket(epoch / kMinuteMs);
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u);
+    upload(a, 0); // everything resident, the node full
+    settle();
+    // Pan two tiles left: the old visible tile is right-side prefetch at distance 2.
+    a.setView("BTC-USD", kMinuteMs, double(epoch - 2 * tileMs), double(epoch - tileMs));
+    settle();
+    std::map<int64_t, SpanRank> ranks;
+    for (const auto &span : a.latestSnapshot()->spans) ranks[span.id.tile] = span.rank;
+    EXPECT_TRUE(ranks.contains(visible - 3)) << "left prefetch at distance 1 admitted";
+    EXPECT_FALSE(ranks.contains(visible)) << "right prefetch at distance 2 made room";
+    EXPECT_TRUE(ranks.contains(visible - 1)) << "equal rank on the right is never evicted";
+    EXPECT_GT(a.stats().evictions, 0u);
+}
+
+// S5c node contract addition: a source the node reports missing (its GPU cap
+// evicted it after the upload, or a new node never held it) is rebuilt from the
+// local chunks when the image was released; the others are untouched.
+TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
+    auto &a = chart();
+    view(a);
+    settle();
+    ASSERT_EQ(upload(a, 1ull << 30), 10u);
+    const auto released = a.latestSnapshot();
+    const SpanSourceKey *missing = nullptr;
+    for (const auto &span : released->spans)
+        if (span.rank.tier == SpanTier::Visible) missing = &span.sources.front().build->key;
+    ASSERT_TRUE(missing);
+    const SpanSourceKey key = *missing;
+    const auto requests = requestedKeys().size();
+    const auto built = cache->stats().builds;
+    a.capacity()->report(1ull << 30, {}, false, {key});
+    a.pollCapacity();
+    settle();
+    EXPECT_EQ(cache->stats().builds, built + 1) << "only the missing source rebuilt";
+    EXPECT_EQ(requestedKeys().size(), requests) << "from local chunks";
+    size_t withImage = 0;
+    for (const auto &span : a.latestSnapshot()->spans)
+        for (const auto &source : span.sources) {
+            ASSERT_TRUE(source.build);
+            if (source.build->gpu) {
+                ++withImage;
+                EXPECT_EQ(source.build->key, key);
+            }
+        }
+    EXPECT_EQ(withImage, 1u);
+}
+
+// Once the node reports a source uploaded, nothing on the CPU keeps its image:
+// not the slot, not the snapshot, not the span-source LRU (plan section 4: "the
+// lab keeps them alive after upload; S5 does not"). Every image still alive is
+// claimed, and the ledger covers what is pinned: claims, reservations and the
+// wanted decoded chunks. Before the fix the LRU kept every uploaded image as an
+// unclaimed entry (up to the 256 MiB tier) that no ledger counted.
+TEST_F(SourceController, UploadedImagesLeaveTheCacheAndTheLedgerCoversWhatStaysPinned) {
+    auto &a = chart();
+    view(a);
+    settle();
+    auto covered = [&] {
+        const auto s = cache->stats();
+        EXPECT_LE(s.liveBytes, int64_t(s.claimedBytes)) << "every image alive is claimed";
+        EXPECT_GE(cache->committedCpuBytes(), s.claimedBytes + s.reservedBytes + store.stats().wantedBytes)
+            << "the ledger covers claims, reservations and wanted chunks";
+    };
+    covered();
+    EXPECT_GT(cache->stats().liveBytes, 0);
+    EXPECT_EQ(upload(a, 1ull << 30), 10u);
+    settle();
+    const auto s = cache->stats();
+    EXPECT_EQ(s.liveBytes, 0) << "uploaded images are gone from the CPU";
+    EXPECT_EQ(s.bytes, 0u) << "the LRU keeps no uploaded image";
+    EXPECT_EQ(s.claimedBytes, 0u);
+    covered();
+    // A second chart on the same view still shares one build per source while
+    // both hold it, and releases it after its own upload.
+    auto &b = chart();
+    view(b);
+    settle();
+    EXPECT_GT(cache->stats().liveBytes, 0) << "rebuilt for the chart that has not uploaded";
+    covered();
+    upload(b, 1ull << 30);
+    settle();
+    EXPECT_EQ(cache->stats().liveBytes, 0);
+    covered();
+}
+
+// Re-review: a key two charts claim. Once one chart's node uploaded it, the LRU
+// never keeps it, whether the other chart uploads later or closes first; its
+// own reference keeps the image only while it needs it. No cache shrinking.
+TEST_F(SourceController, ASharedImageUploadedByOneChartDiesWhenTheOtherLetsGo) {
+    for (const bool otherUploads : {false, true}) {
+        SCOPED_TRACE(otherUploads ? "the other chart uploads later" : "the other chart closes first");
+        auto &a = chart();
+        auto &b = chart();
+        view(a);
+        view(b);
+        settle();
+        ASSERT_GT(cache->stats().liveBytes, 0);
+        EXPECT_EQ(cache->stats().builds % 10, 0u) << "one shared build per source";
+        upload(a, 1ull << 30);
+        settle();
+        EXPECT_GT(cache->stats().liveBytes, 0) << "B still needs the image for its own upload";
+        if (otherUploads) {
+            upload(b, 1ull << 30);
+            settle();
+        } else {
+            charts.pop_back(); // B closes before its upload
+            drain();
+            settle();
+        }
+        EXPECT_EQ(cache->stats().liveBytes, 0) << "the uploaded image is gone";
+        EXPECT_EQ(cache->stats().bytes, 0u) << "and not in the LRU";
+        charts.clear();
+        drain();
+    }
 }
 
 // Review fix 4: surviving slots take their new ranks before admission.
@@ -909,8 +1032,6 @@ TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAga
     EXPECT_EQ(upload(a, 1ull << 30), 10u);
     store.setMaxBytes(1); // unwanted chunks are evictable now
     EXPECT_EQ(store.stats().entries, 0u);
-    cache->setMaxBytes(0); // no cached copies of the released images either
-    cache->setMaxBytes(256ull << 20);
     const auto requests = requestedKeys().size();
     a.capacity()->report(1ull << 30, {}, true); // GPU loss
     a.pollCapacity();
@@ -924,16 +1045,20 @@ TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAga
 
 // A source made ready from the cache after demand was computed must not leave
 // its chunks wanted (one more reconcile follows a cache hit).
-TEST_F(SourceController, LossRecoveredFromTheCacheLeavesNothingWanted) {
+// (S5c: uploaded images no longer stay in the LRU, so a loss rebuilds them from
+// the local chunks, as plan section 4 says.)
+TEST_F(SourceController, LossRebuildsFromLocalChunksAndLeavesNothingWanted) {
     auto &a = chart();
     view(a);
     settle();
-    upload(a, 1ull << 30); // images released; the cache LRU still holds them
+    upload(a, 1ull << 30); // images released, and gone from the LRU
     const auto built = cache->stats().builds;
+    const auto requests = requestedKeys().size();
     a.capacity()->report(1ull << 30, {}, true);
     a.pollCapacity();
     settle();
-    EXPECT_EQ(cache->stats().builds, built); // all from the cache
+    EXPECT_EQ(cache->stats().builds, built + 10);
+    EXPECT_EQ(requestedKeys().size(), requests) << "from local chunks";
     for (const auto &span : a.latestSnapshot()->spans)
         for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
     EXPECT_EQ(store.stats().wantedBytes, 0u);
@@ -1250,8 +1375,6 @@ TEST_F(SourceController, SharedPendingChunksWithDifferentHintsSettle) {
     view(a);
     settle(); // A measured its chunks: its hints are their real (small) sizes
     upload(a, 1ull << 30);
-    cache->setMaxBytes(0); // no cached builds to fall back on
-    cache->setMaxBytes(256ull << 20);
     store.setMaxBytes(1); // the (unwanted, sealed) chunks leave the store
     ASSERT_EQ(store.stats().entries, 0u);
     a.capacity()->report(1ull << 30, {}, true); // GPU loss: A wants its chunks again

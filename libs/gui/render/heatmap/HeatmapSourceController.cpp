@@ -96,6 +96,9 @@ struct SpanSourceCache::State {
     std::shared_ptr<std::atomic<int64_t>> liveBytes = std::make_shared<std::atomic<int64_t>>(0);
     tiles::ByteLru<SpanSourceKey, SpanSourceBuildPtr, SpanSourceKeyHash> lru{SIZE_MAX};
     std::unordered_map<SpanSourceKey, std::weak_ptr<const SpanSourceBuild>, SpanSourceKeyHash> live;
+    // Builds some chart's node uploaded: never cached again (their image lives
+    // only while a claimant still holds it). Pruned with `live`.
+    std::unordered_set<SpanSourceKey, SpanSourceKeyHash> uploaded;
     struct Waiter {
         QPointer<QObject> context;
         Completion completion;
@@ -277,6 +280,7 @@ void SpanSourceCache::trim() {
         ++s.stats.evictions;
     }
     std::erase_if(s.live, [](const auto &entry) { return entry.second.expired(); });
+    std::erase_if(s.uploaded, [&](const SpanSourceKey &key) { return !s.live.contains(key); });
     if (s.claimedBytes > s.options.maxBytes && !relieving_) {
         relieving_ = true;
         QMetaObject::invokeMethod(this, [this] { relieve(); }, Qt::QueuedConnection);
@@ -329,6 +333,16 @@ std::shared_ptr<void> SpanSourceCache::claim(const SpanSourceBuildPtr &build) {
     return token;
 }
 
+void SpanSourceCache::released(const SpanSourceKey &key) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto &s = *state_;
+    // Out of the LRU at once, even while another chart claims it: a claimant
+    // keeps the build through its own reference, and the image dies with the
+    // last one (it uploads or closes), never parked in the LRU.
+    s.uploaded.insert(key);
+    if (s.lru.erase(key)) freed();
+}
+
 SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (const auto *hit = state_->lru.find(key)) {
@@ -340,8 +354,10 @@ SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     auto build = it->second.lock();
     if (!build || !build->gpu) return nullptr;
     ++state_->stats.hits;
-    state_->lru.insert(key, build, build->bytes); // in use again: cache it
-    trim();
+    if (!state_->uploaded.contains(key)) { // in use again: cache it (unless uploaded)
+        state_->lru.insert(key, build, build->bytes);
+        trim();
+    }
     return build;
 }
 
@@ -379,6 +395,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
             s.reservedBytes -= job.reserved;
             s.dropRefs(job.keys);
             if (build) {
+                s.uploaded.erase(key); // a new image (a rebuild after a loss)
                 s.lru.insert(key, build, build->bytes);
                 s.live[key] = build;
                 s.hints[{key.span, key.source}] = {build->bytes, build->uploadBytes};
@@ -558,10 +575,31 @@ void HeatmapSourceController::pollCapacity() {
             light->gpu.reset();
             source.ready = std::move(light);
             source.claim.reset();
+            cache_.released(key); // and out of the LRU, unless another chart still claims it
             ++stats_.releasedImages;
             dirty_ = true;
         }
     }
+    // Single sources the node no longer holds (its cap evicted them) or never
+    // held (a new node): as a loss, for those keys only.
+    for (const auto &key : report.missing) {
+        const auto slot = slots_.find(key.span);
+        if (slot == slots_.end()) continue;
+        const auto it = slot->second.sources.find(key.source);
+        if (it == slot->second.sources.end() || !it->second.ready || it->second.ready->key != key) continue;
+        auto &source = it->second;
+        source.uploaded = false;
+        dirty_ = true;
+        if (source.ready->gpu) continue; // the image is still here: the node uploads it again
+        if (slot->second.plan.rank.tier == SpanTier::RecentTf) {
+            slots_.erase(slot);
+            continue;
+        }
+        source.ready.reset();
+        source.lostRebuild = isRetained(slot->second.plan.rank.tier);
+    }
+    if (!report.missing.empty())
+        sLog_Probe("heatmap.controller.missing", "chart=" << chart_ << " sources=" << report.missing.size());
     if (report.lost) {
         // The node lost its GPU copies. Released images of drawn content are
         // rebuilt from chunks (visible, prefetch, and fallback, which is still
@@ -764,6 +802,24 @@ void HeatmapSourceController::reconcile() {
         return;
     }
     const auto available = sources();
+    // The time this tf can plan spans for: minute history, and hour rollups for
+    // hour-multiple timeframes (tiles::chunksFor), not an earlier level the tf
+    // never reads (the node would wait for spans that are never planned).
+    int64_t availableStart = 0, availableEnd = 0;
+    for (const auto &source : available) {
+        int64_t lo = source.time.minuteOldestMs;
+        if (tfMs_ % kHourMs == 0 && source.time.hourThroughMs > source.time.hourOldestMs && source.time.hourOldestMs > 0)
+            lo = std::min(lo, source.time.hourOldestMs);
+        if (lo == INT64_MAX || lo >= source.time.endMs) continue;
+        lo = std::max(lo, source.time.oldestMs);
+        availableStart = availableEnd ? std::min(availableStart, lo) : lo;
+        availableEnd = std::max(availableEnd, source.time.endMs);
+    }
+    if (availableStart != availableStartMs_ || availableEnd != availableEndMs_) {
+        availableStartMs_ = availableStart;
+        availableEndMs_ = availableEnd;
+        dirty_ = true;
+    }
     const SpanTier retainedTier = visibleReady_ ? SpanTier::RecentTf : SpanTier::Fallback;
     std::erase_if(retained_, [&](const SpanId &id) { return !slots_.contains(id); });
     std::vector<PlannedSpan> retained;
@@ -827,6 +883,29 @@ void HeatmapSourceController::reconcile() {
         const bool guarded = isGuarded(span.rank.tier);
         const size_t need = guarded ? bytes : withHeadroom(bytes);
         auto cpuOver = [&] { return cache_.pinnedBytes() + cpuAdmitted + cpu > cache_.maxBytes(); };
+        // A full node (no credit) still makes room for this span from strictly
+        // lower-ranked content (recent-tf, farther prefetch): the node frees
+        // what the snapshot stops listing before it uploads anything new, so
+        // the victims' bytes count as credit at once (S5c: without this, stale
+        // prefetch behind a pan kept the cap full and starved the new side).
+        while (!guarded && !blocked && credit < need) {
+            auto victim = slots_.end();
+            for (auto it = slots_.begin(); it != slots_.end(); ++it) {
+                const auto &rank = it->second.plan.rank;
+                if (!isGuarded(rank.tier) && span.rank < rank && (victim == slots_.end() || victim->second.plan.rank < rank))
+                    victim = it;
+            }
+            if (victim == slots_.end()) break;
+            sLog_Probe("heatmap.controller.evict", "chart=" << chart_ << " tile=" << victim->first.tile << " tier="
+                       << spanTierName(victim->second.plan.rank.tier) << " for=" << span.id.tile << " credit");
+            const size_t bytesOf = gpuBytes(victim->second), freed = outstanding(victim->second);
+            used -= std::min(used, bytesOf);
+            credit += bytesOf;
+            reserved -= std::min(freed, reserved);
+            slots_.erase(victim); // releases its CPU claims
+            ++stats_.evictions;
+            dirty_ = true;
+        }
         if (!guarded && (blocked || credit < need)) {
             ++stats_.suppressed;
             blocked = true;
@@ -1097,6 +1176,8 @@ void HeatmapSourceController::publish() {
     set->resolution.priceScale = priceScale_;
     set->refused = cpuRefused_;
     set->refusedBytes = cpuRefusedBytes_;
+    set->availableStartMs = availableStartMs_;
+    set->availableEndMs = availableEndMs_;
     for (const auto &[id, slot] : slots_) {
         SpanSnapshot span{id, slot.plan.rank, {}, true};
         for (const auto &planned : slot.plan.sources) {
@@ -1105,6 +1186,7 @@ void HeatmapSourceController::publish() {
             if (it != slot.sources.end()) {
                 source.build = it->second.ready;
                 source.stale = source.build && it->second.expected && source.build->key != *it->second.expected;
+                source.failed = it->second.failed && !it->second.pending;
             }
             span.complete = span.complete && source.build && !source.stale;
             if (source.build && id.tfMs == tfMs_) mergeResolution(set->resolution, source.build->resolution);

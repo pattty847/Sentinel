@@ -139,5 +139,6 @@ TickCoverage tickCoverage(const GpuSource& source, int64_t firstBucket, int64_t 
 // Display tick -> per-tick native rows per display bin (0 = incompatible grid),
 // the same integrality rule binColumn applies.
 std::array<uint32_t, kMaxTicks> tickFactors(const GpuSource& source, double displayTick);
+std::array<uint32_t, kMaxTicks> tickFactors(const std::vector<double>& ticks, double displayTick);
 
 } // namespace heatmap::gpu

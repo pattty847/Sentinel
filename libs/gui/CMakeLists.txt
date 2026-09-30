@@ -185,8 +185,6 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapGpuSelfTest.cpp
     render/heatmap/HeatmapGpuBinner.hpp
     render/heatmap/HeatmapGpuBinner.cpp
-    render/heatmap/HeatmapRenderNode.hpp
-    render/heatmap/HeatmapRenderNode.cpp
     render/heatmap/HeatmapTileNode.hpp
     render/heatmap/HeatmapTileNode.cpp
 )
@@ -224,14 +222,14 @@ target_link_libraries(sentinel_heatmap_gpu
 add_library(sentinel_lab_lib
     lab/LabSources.hpp
     lab/LabSources.cpp
-    lab/LabChunks.hpp
-    lab/LabChunks.cpp
+    lab/LabData.hpp
+    lab/LabData.cpp
     lab/LabItem.hpp
     lab/LabItem.cpp
     lab/Bench.hpp
     lab/Bench.cpp
-    lab/B1Bench.hpp
-    lab/B1Bench.cpp
+    lab/S5Bench.hpp
+    lab/S5Bench.cpp
     lab/OffscreenQuick.hpp
     lab/OffscreenQuick.cpp
     lab/RhiBackend.hpp

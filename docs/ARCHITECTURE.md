@@ -40,7 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
-- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (`HeatmapRenderNode` in a plain `QQuickItem`), with headless `--bench`, `--screenshot` and `--tick-sweep` modes and the slice T tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`).
+- **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (S5c): `LocalChunkTransport` -> `ChunkFetcher` -> `HeatmapSourceController` on a heatmap-data thread (`lab/LabData`) -> `HeatmapTileNode` in a plain `QQuickItem` (`lab/LabItem`). Headless `--screenshot`, `--window-screenshot`, `--tick-sweep`, `--tick-change-frames`, `--s5-bench` (vs the B1 hybrid) and the binner compute `--bench`; tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`), `--end-utc` (a pinned closed range), `--band-edges` (E4) and `--charts`.
 
 ## Data pipeline
 
@@ -152,12 +152,13 @@ stateful, a fixed point at any zoom), Manual preset offering (any preset some
 loaded grid can build), `ManualTickMemory` per (symbol, timeframe), and the
 clamps (time zoom-out one column per physical pixel; Manual price zoom-out one
 row per physical pixel). There is no auto-timeframe: a column is exactly the
-selected timeframe. `HeatmapRenderNode::TickPolicy` applies it per frame to the
-active source (`commonTickInView`); Manual draws the locked preset and columns
-that cannot build it veil (it never coarsens). Re-bins happen only on the spec
-rule 6 triggers; a pan inside the prepared grid is a mapping change. An
-150 ms crossfade (spec rule 8, owner choice after E2; 0 = hard switch) keeps the previous binned
-grid in a second output slot and fades it out over the new one. The binner owns
+selected timeframe. The chart (today the lab's `LabItem`) picks the tick in
+`updatePaintNode` from the `SpanSet`'s `ResolutionSummary` (`autoTickUnits` over
+the rows in view) and hands it to `HeatmapTileNode` in the same frame; Manual
+draws the locked preset and rows no source builds veil (it never coarsens).
+Re-bins happen only on the spec rule 6 triggers; a pan inside the binned rows is
+a mapping change. A 150 ms crossfade (spec rule 8, owner choice after E2; 0 =
+hard switch) fades the previous picture out over the new one. The binner owns
 its readback results and registers a QRhi cleanup callback: whichever of the
 binner and its QRhi goes first, in-flight readbacks complete before their result
 is freed and nothing calls into a destroyed QRhi (FM-099). The veil is a neutral
@@ -179,7 +180,9 @@ pending source), while the previous source keeps drawing; entries are split into
 ≤ 64 MiB pages for D3D11, both sets together are capped (512 MiB default), and a
 failed or refused pending source never disturbs the active one; it is reported
 once and not retried every frame (allocation failures back off 2 s doubling to
-60 s). One compute invocation per
+60 s). That active/spare pair now serves only the precision self-test, the parity
+tests and the compute benchmark; the chart path uses the binner's resident pool
+(below). One compute invocation per
 output cell sums its bin's rows per side in float-float and encodes the 15-bit
 code through a threshold table that is exact against `recording::encodeSize`.
 Codes, side and validity therefore equal `binColumn`. Metal compiles with fast
@@ -193,7 +196,7 @@ Each cell carries one of four states: data, veil (scanned but unproven, or an
 incompatible grid), loading (not scanned, or outside the row clip) and no data
 (outside the advertised availability). The grid is anchored to absolute UTC
 buckets and price bins with a guard margin, so a pan inside it only changes the
-draw mapping. `HeatmapRenderNode` records the compute pass in
+draw mapping. `HeatmapTileNode` records compute passes in
 `QSGRenderNode::prepare()` and draws in `render()` inside the normal scene graph;
 `tests/render/test_qsg_compute_spike.cpp` guards that mechanism. Display ticks
 must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
@@ -243,6 +246,30 @@ draw as loading and are listed in `SpanSet::refused`); its nearest visible span
 always stays. A built source keeps only its open chunks wanted. Results for an
 older serial, or not matching the source's current desired key, are dropped.
 The chunk store never evicts a key some chart wants.
+
+### Heatmap tile node (slice S5c)
+
+`HeatmapTileNode` (render thread) draws a `SpanSet`. Each span source build is
+uploaded once into the binner's resident pool (per-frame byte budget; the binner
+drops its CPU reference when the upload completes) and reported uploaded, so the
+controller releases the image. Per visible span and tick the node bins the rows
+around the view (one view height each side) into its own buffers: the coarsest
+source first, then each finer resident source as a fill pass
+(`heatmap_bin.comp` `dims.w` bit 1) that replaces only cells left veiled, and
+only with valid ones (owner decision 1; `tiles::fillVeiled` is the CPU oracle).
+A finer source is resident while the rows around the view overlap its bands.
+Transitions: the last picture holds until every visible span of a new
+(timeframe, tick) is ready, a tick change then crossfades (each change its own
+fading layer), and a span whose content changed draws its previous bin until the
+new one is ready. The node keeps everything it draws (current, held, fading,
+fallback) resident with its sources and retires it itself; it enforces the
+per-chart GPU cap (320 MiB) by evicting sources the snapshot dropped, then
+recent-tf, then prefetch far to near (never visible, fallback or drawn), and
+reports `HeatmapCapacity::report(free, uploaded, lost, missing)` whenever
+resident bytes change (`missing`: keys it evicted after reporting them uploaded,
+or released images it never held; the controller rebuilds or forgets them).
+Visible spans the CPU ceiling refused draw the loading hatch. The chunk store has
+no blocking loader any more: bodies arrive only through `put()`.
 
 ### Coordinate system: TimeAxisMapping
 

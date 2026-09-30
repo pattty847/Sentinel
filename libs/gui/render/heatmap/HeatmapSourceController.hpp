@@ -98,7 +98,8 @@ struct ChunkBytes {
 //   holds is shared even after the LRU dropped it.
 // - CPU tier (maxBytes, HeatmapBudgets::spanSources): controllers claim the
 //   images they hold; claimed images plus reservations of running builds are
-//   pinned. The LRU keeps unclaimed images only within what is left. When the
+//   pinned. The LRU keeps unclaimed images only within what is left, and never
+//   one that a node has uploaded (released()): after upload no CPU image stays. When the
 //   claimed bytes alone exceed the tier, the cache drops the lowest-rank slots
 //   of all controllers (prefetch, recent-tf; never visible or fallback) until
 //   they fit. Controllers admit prefetch only with CPU room (size hints of past
@@ -149,6 +150,11 @@ public:
     // Pins an image in the CPU tier until the returned token is destroyed (on
     // this thread). A key claimed by several holders counts once.
     std::shared_ptr<void> claim(const SpanSourceBuildPtr &build);
+    // A chart's node uploaded this build: the LRU drops it at once and never
+    // caches it again, so the image dies with the last chart still holding it
+    // (plan section 4: span images are not kept after upload; a GPU loss
+    // rebuilds from chunks).
+    void released(const SpanSourceKey &key);
     // Sizes of the last build of (span, source) at any generation; 0 unknown.
     struct Hint { size_t bytes = 0, uploadBytes = 0; };
     Hint hint(const SpanId &span, const std::string &source) const;
@@ -198,18 +204,24 @@ private:
 // bytes; `uploaded` names the span sources it has uploaded since its last
 // report (their CPU images are then released: the node keeps the GPU copy,
 // identified by SpanSourceBuild::key); `lost` says the node lost its GPU copies
-// (QRhi loss), and the controller rebuilds the released images.
+// (QRhi loss), and the controller rebuilds the released images. `missing` (S5c
+// addition) names single span sources the node no longer holds although it
+// reported them uploaded (its GPU cap evicted them) or never held (a new node
+// seeing released images): the controller rebuilds those it still needs and
+// forgets retained ones whose image is gone, exactly as `lost` does for all.
 // The controller's credit is freeBytes minus its outstanding reservations (every
 // admitted source not reported uploaded, at its built size or estimate), so a
 // build smaller than its estimate returns credit at once, and a static view makes
 // progress without new reports.
 struct HeatmapCapacity {
     std::atomic<uint64_t> capacityEpoch{0};
-    void report(size_t freeBytes, std::vector<SpanSourceKey> uploaded = {}, bool lost = false) {
+    void report(size_t freeBytes, std::vector<SpanSourceKey> uploaded = {}, bool lost = false,
+                std::vector<SpanSourceKey> missing = {}) {
         {
             std::scoped_lock lock(mutex_);
             free_ = freeBytes;
             for (auto &key : uploaded) uploaded_.push_back(std::move(key));
+            for (auto &key : missing) missing_.push_back(std::move(key));
             lost_ = lost_ || lost;
         }
         capacityEpoch.fetch_add(1, std::memory_order_release);
@@ -219,19 +231,21 @@ struct HeatmapCapacity {
         size_t freeBytes = 0;
         std::vector<SpanSourceKey> uploaded;
         bool lost = false;
+        std::vector<SpanSourceKey> missing;
     };
     // Controller: the latest free bytes and everything reported since the last take.
     Report take() {
         std::scoped_lock lock(mutex_);
-        Report out{free_, std::move(uploaded_), lost_};
+        Report out{free_, std::move(uploaded_), lost_, std::move(missing_)};
         uploaded_.clear();
+        missing_.clear();
         lost_ = false;
         return out;
     }
 private:
     std::mutex mutex_;
     size_t free_ = 0;
-    std::vector<SpanSourceKey> uploaded_;
+    std::vector<SpanSourceKey> uploaded_, missing_;
     bool lost_ = false;
 };
 
@@ -239,6 +253,7 @@ struct SpanSourceSnapshot {
     std::string source;
     SpanSourceBuildPtr build; // nullptr until built
     bool stale = false;       // build is an older generation; the rebuild is pending
+    bool failed = false;      // its latest build failed and none is pending (the node stops waiting for it)
 };
 struct SpanSnapshot {
     SpanId id;
@@ -261,6 +276,9 @@ struct SpanSet {
     // view centre first). They draw as loading, not veil, and the UI can say why.
     std::vector<SpanId> refused;
     size_t refusedBytes = 0; // their estimated CPU cost
+    // Union of every source's advertised time (S5c): visible time inside it with
+    // nothing drawable draws the loading hatch; outside it draws nothing.
+    int64_t availableStartMs = 0, availableEndMs = 0;
 };
 
 // CPU ceiling: the controller commits its wanted decoded chunks plus span
@@ -344,6 +362,7 @@ private:
     TickMode tickMode_ = TickMode::Auto;
     int64_t tickUnits_ = 0;
     double priceScale_ = 100;
+    int64_t availableStartMs_ = 0, availableEndMs_ = 0; // SpanSet availability
     uint64_t serial_ = 0, version_ = 0, epoch_ = 0;
     size_t reportedFree_ = 0;
     bool reported_ = false;

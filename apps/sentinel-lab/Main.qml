@@ -10,27 +10,27 @@ ApplicationWindow {
     height: 940
     minimumWidth: 900
     minimumHeight: 600
-    title: "Sentinel · GPU heatmap lab (HeatmapRenderNode)"
+    title: "Sentinel · GPU heatmap lab (production path)"
     color: "#070b10"
     property var metrics: ({})
     property var frameHistory: []
     property string screenshotNotice: ""
     readonly property var hysteresisPresets: [0, 0.15, 0.25, 0.4]
     readonly property var minRowPresets: [1, 1.5, 2, 3, 4]
-    readonly property var prepModes: ["full", "viewport", "whole-chunk", "whole-chunk-cpu", "hybrid"]
     function money(v) { return "$" + Number(v).toString() }
+    function mb(v) { return ((v || 0) / 1048576).toFixed(1) + " MB" }
     function syncTickControls() {
         tickMode.currentIndex = binLab.manualMode ? 1 : 0
         manualPreset.currentIndex = binLab.offeredTicks.indexOf(binLab.manualTick)
         hysteresisBox.currentIndex = hysteresisPresets.indexOf(binLab.hysteresis)
         minRowBox.currentIndex = minRowPresets.indexOf(binLab.minRowPx)
         crossfadeBox.checked = binLab.crossfade
+        bandBox.checked = binLab.showBandEdges
     }
 
     Component.onCompleted: {
-        binLab.prepMode = initialPrep
-        prepBox.currentIndex = prepModes.indexOf(initialPrep)
         binLab.timeframeMinutes = initialTf
+        binLab.showBandEdges = initialBandEdges
         syncTickControls()
         var presets = [1, 5, 15, 60, 240, 1440]
         timeframe.currentIndex = presets.indexOf(initialTf)
@@ -38,14 +38,8 @@ ApplicationWindow {
             timeframe.currentIndex = 6
             customTf.text = String(initialTf)
         }
-        if (initialSynthetic > 0) {
-            source.currentIndex = initialSynthetic >= 10000000 ? 2 : 1
-            binLab.loadSynthetic(initialSynthetic)
-        } else {
-            hours.value = initialHours
-            layerBox.currentIndex = initialLayer === "deep" ? 1 : 0
-            binLab.loadReal(initialHours, initialLayer)
-        }
+        hours.value = initialHours
+        binLab.loadReal(initialHours)
     }
     Timer {
         interval: 250
@@ -87,6 +81,32 @@ ApplicationWindow {
             color: "#080d12"
             border.color: "#2c3d49"
             BinLab { id: cellLab; objectName: cell.labName; anchors.fill: parent }
+            // E4: the finest source's coverage band (the near band) in view.
+            Canvas {
+                id: bandCanvas
+                anchors.fill: parent
+                visible: cellLab.showBandEdges
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.reset()
+                    if (!cellLab.showBandEdges) return
+                    ctx.strokeStyle = "#ffd84a"
+                    ctx.lineWidth = 1.5
+                    ctx.setLineDash([6, 4])
+                    var edges = cellLab.bandEdges()
+                    ctx.beginPath()
+                    for (var i = 0; i < edges.length; ++i) {
+                        var e = edges[i]
+                        ctx.moveTo(e[0], e[2]); ctx.lineTo(e[1], e[2])
+                        ctx.moveTo(e[0], e[3]); ctx.lineTo(e[1], e[3])
+                    }
+                    ctx.stroke()
+                }
+                Connections {
+                    target: cellLab
+                    function onBandEdgesChanged() { bandCanvas.requestPaint() }
+                }
+            }
             MouseArea {
                 anchors.fill: parent
                 hoverEnabled: true
@@ -126,7 +146,7 @@ ApplicationWindow {
                 color: "#ba101820"
                 Label { id: hint; anchors.centerIn: parent; text: "DRAG  pan     WHEEL  time + price     SHIFT + WHEEL  price     S  screenshot"; color: "#9fb4bf"; font.pixelSize: 12 }
             }
-            // Resolution indicator (Manual): columns that cannot build the locked tick veil.
+            // Resolution indicator: rows in view no source builds at the tick veil.
             Rectangle {
                 anchors.left: parent.left; anchors.top: parent.top
                 anchors.margins: 14
@@ -144,8 +164,8 @@ ApplicationWindow {
             }
             Label {
                 anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 10
-                text: cellLab.timeframeMinutes + "m · " + cellLab.prepMode + " · " +
-                      ((cell.cellMetrics.gpuBytes || 0) / 1048576).toFixed(1) + " MB GPU"
+                text: cellLab.timeframeMinutes + "m · " + root.money(cell.cellMetrics.tick || 0) + " · " +
+                      root.mb(cell.cellMetrics.residentBytes) + " resident"
                 color: "#a6e7e9"; font.family: "Menlo"; font.pixelSize: 12
             }
         }
@@ -167,34 +187,10 @@ ApplicationWindow {
             spacing: 4
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: "GPU BIN LAB"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 16; Layout.rightMargin: 16 }
-                ComboBox {
-                    id: source
-                    model: ["Real HMC2", "Synthetic 1M", "Synthetic 10M"]
-                    Layout.preferredWidth: 170
-                }
-                Label { text: "Hours"; color: "#aab7c0"; visible: source.currentIndex === 0 }
-                SpinBox { id: hours; from: 1; to: 720; value: 24; visible: source.currentIndex === 0; Layout.preferredWidth: 95 }
-                ComboBox { id: layerBox; model: ["near", "deep"]; visible: source.currentIndex === 0; Layout.preferredWidth: 90 }
-                Button {
-                    text: "Load"
-                    onClicked: {
-                        if (source.currentIndex === 0) root.forEachChart(function(c) { c.loadReal(hours.value, layerBox.currentText) })
-                        else binLab.loadSynthetic(source.currentIndex === 1 ? 1000000 : 10000000)
-                    }
-                }
-                Label { text: "Prep"; color: "#aab7c0"; Layout.leftMargin: 10 }
-                ComboBox {
-                    id: prepBox
-                    model: ["full (S4 lab)", "viewport (V)", "whole-chunk (W)", "whole-chunk CPU (W)", "hybrid (resident chunks)"]
-                    Layout.preferredWidth: 190
-                    ToolTip.visible: hovered
-                    ToolTip.text: "B1: viewport = source clipped to the view +-1 view, screen grid; whole-chunk = 64-column tiles binned over their whole price extent (GPU or CPU), pan/zoom = mapping only; hybrid = the tiles' sources stay on the GPU and each tile bins the rows around the view"
-                    onActivated: {
-                        var mode = root.prepModes[currentIndex]
-                        root.forEachChart(function(c) { c.prepMode = mode })
-                    }
-                }
+                Label { text: "GPU HEATMAP LAB"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 16; Layout.rightMargin: 16 }
+                Label { text: "Hours"; color: "#aab7c0" }
+                SpinBox { id: hours; from: 1; to: 720; value: 24; Layout.preferredWidth: 95 }
+                Button { text: "Load"; onClicked: root.forEachChart(function(c) { c.loadReal(hours.value) }) }
                 Label { text: binLab.status; color: "#b9c9d2"; elide: Text.ElideRight; Layout.fillWidth: true }
             }
             RowLayout {
@@ -256,6 +252,11 @@ ApplicationWindow {
                     text: "Crossfade 150 ms"
                     onToggled: binLab.crossfade = checked
                 }
+                CheckBox {
+                    id: bandBox
+                    text: "Band edges (E4)"
+                    onToggled: root.forEachChart(function(c) { c.showBandEdges = bandBox.checked })
+                }
                 Button { text: "Screenshot  S"; onClicked: root.screenshotNotice =
                              binLab.saveScreenshot("") ? "Screenshot saved" : "Screenshot failed" }
                 Label { text: root.screenshotNotice; color: "#a6e7e9"; Layout.fillWidth: true; elide: Text.ElideRight }
@@ -281,8 +282,8 @@ ApplicationWindow {
                     labName: "extraLab" + index
                     Component.onCompleted: {
                         lab.timeframeMinutes = [5, 60, 15][index]
-                        lab.prepMode = initialPrep
-                        lab.loadReal(initialHours, initialLayer) // controls are not complete yet
+                        lab.showBandEdges = initialBandEdges
+                        lab.loadReal(initialHours) // controls are not complete yet
                     }
                     Timer {
                         interval: 500; repeat: true; running: true
@@ -296,112 +297,89 @@ ApplicationWindow {
             Layout.fillHeight: true
             color: "#111a23"
             border.color: "#2c3d49"
-            ColumnLayout {
+            Flickable {
                 anchors.fill: parent
                 anchors.margins: 14
-                spacing: 3
-                Label { text: "RENDER TELEMETRY"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 14 }
-                Label { text: "Frame time · last 90 samples"; color: "#aab7c0"; font.pixelSize: 12 }
-                Canvas {
-                    id: graph
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 106
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        ctx.reset(); ctx.fillStyle = "#0a1118"; ctx.fillRect(0, 0, width, height)
-                        ctx.strokeStyle = "#263b48"; ctx.beginPath()
-                        ctx.moveTo(0, height * 0.5); ctx.lineTo(width, height * 0.5); ctx.stroke()
-                        if (root.frameHistory.length < 2) return
-                        ctx.strokeStyle = "#5dd4d8"; ctx.lineWidth = 1.5; ctx.beginPath()
-                        for (var i = 0; i < root.frameHistory.length; ++i) {
-                            var x = i * width / 89
-                            var y = height - Math.min(root.frameHistory[i], 33.3) / 33.3 * height
-                            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-                        }
-                        ctx.stroke()
-                    }
-                }
-                Label { text: "TICK (E1-E3)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
-                Repeater {
-                    model: [
-                        ["Mode", "mode", ""], ["Tick", "tick", " $"], ["h", "hysteresis", ""],
-                        ["Min row px", "minRowPx", ""], ["Row height", "rowPx", " px"],
-                        ["commonTick (view)", "commonTick", " $"], ["Re-bin CPU submit", "binSubmitMs", " ms"],
-                        ["Tick-change CPU submit", "tickChangeBinMs", " ms"], ["Bins since start", "rebins", ""],
-                        ["Tick changes", "tickChanges", ""], ["Crossfade", "crossfadeMs", " ms"]
-                    ]
-                    delegate: RowLayout {
+                contentHeight: panel.implicitHeight
+                clip: true
+                ColumnLayout {
+                    id: panel
+                    width: parent.width
+                    spacing: 3
+                    component StatRow: RowLayout {
+                        property string name
+                        property string value
                         Layout.fillWidth: true
-                        Label { text: modelData[0]; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
-                        Label {
-                            text: {
-                                var value = root.metrics[modelData[1]]
-                                if (value === undefined) return "—"
-                                return typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 3) + modelData[2] : String(value)
-                            }
-                            color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12
-                        }
+                        Label { text: parent.name; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
+                        Label { text: parent.value; color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12 }
                     }
-                }
-                Label {
-                    visible: (root.metrics.indicator || "") !== ""
-                    text: root.metrics.indicator || ""
-                    color: "#f0b46a"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
-                }
-                Label { text: "PREP (B1)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
-                Repeater {
-                    model: [
-                        ["Prep mode", "prep", "", 0], ["GPU memory", "gpuBytes", " MB", 1],
-                        ["Prep CPU (source/cells)", "prepCpuBytes", " MB", 1], ["Decoded chunks", "chunkBytes", " MB", 1],
-                        ["Tile intermediates", "interBytes", " MB", 1], ["Process footprint", "footprintBytes", " MB", 1],
-                        ["Last prep", "lastPrepMs", " ms", 0], ["Prep builds", "prepBuilds", "", 0],
-                        ["Tiles kept / resident", "tiles", "", 0], ["Chunk hits", "chunkHits", "", 0],
-                        ["Chunk misses", "chunkMisses", "", 0], ["Chunk decodes", "chunkLoads", "", 0]
-                    ]
-                    delegate: RowLayout {
+                    Label { text: "RENDER TELEMETRY"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 14 }
+                    Label { text: "Frame time · last 90 samples"; color: "#aab7c0"; font.pixelSize: 12 }
+                    Canvas {
+                        id: graph
                         Layout.fillWidth: true
-                        visible: root.metrics[modelData[1]] !== undefined
-                        Label { text: modelData[0]; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
-                        Label {
-                            text: {
-                                var value = root.metrics[modelData[1]]
-                                if (value === undefined) return "—"
-                                if (modelData[3] === 1) return (value / 1048576).toFixed(1) + modelData[2]
-                                if (modelData[1] === "tiles") return value + " / " + (root.metrics.tilesResident || 0)
-                                return typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) + modelData[2] : String(value)
+                        Layout.preferredHeight: 90
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.reset(); ctx.fillStyle = "#0a1118"; ctx.fillRect(0, 0, width, height)
+                            ctx.strokeStyle = "#263b48"; ctx.beginPath()
+                            ctx.moveTo(0, height * 0.5); ctx.lineTo(width, height * 0.5); ctx.stroke()
+                            if (root.frameHistory.length < 2) return
+                            ctx.strokeStyle = "#5dd4d8"; ctx.lineWidth = 1.5; ctx.beginPath()
+                            for (var i = 0; i < root.frameHistory.length; ++i) {
+                                var x = i * width / 89
+                                var y = height - Math.min(root.frameHistory[i], 33.3) / 33.3 * height
+                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
                             }
-                            color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12
+                            ctx.stroke()
                         }
                     }
-                }
-                Label { text: "RENDER"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
-                Repeater {
-                    model: [
-                        ["FPS", "fps", ""], ["Frame", "frameMs", " ms"],
-                        ["GPU frame (all passes)", "gpuFrameMs", " ms"],
-                        ["Loaded entries", "entries", ""], ["GPU buffers", "gpuBytes", " bytes"],
-                        ["Ticks / bin", "group", ""],
-                        ["Grid", "columns", " cols"], ["Rows", "rows", ""],
-                        ["Load", "loadMs", " ms"], ["Compose", "composeMs", " ms"], ["GPU source build", "buildMs", " ms"],
-                        ["First painted", "firstFrameMs", " ms"]
-                    ]
-                    delegate: RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: modelData[0]; color: "#9bafba"; Layout.fillWidth: true; font.pixelSize: 12 }
-                        Label {
-                            text: {
-                                var value = root.metrics[modelData[1]]
-                                if (value === undefined) return "—"
-                                return typeof value === "number" && value < 10000 ? value.toFixed(2) + modelData[2] : value.toLocaleString() + modelData[2]
-                            }
-                            color: "#e8f0f2"; font.family: "Menlo"; font.pixelSize: 12
-                        }
+                    Label { text: "TICK"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                    StatRow { name: "Mode"; value: root.metrics.mode || "—" }
+                    StatRow { name: "Tick"; value: root.money(root.metrics.tick || 0) }
+                    StatRow { name: "h"; value: String(root.metrics.hysteresis) }
+                    StatRow { name: "Min row px"; value: String(root.metrics.minRowPx) }
+                    StatRow { name: "Row height"; value: (root.metrics.rowPx || 0).toFixed(2) + " px" }
+                    StatRow { name: "Finest tick in view"; value: root.money(root.metrics.commonTick || 0) }
+                    StatRow { name: "Last re-bin (CPU submit)"; value: (root.metrics.lastBinMs || 0).toFixed(3) + " ms" }
+                    StatRow { name: "Tick changes"; value: String(root.metrics.tickChanges || 0) }
+                    StatRow { name: "Crossfade"; value: (root.metrics.crossfadeMs || 0) + " ms" + (root.metrics.crossfading ? " (fading)" : "") }
+                    StatRow { name: "Holding old picture"; value: root.metrics.holding ? "yes" : "no" }
+                    Label {
+                        visible: (root.metrics.indicator || "") !== ""
+                        text: root.metrics.indicator || ""
+                        color: "#f0b46a"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
                     }
-                }
-                Item { Layout.fillHeight: true }
-                Label {
-                    text: "A column is exactly the timeframe: zoom never changes it; time zoom-out stops at 1 column/px. Auto tick: smallest preset >= min row px, hysteresis h. Manual: locked preset, zoom only scales, price zoom-out stops at 1 row/px, remembered per symbol + timeframe; history that cannot build it is veiled, never coarsened. Grey veil: unproven or unbuildable. Blue hatch: not loaded."
-                    color: "#8198a6"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
+                    Label { text: "GPU (NODE)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                    StatRow { name: "Resident (cap 320 MB)"; value: root.mb(root.metrics.residentBytes) }
+                    StatRow { name: "Sources / bins"; value: root.mb(root.metrics.sourceBytes) + " / " + root.mb(root.metrics.binBytes) }
+                    StatRow { name: "Resident sources"; value: String(root.metrics.residentSources || 0) }
+                    StatRow { name: "Uploads / passes / fills"; value: (root.metrics.sourcesUploaded || 0) + " / " + (root.metrics.binPasses || 0) + " / " + (root.metrics.fillPasses || 0) }
+                    StatRow { name: "Evictions / missing"; value: (root.metrics.evictions || 0) + " / " + (root.metrics.missingReports || 0) }
+                    StatRow { name: "Slots ready/fallback/partial"; value: (root.metrics.readySlots || 0) + "/" + (root.metrics.fallbackSlots || 0) + "/" + (root.metrics.partialSlots || 0) }
+                    StatRow { name: "Loading slots"; value: String(root.metrics.loadingSlots || 0) }
+                    StatRow { name: "Refused spans (CPU ceiling)"; value: (root.metrics.refusedSpans || 0) + " · " + root.mb(root.metrics.refusedBytes) }
+                    Label { text: "DATA (CONTROLLER)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                    StatRow { name: "Decoded chunks"; value: root.mb(root.metrics.chunkBytes) + " · " + (root.metrics.chunkEntries || 0) }
+                    StatRow { name: "Chunk decodes / fetched"; value: (root.metrics.chunkLoads || 0) + " / " + (root.metrics.fetchedChunks || 0) }
+                    StatRow { name: "Span builds / cache hits"; value: (root.metrics.spanBuilds || 0) + " / " + (root.metrics.spanCacheHits || 0) }
+                    StatRow { name: "Span images alive / claimed"; value: root.mb(root.metrics.spanLiveBytes) + " / " + root.mb(root.metrics.spanClaimedBytes) }
+                    StatRow { name: "Span LRU / building"; value: root.mb(root.metrics.spanCacheBytes) + " / " + root.mb(root.metrics.spanReservedBytes) }
+                    StatRow { name: "Chunks wanted (pinned)"; value: root.mb(root.metrics.chunkWantedBytes) }
+                    StatRow { name: "CPU committed (1 GiB)"; value: root.mb(root.metrics.cpuCommittedBytes) }
+                    StatRow { name: "Snapshots published"; value: String(root.metrics.publications || 0) }
+                    StatRow { name: "Process footprint"; value: root.mb(root.metrics.footprintBytes) }
+                    Label { text: "RENDER"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                    StatRow { name: "FPS"; value: (root.metrics.fps || 0).toFixed(1) }
+                    StatRow { name: "Frame"; value: (root.metrics.frameMs || 0).toFixed(2) + " ms" }
+                    StatRow { name: "GPU frame (all passes)"; value: (root.metrics.gpuFrameMs || 0).toFixed(2) + " ms" }
+                    StatRow { name: "Node prepare"; value: (root.metrics.prepareMs || 0).toFixed(2) + " ms" }
+                    StatRow { name: "Kernel"; value: root.metrics.kernel || "—" }
+                    StatRow { name: "First painted"; value: (root.metrics.firstFrameMs || 0).toFixed(0) + " ms" }
+                    Label {
+                        text: "A column is exactly the timeframe: zoom never changes it; time zoom-out stops at 1 column/px. Auto tick: smallest preset >= min row px that every row in view can build, hysteresis h. Manual: locked preset, zoom only scales, price zoom-out stops at 1 row/px, remembered per symbol + timeframe; rows no source builds are veiled, never coarsened. The coarsest source bins first; finer sources fill only its veil. Grey veil: unproven or unbuildable. Blue hatch: not loaded (or refused by the CPU ceiling). Yellow dashes: the near band edge (E4)."
+                        color: "#8198a6"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11
+                    }
                 }
             }
         }

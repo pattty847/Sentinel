@@ -1,7 +1,7 @@
 // S4 spike, kept as a regression guard: a QSGRenderNode that lives in an
 // ordinary Qt Quick scene graph records a COMPUTE pass in prepare() (outside
 // the scene graph's main render pass) and draws the compute output in render().
-// If a Qt upgrade breaks this, HeatmapRenderNode must fall back to
+// If a Qt upgrade breaks this, HeatmapTileNode must fall back to
 // QQuickWindow::beforeRendering (see docs/research/2026-09-gpu-heatmap-integration-plan.md, S4).
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
@@ -67,7 +67,7 @@ public:
         const QSize size = renderTarget()->pixelSize();
         cb->setViewport(QRhiViewport(0, 0, float(size.width()), float(size.height())));
         // UsesScissor: a scissor must always be set. Metal tolerated none; D3D
-        // clips everything (as HeatmapRenderNode::render does, fall back to full).
+        // clips everything (as HeatmapTileNode::render does, fall back to full).
         if (state->scissorEnabled()) {
             const QRect r = state->scissorRect();
             cb->setScissor(QRhiScissor(r.x(), r.y(), r.width(), r.height()));

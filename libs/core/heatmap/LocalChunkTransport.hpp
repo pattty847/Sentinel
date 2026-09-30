@@ -19,6 +19,9 @@ public:
         int pollIntervalMs = 1000; // <= 0 disables automatic scans
         std::function<void(recording::Hmc2Reader &, std::stop_token)> beforeAvailability;
         std::function<void(recording::Hmc2Reader &, std::stop_token)> beforeBuild;
+        // Lab benchmarks: availability (and so every chunk's watermark) ends
+        // here, exclusive UTC ms, as if the recorder had stopped; 0 = live.
+        int64_t pinnedEndMs = 0;
     };
     LocalChunkTransport(std::filesystem::path root, TestHooks hooks, QObject *parent = nullptr);
     explicit LocalChunkTransport(std::filesystem::path root, QObject *parent = nullptr);
