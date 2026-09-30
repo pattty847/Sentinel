@@ -45,6 +45,8 @@ add_library(sentinel_core
     servermodel/RecordingPage.hpp
     servermodel/RecordingChunks.cpp
     servermodel/RecordingChunks.hpp
+    servermodel/ChunkService.cpp
+    servermodel/ChunkService.hpp
     heatmap/SparseColumns.cpp
     heatmap/SparseColumns.hpp
     heatmap/ChunkCodec.cpp
@@ -69,6 +71,7 @@ add_library(sentinel_core
     protocol/SentinelStreamClient.cpp
     protocol/SentinelStreamClientParseHelpers.hpp
     protocol/SentinelStreamClientParseHelpers.cpp
+    protocol/ChunkWire.hpp
     trading/TradingTypes.hpp
     trading/TradingTypes.cpp
     trading/OrderStore.hpp

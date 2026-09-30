@@ -68,6 +68,11 @@ public:
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
     bool recordingAvailable() const { return m_recorder != nullptr; }
     const std::optional<std::filesystem::path>& recordingDir() const { return m_recordingDir; }
+    // Per-level recorder cutoffs; zero when the series is not recorded in this process.
+    recording::BookRecorder::Watermarks recordingWatermarks(const std::string& symbol,
+                                                            const std::string& layer) const {
+        return m_recorder ? m_recorder->watermarks(symbol, layer) : recording::BookRecorder::Watermarks{};
+    }
 
 public slots:
     void onTrade(const Trade& trade);

@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <unordered_map>
 #include "../servermodel/ServerDataModel.hpp"
+#include "../servermodel/ChunkService.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
 #include "../trading/LiveTradingSession.hpp"
@@ -74,6 +75,7 @@ public:
 private:
     friend class Session;
     friend struct RecordingServerStopTest;
+    friend struct HeatmapChunkWireTest;
 
     void doAccept();
     void registerSession(const std::shared_ptr<Session>& session);
@@ -86,6 +88,9 @@ private:
                                          int count) const;
 
     ServerDataModel& m_model;
+    // Heatmap chunk serving; null when recording is unavailable. Shared with
+    // history-worker jobs, which the server joins in stop().
+    std::shared_ptr<recording::ChunkService> m_chunks;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
     ServerConfig m_serverConfig;
     int m_port;

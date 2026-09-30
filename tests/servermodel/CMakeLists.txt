@@ -163,6 +163,13 @@ add_test(NAME RecordingServerStopTests COMMAND test_recording_server_stop)
 set_tests_properties(RecordingServerStopTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_recording_server_stop)
 
+add_executable(test_heatmap_chunk_wire test_heatmap_chunk_wire.cpp)
+target_include_directories(test_heatmap_chunk_wire PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_chunk_wire PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME HeatmapChunkWireTests COMMAND test_heatmap_chunk_wire)
+set_tests_properties(HeatmapChunkWireTests PROPERTIES LABELS "servermodel;heatmap")
+add_dependencies(servermodel_tests test_heatmap_chunk_wire)
+
 add_executable(test_price_ladder test_price_ladder.cpp)
 target_include_directories(test_price_ladder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_price_ladder PRIVATE GTest::gtest_main)

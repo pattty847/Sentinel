@@ -184,9 +184,10 @@ possible one-frame misalignment).
 ## 2. Wire protocol
 
 - **Text JSON, requests only:**
-  - `heatmap_chunk_request {req, symbol, layer, level_ms, starts[], have_hash[]}`
+  - `heatmap_chunk_request {req, symbol, source, level_ms, starts[], have_hash[]}` (S3: `source`
+    replaced `layer`; ids `hmc2.near`/`hmc2.deep` are migration-only)
   - `heatmap_live_subscribe {symbol, layers[]}`
-  - Server response `heatmap_availability {layers: {oldest, latest, native grids/generations, levels}}`,
+  - Server response `heatmap_availability {sources: {oldest, latest, native grids/generations, levels}}`,
     sent on subscribe and whenever it changes.
   - `layer` is migration-only. It names an HMC2 layer while HMC2 is the source. With
     raw-derived levels the key is source generation/grid plus level.
@@ -200,7 +201,7 @@ possible one-frame misalignment).
   - Server: add `bool binary` to `Session::PendingWrite` and call `ws_.binary(...)` in
     `internal_async_write`. Client: branch on `m_ws.got_binary()` in `onRead`.
 - **Identity:**
-  - Key: `(symbol, layer, levelMs, startMs)` with a fixed span per level: 1m level -> 1 UTC
+  - Key: `(symbol, source, levelMs, startMs)` with a fixed span per level: 1m level -> 1 UTC
     hour; 1h level -> 1 UTC day. A future 1s level needs its own span (to be measured).
   - Chunk span is open to B1: MarketLens uses 64-column, epoch-aligned, power-of-two chunks
     (64 min at 1m; 16-237 KB per market-chunk after pcodec). Sentinel's 1m hour chunk is 60
@@ -285,7 +286,7 @@ possible one-frame misalignment).
 | L | Legacy phase 2 (inventory doc) | DataProcessor.cpp, MainWindowGpu.cpp, SentinelStreamServer.cpp | Inventory checklist. Land before S3. | **Next** |
 | S1 | Model: `SparseColumns`, `TimeComposer`, `binCell` | new core files + tests | vs `buildPage`: 0 log-code-step deviation, equal validity over 1m-1D, gaps, grid changes, partial coverage. | Landed (`d382215`) |
 | S2 | Server chunks: `RecordingChunks` + `ChunkCodec` | new core files | Round-trip exact; real-root bench (below). | Landed (`07b61b1`) |
-| S3 | Wire: binary framing and new messages | SentinelStreamServer/Client, SentinelStreamProtocol.hpp | Loopback TLS test: chunk, not_modified, live revision ordering, backlog bounds, stop/teardown. | **Next**, after L |
+| S3 | Wire: binary framing and new messages | SentinelStreamServer/Client, SentinelStreamProtocol.hpp | Loopback TLS test: chunk, not_modified, live revision ordering, backlog bounds, stop/teardown. | Implemented on `cloud/s3-binary-wire` (not merged; landed ahead of L at the owner's request). Chunk key uses neutral `source` ids (`hmc2.near`/`hmc2.deep`, migration-only), wire v2. `heatmap_live_subscribe` / `live_column` not in this slice. Wire: `docs/MARKETDATA.md` "Heatmap chunk wire (S3)". |
 | S4 | GPU: binner, render node, shaders; lab repointed | libs/gui/render/heatmap, sentinel-lab | Readback vs `binCell` exact. About 2 ms full-day deep 1m re-bin accepted by the owner. D3D11 run by the owner. | Landed (`4c5a991`); D3D11 run open |
 | B1 | **Benchmark: whole-chunk render-ready price aggregation vs viewport clipping** | libs/gui/lab (Bench, LabSources) | See below. Decides the render-ready source shape and the budget policy. | Before S5 finalizes |
 | T | Tick and zoom contract | HeatmapResolution.hpp, HeatmapRenderNode, lab | Auto (default, 2 px + hysteresis) and Manual tick modes; presets multiples of `commonTick()` (BTC from $1); column = timeframe, time clamp 1 column/px; Manual price clamp 1 row/px; no auto-timeframe. Lab experiments E1-E3 of the interaction spec. Unit tests. | Before S5 |
