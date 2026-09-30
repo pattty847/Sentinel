@@ -303,6 +303,61 @@ TEST(HeatmapChunkStore, RevisionGetsANewGenerationAndOldHoldersKeepTheirVersion)
     EXPECT_NE(reloaded->generation, revised->generation);
 }
 
+TEST(HeatmapChunkStore, PutSharesColumnsAndEqualHashKeepsGenerationAcrossEviction) {
+    ChunkStore store;
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
+    auto columns = std::make_shared<const SparseColumns>(makeHourChunk(0, 0, 30));
+    const auto first = store.put(key, columns, {false, epoch + 30 * minute, 31}, 17);
+    EXPECT_EQ(first->columns, columns);
+    EXPECT_EQ(first->contentHash, 17u);
+    EXPECT_EQ(first->committedThroughMs, epoch + 30 * minute);
+    const auto again = store.put(key, columns, {false, epoch + 30 * minute, 31}, 17);
+    EXPECT_EQ(again->generation, first->generation);
+    const ChunkKey other{"BTC-USD", "hmc2.deep", minute, epoch + hour};
+    store.put(other, std::make_shared<const SparseColumns>(makeHourChunk(1)), {true, epoch + 2 * hour, 0}, 18);
+    store.setMaxBytes(1);
+    ASSERT_FALSE(store.peek(key));
+    const auto restored = store.put(key, columns, {false, epoch + 30 * minute, 31}, 17);
+    EXPECT_EQ(restored->generation, first->generation);
+    EXPECT_EQ(store.revisionCount(), 0u);
+}
+TEST(HeatmapChunkStore, PutAnnouncesChangedContentAndSealingExactlyOnce) {
+    ChunkStore store;
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
+    std::vector<uint64_t> heard;
+    store.setRevisionListener([&](const ChunkKey &k) { heard.push_back(store.generationOf(k)); });
+    auto columns = std::make_shared<const SparseColumns>(makeHourChunk(0));
+    const auto a = store.put(key, columns, {false, epoch + hour, 60}, 1);
+    const auto b = store.put(key, columns, {false, epoch + hour, 61}, 2);
+    EXPECT_NE(a->generation, b->generation);
+    // State participates even if a caller uses an unchanged content hash.
+    const auto sealed = store.put(key, columns, {true, epoch + hour, 0}, 2);
+    EXPECT_NE(sealed->generation, b->generation);
+    EXPECT_EQ(store.put(key, columns, {true, epoch + hour, 0}, 2)->generation, sealed->generation);
+    EXPECT_EQ(heard, (std::vector<uint64_t>{b->generation, sealed->generation}));
+    EXPECT_EQ(store.stats().revisions, 2u);
+    EXPECT_EQ(store.put(key, columns, {false, epoch + 59 * minute, 59}, 3), store.peek(key))
+        << "late open body cannot replace sealed state";
+    EXPECT_EQ(store.revisionCount(), 2u);
+}
+TEST(HeatmapChunkStore, PutWinsTheTicketAgainstAnOlderBlockingLoad) {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    ChunkStore store(1ull << 30, [&](const ChunkKey &) {
+        entered.set_value(); released.wait();
+        return ChunkStore::Loaded{makeHourChunk(0, 0, 20), false, 21};
+    });
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
+    auto old = std::async(std::launch::async, [&] { return store.get(key); });
+    entered.get_future().wait();
+    EXPECT_FALSE(store.peek(key)) << "peek never waits for a loader";
+    const auto newer = store.put(key, std::make_shared<const SparseColumns>(makeHourChunk(0, 0, 30)),
+                                 {false, epoch + 30 * minute, 31}, 17);
+    release.set_value();
+    EXPECT_EQ(old.get(), newer);
+    EXPECT_EQ(store.peek(key), newer);
+}
+
 // ---------------------------------------------------------------- tile math
 TEST(HeatmapTiles, TilesAreEpochAlignedSixtyFourColumnSpans) {
     const int64_t tf = 5 * minute;
