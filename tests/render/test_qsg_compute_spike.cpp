@@ -179,7 +179,8 @@ TEST(QsgComputeSpike, ComputeInRenderNodePrepareFeedsRenderInSameFrame) {
 } // namespace
 
 int main(int argc, char **argv) {
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Offscreen unless set: Vulkan needs a real platform plugin (QT_QPA_PLATFORM=windows|xcb).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
