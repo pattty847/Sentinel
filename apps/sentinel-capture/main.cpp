@@ -1,5 +1,5 @@
 #include <QCoreApplication>
-#include "capture/CaptureSession.hpp"
+#include "capture/CaptureApp.hpp"
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
 

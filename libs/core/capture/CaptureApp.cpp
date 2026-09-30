@@ -1,3 +1,4 @@
+#include "CaptureApp.hpp"
 #include "CaptureSession.hpp"
 #include "CaptureVerifier.hpp"
 #include "SentinelLogging.hpp"
@@ -27,6 +28,10 @@ uint32_t number(const QCommandLineParser& parser, const QString& option, uint32_
 } // namespace
 
 int runApplication(QCoreApplication& app) {
+    return runApplication(app, {});
+}
+
+int runApplication(QCoreApplication& app, const ApplicationDependencies& dependencies) {
     QCoreApplication::setApplicationName("sentinel-capture");
     QCoreApplication::setApplicationVersion(QString::fromStdString(Sentinel::getFullVersionString()));
     QCommandLineParser parser;
@@ -80,7 +85,8 @@ int runApplication(QCoreApplication& app) {
     mdc.sslCaBundle = parser.value("ca-bundle").toStdString();
     if (mdc.useJwt && !auth.hasCredentials()) throw std::runtime_error("--jwt requires valid credentials");
     CoinbaseRestClient rest(auth, "api.coinbase.com", "443", mdc.sslCaBundle);
-    const auto metadata = rest.fetchProductMetadata(config.symbol);
+    const auto metadata = dependencies.fetchMetadata ? dependencies.fetchMetadata(rest, config.symbol) :
+                                                       rest.fetchProductMetadata(config.symbol);
     if (!metadata.ok) throw std::runtime_error("product metadata fetch failed (no connection opened): " + metadata.error);
     DecimalGrid quote(metadata.quoteIncrement), base(metadata.baseIncrement);
     if (stopSignal) return 0;
@@ -103,7 +109,9 @@ int runApplication(QCoreApplication& app) {
     event(Kind::CaptureStarted, "capture started");
     std::unique_ptr<MarketDataCoreEngine> engine;
     const auto startEngine = [&] {
-        engine = std::make_unique<MarketDataCoreEngine>(auth, mdc);
+        engine = dependencies.makeEngine ? dependencies.makeEngine(auth, mdc) :
+                                           std::make_unique<MarketDataCoreEngine>(auth, mdc);
+        if (!engine) throw std::runtime_error("capture engine factory returned null");
         engine->onIngest([&](const MarketDataCoreEngine::IngestObservation& observation) noexcept {
             try {
                 using Ingest = MarketDataCoreEngine::IngestKind;

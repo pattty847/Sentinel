@@ -5,8 +5,6 @@
 #include <mutex>
 #include <thread>
 
-class QCoreApplication;
-
 namespace sentinel::capture {
 
 // The ingest thread only copies into this bounded queue. Compression and fsync
@@ -40,5 +38,4 @@ private:
     std::thread m_thread;
 };
 
-int runApplication(QCoreApplication& application);
 } // namespace sentinel::capture

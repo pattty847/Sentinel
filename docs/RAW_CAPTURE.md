@@ -176,3 +176,12 @@ floating point. Off-grid, negative, malformed or overflowing values fail replay;
 the original raw bytes remain preserved. Invalidations clear the reconstructed
 book until another accepted snapshot; updates during an unanchored interval are
 reported rather than treated as observed liquidity.
+
+Offline regressions cover exact bytes, framing/indexes, zero/garbage and truncated
+tails, interior corruption, rotation, explicit overflow gaps, and a real short
+write followed by failure-marker recovery. Engine tests inject a fake transport
+through repeated failures and watchdog resyncs. `CaptureApplicationTests` runs
+the production application path with fixture metadata and a fake transport,
+sends POSIX SIGTERM during an unfinished block after a reconnect, and verifies
+the drained data, connection IDs, stop reason, final index and run log. No test
+contacts Coinbase.
