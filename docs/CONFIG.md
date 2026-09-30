@@ -65,6 +65,8 @@ server:
     target: /v1
     use_jwt: false   # true only when key.json exists and user/futures channels are needed
     ssl_ca_bundle: resources/certs/ca-bundle.crt
+    connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
+    close_timeout_ms: 3000     # WS close to an unresponsive peer
 ```
 
 Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.

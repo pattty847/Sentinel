@@ -192,6 +192,8 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         readScalar(mdc, "target", cfg.mdc.target);
         readScalar(mdc, "use_jwt", cfg.mdc.useJwt);
         readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
+        readScalar(mdc, "connect_timeout_ms", cfg.mdc.connectTimeoutMs);
+        readScalar(mdc, "close_timeout_ms", cfg.mdc.closeTimeoutMs);
     } else if (serverRoot) {
         readScalar(serverRoot, "host", cfg.mdc.host);
         readScalar(serverRoot, "port", cfg.mdc.port);

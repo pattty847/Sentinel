@@ -84,8 +84,12 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
                    {"source", sourceName}, {"layer", layer}, {"entries", double(gpu.entryCount)}});
             return 2;
         }
+#ifdef Q_OS_MACOS
         QRhiMetalInitParams init;
         std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Metal, &init, QRhi::EnableTimestamps));
+#else
+        std::unique_ptr<QRhi> rhi;
+#endif
         if (!rhi) throw std::runtime_error("headless Metal QRhi creation failed");
         heatmap::gpu::HeatmapGpuBinner binner(rhi.get());
         // Default: the production choice (precision self-test, then fast kernel).

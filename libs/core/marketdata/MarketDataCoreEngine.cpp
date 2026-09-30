@@ -60,8 +60,18 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
     m_sslCtx.set_verify_mode(ssl::verify_peer);
 
     sLog_App("MarketDataCore initialized: host=" << m_host << " port=" << m_port
-             << " target=" << m_target << " jwt=" << m_useJwt);
-    m_transport = transportFactory ? transportFactory(m_ioc, m_sslCtx) : std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
+             << " target=" << m_target << " jwt=" << m_useJwt
+             << " connectTimeoutMs=" << config.connectTimeoutMs << " closeTimeoutMs=" << config.closeTimeoutMs);
+    if (config.connectTimeoutMs <= 0 || config.closeTimeoutMs <= 0)
+        throw std::invalid_argument("market-data connect/close timeouts must be positive");
+    if (transportFactory) {
+        m_transport = transportFactory(m_ioc, m_sslCtx);
+    } else {
+        BeastWsTransport::Options options;
+        options.connectTimeout = std::chrono::milliseconds(config.connectTimeoutMs);
+        options.closeTimeout = std::chrono::milliseconds(config.closeTimeoutMs);
+        m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx, std::move(options));
+    }
     if (!m_transport) throw std::invalid_argument("market-data transport factory returned null");
     m_transport->onStatus([this](bool up){
         if (m_ingestObserver) observeIngest(up ? IngestKind::TransportUp : IngestKind::TransportDown);

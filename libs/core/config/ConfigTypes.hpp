@@ -70,6 +70,10 @@ struct ServerMdcConfig {
     std::string target = "/v1";
     bool useJwt = false;
     std::string sslCaBundle;
+    // Bound one WS connect attempt (resolve + TCP + TLS + WS handshake) and the
+    // WS close handshake; a timeout counts as a failed attempt and backs off.
+    int connectTimeoutMs = 20000;
+    int closeTimeoutMs = 3000;
 };
 
 struct ServerTradingConfig {

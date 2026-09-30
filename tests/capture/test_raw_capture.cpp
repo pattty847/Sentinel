@@ -282,7 +282,12 @@ TEST_F(CaptureTest, SessionSigtermStyleCloseDrainsAcceptedRecordsAndSeals) {
 }
 TEST_F(CaptureTest, SessionDrainsOldReceiveTimesInBlocksInsteadOfFlushingEveryFrame) {
     Session session(config, metadata());
-    for (int i = 0; i < 200; ++i) ASSERT_TRUE(session.submit(record(Kind::Frame, i, "old queued frame")));
+    // Steady times near 0 so the stop marker (Stamp::now) is later even on a freshly booted host.
+    for (int i = 0; i < 200; ++i) {
+        auto old = record(Kind::Frame, i, "old queued frame");
+        old.time.steadyNs = i;
+        ASSERT_TRUE(session.submit(old));
+    }
     session.close();
     ASSERT_TRUE(session.error().empty()) << session.error();
     EXPECT_EQ(session.stats().frames, 200);
