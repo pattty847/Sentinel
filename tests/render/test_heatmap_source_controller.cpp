@@ -1025,4 +1025,110 @@ TEST_F(SourceController, FreedCpuCapacityWakesASuppressedChart) {
     settle();
     EXPECT_EQ(bPtr->latestSnapshot()->spans.size(), 5u);
 }
+
+// Final round P1: a closed chart's running builds stay in the ledger.
+// (The manual executor is the pause: jobs run only when the test says.)
+TEST_F(SourceController, RunningBuildsOfAClosedChartStayInTheLedger) {
+    view(chart());
+    answerAll();
+    ASSERT_FALSE(jobs.empty()); // A's builds are paused
+    charts.clear();             // A closes; its jobs keep inputs and reservations
+    drain();
+    const size_t jobBytes = cache->committedCpuBytes();
+    ASSERT_GT(jobBytes, 0u);
+    cache->setCpuCeiling(jobBytes); // room for the paused jobs only
+    HeatmapSourceController::Options options;
+    options.sourceEstimateBytes = 1;
+    options.chunkEstimateBytes = 1; // B alone would fit easily
+    options.capacityPollMs = 0;
+    charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
+    auto &b = *charts.back();
+    b.setView("BTC-USD", kMinuteMs, double(epoch + 19 * tileMs), double(epoch + 22 * tileMs)); // three tiles
+    drain();
+    EXPECT_EQ(b.latestSnapshot()->refused.size(), 2u); // only B's keeper next to the jobs
+    EXPECT_GE(cache->committedCpuBytes(), jobBytes);
+    // The jobs finish: their bytes drop and B is woken to admit the rest.
+    while (!jobs.empty()) {
+        auto job = std::move(jobs.front());
+        jobs.pop_front();
+        job();
+    }
+    drain();
+    EXPECT_TRUE(b.latestSnapshot()->refused.empty());
+}
+
+// Final round P1: a chart pushed over by another chart's keeper sheds its own
+// lower-rank work (global relief), never below its keeper.
+TEST_F(SourceController, OverCeilingMakesEarlierChartsShedDownToTheirKeepers) {
+    auto &a = chart();
+    view(a);
+    settle();
+    size_t spanBytes = 0;
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible)
+            for (const auto &source : span.sources) spanBytes += source.build->bytes;
+    const size_t ceiling = 5 * spanBytes + spanBytes / 2;
+    cache->setCpuCeiling(ceiling);
+    step();
+    ASSERT_EQ(a.latestSnapshot()->spans.size(), 5u); // A fits with its prefetch
+    auto &b = chart(320ull << 20, spanBytes / 2);
+    b.setView("BTC-USD", kMinuteMs, double(epoch + 20 * tileMs), double(epoch + 21 * tileMs));
+    settle();
+    EXPECT_LE(cache->committedCpuBytes(), ceiling);
+    EXPECT_LE(store.stats().wantedBytes + cache->pinnedBytes(), ceiling);
+    EXPECT_LT(a.latestSnapshot()->spans.size(), 5u); // A shed prefetch
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+    EXPECT_TRUE(visibleComplete(*b.latestSnapshot()));
+}
+
+// Final round P2: a reset leaves no phantom commitment or refusal.
+TEST_F(SourceController, ResetClearsTheLedgerAndTheRefusals) {
+    cache->setCpuCeiling(1);
+    auto &a = chart();
+    a.setView("BTC-USD", kMinuteMs, double(epoch - tileMs), double(epoch + 2 * tileMs));
+    settle();
+    ASSERT_EQ(a.latestSnapshot()->refused.size(), 2u);
+    ASSERT_GT(cache->committedCpuBytes(), 0u);
+    a.setView("", 0, 0, 0); // no chart content
+    drain();
+    EXPECT_EQ(cache->committedCpuBytes(), 0u);
+    EXPECT_TRUE(a.latestSnapshot()->refused.empty());
+    EXPECT_EQ(a.stats().refused, 0u);
+}
+
+// Final round P2: a newly required chunk changes the build identity at once.
+TEST_F(SourceController, ABackfilledChunkChangesTheBuildIdentityBeforeItArrives) {
+    const int64_t h0 = epoch / kHourMs * kHourMs;
+    // The coarse source's hour level starts long before, so the span's bounds
+    // never move; only its minute history is backfilled.
+    auto minutesFrom = [&](int64_t oldest) {
+        auto a = availability(availableEnd, availableStart - 2 * kDayMs, availableStart);
+        for (auto &source : a.sources)
+            if (coarse(source.id))
+                for (auto &level : source.levels)
+                    if (level.levelMs == kMinuteMs) level.oldestMs = oldest;
+        return a;
+    };
+    transport.push(minutesFrom(h0 + kHourMs));
+    drain();
+    auto &a = chart();
+    view(a);
+    answerAll(); // the visible coarse source builds from chunk h0 + 1h (queued)
+    ASSERT_FALSE(jobs.empty());
+    transport.push(minutesFrom(availableStart)); // backfill adds chunk h0
+    drain();
+    const auto held = std::find_if(transport.requests.begin() + long(answered), transport.requests.end(),
+                                   [&](const auto &r) { return coarse(r.source) && r.starts.front() == h0; });
+    ASSERT_NE(held, transport.requests.end()); // requested, deliberately unanswered
+    while (!jobs.empty()) {
+        auto job = std::move(jobs.front());
+        jobs.pop_front();
+        job();
+        drain();
+    }
+    for (const auto &span : a.latestSnapshot()->spans)
+        if (span.rank.tier == SpanTier::Visible) EXPECT_FALSE(span.complete) << "the old plan published as complete";
+    settle();
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
 } // namespace

@@ -49,6 +49,10 @@ struct SpanSourceKey {
     std::string source;
     int64_t availableStartMs = 0, availableEndMs = 0; // SpanSourcePlan bounds
     double priceScale = 100;                          // ResolutionSummary units
+    // Hash of the complete planned chunk-key list, including chunks still
+    // missing: a plan that gains a dependency is a different build even before
+    // that chunk arrives.
+    uint64_t planHash = 0;
     std::vector<ChunkGeneration> generations;         // sorted
     auto operator<=>(const SpanSourceKey &) const = default;
 };
@@ -97,7 +101,12 @@ class HeatmapSourceController;
 // - CPU ceiling (HeatmapBudgets::cpuCeiling): each controller commits what it
 //   pins (wanted decoded chunks plus span images, measured or estimated) to a
 //   process-wide ledger and keeps the ledger total at or under the ceiling by
-//   refusing its own lowest-priority work (see HeatmapSourceController).
+//   refusing its own lowest-priority work (see HeatmapSourceController). The
+//   total also counts every build job no controller covers (a job holds its
+//   input chunks and reservation until it finishes, even after its slot left),
+//   each once. When a commitment raises the total above the ceiling (a chart
+//   down to its keeper), overCeiling() asks every chart to shed by its own loss
+//   order; shedding never raises the total, so it cannot oscillate.
 // - capacityFreed() is emitted at most once per event-loop turn after pinned
 //   bytes or ledger commitments shrink, so controllers suppressed for CPU room
 //   re-admit without another event.
@@ -136,7 +145,7 @@ public:
     void setMaxBytes(size_t bytes);
     size_t cpuCeiling() const;
     void setCpuCeiling(size_t bytes);
-    size_t committedCpuBytes() const; // ledger total of every controller
+    size_t committedCpuBytes() const; // ledger total of every controller plus uncovered jobs
     struct Stats {
         uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0, pressureDrops = 0;
         size_t bytes = 0, entries = 0, jobs = 0; // LRU
@@ -147,20 +156,26 @@ public:
 signals:
     void settled();
     void capacityFreed();
+    void overCeiling();    // coalesced; every controller sheds while over
     void budgetsChanged(); // every controller re-checks its admissions
 private:
     friend class HeatmapSourceController;
     struct State;
     std::shared_ptr<State> state_;
     QThreadPool pool_;
-    bool relieving_ = false, freeing_ = false;
+    bool relieving_ = false, freeing_ = false, overing_ = false;
     void attach(HeatmapSourceController *controller);
     void detach(HeatmapSourceController *controller);
     void trim();
     void relieve();
     void freed(); // coalesced capacityFreed()
-    void commitCpu(const HeatmapSourceController *controller, size_t bytes);
-    size_t committedByOthers(const HeatmapSourceController *controller) const;
+    using KeySet = std::unordered_set<SpanSourceKey, SpanSourceKeyHash>;
+    // `covers`: the build keys whose jobs this commitment already includes.
+    void commitCpu(const HeatmapSourceController *controller, size_t bytes, KeySet covers = {});
+    // Everything but the controller's own commitment, counting jobs that
+    // neither another controller nor `selfCovers` covers.
+    size_t committedByOthers(const HeatmapSourceController *controller, const KeySet &selfCovers) const;
+    size_t uncoveredJobBytes(const HeatmapSourceController *self, const KeySet *selfCovers) const;
 };
 
 // The node side of the capacity contract (HeatmapTileNode, S5c; render thread,
@@ -345,6 +360,7 @@ private:
         std::vector<ChunkKey> want;
     };
     SourceNeed need(const Slot &slot, const SpanSourcePlan &planned);
+    SpanSourceCache::KeySet covers() const; // keys of this chart's pending builds
     size_t chunkCost(const ChunkKey &key) const;
     void onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
     size_t estimate(const SpanId &span, const std::string &source, bool upload) const;

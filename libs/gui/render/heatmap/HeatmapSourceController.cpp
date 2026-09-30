@@ -48,6 +48,7 @@ size_t SpanSourceKeyHash::operator()(const SpanSourceKey &key) const {
     mix(h, key.availableStartMs);
     mix(h, key.availableEndMs);
     mix(h, key.priceScale);
+    mix(h, key.planHash);
     for (const auto &g : key.generations) {
         mix(h, g.source);
         mix(h, g.levelMs);
@@ -100,7 +101,7 @@ struct SpanSourceCache::State {
         Completion completion;
     };
     struct Job {
-        size_t reserved = 0;
+        size_t reserved = 0, inputBytes = 0; // held until the job finishes
         std::vector<Waiter> waiters;
     };
     std::unordered_map<SpanSourceKey, Job, SpanSourceKeyHash> pending;
@@ -113,6 +114,7 @@ struct SpanSourceCache::State {
     std::map<std::pair<SpanId, std::string>, Hint> hints;
     std::vector<HeatmapSourceController *> controllers;
     std::unordered_map<const HeatmapSourceController *, size_t> ledger; // CPU commitments
+    std::unordered_map<const HeatmapSourceController *, KeySet> covers;  // jobs they include
     size_t committed = 0;
 };
 SpanSourceCache::SpanSourceCache(QObject *parent) : SpanSourceCache(Options{}, parent) {}
@@ -135,17 +137,36 @@ void SpanSourceCache::setCpuCeiling(size_t bytes) {
     state_->options.cpuCeiling = bytes;
     emit budgetsChanged();
 }
-size_t SpanSourceCache::committedCpuBytes() const { return state_->committed; }
-void SpanSourceCache::commitCpu(const HeatmapSourceController *controller, size_t bytes) {
-    auto &entry = state_->ledger[controller];
-    const size_t old = entry;
-    entry = bytes;
-    state_->committed = state_->committed - old + bytes;
-    if (bytes < old) freed();
+size_t SpanSourceCache::uncoveredJobBytes(const HeatmapSourceController *self, const KeySet *selfCovers) const {
+    size_t bytes = 0;
+    for (const auto &[key, job] : state_->pending) {
+        bool covered = selfCovers && selfCovers->contains(key);
+        for (const auto &[controller, keys] : state_->covers)
+            if (!covered && controller != self) covered = keys.contains(key);
+        if (!covered) bytes += job.reserved + job.inputBytes;
+    }
+    return bytes;
 }
-size_t SpanSourceCache::committedByOthers(const HeatmapSourceController *controller) const {
+size_t SpanSourceCache::committedCpuBytes() const { return state_->committed + uncoveredJobBytes(nullptr, nullptr); }
+void SpanSourceCache::commitCpu(const HeatmapSourceController *controller, size_t bytes, KeySet covers) {
+    const size_t before = committedCpuBytes();
+    auto &entry = state_->ledger[controller];
+    state_->committed = state_->committed - entry + bytes;
+    entry = bytes;
+    state_->covers[controller] = std::move(covers);
+    const size_t after = committedCpuBytes();
+    if (after < before) freed();
+    if (after > before && after > state_->options.cpuCeiling && !overing_) {
+        overing_ = true;
+        QMetaObject::invokeMethod(this, [this] {
+            overing_ = false;
+            emit overCeiling();
+        }, Qt::QueuedConnection);
+    }
+}
+size_t SpanSourceCache::committedByOthers(const HeatmapSourceController *controller, const KeySet &selfCovers) const {
     const auto it = state_->ledger.find(controller);
-    return state_->committed - (it == state_->ledger.end() ? 0 : it->second);
+    return state_->committed - (it == state_->ledger.end() ? 0 : it->second) + uncoveredJobBytes(controller, &selfCovers);
 }
 void SpanSourceCache::freed() {
     if (freeing_) return;
@@ -175,6 +196,7 @@ void SpanSourceCache::detach(HeatmapSourceController *controller) {
     std::erase(state_->controllers, controller);
     commitCpu(controller, 0);
     state_->ledger.erase(controller);
+    state_->covers.erase(controller);
 }
 
 void SpanSourceCache::trim() {
@@ -274,6 +296,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
     if (s.pending.size() >= s.options.maxJobs) return false;
     auto &job = s.pending[input.key];
     job.reserved = reserveBytes;
+    for (const auto &chunk : input.chunks) job.inputBytes += chunk ? chunk->bytes : 0;
     job.waiters.push_back({context, std::move(completion)});
     s.reservedBytes += reserveBytes;
     ++s.stats.builds;
@@ -302,7 +325,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
             for (auto &waiter : job.waiters)
                 if (waiter.context) waiter.completion(build, error);
             trim();
-            if (job.reserved) freed();
+            freed(); // its reservation and input chunks are released
             emit settled();
         }, Qt::QueuedConnection);
     };
@@ -355,6 +378,7 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         if (cpuSuppressed_) schedule();
     }, Qt::QueuedConnection);
     connect(&cache_, &SpanSourceCache::budgetsChanged, this, &HeatmapSourceController::schedule, Qt::QueuedConnection);
+    connect(&cache_, &SpanSourceCache::overCeiling, this, &HeatmapSourceController::schedule, Qt::QueuedConnection);
     if (options_.capacityPollMs > 0) {
         auto *timer = new QTimer(this);
         timer->setInterval(options_.capacityPollMs);
@@ -384,6 +408,13 @@ void HeatmapSourceController::reset() {
     fetcher_.release(chart_);
     visibleReady_ = true;
     dirty_ = true;
+    // No phantom commitment or refusal from the previous symbol.
+    cache_.commitCpu(this, 0);
+    cpuRefused_.clear();
+    cpuRefusedBytes_ = 0;
+    cpuSuppressed_ = false;
+    stats_.refused = 0;
+    stats_.committedBytes = 0;
 }
 
 void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, double timeLoMs, double timeHiMs) {
@@ -583,6 +614,14 @@ void HeatmapSourceController::setReady(SourceSlot &source, SpanSourceBuildPtr bu
     dirty_ = true;
 }
 
+SpanSourceCache::KeySet HeatmapSourceController::covers() const {
+    SpanSourceCache::KeySet out;
+    for (const auto &[id, slot] : slots_)
+        for (const auto &[name, source] : slot.sources)
+            if (source.pending) out.insert(*source.pending);
+    return out;
+}
+
 size_t HeatmapSourceController::chunkCost(const ChunkKey &key) const {
     const auto it = chunkBytes_.find(key);
     return it != chunkBytes_.end() ? it->second : options_.chunkEstimateBytes;
@@ -607,6 +646,14 @@ HeatmapSourceController::SourceNeed HeatmapSourceController::need(const Slot &sl
         }
     }
     std::sort(key.generations.begin(), key.generations.end());
+    uint64_t plan = 1469598103934665603ull; // FNV-1a over the planned chunk keys
+    auto fold = [&](uint64_t v) { plan = (plan ^ v) * 1099511628211ull; };
+    for (const auto &k : keys) {
+        fold(std::hash<std::string>{}(k.source));
+        fold(uint64_t(k.levelMs));
+        fold(uint64_t(k.startMs));
+    }
+    key.planHash = plan;
     const auto it = slot.sources.find(planned.source);
     const SourceSlot *source = it == slot.sources.end() ? nullptr : &it->second;
     if (isRetained(slot.plan.rank.tier) && !(source && source->lostRebuild)) return out; // built, drawn as is
@@ -618,7 +665,7 @@ HeatmapSourceController::SourceNeed HeatmapSourceController::need(const Slot &sl
         // build, even while some of the new inputs are still missing.
         out.build = have.span != key.span || have.availableStartMs != key.availableStartMs ||
                     have.availableEndMs != key.availableEndMs || have.priceScale != key.priceScale ||
-                    have.generations.size() != keys.size();
+                    have.planHash != key.planHash || have.generations.size() != keys.size();
         for (size_t i = 0; !out.build && i < keys.size(); ++i) {
             const auto match = std::find_if(have.generations.begin(), have.generations.end(), [&](const auto &g) {
                 return g.source == keys[i].source && g.levelMs == keys[i].levelMs && g.startMs == keys[i].startMs;
@@ -644,6 +691,8 @@ HeatmapSourceController::SourceNeed HeatmapSourceController::need(const Slot &sl
 void HeatmapSourceController::reconcile() {
     Q_ASSERT(QThread::currentThread() == thread() && fetcher_.thread() == thread() && cache_.thread() == thread());
     if (symbol_.empty() || tfMs_ <= 0) {
+        cache_.commitCpu(this, 0);
+        stats_.committedBytes = 0;
         if (dirty_) publish();
         return;
     }
@@ -779,7 +828,9 @@ void HeatmapSourceController::reconcile() {
         }
         return bytes;
     };
-    const size_t ceiling = cache_.cpuCeiling(), others = cache_.committedByOthers(this);
+    const size_t ceiling = cache_.cpuCeiling();
+    // A dropped slot's running build stays counted (as an uncovered job).
+    auto others = [&] { return cache_.committedByOthers(this, covers()); };
     size_t mine = committed();
     std::optional<SpanId> keeper; // the nearest visible span
     for (const auto &[id, slot] : slots_)
@@ -790,7 +841,7 @@ void HeatmapSourceController::reconcile() {
     };
     std::vector<SpanId> refusedSpans;
     size_t refusedBytes = 0;
-    while (others + mine > ceiling) {
+    while (others() + mine > ceiling) {
         auto victim = slots_.end();
         for (auto it = slots_.begin(); it != slots_.end(); ++it) {
             if (keeper && it->first == *keeper) continue;
@@ -816,7 +867,6 @@ void HeatmapSourceController::reconcile() {
         cpuSuppressed_ = true;
         dirty_ = true;
     }
-    cache_.commitCpu(this, mine);
     stats_.committedBytes = mine;
     stats_.refused = refusedSpans.size();
     if (refusedSpans != cpuRefused_ || refusedBytes != cpuRefusedBytes_) dirty_ = true;
@@ -829,7 +879,7 @@ void HeatmapSourceController::reconcile() {
         if (now - lastRefusalWarnMs_ >= 5000) {
             sLog_Warning("Heatmap CPU ceiling refused visible spans chart=" << chart_ << " symbol=" << symbol_
                          << " tf=" << tfMs_ << " spans=" << cpuRefused_.size() << " bytes=" << cpuRefusedBytes_
-                         << " committed=" << others + mine << " ceiling=" << ceiling
+                         << " committed=" << others() + mine << " ceiling=" << ceiling
                          << " (suppressed " << quietRefusals_ << ")");
             lastRefusalWarnMs_ = now;
             quietRefusals_ = 0;
@@ -907,6 +957,8 @@ void HeatmapSourceController::reconcile() {
     }
     refused_ = refused;
     if (hits) schedule();
+    // Commit after the builds: new requests are covered by this commitment.
+    cache_.commitCpu(this, mine, covers());
     if (!visibleReady_ && visibleReady) {
         // The new tf's view is complete: fallback spans become the recent-tf tier.
         visibleReady_ = true;
