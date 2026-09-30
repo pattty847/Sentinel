@@ -2,6 +2,7 @@
 #include "LabItem.hpp"
 #include "LabSources.hpp"
 #include "OffscreenQuick.hpp"
+#include "RhiBackend.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include <QCoreApplication>
@@ -79,15 +80,14 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
         const LabSource source = loadSource(hours, layer, synthetic, tfMinutes);
         const auto &gpu = *source.gpu;
         if (!gpu.entryCount || gpu.ticks.empty()) throw std::runtime_error("source has no entries");
-        if (!metalDeviceAvailable()) {
-            print({{"error", QStringLiteral("No MTLDevice (Metal unavailable in this sandbox)")},
+        HeadlessRhi device;
+        if (!device.create(true)) {
+            print({{"error", device.error}, {"backend", device.backend.name},
                    {"source", sourceName}, {"layer", layer}, {"entries", double(gpu.entryCount)}});
             return 2;
         }
-        QRhiMetalInitParams init;
-        std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Metal, &init, QRhi::EnableTimestamps));
-        if (!rhi) throw std::runtime_error("headless Metal QRhi creation failed");
-        heatmap::gpu::HeatmapGpuBinner binner(rhi.get());
+        QRhi *rhi = device.rhi.get();
+        heatmap::gpu::HeatmapGpuBinner binner(rhi);
         // Default: the production choice (precision self-test, then fast kernel).
         if (qgetenv("SENTINEL_HEATMAP_KERNEL") == "precise") binner.forceKernel(heatmap::gpu::KernelVariant::Precise);
         QString error;
@@ -115,8 +115,9 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
             struct Level { double zoom = 0; uint64_t visible = 0; uint32_t cols = 0, rows = 0, factor = 0; std::vector<double> gpuMs, cpuMs; };
             std::array<Level, 25> levels;
             std::vector<double> gpuAll, cpuAll;
-            // lastCompletedGpuTime reports the previous finished frame on Metal:
-            // warm every level once, time 200 passes, then one drain frame.
+            // lastCompletedGpuTime reports the previous finished frame (seen on
+            // Metal, D3D11, D3D12): warm every level once, time 200 passes, then
+            // one drain frame. A backend with no timestamps falls back to CPU wall.
             for (int i = 0; i < 226; ++i) {
                 const int li = i % int(levels.size());
                 const double zoom = std::pow(2.0, double(li) / 5.0);
@@ -189,7 +190,8 @@ int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes)
         };
         const QJsonObject oneX = sweep(1920, 1080, 1);
         const QJsonObject twoX = sweep(3840, 2160, 2);
-        print({{"source", sourceName}, {"layer", synthetic ? QStringLiteral("synthetic") : layer},
+        print({{"backend", device.backend.name}, {"device", QString::fromUtf8(rhi->driverInfo().deviceName)},
+               {"source", sourceName}, {"layer", synthetic ? QStringLiteral("synthetic") : layer},
                {"hours", hours}, {"timeframe_minutes", tfMinutes}, {"columns", double(gpu.columns())},
                {"entries", double(gpu.entryCount)}, {"sparse_entries", double(source.sparseEntries)},
                {"wide_entries", gpu.wide}, {"load_ms", source.loadMs}, {"compose_ms", source.composeMs},
@@ -292,7 +294,7 @@ double median(std::vector<double> v) {
 
 int runScreenshot(const LabRunOptions &options, const QString &path) {
     const QString output = QFileInfo(path).absoluteFilePath();
-    if (output.startsWith(QString::fromLatin1(kRecordingRoot))) {
+    if (insideRecordingRoot(output)) {
         print({{"error", QStringLiteral("recording directory is read-only")}, {"screenshot", path}});
         return 2;
     }
@@ -358,7 +360,7 @@ int runTickSweep(const LabRunOptions &options) {
             const double next = m.value("tick").toDouble();
             if (next == tick) return 0;
             const double ms = m.value("tickChangeBinMs").toDouble();
-            if (!lab.frame()) return 2; // Metal reports the previous frame's GPU time
+            if (!lab.frame()) return 2; // GPU time is reported one frame late
             const double gpu = item->metrics().value("gpuFrameMs").toDouble();
             binMs.push_back(ms);
             gpuMs.push_back(gpu);
@@ -408,7 +410,7 @@ int runTickSweep(const LabRunOptions &options) {
     return 0;
 }
 int runTickChangeSequence(const LabRunOptions &options, const QString &dir) {
-    if (QFileInfo(dir).absoluteFilePath().startsWith(QString::fromLatin1(kRecordingRoot))) {
+    if (insideRecordingRoot(dir)) {
         print({{"error", QStringLiteral("recording directory is read-only")}});
         return 2;
     }

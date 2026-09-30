@@ -22,7 +22,8 @@ struct LabRunOptions {
 };
 // Applies the tick options to an item (before or after its source loads).
 void applyTickOptions(LabItem &item, const LabRunOptions &options);
-// Headless Metal benchmark of HeatmapGpuBinner compute passes (1x and 2x grids).
+// Headless benchmark of HeatmapGpuBinner compute passes (1x and 2x grids) on the
+// selected QRhi backend (RhiBackend.hpp).
 int runBench(int hours, const QString &layer, uint32_t synthetic, int tfMinutes = 1);
 // Renders the lab item (HeatmapRenderNode in a real scene graph) offscreen once
 // its full source is uploaded and drawn, stamps the debug state (mode, tick, h,

@@ -381,9 +381,7 @@ bool LabItem::saveScreenshot(const QString &path) {
     const QString target = path.isEmpty() ?
         QStringLiteral("screenshots/lab-%1.png").arg(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss")) : path;
     const QFileInfo file(target);
-    const QString protectedRoot = QString::fromLatin1(kRecordingRoot);
-    const QString canonicalParent = file.absoluteDir().canonicalPath();
-    if (file.absoluteFilePath().startsWith(protectedRoot) || canonicalParent.startsWith(protectedRoot)) return false;
+    if (insideRecordingRoot(target)) return false;
     QDir().mkpath(file.absolutePath());
     return window()->grabWindow().save(target, "PNG");
 }

@@ -1,9 +1,12 @@
 #include "LabSources.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
+#include <QDir>
+#include <QFileInfo>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <stdexcept>
 
 namespace lab {
@@ -45,7 +48,32 @@ LabSource finish(heatmap::SparseColumns composed, heatmap::gpu::GpuSourceOptions
 }
 } // namespace
 
-LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &root) {
+std::string recordingRoot() {
+    return qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed().toStdString();
+}
+
+bool insideRecordingRoot(const QString &path) {
+    const QString root = QString::fromStdString(recordingRoot());
+    if (root.isEmpty()) return false;
+#ifdef Q_OS_WIN
+    constexpr auto cs = Qt::CaseInsensitive;
+#else
+    constexpr auto cs = Qt::CaseSensitive;
+#endif
+    const QString base = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
+    auto inside = [&](const QString &p) {
+        const QString clean = QDir::cleanPath(p);
+        return !clean.isEmpty() && (clean.compare(base, cs) == 0 || clean.startsWith(base + '/', cs));
+    };
+    const QFileInfo file(path);
+    return inside(file.absoluteFilePath()) || inside(file.absoluteDir().canonicalPath());
+}
+
+LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs, const std::string &rootIn) {
+    const std::string root = rootIn.empty() ? recordingRoot() : rootIn;
+    if (root.empty()) throw std::runtime_error("SENTINEL_RECORDING_ROOT is not set (directory holding BTC-USD/)");
+    if (!std::filesystem::is_directory(std::filesystem::u8path(root) / "BTC-USD"))
+        throw std::runtime_error("no BTC-USD recording under SENTINEL_RECORDING_ROOT=" + root);
     if (hours < 1 || loadHours < 1 || tfMs < heatmap::kMinuteMs || tfMs > heatmap::kDayMs ||
         tfMs % heatmap::kMinuteMs || (layer != "near" && layer != "deep"))
         throw std::invalid_argument("invalid lab recording request");

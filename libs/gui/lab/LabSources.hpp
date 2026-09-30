@@ -2,11 +2,16 @@
 // Lab data paths: HMC2 (read-only) or synthetic -> heatmap::SparseColumns composed
 // at the selected timeframe on the CPU (TimeComposer) -> heatmap::gpu::GpuSource.
 #include "render/heatmap/HeatmapGpuSource.hpp"
+#include <QString>
 #include <memory>
 #include <string>
 
 namespace lab {
-inline constexpr const char *kRecordingRoot = "/Volumes/T7/sentinel-data/recording";
+// Recording root (the directory holding BTC-USD/) from SENTINEL_RECORDING_ROOT.
+// Empty when unset: real-data paths then report or skip instead of guessing.
+std::string recordingRoot();
+// True when `path` lies inside the recording root (read-only for lab outputs).
+bool insideRecordingRoot(const QString &path);
 
 struct LabSource {
     std::shared_ptr<const heatmap::SparseColumns> columns;
@@ -23,8 +28,9 @@ struct LabSource {
 // (heatmap::loadRecordingLevels); everything else composes minutes. `loadHours`
 // may be smaller than `hours` to load just the recent part first; the source
 // then advertises the rest as available-but-not-loaded (drawn as "loading").
+// An empty `root` means recordingRoot(); throws when that is unset or missing.
 LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int64_t tfMs,
-                         const std::string &root = kRecordingRoot);
+                         const std::string &root = {});
 
 // One UTC day of synthetic minutes (about `entries` entries in total) with a grid
 // change, a size-scale change, partial coverage, recorder gaps and one unloaded

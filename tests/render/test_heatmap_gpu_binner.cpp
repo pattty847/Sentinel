@@ -1,13 +1,16 @@
 // S4: GPU price binning parity against heatmap::binColumn (the CPU reference),
 // plus grid/threshold/source unit tests and a scene-graph render-node test.
-// GPU cases skip cleanly without a Metal device. Real-recording parity is opt-in:
-//   SENTINEL_HEATMAP_REAL_PARITY=1 ./test_heatmap_gpu_binner
+// GPU cases run on SENTINEL_RHI_BACKEND (d3d11|d3d12|vulkan|opengl|metal), else the
+// platform default, and skip with the reason when that backend cannot create a
+// QRhi with compute. Real-recording parity is opt-in:
+//   SENTINEL_HEATMAP_REAL_PARITY=1 SENTINEL_RECORDING_ROOT=<dir holding BTC-USD> ./test_heatmap_gpu_binner
 #include "heatmap/BinCell.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include "lab/LabItem.hpp"
 #include "lab/OffscreenQuick.hpp"
+#include "lab/RhiBackend.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapGpuSelfTest.hpp"
 #include "render/heatmap/HeatmapRenderNode.hpp"
@@ -128,15 +131,8 @@ SparseColumns hourLevel() {
 }
 
 // ---------------------------------------------------------------- GPU helpers
-struct Headless {
-    std::unique_ptr<QRhi> rhi;
-    Headless() {
-        if (!lab::metalDeviceAvailable()) return;
-#ifdef Q_OS_MACOS
-        QRhiMetalInitParams init;
-        rhi.reset(QRhi::create(QRhi::Metal, &init));
-#endif
-    }
+struct Headless : lab::HeadlessRhi {
+    Headless() { create(); }
 };
 void uploadPaged(QRhi *rhi, HeatmapGpuBinner &binner, std::shared_ptr<const GpuSource> source,
                  uint64_t budget, int *frames = nullptr) {
@@ -370,7 +366,7 @@ TEST(HeatmapBinGrid, SubBinPanStaysInsideGuardAndTranslatesMapping) {
 // ---------------------------------------------------------------- GPU parity
 TEST(HeatmapGpuParity, SyntheticMatchesBinColumnExactly) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice; GPU readback parity requires Metal";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const auto minutes = minuteLevel();
     const auto hours = hourLevel();
     const std::vector<SparseColumns> levels{hours, minutes};
@@ -418,7 +414,7 @@ TEST(HeatmapGpuParity, SyntheticMatchesBinColumnExactly) {
 // this test), so the always-on suite guards the float-float precision contract.
 TEST(HeatmapGpuParity, PrecisionStressManyEntriesPerBin) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     SparseColumns data{"BTC-USD", "near", minute, epoch, epoch + 240 * minute, {}, {{epoch, epoch + 240 * minute}}};
     std::mt19937_64 rng(11);
     std::uniform_int_distribution<int> code(1, 26'000);
@@ -453,7 +449,7 @@ TEST(HeatmapGpuParity, PrecisionStressManyEntriesPerBin) {
 
 TEST(HeatmapGpuParity, OutputResizeKeepsSourceAndNewSourceSwapsOnlyWhenComplete) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const auto data = compose(minuteLevel(), minute);
     auto first = std::make_shared<const GpuSource>(buildGpuSource(data));
     HeatmapGpuBinner binner(gpu.rhi.get());
@@ -484,7 +480,7 @@ TEST(HeatmapGpuParity, OutputResizeKeepsSourceAndNewSourceSwapsOnlyWhenComplete)
 
 TEST(HeatmapGpuParity, OutputScaleChangeRebinsWithMatchingCodes) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const auto data = compose(minuteLevel(), 5 * minute);
     auto source = std::make_shared<const GpuSource>(buildGpuSource(data));
     HeatmapGpuBinner binner(gpu.rhi.get());
@@ -505,7 +501,7 @@ TEST(HeatmapGpuParity, OutputScaleChangeRebinsWithMatchingCodes) {
 
 TEST(HeatmapGpuParity, ReRequestingActiveSourceCancelsPendingUpload) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     auto a = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
     auto b = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), 5 * minute)));
     HeatmapGpuBinner binner(gpu.rhi.get());
@@ -549,7 +545,7 @@ TEST(HeatmapGpuParity, ReRequestingActiveSourceCancelsPendingUpload) {
 
 TEST(HeatmapGpuParity, BufferPoolIsReusedAcrossSources) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     auto big = [] { return std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute))); };
     auto small = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), hour)));
     HeatmapGpuBinner binner(gpu.rhi.get());
@@ -562,7 +558,7 @@ TEST(HeatmapGpuParity, BufferPoolIsReusedAcrossSources) {
 
 TEST(HeatmapGpuParity, EntriesSplitAcrossPagesMatchSinglePage) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const auto data = compose(minuteLevel(), minute);
     const auto single = buildGpuSource(data);
     GpuSourceOptions options;
@@ -605,7 +601,7 @@ TEST(HeatmapGpuSelfTest, FixtureOracleIsSelfConsistent) {
 }
 TEST(HeatmapGpuSelfTest, ShippedFastKernelPassesOnThisDevice) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     HeatmapGpuBinner binner(gpu.rhi.get());
     EXPECT_EQ(binner.currentKernel(), KernelVariant::Precise) << "precise until proven";
@@ -622,7 +618,7 @@ TEST(HeatmapGpuSelfTest, ShippedFastKernelPassesOnThisDevice) {
 }
 TEST(HeatmapGpuSelfTest, FoldingKernelIsRejectedAndPreciseKernelIsExact) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     // The unguarded candidate really is wrong on the fixture...
     const auto fixture = makePrecisionSelfTest();
     HeatmapGpuBinner direct(gpu.rhi.get());
@@ -656,7 +652,7 @@ TEST(HeatmapGpuSelfTest, FoldingKernelIsRejectedAndPreciseKernelIsExact) {
 
 TEST(HeatmapGpuSelfTest, WaitsForAnActiveSourceAndAWorkerBuiltFixture) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     HeatmapGpuBinner binner(gpu.rhi.get()); // constructing it starts the worker build
     for (int i = 0; i < 5; ++i) {
@@ -687,7 +683,7 @@ TEST(HeatmapGpuSelfTest, WaitsForAnActiveSourceAndAWorkerBuiltFixture) {
 // inside the recording frame, the same order as window teardown.
 TEST(HeatmapGpuSelfTest, DestroyingTheBinnerWithTheReadbackInFlightCompletesItFirst) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     auto binner = std::make_unique<HeatmapGpuBinner>(gpu.rhi.get());
     for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -715,7 +711,7 @@ TEST(HeatmapGpuSelfTest, DestroyingTheBinnerWithTheReadbackInFlightCompletesItFi
 // binners' later destruction must not call into the dead QRhi.
 TEST(HeatmapGpuLifetime, QRhiDestroyedFirstWithReadbacksInFlight) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     ASSERT_TRUE(precisionSelfTestIfReady());
@@ -757,7 +753,7 @@ TEST(HeatmapGpuLifetime, QRhiDestroyedFirstWithReadbacksInFlight) {
 
 TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     HeatmapGpuBinner binner(gpu.rhi.get());
     auto a = smallSource();
     uploadPaged(gpu.rhi.get(), binner, a, 1 << 20);
@@ -802,7 +798,7 @@ TEST(HeatmapGpuParity, AllocationFailureBacksOffInsteadOfRetryingEveryFrame) {
 
 TEST(HeatmapGpuParity, MemoryCapRefusesSourceCleanly) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     auto a = smallSource();
     auto big = std::make_shared<const GpuSource>(buildGpuSource(compose(minuteLevel(), minute)));
     HeatmapGpuBinner binner(gpu.rhi.get(), a->bytes() * 3); // room for the small one only
@@ -827,9 +823,12 @@ TEST(HeatmapGpuParity, RealRecordingOptIn) {
     if (qgetenv("SENTINEL_HEATMAP_REAL_PARITY") != "1")
         GTEST_SKIP() << "set SENTINEL_HEATMAP_REAL_PARITY=1 to compare against the real recording";
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
-    const std::filesystem::path root("/Volumes/T7/sentinel-data/recording");
-    if (!std::filesystem::exists(root / "BTC-USD")) GTEST_SKIP() << "recording directory absent";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
+    const std::string rootName = lab::recordingRoot();
+    if (rootName.empty()) GTEST_SKIP() << "set SENTINEL_RECORDING_ROOT to the directory holding BTC-USD/";
+    const std::filesystem::path root = std::filesystem::u8path(rootName);
+    if (!std::filesystem::exists(root / "BTC-USD"))
+        GTEST_SKIP() << "recording directory absent: " << (root / "BTC-USD").string();
     recording::Hmc2Reader reader(root); // read-only; never takes the writer lock
     // Closed past buckets only: the previous complete UTC day is immutable.
     const int64_t end = QDateTime::currentMSecsSinceEpoch() / day * day;
@@ -932,7 +931,8 @@ std::shared_ptr<const GpuSource> stateSource() {
 }
 
 TEST(HeatmapRenderNodeScene, DrawsFourStatesAndPansWithoutRebinning) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     lab::OffscreenQuick scene;
     QString error;
     ASSERT_TRUE(scene.create(QSize(200, 100), &error)) << error.toStdString();
@@ -1053,7 +1053,7 @@ SparseColumns sliceOf(const SparseColumns &data, int64_t startMs, int64_t endMs)
 // chunk the columns arrived in. Every cell two readbacks share must be equal.
 TEST(HeatmapGpuAnchoring, CellsKeepAbsolutePriceAndTimeAcrossViewsReloadsAndChunks) {
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     const auto minutes = minuteLevel();
     for (const int64_t tf : {5 * minute, 16 * minute}) {
         const auto data = compose(minutes, tf);
@@ -1142,7 +1142,7 @@ TEST(HeatmapTickPolicyNode, ManualKeepsItsTickAutoFollowsTheDataInView) {
     EXPECT_EQ(tickCoverage(source, (epoch + 5 * hour) / minute, (epoch + 7 * hour) / minute, 10).incompatible, 0u);
     // The veil itself: $5 over a $10 column reads back as veil (GPU).
     Headless gpu;
-    if (!gpu.rhi) GTEST_SKIP() << "No MTLDevice";
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
     auto shared = std::make_shared<const GpuSource>(source);
     HeatmapGpuBinner binner(gpu.rhi.get());
     uploadPaged(gpu.rhi.get(), binner, shared, 64ull << 20);
@@ -1169,7 +1169,8 @@ TEST(HeatmapTickPolicyNode, ManualKeepsItsTickAutoFollowsTheDataInView) {
 // the precision self-test started in that frame: node, binner and QRhi go away
 // in scene-graph order without touching freed readback results.
 TEST(HeatmapRenderNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     HeatmapGpuBinner::clearSelfTestCacheForTest();
     for (int i = 0; i < 500 && !precisionSelfTestIfReady(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     for (int frames = 1; frames <= 3; ++frames) {
@@ -1191,7 +1192,8 @@ TEST(HeatmapRenderNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
 }
 
 TEST(HeatmapRenderNodeScene, AutoTickHysteresisAndPansNeverRebin) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     lab::OffscreenQuick scene;
     QString error;
     ASSERT_TRUE(scene.create(QSize(200, 100), &error)) << error.toStdString();
@@ -1315,5 +1317,6 @@ int main(int argc, char **argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
+    std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     return RUN_ALL_TESTS();
 }

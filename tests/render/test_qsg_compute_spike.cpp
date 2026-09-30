@@ -4,6 +4,7 @@
 // If a Qt upgrade breaks this, HeatmapRenderNode must fall back to
 // QQuickWindow::beforeRendering (see docs/research/2026-09-gpu-heatmap-integration-plan.md, S4).
 #include "lab/OffscreenQuick.hpp"
+#include "lab/RhiBackend.hpp"
 #include <QFile>
 #include <QGuiApplication>
 #include <QQuickItem>
@@ -15,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <iostream>
 #include <memory>
 
 namespace {
@@ -64,9 +66,13 @@ public:
         cb->setGraphicsPipeline(graphics_.get());
         const QSize size = renderTarget()->pixelSize();
         cb->setViewport(QRhiViewport(0, 0, float(size.width()), float(size.height())));
+        // UsesScissor: a scissor must always be set. Metal tolerated none; D3D
+        // clips everything (as HeatmapRenderNode::render does, fall back to full).
         if (state->scissorEnabled()) {
             const QRect r = state->scissorRect();
             cb->setScissor(QRhiScissor(r.x(), r.y(), r.width(), r.height()));
+        } else {
+            cb->setScissor(QRhiScissor(0, 0, size.width(), size.height()));
         }
         cb->setShaderResources(drawBindings_.get());
         cb->draw(4);
@@ -138,7 +144,8 @@ protected:
 };
 
 TEST(QsgComputeSpike, ComputeInRenderNodePrepareFeedsRenderInSameFrame) {
-    if (!lab::metalDeviceAvailable()) GTEST_SKIP() << "No MTLDevice";
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     lab::OffscreenQuick scene;
     QString error;
     ASSERT_TRUE(scene.create(QSize(64, 32), &error)) << error.toStdString();
@@ -175,5 +182,6 @@ int main(int argc, char **argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
+    std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     return RUN_ALL_TESTS();
 }
