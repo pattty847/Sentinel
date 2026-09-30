@@ -23,6 +23,12 @@ double msSince(Clock::time_point start) { return std::chrono::duration<double, s
 using heatmap::kHourMs;
 using heatmap::kMinuteMs;
 
+// Chunk keys carry the wire's source id; the lab still selects an HMC2 layer.
+std::string sourceId(const std::string &layer) {
+    const auto *source = heatmap::chunkSourceForHmc2Layer(layer);
+    return source ? std::string(source->id) : layer;
+}
+
 std::mutex rootMutex;
 std::string chunkRoot; // empty: recordingRoot() (SENTINEL_RECORDING_ROOT)
 std::string currentRoot() {
@@ -71,7 +77,9 @@ heatmap::ChunkStore::Loaded loadChunk(const heatmap::ChunkKey &key) {
         reader = std::make_unique<recording::Hmc2Reader>(root);
         readerRoot = root;
     }
-    const auto info = layerInfo(key.layer);
+    const auto *source = heatmap::findChunkSource(key.source);
+    if (!source) throw std::runtime_error("unknown chunk source " + key.source);
+    const auto info = layerInfo(std::string(source->hmc2Layer));
     if (!info.error.empty()) throw std::runtime_error(info.error);
     const recording::BookRecorder::Watermarks watermarks{info.availability.endMs, info.availability.hourThroughMs};
     heatmap::ChunkStore::Loaded loaded;
@@ -196,7 +204,7 @@ double recentMedianPrice(const std::string &layer) {
     if (!info.error.empty()) return 0;
     const int64_t newest = recording::floorDiv(info.availability.endMs - 1, kHourMs) * kHourMs;
     for (int64_t start = newest; start >= newest - 3 * kHourMs; start -= kHourMs) {
-        const auto chunk = chunkStore().get({kSymbol, layer, kMinuteMs, start});
+        const auto chunk = chunkStore().get({kSymbol, sourceId(layer), kMinuteMs, start});
         const double price = medianRecentPrice(*chunk->columns);
         if (price > 0) return price;
     }
@@ -214,7 +222,7 @@ ViewportSource buildViewportSource(const std::string &layer, int64_t tfMs, const
     end = std::min(end, recording::floorDiv(a.endMs + tfMs - 1, tfMs) * tfMs);
     if (end <= start) end = start + tfMs;
     ViewportSource out;
-    const auto keys = heatmap::tiles::chunksFor(kSymbol, layer, tfMs, start, end, a);
+    const auto keys = heatmap::tiles::chunksFor(kSymbol, sourceId(layer), tfMs, start, end, a);
     const auto chunks = getChunks(keys, out.timing);
     out.chunkGenerations = generationsOf(chunks);
     out.generation = heatmap::tiles::combineGenerations(chunks);
@@ -244,7 +252,7 @@ TileBuild buildTile(const std::string &layer, int64_t tfMs, int64_t tickUnits, i
     TileBuild out;
     out.key = {kSymbol, layer, tfMs, tickUnits, tile, 0};
     const int64_t start = heatmap::tiles::tileStartMs(tile, tfMs), end = heatmap::tiles::tileEndMs(tile, tfMs);
-    const auto keys = heatmap::tiles::chunksFor(kSymbol, layer, tfMs, start, end, a);
+    const auto keys = heatmap::tiles::chunksFor(kSymbol, sourceId(layer), tfMs, start, end, a);
     if (keys.empty()) {
         out.empty = true;
         return out;
@@ -311,7 +319,7 @@ std::optional<TileBuild> cachedGpuTile(const std::string &layer, int64_t tfMs, i
     const auto info = layerInfo(layer);
     if (!info.error.empty()) return std::nullopt;
     const int64_t start = heatmap::tiles::tileStartMs(tile, tfMs), end = heatmap::tiles::tileEndMs(tile, tfMs);
-    const auto keys = heatmap::tiles::chunksFor(kSymbol, layer, tfMs, start, end, info.availability);
+    const auto keys = heatmap::tiles::chunksFor(kSymbol, sourceId(layer), tfMs, start, end, info.availability);
     if (keys.empty()) return std::nullopt;
     std::vector<std::shared_ptr<const heatmap::StoredChunk>> chunks;
     for (const auto &key : keys) {
@@ -356,7 +364,7 @@ void resetIntermediateStats() {
 std::vector<heatmap::ChunkKey> chunkKeysFor(const std::string &layer, int64_t tfMs, int64_t startMs, int64_t endMs) {
     const auto info = layerInfo(layer);
     if (!info.error.empty()) return {};
-    return heatmap::tiles::chunksFor(kSymbol, layer, tfMs, startMs, endMs, info.availability);
+    return heatmap::tiles::chunksFor(kSymbol, sourceId(layer), tfMs, startMs, endMs, info.availability);
 }
 
 namespace {

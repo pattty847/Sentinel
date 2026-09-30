@@ -25,7 +25,7 @@ size_t sparseBytes(const SparseColumns &data) {
 size_t ChunkKeyHash::operator()(const ChunkKey &key) const {
     size_t h = std::hash<std::string>{}(key.symbol);
     auto mix = [&](size_t v) { h ^= v + size_t(0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2); };
-    mix(std::hash<std::string>{}(key.layer));
+    mix(std::hash<std::string>{}(key.source));
     mix(std::hash<int64_t>{}(key.levelMs));
     mix(std::hash<int64_t>{}(key.startMs));
     return h;

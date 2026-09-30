@@ -53,7 +53,7 @@ SparseColumns makeHourChunk(int64_t h, int64_t seed = 0, int64_t scannedMinutes 
 }
 std::shared_ptr<const StoredChunk> stored(SparseColumns columns, uint64_t generation) {
     auto chunk = std::make_shared<StoredChunk>();
-    chunk->key = {"BTC-USD", "deep", minute, columns.startMs};
+    chunk->key = {"BTC-USD", "hmc2.deep", minute, columns.startMs};
     chunk->generation = generation;
     chunk->columns = std::make_shared<const SparseColumns>(std::move(columns));
     return chunk;
@@ -96,7 +96,7 @@ TEST(HeatmapChunkStore, SharesOneDecodePerKeyAndEvictsByBytes) {
         ++loads;
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour), true, 0};
     });
-    const ChunkKey a{"BTC-USD", "deep", minute, epoch}, b{"BTC-USD", "deep", minute, epoch + hour};
+    const ChunkKey a{"BTC-USD", "hmc2.deep", minute, epoch}, b{"BTC-USD", "hmc2.deep", minute, epoch + hour};
     const auto first = store.get(a);
     const auto again = store.get(a);
     EXPECT_EQ(first, again);
@@ -156,8 +156,8 @@ TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
         if (fail) throw std::runtime_error("disk gone");
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour), true, 0};
     });
-    const ChunkKey key{"BTC-USD", "deep", minute, epoch + 2 * hour};
-    const ChunkKey other{"BTC-USD", "deep", minute, epoch + 3 * hour};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch + 2 * hour};
+    const ChunkKey other{"BTC-USD", "hmc2.deep", minute, epoch + 3 * hour};
     std::atomic<int> errors{0};
     std::vector<std::shared_ptr<const StoredChunk>> results(4);
     std::vector<std::thread> threads;
@@ -191,7 +191,7 @@ TEST(HeatmapChunkStore, ASlowLoadNeverReplacesARevisionThatArrivedDuringIt) {
         if (n == 1) gate->wait.wait(); // the stale read (30 minutes) blocks
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour, 0, n == 1 ? 30 : 50), false, 0};
     });
-    const ChunkKey key{"BTC-USD", "deep", minute, epoch};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
     std::shared_ptr<const StoredChunk> fromGet;
     std::vector<std::thread> slow;
     const GateThreads guard{gate, slow};
@@ -229,7 +229,7 @@ TEST(HeatmapChunkStore, LatestGenerationSurvivesEvictionAndSealedReloadsKeepIt) 
         const int64_t h = (key.startMs - epoch) / hour;
         return ChunkStore::Loaded{makeHourChunk(h), h != 5, 0}; // hour 5 is the open chunk
     });
-    const ChunkKey sealedKey{"BTC-USD", "deep", minute, epoch + hour}, openKey{"BTC-USD", "deep", minute, epoch + 5 * hour};
+    const ChunkKey sealedKey{"BTC-USD", "hmc2.deep", minute, epoch + hour}, openKey{"BTC-USD", "hmc2.deep", minute, epoch + 5 * hour};
     const auto sealed = store.get(sealedKey);
     const auto open = store.get(openKey);
     const auto revised = store.revise(openKey, {makeHourChunk(5, 1), false, 2});
@@ -252,7 +252,7 @@ TEST(HeatmapChunkStore, RevisionListenerHearsEveryRevision) {
     });
     std::vector<int64_t> heard;
     store.setRevisionListener([&](const ChunkKey &key) { heard.push_back(key.startMs); });
-    const ChunkKey key{"BTC-USD", "deep", minute, epoch};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
     store.get(key);
     EXPECT_TRUE(heard.empty()) << "a first load is not a revision";
     store.reload(key);
@@ -270,7 +270,7 @@ TEST(HeatmapChunkStore, AGetThatReReadsAnEvictedOpenChunkIsARevision) {
     });
     std::vector<int64_t> heard;
     store.setRevisionListener([&](const ChunkKey &key) { heard.push_back(key.startMs); });
-    const ChunkKey sealedKey{"BTC-USD", "deep", minute, epoch + hour}, openKey{"BTC-USD", "deep", minute, epoch + 5 * hour};
+    const ChunkKey sealedKey{"BTC-USD", "hmc2.deep", minute, epoch + hour}, openKey{"BTC-USD", "hmc2.deep", minute, epoch + 5 * hour};
     const auto open = store.get(openKey);
     store.get(sealedKey);
     EXPECT_TRUE(heard.empty()) << "first loads are not revisions";
@@ -290,7 +290,7 @@ TEST(HeatmapChunkStore, RevisionGetsANewGenerationAndOldHoldersKeepTheirVersion)
     ChunkStore store(1ull << 30, [&](const ChunkKey &key) {
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour, 0, 30), false, 1};
     });
-    const ChunkKey key{"BTC-USD", "deep", minute, epoch};
+    const ChunkKey key{"BTC-USD", "hmc2.deep", minute, epoch};
     const auto open = store.get(key);
     EXPECT_FALSE(open->sealed);
     const auto revised = store.revise(key, {makeHourChunk(0, 0, 45), false, 2});
@@ -324,7 +324,7 @@ TEST(HeatmapTiles, TilesAreEpochAlignedSixtyFourColumnSpans) {
 TEST(HeatmapTiles, ChunkPlanUsesHoursBeforeTheWatermarkAndMinutesAfter) {
     Availability a{epoch + 30 * minute, epoch + 2 * day + 90 * minute, epoch + 2 * day};
     // Deep 1h: day chunks of hour rollups through the watermark, then minute chunks.
-    auto keys = chunksFor("BTC-USD", "deep", hour, epoch, epoch + 3 * day, a);
+    auto keys = chunksFor("BTC-USD", "hmc2.deep", hour, epoch, epoch + 3 * day, a);
     ASSERT_EQ(keys.size(), 4u);
     EXPECT_EQ(keys[0].levelMs, hour);
     EXPECT_EQ(keys[0].startMs, epoch);
@@ -334,11 +334,11 @@ TEST(HeatmapTiles, ChunkPlanUsesHoursBeforeTheWatermarkAndMinutesAfter) {
     EXPECT_EQ(keys[3].startMs, epoch + 2 * day + hour);
     // Near (no rollups) and sub-hour timeframes compose minutes only; the range
     // is clipped to the available data.
-    keys = chunksFor("BTC-USD", "near", hour, epoch - day, epoch + 3 * hour, a);
+    keys = chunksFor("BTC-USD", "hmc2.near", hour, epoch - day, epoch + 3 * hour, a);
     ASSERT_EQ(keys.size(), 3u);
     EXPECT_EQ(keys[0].startMs, epoch);
     EXPECT_EQ(keys[0].levelMs, minute);
-    keys = chunksFor("BTC-USD", "deep", 5 * minute, epoch + 2 * day + 2 * hour, epoch + 3 * day, a);
+    keys = chunksFor("BTC-USD", "hmc2.deep", 5 * minute, epoch + 2 * day + 2 * hour, epoch + 3 * day, a);
     EXPECT_TRUE(keys.empty()) << "nothing recorded after availability.endMs";
 }
 
