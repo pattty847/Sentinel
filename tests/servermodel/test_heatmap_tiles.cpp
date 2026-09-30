@@ -122,7 +122,22 @@ TEST(HeatmapChunkStore, SharesOneDecodePerKeyAndEvictsByBytes) {
 struct Gate {
     std::promise<void> opened;
     std::shared_future<void> wait = opened.get_future().share();
-    void open() { opened.set_value(); }
+    bool isOpen = false;
+    void open() {
+        if (!isOpen) opened.set_value();
+        isOpen = true;
+    }
+};
+// Opens the gate and joins the threads on every exit path: a failed ASSERT
+// returns early, and destroying a joinable std::thread calls std::terminate.
+struct GateThreads {
+    std::shared_ptr<Gate> &gate;
+    std::vector<std::thread> &threads;
+    ~GateThreads() {
+        gate->open();
+        for (auto &t : threads)
+            if (t.joinable()) t.join();
+    }
 };
 // Spins (bounded) until pred() holds; the store's counters say when every
 // caller is waiting on the shared load.
@@ -142,8 +157,11 @@ TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
         return ChunkStore::Loaded{makeHourChunk((key.startMs - epoch) / hour), true, 0};
     });
     const ChunkKey key{"BTC-USD", "deep", minute, epoch + 2 * hour};
-    std::vector<std::thread> threads;
+    const ChunkKey other{"BTC-USD", "deep", minute, epoch + 3 * hour};
+    std::atomic<int> errors{0};
     std::vector<std::shared_ptr<const StoredChunk>> results(4);
+    std::vector<std::thread> threads;
+    const GateThreads guard{gate, threads}; // declared after everything the threads touch
     for (int i = 0; i < 4; ++i) threads.emplace_back([&, i] { results[i] = store.get(key); });
     ASSERT_TRUE(eventually([&] { return store.stats().sharedLoads == 3; })) << "three charts wait on the first";
     gate->open();
@@ -152,9 +170,7 @@ TEST(HeatmapChunkStore, ConcurrentChartsWaitOnOneLoadAndShareFailures) {
     for (const auto &r : results) EXPECT_EQ(r, results[0]);
 
     fail = true;
-    gate = std::make_shared<Gate>();
-    const ChunkKey other{"BTC-USD", "deep", minute, epoch + 3 * hour};
-    std::atomic<int> errors{0};
+    gate = std::make_shared<Gate>(); // the loader and the guard read `gate` itself
     threads.clear();
     for (int i = 0; i < 3; ++i)
         threads.emplace_back([&] {
@@ -177,11 +193,13 @@ TEST(HeatmapChunkStore, ASlowLoadNeverReplacesARevisionThatArrivedDuringIt) {
     });
     const ChunkKey key{"BTC-USD", "deep", minute, epoch};
     std::shared_ptr<const StoredChunk> fromGet;
-    std::thread slow([&] { fromGet = store.get(key); });
+    std::vector<std::thread> slow;
+    const GateThreads guard{gate, slow};
+    slow.emplace_back([&] { fromGet = store.get(key); });
     ASSERT_TRUE(eventually([&] { return loads.load() == 1; }));
     const auto revised = store.revise(key, {makeHourChunk(0, 0, 45), false, 7});
     gate->open();
-    slow.join();
+    slow[0].join();
     EXPECT_EQ(fromGet, revised) << "the older load returns the newer revision";
     EXPECT_EQ(store.cached(key), revised);
     EXPECT_EQ(store.generationOf(key), revised->generation);
@@ -193,11 +211,13 @@ TEST(HeatmapChunkStore, ASlowLoadNeverReplacesARevisionThatArrivedDuringIt) {
         if (n == 1) gate2->wait.wait();
         return ChunkStore::Loaded{makeHourChunk((k.startMs - epoch) / hour, 0, n == 1 ? 30 : 55), false, 0};
     });
-    std::thread slow2([&] { fromGet = other.get(key); });
+    std::vector<std::thread> slow2;
+    const GateThreads guard2{gate2, slow2};
+    slow2.emplace_back([&] { fromGet = other.get(key); });
     ASSERT_TRUE(eventually([&] { return loads2.load() == 1; }));
     const auto reloaded = other.reload(key); // second loader call: 55 minutes
     gate2->open();
-    slow2.join();
+    slow2[0].join();
     EXPECT_EQ(fromGet, reloaded);
     EXPECT_EQ(other.cached(key)->columns->scannedRanges.back().endMs, epoch + 55 * minute);
 }
