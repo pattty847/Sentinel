@@ -209,29 +209,83 @@ TEST_F(StoreTest, OpensAndWritesUnderFreshNestedDirectory) {
     EXPECT_EQ(rows[0].bucketStartMs, r.bucketStartMs);
 }
 
+// Records directory syncs (and can fail one) for the whole process while alive.
+struct DirectorySyncProbe {
+    std::vector<std::filesystem::path> synced;
+    std::filesystem::path failOnce;
+    explicit DirectorySyncProbe(std::filesystem::path fail = {}) : failOnce(key(fail)) {
+        Hmc2Store::setDirectorySyncHookForTest([this](const std::filesystem::path &dir) {
+            synced.push_back(key(dir));
+            if (!failOnce.empty() && synced.back() == failOnce) {
+                failOnce.clear();
+                throw std::runtime_error("injected directory sync failure");
+            }
+        });
+    }
+    ~DirectorySyncProbe() { Hmc2Store::setDirectorySyncHookForTest({}); }
+    static std::filesystem::path key(const std::filesystem::path &p) {
+        if (p.empty()) return p;
+        auto k = std::filesystem::absolute(p).lexically_normal();
+        while (!k.has_filename() && k.has_relative_path()) k = k.parent_path();
+        return k;
+    }
+    bool saw(const std::filesystem::path &dir) const {
+        return std::find(synced.begin(), synced.end(), key(dir)) != synced.end();
+    }
+};
+
 // An append creates root/BTC-USD, then fsync of root fails. The retry finds
 // BTC-USD existing; it must still fsync root before reporting success, or a
 // power loss can drop the directory entry that holds written records.
 TEST_F(StoreTest, FailedParentSyncIsRetriedBeforeTheNextAppendSucceeds) {
     Hmc2Store store(root());
-    const auto rootDir = std::filesystem::absolute(root()).lexically_normal();
-    std::vector<std::filesystem::path> synced;
-    bool failRoot = true;
-    store.beforeDirectorySyncForTest([&](const std::filesystem::path &dir) {
-        synced.push_back(std::filesystem::absolute(dir).lexically_normal());
-        if (failRoot && synced.back() == rootDir) {
-            failRoot = false;
-            throw std::runtime_error("injected directory sync failure");
-        }
-    });
+    DirectorySyncProbe probe(root());
     const auto r = record();
     EXPECT_THROW(store.append(r), std::runtime_error);
-    ASSERT_FALSE(failRoot) << "the first append must have tried to sync the root";
-    synced.clear();
+    ASSERT_TRUE(probe.failOnce.empty()) << "the first append must have tried to sync the root";
+    probe.synced.clear();
     store.append(r);
-    EXPECT_NE(std::find(synced.begin(), synced.end(), rootDir), synced.end())
-        << "the retry reported success without re-syncing the root";
+    EXPECT_TRUE(probe.saw(root())) << "the retry reported success without re-syncing the root";
     EXPECT_EQ(read().size(), 1u);
+}
+
+// Construction creates existing/new/recording, then fsync of `existing` fails
+// and the constructor throws with `new` left behind. The next construction
+// must sync `existing` again: every ancestor's parent is synced once per store.
+TEST_F(StoreTest, FailedAncestorSyncDuringConstructionIsRetriedByTheNextStore) {
+    const auto existing = root() / "existing";
+    std::filesystem::create_directories(existing);
+    const auto storeRoot = existing / "new" / "recording";
+    {
+        DirectorySyncProbe probe(existing);
+        EXPECT_THROW(Hmc2Store store(storeRoot), std::runtime_error);
+        ASSERT_TRUE(probe.failOnce.empty()) << "construction must have tried to sync " << existing.string();
+    }
+    ASSERT_TRUE(std::filesystem::is_directory(existing / "new"));
+    DirectorySyncProbe probe;
+    Hmc2Store store(storeRoot);
+    EXPECT_TRUE(probe.saw(existing)) << "the second store never synced " << existing.string();
+    EXPECT_TRUE(probe.saw(existing / "new"));
+    store.append(record());
+    EXPECT_EQ(Hmc2Store::readRange(storeRoot, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000).size(), 1u);
+}
+
+// "/data/recording/" and "/data/recording/." name the same root: the append
+// walk must recognise it (a mismatch made every append throw).
+TEST_F(StoreTest, RootWithTrailingSeparatorOrDotAppendsAndReadsBack) {
+    std::vector<std::string> suffixes{"/", "/."};
+#ifdef _WIN32
+    suffixes.push_back("\\");
+#endif
+    for (size_t i = 0; i < suffixes.size(); ++i) {
+        const auto dir = root() / ("store" + std::to_string(i));
+        {
+            Hmc2Store store(dir.string() + suffixes[i]);
+            store.append(record());
+        }
+        EXPECT_EQ(Hmc2Store::readRange(dir, "BTC-USD", "deep", 60000, kEpoch, kEpoch + 172800000).size(), 1u)
+            << "root suffix " << suffixes[i];
+    }
 }
 
 TEST_F(StoreTest, RoundTripAndBucketUtcPath) {
