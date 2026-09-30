@@ -171,6 +171,27 @@ TEST(RecordingDir, UnmountedVolumeUsesFallbackOrNothing) {
     EXPECT_TRUE(volumeMounted("data/recording")); // relative: the working directory decides
 }
 
+#ifdef _WIN32
+// "/Volumes/<name>" is a macOS mount point. On Windows it names C:\Volumes\<name>,
+// which may exist (left behind by an older build); it must still count as not
+// mounted, or the server records to the boot disk.
+TEST(RecordingDir, VolumesPathIsNeverMountedOnWindowsEvenIfTheDirectoryExists) {
+    namespace fs = std::filesystem;
+    const fs::path volumes("/Volumes");
+    const fs::path volume = volumes / "SentinelTestVolume-RecordingDir";
+    const bool hadVolumes = fs::exists(volumes);
+    std::error_code ec;
+    fs::create_directories(volume, ec);
+    if (ec) GTEST_SKIP() << "cannot create " << fs::absolute(volume).string() << ": " << ec.message();
+    const bool mounted = volumeMounted(volume / "recording");
+    fs::remove(volume, ec);
+    if (!hadVolumes) fs::remove(volumes, ec);
+    EXPECT_FALSE(mounted);
+    const auto choice = resolveRecordingDir((volume / "recording").generic_string(), "data/recording");
+    EXPECT_TRUE(choice.fallback);
+}
+#endif
+
 // Every platform: a store opens under a fresh temp directory whose chain up to
 // the drive root includes directories the user cannot fsync (C:\ on Windows),
 // creates its missing directories, writes and reads back.
