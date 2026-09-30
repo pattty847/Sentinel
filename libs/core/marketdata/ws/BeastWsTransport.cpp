@@ -60,6 +60,9 @@ void BeastWsTransport::armDeadline(uint64_t id, std::chrono::milliseconds timeou
             finishClose(id, net::error::timed_out);
             return;
         }
+        // The handshake can succeed while this expiry is already queued; cancel()
+        // cannot retract it, and the success path keeps the attempt id.
+        if (phase_ == Phase::Open || phase_ == Phase::Idle) return;
         sLog_Warning("MDC transport connect timed out: phase=" << phaseName(phase_)
                      << " timeoutMs=" << timeout.count() << " host=" << host_);
         fail(id, std::string("connect timed out in ") + phaseName(phase_) + " after "

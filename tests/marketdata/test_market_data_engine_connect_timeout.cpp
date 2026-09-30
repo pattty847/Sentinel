@@ -147,6 +147,8 @@ struct EngineConnectTimeout : testing::Test {
     Authenticator auth{"/nonexistent-sentinel-test-credentials"};
     TestTls tls;
     Observed observed;
+    // Outlives the engine: TearDown stops it even when an ASSERT returns early.
+    HangingResolver resolver;
     BeastWsTransport::Options options{150ms, 200ms, {}};
     Engine::ReconnectPolicy policy{50ms, 100ms, 10ms, 2s, 50ms};
     std::unique_ptr<Engine> engine;
@@ -203,7 +205,6 @@ TEST_F(EngineConnectTimeout, TcpAcceptedButTlsNeverCompletesTimesOutIntoBackoff)
 
 TEST_F(EngineConnectTimeout, HungResolveTimesOutAndLateAnswerIsIgnored) {
     Peer peer(tls.server, Peer::Mode::WsHeartbeats);
-    HangingResolver resolver;
     options.resolve = resolver.fn();
     options.connectTimeout = 100ms;
     start(peer.port());
