@@ -774,7 +774,9 @@ void HeatmapSourceController::refreshLive() {
             // preferable to pinning every historical minute chunk indefinitely.
             if (!drawnAtL && previous->second < edgeFloor) start = edgeFloor;
         }
-        const auto lagLimit = std::min(kMaxLiveLagMs, kMaxLiveLagBuckets * tfMs_);
+        // Keep at least the just-finished bucket until its span uploads, even
+        // when one chart bucket is longer than the nominal two-hour cap.
+        const auto lagLimit = std::max(tfMs_, std::min(kMaxLiveLagMs, kMaxLiveLagBuckets * tfMs_));
         const auto capFloor = std::max(edgeFloor, floor(edge->openEndMs - 1));
         if (capFloor - start > lagLimit) {
             sLog_Data("Heatmap live window cap chart=" << chart_ << " symbol=" << symbol_ << " source=" << edge->source
@@ -793,7 +795,8 @@ void HeatmapSourceController::refreshLive() {
         for (const auto &edge : edges) if (edge->openEndMs)
             newestFloor = std::max(newestFloor, recording::floorDiv(
                 std::max(edge->committedThroughMs, edge->openEndMs - 1), tfMs_) * tfMs_);
-        if (newestFloor - lowest > std::min(kMaxLiveLagMs, kMaxLiveLagBuckets * tfMs_)) lowest = newestFloor;
+        const auto lagLimit = std::max(tfMs_, std::min(kMaxLiveLagMs, kMaxLiveLagBuckets * tfMs_));
+        if (newestFloor - lowest > lagLimit) lowest = newestFloor;
         for (auto &[source, start] : starts) start = lowest;
     }
     if (starts != liveStarts_) { liveStarts_ = std::move(starts); invalidateLive(); }

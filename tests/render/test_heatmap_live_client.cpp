@@ -145,6 +145,62 @@ protected:
     void upload(HeatmapSourceController &c) {
         c.capacity()->report(300ull << 20, uploadKeys(c)); c.pollCapacity(); drainLive();
     }
+    void coarseRolloverKeepsPreviousBucket(int tfMinutes) {
+        const auto tf = tfMinutes * kMinuteMs;
+        cutoff = minute(tfMinutes - 1);
+        transport.push(available(cutoff)); drainLive();
+        auto &c = chart(tf, tfMinutes * 2); settle(); upload(c); settle();
+        // Model what the node can draw, not merely a replacement SpanSet that
+        // the controller published but the node has not uploaded yet.
+        auto drawn = c.latestSnapshot();
+        auto historyHasPrevious = [](const SpanSet &set) {
+            for (const auto &column : set.resolution.columns) if (column.startMs == base)
+                for (const auto &s : column.sources) if (s.state == BucketState::Present) return true;
+            return false;
+        };
+        ASSERT_FALSE(historyHasPrevious(*drawn));
+        send(tail(tfMinutes - 1, tfMinutes - 1, tfMinutes - 1, 1, kMinuteMs)); settle();
+        ASSERT_TRUE(c.latestLive());
+        ASSERT_EQ(bucketState(*live(c).columns, base), BucketState::Present);
+        unsigned checked = 0;
+        auto checkDrawnUnion = [&] {
+            ++checked;
+            bool liveHasPrevious = false;
+            for (const auto &s : c.latestLive()->sources) {
+                if (bucketState(*s.columns, base) != BucketState::Present) continue;
+                liveHasPrevious = true;
+                const auto column = std::find_if(s.columns->columns.begin(), s.columns->columns.end(),
+                                                 [](const auto &v) { return v.bucketStartMs == base; });
+                ASSERT_NE(column, s.columns->columns.end());
+                EXPECT_EQ(column->observedMs, uint64_t(tf)); // every minute once
+            }
+            EXPECT_TRUE(historyHasPrevious(*drawn) || liveHasPrevious)
+                << "previous bucket would draw loading at tf=" << tf;
+        };
+        checkDrawnUnion();
+        const auto watch = QObject::connect(&c, &HeatmapSourceController::liveChanged, &c, checkDrawnUnion);
+        // The new bucket has opened while the server cutoff is still inside
+        // the previous bucket. Both the per-source and common-L caps must wait.
+        send(tail(tfMinutes - 1, tfMinutes, tfMinutes - 1, 2)); advance(c);
+        EXPECT_EQ(live(c).startMs, base);
+        checkDrawnUnion();
+        cutoff = minute(tfMinutes); ++chunkRevision;
+        send(tail(tfMinutes - 1, tfMinutes, tfMinutes, 3)); settle(); advance(c);
+        EXPECT_TRUE(historyHasPrevious(*c.latestSnapshot()));
+        EXPECT_FALSE(historyHasPrevious(*drawn)); // replacement built, upload deliberately held
+        EXPECT_EQ(live(c).startMs, base);
+        checkDrawnUnion();
+        send(tail(tfMinutes, tfMinutes + 1, tfMinutes, 4)); advance(c);
+        EXPECT_EQ(live(c).startMs, base);
+        checkDrawnUnion();
+        drawn = c.latestSnapshot();
+        upload(c); advance(c);
+        EXPECT_EQ(live(c).startMs, minute(tfMinutes));
+        EXPECT_EQ(bucketState(*live(c).columns, base), BucketState::NotLoaded);
+        checkDrawnUnion(); // history takes over only after the upload report
+        EXPECT_GE(checked, 8u);
+        QObject::disconnect(watch);
+    }
 };
 
 TEST_F(LiveClient, OneSubscriptionAcrossTwoChartsAndLastReleaseUnsubscribes) {
@@ -672,6 +728,12 @@ TEST_F(LiveClient, HourBoundaryLostFinalAndDelayedUploadKeepBothMinutesCovered) 
     EXPECT_FALSE(fetcher.live(symbol).front()->minutes.contains(minute(59))); // now supplied from sealed chunk
     upload(c); advance(c);
     EXPECT_EQ(live(c).startMs, minute(60));
+}
+TEST_F(LiveClient, FourHourRolloverKeepsPreviousBucketUntilUpload) {
+    coarseRolloverKeepsPreviousBucket(240);
+}
+TEST_F(LiveClient, DailyRolloverKeepsPreviousBucketUntilUpload) {
+    coarseRolloverKeepsPreviousBucket(1440);
 }
 TEST_F(LiveClient, CoarseTimeframesKeepOneHzAndDoNotFetchFromTheBeginningOfTheTile) {
     for (const int tfMinutes : {60, 240, 1440}) {
