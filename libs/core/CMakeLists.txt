@@ -2,6 +2,10 @@ project(sentinel_core)
 
 add_library(sentinel_core
     Cpp20Utils.hpp
+    capture/RawCapture.cpp
+    capture/CaptureVerifier.cpp
+    capture/CaptureSession.cpp
+    capture/CaptureApp.cpp
     Version.cpp
     Version.hpp
     ConfigLoader.cpp

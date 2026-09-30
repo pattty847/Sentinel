@@ -9,7 +9,7 @@
 #include <limits>
 #include <chrono>
 #include <algorithm>
-#include <random>
+#include <stdexcept>
 #include <utility>
 #include <string>
 
@@ -18,8 +18,6 @@ namespace {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    // Coinbase can be slow to send first frames; 20s avoids aggressive reconnect loop.
-    static constexpr int64_t kHeartbeatStaleThresholdMs = 20000;
 
     // "A,B,C" for log lines.
     std::string joinSymbols(const std::vector<std::string>& symbols) {
@@ -33,13 +31,22 @@ namespace {
 }
 
 MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config)
+    : MarketDataCoreEngine(auth, config, {}, ReconnectPolicy{}) {}
+
+MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config,
+                                           TransportFactory transportFactory, ReconnectPolicy policy)
     : m_auth(auth)
     , m_host(config.host)
     , m_port(config.port)
     , m_target(config.target)
     , m_useJwt(config.useJwt)
     , m_sslCaBundle(config.sslCaBundle)
+    , m_reconnectPolicy(policy)
 {
+    if (policy.initialDelay.count() <= 0 || policy.maximumDelay < policy.initialDelay ||
+        policy.watchdogInterval.count() <= 0 || policy.heartbeatStale < policy.watchdogInterval ||
+        policy.staleHeartbeatDelay < policy.initialDelay || policy.staleHeartbeatDelay > policy.maximumDelay)
+        throw std::invalid_argument("invalid market-data reconnect policy");
     const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
     const std::string bundlePath = !m_sslCaBundle.empty() ? m_sslCaBundle : defaultCaBundle;
     try {
@@ -54,12 +61,19 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
 
     sLog_App("MarketDataCore initialized: host=" << m_host << " port=" << m_port
              << " target=" << m_target << " jwt=" << m_useJwt);
-    m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
+    m_transport = transportFactory ? transportFactory(m_ioc, m_sslCtx) : std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx);
+    if (!m_transport) throw std::invalid_argument("market-data transport factory returned null");
     m_transport->onStatus([this](bool up){
+        if (m_ingestObserver) observeIngest(up ? IngestKind::TransportUp : IngestKind::TransportDown);
+        if (!m_running.load()) return;
         m_connected.store(up);
+        m_closePending = false;
         sLog_Data("WebSocket transport status changed: " << (up ? "UP" : "DOWN")
                   << " host=" << m_host);
         if (up) {
+            m_reconnectTimer.cancel();
+            m_reconnectScheduled = false;
+            m_backoffDuration = m_reconnectPolicy.initialDelay;
             m_lastHeartbeatMs.store(steadyClockMs());
             {
                 std::lock_guard<std::mutex> lock(m_seqMutex);
@@ -69,13 +83,14 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
             net::post(m_strand, [this]() {
                 replaySubscriptionsOnConnect();
             });
-            startHeartbeatWatchdog();
         } else {
             emitError("Transport down");
+            scheduleReconnect();
         }
     });
     m_transport->onError([this](std::string err){ emitError(std::move(err)); });
     m_transport->onMessage([this](std::string payload){
+        if (m_ingestObserver) observeIngest(IngestKind::Frame, payload);
         try {
             auto j = nlohmann::json::parse(payload);
             dispatch(j);
@@ -91,6 +106,21 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
 
 MarketDataCoreEngine::~MarketDataCoreEngine() {
     stop();
+}
+
+void MarketDataCoreEngine::observeIngest(IngestKind kind, std::string_view payload,
+                                         std::string_view product, std::string_view reason) noexcept {
+    const auto systemNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto steadyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    try {
+        m_ingestObserver({kind, systemNs, steadyNs, payload, product, reason});
+    } catch (const std::exception& e) {
+        sLog_Error("Ingest observer exception: " << e.what());
+    } catch (...) {
+        sLog_Error("Ingest observer exception (unknown)");
+    }
 }
 
 inline void MarketDataCoreEngine::emitError(std::string msg) {
@@ -159,26 +189,32 @@ void MarketDataCoreEngine::start() {
     if (!m_running.exchange(true)) {
         sLog_App("Starting MarketDataCore: host=" << m_host << " port=" << m_port
                  << " target=" << m_target);
-        m_backoffDuration = std::chrono::seconds(1);
+        m_backoffDuration = m_reconnectPolicy.initialDelay;
+        m_reconnectScheduled = m_closePending = false;
         m_workGuard.emplace(m_ioc.get_executor());
         m_ioc.restart();
         m_ioThread = std::thread(&MarketDataCoreEngine::run, this);
-        if (m_transport) {
+        net::post(m_strand, [this] {
+            if (!m_running.load()) return;
+            startHeartbeatWatchdog();
             m_transport->connect(m_host, m_port, m_target);
-        }
+        });
     }
 }
 
 void MarketDataCoreEngine::stop() {
     if (m_running.exchange(false)) {
         sLog_App("Stopping MarketDataCore...");
+        m_ioc.stop();
+        if (m_ioThread.joinable()) m_ioThread.join();
+        // Timer objects are not safe for concurrent cancel/expiry operations.
+        // Cancel after joining, so stop cannot race an I/O-thread retry.
         m_reconnectTimer.cancel();
+        m_heartbeatTimer.cancel();
+        m_reconnectScheduled = m_closePending = false;
+        m_connected.store(false);
         if (m_transport) m_transport->close();
         m_workGuard.reset();
-        m_ioc.stop();
-        if (m_ioThread.joinable()) {
-            m_ioThread.join();
-        }
 
         sLog_App("MarketDataCore stopped");
     }
@@ -208,26 +244,20 @@ void MarketDataCoreEngine::run() {
 }
 
 void MarketDataCoreEngine::scheduleReconnect() {
-    if (!m_running) return;
-    m_backoffDuration = std::min(m_backoffDuration * 2, std::chrono::seconds(60));
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    std::uniform_int_distribution<> jitter(0, 250);
-    auto delay = m_backoffDuration + std::chrono::milliseconds(jitter(gen));
-    
-    sLog_Data("Scheduling reconnect: delayMs="
-              << std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()
-              << " backoffSec=" << m_backoffDuration.count()
-              << " host=" << m_host);
+    if (!m_running.load() || m_connected.load() || m_reconnectScheduled || m_closePending) return;
+    m_reconnectScheduled = true;
+    const auto delay = m_backoffDuration;
+    m_backoffDuration = std::min(m_backoffDuration * 2, m_reconnectPolicy.maximumDelay);
+    sLog_Data("Scheduling reconnect: delayMs=" << delay.count() << " host=" << m_host);
     m_reconnectTimer.expires_after(delay);
     m_reconnectTimer.async_wait([this](beast::error_code ec) {
-        if (ec || !m_running) return;
-        
+        if (ec) return;
+        m_reconnectScheduled = false;
+        if (!m_running.load() || m_connected.load() || m_closePending) return;
         sLog_Data("Attempting reconnection: host=" << m_host << " port=" << m_port);
-        if (m_transport) {
-            m_transport->close();
-            m_transport->connect(m_host, m_port, m_target);
-        }
+        // A down callback already closed/failed the previous connection. Do not
+        // issue another close here: its delayed down event can cancel a new up.
+        m_transport->connect(m_host, m_port, m_target);
     });
 }
 
@@ -289,6 +319,7 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, cons
 }
 
 void MarketDataCoreEngine::emitBookInvalidated(const std::string& productId, const std::string& reason) {
+    if (m_ingestObserver) observeIngest(IngestKind::BookInvalidated, {}, productId, reason);
     sLog_Warning("Order book invalidated: product=" << (productId.empty() ? std::string("*") : productId)
                  << " reason=" << reason);
     if (m_onLiveOrderBookInvalidated) {
@@ -550,36 +581,35 @@ void MarketDataCoreEngine::handleHeartbeats(const nlohmann::json& message) {
 }
 
 void MarketDataCoreEngine::startHeartbeatWatchdog() {
-    net::post(m_strand, [this](){
-        m_heartbeatTimer.expires_after(std::chrono::seconds(2));
-        m_heartbeatTimer.async_wait([this](beast::error_code ec){
-            if (ec || !m_running.load()) return;
-            const int64_t nowMs = steadyClockMs();
-            const int64_t lastMs = m_lastHeartbeatMs.load();
-            if (lastMs > 0 && (nowMs - lastMs) > kHeartbeatStaleThresholdMs) {
-                sLog_Warning("Heartbeat stale, reconnecting: silenceMs=" << (nowMs - lastMs)
-                             << " thresholdMs=" << kHeartbeatStaleThresholdMs
-                             << " host=" << m_host);
-                triggerImmediateReconnect("stale heartbeat");
-                return;
-            }
-            startHeartbeatWatchdog();
-        });
+    if (!m_running.load()) return;
+    m_heartbeatTimer.expires_after(m_reconnectPolicy.watchdogInterval);
+    m_heartbeatTimer.async_wait([this](beast::error_code ec) {
+        if (ec || !m_running.load()) return;
+        const int64_t nowMs = steadyClockMs();
+        const int64_t lastMs = m_lastHeartbeatMs.load();
+        if (m_connected.load() && !m_closePending && lastMs > 0 &&
+            nowMs - lastMs > m_reconnectPolicy.heartbeatStale.count()) {
+            sLog_Warning("Heartbeat stale, reconnecting: silenceMs=" << (nowMs - lastMs)
+                         << " thresholdMs=" << m_reconnectPolicy.heartbeatStale.count()
+                         << " host=" << m_host);
+            triggerImmediateReconnect("stale heartbeat");
+        }
+        // Keep the watchdog alive across outages and repeated failed attempts.
+        startHeartbeatWatchdog();
     });
 }
 
 void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
-    net::post(m_strand, [this, r = std::string(reason)](){
+    net::post(m_strand, [this, r = std::string(reason)] {
+        if (!m_running.load() || m_closePending || m_reconnectScheduled) return;
+        if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, {}, r);
         sLog_Data("Immediate reconnect: reason=" << r);
-        // Use 5s backoff for stale heartbeat to avoid hammering Coinbase when they're slow.
-        m_backoffDuration = (r == "stale heartbeat")
-            ? std::chrono::seconds(5)
-            : std::chrono::seconds(1);
-        m_reconnectTimer.cancel();
-        if (m_transport) {
-            m_transport->close();
-            scheduleReconnect();
-        }
+        if (r == "stale heartbeat")
+            m_backoffDuration = std::max(m_backoffDuration, m_reconnectPolicy.staleHeartbeatDelay);
+        m_closePending = true;
+        m_connected.store(false);
+        // onStatus(false) is the sole retry scheduler, for this close and for
+        // every failed connection attempt that follows it.
+        m_transport->close();
     });
 }
-

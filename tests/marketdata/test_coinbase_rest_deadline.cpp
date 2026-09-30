@@ -20,7 +20,7 @@ using namespace std::chrono_literals;
 
 class CoinbaseRestDeadline : public testing::Test {
 protected:
-    enum class Reply { StallHandshake, StallRead, Candles, HttpError };
+    enum class Reply { StallHandshake, StallRead, Candles, HttpError, Product, WrongProduct, BadProduct };
     QTemporaryDir directory;
     Authenticator auth{"/nonexistent-sentinel-test-credentials"};
     net::io_context ioc;
@@ -82,6 +82,12 @@ protected:
                     response.result(reply == Reply::HttpError ? http::status::service_unavailable : http::status::ok);
                     response.body() = reply == Reply::HttpError ? "fixture unavailable" :
                         R"({"candles":[{"start":"60","open":"10","high":"12","low":"9","close":"11","volume":"3"}]})";
+                    if (reply == Reply::Product || reply == Reply::WrongProduct || reply == Reply::BadProduct) {
+                        nlohmann::json product = {{"product_id", reply == Reply::WrongProduct ? "ETH-USD" : "BTC-USD"},
+                            {"quote_increment", "0.0100"}, {"base_increment", "0.00000001"}, {"status", "online"}};
+                        if (reply == Reply::BadProduct) product["base_increment"] = 0.00000001;
+                        response.body() = product.dump();
+                    }
                     response.prepare_payload();
                     http::async_write(peer, response, [](beast::error_code, size_t) {});
                     // Intentionally never send close_notify, even after success.
@@ -135,6 +141,37 @@ TEST_F(CoinbaseRestDeadline, HttpFailureKeepsErrorContractWithoutWaitingForTlsSh
     const auto result = fetch(1s);
     EXPECT_FALSE(result.ok); EXPECT_TRUE(result.candles.empty());
     EXPECT_NE(result.error.find("HTTP 503"), std::string::npos);
+}
+
+TEST_F(CoinbaseRestDeadline, ProductMetadataRetainsExactIncrementStringsAndSource) {
+    serve(Reply::Product);
+    CoinbaseRestClient client(auth, "127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile, 2s);
+    const auto result = client.fetchProductMetadata("BTC-USD");
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.quoteIncrement, "0.0100");
+    EXPECT_EQ(result.baseIncrement, "0.00000001");
+    EXPECT_EQ(result.metadata["status"], "online");
+    EXPECT_EQ(request.target(), "/api/v3/brokerage/market/products/BTC-USD");
+    EXPECT_EQ(result.sourcePath, request.target());
+}
+TEST_F(CoinbaseRestDeadline, ProductMetadataRejectsDifferentProduct) {
+    serve(Reply::WrongProduct);
+    CoinbaseRestClient client(auth, "127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile, 2s);
+    const auto result = client.fetchProductMetadata("BTC-USD");
+    EXPECT_FALSE(result.ok); EXPECT_EQ(result.error, "product_id mismatch");
+}
+TEST_F(CoinbaseRestDeadline, ProductMetadataRequiresExactDecimalStrings) {
+    serve(Reply::BadProduct);
+    CoinbaseRestClient client(auth, "127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile, 2s);
+    EXPECT_FALSE(client.fetchProductMetadata("BTC-USD").ok);
+}
+TEST_F(CoinbaseRestDeadline, ProductMetadataUsesTheExistingTotalDeadline) {
+    serve(Reply::StallRead);
+    CoinbaseRestClient client(auth, "127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile, 250ms);
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = client.fetchProductMetadata("BTC-USD");
+    EXPECT_FALSE(result.ok); EXPECT_NE(result.error.find("deadline"), std::string::npos);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 250ms + 2s);
 }
 
 TEST(RestResolver, FreshCacheAvoidsRepeatedLookups) {

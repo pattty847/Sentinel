@@ -107,29 +107,10 @@ CoinbaseRestClient::CoinbaseRestClient(Authenticator& auth,
     , m_requestTimeout(std::clamp(requestTimeout, std::chrono::milliseconds(1), std::chrono::milliseconds(10000))) {
 }
 
-CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& productId,
-                                                          int64_t startSec,
-                                                          int64_t endSec,
-                                                          const std::string& granularity,
-                                                          int limit) const {
-    CandleFetchResult result;
-    if (productId.empty()) {
-        result.error = "missing product_id";
-        return result;
-    }
-    if (granularity.empty()) {
-        result.error = "missing granularity";
-        return result;
-    }
-    if (startSec <= 0 || endSec <= 0 || endSec <= startSec) {
-        result.error = "invalid time range";
-        return result;
-    }
-    if (limit <= 0) {
-        result.error = "invalid limit";
-        return result;
-    }
-
+CoinbaseRestClient::JsonResult CoinbaseRestClient::requestJson(
+    const std::string& publicPath, const std::string& privatePath,
+    const std::string& query, const char* label) const {
+    JsonResult result;
     const auto deadline = std::chrono::steady_clock::now() + m_requestTimeout;
     const char* stage = "DNS resolve";
     try {
@@ -186,8 +167,8 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         await([&](auto complete) { stream.async_handshake(ssl::stream_base::client, std::move(complete)); });
 
         auto doRequest = [&](bool usePublic) -> std::optional<nlohmann::json> {
-            const std::string path = buildCandlesPath(productId, usePublic);
-            const std::string target = buildCandlesTarget(productId, startSec, endSec, granularity, limit, usePublic);
+            const std::string path = usePublic ? publicPath : privatePath;
+            const std::string target = path + query;
 
             http::request<http::string_body> req{http::verb::get, target, 11};
             req.set(http::field::host, m_host);
@@ -222,6 +203,7 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
                 return std::nullopt;
             }
 
+            result.sourcePath = path;
             return nlohmann::json::parse(res.body());
         };
 
@@ -232,18 +214,81 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
         } else {
             jsonOpt = doRequest(false);
             if (!jsonOpt && result.error.find("401") != std::string::npos) {
-                sLog_Warning("REST candles: auth failed, retrying public endpoint: product=" << productId
+                sLog_Warning("REST " << label << ": auth failed, retrying public endpoint: product=" << publicPath
                              << " error=" << result.error);
                 jsonOpt = doRequest(true);
             }
         }
 
         if (!jsonOpt) {
-            sLog_Warning("REST candles failed: product=" << productId << " error=" << result.error);
+            sLog_Warning("REST " << label << " failed: product=" << publicPath << " error=" << result.error);
             return result;
         }
 
-        auto json = std::move(*jsonOpt);
+        result.body = std::move(*jsonOpt);
+        result.ok = true;
+        return result;
+    } catch (const std::exception& e) {
+        result.error = std::string(stage) + ": " + e.what();
+        sLog_Warning("REST " << label << " failed: path=" << publicPath << " error=" << result.error);
+        return result;
+    }
+}
+
+ProductMetadataResult CoinbaseRestClient::fetchProductMetadata(const std::string& productId) const {
+    ProductMetadataResult result;
+    if (productId.empty() || productId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != std::string::npos) {
+        result.error = "invalid product_id";
+        return result;
+    }
+    auto response = requestJson("/api/v3/brokerage/market/products/" + productId,
+                               "/api/v3/brokerage/products/" + productId, {}, "product metadata");
+    result.error = response.error;
+    if (!response.ok) return result;
+    try {
+        if (response.body.at("product_id").get<std::string>() != productId)
+            throw std::runtime_error("product_id mismatch");
+        result.quoteIncrement = response.body.at("quote_increment").get<std::string>();
+        result.baseIncrement = response.body.at("base_increment").get<std::string>();
+        result.metadata = std::move(response.body);
+        result.sourcePath = std::move(response.sourcePath);
+        result.ok = true;
+    } catch (const std::exception& e) {
+        result.error = e.what();
+    }
+    return result;
+}
+
+CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& productId,
+                                                          int64_t startSec,
+                                                          int64_t endSec,
+                                                          const std::string& granularity,
+                                                          int limit) const {
+    CandleFetchResult result;
+    if (productId.empty()) {
+        result.error = "missing product_id";
+        return result;
+    }
+    if (granularity.empty()) {
+        result.error = "missing granularity";
+        return result;
+    }
+    if (startSec <= 0 || endSec <= 0 || endSec <= startSec) {
+        result.error = "invalid time range";
+        return result;
+    }
+    if (limit <= 0) {
+        result.error = "invalid limit";
+        return result;
+    }
+
+    auto response = requestJson(buildCandlesPath(productId, true), buildCandlesPath(productId, false),
+        buildCandlesTarget(productId, startSec, endSec, granularity, limit, true).substr(
+            buildCandlesPath(productId, true).size()), "candles");
+    result.error = response.error;
+    if (!response.ok) return result;
+    try {
+        auto json = std::move(response.body);
         if (!json.contains("candles") || !json["candles"].is_array()) {
             result.error = "missing candles in response";
             return result;
@@ -277,7 +322,7 @@ CandleFetchResult CoinbaseRestClient::fetchProductCandles(const std::string& pro
     } catch (const std::exception& e) {
         result.ok = false;
         result.candles.clear();
-        result.error = std::string(stage) + ": " + e.what();
+        result.error = std::string("HTTP read: ") + e.what();
         sLog_Warning("REST candles failed: product=" << productId << " error=" << result.error);
         return result;
     }

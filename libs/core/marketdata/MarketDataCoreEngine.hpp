@@ -15,6 +15,7 @@
 #include <mutex>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "auth/Authenticator.hpp"
 #include "ws/SubscriptionManager.hpp"
@@ -45,7 +46,34 @@ public:
     using ErrorCb = std::function<void(const std::string&)>;
     using LatencyCb = std::function<void(int)>;
 
+    // Optional pre-parse capture tap. Views are valid only for the callback; set
+    // before start(). Runs on the I/O thread. No clocks/copies when unset.
+    enum class IngestKind { Frame, TransportUp, TransportDown, BookInvalidated, ResyncRequested };
+    struct IngestObservation {
+        IngestKind kind;
+        int64_t systemNs;
+        int64_t steadyNs;
+        std::string_view payload;
+        std::string_view product;
+        std::string_view reason;
+    };
+    using IngestObserver = std::function<void(const IngestObservation&)>;
+    void onIngest(IngestObserver cb) { m_ingestObserver = std::move(cb); }
+
+    struct ReconnectPolicy {
+        std::chrono::milliseconds initialDelay{1000};
+        std::chrono::milliseconds maximumDelay{30000};
+        std::chrono::milliseconds watchdogInterval{2000};
+        std::chrono::milliseconds heartbeatStale{20000};
+        std::chrono::milliseconds staleHeartbeatDelay{5000};
+    };
+    // Alternate transport/timings support deterministic offline tests. All
+    // transport callbacks must run on the supplied I/O context's single thread.
+    using TransportFactory = std::function<std::unique_ptr<WsTransport>(net::io_context&, ssl::context&)>;
     explicit MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config);
+    MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config,
+                         TransportFactory transportFactory, ReconnectPolicy policy);
+
 
     ~MarketDataCoreEngine();
     void start();
@@ -69,6 +97,8 @@ public:
     void onLatency(LatencyCb cb) { m_onLatency = std::move(cb); }
 
 private:
+    void observeIngest(IngestKind kind, std::string_view payload = {},
+                       std::string_view product = {}, std::string_view reason = {}) noexcept;
     void run();
     void scheduleReconnect();
 
@@ -115,11 +145,15 @@ private:
     net::steady_timer               m_reconnectTimer{m_strand};
     net::steady_timer               m_heartbeatTimer{m_strand};
     std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
-    std::unique_ptr<BeastWsTransport> m_transport;
+    std::unique_ptr<WsTransport>      m_transport;
     
     std::atomic<bool>               m_running{false};
     std::atomic<bool>               m_connected{false};
-    std::chrono::seconds            m_backoffDuration{1};
+    ReconnectPolicy                m_reconnectPolicy;
+    std::chrono::milliseconds       m_backoffDuration{1000};
+    // I/O-thread-owned. Duplicate down/close callbacks share one pending retry.
+    bool                            m_reconnectScheduled = false;
+    bool                            m_closePending = false;
     std::thread                     m_ioThread;
     
     std::atomic<int>                m_tradeLogCount{0};
@@ -139,4 +173,5 @@ private:
     ConnectionStatusCb               m_onConnectionStatus;
     ErrorCb                          m_onError;
     LatencyCb                        m_onLatency;
+    IngestObserver                   m_ingestObserver;
 };
