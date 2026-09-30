@@ -192,6 +192,7 @@ Routing (starting defaults; the orchestrator recalibrates them as results come i
 - **Codex `gpt-6-sol`, effort high:** a well-specified bug fix or small feature with clear acceptance checks, in its own worktree.
 - **Codex `gpt-6-astra`, effort high or above:** harder self-contained work: deeper reasoning, larger isolated refactors, second-opinion reviews (`-s read-only`).
 - **Claude subagents (the orchestrator's Agent tool, model `opus` or `sonnet`):** the same kinds of tasks as the Codex lieutenants, used to spread usage across the owner's Claude and ChatGPT subscriptions. Write tasks follow the same hand-off protocol in their own worktree (branch `lt-claude/...`); reviews run read-only.
+- **UI / visual write tasks go to Claude subagents:** they can launch the GUI or lab and read their own screenshots; a sandboxed Codex run cannot (no window server, no Metal). Codex takes non-visual work and reviews.
 - **Read-only review before merge:** a different model from the one that wrote the change; prefer the other vendor (Claude reviews Codex work, Codex reviews Claude work).
 - A delegated agent does not delegate further unless its prompt explicitly allows it, and never merges its own branch.
 
