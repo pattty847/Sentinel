@@ -49,7 +49,7 @@ struct Layer {
     int64_t hour = -1;
     int64_t hourThroughMs = 0;
     bool hourWatermarkBlocked = false;
-    int64_t publishedMinuteMs = -1, publishedHourMs = -1; // last values handed to readers
+    int64_t publishedMinuteMs = -1, publishedHourMs = -1, publishedColumnMs = -1; // last values handed to readers
     explicit Layer(std::pmr::memory_resource *pool) : rows(pool) {
         rows.reserve(8192);
         touched.reserve(4096);
@@ -69,6 +69,11 @@ struct Symbol {
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
+    int64_t lastColumnMs = 0;
+    // Set while invalid by the recorder's own decision; cleared by an accepted
+    // snapshot or an upstream invalidation (whose reconnect brings a snapshot).
+    std::string selfInvalidReason;
+    int64_t nextResnapshotLocal = 0;
 };
 int64_t systemNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -113,6 +118,7 @@ struct BookRecorder::Impl {
         }
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
+        bool upstream = false; // Invalid from onInvalid(), not the recorder's own overflow control
     };
     // Only the producer accesses this set. Its immutable strings have stable
     // addresses, so even long symbols require no allocation on repeated enqueues.
@@ -132,6 +138,7 @@ struct BookRecorder::Impl {
     int64_t emergencyLocal = 0;
     std::thread worker;
     std::map<std::string, std::unique_ptr<Symbol>> symbols;
+    int64_t workerLocal = 0; // local time of the newest accepted message; worker only
     mutable std::mutex watermarksMutex;
     std::map<std::pair<std::string, std::string>, BookRecorder::Watermarks> watermarksBySeries;
     std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, queueDrops{0}, invalidations{0},
@@ -245,7 +252,20 @@ struct BookRecorder::Impl {
         }
         return *symbols.emplace(name, std::move(next)).first->second;
     }
-    void invalidate(const std::string &name, Symbol &s, const std::string &reason) {
+    void requestResnapshot(const std::string &name, Symbol &s) {
+        if (!cfg.onSelfInvalidated || s.selfInvalidReason.empty() || workerLocal < s.nextResnapshotLocal)
+            return;
+        s.nextResnapshotLocal = workerLocal + cfg.resnapshotIntervalMs;
+        sLog_Warning("BookRecorder: requesting resnapshot symbol=" << name << " reason=" << s.selfInvalidReason
+                                                                   << " time=" << s.clock);
+        try {
+            cfg.onSelfInvalidated(name, s.selfInvalidReason);
+        } catch (const std::exception &e) {
+            sLog_Error("BookRecorder: resnapshot request failed symbol=" << name << " error=" << e.what());
+        }
+    }
+    // upstream: reported via onInvalid; the source already owes a snapshot.
+    void invalidate(const std::string &name, Symbol &s, const std::string &reason, bool upstream = false) {
         for (auto &layer : s.layers) {
             for (auto &[_, row] : layer.rows) {
                 if (s.valid)
@@ -262,6 +282,12 @@ struct BookRecorder::Impl {
         s.asks.clear();
         ++invalidations;
         sLog_Data("BookRecorder: invalid symbol=" << name << " time=" << s.clock << " reason=" << reason);
+        if (upstream) {
+            s.selfInvalidReason.clear();
+        } else {
+            s.selfInvalidReason = reason;
+            requestResnapshot(name, s);
+        }
     }
     bool trackMid(Symbol &s) {
         if (s.bids.empty() || s.asks.empty())
@@ -547,6 +573,7 @@ struct BookRecorder::Impl {
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
                 continue;
             }
+            s.lastColumnMs = std::max(s.lastColumnMs, r.bucketStartMs);
             publishCopy(r, r.bucketStartMs + kMinute, false);
             try {
                 rollup(s, r);
@@ -586,7 +613,8 @@ struct BookRecorder::Impl {
                 (l.hour < 0 || l.hour >= hourBoundary || l.hourMinutes.empty()))
                 l.hourThroughMs = std::max(l.hourThroughMs, hourBoundary);
             const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
-            changed = changed || l.publishedMinuteMs != s.minuteThroughMs || l.publishedHourMs != hourMs;
+            changed = changed || l.publishedMinuteMs != s.minuteThroughMs || l.publishedHourMs != hourMs ||
+                      l.publishedColumnMs != s.lastColumnMs;
         }
         if (!changed)
             return;
@@ -594,11 +622,13 @@ struct BookRecorder::Impl {
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &l = s.layers[li];
             const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
-            if (l.publishedMinuteMs == s.minuteThroughMs && l.publishedHourMs == hourMs)
+            if (l.publishedMinuteMs == s.minuteThroughMs && l.publishedHourMs == hourMs &&
+                l.publishedColumnMs == s.lastColumnMs)
                 continue;
-            watermarksBySeries[{l.header.symbol, l.header.layer}] = {s.minuteThroughMs, hourMs};
+            watermarksBySeries[{l.header.symbol, l.header.layer}] = {s.minuteThroughMs, hourMs, s.lastColumnMs};
             l.publishedMinuteMs = s.minuteThroughMs;
             l.publishedHourMs = hourMs;
+            l.publishedColumnMs = s.lastColumnMs;
         }
     }
     void apply(Symbol &s, const Message &m) {
@@ -680,6 +710,7 @@ struct BookRecorder::Impl {
                 row->peak = std::max(row->peak, row->size);
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
+            s.selfInvalidReason.clear();
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
@@ -691,6 +722,7 @@ struct BookRecorder::Impl {
                 invalidate(name, *s, "invalid timestamp");
             return;
         }
+        workerLocal = m.local;
         if (m.kind == Kind::Tick || m.kind == Kind::Invalid) {
             for (auto &[name, ptr] : symbols) {
                 if (m.kind == Kind::Invalid && !m.symbol().empty() && name != m.symbol())
@@ -701,7 +733,9 @@ struct BookRecorder::Impl {
                 const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
-                    invalidate(name, s, m.reason);
+                    invalidate(name, s, m.reason, m.upstream);
+                else if (!s.valid)
+                    requestResnapshot(name, s); // repeats while still invalid, rate limited
                 publishOpen(s);
             }
             return;
@@ -755,7 +789,7 @@ void BookRecorder::onUpdates(const std::string &symbol, int64_t time, std::vecto
         {Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
-    impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
+    impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}, true});
 }
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});

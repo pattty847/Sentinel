@@ -609,6 +609,14 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
     });
 }
 
+void MarketDataCoreEngine::requestResnapshot(const std::string& productId) {
+    net::post(m_strand, [this, productId] {
+        if (!m_running.load() || !m_connected.load()) return;
+        sLog_Warning("Resnapshot requested, reconnecting: product=" << productId << " host=" << m_host);
+        triggerImmediateReconnect(("resnapshot " + productId).c_str());
+    });
+}
+
 void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
     net::post(m_strand, [this, r = std::string(reason)] {
         if (!m_running.load() || m_closePending || m_reconnectScheduled) return;

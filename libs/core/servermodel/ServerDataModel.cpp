@@ -176,6 +176,13 @@ void ServerDataModel::startRecorder() {
             if (!live->publish(std::move(record)))
                 sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
         };
+        cfg.onSelfInvalidated = [this](const std::string& symbol, const std::string& reason) {
+            // Recorder worker thread: hand off only.
+            QMetaObject::invokeMethod(this, [this, s = QString::fromStdString(symbol),
+                                             r = QString::fromStdString(reason)] {
+                emit recordingResnapshotRequested(s, r);
+            }, Qt::QueuedConnection);
+        };
         m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
         m_recordingDir = dir;
     } catch (const std::exception& e) {
@@ -196,9 +203,33 @@ void ServerDataModel::startRecorder() {
             sLog_Data("Recording v2 stats: columns=" << s.columnsWritten << " late=" << s.lateEvents
                       << " backward=" << s.backwardSteps << " queueDrops=" << s.queueDrops
                       << " invalidations=" << s.invalidations << " diskErrors=" << s.diskErrors);
+            checkRecorderProgress(localNowMs());
         }
     });
     m_recorderTimer.start();
+}
+
+// Once a minute: warn per pinned symbol whose newest committed column has not
+// moved for 2+ minutes of continuous market-data connection.
+void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
+    for (const auto& symbol : m_serverConfig.defaultSymbols) {
+        const int64_t last = m_recorder->watermarks(symbol, "near").lastColumnMs;
+        auto& progress = m_recorderProgress[symbol];
+        if (!m_marketDataConnected || progress.sinceMs == 0 || last != progress.lastColumnMs) {
+            progress = {last, nowMs};
+            continue;
+        }
+        if (nowMs - progress.sinceMs >= 120'000)
+            sLog_Warning("Recording v2 stalled: symbol=" << symbol << " lastColumnMs=" << last
+                         << " flatMs=" << (nowMs - progress.sinceMs)
+                         << " invalidations=" << m_recorder->stats().invalidations);
+    }
+}
+
+void ServerDataModel::onMarketDataConnectionChanged(bool connected) {
+    if (connected == m_marketDataConnected) return;
+    m_marketDataConnected = connected;
+    for (auto& [_, progress] : m_recorderProgress) progress.sinceMs = 0; // count only connected time
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {

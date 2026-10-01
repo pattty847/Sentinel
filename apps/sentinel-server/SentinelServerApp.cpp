@@ -147,9 +147,16 @@ bool SentinelServerApp::initialize() {
         });
         
         // Wire up callbacks for logging
-        m_marketDataCore->onConnectionStatus([](bool connected){
+        m_marketDataCore->onConnectionStatus([modelPtr](bool connected){
             sLog_App("MarketDataCore Connection: " << (connected ? "CONNECTED" : "DISCONNECTED"));
+            safeInvoke(modelPtr, [connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(connected); });
         });
+        // The recorder dropped a book on its own: only a fresh snapshot resumes it.
+        connect(m_serverModel.get(), &ServerDataModel::recordingResnapshotRequested, this,
+                [this](const QString& symbol, const QString& reason) {
+                    sLog_Warning("Recording resnapshot request: symbol=" << symbol << " reason=" << reason);
+                    if (m_marketDataCore) m_marketDataCore->requestResnapshot(symbol.toStdString());
+                });
         
         m_marketDataCore->onError([](const std::string& error){
             sLog_Error("MarketDataCore Error: " << error);

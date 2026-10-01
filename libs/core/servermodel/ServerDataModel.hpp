@@ -82,6 +82,8 @@ public slots:
     void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs = 0);
     // Empty productId = every symbol. The book stays invalid until its next snapshot.
     void onLiveOrderBookInvalidated(const QString& productId, const QString& reason);
+    // Market-data transport up/down; gates the recorder stall warning.
+    void onMarketDataConnectionChanged(bool connected);
 
 signals:
     // Rebroadcast signals for streaming clients
@@ -93,6 +95,10 @@ signals:
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
 
     void heatmapSliceReady(const HeatmapSlice& slice);
+
+    // The recorder lost a symbol's book on its own; only a fresh upstream snapshot
+    // resumes it. Main thread, at most once per symbol per 30 s (recorder-limited).
+    void recordingResnapshotRequested(const QString& symbol, const QString& reason);
 
 private:
     void updateExchangeOffsetMs(int64_t exchangeMs);
@@ -115,5 +121,9 @@ private:
     std::optional<std::filesystem::path> m_recordingDir;
     QTimer m_recorderTimer;
     int m_recorderTicks = 0;
+    bool m_marketDataConnected = false;
+    struct RecorderProgress { int64_t lastColumnMs = 0, sinceMs = 0; };
+    std::unordered_map<std::string, RecorderProgress> m_recorderProgress; // main thread
     void startRecorder();
+    void checkRecorderProgress(int64_t nowMs);
 };

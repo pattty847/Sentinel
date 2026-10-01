@@ -617,6 +617,7 @@ TEST_F(RecorderTest, OneSidedUpdateDoesNotStopRecordingAcrossUtcDay) {
     value(rows[3], 99, false, 2.5, 3);
     value(rows[3], 101, true, 4, 4);
     EXPECT_TRUE(std::filesystem::exists(dir.path().toStdString() + "/BTC-USD/near-60000/2000-01-02.hmc2"));
+    EXPECT_EQ(r->watermarks("BTC-USD", "near").lastColumnMs, kEpoch + D + 120000); // feeds the stall warning
 }
 // A one-sided book that crosses a minute boundary keeps the last two-sided mid
 // for the new window (no mid from an empty side, no UB on the empty map).
@@ -640,4 +641,43 @@ TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryKeepsLastMid) {
     value(rows[1], 99, false, 2, 2);
     EXPECT_DOUBLE_EQ(rows[2].midOpen, 100.5);
     value(rows[2], 102, true, 5, 5);
+}
+TEST_F(RecorderTest, SelfInvalidationRequestsResnapshot) {
+    std::vector<std::pair<std::string, std::string>> requests;
+    auto c = config();
+    c.maxQueuedLevels = 2;
+    c.onSelfInvalidated = [&](const std::string &symbol, const std::string &reason) {
+        requests.emplace_back(symbol, reason);
+    };
+    auto r = make(c);
+    snap(*r, 0);
+    update(*r, 20000, {{true, 99, 7}, {false, 101, 8}, {true, 98, 1}}); // queue level overflow
+    ASSERT_EQ(requests.size(), 1);
+    EXPECT_EQ(requests[0], (std::pair<std::string, std::string>{"BTC-USD", "queue level/slot overflow"}));
+    snap(*r, 30000);
+    local = 100000;
+    r->onInvalid("BTC-USD", kEpoch + 100000, "disconnect"); // upstream owes the snapshot
+    r->drainForTest();
+    tick(*r, 200000);
+    EXPECT_EQ(requests.size(), 1);
+}
+TEST_F(RecorderTest, ResnapshotRequestsAreRateLimitedAndRepeatWhileStuck) {
+    std::vector<int64_t> requestedAt;
+    auto c = config();
+    c.maxQueuedLevels = 2;
+    c.onSelfInvalidated = [&](const std::string &, const std::string &) { requestedAt.push_back(local); };
+    auto r = make(c);
+    const std::vector<Level> overflow{{true, 99, 7}, {false, 101, 8}, {true, 98, 1}};
+    snap(*r, 0);
+    update(*r, 10000, overflow);
+    snap(*r, 20000);
+    update(*r, 25000, overflow); // second self-invalidation inside 30 s: suppressed
+    tick(*r, 39999);
+    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000}));
+    tick(*r, 40000); // still invalid: ask again once the interval has passed
+    tick(*r, 50000);
+    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000, 40000}));
+    snap(*r, 60000);
+    tick(*r, 200000); // valid again: no more requests
+    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000, 40000}));
 }

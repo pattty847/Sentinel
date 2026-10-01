@@ -82,6 +82,10 @@ public:
     // Subscription Management
     void subscribeToSymbols(const std::vector<std::string>& symbols);
     void unsubscribeFromSymbols(const std::vector<std::string>& symbols);
+    // A consumer lost its book for productId on its own (not via onLiveOrderBookInvalidated)
+    // and needs a fresh snapshot: reconnect, which resubscribes every product. Thread-safe;
+    // ignored while disconnected (the pending reconnect brings snapshots). Callers rate-limit.
+    void requestResnapshot(const std::string& productId);
 
     MarketDataCoreEngine(const MarketDataCoreEngine&) = delete;
     MarketDataCoreEngine& operator=(const MarketDataCoreEngine&) = delete;

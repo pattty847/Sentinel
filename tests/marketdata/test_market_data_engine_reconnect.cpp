@@ -2,6 +2,9 @@
 #include "marketdata/MarketDataCoreEngine.hpp"
 #include "fixtures/coinbase_messages.hpp"
 #include "fixtures/fake_ws_transport.hpp"
+#include "servermodel/BookRecorder.hpp"
+#include "servermodel/Hmc2Store.hpp"
+#include <QTemporaryDir>
 #include <future>
 
 namespace {
@@ -149,5 +152,56 @@ TEST_F(EngineReconnect, WatchdogDoesNotCloseAgainWhileWaitingForTransportDown) {
     ASSERT_TRUE(scenario->wait([](auto& s) { return s.frames >= 10; }));
     engine->stop();
     EXPECT_EQ(scenario->attempts.size(), 2); EXPECT_EQ(scenario->closes, 1);
+}
+// The recorder drops a book on its own (here: queue level overflow). Its request
+// must reach the engine, which reconnects; the fresh snapshot resumes recording.
+TEST_F(EngineReconnect, RecorderSelfInvalidationResnapshotsAndRecordingResumes) {
+    constexpr int64_t kT0 = 1'767'225'600'000; // 2026-01-01T00:00:00Z
+    scenario->onAttempt = [](auto& transport, int attempt) {
+        transport.up();
+        if (attempt == 1) {
+            transport.frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z").dump());
+            transport.frame(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 7}, {"offer", 101, 8}, {"bid", 98, 1}},
+                                                       "2026-01-01T00:00:10Z").dump());
+        } else {
+            transport.frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:30Z").dump());
+            transport.frame(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 3}}, "2026-01-01T00:01:10Z").dump());
+        }
+    };
+    create();
+    QTemporaryDir dir;
+    recording::RecorderConfig config{dir.path().toStdString(), 100, {}, {{"near", 100, 0.5, 2, false}}, 0, 2};
+    config.onSelfInvalidated = [this](const std::string& symbol, const std::string&) { engine->requestResnapshot(symbol); };
+    recording::BookRecorder recorder(std::move(config), [] { return kT0; });
+    engine->onLiveOrderBookInitialized([&](const std::string& product, const auto& bids, const auto& asks, int64_t envelopeMs) {
+        std::vector<recording::Level> levels;
+        for (const auto& l : bids) levels.push_back({true, l.price, l.size});
+        for (const auto& l : asks) levels.push_back({false, l.price, l.size});
+        recorder.onSnapshot(product, envelopeMs, std::move(levels));
+    });
+    engine->onLiveOrderBookLevelUpdates([&](const std::string& product, const auto& updates, int64_t exchangeMs) {
+        std::vector<recording::Level> levels;
+        for (const auto& u : updates) levels.push_back({u.isBid, u.price, u.quantity});
+        recorder.onUpdates(product, exchangeMs, std::move(levels));
+    });
+    engine->onLiveOrderBookInvalidated([&](const std::string& product, const std::string& reason) {
+        recorder.onInvalid(product, kT0, reason);
+    });
+    std::vector<std::string> resyncs;
+    engine->onIngest([&](const auto& event) {
+        if (event.kind == Kind::ResyncRequested) resyncs.emplace_back(event.reason);
+    });
+    engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.ups == 2 && s.frames == 4; }));
+    engine->stop();
+    recorder.drainForTest();
+    EXPECT_EQ(scenario->attempts.size(), 2);
+    EXPECT_EQ(resyncs, (std::vector<std::string>{"resnapshot BTC-USD"}));
+    const auto rows = recording::Hmc2Store::readRange(dir.path().toStdString(), "BTC-USD", "near", 60000, kT0,
+                                                      kT0 + 3'600'000);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].bucketStartMs, kT0);
+    EXPECT_EQ(rows[0].observedMs, 40000); // 10 s before the overflow + 30 s after the fresh snapshot
+    EXPECT_NE(rows[0].flags & recording::kResynced, 0u);
 }
 } // namespace
