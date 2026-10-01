@@ -48,6 +48,7 @@ public slots:
     void setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow,
                             double minPrice = 0, double maxPrice = 0,
                             double widthPx = 0, double heightPx = 0);
+    void setHeatmapEnabled(bool enabled); // processor thread; preserves recording/legacy mode
     void setRecordingConfig(bool requested, double minRowPx);
     void setRecordingCapability(bool available);
     void setRecordingConnected(bool connected);
@@ -115,6 +116,7 @@ private:
     void applyRecordingBand();
     void sendRecordingRequest(int64_t endMs, bool finalRepair = false);
     void resetRecordingRequest();
+    bool m_heatmapEnabled = true;
     bool m_recordingRequested = false, m_recordingAvailable = false;
     bool m_recordingConnected = false;
     bool m_recordingInFlight = false, m_recordingBandConfirmed = false;

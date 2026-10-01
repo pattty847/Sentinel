@@ -232,6 +232,54 @@ TEST_F(LabItemTest, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     delete item;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
 }
+// S6a CPU parity: synthetic HMC2 -> local transport -> shared service -> two
+// controllers. Runs even when the sandbox has no Metal device/window server.
+TEST(LabDataService, LocalControllersShareRecordedBuildsWithoutAGpu) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    writeRecording(dir, 4 * 60);
+    lab::LabData::configure(dir.path().toStdString(), epoch + 4 * kHourMs);
+    struct Cleanup { ~Cleanup() { lab::LabData::configure({}, 0); } } cleanup;
+    auto &data = lab::LabData::instance();
+    auto &service = data.service();
+    auto *a = data.createController(320ull << 20);
+    auto *b = data.createController(320ull << 20);
+    service.onData([&] {
+        a->setView(lab::kSymbol, minute, epoch + kHourMs, epoch + 2 * kHourMs);
+        b->setView(lab::kSymbol, minute, epoch + kHourMs, epoch + 2 * kHourMs);
+    });
+    auto builds = [](const auto *controller) {
+        std::set<const heatmap::SpanSourceBuild *> out;
+        if (const auto set = controller->latestSnapshot()) {
+            for (const auto &span : set->spans) {
+                if (span.rank.tier != heatmap::SpanTier::Visible) continue;
+                for (const auto &source : span.sources) {
+                    if (!source.build) return std::set<const heatmap::SpanSourceBuild *>{};
+                    out.insert(source.build.get());
+                }
+            }
+        }
+        return out;
+    };
+    QElapsedTimer deadline;
+    deadline.start();
+    while ((builds(a).empty() || builds(b).empty()) && deadline.elapsed() < 5000) {
+        QCoreApplication::processEvents();
+        service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+        std::this_thread::yield();
+    }
+    ASSERT_FALSE(builds(a).empty());
+    EXPECT_EQ(builds(a), builds(b));
+    ASSERT_TRUE(data.availability());
+    EXPECT_EQ(data.availability()->sources.size(), 2);
+    data.refreshStats();
+    EXPECT_GT(data.stats().fetcher.bodies, 0);
+    EXPECT_GT(data.stats().store.bytes, 0);
+    data.destroyController(a);
+    data.destroyController(b);
+    EXPECT_EQ(service.controllerCount(), 0);
+}
+
 // S5L-c review fix 2: the server-mode data path shuts down with a connection
 // completion queued behind it (the stream client's connected() emitted inside
 // the teardown turn, before the client is deleted). Its delivery is dropped with

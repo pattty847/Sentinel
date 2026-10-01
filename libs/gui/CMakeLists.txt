@@ -22,6 +22,8 @@ set(GRID_CORE_SOURCES
     mainwindow/MenuBuilder.h
     mainwindow/ShortcutBinder.cpp
     mainwindow/ShortcutBinder.h
+    mainwindow/AgentApiInput.cpp
+    mainwindow/AgentApiInput.hpp
     mainwindow/AgentApiCodec.cpp
     mainwindow/AgentApiCodec.hpp
     mainwindow/AgentApiOperations.cpp
@@ -179,6 +181,10 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapBinGrid.hpp
     render/heatmap/HeatmapGpuSource.hpp
     render/heatmap/HeatmapGpuSource.cpp
+    render/heatmap/HeatmapSettingsStore.hpp
+    render/heatmap/HeatmapSettingsStore.cpp
+    render/heatmap/HeatmapDataService.hpp
+    render/heatmap/HeatmapDataService.cpp
     render/heatmap/HeatmapSourceController.hpp
     render/heatmap/HeatmapSourceController.cpp
     render/heatmap/HeatmapGpuSelfTest.hpp
@@ -374,6 +380,7 @@ target_include_directories(sentinel_gui_lib
 
 target_link_libraries(sentinel_gui_lib
     PUBLIC
+        sentinel_heatmap_gpu
         sentinel_core
         msdfgen::msdfgen
         Qt6::Core

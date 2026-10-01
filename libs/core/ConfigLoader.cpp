@@ -214,6 +214,37 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
     }
 
     if (heatmapNode) {
+        readScalar(heatmapNode, "renderer", cfg.heatmap.renderer);
+        readScalar(heatmapNode, "tick_mode", cfg.heatmap.tickMode);
+        readScalar(heatmapNode, "manual_tick", cfg.heatmap.manualTick);
+        readScalar(heatmapNode, "min_row_px", cfg.heatmap.minRowPx);
+        readScalar(heatmapNode, "hysteresis", cfg.heatmap.hysteresis);
+        readScalar(heatmapNode, "crossfade_ms", cfg.heatmap.crossfadeMs);
+        readScalar(heatmapNode, "show_band_edges", cfg.heatmap.showBandEdges);
+        readScalar(heatmapNode, "palette_preset", cfg.heatmap.palettePreset);
+        const auto readGradient = [&](const char *key, auto &out) {
+            const auto node = heatmapNode[key];
+            if (!node || !node.IsSequence() || node.size() < 2 || node.size() > 16) return;
+            std::vector<std::pair<double, std::string>> stops;
+            for (const auto &stop : node) {
+                if (!stop.IsMap() || !stop["position"] || !stop["color"]) return;
+                stops.emplace_back(stop["position"].as<double>(), stop["color"].as<std::string>());
+            }
+            out = std::move(stops); // chartDefaults validates positions/colors
+        };
+        readGradient("bid_gradient", cfg.heatmap.bidGradient);
+        readGradient("ask_gradient", cfg.heatmap.askGradient);
+        readScalar(heatmapNode, "opacity", cfg.heatmap.opacity);
+        readScalar(heatmapNode, "gpu_cap_bytes", cfg.heatmap.gpuCapBytes);
+        readScalar(heatmapNode, "upload_budget_bytes", cfg.heatmap.uploadBudgetBytes);
+        readScalar(heatmapNode, "decoded_chunk_bytes", cfg.heatmap.decodedChunkBytes);
+        readScalar(heatmapNode, "span_source_bytes", cfg.heatmap.spanSourceBytes);
+        readScalar(heatmapNode, "cpu_ceiling_bytes", cfg.heatmap.cpuCeilingBytes);
+        readScalar(heatmapNode, "prefetch_tiles", cfg.heatmap.prefetchTiles);
+        readScalar(heatmapNode, "live_min_interval_ms", cfg.heatmap.liveMinIntervalMs);
+        readScalar(heatmapNode, "show_telemetry", cfg.heatmap.showTelemetry);
+        if (cfg.heatmap.renderer != "legacy" && cfg.heatmap.renderer != "gpu")
+            cfg.heatmap.renderer = "legacy";
         readScalar(heatmapNode, "source", cfg.heatmap.source);
         if (cfg.heatmap.source != "legacy" && cfg.heatmap.source != "recording")
             cfg.heatmap.source = "legacy";

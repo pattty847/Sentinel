@@ -9,6 +9,9 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
 | GET | `/api/v1/trades?windowMs=60000&limit=100` | Receive-time tape, newest first, and summary of all retained matches. Window maximum 900,000 ms; limit maximum 1,000. |
+| GET | `/api/v1/heatmap/state` | Saved renderer/tick settings and shared service status; S6b-only metrics are `null`. |
+| POST | `/api/v1/heatmap/settings` | Partial chart settings; persists and returns an operation ID. |
+| POST | `/api/v1/input` | Synthetic wheel, drag or click to the heatmap QQuickView; returns an operation ID. |
 | GET | `/api/v1/heatmap/walls?startMs=...&endMs=...&priceMin=...&priceMax=...&minQty=0&limit=20` | Ranked recording heatmap cells from the loaded window. `limit` maximum 100. |
 | GET | `/api/v1/screenshot?name=review&target=main` | Existing screenshot result; `target` is `main`, `heatmap`, or `lab`. |
 | POST | `/api/v1/symbol` | JSON `{"symbol":"ETH-USD"}`; subscribes through the chart's symbol path. |
@@ -33,6 +36,30 @@ Every successful POST returns an `operationId` and `status:"applied"`, plus the 
 `/symbol` accepts uppercase `BASE-QUOTE` symbols with two to twenty ASCII alphanumeric characters on each side. `/timeframe` requires an advertised `servedTimeframesMs` entry; older servers without that advertisement cannot select a timeframe through this API. Either field sets both v1 timeframes, and unequal values return 422. `/viewport` requires each bound pair to be complete, finite, positive for price, and increasing. Explicit time bounds turn off follow mode; neither bound pair can be combined with `followLive:true`. Omitted price bounds preserve the current price range. Follow-only requests preserve the current price span and recenter it on the latest best bid/ask midpoint, falling back to the last trade until a two-sided book arrives. An explicit price range disables follow mode. Viewport changes use `setViewport()` so the version advances.
 
 The render acknowledgement is an ordering guarantee: the renderer copies the GUI control revision, selection epoch and viewport version into its frame context, and publishes fixed-size atomic frame data after rendering. It does not assert that history is complete or that live data did not advance. A hidden chart can leave an operation `applied`, so a guarded screenshot can time out. Existing layer setters may disable conflicting layers; the response reports the resulting full layer state.
+
+## Heatmap plumbing (S6a)
+
+`GET /api/v1/heatmap/state` uses the standard `ok/meta/data` envelope and accepts only optional `symbol=<active-symbol>`. `data.renderer` is the persisted selection (`legacy` or `gpu`); `activeRenderer` is `legacy` throughout S6a, including when the selection is `gpu`. Drawing, tick policy and runtime application arrive in S6b. `tickMode` is `auto` or `manual`; `tickUnits` is the saved manual tick (integer price units, price times the source's `priceScale`) in manual mode and `null` in auto mode. `settings` contains the complete persisted chart model. The fields `offeredPresets`, `settled`, `drawnTimeframeMs`, `drawnTickUnits`, `indicatorText`, `residentBytes`, `gpuBytes`, `liveVersion`, `liveAgeMs`, and `controllerStats` are `null` until the S6b chart layer supplies them. `service` reports `connected`, `availabilityReady` for the active symbol, `committedCpuBytes`, and `chunkRequests` (stats refreshed at 4 Hz). No controller, historical fetch or live subscription is created by this read.
+
+`POST /api/v1/heatmap/settings` accepts any nonempty subset of `renderer`, `tickMode`, `manualTick`, `minRowPx`, `hysteresis`, `crossfadeMs`, `showBandEdges`, `palettePreset`, `bidGradient`, `askGradient`, `sensitivityMin`, `sensitivityMax`, `opacity`, `gpuCapBytes`, `uploadBudgetBytes`, `prefetchTiles`, `liveMinIntervalMs`, and `showTelemetry`. Unknown keys, wrong types, invalid enums and malformed gradients return 422 without changing settings. Finite numeric settings clamp to the limits in [CONFIG.md](CONFIG.md#heatmap-chart-settings-s6); fractional values for integer fields are rejected. The response contains the normalized settings/state and `operationId`/`status`. In S6a this acknowledges persistence and the normal frame ordering; it does not activate GPU drawing or mute the legacy processor. Process CPU budgets are shared settings, outside this per-chart patch.
+
+`POST /api/v1/input` accepts:
+
+```json
+{"kind":"wheel","target":"chart","x":300,"y":200,"deltaY":120,"modifiers":["shift"]}
+```
+
+`kind` is `wheel`, `dragStart`, `dragMove`, `dragEnd`, or `click`. `target` is `chart`, `priceAxis`, or `timeAxis`. Required `x,y` are finite, nonnegative logical pixels **relative to the target region's top-left**, strictly inside that region (right/bottom edge excluded). The regions use the current renderer geometry: chart content, its right price gutter, or its bottom time gutter; the corner is excluded. Values above 1,000,000 are rejected at decode time. `deltaY` is required only for wheel, an integer in -12000..12000 excluding zero, in Qt angle-delta units (120 is one wheel notch). Omit it for mouse kinds. Optional `modifiers` is a distinct array drawn from `shift`, `control`, `alt`, `meta`. Unknown fields, missing coordinates, invalid kinds/targets/modifiers or out-of-region positions return 422 before sending an event.
+
+Drags use the left mouse button. `dragStart` presses, `dragMove` moves with that button held, and `dragEnd` releases it. Move/end require an active drag on the same target; other inputs during a drag return `409 drag_active`. Unmatched move/end return `409 no_drag`. A click sends a press/release pair. Each wheel request sends exactly one `QWheelEvent`; the host sends events synchronously on the GUI thread through `QCoreApplication::sendEvent` to the heatmap dock's `QQuickView`. Successful requests return an operation ID with the same frame acknowledgement rules as `/viewport`; they do not promise data completeness. A missing view returns 503.
+
+```sh
+curl -s 'http://127.0.0.1:17100/api/v1/heatmap/state'
+curl -s -H 'Content-Type: application/json' -d '{"renderer":"gpu","tickMode":"manual","manualTick":100}' http://127.0.0.1:17100/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"kind":"wheel","target":"chart","x":300,"y":200,"deltaY":120}' http://127.0.0.1:17100/api/v1/input
+# Use the returned operation ID; chart evidence uses target=heatmap (FM-120).
+curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afterOperation=o3&waitMs=5000'
+```
 
 ## Local evidence reads
 

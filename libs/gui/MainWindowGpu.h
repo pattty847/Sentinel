@@ -18,6 +18,8 @@
 #include <memory>
 #include <optional>
 #include "mainwindow/AgentApiTypes.hpp"
+#include "mainwindow/AgentApiInput.hpp"
+#include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
 #include "render/TpoHistoryPager.hpp"
@@ -51,6 +53,7 @@ class ShortcutBinder;
 class GuiApiServer;
 class QDoubleSpinBox;
 namespace AgentApi { struct ControlBody; }
+namespace heatmap { class HeatmapDataService; }
 
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
@@ -58,6 +61,10 @@ class MainWindowGPU : public QMainWindow {
 public:
     explicit MainWindowGPU(QWidget* parent = nullptr);
     ~MainWindowGPU();
+    // S6b creates per-chart controllers here, after GUI construction. A view can
+    // precede availability: HeatmapSourceController replans on its arrival.
+    heatmap::HeatmapDataService *heatmapDataService() const { return m_heatmapDataService.get(); }
+    const heatmap::HeatmapChartSettings &heatmapChartSettings() const { return m_heatmapChartSettings; }
 
 signals:
     /**
@@ -89,6 +96,7 @@ private:
     bool subscribeSymbol(const QString& symbol);
     void selectTimeframe(int ms);
     AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
+    QJsonObject agentApiHeatmapSnapshot() const;
     AgentApi::Metadata agentApiMetadata() const;
     AgentApi::StateSnapshot agentApiStateSnapshot() const;
     AgentApi::ViewportSnapshot agentApiViewportSnapshot() const;
@@ -113,6 +121,11 @@ private:
     void onOpenFontSettings();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
+    // Declared after the source: the adapter/data thread dies before the client.
+    std::unique_ptr<heatmap::HeatmapDataService> m_heatmapDataService;
+    heatmap::HeatmapSettingsStore m_heatmapSettingsStore;
+    heatmap::HeatmapChartSettings m_heatmapChartSettings;
+    AgentApi::InputDispatcher m_agentInput;
     // TPO history: one paced page in flight; see TpoHistoryPager.
     tpo::HistoryPager m_tpoPager;
     class QTimer* m_tpoPagerTimer = nullptr;

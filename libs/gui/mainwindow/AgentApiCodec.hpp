@@ -20,6 +20,8 @@ struct ControlBody {
     std::optional<double> priceMin, priceMax;
     std::optional<bool> followLive;
     QJsonObject layers;
+    QJsonObject heatmapSettings;
+    InputCommand input;
 };
 struct ControlValidation {
     int status = 200;
