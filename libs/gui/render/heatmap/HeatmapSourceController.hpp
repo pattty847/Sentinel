@@ -331,7 +331,9 @@ public:
     // Live composition follows the frames: a live frame's arrival composes after
     // a short coalescing window (both sources' frames arrive together), at most
     // once per kLiveMinIntervalMs (other triggers too); kLiveBackoffIntervalMs
-    // while composing is measured slow. The server publishes at 1 Hz.
+    // while composing is measured slow. The server sends a frame per recorder
+    // publication: 2 Hz at the default recording.live_publish_ms (500), which
+    // this interval does not throttle (TwoHertzServerFramesComposeEveryFrame).
     static constexpr int kLiveMinIntervalMs = 500;
     static constexpr int kLiveBackoffIntervalMs = 5000;
     struct Options {

@@ -3,6 +3,7 @@
 #include "servermodel/RecordingLive.hpp"
 #include "servermodel/RecorderStallMonitor.hpp"
 #include "config/ConfigTypes.hpp"
+#include "ConfigLoader.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <cmath>
@@ -505,8 +506,8 @@ TEST_F(RecorderTest, PublicationIsWorkerOwnedAndConstantBookMatchesClose) {
     EXPECT_EQ(provisional->observedMs, 30'000);
     value(*provisional, 99, false, 2, 2);
     value(*provisional, 101, true, 4, 4);
-    tick(*r, 30'250);
-    EXPECT_EQ(publications.size(), 1); // one-second coalescing
+    tick(*r, 30'000 + c.livePublishMs - 1);
+    EXPECT_EQ(publications.size(), 1); // coalesced to one per livePublishMs
     tick(*r, 60'000);
     ASSERT_EQ(publications.size(), 3); // finished-pending publication, then commit
     const auto committed = publications.back();
@@ -521,6 +522,53 @@ TEST_F(RecorderTest, PublicationIsWorkerOwnedAndConstantBookMatchesClose) {
         EXPECT_EQ(found->twapCode, e.twapCode);
         EXPECT_EQ(found->peakCode, e.peakCode);
     }
+}
+
+// Owner decision 2026-10-01: the open minute publishes every 500 ms by default
+// (two per second of integration clock), at the configured interval otherwise.
+TEST_F(RecorderTest, OpenMinutePublishesAtTheConfiguredInterval) {
+    EXPECT_EQ(RecorderConfig{}.livePublishMs, 500);
+    EXPECT_EQ(RecorderConfig{}.livePublishMs, ServerRecordingConfig{}.livePublishMs);
+    for (const int64_t interval : {RecorderConfig{}.livePublishMs, int64_t{250}, int64_t{1000}}) {
+        SCOPED_TRACE(interval);
+        QTemporaryDir own;
+        std::vector<int64_t> observed;
+        auto c = config();
+        c.root = own.path().toStdString();
+        c.livePublishMs = interval;
+        c.publisher = [&](auto record) { if (record->flags & kProvisional) observed.push_back(record->observedMs); };
+        auto r = make(c);
+        snap(*r, 0); // nothing observed yet, nothing to publish
+        for (int64_t t = 50; t <= 10'000; t += 50) tick(*r, t);
+        ASSERT_FALSE(observed.empty());
+        EXPECT_EQ(observed.front(), 50);
+        for (size_t i = 1; i < observed.size(); ++i) EXPECT_EQ(observed[i] - observed[i - 1], interval);
+        EXPECT_EQ(int64_t(observed.size()), (10'000 - 50) / interval + 1);
+    }
+    auto invalid = config();
+    invalid.livePublishMs = 0;
+    EXPECT_THROW(make(invalid), std::invalid_argument);
+}
+TEST(RecordingServerConfig, LivePublishMsDefaultsAndClamps) {
+    QTemporaryDir dir;
+    const auto load = [&](const std::string& recording) {
+        const auto path = dir.filePath("server.yaml").toStdString();
+        std::ofstream(path) << "recording:\n  enabled: false\n" << recording;
+        ServerConfig cfg;
+        EXPECT_TRUE(ConfigLoader::loadServerConfig(path, &cfg));
+        return cfg.recording.livePublishMs;
+    };
+    EXPECT_EQ(ServerConfig{}.recording.livePublishMs, 500);
+    EXPECT_EQ(load(""), 500);
+    EXPECT_EQ(load("  live_publish_ms: 750\n"), 750);
+    EXPECT_EQ(load("  live_publish_ms: 250\n"), 250);
+    EXPECT_EQ(load("  live_publish_ms: 100\n"), 250);
+    EXPECT_EQ(load("  live_publish_ms: 0\n"), 250);
+    EXPECT_EQ(load("  live_publish_ms: -5\n"), 250);
+    EXPECT_EQ(load("  live_publish_ms: 5000\n"), 5000);
+    EXPECT_EQ(load("  live_publish_ms: 60000\n"), 5000);
+    // The live worker paces subscriptions at half the publish interval.
+    EXPECT_EQ(liveCadenceMs(load("")), 250);
 }
 
 TEST_F(RecorderTest, PublicationExcludesInvalidTimeAndResyncDoesNotInventLiquidity) {

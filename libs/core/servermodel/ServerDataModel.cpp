@@ -165,6 +165,7 @@ void ServerDataModel::startRecorder() {
     cfg.priceScale = rc.priceScale;
     cfg.sizeScale = {rc.sizeFloor, rc.codesPerOctave};
     cfg.latenessMs = rc.latenessMs;
+    cfg.livePublishMs = rc.livePublishMs;
     const auto units = [&](double dollars) { return static_cast<int64_t>(std::llround(dollars * rc.priceScale)); };
     cfg.layers = {
         {"near", units(rc.nearTick), 1.0 - rc.nearPct, 1.0 + rc.nearPct, false},
@@ -177,7 +178,7 @@ void ServerDataModel::startRecorder() {
             m_stallSeries.push_back({symbol, layer.name, 0});
     m_stallMonitor.emplace(rc.latenessMs);
     try {
-        m_recordingLive = std::make_shared<recording::LiveService>(dir);
+        m_recordingLive = std::make_shared<recording::LiveService>(dir, recording::liveCadenceMs(rc.livePublishMs));
         cfg.publisher = [live = m_recordingLive](recording::RecordPtr record) {
             if (!live->publish(std::move(record)))
                 sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
@@ -199,7 +200,8 @@ void ServerDataModel::startRecorder() {
     }
     sLog_App("Recording v2 started: dir=" << dir.string()
              << " near=" << rc.nearTick << "@+/-" << rc.nearPct * 100 << "%"
-             << " deep=" << rc.deepTick << "@[" << rc.deepLowFrac << "x.." << rc.deepHighMult << "x]");
+             << " deep=" << rc.deepTick << "@[" << rc.deepLowFrac << "x.." << rc.deepHighMult << "x]"
+             << " livePublishMs=" << rc.livePublishMs << " liveCadenceMs=" << recording::liveCadenceMs(rc.livePublishMs));
 
     m_recorderTimer.setInterval(250);
     connect(&m_recorderTimer, &QTimer::timeout, this, [this]() {

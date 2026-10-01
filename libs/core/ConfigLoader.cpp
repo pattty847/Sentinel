@@ -161,6 +161,9 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "deep_low_frac", cfg.recording.deepLowFrac);
             readScalar(rec, "deep_high_mult", cfg.recording.deepHighMult);
             readScalar(rec, "lateness_ms", cfg.recording.latenessMs);
+            if (readScalar(rec, "live_publish_ms", cfg.recording.livePublishMs))
+                cfg.recording.livePublishMs = std::clamp(cfg.recording.livePublishMs,
+                    ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs);
         }
         if (serverRoot["candles"]) {
             auto candles = serverRoot["candles"];

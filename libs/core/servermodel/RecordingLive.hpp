@@ -79,12 +79,28 @@ private:
     std::vector<RecordPtr> records_;
     std::vector<RecordPtr> filledRecords_;
 };
+// The recorder publishes the open minute every recording.live_publish_ms
+// (RecorderConfig::livePublishMs, default 500). The live worker checks for a
+// new revision at half that interval: frames still follow publications (one
+// per revision, so the frame rate is the publish rate), but a worker cadence
+// equal to the publish interval plus its 100 ms turn quantization falls behind
+// the recorder and skips publications, so the data age would sawtooth through a
+// whole interval instead of staying within one worker turn.
+inline constexpr int64_t kLivePublishDefaultMs = 500;
+inline constexpr int64_t kLiveCadenceMaxMs = 5000;
+constexpr int64_t liveCadenceMs(int64_t publishMs) {
+    return std::clamp<int64_t>(publishMs / 2, 1, kLiveCadenceMaxMs);
+}
+inline constexpr int64_t kLiveCadenceDefaultMs = liveCadenceMs(kLivePublishDefaultMs);
+// Per-subscriber send pacing: baseMs after an accepted send; a refused one
+// doubles the delay up to kLiveCadenceMaxMs; the next acceptance resets it.
 struct LiveCadence {
+    int64_t baseMs = kLiveCadenceDefaultMs;
     int64_t nextMs = 0;
-    int64_t delayMs = 1000;
+    int64_t delayMs = baseMs;
     bool due(int64_t now) const { return now >= nextMs; }
     void completed(int64_t now, bool accepted) {
-        delayMs = accepted ? 1000 : std::min<int64_t>(5000, delayMs * 2);
+        delayMs = accepted ? baseMs : std::min(std::max(kLiveCadenceMaxMs, baseMs), delayMs * 2);
         nextMs = now + delayMs;
     }
 };
@@ -138,7 +154,9 @@ public:
         RawSubscription(RawTailView v, RawDeliver d) : view(std::move(v)), deliver(std::move(d)) {}
     };
     static constexpr size_t kMaxRawSubscriptions = 128; // symbols, separate from legacy views
-    explicit LiveService(std::filesystem::path root);
+    // cadenceMs: LiveCadence base for every subscription (liveCadenceMs() of
+    // the recorder's publish interval).
+    explicit LiveService(std::filesystem::path root, int64_t cadenceMs = kLiveCadenceDefaultMs);
     ~LiveService();
     // Idempotent. Deactivates subscriptions and joins in-flight delivery before
     // the transport executor can be stopped/destroyed. Call off the live worker.
