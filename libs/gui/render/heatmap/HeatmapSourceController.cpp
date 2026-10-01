@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -472,10 +473,7 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
-    if (!options_.composeNowNs) options_.composeNowNs = [] {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
+    if (!options_.composeNowNs) options_.composeNowNs = &HeatmapSourceController::threadCpuNs;
     liveTimer_ = new QTimer(this);
     liveTimer_->setSingleShot(true);
     connect(liveTimer_, &QTimer::timeout, this, &HeatmapSourceController::pollLive);
@@ -546,6 +544,15 @@ HeatmapSourceController::~HeatmapSourceController() {
     cache_.detach(this);
     slots_.clear(); // releases claims while the cache is alive
     fetcher_.release(chart_);
+}
+
+int64_t HeatmapSourceController::threadCpuNs() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+#endif
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache) {
@@ -689,6 +696,8 @@ void HeatmapSourceController::resetLive() {
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
     stats_.liveIntervalMs = kLiveMinIntervalMs;
+    liveCosts_ = {};
+    liveCostCount_ = 0;
     setLiveBytes(0);
     liveWanted_.clear();
     // An old job owns its old composer until it finishes; it cannot mutate the
@@ -920,13 +929,23 @@ void HeatmapSourceController::pollLive() {
         stats_.liveComposeMs = result->ms;
         stats_.liveComposedBuckets += result->buckets;
         stats_.liveCommittedPieces += result->pieces;
-        // Measure the whole worker update (compose + upload image + summary).
+        // Measure the whole worker update (compose + upload image + summary) in
+        // the worker's CPU time, and decide on the median of the last three
+        // updates (fewer at first: the one, then the lower of two), so neither a
+        // descheduled worker nor one slow update switches to 5 s.
         if (state == liveWork_ && error.isEmpty()) {
-            const int interval = result->ms > 5 ? kLiveBackoffIntervalMs : kLiveMinIntervalMs;
+            std::rotate(liveCosts_.begin(), liveCosts_.begin() + 1, liveCosts_.end());
+            liveCosts_.back() = result->ms;
+            liveCostCount_ = std::min<size_t>(liveCostCount_ + 1, liveCosts_.size());
+            std::array<double, 3> recent = liveCosts_;
+            std::sort(recent.end() - liveCostCount_, recent.end());
+            const double cost = liveCostCount_ == 3 ? recent[1] : recent[3 - liveCostCount_];
+            const int interval = cost > 5 ? kLiveBackoffIntervalMs : kLiveMinIntervalMs;
             if (interval != stats_.liveIntervalMs) {
                 if (interval == kLiveBackoffIntervalMs)
                     sLog_Warning("Heatmap live compose backoff chart=" << chart_ << " symbol=" << symbol_
-                                 << " tf=" << tfMs_ << " ms=" << result->ms << " interval=" << interval);
+                                 << " tf=" << tfMs_ << " ms=" << result->ms << " medianMs=" << cost
+                                 << " interval=" << interval);
                 else
                     sLog_Data("Heatmap live compose recovered chart=" << chart_ << " symbol=" << symbol_
                               << " tf=" << tfMs_ << " ms=" << result->ms << " interval=" << interval);

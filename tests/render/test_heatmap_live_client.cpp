@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <deque>
 #include <set>
+#include <thread>
 
 namespace {
 using namespace heatmap;
@@ -808,6 +809,42 @@ TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     send(tail(10, 10, 10, 2, 2000));
     advance(c, 4999); EXPECT_EQ(c.latestLive(), first);
     advance(c, 1); EXPECT_EQ(live(c).revision, 2u);
+}
+// S5L-c review 5b: the cost that switches live composition to 5 s is the
+// worker's CPU time, not wall time: a descheduled worker on a busy host (the
+// live run measured single 15-58 ms updates whose median was 2-3 ms) costs
+// nothing while it waits.
+TEST(LiveComposeCost, TheDefaultClockIsTheWorkersCpuTime) {
+    const int64_t idle0 = HeatmapSourceController::threadCpuNs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const int64_t idle = HeatmapSourceController::threadCpuNs() - idle0;
+    EXPECT_LT(idle, 5'000'000) << "sleeping is not cost";
+    const int64_t busy0 = HeatmapSourceController::threadCpuNs();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    volatile uint64_t spin = 0;
+    while (std::chrono::steady_clock::now() < until) spin = spin + 1;
+    EXPECT_GE(HeatmapSourceController::threadCpuNs() - busy0, 10'000'000) << "running is";
+}
+// ...and one slow update among fast ones does not back off: the decision is the
+// median of the last three updates; two slow ones in three do.
+TEST_F(LiveClient, OneSlowLiveComposeDoesNotBackOffTwoInThreeDo) {
+    int64_t clock = 0, cost = 1'000'000;
+    composeClock = [&] { const auto t = clock; clock += cost; return t; };
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    uint64_t revision = 1;
+    for (const int ms : {1, 15, 1}) {
+        cost = int64_t(ms) * 1'000'000;
+        now += HeatmapSourceController::kLiveMinIntervalMs;
+        send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+        EXPECT_EQ(live(c).revision, revision);
+        EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs) << "after a " << ms << " ms update";
+    }
+    cost = 15'000'000;
+    now += HeatmapSourceController::kLiveMinIntervalMs;
+    send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+    EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveBackoffIntervalMs) << "15, 1, 15 ms: median 15";
 }
 TEST_F(LiveClient, RecorderReplayMatchesLiveBuilderAndAnalyticalTwapAtOneAndFiveMinutes) {
     QTemporaryDir dir;

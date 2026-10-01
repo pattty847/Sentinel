@@ -19,6 +19,7 @@
 #include "heatmap/ChunkFetcher.hpp"
 #include "heatmap/HeatmapSpanPlanner.hpp"
 #include <QThreadPool>
+#include <array>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -334,7 +335,9 @@ public:
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
         size_t chunkEstimateBytes = 4ull << 20;  // decoded size of a chunk never seen (as ChunkFetcher)
         int capacityPollMs = 16;                // <= 0: tests call pollCapacity()
-        std::function<int64_t()> composeNowNs;   // worker clock; tests inject measured cost
+        // Worker cost clock (default threadCpuNs(): time the composing thread ran,
+        // so descheduling on a busy host is not cost); tests inject measured cost.
+        std::function<int64_t()> composeNowNs;
         std::function<int64_t()> nowMs;          // monotonic clock; injected in deterministic tests
         int liveCoalesceMs = 15;                 // wait after a live frame for its siblings (tests: 0)
     };
@@ -355,6 +358,9 @@ public:
     // Applies the CPU tiers to the process-wide store and cache; false (and no
     // change) when the budgets are invalid.
     static bool applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache);
+    // CPU time of the calling thread, ns (POSIX thread CPU clock; steady clock
+    // where there is none).
+    static int64_t threadCpuNs();
 
     // Any thread (including updatePaintNode).
     std::shared_ptr<const SpanSet> latestSnapshot() const;
@@ -441,6 +447,8 @@ private:
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
     int64_t liveDueMs_ = 0, liveCoalesceUntilMs_ = 0;
+    std::array<double, 3> liveCosts_{}; // the last update costs (ms), newest last
+    size_t liveCostCount_ = 0;
     std::map<std::string, int64_t> liveStarts_;
     std::map<std::pair<SpanId, std::string>, int64_t> liveUploadedEnds_;
     std::unordered_set<ChunkKey, ChunkKeyHash> liveWanted_;
