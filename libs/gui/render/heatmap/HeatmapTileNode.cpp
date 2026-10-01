@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <QFile>
 #include <rhi/qrhi.h>
+#include <chrono>
 #include <rhi/qshader.h>
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,13 @@ constexpr uint32_t kBlockRows = 8192; // heatmap::tiles::kTileBlockRows (the bin
 constexpr uint32_t kMaxRows = 1u << 18;
 constexpr size_t kMaxSpareBuffers = 64;
 constexpr uint64_t kSourceOverheadBytes = 256; // per-buffer rounding of a resident source (13 buffers x 16)
+// Live buffer sets use binner ids in their own range (GpuSource ids count up from 1).
+constexpr uint64_t kLiveIdBase = 1ull << 62;
+constexpr uint32_t kLiveColumnQuantum = 8; // live cell buffers: room for this many more columns
+int64_t steadyNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 std::atomic<bool> retentionDisabled{false};
 QShader loadShader(const QString &path) {
     QFile file(path);
@@ -66,6 +74,9 @@ struct HeatmapTileNode::Bin {
         std::unique_ptr<QRhiShaderResourceBindings> bindings;
         QRhiBuffer *boundTo = nullptr;
         bool top = false, bottom = false;
+        // Live bins: each pass's uniform and compute bindings, reused at 1 Hz.
+        std::array<HeatmapGpuBinner::PassCache, kMaxSpanSources> passCaches;
+        uint64_t passFrame = 0; // frame whose passes used the caches
     };
     uint64_t id = 0;
     SpanId span;
@@ -77,11 +88,29 @@ struct HeatmapTileNode::Bin {
     std::vector<Block> blocks;
     uint32_t usedBlocks = 0;
     uint64_t usedFrame = 0, drawnFrame = 0, pinnedFrame = 0;
+    // Span bins: the lowest complete end of its passes' builds (draw clip E).
+    int64_t completeEndMs = INT64_MAX;
+    // Live bins: the version binned, and its window [L, end) (end: open end
+    // rounded up to the tf). The snapshot is kept with the bin (held, fading).
+    bool live = false;
+    uint64_t liveVersion = 0;
+    int64_t liveStartMs = 0, liveEndMs = 0;
+    std::shared_ptr<const LiveSnapshot> liveSnapshot;
     uint64_t bytes() const {
         uint64_t total = 0;
         for (const auto &b : blocks) total += (b.cells ? b.cells->size() : 0) + (b.params ? b.params->size() : 0);
         return total;
     }
+};
+// One live source's resident buffers in the binner (id kLiveIdBase + n), refilled
+// in place for each new version.
+struct HeatmapTileNode::LiveSet {
+    uint64_t residentId = 0;
+    std::string source;      // the source it last held (reuse prefers the same one)
+    uint64_t version = 0;    // live version it holds
+    uint64_t bytes = 0;      // resident buffer bytes
+    uint64_t usedFrame = 0;  // last frame that wrote or binned from it
+    uint64_t pinnedFrame = 0; // a retained live bin bins from it
 };
 struct HeatmapTileNode::DrawSlot {
     std::unique_ptr<QRhiBuffer> params;
@@ -95,10 +124,18 @@ HeatmapTileNode::~HeatmapTileNode() { releaseResources(); }
 void HeatmapTileNode::releaseAll(bool reportLoss, bool inRhiCleanup) {
     bool held = !bins_.empty();
     for (const auto &[key, s] : sources_) held = held || s->created;
+    held = held || !liveSets_.empty();
     bins_.clear();
     spareBuffers_.clear();
     sources_.clear();
     byId_.clear();
+    liveSets_.clear(); // the binner (below) holds their buffers
+    live_.reset();
+    liveVersion_ = liveSerial_ = 0;
+    liveCurrent_ = {};
+    liveCount_ = 0;
+    liveTfMs_ = liveStartMs_ = liveEndMs_ = 0;
+    drawnLiveVersion_ = 0;
     indexedSet_.reset();
     indexed_ = nullptr;
     if (inRhiCleanup) {
@@ -305,14 +342,19 @@ bool HeatmapTileNode::admit(Source &source) {
     return listed && guarded(source.rank.tier); // visible and fallback content may exceed the cap
 }
 
-void HeatmapTileNode::upload(QRhiCommandBuffer *cb) {
-    uint64_t budget = std::max<uint64_t>(frame_.uploadBudgetBytes, 1);
+void HeatmapTileNode::upload(QRhiCommandBuffer *cb, uint64_t budget) {
     // Rank order (the snapshot is sorted by rank): visible, fallback, prefetch near
     // to far, recent-tf.
     order_.clear();
-    for (const auto &ref : spanRefs_)
+    for (const auto &ref : spanRefs_) {
+        // Every source of a span in the live window uploads, wanted or not: the
+        // controller advances L only after each source's upload report (S5L-b).
+        const bool liveEdge = liveCount_ && ref.span->id.tfMs == liveTfMs_ &&
+                              ref.span->id.endMs() > liveStartMs_ && ref.span->id.startMs() < liveEndMs_;
         for (size_t i = 0; i < ref.count; ++i)
-            if (ref.sources[i] && !ref.sources[i]->complete && wanted(ref, i)) order_.push_back(ref.sources[i]);
+            if (ref.sources[i] && !ref.sources[i]->complete && (liveEdge || wanted(ref, i)))
+                order_.push_back(ref.sources[i]);
+    }
     for (Source *s : order_) {
         if (!budget) break;
         const auto &image = s->build->gpu;
@@ -346,7 +388,7 @@ void HeatmapTileNode::upload(QRhiCommandBuffer *cb) {
 }
 
 // ------------------------------------------------------------------ bins
-std::unique_ptr<QRhiBuffer> HeatmapTileNode::cellBuffer(uint64_t bytes) {
+std::unique_ptr<QRhiBuffer> HeatmapTileNode::cellBuffer(uint64_t bytes, bool live) {
     bytes = (bytes + 15) / 16 * 16;
     // The smallest retired buffer that fits, else a new one.
     auto best = spareBuffers_.end();
@@ -360,7 +402,8 @@ std::unique_ptr<QRhiBuffer> HeatmapTileNode::cellBuffer(uint64_t bytes) {
         return buffer;
     }
     std::unique_ptr<QRhiBuffer> buffer(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, quint32(bytes)));
-    buffer->setName("heatmap.tileCells");
+    buffer->setName(live ? "heatmap.liveCells" : "heatmap.tileCells");
+    if (live) stats_->liveBufferCreations.fetch_add(1);
     if (!buffer->create()) {
         noteError(QStringLiteral("tile cell buffer allocation failed (%1 bytes)").arg(bytes));
         return {};
@@ -400,7 +443,12 @@ bool HeatmapTileNode::binRows(Bin &bin, QRhiCommandBuffer *cb) {
         const uint64_t bytes = uint64_t(block.grid.columns) * block.grid.rows * 4;
         if (!block.cells || block.cells->size() < bytes) {
             if (block.cells && spareBuffers_.size() < kMaxSpareBuffers) spareBuffers_.push_back(std::move(block.cells));
-            block.cells = cellBuffer(bytes);
+            // A live window gains a column at every rollover: room for a few more.
+            const uint64_t alloc = bin.live
+                ? uint64_t((block.grid.columns + kLiveColumnQuantum) / kLiveColumnQuantum * kLiveColumnQuantum) *
+                      block.grid.rows * 4
+                : bytes;
+            block.cells = cellBuffer(alloc, bin.live);
             if (!block.cells) return false;
         }
         if (!block.params) {
@@ -410,6 +458,7 @@ bool HeatmapTileNode::binRows(Bin &bin, QRhiCommandBuffer *cb) {
                 noteError(QStringLiteral("tile uniform allocation failed"));
                 return false;
             }
+            if (bin.live) stats_->liveBufferCreations.fetch_add(1);
         }
         if (!block.bindings || block.boundTo != block.cells.get()) {
             if (!block.bindings) block.bindings.reset(rhi_->newShaderResourceBindings());
@@ -418,16 +467,29 @@ bool HeatmapTileNode::binRows(Bin &bin, QRhiCommandBuffer *cb) {
             if (!block.bindings->create()) { noteError(QStringLiteral("tile bindings failed")); return false; }
             block.boundTo = block.cells.get();
         }
+        // Live bins reuse each pass's uniform and bindings (one use per frame).
+        const bool cached = bin.live && block.passFrame != frameNo_;
+        if (cached) block.passFrame = frameNo_;
         for (uint8_t p = 0; p < bin.passCount; ++p) {
+            auto *cache = cached ? &block.passCaches[p] : nullptr;
+            const uint64_t before = cache ? cache->created : 0;
             if (!binner_->binResidentInto(bin.passes[p], cb, block.grid, frame_.outputScale, block.cells.get(),
-                                          &error, p > 0)) {
+                                          &error, p > 0, cache)) {
                 noteError(error);
                 return false;
             }
             stats_->binPasses.fetch_add(1);
             if (p > 0) stats_->fillPasses.fetch_add(1);
+            if (bin.live) {
+                stats_->liveBinPasses.fetch_add(1);
+                stats_->liveBufferCreations.fetch_add(cache ? cache->created - before : 1);
+            }
         }
     }
+    if (bin.live) // the sets it read are in this frame's commands
+        for (uint8_t p = 0; p < bin.passCount; ++p)
+            for (auto &set : liveSets_)
+                if (set->residentId == bin.passes[p]) set->usedFrame = frameNo_;
     // Blocks beyond the rows in use keep their buffers for the next re-bin.
     stats_->lastBinMs.store(msSince(started));
     stats_->preciseKernel.store(binner_->currentKernel() == KernelVariant::Precise);
@@ -446,6 +508,7 @@ HeatmapTileNode::Bin *HeatmapTileNode::binFor(const SpanRef &ref, int64_t tickUn
                                               bool *complete) {
     std::array<uint64_t, kMaxSpanSources> passes{};
     uint8_t count = 0;
+    int64_t completeEnd = INT64_MAX;
     *complete = true;
     for (size_t i = 0; i < ref.count; ++i) {
         const auto &snap = ref.span->sources[i];
@@ -460,10 +523,11 @@ HeatmapTileNode::Bin *HeatmapTileNode::binFor(const SpanRef &ref, int64_t tickUn
             continue;
         }
         passes[count++] = source->sourceId;
+        completeEnd = std::min(completeEnd, snap.build->completeEndMs);
     }
     if (!count || tickUnits <= 0 || !indexed_) return nullptr;
     for (const auto &bin : bins_) {
-        if (bin->span != ref.span->id || bin->tickUnits != tickUnits || bin->passCount != count ||
+        if (bin->live || bin->span != ref.span->id || bin->tickUnits != tickUnits || bin->passCount != count ||
             !std::equal(passes.begin(), passes.begin() + count, bin->passes.begin()))
             continue;
         bin->usedFrame = frameNo_;
@@ -480,6 +544,7 @@ HeatmapTileNode::Bin *HeatmapTileNode::binFor(const SpanRef &ref, int64_t tickUn
     bin->tick = fromUnits(tickUnits, indexed_->priceScale);
     bin->passes = passes;
     bin->passCount = count;
+    bin->completeEndMs = completeEnd; // the passes identify their builds
     bin->grid.tfMs = ref.span->id.tfMs;
     bin->grid.firstBucket = tiles::tileFirstBucket(ref.span->id.tile);
     bin->grid.columns = uint32_t(tiles::kTileColumns);
@@ -505,10 +570,17 @@ uint64_t HeatmapTileNode::residentBytes() const {
     uint64_t total = spareBytes();
     for (const auto &[id, s] : byId_) total += s->bytes;
     for (const auto &bin : bins_) total += bin->bytes();
+    for (const auto &set : liveSets_) total += set->bytes;
     return total;
 }
 
 void HeatmapTileNode::pinSources(const Bin &bin) {
+    if (bin.live) {
+        for (uint8_t p = 0; p < bin.passCount; ++p)
+            for (auto &set : liveSets_)
+                if (set->residentId == bin.passes[p]) set->pinnedFrame = frameNo_;
+        return;
+    }
     for (uint8_t p = 0; p < bin.passCount; ++p)
         if (const auto it = byId_.find(bin.passes[p]); it != byId_.end()) it->second->pinnedFrame = frameNo_;
 }
@@ -540,6 +612,7 @@ void HeatmapTileNode::retire(bool keepDrawn) {
             if (block.cells && spareBuffers_.size() < kMaxSpareBuffers) spareBuffers_.push_back(std::move(block.cells));
         it = bins_.erase(it);
     }
+    trimLiveSets();
     for (auto it = sources_.begin(); it != sources_.end();) {
         auto &s = *it->second;
         const bool listed = indexed_ && s.listedVersion == indexedVersion_;
@@ -636,12 +709,12 @@ bool HeatmapTileNode::ensurePipeline(QRhiRenderPassDescriptor *pass, int samples
     return true;
 }
 
-void HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity) {
+void HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, int64_t loMs,
+                                 int64_t hiMs) {
     if (bin.drawnFrame == frameNo_) return; // one uniform block per bin and frame
     QRectF r;
     ViewWindow sub;
-    const int64_t first = tiles::tileFirstBucket(bin.span.tile);
-    if (!subRect(first, first + tiles::kTileColumns, bin.span.tfMs, &r, &sub)) return;
+    if (!subRect(loMs, hiMs, 1, &r, &sub)) return; // [loMs, hiMs): the draw clip (E, L)
     const auto &view = frame_.view;
     const double priceSpan = view.priceHi - view.priceLo;
     if (!(priceSpan > 0)) return;
@@ -706,6 +779,239 @@ bool HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t l
     return true;
 }
 
+// ------------------------------------------------------------------ live edge
+// A new LiveSnapshot version: each source goes into a buffer set no frame in
+// flight reads and no retained live bin bins from, refilled in place. The same
+// version again (every frame between publications, or while disconnected) does
+// nothing.
+void HeatmapTileNode::updateLive(QRhiCommandBuffer *cb, uint64_t &budget) {
+    const auto &snap = frame_.live;
+    if (snap == live_) return;
+    if (!snap || snap->tfMs <= 0 || snap->sources.empty()) {
+        // No live window: live bins a picture still draws keep their sets until they retire.
+        live_ = snap;
+        liveVersion_ = snap ? snap->version : 0;
+        liveSerial_ = snap ? snap->serial : 0;
+        liveCurrent_ = {};
+        liveCount_ = 0;
+        return;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const uint64_t inFlight = uint64_t(std::max(1, rhi_->resourceLimit(QRhi::FramesInFlight)));
+    std::array<LiveSet *, kMaxSpanSources> chosen{};
+    uint8_t count = 0;
+    uint64_t created = 0, bytes = 0;
+    int64_t start = INT64_MAX, end = 0;
+    const int64_t tf = snap->tfMs;
+    for (const auto &source : snap->sources) {
+        if (count == kMaxSpanSources) break;
+        if (!source.gpu || !source.columns || source.openEndMs <= source.startMs) continue;
+        LiveSet *set = nullptr;
+        for (const auto &candidate : liveSets_) {
+            auto *c = candidate.get();
+            if (std::find(chosen.begin(), chosen.begin() + count, c) != chosen.begin() + count) continue;
+            if (c->pinnedFrame == frameNo_ || c->usedFrame + inFlight > frameNo_) continue; // drawn or in flight
+            // Prefer the set that held this source (its capacity fits), then the oldest.
+            if (!set || (c->source == source.source) > (set->source == source.source) ||
+                ((c->source == source.source) == (set->source == source.source) && c->usedFrame < set->usedFrame))
+                set = c;
+        }
+        if (!set) {
+            liveSets_.push_back(std::make_unique<LiveSet>());
+            set = liveSets_.back().get();
+            set->residentId = kLiveIdBase + nextLiveId_++;
+        }
+        QString error;
+        if (!binner_->refillResident(set->residentId, source.gpu, cb, &created, &error)) {
+            noteError(error);
+            set->version = 0;
+            stats_->liveBufferCreations.fetch_add(created);
+            return; // keep drawing the previous version; the next frame retries
+        }
+        set->source = source.source;
+        set->version = snap->version;
+        set->usedFrame = frameNo_;
+        set->bytes = binner_->residentBytes(set->residentId);
+        bytes += source.gpu->bytes();
+        chosen[count++] = set;
+        start = std::min(start, source.startMs);
+        end = std::max(end, (source.openEndMs + tf - 1) / tf * tf);
+    }
+    stats_->liveBufferCreations.fetch_add(created);
+    live_ = snap;
+    liveVersion_ = snap->version;
+    liveSerial_ = snap->serial;
+    liveCurrent_ = chosen;
+    liveCount_ = count;
+    liveTfMs_ = tf;
+    liveStartMs_ = count ? start : 0;
+    liveEndMs_ = count ? end : 0;
+    if (!count) return;
+    budget -= std::min(budget, bytes);
+    stats_->liveUploads.fetch_add(1);
+    stats_->liveUploadBytes.fetch_add(bytes);
+    sLog_Probe("heatmap.live.upload", "version=" << snap->version << " tf=" << tf << " L=" << liveStartMs_
+               << " end=" << liveEndMs_ << " sources=" << int(count) << " bytes=" << bytes << " created=" << created
+               << " ms=" << msSince(started));
+}
+
+// The live window's bin at the frame's tick (the target): made, or re-binned in
+// place when a new version arrived (no crossfade) or the view left its rows.
+HeatmapTileNode::Bin *HeatmapTileNode::liveBinFor(int64_t tickUnits, QRhiCommandBuffer *cb) {
+    if (!live_ || !liveCount_ || liveTfMs_ != frame_.tfMs || tickUnits <= 0 || liveEndMs_ <= liveStartMs_)
+        return nullptr;
+    const int64_t tf = liveTfMs_;
+    Bin *bin = nullptr;
+    for (const auto &b : bins_)
+        if (b->live && b->span.tfMs == tf && b->tickUnits == tickUnits && b->span.symbol == live_->symbol) {
+            bin = b.get();
+            break;
+        }
+    std::array<uint64_t, kMaxSpanSources> passes{};
+    for (uint8_t i = 0; i < liveCount_; ++i) passes[i] = liveCurrent_[i]->residentId;
+    if (!bin) {
+        auto fresh = std::make_unique<Bin>();
+        fresh->id = nextBinId_++;
+        fresh->live = true;
+        fresh->span = {live_->symbol, tf, INT64_MIN};
+        fresh->tickUnits = tickUnits;
+        const double scale = live_->resolution.priceScale > 0 ? live_->resolution.priceScale
+                                                              : (indexed_ ? indexed_->priceScale : 100.0);
+        fresh->tick = fromUnits(tickUnits, scale);
+        fresh->grid.tfMs = tf;
+        fresh->grid.displayTick = fresh->tick;
+        bins_.push_back(std::move(fresh));
+        bin = bins_.back().get();
+    }
+    bin->usedFrame = frameNo_;
+    const bool fresh = bin->liveSnapshot != live_ || bin->passCount != liveCount_ ||
+                       !std::equal(passes.begin(), passes.begin() + liveCount_, bin->passes.begin());
+    if (fresh) {
+        bin->passes = passes;
+        bin->passCount = liveCount_;
+        bin->liveSnapshot = live_;
+        bin->liveVersion = liveVersion_;
+        bin->liveStartMs = liveStartMs_;
+        bin->liveEndMs = liveEndMs_;
+        bin->grid.firstBucket = recording::floorDiv(liveStartMs_, tf);
+        bin->grid.columns = uint32_t(std::clamp<int64_t>(liveEndMs_ / tf - bin->grid.firstBucket, 1, kMaxGridColumns));
+    }
+    if ((fresh || !rowsCover(*bin)) && !binRows(*bin, cb)) {
+        bin->liveSnapshot.reset(); // re-bin next frame
+        return nullptr;
+    }
+    return bin;
+}
+
+// Sets that are neither current nor binned from by a retained live bin are
+// spares; one per current source stays for the next version, the least recently
+// used others go (no allocation: a few sets at most).
+void HeatmapTileNode::trimLiveSets() {
+    const size_t spares = live_ ? liveCount_ : 0;
+    auto isFree = [&](const LiveSet *s) {
+        return s->pinnedFrame != frameNo_ &&
+               std::find(liveCurrent_.begin(), liveCurrent_.begin() + liveCount_, s) == liveCurrent_.begin() + liveCount_;
+    };
+    for (;;) {
+        size_t free = 0;
+        LiveSet *oldest = nullptr;
+        for (const auto &set : liveSets_)
+            if (isFree(set.get())) {
+                ++free;
+                if (!oldest || set->usedFrame < oldest->usedFrame) oldest = set.get();
+            }
+        if (free <= spares) return;
+        binner_->releaseResident(oldest->residentId); // deleteLater: a frame in flight may read it
+        std::erase_if(liveSets_, [&](const auto &set) { return set.get() == oldest; });
+    }
+}
+
+// The pieces of one picture with the draw clip: each span bin draws before its
+// complete end E; the live bin of the same timeframe draws [X, end) with X =
+// max(L, E) of the first span in its window that is not complete (no span bin:
+// its start), and span bins inside [X, end) give way to it (their complete
+// buckets equal the live ones). Where history is ahead of the live window (a
+// span complete past the live end, e.g. a frozen live edge), history draws and
+// the live bin stops at that span. What no piece covers draws loading (the hatch
+// pass), including a gap [E, L).
+void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
+    pieces_.clear();
+    struct Live { int64_t tfMs = 0, fromMs = 0, endMs = 0; Bin *bin = nullptr; };
+    std::array<Live, 4> lives{};
+    size_t liveCount = 0;
+    auto spanEnd = [](const Bin &bin, int64_t ts, int64_t te) { return std::clamp(bin.completeEndMs, ts, te); };
+    for (const auto &d : draws) {
+        if (!d.live || liveCount == lives.size()) continue;
+        Bin *bin = findBin(d.bin);
+        if (!bin) continue;
+        const int64_t tf = d.tfMs, L = bin->liveStartMs, end = bin->liveEndMs;
+        int64_t from = end;
+        const int64_t first = tiles::tileOfBucket(recording::floorDiv(L, tf));
+        for (int64_t t = first; tiles::tileStartMs(t, tf) < end && t < first + 1024; ++t) {
+            const int64_t ts = tiles::tileStartMs(t, tf), te = tiles::tileEndMs(t, tf);
+            const Bin *span = nullptr;
+            for (const auto &o : draws)
+                if (!o.live && o.tfMs == tf && o.tile == t) { span = findBin(o.bin); break; }
+            const int64_t e = span ? spanEnd(*span, ts, te) : ts;
+            if (e < te) {
+                from = std::max(L, e);
+                break;
+            }
+        }
+        if (from >= end) continue; // history covers the whole live window
+        // A later span complete past the live end: the live bin stops at it.
+        int64_t stop = end;
+        for (const auto &o : draws) {
+            if (o.live || o.tfMs != tf) continue;
+            const int64_t ts = tiles::tileStartMs(o.tile, tf), te = tiles::tileEndMs(o.tile, tf);
+            if (const Bin *span = findBin(o.bin); span && ts >= from && spanEnd(*span, ts, te) > end)
+                stop = std::min(stop, ts);
+        }
+        lives[liveCount++] = {tf, from, stop, bin};
+    }
+    for (size_t i = 0; i < liveCount; ++i)
+        if (lives[i].endMs > lives[i].fromMs) pieces_.push_back({lives[i].bin, lives[i].fromMs, lives[i].endMs, true});
+    for (const auto &d : draws) {
+        if (d.live) continue;
+        Bin *bin = findBin(d.bin);
+        if (!bin) continue;
+        const int64_t ts = tiles::tileStartMs(d.tile, d.tfMs), te = tiles::tileEndMs(d.tile, d.tfMs);
+        int64_t hi = spanEnd(*bin, ts, te);
+        for (size_t i = 0; i < liveCount; ++i)
+            if (lives[i].tfMs == d.tfMs && ts < lives[i].endMs) hi = std::min(hi, std::max(ts, lives[i].fromMs));
+        pieces_.push_back({bin, ts, hi, false});
+    }
+}
+
+// The first frame that draws a live version: latency telemetry (heatmap.live).
+void HeatmapTileNode::noteLiveDrawn(const Bin &bin) {
+    if (bin.liveVersion == drawnLiveVersion_ || !bin.liveSnapshot) return;
+    drawnLiveVersion_ = bin.liveVersion;
+    const auto &snap = *bin.liveSnapshot;
+    const double publishToDraw = snap.publishedNs > 0 ? double(steadyNs() - snap.publishedNs) / 1e6 : 0.0;
+    // The newest observation: the last column's start plus its observed time.
+    int64_t newest = 0;
+    for (const auto &source : snap.sources)
+        if (source.columns && !source.columns->columns.empty()) {
+            const auto &last = source.columns->columns.back();
+            newest = std::max(newest, last.bucketStartMs + int64_t(last.observedMs));
+        }
+    const double age = newest > 0 ? double(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch()).count() - newest)
+                                  : 0.0;
+    stats_->livePublishToDrawMs.store(publishToDraw);
+    stats_->liveDataAgeMs.store(age);
+    {
+        std::scoped_lock lock(stats_->mutex);
+        auto &samples = stats_->liveLatency;
+        if (samples.size() >= HeatmapTileStats::kMaxLiveSamples) samples.erase(samples.begin());
+        samples.emplace_back(publishToDraw, age);
+    }
+    sLog_Probe("heatmap.live", "version=" << bin.liveVersion << " publishToDrawMs=" << publishToDraw
+               << " dataAgeMs=" << age << " tf=" << bin.span.tfMs << " L=" << bin.liveStartMs << " end="
+               << bin.liveEndMs << " newest=" << newest << " tick=" << bin.tickUnits);
+}
+
 // ------------------------------------------------------------------ frame
 void HeatmapTileNode::prepare() {
     const auto started = std::chrono::steady_clock::now();
@@ -749,9 +1055,13 @@ void HeatmapTileNode::prepare() {
     // last frame's bins and uploads pushed over it goes now (nothing of this
     // frame references it yet).
     if (residentBytes() > frame_.gpuCapBytes) evictDown(frame_.gpuCapBytes, nullptr);
-    upload(cb);
+    // A new live version first (it is small and the newest thing on screen), then
+    // span sources by rank within what is left of the budget.
+    uint64_t budget = std::max<uint64_t>(frame_.uploadBudgetBytes, 1);
+    updateLive(cb, budget);
+    upload(cb, std::max<uint64_t>(budget, 1));
 
-    // 2. The target's visible spans: bin them at the tick (same frame).
+    // 2. The target's visible spans and its live window: bin them at the tick (same frame).
     const int64_t tf = frame_.tfMs, tick = frame_.tickUnits;
     slots_.clear();
     uint32_t refusedSlots = 0;
@@ -781,6 +1091,7 @@ void HeatmapTileNode::prepare() {
             slots_.push_back(s);
         }
     }
+    Bin *liveBin = liveBinFor(tick, cb); // never holds a transition: it is binned with its upload
 
     // 3. Transitions.
     const bool targetChanged = tf != drawnTf_ || tick != drawnTick_;
@@ -820,58 +1131,83 @@ void HeatmapTileNode::prepare() {
     auto *updates = rhi_->nextResourceUpdateBatch();
     uint32_t ready = 0, fallback = 0, partial = 0, loading = 0;
     uint64_t missingDraws = 0, unpinnedDraws = 0;
-    now_.clear();
-    auto drawBin = [&](const Draw &d, float opacity) {
-        Bin *bin = findBin(d.bin);
-        if (!bin) { ++missingDraws; return; }
-        if (!rowsCover(*bin) && binRows(*bin, cb)) stats_->rebins.fetch_add(1);
-        addBinDraw(updates, *bin, opacity);
-    };
-    // Loading over the parts of [lo, hi) no drawn picture covers (holding across
-    // a tf change: the old tiles are narrower or wider than the new slots).
+    auto &segments = segmentScratch_;
+    segments.clear();
+    // Draws one picture with the draw clip; `covered` collects what it draws.
     auto &covered = covered_;
     covered.clear();
+    int64_t liveFrom = 0, liveEdgeE = 0, liveL = 0, liveEnd = 0;
+    uint64_t liveDrawn = 0;
+    auto drawPicture = [&](const std::vector<Draw> &draws, float opacity, uint8_t layer) {
+        for (const auto &d : draws)
+            if (!findBin(d.bin)) ++missingDraws;
+        layout(draws);
+        for (const auto &piece : pieces_) {
+            Bin &bin = *piece.bin;
+            if (piece.live && layer == 0) {
+                liveFrom = piece.loMs;
+                liveL = bin.liveStartMs;
+                liveEnd = bin.liveEndMs;
+                liveDrawn = bin.liveVersion;
+            }
+            if (!(piece.hiMs > piece.loMs)) continue;
+            if (!rowsCover(bin) && binRows(bin, cb)) stats_->rebins.fetch_add(1);
+            addBinDraw(updates, bin, opacity, piece.loMs, piece.hiMs);
+            segments.push_back({piece.loMs, piece.hiMs, bin.id,
+                                piece.live ? HeatmapTileStats::Segment::Live : HeatmapTileStats::Segment::Span, layer});
+            if (layer == 0) {
+                covered.emplace_back(piece.loMs, piece.hiMs);
+                if (piece.live) noteLiveDrawn(bin);
+            }
+        }
+        if (layer == 0) // E of the span where the live bin starts (telemetry)
+            for (const auto &piece : pieces_)
+                if (!piece.live && piece.hiMs == liveFrom && liveDrawn) liveEdgeE = piece.bin->completeEndMs;
+    };
+    // Loading over the parts of [lo, hi) the picture does not cover (holding
+    // across a tf change: the old tiles are narrower or wider than the new
+    // slots; a span's buckets after E that no live bin draws; a gap [E, L)).
     auto hatch = [&](int64_t lo, int64_t hi) {
         lo = std::max(lo, set ? set->availableStartMs : lo);
         hi = std::min(hi, set ? set->availableEndMs : hi);
+        auto add = [&](int64_t a, int64_t b) {
+            loading += addLoadingDraw(updates, a, b);
+            segments.push_back({a, b, 0, HeatmapTileStats::Segment::Loading, 0});
+        };
         for (const auto &[a, b] : covered) {
             if (b <= lo || a >= hi) continue;
-            if (a > lo) loading += addLoadingDraw(updates, lo, a);
+            if (a > lo) add(lo, a);
             lo = std::max(lo, b);
         }
-        if (hi > lo) loading += addLoadingDraw(updates, lo, hi);
+        if (hi > lo) add(lo, hi);
     };
+    now_.clear();
     if (holding) {
         now_.assign(held_.begin(), held_.end());
-        for (const auto &d : held_) {
-            drawBin(d, 1.0f);
-            covered.emplace_back(tiles::tileStartMs(d.tile, d.tfMs), tiles::tileEndMs(d.tile, d.tfMs));
-        }
-        std::sort(covered.begin(), covered.end());
-        for (const auto &s : slots_)
-            if (s.expected) hatch(tiles::tileStartMs(s.tile, tf), tiles::tileEndMs(s.tile, tf));
     } else {
         for (const auto &s : slots_) {
             const Draw *previous = nullptr;
             if (!s.ready)
                 for (const auto &d : held_)
-                    if (d.tile == s.tile && d.tfMs == tf) { previous = &d; break; }
+                    if (!d.live && d.tile == s.tile && d.tfMs == tf) { previous = &d; break; }
             if (s.ready && s.bin) {
-                now_.push_back({s.bin->id, s.tile, tf});
+                now_.push_back({s.bin->id, s.tile, tf, false});
                 ++ready;
             } else if (previous) {
                 now_.push_back(*previous); // slot fallback: the previous content until the new one is ready
                 ++fallback;
             } else if (s.bin) {
-                now_.push_back({s.bin->id, s.tile, tf}); // what is resident so far
+                now_.push_back({s.bin->id, s.tile, tf, false}); // what is resident so far
                 ++partial;
-            } else if (s.expected) {
-                hatch(tiles::tileStartMs(s.tile, tf), tiles::tileEndMs(s.tile, tf));
             }
         }
-        for (const auto &d : now_) drawBin(d, 1.0f);
-        held_.assign(now_.begin(), now_.end()); // the newest picture of this target
+        if (liveBin) now_.push_back({liveBin->id, 0, tf, true});
     }
+    drawPicture(now_, 1.0f, 0);
+    std::sort(covered.begin(), covered.end());
+    for (const auto &s : slots_)
+        if (s.expected) hatch(tiles::tileStartMs(s.tile, tf), tiles::tileEndMs(s.tile, tf));
+    if (!holding) held_.assign(now_.begin(), now_.end()); // the newest picture of this target
     // Fading layers, oldest first, over the current picture.
     fadeDrawsFrom_ = tileDraws_.size();
     uint32_t fadingLayers = 0;
@@ -888,7 +1224,7 @@ void HeatmapTileNode::prepare() {
             continue;
         }
         ++fadingLayers;
-        for (const auto &d : layer.draws) drawBin(d, float(1 - t));
+        drawPicture(layer.draws, float(1 - t), uint8_t(fadingLayers));
     }
     cb->resourceUpdate(updates);
     if (!ensurePipeline(rt->renderPassDescriptor(), rt->sampleCount()) && !loadingDraws_.empty())
@@ -921,7 +1257,15 @@ void HeatmapTileNode::prepare() {
         stats_->drawn.assign(drawn.begin(), drawn.end());
         stats_->resident.clear();
         for (const auto &bin : bins_) stats_->resident.push_back(bin->id);
+        stats_->drawnSegments.assign(segments.begin(), segments.end());
     }
+    stats_->liveVersion.store(liveDrawn);
+    stats_->liveStartMs.store(liveDrawn ? liveL : 0);
+    stats_->liveEndMs.store(liveDrawn ? liveEnd : 0);
+    stats_->liveDrawFromMs.store(liveDrawn ? liveFrom : 0);
+    stats_->liveEdgeCompleteMs.store(liveDrawn ? liveEdgeE : 0);
+    stats_->liveSets.store(uint32_t(liveSets_.size()));
+    if (frame_.capture) captureCells(cb);
     bool complete = !holding && tick > 0 && !slots_.empty() && tf == drawnTf_ && tick == drawnTick_;
     for (const auto &s : slots_) complete = complete && s.complete;
     complete = complete && !fallback && !partial;
@@ -948,6 +1292,32 @@ void HeatmapTileNode::prepare() {
     stats_->complete.store(complete);
     stats_->gpuFrameMs.store(cb->lastCompletedGpuTime() * 1000.0);
     stats_->prepareMs.store(msSince(started));
+}
+
+// Tests: queue a readback of every block of every bin this frame drew.
+void HeatmapTileNode::captureCells(QRhiCommandBuffer *cb) {
+    auto &capture = *frame_.capture;
+    capture.blocks.clear();
+    std::vector<uint64_t> seen;
+    auto *updates = rhi_->nextResourceUpdateBatch();
+    for (const auto &segment : segmentScratch_) {
+        if (!segment.bin || std::find(seen.begin(), seen.end(), segment.bin) != seen.end()) continue;
+        seen.push_back(segment.bin);
+        const Bin *bin = findBin(segment.bin);
+        if (!bin) continue;
+        for (uint32_t b = 0; b < bin->usedBlocks; ++b) {
+            const auto &block = bin->blocks[b];
+            HeatmapCellCapture::Block out;
+            out.bin = bin->id;
+            out.live = bin->live;
+            out.grid = block.grid;
+            out.result = std::make_shared<QRhiReadbackResult>();
+            updates->readBackBuffer(block.cells.get(), 0, quint32(uint64_t(block.grid.columns) * block.grid.rows * 4),
+                                    out.result.get());
+            capture.blocks.push_back(std::move(out));
+        }
+    }
+    cb->resourceUpdate(updates);
 }
 
 void HeatmapTileNode::render(const RenderState *state) {

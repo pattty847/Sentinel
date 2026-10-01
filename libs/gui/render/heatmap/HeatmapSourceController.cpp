@@ -945,6 +945,8 @@ void HeatmapSourceController::pollLive() {
             return;
         }
         result->snapshot->version = ++liveVersion_;
+        result->snapshot->publishedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         setLiveBytes(result->bytes);
         {
             std::scoped_lock lock(latestMutex_);

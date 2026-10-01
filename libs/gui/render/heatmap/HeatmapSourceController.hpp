@@ -299,6 +299,7 @@ struct LiveSourceSnapshot {
 // makes the node re-index spans. Keep old snapshots with held/fading pictures.
 struct LiveSnapshot {
     uint64_t version = 0, serial = 0;
+    int64_t publishedNs = 0; // steady clock at publication (telemetry: publish-to-draw latency)
     std::string symbol;
     int64_t tfMs = 0;
     std::vector<LiveSourceSnapshot> sources; // coarsest common tick first

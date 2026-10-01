@@ -114,13 +114,38 @@ public:
     bool uploadResident(const std::shared_ptr<const GpuSource> &source, QRhiCommandBuffer *cb, uint64_t &budget,
                         bool *complete, QString *error);
     bool isResident(uint64_t sourceId) const;
+    // Caller-owned state of one recurring bin pass (the node's live bins): the
+    // pass's uniform buffer and compute bindings, kept while the source's buffers
+    // and the target stay the same, so a steady 1 Hz re-bin creates nothing. One
+    // cache must not serve two passes recorded in the same frame (its uniform
+    // buffer is written when the pass is recorded).
+    struct PassCache {
+        std::unique_ptr<QRhiBuffer> params;
+        std::unique_ptr<QRhiShaderResourceBindings> bindings;
+        std::array<const QRhiBuffer *, 8 + kMaxEntryPages> boundTo{};
+        uint64_t created = 0; // QRhiBuffers created for it (churn tests)
+        PassCache();
+        ~PassCache();
+        PassCache(PassCache &&) noexcept;
+        PassCache &operator=(PassCache &&) noexcept;
+    };
     // One compute pass over a resident source into a caller-owned storage buffer
     // of at least columns * rows * 4 bytes (the kernel's cell encoding); several
     // may be recorded in one frame. fill: a fill pass (heatmap_bin.comp dims.w
     // bit 1) that replaces only the target's veil cells, and only with valid ones.
+    // cache: reuse its uniform buffer and bindings (else transient ones).
     bool binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb, const BinGrid &grid,
                          const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error,
-                         bool fill = false);
+                         bool fill = false, PassCache *cache = nullptr);
+    // Live sources (S5L-c): fills the resident entry `residentId` (a caller-chosen
+    // id, never a GpuSource id) with `source` in place. Buffers that are large
+    // enough are reused; smaller ones are replaced with headroom (the old ones go
+    // through deleteLater()). The whole image is recorded in this frame, and the
+    // binner keeps no reference to it. Static storage buffers are written from
+    // the CPU on some backends (Metal), so the caller must not refill an entry
+    // that a frame still in flight reads. *created: QRhiBuffers this call made.
+    bool refillResident(uint64_t residentId, const std::shared_ptr<const GpuSource> &source, QRhiCommandBuffer *cb,
+                        uint64_t *created, QString *error);
     // Its buffers go through QRhiResource::deleteLater(): a frame being recorded
     // may still reference them (uploads, bins), so they die at its end.
     void releaseResident(uint64_t sourceId);
@@ -221,7 +246,8 @@ private:
     std::unique_ptr<QRhiShaderResourceBindings> makeComputeBindings(const SourceBuffers &source, QRhiBuffer *output,
                                                                     QRhiBuffer *params, QString *error);
     bool binSourceInto(const SourceBuffers &source, QRhiCommandBuffer *cb, const BinGrid &grid,
-                       const recording::SizeScale &outputScale, QRhiBuffer *target, bool fill, QString *error);
+                       const recording::SizeScale &outputScale, QRhiBuffer *target, bool fill, QString *error,
+                       PassCache *cache = nullptr);
     bool ensureThresholds(QRhiResourceUpdateBatch *updates, const recording::SizeScale &outputScale, QString *error);
     // sourceParams: the binner's SourceParams (HeatmapGpuBinner.cpp).
     bool fillComputeParams(const void *sourceParams, const BinGrid &grid, const recording::SizeScale &outputScale,
