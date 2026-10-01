@@ -24,6 +24,9 @@
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
 #include "servermodel/Hmc2Store.hpp"
+#include "heatmap/LocalChunkTransport.hpp"
+#include "../servermodel/FakeChunkTransport.hpp"
+#include "marketdata/model/TradeData.h"
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QQmlContext>
@@ -139,6 +142,33 @@ protected:
     }
     template <class Done>
     bool pump(int ms, Done done) { return pump(ms, done, [] {}); }
+    // Frames only when the scene asks for one (a real render loop): no update()
+    // from the test, so the chart's own scheduling must keep work moving.
+    template <class Done>
+    bool pumpOnRequest(int ms, Done done, int *rendered = nullptr) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            if (scene->frameRequested()) {
+                image = scene->renderFrame(&error);
+                if (image.isNull()) return false;
+                if (rendered) ++*rendered;
+            }
+            if (done()) return true;
+        }
+        return false;
+    }
+    double timeSpan() const {
+        return double(ugr->getViewState()->getVisibleTimeEnd() - ugr->getViewState()->getVisibleTimeStart());
+    }
+    double priceSpan() const { return ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice(); }
+    void recordingMode() {
+        ClientConfig config;
+        config.heatmap.source = "recording";
+        config.heatmap.initialPricePct = 5;
+        ugr->applyClientConfig(config);
+    }
     bool frames(int n) {
         int left = n;
         pump(10'000, [&] { return --left <= 0; });
@@ -412,6 +442,147 @@ TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     ugr->setHeatmapChartSettings(brightSettings()); // Auto re-ticks instead of clamping
     for (int i = 0; i < 10; ++i) wheel({-120, 0}, Qt::ShiftModifier);
     EXPECT_GT(priceSpan(), 3200);
+}
+
+// Review blocker 1: MainWindowGPU destroys its HeatmapDataService (a member)
+// before the base QWidget deletes the chart. The chart's layer must not touch
+// the controller or the service afterwards (Guard Malloc run in CMake).
+TEST_F(UgrGpu, TheServiceMayDieBeforeTheChart) {
+    // A passive transport: the controller is created and requests chunks, and no
+    // read is in flight at teardown (a local reader's in-flight read on teardown is
+    // the lab-only FM-125, unrelated to this order).
+    FakeChunkTransport *transport = nullptr;
+    auto service = std::make_unique<heatmap::HeatmapDataService>([&](QObject *) -> heatmap::ChunkTransport * {
+        transport = new FakeChunkTransport;
+        return transport;
+    }, heatmap::HeatmapBudgets{}, [](heatmap::ChunkTransport &t) { static_cast<FakeChunkTransport &>(t).goOnline(); });
+    ugr->setHeatmapService(service.get());
+    gpuOn();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_NE(layer().controller(), nullptr);
+    EXPECT_EQ(service->controllerCount(), 1u);
+    service.reset(); // as ~MainWindowGPU's members go first
+    EXPECT_EQ(layer().controller(), nullptr) << "the layer forgot the controller the service deleted";
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ugr->setTimeframe(int(5 * minute)); // GUI-side work after the service is gone
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    delete ugr; // as the base QWidget deletes the dock
+    ugr = nullptr;
+    ASSERT_FALSE(scene->renderFrame(&error).isNull());
+}
+
+// Review blocker 2: a book-seeded GPU start leaves the legacy stream's bootstrap
+// and initial price centring pending; flipping to legacy must adopt the view,
+// not re-apply initial_price_pct on the next book or trade.
+TEST_F(UgrGpu, FlipToLegacyKeepsABookSeededView) {
+    recordingMode();
+    ugr->setHeatmapRenderer("gpu");
+    ugr->setLiveBookTop(100'100, 100'101);
+    ASSERT_TRUE(ugr->getViewState()->isTimeWindowValid());
+    const qint64 start = ugr->getViewState()->getVisibleTimeStart(), end = ugr->getViewState()->getVisibleTimeEnd();
+    EXPECT_NEAR(priceSpan(), 102.4, 1e-9) << "the seed: 5% of a 2048-row $1 band";
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ugr->setHeatmapRenderer("legacy");
+    ugr->setLiveBookTop(100'120, 100'121);
+    Trade trade;
+    trade.product_id = "BTC-USD";
+    trade.price = 100'125;
+    ugr->onTradeReceived(trade);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_NEAR(priceSpan(), 102.4, 1e-9) << "the legacy resume adopted the view";
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeStart(), start);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end);
+}
+TEST_F(UgrGpu, FlipToLegacyAfterAGpuSymbolSwitchKeepsTheView) {
+    recordingMode();
+    ugr->setHeatmapRenderer("gpu");
+    ugr->setLiveBookTop(100'100, 100'101);
+    ugr->setActiveSymbol("ETH-USD"); // resets the legacy price centring while gpu draws
+    ugr->setLiveBookTop(3'000, 3'000.5);
+    const double lo = ugr->getViewState()->getMinPrice();
+    EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
+    EXPECT_LT(lo, 3'000);
+    ugr->setHeatmapRenderer("legacy");
+    ugr->setLiveBookTop(3'010, 3'010.5);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
+    EXPECT_DOUBLE_EQ(ugr->getViewState()->getMinPrice(), lo);
+}
+
+// Review major 3: the chart schedules its own frames while the node has work
+// (budgeted uploads, a crossfade) and stops when idle; the test renders only
+// when the scene asks.
+TEST_F(UgrGpu, NodeWorkGetsItsFramesWithoutOutsideRedraws) {
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // A tick change with a long crossfade.
+    auto s = brightSettings();
+    s.crossfadeMs = 400;
+    s.tickMode = heatmap::TickMode::Manual;
+    s.manualTick = 500; // $5
+    ugr->setHeatmapChartSettings(s, true);
+    const auto &stats = layer().tileStats();
+    int rendered = 0;
+    bool faded = false;
+    ASSERT_TRUE(pumpOnRequest(3000, [&] {
+        faded = faded || stats.crossfading.load();
+        return faded && !stats.crossfading.load() && layer().settled();
+    }, &rendered)) << "the crossfade stalled (frames rendered: " << rendered << ")";
+    // Small upload budget: a new timeframe's sources page in over many frames.
+    s.uploadBudgetBytes = 64 << 10;
+    ugr->setHeatmapChartSettings(s);
+    rendered = 0;
+    ugr->setTimeframe(int(15 * minute));
+    ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); }, &rendered))
+        << "uploads stalled (frames rendered: " << rendered << ")";
+    EXPECT_GT(rendered, 3) << "budgeted uploads took several frames";
+    // Idle: no more frame requests.
+    rendered = 0;
+    pumpOnRequest(500, [] { return false; }, &rendered);
+    EXPECT_LE(rendered, 2) << "an idle chart stops asking for frames";
+}
+
+// Review major 4: follow-live activation returns to the live anchor (the
+// recording's end here: no live subscription) from history and from the future.
+TEST_F(UgrGpu, FollowLiveReturnsFromHistoryAndFromTheFuture) {
+    gpuOn(); // a historical view (2 h before the end); follow-live off
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double span = timeSpan();
+    const int64_t anchor = layer().liveAnchorMs();
+    ASSERT_EQ(anchor, epoch + 4 * kHourMs);
+    const int64_t expectedEnd = anchor + std::max<int64_t>(minute, int64_t(span * 0.08));
+    ugr->enableAutoScroll(true);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), expectedEnd) << "from history";
+    EXPECT_EQ(timeSpan(), span);
+    ugr->setViewport(epoch + 10 * kHourMs, epoch + 10 * kHourMs + int64_t(span), 99'900, 100'300); // the future
+    ugr->enableAutoScroll(true);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), expectedEnd) << "from the future";
+    ASSERT_TRUE(settle()) << error.toStdString();
+}
+
+// Review major 5: recording availability only (no book, no trade, no API
+// viewport): a time-only view from availability, the price from decoded data.
+TEST_F(UgrGpu, ColdStartFromTheRecordingAlone) {
+    ugr->setHeatmapRenderer("gpu");
+    ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); })) << "never drew: " << error.toStdString();
+    EXPECT_GT(ugr->getViewState()->getMinPrice(), 99'000);
+    EXPECT_LT(ugr->getViewState()->getMaxPrice(), 101'000);
+    EXPECT_GT(ugr->getViewState()->getVisibleTimeEnd(), epoch + 4 * kHourMs) << "at the recording's end";
+}
+
+// Review minor 7: heatmap gamma/contrast/floor reach the GPU palette.
+TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const QImage before = image;
+    ugr->setHeatmapContrast(3.0);
+    ugr->setHeatmapGamma(0.5);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    int changed = 0;
+    for (int y = 2; y < 320; y += 4)
+        for (int x = 2; x < 640; x += 4) changed += image.pixel(x, y) != before.pixel(x, y);
+    EXPECT_GT(changed, 1000) << "the tone mapping changed the picture";
 }
 
 // Owner decision 4: the legacy renderer draws the chart preset from the same

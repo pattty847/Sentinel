@@ -33,6 +33,10 @@ public:
     QImage renderFrame(QString *error);
     // The same frame without the readback (timing runs). Waits for the GPU.
     bool renderFrameOnly(QString *error);
+    // Whether the scene asked for a frame (QQuickRenderControl renderRequested or
+    // sceneChanged) since the last render: tests drive frames only on request,
+    // as a real render loop does.
+    bool frameRequested() const { return requested_; }
 private:
     HeadlessRhi device_;
     std::unique_ptr<QQuickRenderControl> control_;
@@ -41,5 +45,6 @@ private:
     std::unique_ptr<QRhiTextureRenderTarget> target_;
     std::unique_ptr<QRhiRenderPassDescriptor> pass_;
     QSize size_;
+    bool requested_ = false;
 };
 } // namespace lab

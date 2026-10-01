@@ -83,6 +83,10 @@ public:
     std::shared_ptr<const LiveSnapshot> live() const { return live_; }
     // Newest live open end of the current symbol and timeframe (0: none).
     int64_t liveOpenEndMs() const;
+    // Where "live" is for this symbol, independent of the live subscription (a
+    // historical view drops it): the newest live open end seen, or the recording's
+    // committed end from the service's availability. 0: unknown yet.
+    int64_t liveAnchorMs() const;
     // Wall-clock receive time of the newest live version (ms since epoch; 0: none).
     int64_t liveReceivedAtMs() const { return liveReceivedAtMs_; }
     // The price a fresh view centres on, from the decoded chunks of the newest
@@ -108,6 +112,7 @@ signals:
 
 private:
     HeatmapDataService *service_ = nullptr;
+    int serviceHook_ = 0;
     HeatmapSourceController *controller_ = nullptr;
     std::shared_ptr<HeatmapCapacity> capacity_;
     bool active_ = false;
@@ -125,6 +130,7 @@ private:
     std::shared_ptr<const LiveSnapshot> live_;
     std::shared_ptr<const ResolutionSummary> resolution_;
     uint64_t lastLiveVersion_ = 0;
+    int64_t lastLiveEndMs_ = 0; // newest open end seen for symbol_ (any timeframe)
     int64_t liveReceivedAtMs_ = 0;
     std::shared_ptr<HeatmapTileStats> tileStats_ = std::make_shared<HeatmapTileStats>();
     bool manualMode_ = false;
@@ -153,6 +159,7 @@ private:
 
     void createController();
     void destroyController();
+    void forgetService(); // the service is being destroyed: it deletes the controller itself
     void onSnapshot();
     void onLive();
     void postView();

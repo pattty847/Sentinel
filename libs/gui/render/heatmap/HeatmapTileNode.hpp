@@ -85,6 +85,10 @@ struct HeatmapTileStats {
     std::atomic<uint32_t> slotCount{0}, readySlots{0}, fallbackSlots{0}, partialSlots{0}, loadingSlots{0};
     std::atomic<uint32_t> refusedSlots{0}, fadingLayers{0};
     std::atomic<bool> complete{false}, holding{false}, crossfading{false};
+    // The last prepare() left work that needs another frame with no new input:
+    // budgeted uploads, a crossfade, a live replacement paging in, the precision
+    // self-test readback. Hosts schedule a frame while it is set (S6b review 3).
+    std::atomic<bool> wantsFrame{false};
     std::atomic<int64_t> drawnTickUnits{0}, drawnTfMs{0};
     std::atomic<double> prepareMs{0}, lastBinMs{0}, gpuFrameMs{0};
     std::atomic<bool> preciseKernel{true};
@@ -272,6 +276,7 @@ private:
     std::vector<SpanSourceKey> reportedMissing_; // not reported again while the snapshot still lists them
     bool lost_ = false;
     std::vector<Source *> order_; // reused per frame
+    bool uploadPending_ = false;   // upload(): wanted sources left for later frames
     std::vector<std::pair<int64_t, int64_t>> covered_;
     std::vector<uint64_t> drawnScratch_;
     std::vector<Piece> pieces_;                                // reused per picture

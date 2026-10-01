@@ -49,7 +49,10 @@ DataProcessor::DataProcessor(QObject* parent)
     m_recordingViewRetry->setSingleShot(true);
     connect(m_recordingViewRetry, &QTimer::timeout, this, [this] {
         if (recordingMode() && m_recordingConnected && m_recordingBandConfirmed &&
-            m_registeredView.generation == m_bandGeneration) emit recordingViewNeeded(m_registeredView);
+            m_registeredView.generation == m_bandGeneration) {
+            m_viewMayBeRegistered = true;
+            emit recordingViewNeeded(m_registeredView);
+        }
     });
     m_recordingFinalRetry = new QTimer(this);
     m_recordingFinalRetry->setSingleShot(true);
@@ -693,8 +696,13 @@ void DataProcessor::setHeatmapEnabled(bool enabled) {
     m_heatmapEnabled = enabled;
     // A registered live recording view would keep streaming band columns the
     // muted processor drops: release it on the server.
-    if (!enabled && m_recordingBandConfirmed && m_recordingConnected && !m_registeredView.symbol.empty())
+    // The server keeps streaming the last registered view while a re-band is
+    // pending (confirmation of the current band is cleared then), so this tracks
+    // registration itself; an unview is idempotent on the server.
+    if (!enabled && m_viewMayBeRegistered && m_recordingConnected && !m_registeredView.symbol.empty()) {
+        m_viewMayBeRegistered = false;
         emit recordingViewReleased(m_registeredView);
+    }
     resetRecordingRequest(); // cancel timers and invalidate in-flight replies
     m_heatmapFetchInFlight = false;
     ++m_heatmapFetchGeneration;
@@ -730,6 +738,7 @@ void DataProcessor::setRecordingCapability(bool available) {
 void DataProcessor::setRecordingConnected(bool connected) {
     m_recordingConnected = connected;
     if (!connected) {
+        m_viewMayBeRegistered = false; // the server drops a connection's view with it
         m_recordingAvailable = false; // require a fresh hello on reconnect
         resetRecordingRequest();
     }
@@ -911,6 +920,7 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
     if (registerView) {
         m_registeredView = {page.symbol.toStdString(), page.layer.toStdString(), page.timeframeMs,
             {page.bandLo, page.bandTick, static_cast<uint32_t>(page.bandRows)}, page.bandGeneration};
+        m_viewMayBeRegistered = true;
         emit recordingViewNeeded(m_registeredView);
     }
     std::vector<heatmap_window::Column> columns;

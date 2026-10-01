@@ -575,6 +575,34 @@ TEST_F(RecordingDataProcessor, MutedViewportsPublishNothingAndTheLatestIsPlacedO
     EXPECT_EQ(released.size(), 1) << "no view registered since the resume: nothing to release";
 }
 
+// Review major 6: a re-band clears confirmation of the current band while the
+// server keeps streaming the registered view; muting in that window must still
+// release it (and a disconnect forgets it: the server drops it with the connection).
+TEST_F(RecordingDataProcessor, MutingDuringAPendingRebandReleasesTheRegisteredView) {
+    processor.setRecordingCapability(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 1);
+    std::vector<recording::LiveView> released;
+    QObject::connect(&processor, &DataProcessor::recordingViewReleased, &processor,
+                     [&](const auto &view) { released.push_back(view); });
+    const auto sent = requests.size();
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 20000, 20100, 1000, 500); // re-band
+    events(180);
+    ASSERT_GT(requests.size(), sent) << "the re-band request is out (its band not yet confirmed)";
+    processor.setHeatmapEnabled(false);
+    ASSERT_EQ(released.size(), 1) << "the old view is still streaming: release it";
+    EXPECT_EQ(released.back().generation, views.back().generation);
+    processor.setHeatmapEnabled(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 2);
+    processor.setRecordingConnected(false);
+    processor.setRecordingConnected(true);
+    processor.setHeatmapEnabled(false);
+    EXPECT_EQ(released.size(), 1) << "a dropped connection has no view to release";
+}
+
 TEST_F(RecordingDataProcessor, MutingLegacySlicesAlsoStopsFetchesAndResumesWithoutChangingMode) {
     processor.setRecordingConfig(false, 2);
     HeatmapSlice live;

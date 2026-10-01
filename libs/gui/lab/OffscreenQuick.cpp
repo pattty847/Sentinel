@@ -32,6 +32,8 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
     QQuickWindow::setSceneGraphBackend(QStringLiteral("rhi"));
     QQuickWindow::setGraphicsApi(device_.backend.graphicsApi);
     control_ = std::make_unique<QQuickRenderControl>();
+    QObject::connect(control_.get(), &QQuickRenderControl::renderRequested, [this] { requested_ = true; });
+    QObject::connect(control_.get(), &QQuickRenderControl::sceneChanged, [this] { requested_ = true; });
     window_ = std::make_unique<QQuickWindow>(control_.get());
 #if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
     if (device_.vulkan) window_->setVulkanInstance(device_.vulkan.get());
@@ -61,6 +63,7 @@ bool OffscreenQuick::renderFrameOnly(QString *error) {
         if (error) *error = QStringLiteral("offscreen scene was not created");
         return false;
     }
+    requested_ = false;
     control_->polishItems();
     control_->beginFrame();
     control_->sync();
@@ -74,6 +77,7 @@ QImage OffscreenQuick::renderFrame(QString *error) {
         if (error) *error = QStringLiteral("offscreen scene was not created");
         return {};
     }
+    requested_ = false;
     control_->polishItems();
     control_->beginFrame();
     control_->sync();

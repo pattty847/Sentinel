@@ -71,21 +71,33 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   setFlag(ItemAcceptsInputMethod, true);
 
   setAcceptHoverEvents(false); // Reduce event capture
-  connect(this, &QQuickItem::windowChanged, this,
-          [this](QQuickWindow* w) {
-              if (m_axisTextService) {
-                  m_axisTextService->bindAxisLayoutWindow(w);
-              }
-              syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
-              if (w) connect(w, &QQuickWindow::afterRendering, this, [this]() {
-                  // Direct render-thread callback: fixed-size frame snapshot only.
-                  m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
-                  m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
-              }, Qt::DirectConnection);
-          });
+  connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
   init();
+  // An item constructed with a parent already in a window (C++ hosts, tests)
+  // saw windowChanged before the connection above.
+  if (window()) bindWindow(window());
 }
+
+void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
+  if (m_axisTextService) {
+    m_axisTextService->bindAxisLayoutWindow(w);
+  }
+  syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
+  if (!w) return;
+  // The GPU tile node's stats outlive this connection (shared).
+  auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
+  connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
+    // Direct render-thread callback: fixed-size frame snapshot only.
+    m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
+    m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
+    // GPU heatmap work left after this frame (budgeted uploads, a crossfade,
+    // live paging): ask for the next frame; an idle node stops asking.
+    if (tileStats && tileStats->wantsFrame.exchange(false))
+      QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+  }, Qt::DirectConnection);
+}
+
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
   m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
@@ -620,6 +632,7 @@ void UnifiedGridRenderer::setHeatmapGamma(double gamma) {
     return;
   }
   m_heatmapGamma = clamped;
+  syncGpuTone();
   update();
   emit heatmapGammaChanged();
 }
@@ -630,6 +643,7 @@ void UnifiedGridRenderer::setHeatmapContrast(double contrast) {
     return;
   }
   m_heatmapContrast = clamped;
+  syncGpuTone();
   update();
   emit heatmapContrastChanged();
 }
@@ -640,6 +654,7 @@ void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
     return;
   }
   m_heatmapShaderFloor = clamped;
+  syncGpuTone();
   update();
   emit heatmapShaderFloorChanged();
 }
@@ -773,7 +788,7 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
   if (m_viewState && m_gpuHeatmap) {
     m_viewState->enableAutoScroll(enabled);
-    if (enabled) followGpuLive(); // back to the live edge, same span
+    if (enabled) returnGpuToLive(); // back to the live edge from history or the future, same span
     update();
     emit autoScrollEnabledChanged();
     sLog_Render("auto-scroll enabled=" << enabled << " reason=request renderer=gpu");
@@ -836,8 +851,13 @@ void UnifiedGridRenderer::setHeatmapRenderer(const QString& renderer) {
     applyGpuLimits();
     syncGpuView();
     followGpuLive();
+    bootstrapGpuTimeView();
   } else {
     if (m_viewState) m_viewState->setMaxSpans(0, 0);
+    // Legacy resume adopts the current view before the stream unmutes: pending
+    // bootstrap/initial centring (from startup or a gpu-mode symbol or tf
+    // change) must not replace it on the next book, trade or window update.
+    if (m_heatmapStreamService && m_viewState) m_heatmapStreamService->adoptViewport(*m_viewState);
     m_heatmapOverlay.requestFullTextureRebuild();
     onViewportChanged(); // the processor places its window over the current view again
   }
@@ -866,6 +886,14 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
 
 void UnifiedGridRenderer::setHeatmapTickMemory(const heatmap::ManualTickMemory& memory) {
   if (m_gpuLayer) m_gpuLayer->setTickMemory(memory);
+}
+
+// The GPU palette's tone mapping is the legacy shader's gamma/contrast/floor.
+void UnifiedGridRenderer::syncGpuTone() {
+  if (m_gpuLayer) {
+    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
+                         static_cast<float>(m_heatmapShaderFloor)});
+  }
 }
 
 void UnifiedGridRenderer::syncGpuSurface() {
@@ -940,6 +968,50 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   setGpuViewportSelf(start, end, mid - span * 0.5, mid + span * 0.5);
   syncGpuView(); // also when the viewport did not change (priceKnown flips)
   update();
+}
+
+void UnifiedGridRenderer::returnGpuToLive() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid()) return;
+  const int64_t anchor = m_gpuLayer->liveAnchorMs();
+  const int64_t tf = m_currentTimeframe_ms;
+  if (anchor <= 0 || tf <= 0) return; // nothing known yet: the next live frame steps forward
+  const int64_t span = m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart();
+  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+  const int64_t pad = std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  sLog_Render("GPU heatmap returns to live: anchor=" << anchor << " end=" << liveEnd + pad);
+  m_viewState->setViewport(liveEnd + pad - span, liveEnd + pad, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  syncGpuView(); // publishes the view even when it was already there
+  emit liveRenderTick();
+}
+
+void UnifiedGridRenderer::bootstrapGpuTimeView() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || m_viewState->isTimeWindowValid()) {
+    if (m_gpuBootstrapTimer) m_gpuBootstrapTimer->stop();
+    return;
+  }
+  const int64_t anchor = m_gpuLayer->liveAnchorMs();
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  if (anchor <= 0) {
+    // Availability arrives on the data thread: look again shortly (stops once
+    // a view exists, from here, a book top, a trade or the API).
+    if (!m_gpuBootstrapTimer) {
+      m_gpuBootstrapTimer = new QTimer(this);
+      m_gpuBootstrapTimer->setInterval(50);
+      connect(m_gpuBootstrapTimer, &QTimer::timeout, this, [this] { bootstrapGpuTimeView(); });
+    }
+    if (!m_gpuBootstrapTimer->isActive()) m_gpuBootstrapTimer->start();
+    return;
+  }
+  if (m_gpuBootstrapTimer) m_gpuBootstrapTimer->stop();
+  const int64_t span = gpuInitialSpanMs(width());
+  const int64_t end = recording::floorDiv(anchor, tf) * tf + tf +
+                      std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  sLog_Render("GPU heatmap time-only bootstrap from availability: anchor=" << anchor << " time=[" << end - span
+              << ".." << end << "] (price from the first decoded data)");
+  m_gpuPriceKnown = false;
+  m_gpuViewPristine = true;
+  setGpuViewportSelf(end - span, end, 0.0, 1.0); // placeholder price: nothing draws until it is known
+  syncGpuView();
 }
 
 // The legacy first view's time span: initial_column_px per column (16 columns min).
@@ -1052,10 +1124,7 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
-  if (m_gpuLayer) {
-    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
-                         static_cast<float>(m_heatmapShaderFloor)});
-  }
+  syncGpuTone();
   m_heatmapTargetRowPx = std::clamp(config.heatmap.targetRowPx, 1, 64);
   m_heatmapCellAspect = std::clamp(config.heatmap.cellAspect, 0.05, 4.0);
   if (!m_chartSensitivityApplied && config.heatmap.sensitivityMin > 0.0 &&

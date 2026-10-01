@@ -451,8 +451,17 @@ private:
     void followGpuLive();
     void seedGpuViewport(double bestBid, double bestAsk);
     void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax);
+    // "Return to live" (follow-live activation): the view's right edge goes one
+    // padding past the live anchor's bucket, in either direction, span kept.
+    void returnGpuToLive();
+    // Cold start without a book or trade: a time-only view from the recording's
+    // availability (price unknown until decoded data supplies it).
+    void bootstrapGpuTimeView();
+    QTimer* m_gpuBootstrapTimer = nullptr;
     qint64 gpuInitialSpanMs(double widthPx) const;
     void syncGpuSurface();
+    void syncGpuTone();
+    void bindWindow(QQuickWindow* window);
     void computeAndApplyFrameMapping(FrameContext& frame,
                                      HeatmapIntensityNode* texNode,
                                      int64_t cadenceMs,

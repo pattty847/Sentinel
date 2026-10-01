@@ -406,6 +406,14 @@ void HeatmapTileNode::upload(QRhiCommandBuffer *cb, uint64_t &budget) {
                        << s->key.source << " bytes=" << s->bytes << " tier=" << spanTierName(s->rank.tier));
         }
     }
+    // More frames are needed when a wanted source is part-uploaded or waits for
+    // budget; one the cap refused waits for a new snapshot instead.
+    uploadPending_ = false;
+    for (const Source *s : order_)
+        if (!s->complete && s->build && s->build->gpu && (s->created || !budget)) {
+            uploadPending_ = true;
+            break;
+        }
 }
 
 // ------------------------------------------------------------------ bins
@@ -1171,6 +1179,8 @@ void HeatmapTileNode::noteLiveDrawn(const Bin &bin) {
 // ------------------------------------------------------------------ frame
 void HeatmapTileNode::prepare() {
     const auto started = std::chrono::steady_clock::now();
+    stats_->wantsFrame.store(false); // set again at the end when work remains
+    uploadPending_ = false;
     tileDraws_.clear();
     loadingUsed_ = 0;
     QRhiCommandBuffer *cb = commandBuffer();
@@ -1450,6 +1460,8 @@ void HeatmapTileNode::prepare() {
     stats_->drawnTickUnits.store(drawnTick_);
     stats_->drawnTfMs.store(drawnTf_);
     stats_->complete.store(complete);
+    stats_->wantsFrame.store(uploadPending_ || fadingLayers > 0 || pendingLive_ != nullptr ||
+                             (binner_ && binner_->selfTestInFlightForTest()));
     stats_->gpuFrameMs.store(cb->lastCompletedGpuTime() * 1000.0);
     stats_->prepareMs.store(msSince(started));
 }

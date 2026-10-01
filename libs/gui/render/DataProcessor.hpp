@@ -145,6 +145,7 @@ private:
     QTimer* m_recordingRetry = nullptr;
     int m_recordingNoProgress = 0;
     recording::LiveView m_registeredView;
+    bool m_viewMayBeRegistered = false; // a view was sent on this connection and not released
     QTimer* m_recordingViewRetry = nullptr;
     int m_recordingViewRetryMs = 1000;
     QTimer* m_recordingFinalRetry = nullptr;

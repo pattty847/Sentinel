@@ -46,13 +46,31 @@ HeatmapGpuLayer::HeatmapGpuLayer(QObject *parent) : QObject(parent) {
     palette_ = makePalette(gradientsFor(settings_), tone_);
 }
 
-HeatmapGpuLayer::~HeatmapGpuLayer() { destroyController(); }
+HeatmapGpuLayer::~HeatmapGpuLayer() { setService(nullptr); }
 
 void HeatmapGpuLayer::setService(HeatmapDataService *service) {
     if (service_ == service) return;
     destroyController();
+    if (service_) service_->removeShutdownHook(serviceHook_);
+    serviceHook_ = 0;
     service_ = service;
+    if (service_) serviceHook_ = service_->addShutdownHook([this] { forgetService(); });
     if (active_) createController();
+}
+
+// The service dies before this layer (e.g. MainWindowGPU members before its
+// widgets): drop the controller pointer without touching it; the service
+// deletes it on its data thread. The node keeps its shared snapshot/capacity.
+void HeatmapGpuLayer::forgetService() {
+    if (controller_) QObject::disconnect(controller_, nullptr, this, nullptr);
+    controller_ = nullptr;
+    capacity_.reset();
+    snapshot_.reset();
+    live_.reset();
+    resolution_.reset();
+    service_ = nullptr;
+    serviceHook_ = 0;
+    sLog_App("Heatmap GPU layer: data service shut down first; controller forgotten");
 }
 
 void HeatmapGpuLayer::setActive(bool active) {
@@ -101,6 +119,7 @@ void HeatmapGpuLayer::destroyController() {
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     symbol_ = symbol;
+    lastLiveEndMs_ = 0;
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
     restoreTick();
     noteLimits();
@@ -240,6 +259,8 @@ void HeatmapGpuLayer::onLive() {
         lastLiveVersion_ = live_->version;
         liveReceivedAtMs_ = QDateTime::currentMSecsSinceEpoch();
     }
+    if (live_ && live_->symbol == symbol_)
+        for (const auto &source : live_->sources) lastLiveEndMs_ = std::max(lastLiveEndMs_, source.openEndMs);
     emit liveChanged();
 }
 
@@ -248,6 +269,15 @@ int64_t HeatmapGpuLayer::liveOpenEndMs() const {
     int64_t end = 0;
     for (const auto &source : live_->sources) end = std::max(end, source.openEndMs);
     return end;
+}
+
+int64_t HeatmapGpuLayer::liveAnchorMs() const {
+    int64_t anchor = std::max(lastLiveEndMs_, liveOpenEndMs());
+    if (service_ && !symbol_.empty())
+        if (const auto available = service_->availability(symbol_))
+            for (const auto &source : available->sources)
+                for (const auto &level : source.levels) anchor = std::max(anchor, level.committedThroughMs);
+    return anchor;
 }
 
 void HeatmapGpuLayer::refreshPresets() {

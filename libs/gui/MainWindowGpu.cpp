@@ -242,6 +242,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
 }
 
 MainWindowGPU::~MainWindowGPU() {
+    // Members (the heatmap data service) die before the base QWidget deletes the
+    // docks and the chart: detach the chart's GPU layer while both are alive.
+    if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr)
+        renderer->setHeatmapService(nullptr);
 }
 
 void MainWindowGPU::setupUI() {

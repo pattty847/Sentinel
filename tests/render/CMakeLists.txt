@@ -205,6 +205,12 @@ target_link_libraries(test_ugr_gpu PRIVATE sentinel_gui_lib sentinel_lab_lib GTe
 target_compile_definitions(test_ugr_gpu PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME UgrGpuTests COMMAND test_ugr_gpu)
 set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)
+# Review blocker 1 under Guard Malloc: the data service dies before the chart.
+if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
+    add_test(NAME UgrGpuServiceTeardownGuardMalloc COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.TheServiceMayDieBeforeTheChart")
+    set_tests_properties(UgrGpuServiceTeardownGuardMalloc PROPERTIES LABELS "render;heatmap" TIMEOUT 300
+                         ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
+endif()
 # Lab outputs never land inside the recording root (links, aliases, missing descendants).
 add_executable(test_lab_output_guard test_lab_output_guard.cpp)
 target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)

@@ -106,6 +106,10 @@ public:
     void resetAutoScrollSpan();
     void updateAutoScrollLag(GridViewState& vs, int64_t cadenceMs);
     void resetPriceCenter();
+    // The legacy stream resumes under an established view (renderer flip from
+    // gpu): the view counts as initialised and no initial price centring is
+    // pending, so neither a window update nor a book/trade replaces it.
+    void adoptViewport(const GridViewState& viewState);
     void setRecordingMode(bool recording) { m_recordingMode = recording; }
     bool recordingViewportReady(GridViewState* viewState);
     void setLiveBook(double bid, double ask, GridViewState* viewState);

@@ -28,6 +28,13 @@ public:
     void setLastTrade(double price) { m_priceCenter.setTrade(price); }
     void requestPriceCenter() { m_priceCenter.requestFollow(); }
     void cancelPriceCenter() { m_priceCenter.cancel(); }
+    // Adopt an established view as the bootstrap result: no initial price
+    // centring, span and right edge taken from the view (legacy resume, S6b).
+    void adoptView(int64_t spanMs, int64_t viewEndMs) {
+        m_priceCenter.cancel();
+        m_autoScrollSpanMs = spanMs;
+        m_lastViewEndMs = viewEndMs;
+    }
     bool priceCenterPending() const { return m_priceCenter.pending(); }
     bool initialPriceCenterPending() const { return m_priceCenter.initialRequest(); }
     bool applyPendingPriceCenter(GridViewState& view, double span);
