@@ -297,6 +297,7 @@ struct LiveSourceSnapshot {
     std::shared_ptr<const gpu::GpuSource> gpu;
     int64_t commonUnits = 0;
     bool carried = false; // frozen previous publication; no new observation or extended coverage
+    std::shared_ptr<const ResolutionSummary> resolution; // cached with the immutable source, including when carried
 };
 // Published separately: a live revision never changes the SpanSet pointer or
 // makes the node re-index spans. Keep old snapshots with held/fading pictures.
@@ -462,6 +463,7 @@ private:
     // last admitted composition (later frames never extend it).
     std::optional<int64_t> liveCoalesceUntilMs_;
     std::optional<int64_t> liveSourcesUntilMs_; // first available edge anchors the bounded startup wait
+    bool liveHasPublished_ = false; // additions to an established state never restart the startup wait
     std::array<double, 3> liveCosts_{}; // warm composition CPU costs (ms), newest last
     size_t liveCostCount_ = 0;
     std::map<std::string, int64_t> liveStarts_;

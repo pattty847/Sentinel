@@ -731,6 +731,7 @@ void HeatmapSourceController::resetLive(bool keepPicture) {
     liveDueMs_ = 0;
     liveCoalesceUntilMs_.reset();
     liveSourcesUntilMs_.reset();
+    liveHasPublished_ = false;
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
@@ -748,7 +749,7 @@ void HeatmapSourceController::resetLive(bool keepPicture) {
         if (latestLive_) {
             bytes = resolutionBytes(latestLive_->resolution);
             for (const auto &source : latestLive_->sources)
-                bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu);
+                bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu) + resolutionBytes(*source.resolution);
         }
         mergeLatestResolution(); // retain the history summary while live is absent
     }
@@ -782,10 +783,11 @@ void HeatmapSourceController::refreshLive() {
                 liveInterested_ = false;
                 liveReleaseMs_.reset();
                 liveReleaseTimer_->stop();
+                resetLive(); // retire the node's live window and its CPU commitment after the grace
+                schedule();
             } else liveReleaseTimer_->start(int(*liveReleaseMs_ - now));
         }
-        // A same-tf pan can release its subscription, but keep the immutable
-        // picture for return-to-live until the replacement sources arrive.
+        // Keep the immutable picture only during the subscription release grace.
         if (!liveStarts_.empty()) { resetLive(true); schedule(); }
         return;
     }
@@ -891,7 +893,7 @@ void HeatmapSourceController::pollLive() {
     const bool missingSource = std::any_of(edges.begin(), edges.end(), [](const auto &edge) {
         return !edge->openEndMs;
     });
-    if (missingSource) {
+    if (missingSource && !liveHasPublished_) {
         if (!liveSourcesUntilMs_) liveSourcesUntilMs_ = now + kLiveSourcesWaitMs;
     } else liveSourcesUntilMs_.reset();
     if (const auto due = std::max({liveDueMs_, liveCoalesceUntilMs_.value_or(0),
@@ -907,13 +909,16 @@ void HeatmapSourceController::pollLive() {
     std::vector<Input> inputs;
     std::vector<LiveSourceSnapshot> carried;
     const auto previous = latestLive();
+    int64_t healthyThrough = INT64_MAX;
+    for (const auto &edge : edges) if (edge->openEndMs)
+        healthyThrough = std::min(healthyThrough, edge->committedThroughMs);
     std::vector<ChunkBytes> keys;
     size_t reservation = stats_.liveBytes;
     for (const auto &edge : edges) {
         if (!edge->openEndMs && previous && previous->symbol == symbol_ && previous->tfMs == tfMs_) {
             for (const auto &source : previous->sources)
                 if (source.source == edge->source && source.startMs == liveStarts_.begin()->second &&
-                    source.openEndMs > source.startMs) {
+                    source.openEndMs > source.startMs && source.openEndMs >= healthyThrough) {
                     carried.push_back(source);
                     carried.back().carried = true;
                 }
@@ -977,24 +982,23 @@ void HeatmapSourceController::pollLive() {
             source.openEndMs = input.edge->openEndMs;
             source.columns = std::make_shared<SparseColumns>(std::move(composed.columns));
             source.gpu = std::make_shared<gpu::GpuSource>(gpu::buildGpuSource(*source.columns));
-            auto summary = summarizeResolution(*source.columns, source.source, tf, source.startMs,
-                                               source.columns->endMs, scale);
-            for (const auto &column : summary.columns)
+            source.resolution = std::make_shared<ResolutionSummary>(summarizeResolution(*source.columns,
+                                source.source, tf, source.startMs, source.columns->endMs, scale));
+            for (const auto &column : source.resolution->columns)
                 for (const auto &s : column.sources) if (s.commonUnits > 0)
                     source.commonUnits = source.commonUnits ? std::lcm(source.commonUnits, s.commonUnits) : s.commonUnits;
-            mergeResolution(out->resolution, summary);
+            mergeResolution(out->resolution, *source.resolution);
             result->imageMs += double(clock() - imageBegin) / 1e6;
             result->bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu) +
-                             state->composers[input.edge->source].bytes();
+                             resolutionBytes(*source.resolution) + state->composers[input.edge->source].bytes();
             out->sources.push_back(std::move(source));
         }
-        for (const auto &source : carried) {
+        for (auto source : carried) {
             // Reuse the whole immutable source, including its original scan
             // proof. Never merge it into fresh raw minutes or stretch its end.
-            mergeResolution(out->resolution, summarizeResolution(*source.columns, source.source, tf,
-                            source.startMs, source.columns->endMs, scale));
-            result->bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu);
-            out->sources.push_back(source);
+            mergeResolution(out->resolution, *source.resolution);
+            result->bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu) + resolutionBytes(*source.resolution);
+            out->sources.push_back(std::move(source));
         }
         result->bytes += resolutionBytes(out->resolution);
         std::sort(out->sources.begin(), out->sources.end(), [](const auto &a, const auto &b) {
@@ -1066,6 +1070,7 @@ void HeatmapSourceController::pollLive() {
             mergeLatestResolution();
         }
         ++stats_.livePublications;
+        liveHasPublished_ = true;
         emit liveChanged();
         // Inputs that changed during this job are still dirty. Its consistent
         // result is drawable now; the newest inputs run at the next cadence.

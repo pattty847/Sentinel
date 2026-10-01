@@ -51,7 +51,7 @@ ChunkFramePtr chunk(const ChunkKey &key, int64_t cutoff, uint64_t revision = 1, 
     const auto through = std::clamp(cutoff, key.startMs, end);
     f->state = {through == end, through, revision};
     f->contentHash = uint64_t(through) + revision;
-    f->columns = {symbol, std::string(findChunkSource(key.source)->hmc2Layer), kMinuteMs, key.startMs, end, {}, {}};
+    f->columns = {key.symbol, std::string(findChunkSource(key.source)->hmc2Layer), kMinuteMs, key.startMs, end, {}, {}};
     if (through > key.startMs) f->columns.scannedRanges = {{key.startMs, through}};
     for (auto t = std::max(base, key.startMs); t < through; t += kMinuteMs) f->columns.columns.push_back(col(t, kMinuteMs, size));
     return f;
@@ -152,6 +152,14 @@ protected:
         c.setView(symbol, tf, double(base - 4 * tf), double(base)); settle();
         now += HeatmapSourceController::kLiveReleaseDelayMs;
         c.pollLive(); settle();
+    }
+    void restartNearDuringGrace(HeatmapSourceController &c, int64_t tf) {
+        c.setView(symbol, tf, double(base - 4 * tf), double(base)); settle();
+        // Availability changes replace the subscription and discard near's
+        // edge, while the short pan still holds the previous complete picture.
+        transport.push(available(cutoff)); drainLive();
+        transport.push(available(cutoff, true)); drainLive();
+        c.setView(symbol, tf, double(base), double(minute(80))); settle();
     }
     // The deep grid cannot build Manual $1; the near fill pass must keep the
     // known cell valid. Check the actual CPU bin oracle, not only source count.
@@ -680,7 +688,7 @@ TEST_F(LiveClient, ViewChangeAndReturnToLiveKeepEveryPublishedSource) {
         EXPECT_EQ(sub(), oldSub);
         EXPECT_EQ(c.latestLive(), before);
         leaveAndRelease(c, tf);
-        EXPECT_EQ(c.latestLive(), before) << "keep the known picture across a historical pan";
+        EXPECT_FALSE(c.latestLive()) << "the historical picture expires with the release grace";
         c.setView(symbol, tf, double(base), double(minute(80))); settle();
         ASSERT_NE(sub(), oldSub);
         unsigned publications = 0;
@@ -689,7 +697,7 @@ TEST_F(LiveClient, ViewChangeAndReturnToLiveKeepEveryPublishedSource) {
         }, Qt::QueuedConnection);
         sendDeep(1, 2000); settle();
         advance(c, 700);
-        EXPECT_EQ(c.latestLive(), before);
+        EXPECT_FALSE(c.latestLive());
         send(tail(10, 10, 10, 1, 2000, "hmc2.near")); settle();
         ASSERT_NE(c.latestLive(), before);
         EXPECT_GT(publications, 0u);
@@ -721,8 +729,7 @@ TEST_F(LiveClient, DeadSourceAfterResubscriptionCarriesKnownColumnsAtTheBound) {
     ASSERT_TRUE(c.latestLive());
     const auto before = c.latestLive();
     checkManualCell(*before);
-    leaveAndRelease(c, 5 * kMinuteMs);
-    c.setView(symbol, 5 * kMinuteMs, double(base), double(minute(80))); settle();
+    restartNearDuringGrace(c, 5 * kMinuteMs);
     sendDeep(1, 2000); settle();
     advance(c, HeatmapSourceController::kLiveSourcesWaitMs - 1);
     EXPECT_EQ(c.latestLive(), before);
@@ -735,6 +742,8 @@ TEST_F(LiveClient, DeadSourceAfterResubscriptionCarriesKnownColumnsAtTheBound) {
         for (const auto &old : before->sources) if (old.source == s.source) {
             EXPECT_EQ(s.columns, old.columns);
             EXPECT_EQ(s.gpu, old.gpu);
+            ASSERT_TRUE(s.resolution);
+            EXPECT_EQ(s.resolution, old.resolution);
             EXPECT_EQ(s.openEndMs, old.openEndMs);
         }
     }
@@ -744,6 +753,149 @@ TEST_F(LiveClient, DeadSourceAfterResubscriptionCarriesKnownColumnsAtTheBound) {
     send(tail(10, 10, 10, 1, 3000, "hmc2.near")); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
     checkManualCell(*c.latestLive());
     for (const auto &s : c.latestLive()->sources) EXPECT_FALSE(s.carried);
+}
+TEST_F(LiveClient, HistoricalPanRetiresTheLivePictureAndBytesAtTheReleaseDeadline) {
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    const auto before = c.latestLive();
+    ASSERT_TRUE(before);
+    c.setView(symbol, kMinuteMs, double(base - kHourMs), double(base)); settle();
+    advance(c, HeatmapSourceController::kLiveReleaseDelayMs - 1);
+    EXPECT_EQ(c.latestLive(), before);
+    EXPECT_GT(c.stats().liveBytes, 0u);
+    advance(c, 1);
+    EXPECT_FALSE(c.latestLive()) << "the node must no longer see an active live window";
+    EXPECT_EQ(c.stats().liveBytes, 0u);
+    EXPECT_EQ(c.stats().liveUploadedSpans, 0u);
+    EXPECT_EQ(transport.liveUnsubscribes.size(), 1u);
+}
+TEST_F(LiveClient, LongPanAtOneHourDoesNotCarryAnOldFormingPrefix) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(kHourMs); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    ASSERT_EQ(c.latestLive()->sources.size(), 2u);
+    const auto before = c.latestLive();
+    // A pan within the same forming hour still intersects the live window,
+    // so the grace expiry alone cannot protect against an old prefix here.
+    c.setView(symbol, kHourMs, double(base), double(minute(5))); settle();
+    now += 40 * kMinuteMs;
+    c.pollLive(); settle();
+    EXPECT_EQ(c.latestLive(), before);
+    restartNearDuringGrace(c, kHourMs);
+    cutoff = minute(50); ++chunkRevision;
+    send(tail(50, 50, 50, 1)); advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_TRUE(c.latestLive());
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+    EXPECT_EQ(live(c).startMs, base);
+    EXPECT_FALSE(live(c).carried);
+}
+TEST_F(LiveClient, MatchingHourWindowCannotCarryBehindTheHealthyCommitWatermark) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(kHourMs); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    const auto before = c.latestLive();
+    ASSERT_EQ(before->sources.size(), 2u);
+    // L remains at the same hour. Even a short pan may retain a picture whose
+    // missing source is old compared with the healthy source's new watermark.
+    restartNearDuringGrace(c, kHourMs);
+    cutoff = minute(50); ++chunkRevision;
+    send(tail(50, 50, 50, 1)); advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).startMs, before->sources.front().startMs);
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u) << "an old wall is not fresh merely because L matches";
+    EXPECT_EQ(live(c).source, source);
+}
+TEST_F(LiveClient, AddingASourceDoesNotPauseAnEstablishedLiveState) {
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    now += HeatmapSourceController::kLiveMinIntervalMs;
+    transport.push(available(cutoff, true)); drainLive();
+    send(tail(10, 10, 10, 2, 2000)); settle();
+    EXPECT_EQ(live(c).revision, 2u) << "new sibling must not arm another 1.5 s startup wait";
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+    send(tail(10, 10, 10, 1, 2000, "hmc2.near")); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+    EXPECT_EQ(c.latestLive()->sources.size(), 2u);
+}
+TEST_F(LiveClient, CarriedSummaryIsReusedAcrossHealthyUpdates) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    std::shared_ptr<const ResolutionSummary> summary;
+    for (const auto &s : c.latestLive()->sources) if (s.source == "hmc2.near") summary = s.resolution;
+    ASSERT_TRUE(summary);
+    restartNearDuringGrace(c, 5 * kMinuteMs);
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    for (int revision = 2; revision <= 4; ++revision) {
+        send(tail(10, 10, 10, revision, revision * 1000)); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+        ASSERT_EQ(c.latestLive()->sources.size(), 2u);
+        for (const auto &s : c.latestLive()->sources) if (s.source == "hmc2.near") {
+            EXPECT_TRUE(s.carried);
+            EXPECT_EQ(s.resolution, summary) << "carried summary must not be recomputed";
+        }
+        const auto &columns = c.latestLive()->resolution.columns;
+        EXPECT_TRUE(std::any_of(columns.begin(), columns.end(), [](const auto &column) {
+            return column.startMs == minute(10) && std::any_of(column.sources.begin(), column.sources.end(),
+                [](const auto &s) { return s.source == "hmc2.near" && s.state == BucketState::Present; });
+        }));
+    }
+}
+TEST_F(LiveClient, CarriedSourceDropsWhenLAdvancesEvenWhileItsEndIsFresh) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
+    send(tail(10, 19, 10, 1)); send(tail(10, 19, 10, 1, 1000, "hmc2.near")); settle();
+    restartNearDuringGrace(c, 5 * kMinuteMs);
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_EQ(c.latestLive()->sources.size(), 2u);
+    for (const auto &s : c.latestLive()->sources) if (s.source == "hmc2.near") ASSERT_TRUE(s.carried);
+    cutoff = minute(15); ++chunkRevision;
+    send(tail(15, 19, 15, 2)); settle(); upload(c); advance(c);
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).startMs, minute(15));
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u) << "near end=20 is fresh but its L=10 is obsolete";
+}
+TEST_F(LiveClient, MissingSourceIsNotCarriedIntoADifferentLiveStart) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
+    send(tail(10, 19, 10, 1)); send(tail(10, 19, 10, 1, 1000, "hmc2.near")); settle();
+    cutoff = minute(15); ++chunkRevision;
+    send(tail(15, 19, 15, 2)); settle(); upload(c); advance(c);
+    ASSERT_EQ(c.latestLive()->sources.size(), 2u); // the slower near source still pins common L=10
+    EXPECT_EQ(live(c).startMs, minute(10));
+    restartNearDuringGrace(c, 5 * kMinuteMs);
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).startMs, minute(15));
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+}
+TEST_F(LiveClient, TimeframeChangeDiscardsCarryCandidates) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    restartNearDuringGrace(c, 5 * kMinuteMs);
+    c.setView(symbol, kHourMs, double(base), double(minute(80))); settle();
+    EXPECT_FALSE(c.latestLive());
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(c.latestLive()->tfMs, kHourMs);
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+    EXPECT_FALSE(live(c).carried);
+}
+TEST_F(LiveClient, SymbolChangeDiscardsCarryCandidates) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    auto other = available(cutoff, true); other.symbol = "ETH-USD";
+    transport.push(other); drainLive();
+    c.setView(other.symbol, kMinuteMs, double(base), double(minute(80))); settle();
+    EXPECT_FALSE(c.latestLive());
+    auto frame = std::make_shared<ChunkFrame>(*tail(10, 10, 10, 1));
+    frame->key.symbol = frame->columns.symbol = other.symbol;
+    send(frame); advance(c, HeatmapSourceController::kLiveSourcesWaitMs);
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(c.latestLive()->symbol, other.symbol);
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+    EXPECT_FALSE(live(c).carried);
 }
 TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
