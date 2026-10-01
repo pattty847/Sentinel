@@ -10,6 +10,9 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QJsonArray>
+#include <QDir>
+#include <QPointer>
+#include <stdexcept>
 #include <gtest/gtest.h>
 #include <limits>
 
@@ -128,7 +131,7 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
         {"gpuCapBytes", 64 * 1048576}, {"uploadBudgetBytes", 2 * 1048576}, {"prefetchTiles", 3},
         {"liveMinIntervalMs", 750}, {"showTelemetry", true}}).isEmpty());
     store.save("main", s);
-    store.saveLayout("work", "main", s);
+    store.saveLayout("work", "main", {});
     store.save("main", {});
     EXPECT_EQ(store.restoreLayout("work", "main", {}), s);
     EXPECT_TRUE(store.saveManualTick("BTC-USD", kMinuteMs, 100));
@@ -182,5 +185,118 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     EXPECT_EQ(store.load("main", config.heatmap).renderer, "gpu");
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
+}
+TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrides) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    auto current = chartDefaults({});
+    store.save("main", current);
+    store.saveLayout("work", "main", {});
+    // A snapshot left by an older binary, before a live POST and a crash.
+    ini.setValue("layouts/_last_session/heatmap/main/opacity", 0.1);
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"opacity", 0.7}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
+    current = store.load("main", {}); // fresh process after an unclean shutdown
+    store.restoreLayoutInto("_last_session", "main", current, {});
+    EXPECT_EQ(current.opacity, 0.7);
+    EXPECT_EQ(store.load("main", {}).opacity, 0.7);
+    EXPECT_EQ(store.restoreLayout("_last_session", "main", {}).opacity, 0.7);
+    const auto keys = ini.allKeys();
+    store.saveLayout("_last_session", "main", {});
+    EXPECT_EQ(ini.allKeys(), keys);
+    EXPECT_EQ(ini.value("layouts/_last_session/heatmap/main/opacity").toDouble(), 0.1);
+    store.restoreLayoutInto("work", "main", current, {});
+    EXPECT_EQ(current.opacity, 1); // explicit named workspace still restores
+    EXPECT_EQ(store.load("main", {}).opacity, 1);
+}
+TEST_F(HeatmapPlumbing, ProcessOnlyRendererNeverLeaksIntoOtherPatchesOrWorkspaces) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    auto current = store.load("main", {});
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "gpu"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(current.renderer, "gpu");
+    EXPECT_TRUE(ini.allKeys().isEmpty());
+    // Automatic session restore cannot erase a process override, either.
+    store.restoreLayoutInto("_last_session", "main", current, {});
+    EXPECT_EQ(current.renderer, "gpu");
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"opacity", 0.4}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(current.renderer, "gpu");
+    EXPECT_EQ(store.load("main", {}).renderer, "legacy");
+    EXPECT_EQ(store.load("main", {}).opacity, 0.4);
+    store.saveLayout("ab", "main", {});
+    EXPECT_EQ(ini.value("layouts/ab/heatmap/main/renderer").toString(), "legacy");
+    ini.sync();
+    QSettings peerIni(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore peer(peerIni);
+    EXPECT_EQ(peer.load("main", {}).renderer, "legacy");
+    // Bad patches are still atomic even when no persistence was requested.
+    const auto before = current;
+    EXPECT_FALSE(store.applyChartPatch("main", current, {{"renderer", "bad"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(current, before);
+}
+TEST_F(HeatmapPlumbing, EnteringManualAlonePreservesTheRememberedSymbolTick) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    ASSERT_TRUE(store.saveManualTick("BTC-USD", kMinuteMs, 2500));
+    auto current = store.load("main", {});
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"tickMode", "manual"}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(store.loadManualTicks().get("BTC-USD", kMinuteMs), 2500);
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"manualTick", 5000}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(store.loadManualTicks().get("BTC-USD", kMinuteMs), 5000);
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"manualTick", 250}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(current.manualTick, 250);
+    EXPECT_EQ(store.loadManualTicks().get("BTC-USD", kMinuteMs), 5000);
+}
+TEST_F(HeatmapPlumbing, LabBudgetsAreInjectedAndCacheClearsDoNotReadConfiguration) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(QDir(dir.path()).mkpath("config"));
+    QFile yaml(dir.filePath("config/client_config.yaml"));
+    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
+    yaml.write("heatmap:\n  decoded_chunk_bytes: 8388608\n  span_source_bytes: 8388608\n");
+    yaml.close();
+    struct Cleanup {
+        QString cwd = QDir::currentPath();
+        ~Cleanup() { lab::LabData::configure({}, 0); QDir::setCurrent(cwd); }
+    } cleanup;
+    ASSERT_TRUE(QDir::setCurrent(dir.path()));
+    const auto loaded = ConfigLoader::getLoadedFiles();
+    lab::LabData::configure(dir.path().toStdString(), 0);
+    lab::LabData::instance().refreshStats();
+    EXPECT_EQ(lab::LabData::instance().stats().store.maxBytes, HeatmapBudgets{}.decodedChunks);
+    const HeatmapBudgets budgets{32ull << 20, 16ull << 20, 64ull << 20, 8ull << 20};
+    lab::LabData::configure(dir.path().toStdString(), 0, budgets);
+    for (int i = 0; i < 3; ++i) {
+        auto &data = lab::LabData::instance();
+        data.refreshStats();
+        EXPECT_EQ(data.stats().store.maxBytes, budgets.decodedChunks);
+        data.service().onData([&] { EXPECT_EQ(data.cache()->maxBytes(), budgets.spanSources); });
+        data.clearCaches();
+    }
+    EXPECT_EQ(ConfigLoader::getLoadedFiles(), loaded);
+}
+TEST_F(HeatmapPlumbing, FactoryFailuresCleanUpOnTheWorkerAndJoinBeforeRethrowing) {
+    for (const int failure : {0, 1, 2}) { // factory throw, null return, start throw
+        QPointer<QObject> owned;
+        QPointer<QThread> thread;
+        bool deletedOnWorker = false;
+        const auto construct = [&] {
+            HeatmapDataService service([&](QObject *context) -> ChunkTransport * {
+                thread = QThread::currentThread();
+                owned = new QObject(context);
+                QObject::connect(owned, &QObject::destroyed, context, [&] {
+                    deletedOnWorker = QThread::currentThread() == thread.data();
+                });
+                if (failure == 0) throw std::runtime_error("factory failed");
+                if (failure == 1) return nullptr;
+                return new FakeChunkTransport;
+            }, {}, [=](ChunkTransport &) { if (failure == 2) throw std::runtime_error("start failed"); });
+        };
+        EXPECT_THROW(construct(), std::runtime_error);
+        EXPECT_TRUE(owned.isNull());
+        EXPECT_TRUE(thread.isNull()); // QThread destruction would abort if still running
+        EXPECT_TRUE(deletedOnWorker);
+    }
 }
 } // namespace

@@ -392,3 +392,16 @@ TEST(AgentApiHeatmap, SettingsPartialTypesAndGradientValidation) {
         R"({"askGradient":[{"position":0.5,"color":"#000000"},{"position":1,"color":"#ffffff"}]})",
         R"({"bidGradient":[]})"}) EXPECT_EQ(check(bad).status, 422) << bad;
 }
+
+TEST(AgentApiHeatmap, ProcessOnlySettingsFlagIsStrictAndRemovedFromThePatch) {
+    const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
+    auto c = check(R"({"renderer":"gpu","persist":false})");
+    ASSERT_EQ(c.status, 200);
+    EXPECT_FALSE(c.body.persistHeatmapSettings);
+    EXPECT_EQ(c.body.heatmapSettings.size(), 1);
+    EXPECT_EQ(c.body.heatmapSettings["renderer"], "gpu");
+    EXPECT_TRUE(check(R"({"opacity":0.4})").body.persistHeatmapSettings);
+    EXPECT_TRUE(check(R"({"opacity":0.4,"persist":true})").body.persistHeatmapSettings);
+    for (const auto *body : {R"({"persist":false})", R"({"renderer":"gpu","persist":0})", R"({"renderer":"gpu","persist":"false"})"})
+        EXPECT_EQ(check(body).status, 422);
+}

@@ -45,6 +45,8 @@ public:
     // when already on the data thread. No GUI callbacks from inside work.
     void onData(std::function<void()> work) const;
 private:
+    void destroyData(); // data thread, including partial construction
+    void stopThread();
     std::function<void()> beforeStop_;
     ChunkStore store_;
     std::unique_ptr<QThread> thread_;

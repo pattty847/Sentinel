@@ -21,6 +21,7 @@ struct ControlBody {
     std::optional<bool> followLive;
     QJsonObject layers;
     QJsonObject heatmapSettings;
+    bool persistHeatmapSettings = true;
     InputCommand input;
 };
 struct ControlValidation {

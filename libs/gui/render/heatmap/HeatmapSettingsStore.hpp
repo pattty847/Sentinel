@@ -19,7 +19,12 @@ public:
     explicit HeatmapSettingsStore(QSettings &settings); // isolated store for tests
     HeatmapChartSettings load(const QString &chartId, const ClientHeatmapConfig &defaults) const;
     void save(const QString &chartId, HeatmapChartSettings value);
-    void saveLayout(const QString &name, const QString &chartId, HeatmapChartSettings value);
+    // Patches persist only their own fields, never earlier process-only overrides.
+    QString applyChartPatch(const QString &chartId, HeatmapChartSettings &current, const QJsonObject &patch,
+                            bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs);
+    void saveLayout(const QString &name, const QString &chartId, const ClientHeatmapConfig &defaults);
+    void restoreLayoutInto(const QString &name, const QString &chartId, HeatmapChartSettings &current,
+                           const ClientHeatmapConfig &defaults);
     HeatmapChartSettings restoreLayout(const QString &name, const QString &chartId,
                                       const ClientHeatmapConfig &defaults);
     ManualTickMemory loadManualTicks() const;

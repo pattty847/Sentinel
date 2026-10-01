@@ -309,11 +309,17 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
     const QString kind = request.path.mid(QStringLiteral("/api/v1/").size());
     ControlValidation result;
     if (kind == "heatmap/settings") {
+        auto patch = obj;
+        if (patch.contains("persist")) {
+            if (!patch["persist"].isBool()) return reject("invalid_settings", "persist must be boolean");
+            result.body.persistHeatmapSettings = patch.take("persist").toBool();
+        }
+        if (patch.isEmpty()) return reject("invalid_settings", "Body must contain a heatmap setting");
         heatmap::HeatmapChartSettings check;
-        const auto error = heatmap::applySettingsPatch(check, obj);
+        const auto error = heatmap::applySettingsPatch(check, patch);
         if (!error.isEmpty()) {
             result.status = 422; result.code = "invalid_settings"; result.message = error;
-        } else result.body.heatmapSettings = obj;
+        } else result.body.heatmapSettings = patch;
         return result;
     }
     if (kind == "input") {

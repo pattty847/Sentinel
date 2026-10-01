@@ -193,10 +193,33 @@ HeatmapChartSettings HeatmapSettingsStore::load(const QString &id, const ClientH
 void HeatmapSettingsStore::save(const QString &id, HeatmapChartSettings value) {
     saveAt("heatmap/" + segment(id) + "/", std::move(value));
 }
-void HeatmapSettingsStore::saveLayout(const QString &name, const QString &id, HeatmapChartSettings value) {
-    saveAt("layouts/" + segment(name) + "/heatmap/" + segment(id) + "/", std::move(value));
+QString HeatmapSettingsStore::applyChartPatch(const QString &id, HeatmapChartSettings &current,
+    const QJsonObject &patch, bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs) {
+    auto next = current;
+    if (const auto error = applySettingsPatch(next, patch); !error.isEmpty()) return error;
+    if (persist) {
+        auto saved = load(id, defaults);
+        if (const auto error = applySettingsPatch(saved, patch); !error.isEmpty()) return error;
+        save(id, saved);
+        // Merely entering Manual must not overwrite this symbol/tf's remembered
+        // choice with a chart-wide default (or a previous process-only override).
+        if (next.tickMode == TickMode::Manual && patch.contains("manualTick"))
+            saveManualTick(symbol, tfMs, next.manualTick);
+    }
+    current = std::move(next);
+    return {};
+}
+void HeatmapSettingsStore::saveLayout(const QString &name, const QString &id, const ClientHeatmapConfig &defaults) {
+    if (name == "_last_session") return;
+    saveAt("layouts/" + segment(name) + "/heatmap/" + segment(id) + "/", load(id, defaults));
+}
+void HeatmapSettingsStore::restoreLayoutInto(const QString &name, const QString &id, HeatmapChartSettings &current,
+                                            const ClientHeatmapConfig &defaults) {
+    if (name == "_last_session") return;
+    current = restoreLayout(name, id, defaults);
 }
 HeatmapChartSettings HeatmapSettingsStore::restoreLayout(const QString &name, const QString &id, const ClientHeatmapConfig &defaults) {
+    if (name == "_last_session") return load(id, defaults);
     auto out = loadAt("layouts/" + segment(name) + "/heatmap/" + segment(id) + "/", load(id, defaults));
     save(id, out);
     return out;

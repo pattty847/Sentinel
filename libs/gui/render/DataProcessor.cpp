@@ -690,6 +690,7 @@ void DataProcessor::setHeatmapEnabled(bool enabled) {
     ++m_heatmapFetchGeneration;
     sLog_App("Legacy heatmap stream enabled=" << enabled);
     if (enabled) {
+        resetHeatmapWindow(); // discarded slices require a fresh placement/history page
         scheduleRecordingBand();
         requestHeatmapFetch();
     }

@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QTimer>
 #include <stdexcept>
+#include <exception>
 
 namespace heatmap {
 HeatmapDataService::HeatmapDataService(TransportFactory factory, HeatmapBudgets budgets, StartTransport start,
@@ -13,51 +14,69 @@ HeatmapDataService::HeatmapDataService(TransportFactory factory, HeatmapBudgets 
     context_ = new QObject;
     context_->moveToThread(thread_.get());
     thread_->start();
+    std::exception_ptr failure;
     onData([&] {
-        transport_ = factory(context_);
-        Q_ASSERT(transport_ && transport_->thread() == QThread::currentThread());
-        fetcher_ = new ChunkFetcher(store_, *transport_);
-        cache_ = new SpanSourceCache;
-        HeatmapSourceController::applyBudgets(budgets, store_, *cache_);
-        QObject::connect(transport_, &ChunkTransport::connected, context_, [this] { connected_ = true; });
-        QObject::connect(transport_, &ChunkTransport::disconnected, context_, [this] {
-            connected_ = false;
-            std::scoped_lock lock(mutex_);
-            availability_.clear();
-        });
-        QObject::connect(fetcher_, &ChunkFetcher::availabilityChanged, context_, [this](const ChunkAvailability &value) {
-            std::scoped_lock lock(mutex_);
-            availability_[value.symbol] = value;
-        });
-        QObject::connect(fetcher_, &ChunkFetcher::storeCleared, context_, [this] {
-            std::scoped_lock lock(mutex_);
-            availability_.clear();
-        });
-        statsTimer_ = new QTimer(context_);
-        statsTimer_->setInterval(250);
-        QObject::connect(statsTimer_, &QTimer::timeout, context_, [this] { refreshStats(); });
-        statsTimer_->start();
-        // The fetcher and service are attached before any connection or local
-        // availability emission. External clients connect after construction.
-        if (start) start(*transport_);
+        // Exceptions must not unwind through Qt's worker event dispatcher.
+        try {
+            transport_ = factory(context_);
+            if (!transport_) throw std::runtime_error("Heatmap transport factory returned null");
+            Q_ASSERT(transport_ && transport_->thread() == QThread::currentThread());
+            fetcher_ = new ChunkFetcher(store_, *transport_);
+            cache_ = new SpanSourceCache;
+            HeatmapSourceController::applyBudgets(budgets, store_, *cache_);
+            QObject::connect(transport_, &ChunkTransport::connected, context_, [this] { connected_ = true; });
+            QObject::connect(transport_, &ChunkTransport::disconnected, context_, [this] {
+                connected_ = false;
+                std::scoped_lock lock(mutex_);
+                availability_.clear();
+            });
+            QObject::connect(fetcher_, &ChunkFetcher::availabilityChanged, context_, [this](const ChunkAvailability &value) {
+                std::scoped_lock lock(mutex_);
+                availability_[value.symbol] = value;
+            });
+            QObject::connect(fetcher_, &ChunkFetcher::storeCleared, context_, [this] {
+                std::scoped_lock lock(mutex_);
+                availability_.clear();
+            });
+            statsTimer_ = new QTimer(context_);
+            statsTimer_->setInterval(250);
+            QObject::connect(statsTimer_, &QTimer::timeout, context_, [this] { refreshStats(); });
+            statsTimer_->start();
+            // The fetcher and service are attached before any connection or local
+            // availability emission. External clients connect after construction.
+            if (start) start(*transport_);
+        } catch (...) {
+            failure = std::current_exception();
+            destroyData();
+        }
     });
+    if (failure) {
+        stopThread();
+        std::rethrow_exception(failure);
+    }
     sLog_App("Heatmap data service started decodedBytes=" << budgets.decodedChunks
              << " spanBytes=" << budgets.spanSources << " ceilingBytes=" << budgets.cpuCeiling);
 }
 HeatmapDataService::~HeatmapDataService() {
     onData([this] {
         if (beforeStop_) beforeStop_();
-        delete statsTimer_;
-        for (auto *controller : controllers_) delete controller;
-        controllers_.clear();
-        delete cache_;
-        delete fetcher_;
-        delete transport_;
-        // Delete factory-owned clients/timers before draining queued callbacks.
-        // Their receiver contexts die with them (FM-122).
-        qDeleteAll(context_->children());
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        destroyData();
     });
+    stopThread();
+}
+void HeatmapDataService::destroyData() {
+    delete statsTimer_;
+    for (auto *controller : controllers_) delete controller;
+    controllers_.clear();
+    delete cache_;
+    delete fetcher_;
+    delete transport_;
+    // Factory-owned clients/timers also die on their thread, including when
+    // the factory/start callback threw. Drop their queued calls (FM-122).
+    qDeleteAll(context_->children());
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+}
+void HeatmapDataService::stopThread() {
     thread_->quit();
     thread_->wait();
     delete context_;

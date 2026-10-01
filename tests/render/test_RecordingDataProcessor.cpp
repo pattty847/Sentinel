@@ -562,9 +562,11 @@ TEST_F(RecordingDataProcessor, MutingLegacySlicesAlsoStopsFetchesAndResumesWitho
     processor.setHeatmapViewport(5'000'000, 11'000'000, false, 8000, 12096, 1000, 500);
     EXPECT_EQ(fetches, 0);
     processor.setHeatmapEnabled(true);
-    EXPECT_GT(fetches, 0);
+    EXPECT_EQ(fetches, 0); // a reset window waits for the next live/history placement
     live.bucketStartMs = 10'980'000;
     const auto resumed = updates.size();
     processor.onHeatmapSliceReceived(live);
-    EXPECT_GT(updates.size(), resumed);
+    ASSERT_GT(updates.size(), resumed);
+    EXPECT_TRUE(updates.back()->full); // no frozen columns or holes from the muted interval
+    EXPECT_GT(fetches, 0); // first placement backfills slices dropped while muted
 }

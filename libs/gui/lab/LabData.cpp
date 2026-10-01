@@ -1,8 +1,6 @@
 #include "LabData.hpp"
 #include "heatmap/LocalChunkTransport.hpp"
 #include "LabSources.hpp"
-#include "ConfigLoader.hpp"
-#include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "SentinelLogging.hpp"
 #include "protocol/SentinelStreamClient.hpp"
 #include "protocol/SentinelStreamClientTransport.hpp"
@@ -29,6 +27,7 @@ std::mutex instanceMutex;
 std::unique_ptr<LabData> current;
 std::string configuredRoot;
 int64_t configuredPin = 0;
+heatmap::HeatmapBudgets configuredBudgets;
 std::optional<LabData::Server> configuredServer;
 std::atomic<bool> queueConnectedOnShutdown{false};
 std::atomic<int> lateConnectionCallbacks{0};
@@ -49,7 +48,7 @@ LabData &LabData::instance() {
     std::scoped_lock lock(instanceMutex);
     if (!current) {
         current.reset(new LabData(configuredRoot.empty() ? recordingRoot() : configuredRoot, configuredPin,
-                                  configuredServer));
+                                  configuredServer, configuredBudgets));
         current->start();
         if (!postRoutine) {
             qAddPostRoutine(shutdownInstance); // before the QCoreApplication goes
@@ -59,7 +58,7 @@ LabData &LabData::instance() {
     return *current;
 }
 
-void LabData::configure(const std::string &root, int64_t pinnedEndMs) {
+void LabData::configure(const std::string &root, int64_t pinnedEndMs, heatmap::HeatmapBudgets budgets) {
     std::unique_ptr<LabData> old;
     {
         std::scoped_lock lock(instanceMutex);
@@ -68,6 +67,7 @@ void LabData::configure(const std::string &root, int64_t pinnedEndMs) {
         old = std::move(current);
         configuredRoot = root;
         configuredPin = std::max<int64_t>(pinnedEndMs, 0);
+        configuredBudgets = budgets;
     }
     old.reset(); // the next instance() starts afresh
 }
@@ -105,21 +105,17 @@ int64_t LabData::pinnedEndMs() {
     return configuredPin;
 }
 
-LabData::LabData(std::string root, int64_t pinnedEndMs, std::optional<Server> server)
-    : root_(std::move(root)), pinnedEndMs_(pinnedEndMs), server_(std::move(server)) {}
+LabData::LabData(std::string root, int64_t pinnedEndMs, std::optional<Server> server, heatmap::HeatmapBudgets budgets)
+    : budgets_(budgets), root_(std::move(root)), pinnedEndMs_(pinnedEndMs), server_(std::move(server)) {}
 LabData::~LabData() { shutdown(); }
 
 void LabData::start() {
-    ClientConfig config;
-    ConfigLoader::loadClientConfig("config/client_config.yaml", &config);
-    ConfigLoader::loadClientConfig("config/.client_config.yaml", &config);
-    const auto budgets = heatmap::HeatmapSettingsStore{}.loadBudgets(config.heatmap);
     service_ = std::make_unique<heatmap::HeatmapDataService>([this](QObject *context) -> heatmap::ChunkTransport * {
         if (server_) return createServerTransport(context);
         heatmap::LocalChunkTransport::TestHooks hooks;
         hooks.pinnedEndMs = pinnedEndMs_;
         return new heatmap::LocalChunkTransport(root_, hooks);
-    }, budgets, [this](heatmap::ChunkTransport &transport) {
+    }, budgets_, [this](heatmap::ChunkTransport &transport) {
         if (auto *local = qobject_cast<heatmap::LocalChunkTransport *>(&transport)) local->start({kSymbol});
         else {
             connection_ = Connection::Connecting;
@@ -188,7 +184,7 @@ void LabData::destroyController(heatmap::HeatmapSourceController *controller) {
 std::optional<heatmap::ChunkAvailability> LabData::availability() const {
     return service_->availability(kSymbol);
 }
-void LabData::clearCaches() { configure(root_, pinnedEndMs_); }
+void LabData::clearCaches() { configure(root_, pinnedEndMs_, budgets_); }
 
 std::vector<std::pair<heatmap::ChunkKey, uint64_t>> LabData::reviseNewestChunks() {
     std::vector<std::pair<heatmap::ChunkKey, uint64_t>> out;

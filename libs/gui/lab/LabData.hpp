@@ -25,8 +25,9 @@ public:
     static LabData &instance();
     // Restart the whole data path on another recording root / pinned end (UTC ms,
     // exclusive; 0 = live). Empty root: recordingRoot(). Every controller must
-    // have been destroyed first. Clears every cache.
-    static void configure(const std::string &root, int64_t pinnedEndMs);
+    // have been destroyed first. Clears every cache. Budgets are injected; the
+    // default is deterministic and does not read YAML or QSettings.
+    static void configure(const std::string &root, int64_t pinnedEndMs, heatmap::HeatmapBudgets budgets = {});
     static std::string root();
     static int64_t pinnedEndMs();
     // Server mode: chunks and the live edge from sentinel-server at host:port
@@ -78,9 +79,10 @@ public:
     ~LabData();
 
 private:
-    LabData(std::string root, int64_t pinnedEndMs, std::optional<Server> server);
+    LabData(std::string root, int64_t pinnedEndMs, std::optional<Server> server, heatmap::HeatmapBudgets budgets);
     void start();
     void shutdown();
+    heatmap::HeatmapBudgets budgets_;
     std::string root_;
     int64_t pinnedEndMs_ = 0;
     std::optional<Server> server_;

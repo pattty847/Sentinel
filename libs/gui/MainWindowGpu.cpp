@@ -186,10 +186,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
     m_layoutOrchestrator->setHeatmapHooks(
-        [this](const QString &name) { m_heatmapSettingsStore.saveLayout(name, "main", m_heatmapChartSettings); },
         [this](const QString &name) {
-            m_heatmapChartSettings = m_heatmapSettingsStore.restoreLayout(
-                name, "main", GuiConfigStore::instance().clientConfig().heatmap);
+            m_heatmapSettingsStore.saveLayout(name, "main", GuiConfigStore::instance().clientConfig().heatmap);
+        },
+        [this](const QString &name) {
+            m_heatmapSettingsStore.restoreLayoutInto(
+                name, "main", m_heatmapChartSettings, GuiConfigStore::instance().clientConfig().heatmap);
         });
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -1377,18 +1379,17 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         return out;
     }
     if (kind == "heatmap/settings") {
-        const auto error = heatmap::applySettingsPatch(m_heatmapChartSettings, body.heatmapSettings);
+        const auto error = m_heatmapSettingsStore.applyChartPatch(
+            "main", m_heatmapChartSettings, body.heatmapSettings, body.persistHeatmapSettings,
+            GuiConfigStore::instance().clientConfig().heatmap, m_currentSymbol.toStdString(), renderer->getCurrentTimeframe());
         if (!error.isEmpty()) {
             out.status = 422; out.code = "invalid_settings"; out.message = error;
             return out;
         }
-        m_heatmapSettingsStore.save("main", m_heatmapChartSettings);
-        if (m_heatmapChartSettings.tickMode == heatmap::TickMode::Manual &&
-            (body.heatmapSettings.contains("manualTick") || body.heatmapSettings.contains("tickMode")))
-            m_heatmapSettingsStore.saveManualTick(m_currentSymbol.toStdString(), renderer->getCurrentTimeframe(),
-                                                 m_heatmapChartSettings.manualTick);
-        sLog_App("Heatmap settings saved chart=main renderer=" << m_heatmapChartSettings.renderer);
+        sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapChartSettings.renderer
+                 << " persist=" << body.persistHeatmapSettings);
         out.data = agentApiHeatmapSnapshot();
+        out.data["persist"] = body.persistHeatmapSettings;
     } else if (kind == "input") {
         auto *view = m_heatmapDock ? m_heatmapDock->qquickView() : nullptr;
         out = m_agentInput.apply(view, renderer->mapRectToScene(renderer->boundingRect()), body.input);
