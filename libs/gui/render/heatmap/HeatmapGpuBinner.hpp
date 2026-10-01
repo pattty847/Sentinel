@@ -137,15 +137,19 @@ public:
     bool binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb, const BinGrid &grid,
                          const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error,
                          bool fill = false, PassCache *cache = nullptr);
-    // Live sources (S5L-c): fills the resident entry `residentId` (a caller-chosen
-    // id, never a GpuSource id) with `source` in place. Buffers that are large
-    // enough are reused; smaller ones are replaced with headroom (the old ones go
-    // through deleteLater()). The whole image is recorded in this frame, and the
-    // binner keeps no reference to it. Static storage buffers are written from
-    // the CPU on some backends (Metal), so the caller must not refill an entry
-    // that a frame still in flight reads. *created: QRhiBuffers this call made.
-    bool refillResident(uint64_t residentId, const std::shared_ptr<const GpuSource> &source, QRhiCommandBuffer *cb,
-                        uint64_t *created, QString *error);
+    // Live sources (S5L-c): starts refilling the resident entry `residentId` (a
+    // caller-chosen id, never a GpuSource id) with `source` in place. Buffers that
+    // are large enough are reused; smaller ones are replaced with headroom, and
+    // with `shrink` (GPU pressure) so are buffers more than twice that size; pages
+    // beyond the image's go. Old buffers go through deleteLater(). The entry is
+    // not resident (no bin) until refillStep() has paged the whole image in within
+    // the caller's per-frame budget; the binner holds the image until then.
+    // Static storage buffers are written from the CPU on some backends (Metal),
+    // so the caller must not refill an entry that a frame still in flight reads.
+    // *created: QRhiBuffers this call made.
+    bool beginRefill(uint64_t residentId, std::shared_ptr<const GpuSource> source, bool shrink, uint64_t *created,
+                     QString *error);
+    bool refillStep(uint64_t residentId, QRhiCommandBuffer *cb, uint64_t &budget, bool *complete, QString *error);
     // Its buffers go through QRhiResource::deleteLater(): a frame being recorded
     // may still reference them (uploads, bins), so they die at its end.
     void releaseResident(uint64_t sourceId);

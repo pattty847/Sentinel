@@ -25,6 +25,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <thread>
 
 namespace {
 using namespace heatmap;
@@ -436,10 +437,11 @@ TEST_F(LiveNode, RolloverSequenceNeverShrinksDrawnCoverage) {
 }
 
 // L advances only after every source of the live-edge span reported its upload
-// (S5L-b): the node uploads all of them even where the view does not overlap a
-// finer source's band (where it would not bin it). Elsewhere a finer source out
-// of the view's band still waits until it is wanted.
-TEST_F(LiveNode, LiveEdgeSpansUploadEverySourceForTheControllersAcknowledgement) {
+// (S5L-b). Where the view does not overlap a finer source's band nothing bins
+// it, so the node acknowledges it without an upload (no GPU memory); once the
+// view moves into the band the released image is reported missing, so the
+// controller rebuilds it. Elsewhere a finer source out of its band just waits.
+TEST_F(LiveNode, LiveEdgeSpansAcknowledgeOutOfBandSourcesWithoutUploadingThem) {
     const int64_t tf = minute, T = kEpoch + 2 * kTileMs, tile1 = tiles::tileOfBucket(T / tf) - 1;
     const int64_t open = T - 4 * minute;
     frame().view = {double(T - 3 * kTileMs), double(T), 103'000, 103'400}; // far above the fine band
@@ -447,18 +449,152 @@ TEST_F(LiveNode, LiveEdgeSpansUploadEverySourceForTheControllersAcknowledgement)
     frame().capacity = capacity;
     spans.fake.availableEndMs = open + minute;
     frame().tfMs = tf;
-    frame().spans = spans.fake.set(tf, {spans.span(tf, tile1 - 2, open), spans.span(tf, tile1 - 1, open),
-                                        spans.span(tf, tile1, open)});
+    auto list = [&](bool released) {
+        std::vector<FakeSpans::Span> out{spans.span(tf, tile1 - 2, open), spans.span(tf, tile1 - 1, open),
+                                         spans.span(tf, tile1, open)};
+        if (released) // the controller released the acknowledged image
+            for (auto &b : out.back().sources) b = FakeSpans::released(b);
+        return out;
+    };
+    frame().spans = spans.fake.set(tf, list(false));
     frame().live = spans.live(tf, open, open, 20'000, 1);
     ASSERT_TRUE(render(3));
     std::set<std::pair<int64_t, std::string>> uploaded;
     for (const auto &key : capacity->take().uploaded) uploaded.emplace(key.span.tile, key.source);
-    EXPECT_TRUE(uploaded.contains({tile1, kFine})) << "the live-edge span's fine source is uploaded and reported";
+    EXPECT_TRUE(uploaded.contains({tile1, kFine})) << "the live-edge span's fine source is acknowledged";
     EXPECT_TRUE(uploaded.contains({tile1, kCoarse}));
-    EXPECT_FALSE(uploaded.contains({tile1 - 2, kFine})) << "away from the live edge only wanted sources upload";
+    EXPECT_FALSE(uploaded.contains({tile1 - 2, kFine})) << "away from the live edge only wanted sources report";
     EXPECT_TRUE(uploaded.contains({tile1 - 2, kCoarse}));
+    EXPECT_EQ(stats().acknowledgedOnly.load(), 1u);
+    EXPECT_EQ(stats().residentSources.load(), 3u) << "the acknowledged source takes no GPU memory";
     // The live bin bins both sources (one fill pass per bin); span bins only the coarse one.
     EXPECT_EQ(stats().fillPasses.load(), stats().liveBinPasses.load() / 2) << "out of its band, no span fill pass";
+    // The controller released both images (it was told both are uploaded); the
+    // node holds the coarse one, and reports nothing missing while out of band.
+    frame().spans = spans.fake.set(tf, list(true));
+    ASSERT_TRUE(render(3));
+    capacity->take();
+    EXPECT_EQ(stats().missingReports.load(), 0u) << "out of band, the acknowledged source is not missing";
+    // Into the fine band: the acknowledged source is now wanted and reported missing (rebuild).
+    frame().view.priceLo = 99'800;
+    frame().view.priceHi = 100'200;
+    ASSERT_TRUE(render(2));
+    std::set<std::pair<int64_t, std::string>> missing;
+    for (const auto &key : capacity->take().missing) missing.emplace(key.span.tile, key.source);
+    EXPECT_TRUE(missing.contains({tile1, kFine})) << "wanted now: the controller must rebuild it";
+    EXPECT_FALSE(missing.contains({tile1, kCoarse})) << "the coarse source is held";
+}
+
+// Review fix 1: a live replacement pages in within the frame's upload budget
+// (shared with span sources) and the previous live picture keeps drawing until
+// all of its sources are resident. A 45-minute bridge (about 1 MB over two
+// sources) at a 64 KiB budget takes many frames, none above the budget.
+TEST_F(LiveNode, LiveUploadsStayWithinTheFrameBudgetWhileThePreviousVersionDraws) {
+    const int64_t tf = minute, T = kEpoch + 2 * kTileMs, tile1 = tiles::tileOfBucket(T / tf) - 1;
+    const int64_t cutoff = T - 50 * minute;
+    frame().view = {double(T - 60 * minute), double(T), 99'800, 100'200};
+    show(tf, {tile1 - 1, tile1}, cutoff, cutoff, cutoff, 20'000, 1);
+    ASSERT_TRUE(render(3));
+    ASSERT_EQ(stats().liveVersion.load(), 1u);
+    constexpr uint64_t budget = 64u << 10;
+    frame().uploadBudgetBytes = budget;
+    const uint64_t uploadedBefore = stats().liveUploadBytes.load();
+    show(tf, {tile1 - 1, tile1}, cutoff, cutoff, cutoff + 45 * minute, 30'000, 2);
+    uint64_t imageBytes = 0;
+    for (const auto &source : frame().live->sources) imageBytes += source.gpu->bytes();
+    ASSERT_GT(imageBytes, 8 * budget);
+    int frames = 0, oldFrames = 0;
+    uint64_t maxFrame = 0;
+    while (stats().liveVersion.load() != 2 && frames < 200) {
+        ASSERT_TRUE(render());
+        ++frames;
+        maxFrame = std::max<uint64_t>(maxFrame, stats().frameUploadBytes.load());
+        if (stats().liveVersion.load() == 1) {
+            ++oldFrames;
+            bool live = false;
+            for (const auto &seg : layer0(stats())) live = live || (seg.kind == Segment::Live && seg.liveVersion == 1);
+            EXPECT_TRUE(live) << "frame " << frames << ": the previous live picture keeps drawing";
+        }
+    }
+    EXPECT_EQ(stats().liveVersion.load(), 2u) << "the replacement completed";
+    EXPECT_LE(maxFrame, budget) << "no frame records more than its upload budget";
+    EXPECT_GE(oldFrames, int(imageBytes / budget) - 1) << "it paged in over many frames";
+    EXPECT_EQ(stats().liveUploadBytes.load() - uploadedBefore, imageBytes);
+    EXPECT_EQ(stats().errors.load(), 0u);
+}
+
+// Review fix 3: live residency follows GPU pressure. A long bridge (L lagging)
+// grows the live buffer sets; once the window is small again and the node is
+// over a tight cap, the oversized spare goes and the next refill right-sizes the
+// set it reuses, so resident bytes come back under the cap and the capacity
+// report shows free bytes again.
+TEST_F(LiveNode, LiveCapacityRecoversAfterALargeWindowShrinksUnderATightCap) {
+    const int64_t tf = minute, T = kEpoch + 2 * kTileMs, tile1 = tiles::tileOfBucket(T / tf) - 1;
+    const int64_t cutoff = T - 55 * minute;
+    frame().view = {double(T - 60 * minute), double(T), 99'800, 100'200};
+    auto capacity = std::make_shared<HeatmapCapacity>();
+    frame().capacity = capacity;
+    uint64_t version = 0;
+    auto small = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            show(tf, {tile1 - 1, tile1}, T - 2 * minute, T - 2 * minute, T - 2 * minute, 5'000 + 4'000 * i, ++version);
+            ASSERT_TRUE(render(2));
+        }
+    };
+    small(6);
+    const uint64_t baseline = stats().residentBytes.load();
+    for (int i = 0; i < 3; ++i) { // a 53-minute bridge
+        show(tf, {tile1 - 1, tile1}, cutoff, cutoff, T - 2 * minute, 10'000 + 5'000 * i, ++version);
+        ASSERT_TRUE(render(2));
+    }
+    const uint64_t peak = stats().residentBytes.load();
+    ASSERT_GT(peak, baseline + (512u << 10)) << "the bridge grew the live sets";
+    const uint64_t cap = baseline + (peak - baseline) / 4;
+    frame().gpuCapBytes = cap;
+    small(6);
+    EXPECT_LE(stats().residentBytes.load(), cap) << "resident " << stats().residentBytes.load() << " baseline "
+                                                 << baseline << " peak " << peak;
+    const auto report = capacity->take();
+    EXPECT_GT(report.freeBytes, 0u) << "capacity recovered";
+    EXPECT_EQ(stats().liveVersion.load(), version);
+    EXPECT_EQ(stats().errors.load(), 0u);
+}
+
+// Review fix 4: A -> B -> A -> C before the fades end, with a new live version
+// after the first A: every picture keeps its own live content at its own
+// opacity. The first A picture still shows version 1 (the second A got a live
+// bin of its own instead of re-binning the one a fading layer draws).
+TEST_F(LiveNode, ReturningToATickNeverMutatesALiveBinAFadingPictureDraws) {
+    const int64_t tf = minute, T = kEpoch + 2 * kTileMs, tile1 = tiles::tileOfBucket(T / tf) - 1;
+    const int64_t open = T - 5 * minute;
+    frame().view = {double(T - 30 * minute), double(T), 99'800, 100'200};
+    frame().crossfadeMs = 60'000;
+    show(tf, {tile1}, open, open, open, 10'000, 1);
+    frame().tickUnits = 500; // A
+    ASSERT_TRUE(render(3));
+    frame().tickUnits = 1000; // B
+    ASSERT_TRUE(render());
+    frame().live = spans.live(tf, open, open, 25'000, 2); // a new version while A fades
+    ASSERT_TRUE(render());
+    frame().tickUnits = 500; // A again
+    ASSERT_TRUE(render());
+    frame().tickUnits = 2000; // C
+    ASSERT_TRUE(render());
+    std::this_thread::sleep_for(std::chrono::milliseconds(30)); // the newest fade has started too
+    ASSERT_TRUE(render());
+    std::map<uint8_t, Segment> live;
+    for (const auto &seg : stats().segments())
+        if (seg.kind == Segment::Live) live[seg.layer] = seg;
+    ASSERT_EQ(live.size(), 4u) << "the current picture and three fading pictures each draw a live bin";
+    EXPECT_EQ(live[1].liveVersion, 1u) << "the first A picture keeps the content it faded out with";
+    EXPECT_EQ(live[3].liveVersion, 2u) << "the second A picture";
+    EXPECT_NE(live[1].bin, live[3].bin);
+    EXPECT_EQ(live[0].opacity, 1.0f);
+    EXPECT_LT(live[1].opacity, live[2].opacity) << "older layers fade further";
+    EXPECT_LT(live[2].opacity, live[3].opacity);
+    EXPECT_LT(live[3].opacity, 1.0f);
+    EXPECT_EQ(stats().missingDraws.load(), 0u);
+    EXPECT_EQ(stats().unpinnedDraws.load(), 0u);
 }
 
 // ---------------------------------------------------------------- transitions

@@ -732,10 +732,10 @@ bool HeatmapGpuBinner::binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb,
     return binSourceInto(*resident_.at(sourceId), cb, grid, outputScale, target, fill, error, cache);
 }
 
-bool HeatmapGpuBinner::refillResident(uint64_t residentId, const std::shared_ptr<const GpuSource> &source,
-                                      QRhiCommandBuffer *cb, uint64_t *created, QString *error) {
+bool HeatmapGpuBinner::beginRefill(uint64_t residentId, std::shared_ptr<const GpuSource> source, bool shrink,
+                                   uint64_t *created, QString *error) {
     if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
-    if (!source || !cb) return fail(error, QStringLiteral("invalid live source"));
+    if (!source) return fail(error, QStringLiteral("invalid live source"));
     if (source->entryPages() > kMaxEntryPages)
         return fail(error, QStringLiteral("heatmap source needs more than %1 entry pages").arg(kMaxEntryPages));
     auto &slot = resident_[residentId];
@@ -755,34 +755,64 @@ bool HeatmapGpuBinner::refillResident(uint64_t residentId, const std::shared_ptr
         const uint64_t words = first < src.entries.size() ? std::min<uint64_t>(pageWords, src.entries.size() - first) : 0;
         specs.push_back({&s.pages[p], src.entries.data() + first, words * 4});
     }
-    // Capacity first, so a failure leaves the entry's old content intact.
+    s.parts.clear();
+    s.part = s.offset = 0;
+    s.source.reset();
+    for (uint32_t p = pageCount; p < kMaxEntryPages; ++p) // capacity no image of this size needs
+        if (s.pages[p]) s.pages[p].release()->deleteLater();
     for (const auto &spec : specs) {
         const uint64_t need = std::max<uint64_t>((spec.bytes + 15) / 16 * 16, 16);
-        if (*spec.slot && (*spec.slot)->size() >= need) continue;
         // Headroom: the forming bucket grows during the minute.
         const uint64_t grown = std::min<uint64_t>(std::max(need + need / 2, uint64_t(4096)),
                                                   std::max(need, kMaxGpuBufferBytes));
-        auto buffer = failAllocationsForTest_ ? nullptr
-            : makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, grown, error, "heatmap.live");
-        if (!buffer) {
-            if (failAllocationsForTest_ && error) *error = QStringLiteral("GPU buffer allocation failed (test)");
-            return false;
+        const uint64_t have = *spec.slot ? (*spec.slot)->size() : 0;
+        const bool replace = have < need || (shrink && have > 2 * grown);
+        if (replace) {
+            auto buffer = failAllocationsForTest_ ? nullptr
+                : makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, grown, error, "heatmap.live");
+            if (!buffer) {
+                if (failAllocationsForTest_ && error) *error = QStringLiteral("GPU buffer allocation failed (test)");
+                resident_.erase(residentId); // never half-filled: the caller starts again
+                return false;
+            }
+            if (*spec.slot) spec.slot->release()->deleteLater(); // a frame in flight may still read it
+            *spec.slot = std::move(buffer);
+            if (created) ++*created;
         }
-        if (*spec.slot) spec.slot->release()->deleteLater(); // a frame in flight may still read it
-        *spec.slot = std::move(buffer);
-        if (created) ++*created;
+        if (spec.bytes) s.parts.push_back({spec.slot, static_cast<const char *>(spec.data), spec.bytes});
     }
-    s.source.reset();
-    s.params = paramsOf(src);
-    s.pageCount = pageCount; // pages beyond it keep their capacity, unbound
-    s.parts.clear();
-    s.needs.clear();
-    s.part = 0;
-    s.offset = 0;
-    auto *updates = rhi_->nextResourceUpdateBatch();
-    for (const auto &spec : specs)
-        if (spec.bytes) updates->uploadStaticBuffer(spec.slot->get(), 0, quint32(spec.bytes), spec.data);
-    cb->resourceUpdate(updates);
+    s.source = std::move(source); // keeps the image alive while it pages in
+    s.params = paramsOf(*s.source);
+    s.pageCount = pageCount;
+    if (s.parts.empty()) s.source.reset();
+    return true;
+}
+
+bool HeatmapGpuBinner::refillStep(uint64_t residentId, QRhiCommandBuffer *cb, uint64_t &budget, bool *complete,
+                                  QString *error) {
+    *complete = false;
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
+    const auto it = resident_.find(residentId);
+    if (it == resident_.end() || !cb) return fail(error, QStringLiteral("no live refill in progress"));
+    auto &s = *it->second;
+    if (s.part < s.parts.size() && budget) {
+        auto *updates = rhi_->nextResourceUpdateBatch();
+        while (s.part < s.parts.size() && budget) {
+            const auto &part = s.parts[s.part];
+            const uint64_t chunk = std::min(part.bytes - s.offset, budget);
+            updates->uploadStaticBuffer(part.slot->get(), quint32(s.offset), quint32(chunk), part.data + s.offset);
+            s.offset += chunk;
+            budget -= chunk;
+            if (s.offset == part.bytes) { ++s.part; s.offset = 0; }
+        }
+        cb->resourceUpdate(updates);
+    }
+    *complete = s.part >= s.parts.size();
+    if (*complete) {
+        s.parts.clear();
+        s.part = 0;
+        s.source.reset();
+    }
     return true;
 }
 
