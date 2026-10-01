@@ -4,6 +4,7 @@
 #include "capture/CaptureSession.hpp"
 #include "capture/CaptureRouting.hpp"
 #include <future>
+#include <filesystem>
 #include <iostream>
 #include "servermodel/HmcolFormat.hpp"
 #include "marketdata/fixtures/coinbase_messages.hpp"
@@ -723,6 +724,168 @@ TEST_F(CaptureTest, InterruptedRunChecksReceiptAgainstLostRawAtCommonPrefix) {
     EXPECT_EQ(report.json["totals"]["open_runs"], 0);
     EXPECT_GT(report.json["routing_errors"].get<int>(), 0) << report.json.dump(2);
     EXPECT_TRUE(report.json["connection_runs"][0]["routing_checked"].get<bool>());
+}
+TEST_F(CaptureTest, ScopeTailIsTruncatedRatherThanInterruptedOrOpen) {
+    {
+        Writer writer(config, metadata());
+        auto input = fixture(); input.back().time.systemNs += 24 * Hour;
+        for (const auto& r : input) writer.append(r);
+        writer.close();
+    }
+    // Ensure the scope classification is independent of newest-run status.
+    Writer newer(config, metadata());
+    auto input = fixture();
+    for (auto& r : input) { r.time.systemNs += 48 * Hour; newer.append(r); }
+    newer.close();
+    for (const auto& scope : {config.root + "/BTC-USD/2026/09", paths(config.root).front()}) {
+        const auto report = verify(scope);
+        EXPECT_TRUE(report.ok) << report.json.dump(2);
+        EXPECT_EQ(report.json["complete"], true);
+        EXPECT_EQ(report.json["truncated_by_scope_runs"], 1);
+        EXPECT_EQ(report.json["interrupted_runs"], 0);
+        EXPECT_EQ(report.json["open_runs"], 0);
+        EXPECT_EQ(report.json["connection_runs"][0]["truncated_by_scope"], true);
+    }
+    EXPECT_EQ(verify(config.root).json["truncated_by_scope_runs"], 0);
+}
+TEST_F(CaptureTest, RoutingChecksContinueAfterEveryBadGroupWithBoundedDetails) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path();
+    auto input = multiFixture(); input.pop_back();
+    for (uint64_t i = 0; i < 40; ++i)
+        input.push_back(frame(nlohmann::json{{"channel", "heartbeats"}}, 6 + i, (i + 1) * RoutingIntervalNs));
+    input.push_back(record(Kind::CaptureStopped, 42 * RoutingIntervalNs));
+    writeMulti(src, input);
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer writer(cfg, header);
+        scan(path, [&](const Record& r) {
+            if (cfg.symbol == "BTC-USD" && r.kind == Kind::Frame &&
+                nlohmann::json::parse(r.payload).at("sequence_num").get<uint64_t>() >= 6) return;
+            writer.append(r);
+        });
+        writer.close();
+    }
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["routing_errors"], 40); // one missing BTC copy in each independently proven group
+    EXPECT_EQ(report.json["routing_details"].size(), 30);
+}
+TEST_F(CaptureTest, UnsequencedBroadcastUsesStreamOrderAndDoesNotAbortRoutingProof) {
+    auto input = multiFixture();
+    // Same steady clock as neighboring frames tests ordering by stream position.
+    input.insert(input.begin() + 4, record(Kind::Frame, 200, R"({"type":"error","message":"one"})"));
+    input.insert(input.begin() + 5, record(Kind::Frame, 200, R"({"type":"error","message":"two"})"));
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok); // unsequenced input remains visible as an integrity anomaly
+    EXPECT_EQ(report.json["totals"]["unsequenced_frames"], 2);
+    EXPECT_EQ(report.json["routing_errors"], 0) << report.json.dump(2);
+}
+TEST_F(CaptureTest, RepeatedAndProductOnlyUnsequencedFramesRetainRoutingOrder) {
+    auto input = multiFixture();
+    auto btc = fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 4}});
+    auto eth = fixtures::coinbaseL2Update("ETH-USD", {{"bid", 9, 4}});
+    btc.erase("sequence_num"); eth.erase("sequence_num");
+    const auto broadcast = record(Kind::Frame, 2000000000, R"({"type":"error"})");
+    input.insert(input.end() - 2, {record(Kind::Frame, 2000000000, btc.dump()), broadcast,
+        record(Kind::Frame, 2000000000, eth.dump()), broadcast});
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    EXPECT_EQ(report.json["routing_errors"], 0) << report.json.dump(2);
+}
+TEST_F(CaptureTest, InterruptedUnreceiptedMergedTailChecksSequenceContinuity) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer writer(cfg, header);
+        scan(path, [&](const Record& r) {
+            if (r.kind == Kind::FrameReference || r.kind == Kind::CaptureStopped) return;
+            if (r.kind == Kind::Frame && nlohmann::json::parse(r.payload).at("sequence_num") == 2) return;
+            writer.append(r);
+        });
+        writer.flush();
+    }
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["routing_errors"], 1) << report.json.dump(2);
+    EXPECT_NE(report.json["routing_details"].dump().find("merged tail sequence gap expected=2 got=3"), std::string::npos);
+}
+TEST_F(CaptureTest, InterruptedMergedTailChecksFirstSequenceAfterDurableReceipt) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer writer(cfg, header);
+        scan(path, [&](const Record& r) { if (r.kind != Kind::CaptureStopped) writer.append(r); });
+        writer.append(frame(nlohmann::json{{"channel", "heartbeats"}}, 8, 4000000000));
+        writer.flush();
+    }
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    const auto report = verify(config.root);
+    EXPECT_EQ(report.json["routing_errors"], 1) << report.json.dump(2);
+    EXPECT_NE(report.json["routing_details"].dump().find("merged tail sequence gap expected=6 got=8"), std::string::npos);
+}
+TEST_F(CaptureTest, InventoryOver100000FilesHasBoundedBuffersAtEveryScope) {
+    Writer writer(config, metadata());
+    for (const auto& r : fixture()) writer.append(r);
+    writer.close();
+    const auto selected = paths(config.root).front();
+    // Header-only historical segments suffice to exercise discovery and replay
+    // without 100k compressed payloads. Hard links keep fixture creation cheap.
+    const auto headerSize = scan(selected).index.front().offset;
+    const auto outside = config.root + "/BTC-USD/2025/01";
+    ASSERT_TRUE(QDir().mkpath(outside));
+    const auto seed = outside + "/seed.rawl2";
+    save(seed, contents(selected).first(headerSize));
+    for (int i = 0; i < 100000; ++i) {
+        const auto bucket = outside + '/' + QString::number(i / 1000);
+        if (i % 1000 == 0) ASSERT_TRUE(QDir().mkpath(bucket));
+        const auto destination = bucket + '/' + QString::number(i) + ".rawl2";
+        if (i % 1000 == 0) ASSERT_TRUE(QFile::copy(seed, destination));
+        else std::filesystem::create_hard_link((bucket + '/' + QString::number(i - i % 1000) + ".rawl2").toStdString(), destination.toStdString());
+    }
+#ifndef _WIN32
+    const auto peakRss = [] {
+        rusage usage{};
+        if (getrusage(RUSAGE_SELF, &usage) != 0) throw std::runtime_error("getrusage failed");
+#ifdef __APPLE__
+        return uint64_t(usage.ru_maxrss);
+#else
+        return uint64_t(usage.ru_maxrss) * 1024;
+#endif
+    };
+    uint64_t smallScopePeak = 0;
+#endif
+    for (const auto& scope : {selected, config.root + "/BTC-USD/2026/09", config.root}) {
+        const auto report = verify(scope);
+        EXPECT_EQ(report.json["inventory_files"], 100002);
+        EXPECT_LE(report.json["inventory_peak_buffered_files"].get<size_t>(), 1024);
+        if (scope != config.root) {
+            EXPECT_TRUE(report.ok) << report.json.dump(2);
+            EXPECT_EQ(report.json["files"], 1);
+#ifndef _WIN32
+            smallScopePeak = peakRss();
+#endif
+        } else {
+            EXPECT_FALSE(report.ok); // duplicated, unindexed historical segments are real errors
+            EXPECT_EQ(report.json["files"], 100002);
+            EXPECT_EQ(report.json["inventory_peak_buffered_files"], 1024);
+#ifndef _WIN32
+            EXPECT_LT(peakRss(), smallScopePeak + 32 * 1024 * 1024);
+#endif
+            EXPECT_EQ(report.json["details"].size(), 30);
+        }
+    }
 }
 TEST_F(CaptureTest, OneWriterAppendFailurePreservesHealthyBufferedFramesAndSealsThem) {
     auto input = multiFixture();

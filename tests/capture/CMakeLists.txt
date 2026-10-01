@@ -1,7 +1,9 @@
 add_executable(test_raw_capture test_raw_capture.cpp)
 target_include_directories(test_raw_capture PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_raw_capture PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-add_test(NAME RawCaptureTests COMMAND test_raw_capture)
+add_test(NAME RawCaptureTests COMMAND test_raw_capture --gtest_filter=-CaptureTest.InventoryOver100000FilesHasBoundedBuffersAtEveryScope)
+add_test(NAME CaptureVerifierScaleTests COMMAND test_raw_capture --gtest_filter=CaptureTest.InventoryOver100000FilesHasBoundedBuffersAtEveryScope)
+set_tests_properties(CaptureVerifierScaleTests PROPERTIES LABELS "capture" TIMEOUT 180)
 set_tests_properties(RawCaptureTests PROPERTIES LABELS "capture" TIMEOUT 60)
 
 add_executable(capture_app_fixture capture_app_fixture.cpp)
