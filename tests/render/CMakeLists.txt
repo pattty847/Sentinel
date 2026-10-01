@@ -211,6 +211,15 @@ if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
     set_tests_properties(UgrGpuServiceTeardownGuardMalloc PROPERTIES LABELS "render;heatmap" TIMEOUT 300
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
 endif()
+# S6c: the settings dialog, persistence, the toolbar tick selector, the telemetry
+# dock and API -> UI sync on the settings model (offscreen widgets, temporary INI
+# settings, the synthetic HMC2 recording for the GPU chart cases).
+find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
+add_executable(test_heatmap_settings_ui test_heatmap_settings_ui.cpp)
+target_include_directories(test_heatmap_settings_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_settings_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
+add_test(NAME HeatmapSettingsUiTests COMMAND test_heatmap_settings_ui)
+set_tests_properties(HeatmapSettingsUiTests PROPERTIES LABELS "render;heatmap;ui" TIMEOUT 300)
 # Lab outputs never land inside the recording root (links, aliases, missing descendants).
 add_executable(test_lab_output_guard test_lab_output_guard.cpp)
 target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)

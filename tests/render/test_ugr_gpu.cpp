@@ -26,6 +26,7 @@
 #include "servermodel/Hmc2Store.hpp"
 #include "heatmap/LocalChunkTransport.hpp"
 #include "../servermodel/FakeChunkTransport.hpp"
+#include "SyntheticHmc2Fixture.hpp"
 #include "marketdata/model/TradeData.h"
 #include <QElapsedTimer>
 #include <QGuiApplication>
@@ -43,37 +44,7 @@
 #include <iostream>
 
 namespace {
-using heatmap::kHourMs;
-using heatmap::kMinuteMs;
-constexpr int64_t minute = kMinuteMs;
-constexpr int64_t epoch = recording::kHmc2MinMs + 50 * heatmap::kDayMs;
-
-// Minute i of layer "deep" ($10 rows, a wide book) or "near" ($1 rows, a band):
-// the fixture of LabItemTest.
-recording::Hmc2Record syntheticMinute(const std::string &layer, int64_t i) {
-    const bool deep = layer == "deep";
-    recording::Hmc2Record r;
-    r.header = {"BTC-USD", layer, minute, 100, deep ? 1000 : 100, {}, deep ? 77u : 78u};
-    r.bucketStartMs = epoch + i * minute;
-    r.observedMs = uint32_t(minute);
-    const int64_t mid = (100'000 + (i % 30) * 10) * 100 / r.header.rowTickUnits;
-    const int64_t half = deep ? 40 : 200;
-    r.bidRowLo = r.askRowLo = mid - half;
-    r.bidRowHi = r.askRowHi = mid + half - 1;
-    r.midOpen = r.midClose = r.midMin = r.midMax = double(mid) * double(r.header.rowTickUnits) / 100;
-    for (int64_t row = mid - half; row < mid + half; ++row) {
-        const bool ask = row >= mid;
-        const auto code = recording::encodeSize(0.01 * double(1 + (row * 7 + i) % 53), r.header.sizeScale);
-        r.entries.push_back({row, ask, code, code, r.observedMs});
-    }
-    return r;
-}
-void writeRecording(const QTemporaryDir &dir, int64_t minutes) {
-    recording::Hmc2Store writer(dir.path().toStdString());
-    for (int64_t i = 0; i < minutes; ++i)
-        for (const char *layer : {"deep", "near"}) writer.append(syntheticMinute(layer, i));
-}
-
+using namespace synthetic_hmc2;
 QSGNode *paintRoot(QQuickItem *item) { return QQuickItemPrivate::get(item)->paintNode; }
 
 // One synthetic recording (4 h) for the whole binary: the data path is configured
