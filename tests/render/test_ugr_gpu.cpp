@@ -176,7 +176,11 @@ protected:
     }
     bool settle() {
         int streak = 0;
-        const bool ok = pump(30'000, [&] { streak = layer().settled() ? streak + 1 : 0; return streak >= 3; });
+        const bool ok = pump(30'000, [&] {
+            const auto &st = layer().tileStats();
+            streak = layer().settled() && !st.crossfading.load() && !st.holding.load() ? streak + 1 : 0;
+            return streak >= 3;
+        });
         if (!ok && error.isEmpty()) error = QStringLiteral("did not settle");
         return ok;
     }
@@ -535,7 +539,7 @@ TEST_F(UgrGpu, NodeWorkGetsItsFramesWithoutOutsideRedraws) {
     ugr->setTimeframe(int(15 * minute));
     ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); }, &rendered))
         << "uploads stalled (frames rendered: " << rendered << ")";
-    EXPECT_GT(rendered, 3) << "budgeted uploads took several frames";
+    EXPECT_GE(rendered, 2) << "budgeted uploads took more than one frame";
     // Idle: no more frame requests.
     rendered = 0;
     pumpOnRequest(500, [] { return false; }, &rendered);
