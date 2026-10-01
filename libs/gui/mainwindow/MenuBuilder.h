@@ -42,6 +42,7 @@ public:
         StockChartDock* stockChartDock = nullptr;
         OrderBookDock* orderBookDock = nullptr;
         QDockWidget* paperTradingDock = nullptr;
+        QDockWidget* heatmapTelemetryDock = nullptr;
     };
 
     struct Callbacks {
