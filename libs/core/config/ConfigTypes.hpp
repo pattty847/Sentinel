@@ -182,6 +182,9 @@ struct ClientGuiConfig {
     std::string msdfFontPath;
     int axisLabelPx = 0;
     double defaultOrderQty = 1.0;
+    // Process-only (--no-screener): skip the screener_server.py child on port 17200. Not read
+    // from YAML. A/B and test processes use it so they never spawn or kill a port-17200 holder.
+    bool startScreener = true;
 };
 
 /// TPO (market profile) overlay. Parsed values are validated by the GUI.

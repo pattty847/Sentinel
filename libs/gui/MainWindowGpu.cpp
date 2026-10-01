@@ -618,6 +618,10 @@ void MainWindowGPU::startScreenerServer() {
     if (m_screenerProcess && m_screenerProcess->state() != QProcess::NotRunning) {
         return;  // already running
     }
+    if (!GuiConfigStore::instance().clientConfig().gui.startScreener) {
+        sLog_App("Screener server not started: --no-screener");
+        return;
+    }
 
     // Locate scripts/screener/screener_server.py relative to the running binary.
     const QString appDir = QCoreApplication::applicationDirPath();

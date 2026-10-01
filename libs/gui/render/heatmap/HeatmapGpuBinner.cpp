@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <sstream>
 
 namespace heatmap::gpu {
 namespace {
@@ -472,9 +473,22 @@ void HeatmapGpuBinner::driveSelfTest(QRhiCommandBuffer *cb) {
     else std::fill(cells.begin(), cells.end(), 0xffffffffu); // a failed readback fails the test
     const size_t mismatches = countSelfTestMismatches(*run.fixture, cells);
     resolved_ = mismatches ? KernelVariant::Precise : KernelVariant::Fast;
-    if (mismatches)
+    if (mismatches) {
+        // FM-126 evidence: which cells came back (all zero = the readback saw the buffer
+        // before the dispatch wrote it; 0xffffffff = the readback itself failed).
+        size_t zeros = 0, unset = 0;
+        for (const auto c : cells) {
+            zeros += c == 0;
+            unset += c == 0xffffffffu;
+        }
+        std::ostringstream sample;
+        for (size_t i = 0; i < std::min<size_t>(cells.size(), 4); ++i)
+            sample << (i ? " " : "") << std::hex << cells[i] << "/" << run.fixture->expected[i] << std::dec;
         sLog_Warning("heatmap gpu: fast kernel failed the precision self-test on " << deviceKey() << " ("
-                     << mismatches << "/" << cells.size() << " cells differ from binColumn); using the precise kernel");
+                     << mismatches << "/" << cells.size() << " cells differ from binColumn); using the precise kernel"
+                     << " readback=" << data.size() << "B zeros=" << zeros << " unset=" << unset
+                     << " got/expected[0..3]=" << sample.str() << " frame=" << rhi_->currentFrameSlot());
+    }
     else
         sLog_App("heatmap gpu: fast kernel passed the precision self-test on " << deviceKey() << " ("
                     << cells.size() << " cells)");
