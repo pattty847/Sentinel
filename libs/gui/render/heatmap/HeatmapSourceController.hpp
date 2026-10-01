@@ -296,6 +296,8 @@ struct LiveSourceSnapshot {
     std::shared_ptr<const SparseColumns> columns;
     std::shared_ptr<const gpu::GpuSource> gpu;
     int64_t commonUnits = 0;
+    bool carried = false; // frozen previous publication; no new observation or extended coverage
+    std::shared_ptr<const ResolutionSummary> resolution; // cached with the immutable source, including when carried
 };
 // Published separately: a live revision never changes the SpanSet pointer or
 // makes the node re-index spans. Keep old snapshots with held/fading pictures.
@@ -325,6 +327,7 @@ public:
     static constexpr int64_t kMaxLiveLagMs = 2 * kHourMs;
     static constexpr int64_t kMaxLiveLagBuckets = 64;
     static constexpr int kLiveReleaseDelayMs = 3000;
+    static constexpr int kLiveSourcesWaitMs = 1500;
     // Live composition follows the frames: a live frame's arrival composes after
     // a short coalescing window (both sources' frames arrive together), at most
     // once per kLiveMinIntervalMs (other triggers too); kLiveBackoffIntervalMs
@@ -459,7 +462,9 @@ private:
     // End of the coalescing window, anchored to the first live frame since the
     // last admitted composition (later frames never extend it).
     std::optional<int64_t> liveCoalesceUntilMs_;
-    std::array<double, 3> liveCosts_{}; // the last update costs (ms), newest last
+    std::optional<int64_t> liveSourcesUntilMs_; // first available edge anchors the bounded startup wait
+    bool liveHasPublished_ = false; // additions to an established state never restart the startup wait
+    std::array<double, 3> liveCosts_{}; // warm composition CPU costs (ms), newest last
     size_t liveCostCount_ = 0;
     std::map<std::string, int64_t> liveStarts_;
     std::map<std::pair<SpanId, std::string>, int64_t> liveUploadedEnds_;
@@ -469,7 +474,7 @@ private:
     void invalidateLive();
     bool overlapsLive(const SpanId &span) const;
     void setLiveBytes(size_t bytes);
-    void resetLive();
+    void resetLive(bool keepPicture = false);
     void mergeLatestResolution(); // caller holds latestMutex_
     void schedule();
     void reconcile();
