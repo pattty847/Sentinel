@@ -544,6 +544,37 @@ TEST_F(RecordingDataProcessor, MutingCancelsPendingBandsAndRejectsRepliesThenRes
     EXPECT_GT(requests.back().priceMin, requests.front().priceMin);
 }
 
+// S6b (S6a review minor 2): a muted processor places and publishes nothing for
+// viewports the GUI still sends; the latest one is placed when the stream
+// resumes; muting releases the registered live recording view on the server.
+TEST_F(RecordingDataProcessor, MutedViewportsPublishNothingAndTheLatestIsPlacedOnResume) {
+    processor.setRecordingCapability(true);
+    events(180);
+    processor.onRecordingHistoryReceived(page(requests.back()));
+    ASSERT_EQ(views.size(), 1); // a live view is registered
+    std::vector<recording::LiveView> released;
+    QObject::connect(&processor, &DataProcessor::recordingViewReleased, &processor,
+                     [&](const auto &view) { released.push_back(view); });
+    processor.setHeatmapEnabled(false);
+    ASSERT_EQ(released.size(), 1);
+    EXPECT_EQ(released.back().symbol, "BTC-USD");
+    EXPECT_EQ(released.back().generation, views.back().generation);
+    const auto count = updates.size();
+    const auto sent = requests.size();
+    processor.setHeatmapViewport(7'000'000, 13'000'000, false, 10500, 10600, 1000, 500);
+    processor.setHeatmapViewport(8'000'000, 14'000'000, false, 10600, 10700, 1000, 500);
+    events(180);
+    EXPECT_EQ(updates.size(), count) << "no window publication while muted";
+    EXPECT_EQ(requests.size(), sent) << "no band request while muted";
+    processor.setHeatmapEnabled(true);
+    events(180);
+    ASSERT_GT(requests.size(), sent);
+    EXPECT_EQ(requests.back().endTimeMs, 14'000'000) << "the latest muted view is placed on resume";
+    EXPECT_GT(requests.back().priceMin, requests[sent - 1].priceMin) << "around the latest muted price window";
+    processor.setHeatmapEnabled(false);
+    EXPECT_EQ(released.size(), 1) << "no view registered since the resume: nothing to release";
+}
+
 TEST_F(RecordingDataProcessor, MutingLegacySlicesAlsoStopsFetchesAndResumesWithoutChangingMode) {
     processor.setRecordingConfig(false, 2);
     HeatmapSlice live;

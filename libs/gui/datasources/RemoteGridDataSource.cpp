@@ -186,6 +186,10 @@ void RemoteGridDataSource::registerRecordingView(const recording::LiveView& view
     m_client.registerRecordingView(view);
 }
 
+void RemoteGridDataSource::releaseRecordingView(const recording::LiveView& view) {
+    m_client.releaseRecordingView(view.symbol);
+}
+
 void RemoteGridDataSource::requestRecordingHeatmapHistory(
     const protocol::recordingwire::Request& request) {
     m_client.requestRecordingHeatmapHistory(request);

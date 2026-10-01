@@ -995,6 +995,11 @@ public:
                     "capacity", "recording live view capacity reached or service stopped").dump());
                 sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
                     << " gen=" << view->generation << " layer=" << view->layer);
+            } else if (type == "heatmap_recording_unview") {
+                // The client muted its legacy band stream (GPU renderer, S6b).
+                if (recordingView_) recordingView_->active.store(false);
+                recordingView_.reset();
+                sLog_Probe("recording.live.view", "released symbol=" << j.value("symbol", std::string{}));
             } else if (type == "heatmap_live_subscribe") {
                 handleLiveSubscribe(j);
             } else if (type == "heatmap_live_unsubscribe") {

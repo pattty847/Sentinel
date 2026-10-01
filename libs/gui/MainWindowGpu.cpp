@@ -1051,6 +1051,10 @@ void MainWindowGPU::connectMarketDataSignals() {
                     if (canRequestConfiguredHistoryForSymbol(QString::fromStdString(view.symbol)))
                         m_dataSource->registerRecordingView(view);
                 }, Qt::QueuedConnection);
+        connect(dataProcessor, &DataProcessor::recordingViewReleased, this,
+                [this](const recording::LiveView& view) {
+                    if (m_dataSource) m_dataSource->releaseRecordingView(view);
+                }, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryReceived,
                 dataProcessor, &DataProcessor::onRecordingHistoryReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryError,

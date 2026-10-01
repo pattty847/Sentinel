@@ -222,6 +222,12 @@ void DataProcessor::setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, boo
     if (m_shuttingDown.load()) {
         return;
     }
+    if (!m_heatmapEnabled) {
+        // Muted (gpu renderer): no window placement, publication, band or fetch;
+        // the view is kept and placed when the stream resumes.
+        m_mutedViewport = {viewStartMs, viewEndMs, follow, minPrice, maxPrice, widthPx, heightPx, true};
+        return;
+    }
     // Placement only changes at bucket granularity; skip sub-bucket pans.
     const int64_t tf = std::max<int64_t>(1, m_heatmapWindow.timeframeMs());
     const HeatmapViewKey key{viewStartMs / tf, viewEndMs / tf, follow,
@@ -685,12 +691,22 @@ void DataProcessor::resetRecordingRequest() {
 void DataProcessor::setHeatmapEnabled(bool enabled) {
     if (m_heatmapEnabled == enabled) return;
     m_heatmapEnabled = enabled;
+    // A registered live recording view would keep streaming band columns the
+    // muted processor drops: release it on the server.
+    if (!enabled && m_recordingBandConfirmed && m_recordingConnected && !m_registeredView.symbol.empty())
+        emit recordingViewReleased(m_registeredView);
     resetRecordingRequest(); // cancel timers and invalidate in-flight replies
     m_heatmapFetchInFlight = false;
     ++m_heatmapFetchGeneration;
     sLog_App("Legacy heatmap stream enabled=" << enabled);
     if (enabled) {
         resetHeatmapWindow(); // discarded slices require a fresh placement/history page
+        if (m_mutedViewport.valid) {
+            // The view the GUI sent while muted is placed now (nothing was published then).
+            const auto v = m_mutedViewport;
+            m_mutedViewport.valid = false;
+            setHeatmapViewport(v.startMs, v.endMs, v.follow, v.minPrice, v.maxPrice, v.widthPx, v.heightPx);
+        }
         scheduleRecordingBand();
         requestHeatmapFetch();
     }

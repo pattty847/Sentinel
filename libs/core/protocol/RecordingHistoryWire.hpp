@@ -186,6 +186,11 @@ inline nlohmann::json viewMessage(const recording::LiveView& v) {
         {"timeframe_ms", v.tfMs}, {"band_lo", v.band.lo}, {"band_tick", v.band.tick},
         {"band_rows", v.band.rows}, {"band_generation", v.generation}};
 }
+// Stops the live recording view this connection registered (S6b: the client
+// muted its legacy band stream). Servers that predate it ignore the message.
+inline nlohmann::json unviewMessage(const std::string& symbol) {
+    return {{"type", "heatmap_recording_unview"}, {"symbol", symbol}};
+}
 inline std::optional<recording::LiveView> parseView(const nlohmann::json& j) {
     try {
         recording::LiveView v;
